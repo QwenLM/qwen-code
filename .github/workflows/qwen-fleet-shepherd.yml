@@ -11,7 +11,11 @@ name: 'Fleet Shepherd'
 #                        propagates workflow/skill fixes; self-limiting since
 #                        behind_by resets to 0 after the sync)
 #   • scan liveness    → if no autofix full scan (schedule/dispatch) ran
-#                        recently, dispatch one (GitHub cron is unreliable)
+#                        recently, dispatch one (GitHub cron is unreliable).
+#                        A run wedged in `queued` past ZOMBIE_QUEUED_MINUTES
+#                        never counts as in-flight: GitHub never started it,
+#                        so deferring to it starves the watchdog forever
+#                        (2026-08-19, an oversized workflow file)
 #
 # It also maintains a single "Fleet Shepherd Dashboard" issue (edited in
 # place, never comment spam) so fleet state is observable at a glance. The
@@ -70,6 +74,15 @@ env:
   AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
   BEHIND_SYNC_THRESHOLD: '25'
   SCAN_LIVENESS_MINUTES: '60'
+  # A dispatched or scheduled run claims a runner within seconds; one still
+  # 'queued' this long was never STARTED by GitHub at all. That run is wedged,
+  # not in flight, and counting it as in-flight starves every lever that
+  # defers to a live run — permanently, since nothing will ever complete it.
+  # 2026-08-19: a workflow file over GitHub's 500 KB limit produced exactly
+  # this (runs created, zero jobs, uncancellable through the API) and the
+  # liveness watchdog sat at in-flight=1 for 18 hours while the loop was dark.
+  # Generous by design: it must never fire on an ordinary runner queue.
+  ZOMBIE_QUEUED_MINUTES: "${{ vars.QWEN_SHEPHERD_ZOMBIE_QUEUED_MINUTES || '30' }}"
   MAX_SYNCS_PER_TICK: '3'
   MAX_CONFLICT_DISPATCHES_PER_TICK: '2'
   DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'
@@ -218,6 +231,36 @@ jobs:
             SCAN_RUNS_OK=false
             echo "::warning::autofix run-list read failed; liveness lever and conflict dispatches skipped this tick"
           fi
+          # The variable is operator-tunable, so it is also operator-
+          # breakable: a non-numeric value makes every jq consumer carrying
+          # $zmin exit 5 into its benign fallback — in-flight reads 0 on top
+          # of live runs and the census reads 0, re-hiding exactly the wedge
+          # this lever exists to surface. Fall back to the default, mirroring
+          # AUTO_RELEASE_DAYS. The digit-only regex still admits values large
+          # enough to wedge every queued run at once — re-creating the
+          # starvation — so bound by string LENGTH too, and reject zero: it
+          # wedges every queued run at birth, the exact opposite of the
+          # generous-by-design invariant the env block declares.
+          if [[ ! "${ZOMBIE_QUEUED_MINUTES}" =~ ^[0-9]+$ ]] || [[ ${#ZOMBIE_QUEUED_MINUTES} -gt 3 ]] || [[ "${ZOMBIE_QUEUED_MINUTES}" =~ ^0+$ ]]; then
+            echo "::warning::ZOMBIE_QUEUED_MINUTES '${ZOMBIE_QUEUED_MINUTES}' is not a positive integer or is too large; using 30"
+            ZOMBIE_QUEUED_MINUTES=30
+          fi
+          # One definition of "wedged", shared by every reader of the run
+          # snapshot below, so the in-flight count, the census, and the
+          # liveness re-dispatch guard can never disagree about what counts
+          # as a live run. A missing createdAt reads as brand new (never
+          # wedged): unknown age must not license a duplicate dispatch.
+          ZOMBIE_JQ='def wedged($now; $mins): .status == "queued" and (((.createdAt // "") | if . == "" then 9999999999 else fromdateiso8601 end) <= (($now | tonumber) - ($mins | tonumber) * 60));'
+          SCAN_ZOMBIES="$(jq -r --arg now "${NOW_EPOCH}" --arg zmin "${ZOMBIE_QUEUED_MINUTES}" "${ZOMBIE_JQ}"'
+            [ .[] | select(wedged($now; $zmin)) ] | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
+          SCAN_ZOMBIE_OLDEST="$(jq -r --arg now "${NOW_EPOCH}" --arg zmin "${ZOMBIE_QUEUED_MINUTES}" "${ZOMBIE_JQ}"'
+            [ .[] | select(wedged($now; $zmin)) | .createdAt ] | sort | first // ""' /tmp/scan-runs.json 2> /dev/null || echo '')"
+          # Loud, because invisibility is what made this expensive: the loop
+          # looked half-alive for a day (PR-event runs kept succeeding) while
+          # every dispatch queued forever.
+          if [[ "${SCAN_ZOMBIES}" -gt 0 ]]; then
+            echo "::warning::${SCAN_ZOMBIES} autofix run(s) stuck 'queued' for over ${ZOMBIE_QUEUED_MINUTES}m (oldest ${SCAN_ZOMBIE_OLDEST:-unknown}) — GitHub is not starting them; a workflow file over the 500 KB limit does exactly this. They are excluded from the in-flight count so the liveness lever keeps working."
+          fi
           LAST_SCHEDULE="$(jq -r '[.[] | select(.event == "schedule")] | first | .createdAt // ""' /tmp/scan-runs.json 2> /dev/null || echo '')"
           # In-flight counts SCHEDULE runs plus OUR OWN liveness dispatch,
           # attributed by recorded run id — never by timestamp proximity: a
@@ -228,13 +271,29 @@ jobs:
           # marker): the dispatch is simply not counted, so the failure mode
           # is one absorbed duplicate scan — never starvation. Same for the
           # first tick: no watermark, nothing attributed.
-          SCAN_INFLIGHT="$(jq -r --arg lvrun "${PREV_LIVENESS_RUN}" '
+          SCAN_INFLIGHT="$(jq -r --arg lvrun "${PREV_LIVENESS_RUN}" --arg now "${NOW_EPOCH}" --arg zmin "${ZOMBIE_QUEUED_MINUTES}" "${ZOMBIE_JQ}"'
             [ .[] | select(.status != "completed")
+              | select(wedged($now; $zmin) | not)
               | select(
                   (.event == "schedule")
                   or (.event == "workflow_dispatch" and $lvrun != ""
                       and ((.databaseId | tostring) == $lvrun)) ) ]
             | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
+          # During a PERSISTENT wedge the watermark cycle would reopen this
+          # gate every 60 minutes and plant a fresh uncancellable queued
+          # dispatch per hour, each refreshing the very liveness watermark
+          # whose growing age exposed the incident. If the run recorded from
+          # the last dispatch is ITSELF still wedged in the snapshot, another
+          # dispatch would wedge too — keep the gate closed. This lengthens
+          # the interval, it does not block hard: once that run starts,
+          # completes, or leaves the snapshot window, the gate reopens on its
+          # own, so the residual stays the documented single absorbed
+          # duplicate scan instead of one corpse per hour. When attribution
+          # falls back to run=none the guard cannot see the dispatch — no id
+          # was recorded — and the watermark-cycle corpse planting resumes;
+          # the wedge banner remains the exposure signal for that path.
+          PREV_LIVENESS_WEDGED="$(jq -r --arg lvrun "${PREV_LIVENESS_RUN}" --arg now "${NOW_EPOCH}" --arg zmin "${ZOMBIE_QUEUED_MINUTES}" "${ZOMBIE_JQ}"'
+            [ .[] | select($lvrun != "" and ((.databaseId | tostring) == $lvrun) and wedged($now; $zmin)) ] | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
           LAST_SIGNAL="${LAST_SCHEDULE}"
           if [[ -n "${PREV_LIVENESS}" && "${PREV_LIVENESS}" > "${LAST_SIGNAL}" ]]; then
             LAST_SIGNAL="${PREV_LIVENESS}"
@@ -245,8 +304,8 @@ jobs:
           fi
           LIVENESS_OUT="${PREV_LIVENESS}"
           LIVENESS_RUN_OUT="${PREV_LIVENESS_RUN}"
-          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), liveness-relevant in-flight: ${SCAN_INFLIGHT}, snapshot ok: ${SCAN_RUNS_OK}, watermark state known: ${DASH_LOOKUP_OK}"
-          if [[ "${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
+          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), liveness-relevant in-flight: ${SCAN_INFLIGHT}, wedged-queued: ${SCAN_ZOMBIES}, prev-liveness wedged: ${PREV_LIVENESS_WEDGED}, snapshot ok: ${SCAN_RUNS_OK}, watermark state known: ${DASH_LOOKUP_OK}"
+          if [[ "${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" && "${PREV_LIVENESS_WEDGED}" == "0" ]]; then
             DISPATCH_T0="$(date -u -d '5 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
             if act "scan liveness: dispatch unforced review scan" \
               env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f phase=review; then
@@ -305,6 +364,11 @@ jobs:
           # enumeration is not a busy-set, it is unknown busy-state, and
           # BUSY_OK=false defers every conflict dispatch below (it inherits
           # SCAN_RUNS_OK so a failed run-list read defers the same way).
+          # Wedged runs are NOT skipped here (unlike the in-flight count):
+          # age alone proves jobless only for the wedge class that defined
+          # the threshold — when the runner pool is offline, queued runs hold
+          # live review-address jobs indefinitely, and dropping them by age
+          # would silently re-dispatch their PRs. The jobs read settles it.
           SHEP_BUSY=' '
           BUSY_OK="${SCAN_RUNS_OK}"
           while IFS= read -r LIVE_RUN; do
@@ -1130,6 +1194,16 @@ jobs:
             echo
             echo "Last tick: $(date -u +%Y-%m-%dT%H:%M:%SZ) · scan-signal age: ${SCAN_AGE_MIN}m · syncs: ${SYNCS} · dispatches: ${DISPATCHES} · releases: ${RELEASES} · cleanups: ${CLEANUPS}"
             echo
+            # Surfaced on the dashboard, not just in a log nobody opens: a
+            # wedged queue is the shape of a dead loop that still reports
+            # green from PR-event runs.
+            if [[ "${SCAN_ZOMBIES}" -gt 0 ]]; then
+              echo "> ⚠️ **${SCAN_ZOMBIES} autofix run(s) wedged in \`queued\`** (oldest ${SCAN_ZOMBIE_OLDEST:-unknown}) — excluded from the in-flight count. The list is status+age only and cannot see jobs: a workflow file over GitHub's 500 KB limit wedges zero-job runs, and an offline runner pool keeps live jobs queued just as long. Check \`gh run view <id> --json jobs\` before deleting any of them."
+              if [[ "${PREV_LIVENESS_WEDGED}" -gt 0 ]]; then
+                echo "> 🚧 The shepherd's liveness re-dispatch stays paused while the recorded liveness run (id ${PREV_LIVENESS_RUN}) is among them — a fresh dispatch would only wedge again. Deleting THAT run (\`gh run delete ${PREV_LIVENESS_RUN}\`) reopens it immediately; it also reopens once it leaves the 50-run snapshot window. When several runs are listed, check \`gh run view <id> --json jobs\` before deleting — an offline runner pool keeps live jobs queued."
+              fi
+              echo
+            fi
             echo '## Bot fleet'
             echo
             echo '| PR | Head | State | Action this tick |'

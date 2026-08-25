@@ -36,6 +36,7 @@ function renderHookHarness(overrides?: {
   endStreaming?: ReturnType<typeof vi.fn>;
   clearWaitingForResponse?: ReturnType<typeof vi.fn>;
   setInsightReportPath?: ReturnType<typeof vi.fn>;
+  setInsightProgress?: ReturnType<typeof vi.fn>;
 }) {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -45,6 +46,7 @@ function renderHookHarness(overrides?: {
   const endStreaming = overrides?.endStreaming ?? vi.fn();
   const clearWaitingForResponse = overrides?.clearWaitingForResponse ?? vi.fn();
   const setInsightReportPath = overrides?.setInsightReportPath ?? vi.fn();
+  const setInsightProgress = overrides?.setInsightProgress ?? vi.fn();
 
   const handlers = {
     sessionManagement: {
@@ -100,6 +102,7 @@ function renderHookHarness(overrides?: {
     setAvailableCommands: vi.fn(),
     setAvailableModels: vi.fn(),
     setInsightReportPath,
+    setInsightProgress,
   };
 
   function Harness() {
@@ -119,6 +122,7 @@ function renderHookHarness(overrides?: {
     endStreaming,
     clearWaitingForResponse,
     setInsightReportPath,
+    setInsightProgress,
   };
 }
 
@@ -665,5 +669,102 @@ describe('useWebViewMessages', () => {
 
     expect(input.textContent).toBe('@notes.txt ');
     expect(rendered.handlers.setInputText).toHaveBeenCalledWith('@notes.txt ');
+  });
+
+  it('marks locally generated error notices so the App can render them outside the ACP transcript', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'agentConnectionError',
+            data: { message: 'spawn failed' },
+          },
+        }),
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'authError',
+            data: { message: 'bad token' },
+          },
+        }),
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'error',
+            data: { message: 'boom' },
+          },
+        }),
+      );
+    });
+
+    const added = rendered.handlers.messageHandling.addMessage.mock.calls.map(
+      (call) =>
+        call[0] as { role?: string; content?: string; localOnly?: boolean },
+    );
+    expect(added).toHaveLength(3);
+    for (const message of added) {
+      expect(message.localOnly).toBe(true);
+      expect(message.role).toBe('assistant');
+    }
+    expect(added[0]?.content).toContain('Failed to connect to Qwen agent');
+    expect(added[1]?.content).toBe('bad token');
+    expect(added[2]?.content).toBe('boom');
+  });
+
+  it('delivers insight progress and report path to the provided setters', () => {
+    const setInsightReportPath = vi.fn();
+    const setInsightProgress = vi.fn();
+    const rendered = renderHookHarness({
+      setInsightReportPath,
+      setInsightProgress,
+    });
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'insightProgress',
+            data: { stage: 'Analyzing', progress: 0.4 },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.setInsightProgress).toHaveBeenCalledWith({
+      stage: 'Analyzing',
+      progress: 0.4,
+      detail: undefined,
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'insightReportReady',
+            data: { path: '/tmp/insight-report.md' },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.setInsightReportPath).toHaveBeenCalledWith(
+      '/tmp/insight-report.md',
+    );
+    // Report ready clears the progress indicator.
+    expect(rendered.setInsightProgress).toHaveBeenLastCalledWith(null);
   });
 });

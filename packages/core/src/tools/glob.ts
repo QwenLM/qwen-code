@@ -23,7 +23,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import {
   DEFAULT_FILE_FILTERING_OPTIONS,
   type FileFilteringOptions,
-} from '../config/constants.js';
+} from '../utils/file-filtering-options.js';
 import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';

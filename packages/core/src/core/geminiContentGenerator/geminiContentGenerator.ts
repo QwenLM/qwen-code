@@ -5,8 +5,6 @@
  */
 
 import type {
-  CountTokensParameters,
-  CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
   GenerateContentParameters,
@@ -366,19 +364,9 @@ export class GeminiContentGenerator implements ContentGenerator {
     return part;
   }
 
-  async countTokens(
-    request: CountTokensParameters,
-  ): Promise<CountTokensResponse> {
-    return this.googleGenAI.models.countTokens(request);
-  }
-
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
     return this.googleGenAI.models.embedContent(request);
-  }
-
-  useSummarizedThinking(): boolean {
-    return true;
   }
 }

@@ -9,6 +9,13 @@ import { tool } from '../../tool.js';
 import { formatJsonResult, formatToolError } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
 import { handler, resolveSessionId } from '../helpers.js';
+import { PERMISSION_MODES } from '../../../types/permission-mode.js';
+
+const SAFE_LOCAL_APPROVAL_MODES = new Set(['plan', 'default']);
+const GLOBAL_SCOPE_APPROVAL_MODES = PERMISSION_MODES.filter(
+  (mode) => !SAFE_LOCAL_APPROVAL_MODES.has(mode),
+);
+const PERMISSION_MODE_LIST = PERMISSION_MODES.join(', ');
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 export function workspaceWriteTools(state: BridgeState): any[] {
@@ -80,11 +87,9 @@ export function workspaceWriteTools(state: BridgeState): any[] {
 
     tool(
       'session_set_approval_mode',
-      'Change the approval mode of a session (plan, default, auto-edit, auto, yolo).',
+      `Change the approval mode of a session (${PERMISSION_MODE_LIST}).`,
       {
-        mode: z
-          .enum(['plan', 'default', 'auto-edit', 'auto', 'yolo'])
-          .describe('Approval mode.'),
+        mode: z.enum(PERMISSION_MODES).describe('Approval mode.'),
         persist: z
           .boolean()
           .optional()
@@ -97,10 +102,9 @@ export function workspaceWriteTools(state: BridgeState): any[] {
       handler(async (args) => {
         // Block dangerous modes and persistent changes without explicit opt-in
         if (!state.allowGlobalScope) {
-          const dangerousModes = ['yolo', 'auto', 'auto-edit'];
-          if (dangerousModes.includes(args.mode)) {
+          if (GLOBAL_SCOPE_APPROVAL_MODES.includes(args.mode)) {
             return formatToolError(
-              `Approval modes '${dangerousModes.join("', '")}' are restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.`,
+              `Approval modes '${GLOBAL_SCOPE_APPROVAL_MODES.join("', '")}' are restricted for security. Set QWEN_BRIDGE_ALLOW_GLOBAL_SCOPE=true to enable.`,
             );
           }
           if (args.persist) {

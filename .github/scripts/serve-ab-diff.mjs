@@ -44,6 +44,15 @@ export function maskPath(path, patterns = DEFAULT_VOLATILE) {
   return patterns.some((re) => re.test(path));
 }
 
+// The completion marker is OWNED by the drive script (the writer) and imported
+// here rather than re-declared: two copies drift silently — each suite would
+// keep testing against its own — and a drifted reader either flags every
+// complete baseline as truncated or stops noticing truncated ones at all.
+// Importing is side-effect-free; the drive's CLI body sits behind an
+// `import.meta.url` guard.
+export { DRIVE_COMPLETE_MARKER } from './serve-ab-drive.mjs';
+import { DRIVE_COMPLETE_MARKER } from './serve-ab-drive.mjs';
+
 export function typeOf(v) {
   if (v === null) return 'null';
   if (Array.isArray(v)) return 'array';
@@ -165,6 +174,17 @@ export function buildComment(sections, ctx = {}) {
     out.push('— _Qwen Code · serve A/B_');
     return out.join('\n') + '\n';
   }
+  // Partial run: the base produced SOME captures and then stopped (a canary
+  // deviation, a daemon crash). The scenarios it never reached have no
+  // baseline, so they would render as "this PR adds these responses" — the same
+  // shape a genuinely new scenario produces. Disclose it rather than let the
+  // reader mistake a truncated baseline for a complete one.
+  if (ctx.baselineIncomplete) {
+    out.push(
+      '⚠️ _The PR-base drive did not finish, so its capture set is partial. Scenarios it never reached appear below as additions rather than as a before/after — treat those tables as unverified._',
+    );
+    out.push('');
+  }
   if (ctx.removed?.length) {
     out.push(
       `⚠️ _Present in the base but absent from this PR: ${ctx.removed
@@ -187,11 +207,16 @@ export function buildComment(sections, ctx = {}) {
 }
 
 /**
- * Read a capture dir's `<scenario>.json` files → `{ sections, baselineMissing }`.
- * Each section diffs an after-capture against the same-named base file. When the
- * base captures are ENTIRELY absent (a failed base build/drive) but head
- * captures exist, `baselineMissing` is set so the caller reports "diff skipped"
- * rather than misreporting every field as added. This is the function the CI
+ * Read a capture dir's `<scenario>.json` files →
+ * `{ sections, baselineMissing, baselineIncomplete, removed }`. Each section
+ * diffs an after-capture against the same-named base file.
+ *
+ * Two degraded baselines are distinguished, because both would otherwise read
+ * as an ordinary diff. `baselineMissing`: the base produced NO captures (a
+ * failed base build/drive), so nothing was compared. `baselineIncomplete`: the
+ * base drive started and stopped part-way, so the scenarios it never reached
+ * have no baseline and render as pure additions — indistinguishable, on the
+ * page, from a scenario this PR genuinely adds. This is the function the CI
  * `comment` subcommand actually invokes, so it is exported + covered.
  */
 export function diffCaptureDirs(beforeDir, afterDir) {
@@ -205,6 +230,10 @@ export function diffCaptureDirs(beforeDir, afterDir) {
   const afterFiles = jsonFiles(afterDir).sort();
   const beforeFiles = jsonFiles(beforeDir);
   const baselineMissing = afterFiles.length > 0 && beforeFiles.length === 0;
+  const baselineIncomplete =
+    !baselineMissing &&
+    beforeFiles.length > 0 &&
+    !existsSync(join(beforeDir, DRIVE_COMPLETE_MARKER));
   const afterSet = new Set(afterFiles);
   // Scenarios present in the base but gone from the head — a removed or broken
   // scenario would otherwise vanish silently and lower the "across N" count,
@@ -223,20 +252,23 @@ export function diffCaptureDirs(beforeDir, afterDir) {
     const before = existsSync(beforePath) ? readJson(beforePath) : {};
     return { scenario, changes: diffJson(before, after) };
   });
-  return { sections, baselineMissing, removed };
+  return { sections, baselineMissing, baselineIncomplete, removed };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const [cmd, ...rest] = process.argv.slice(2);
   if (cmd === 'comment') {
     const [beforeDir, afterDir, shortSha, bodyFile] = rest;
-    const { sections, baselineMissing, removed } = diffCaptureDirs(
-      beforeDir,
-      afterDir,
-    );
+    const { sections, baselineMissing, baselineIncomplete, removed } =
+      diffCaptureDirs(beforeDir, afterDir);
     writeFileSync(
       bodyFile,
-      buildComment(sections, { shortSha, baselineMissing, removed }),
+      buildComment(sections, {
+        shortSha,
+        baselineMissing,
+        baselineIncomplete,
+        removed,
+      }),
     );
     const total = baselineMissing
       ? 0

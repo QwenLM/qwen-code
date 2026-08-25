@@ -6,6 +6,7 @@
 
 export {
   DaemonSessionProvider,
+  DEFAULT_MAX_BLOCKS,
   useDaemonActions,
   useOptionalDaemonActions,
   useDaemonSessionOwnerGuard,

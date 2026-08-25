@@ -4,7 +4,10 @@ import {
   useMemo,
   useSyncExternalStore,
 } from 'react';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonTranscriptBlock,
+  DaemonTranscriptBlockChangeSummary,
+} from '@qwen-code/sdk/daemon';
 import {
   useConnection,
   useTranscriptStore,
@@ -28,7 +31,31 @@ function hasPendingInput(): boolean {
   return scheduling?.isInputPending?.() === true;
 }
 
-export function useAnimationFrameTranscriptBlocks(): readonly DaemonTranscriptBlock[] {
+interface AnimationFrameTranscriptSnapshot {
+  blocks: readonly DaemonTranscriptBlock[];
+  blockChangeSummary?: DaemonTranscriptBlockChangeSummary;
+}
+
+interface AnimationFrameTranscriptSnapshotOptions {
+  structuralOnly?: boolean;
+}
+
+function isSameTranscriptStructure(
+  previous: DaemonTranscriptBlockChangeSummary | undefined,
+  next: DaemonTranscriptBlockChangeSummary | undefined,
+): boolean {
+  return (
+    previous !== undefined &&
+    next !== undefined &&
+    previous.source === next.source &&
+    previous.tailAppendBarrierRevision === next.tailAppendBarrierRevision
+  );
+}
+
+export function useAnimationFrameTranscriptSnapshot(
+  options: AnimationFrameTranscriptSnapshotOptions = {},
+): AnimationFrameTranscriptSnapshot {
+  const structuralOnly = options.structuralOnly === true;
   const store = useTranscriptStore();
   const { sessionId } = useConnection();
   const subscribe = useCallback(
@@ -56,7 +83,14 @@ export function useAnimationFrameTranscriptBlocks(): readonly DaemonTranscriptBl
         }
       };
       document.addEventListener('beforeinput', recordInput, true);
+      let previousSummary = store.getBlockChangeSummary?.();
       const unsubscribe = store.subscribe(() => {
+        const nextSummary = store.getBlockChangeSummary?.();
+        const tailOnly =
+          structuralOnly &&
+          isSameTranscriptStructure(previousSummary, nextSummary);
+        previousSummary = nextSummary;
+        if (tailOnly) return;
         if (frame !== null) return;
         pendingSinceTs = performance.now();
         frame = window.requestAnimationFrame(dispatchWhenDue);
@@ -69,30 +103,41 @@ export function useAnimationFrameTranscriptBlocks(): readonly DaemonTranscriptBl
         }
       };
     },
-    [store],
+    [store, structuralOnly],
   );
   const getSnapshot = useMemo(() => {
     let cached:
       | {
           blocks: readonly DaemonTranscriptBlock[];
           blockIndexById: Readonly<Record<string, number>>;
+          blockChangeSummary: DaemonTranscriptBlockChangeSummary | undefined;
         }
       | undefined;
     return () => {
       const state = store.getSnapshot();
-      if (
-        !cached ||
-        cached.blocks !== state.blocks ||
-        cached.blockIndexById !== state.blockIndexById
-      ) {
+      const blockChangeSummary = store.getBlockChangeSummary?.();
+      const canCompareStructure =
+        structuralOnly &&
+        cached?.blockChangeSummary !== undefined &&
+        blockChangeSummary !== undefined;
+      const changed = canCompareStructure
+        ? !isSameTranscriptStructure(
+            cached?.blockChangeSummary,
+            blockChangeSummary,
+          ) || cached?.blockIndexById !== state.blockIndexById
+        : cached?.blocks !== state.blocks ||
+          cached?.blockIndexById !== state.blockIndexById ||
+          cached?.blockChangeSummary !== blockChangeSummary;
+      if (!cached || changed) {
         cached = {
           blocks: state.blocks,
           blockIndexById: state.blockIndexById,
+          blockChangeSummary,
         };
       }
       return cached;
     };
-  }, [store]);
+  }, [store, structuralOnly]);
   const live = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   // Defer transcript re-renders so urgent updates — composer keystrokes,
   // button presses — are never queued behind a streaming frame. The deferred
@@ -104,8 +149,13 @@ export function useAnimationFrameTranscriptBlocks(): readonly DaemonTranscriptBl
   // same-session store reset without blocking ordinary streamed text updates.
   const snapshot = useMemo(() => ({ sessionId, ...live }), [live, sessionId]);
   const deferred = useDeferredValue(snapshot);
-  return deferred.sessionId === sessionId &&
+  const current =
+    deferred.sessionId === sessionId &&
     deferred.blockIndexById === live.blockIndexById
-    ? deferred.blocks
-    : live.blocks;
+      ? deferred
+      : live;
+  return {
+    blocks: current.blocks,
+    blockChangeSummary: current.blockChangeSummary,
+  };
 }

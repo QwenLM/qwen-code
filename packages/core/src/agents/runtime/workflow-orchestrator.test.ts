@@ -451,6 +451,238 @@ describe('WorkflowOrchestrator', () => {
     });
   });
 
+  it('records dependency tails across sequential, parallel, and pipeline dispatches', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `mock:${prompt}`,
+    );
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        phase('Inspect');
+        await agent('inspect', { label: 'inspect' });
+        phase('Review');
+        await parallel([
+          () => agent('correctness', { label: 'correctness' }),
+          () => agent('architecture', { label: 'architecture' }),
+        ]);
+        phase('Fix');
+        await pipeline(
+          ['a', 'b'],
+          (_prev, item) => agent('verify ' + item, { label: 'verify-' + item }),
+          (_prev, item) => agent('fix ' + item, { label: 'fix-' + item }),
+        );
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const ids = new Map(queued.map((event) => [event.label, event.id]));
+    const dependencies = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => queued.find((event) => event.id === id)!.label);
+
+    expect(dependencies('inspect')).toEqual([]);
+    expect(dependencies('correctness')).toEqual(['inspect']);
+    expect(dependencies('architecture')).toEqual(['inspect']);
+    expect(dependencies('verify-a')).toEqual(['correctness', 'architecture']);
+    expect(dependencies('verify-b')).toEqual(['correctness', 'architecture']);
+    expect(dependencies('fix-a')).toEqual(['verify-a']);
+    expect(dependencies('fix-b')).toEqual(['verify-b']);
+    expect(new Set(ids.values()).size).toBe(7);
+  });
+
+  it.each(['parallel', 'pipeline'] as const)(
+    'preserves newer parent dependencies when an un-awaited %s settles',
+    async (kind) => {
+      const queued: Array<{
+        id: string;
+        label?: string;
+        dependsOn: string[];
+      }> = [];
+      const orchestrator = new WorkflowOrchestrator(
+        async (prompt) => `${prompt}-done`,
+      );
+      const fanout =
+        kind === 'parallel'
+          ? `parallel([() => agent('fanout', { label: 'fanout' })])`
+          : `pipeline([0], () => agent('fanout', { label: 'fanout' }))`;
+
+      await orchestrator.run({
+        script: `
+          const pending = ${fanout};
+          await agent('parent', { label: 'parent' });
+          await pending;
+          await agent('joined', { label: 'joined' });
+        `,
+        args: undefined,
+        scheduler: new WorkflowDispatchScheduler(2),
+        emitter: {
+          dispatchQueued: (event) => queued.push(event),
+        },
+      });
+
+      const labelsById = new Map(
+        queued.map((event) => [event.id, event.label]),
+      );
+      const joined = queued.find((event) => event.label === 'joined');
+      expect(joined?.dependsOn.map((id) => labelsById.get(id)).sort()).toEqual([
+        'fanout',
+        'parent',
+      ]);
+    },
+  );
+
+  it('emits queued, started, and settled lifecycle events for one dispatch', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const events: string[] = [];
+
+    await orchestrator.run({
+      script: `await agent('inspect', { label: 'scope' });`,
+      args: undefined,
+      emitter: {
+        dispatchQueued: ({ id, label }) => events.push(`queued:${id}:${label}`),
+        dispatchStarted: (id) => events.push(`started:${id}`),
+        dispatchSettled: (id, error) =>
+          events.push(`settled:${id}:${error ?? 'ok'}`),
+      },
+    });
+
+    expect(events).toHaveLength(3);
+    const dispatchId = events[0]!.split(':')[1];
+    expect(events).toEqual([
+      `queued:${dispatchId}:scope`,
+      `started:${dispatchId}`,
+      `settled:${dispatchId}:ok`,
+    ]);
+  });
+
+  it('passes the recorded dispatch id into the production dispatch boundary', async () => {
+    const receivedIds: Array<string | undefined> = [];
+    const orchestrator = new WorkflowOrchestrator(
+      async (_prompt, _opts, dispatchId) => {
+        receivedIds.push(dispatchId);
+        return 'done';
+      },
+    );
+
+    await orchestrator.run({
+      script: `await agent('inspect', { label: 'scope' });`,
+      args: undefined,
+    });
+
+    expect(receivedIds).toEqual(['dispatch-1']);
+  });
+
+  it('preserves the dependency tail across empty parallel helpers', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('before', { label: 'before' });
+        await parallel([]);
+        await agent('after parallel', { label: 'after-parallel' });
+        await pipeline([], () => agent('unused'));
+        await agent('after pipeline', { label: 'after-pipeline' });
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelById = new Map(
+      queued.map((event) => [event.id, event.label ?? event.id]),
+    );
+    const dependsOn = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => labelById.get(id));
+
+    expect(dependsOn('after-parallel')).toEqual(['before']);
+    expect(dependsOn('after-pipeline')).toEqual(['after-parallel']);
+  });
+
+  it('does not re-inject inherited tails from a fan-out branch that never dispatches', async () => {
+    const orchestrator = new WorkflowOrchestrator(
+      async (prompt) => `${prompt}`,
+    );
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('a', { label: 'a' });
+        const pending = parallel([
+          () => agent('b', { label: 'b' }),
+          () => 42,
+        ]);
+        await agent('m', { label: 'm' });
+        await pending;
+        await agent('z', { label: 'z' });
+      `,
+      args: undefined,
+      scheduler: new WorkflowDispatchScheduler(2),
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelsById = new Map(queued.map((event) => [event.id, event.label]));
+    const dependsOn = (label: string) =>
+      queued
+        .find((event) => event.label === label)!
+        .dependsOn.map((id) => labelsById.get(id))
+        .sort();
+
+    expect(dependsOn('b')).toEqual(['a']);
+    expect(dependsOn('m')).toEqual(['a']);
+    // The no-dispatch branch must not re-inject the ancestor 'a' edge.
+    expect(dependsOn('z')).toEqual(['b', 'm']);
+  });
+
+  it('keeps inherited tails when no fan-out branch issues a dispatch', async () => {
+    const orchestrator = new WorkflowOrchestrator(async () => 'done');
+    const queued: Array<{
+      id: string;
+      label?: string;
+      dependsOn: string[];
+    }> = [];
+
+    await orchestrator.run({
+      script: `
+        await agent('before', { label: 'before' });
+        await parallel([() => 1, () => 2]);
+        await agent('after', { label: 'after' });
+      `,
+      args: undefined,
+      emitter: {
+        dispatchQueued: (event) => queued.push(event),
+      },
+    });
+
+    const labelById = new Map(
+      queued.map((event) => [event.id, event.label ?? event.id]),
+    );
+    const after = queued.find((event) => event.label === 'after');
+    expect(after?.dependsOn.map((id) => labelById.get(id))).toEqual(['before']);
+  });
+
   it('emitter subscriber errors do not break the run (defensive try/catch)', async () => {
     const orchestrator = new WorkflowOrchestrator(
       async (prompt) => `mock:${prompt}`,
@@ -471,6 +703,15 @@ describe('WorkflowOrchestrator', () => {
       },
       logAppended: () => {
         throw new Error('log-subscriber-boom');
+      },
+      dispatchQueued: () => {
+        throw new Error('queued-subscriber-boom');
+      },
+      dispatchStarted: () => {
+        throw new Error('started-subscriber-boom');
+      },
+      dispatchSettled: () => {
+        throw new Error('settled-subscriber-boom');
       },
     };
     const outcome = await orchestrator.run({
@@ -847,9 +1088,13 @@ describe('WorkflowOrchestrator', () => {
     const orchestrator = new WorkflowOrchestrator(() =>
       Promise.reject(new Error('nested-boom')),
     );
+    const appendedLogs: string[] = [];
     const outcome = await orchestrator.run({
       script: `return 'parent:' + (await workflow('child'));`,
       args: undefined,
+      emitter: {
+        logAppended: (line) => appendedLogs.push(line),
+      },
       resolveSavedWorkflow: async () => ({
         // The fire-and-forget dispatch fails but the nested script
         // still completes — the only trace of the failure is the
@@ -861,6 +1106,9 @@ describe('WorkflowOrchestrator', () => {
     expect(outcome.logs).toContain(
       'dispatch failed (result not consumed): nested-boom',
     );
+    expect(appendedLogs).toEqual([
+      'dispatch failed (result not consumed): nested-boom',
+    ]);
   });
 
   it('keeps a nested agent result behind the shared pause gate', async () => {
@@ -1834,24 +2082,31 @@ describe('createProductionDispatch', () => {
         signal?.addEventListener('abort', () => resolve(), { once: true });
       });
     };
-    const installed: AgentEventEmitter[] = [];
+    const installed: Array<{
+      emitter: AgentEventEmitter;
+      dispatchId?: string;
+    }> = [];
     const cleaned: AgentEventEmitter[] = [];
     const dispatch = createProductionDispatch(
       fakeConfig(),
       undefined,
       undefined,
-      (emitter) => {
-        installed.push(emitter);
+      (emitter, dispatchId) => {
+        installed.push({ emitter, dispatchId });
         return () => cleaned.push(emitter);
       },
     );
 
-    await expect(dispatch('hello', { label: 'h1', stallMs: 5 })).resolves.toBe(
-      'headless-said:hello',
-    );
+    await expect(
+      dispatch('hello', { label: 'h1', stallMs: 5 }, 'dispatch-1'),
+    ).resolves.toBe('headless-said:hello');
     expect(installed).toHaveLength(2);
-    expect(installed[0]).not.toBe(installed[1]);
-    expect(cleaned).toEqual(installed);
+    expect(installed[0]?.emitter).not.toBe(installed[1]?.emitter);
+    expect(installed.map(({ dispatchId }) => dispatchId)).toEqual([
+      'dispatch-1',
+      'dispatch-1',
+    ]);
+    expect(cleaned).toEqual(installed.map(({ emitter }) => emitter));
   });
 
   it('bubbles a production subagent approval through the run registry and resumes after ProceedOnce', async () => {

@@ -565,6 +565,7 @@ export const useWebViewMessages = ({
             role: 'assistant',
             content: `Failed to connect to Qwen agent: ${errorMsg}\nYou can still use the chat UI, but messages won't be sent to AI.`,
             timestamp: Date.now(),
+            localOnly: true,
           });
           // Set authentication state to false
           handlers.setIsAuthenticated?.(false);
@@ -581,6 +582,7 @@ export const useWebViewMessages = ({
             role: 'assistant',
             content: errorMsg,
             timestamp: Date.now(),
+            localOnly: true,
           });
           // Set authentication state to false
           handlers.setIsAuthenticated?.(false);
@@ -846,6 +848,7 @@ export const useWebViewMessages = ({
             role: 'assistant',
             content: errorMessage,
             timestamp: Date.now(),
+            localOnly: true,
           });
           break;
         }

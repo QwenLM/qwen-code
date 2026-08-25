@@ -203,10 +203,11 @@ Math.max(1, Math.floor(m / 2) + 1);
 | 6                        | 4         | More than half.                 |
 
 For **M = 2**, split votes (A selects X, B selects Y) can only be resolved by
-the per-permission timeout: no option reaches unanimity, so the request waits
-until `permissionResponseTimeoutMs` (default 5 min) and resolves as
-`{cancelled, timeout}`. The vote-advance path logs this "unanimity means split
-votes time out" behavior to stderr for operators.
+voter cancellation, session cancellation, or the optional interaction timeout:
+no option reaches unanimity. `permissionResponseTimeoutMs` is disabled by
+default; when configured, an unresolved split resolves as
+`{cancelled, timeout}` at that deadline. The vote-advance path logs the
+applicable behavior to stderr for operators.
 
 Operators who want first-vote-wins behavior for M = 2 can explicitly set
 `policy.consensusQuorum: 1`. Stricter configurations, such as requiring

@@ -101,7 +101,7 @@ Commands for managing AI tools and models.
 | `/model --voice`      | Set the model used for voice transcription                                            | `/model --voice <model-id>`                                                                               |
 | `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model      | `/model --vision <model-id>`                                                                              |
 | `/model --compaction` | Set the model used for chat compression                                               | `/model --compaction <model-id>`, `/model --compaction clear`                                             |
-| `/model --image`      | Set an image-only model for the built-in image generation tool                        | `/model --image <model-id>`                                                                               |
+| `/model --image`      | Set an image-generation-capable model for the built-in image generation tool          | `/model --image <model-id>`                                                                               |
 | `/effort`             | Set reasoning effort for thinking-capable models                                      | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
 | `/extensions`         | Manage extensions                                                                     | `/extensions list`, `/extensions manage`                                                                  |
 | → `list`              | List installed extensions                                                             | `/extensions list`                                                                                        |
@@ -133,7 +133,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. When disabled they won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 ### 1.5 Built-in Skills
 

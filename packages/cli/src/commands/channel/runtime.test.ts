@@ -14,7 +14,10 @@ import {
   sessionsPath,
 } from './runtime.js';
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  APPROVAL_MODES: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).APPROVAL_MODES,
   Storage: { getGlobalQwenDir: () => '/tmp/qwen' },
   hashDaemonWorkspace: (workspace: string) =>
     workspace === '/workspace' ? 'workspace-hash' : 'other-hash',

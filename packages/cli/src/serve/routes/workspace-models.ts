@@ -11,7 +11,7 @@ import {
   getOwnKeyScope,
   getWritableScopes,
 } from '../../config/modelProvidersScope.js';
-import { getSettingDefinition } from '../../utils/settingsUtils.js';
+import { getSettingDefinition } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   isActiveModelSelection,

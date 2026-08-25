@@ -15,7 +15,6 @@ const mockReportGeminiChunk = vi.hoisted(() => vi.fn());
 vi.mock('@google/genai', () => {
   const mockGenerateContent = vi.fn();
   const mockGenerateContentStream = vi.fn();
-  const mockCountTokens = vi.fn();
   const mockEmbedContent = vi.fn();
 
   return {
@@ -23,7 +22,6 @@ vi.mock('@google/genai', () => {
       models: {
         generateContent: mockGenerateContent,
         generateContentStream: mockGenerateContentStream,
-        countTokens: mockCountTokens,
         embedContent: mockEmbedContent,
       },
     })),
@@ -209,17 +207,6 @@ describe('GeminiContentGenerator', () => {
 
     await expect(stream.next()).rejects.toBe(failure);
     expect(mockReportGeminiChunk).not.toHaveBeenCalled();
-  });
-
-  it('should call countTokens on the underlying model', async () => {
-    const request = { model: 'gemini-1.5-flash', contents: [] };
-    const expectedResponse = { totalTokens: 10 };
-    mockGoogleGenAI.models.countTokens.mockResolvedValue(expectedResponse);
-
-    const response = await generator.countTokens(request);
-
-    expect(mockGoogleGenAI.models.countTokens).toHaveBeenCalledWith(request);
-    expect(response).toBe(expectedResponse);
   });
 
   it('should call embedContent on the underlying model', async () => {

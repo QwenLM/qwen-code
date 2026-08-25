@@ -433,6 +433,7 @@ describe('SessionTranscriptReader', () => {
             evidenceCursor: { recordId: null },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1,
             updatedAt: 1,
           },
@@ -500,6 +501,7 @@ describe('SessionTranscriptReader', () => {
             evidenceCursor: { recordId: null },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1,
             updatedAt: 1,
           },
@@ -528,6 +530,7 @@ describe('SessionTranscriptReader', () => {
             evidenceCursor: { recordId: null },
             turnCount: 0,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1,
             updatedAt: 1,
           },
@@ -787,6 +790,7 @@ describe('SessionTranscriptReader', () => {
           evidenceCursor: { recordId: 'goal' },
           turnCount: 1,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -1204,6 +1208,7 @@ describe('SessionTranscriptReader', () => {
           evidenceCursor: { recordId: 'goal' },
           turnCount: 1,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -1599,6 +1604,144 @@ describe('SessionTranscriptReader', () => {
     });
   });
 
+  it('restores the last session_model payload', async () => {
+    const firstModel: ChatRecord = {
+      ...record('model-1', null, ''),
+      type: 'system',
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 'old-model', authType: 'openai' },
+    };
+    const laterModel: ChatRecord = {
+      ...record('model-2', 'model-1', ''),
+      type: 'system',
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: {
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+        baseUrl: 'https://example.test/v1',
+      },
+    };
+    await writeRecords([
+      firstModel,
+      laterModel,
+      record('u1', 'model-2', 'prompt'),
+      {
+        ...record('a1', 'u1', 'answer'),
+        model: 'other-turn-model',
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toEqual({
+      modelId: 'qwen3-coder-plus',
+      authType: 'openai',
+      baseUrl: 'https://example.test/v1',
+    });
+    expect(projection?.runtime.recording.lastAssistantModel).toBe(
+      'other-turn-model',
+    );
+  });
+
+  it('captures lastAssistantModel when no session_model record exists', async () => {
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      {
+        ...record('a1', 'u1', 'answer'),
+        model: 'session-a-model',
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toBeUndefined();
+    expect(projection?.runtime.recording.lastAssistantModel).toBe(
+      'session-a-model',
+    );
+  });
+
+  it('captures lastAssistantModel on resume when a trailing compression excludes the last assistant record', async () => {
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      {
+        ...record('a1', 'u1', 'answer'),
+        model: 'session-a-model',
+      },
+      {
+        ...record('compression', 'a1', ''),
+        type: 'system',
+        subtype: 'chat_compression',
+        message: undefined,
+        systemPayload: {
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'compressed prompt' }] },
+            { role: 'model', parts: [{ text: 'compressed answer' }] },
+          ],
+          info: { newTokenCount: 20, newTokenCountIsEstimated: false },
+        } as ChatRecord['systemPayload'],
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toBeUndefined();
+    expect(projection?.runtime.recording.lastAssistantModel).toBe(
+      'session-a-model',
+    );
+  });
+
+  it('keeps the last valid session_model when a trailing payload is unusable', async () => {
+    const validModel: ChatRecord = {
+      ...record('model-1', null, ''),
+      type: 'system',
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+    };
+    const invalidModel = {
+      ...record('model-2', 'model-1', ''),
+      type: 'system' as const,
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 42, authType: 'openai' },
+    };
+    await writeRecords([validModel, invalidModel as unknown as ChatRecord]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toEqual({
+      modelId: 'qwen3-coder-plus',
+      authType: 'openai',
+    });
+  });
+
+  it('drops a session_model payload that is not a usable string pair', async () => {
+    const invalidModel = {
+      ...record('model-1', null, ''),
+      type: 'system' as const,
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 42, authType: 'openai' },
+    };
+    await writeRecords([invalidModel as unknown as ChatRecord]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toBeUndefined();
+  });
+
   it('preserves malformed compression failure behavior', async () => {
     await writeRecords([
       record('u1', null, 'prompt'),
@@ -1643,6 +1786,7 @@ describe('SessionTranscriptReader', () => {
           evidenceCursor: { recordId: 'u1' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -1910,6 +2054,7 @@ describe('SessionTranscriptReader', () => {
           evidenceCursor: { recordId: 'cursor' },
           turnCount: 1,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1,
           updatedAt: 2,
         },
@@ -1992,6 +2137,7 @@ describe('SessionTranscriptReader', () => {
             evidenceCursor: { recordId: 'missing-cursor' },
             turnCount: 1,
             activeTimeMs: 0,
+            tokensUsed: 0,
             createdAt: 1,
             updatedAt: 2,
           },

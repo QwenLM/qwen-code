@@ -4,17 +4,12 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
+import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
-const CHANNEL_APPROVAL_MODES = new Set([
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-]);
+const CHANNEL_APPROVAL_MODES = new Set<string>(APPROVAL_MODES);
 
 export { findCliEntryPath } from './cli-entry-path.js';
 

@@ -11,6 +11,11 @@ import type { Config } from '../config/config.js';
 import { isNodeError } from '../utils/errors.js';
 import { isWithinRoot } from '../utils/fileUtils.js';
 import {
+  MAX_DIRECTORY_ARTIFACT_DEPTH,
+  collectRecordableWorkspaceFiles,
+  pathHasSkippedDirectoryComponent,
+} from '../utils/workspace-artifact-directory.js';
+import {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
 } from '../utils/workspace-artifact-path.js';
@@ -38,11 +43,11 @@ export interface RecordArtifactParams {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
-const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later, unless the producing tool already returned artifact metadata. For example, write_file automatically records HTML, image, PDF, notebook, CSV, and Excel files it writes inside the workspace, so do not call record_artifact again for the same workspacePath; still call it for other formats such as Markdown, JSON, and plain text, and for files produced outside write_file. When the session creates a remote resource, such as a pull request, issue, or comment submitted via gh, record its URL with kind "link" and the url locator so the user can reopen it later.
+const DESCRIPTION = `Registers a session artifact so clients can show it in an artifacts panel. Use it after creating a useful file, URL, image, report, notebook, or other intermediate result that the user may want to open later, unless the producing tool already returned artifact metadata. For example, write_file automatically records HTML, image, PDF, notebook, CSV, and office documents it writes inside the workspace, so do not call record_artifact again for the same workspacePath; still call it for other formats such as Markdown, JSON, and plain text, and for files produced outside write_file. When the session creates a remote resource, such as a pull request, issue, or comment submitted via gh, record its URL with kind "link" and the url locator so the user can reopen it later.
 
 Provide exactly one locator: workspacePath, managedId, or url. Do not use the old "path" field. Use the Artifact tool, not record_artifact, for published interactive HTML artifacts.
 
-For workspace files, workspacePath must be relative to the current execution directory (for example "report.csv" or "reports/summary.html") or an absolute path inside the bound workspace. Do not add workspace folder prefixes such as "w/agent/", and do not use ".." to walk up from a worktree. This tool resolves the file, verifies it exists as a regular file inside the workspace, then stores a workspace-root-relative canonical workspacePath. A successful result includes status=available, the canonical workspacePath, and resolvedPath. If verification fails, the tool returns an error — do not tell the user the artifact can be opened or downloaded.`;
+For workspace files, workspacePath must be relative to the current execution directory (for example "report.csv" or "reports/summary.html") or an absolute path inside the bound workspace. Do not add workspace folder prefixes such as "w/agent/", and do not use ".." to walk up from a worktree. This tool resolves the path and verifies it stays inside the workspace. A regular file is stored as one workspace-root-relative canonical workspacePath. A directory is never stored as an artifact; each recordable file inside it is recorded separately. Word, Excel, PowerPoint, and other office documents use kind "document". A successful file result includes status=available, the canonical workspacePath, and resolvedPath. A successful directory result lists the expanded files instead of "Recorded artifact". If verification fails, the tool returns an error — do not tell the user the artifact can be opened or downloaded.`;
 
 export const ARTIFACT_TITLE_MAX_LENGTH = 200;
 export const ARTIFACT_WORKSPACE_PATH_MAX_LENGTH = 500;
@@ -54,7 +59,9 @@ type WorkspaceLocatorSuccess = {
   ok: true;
   workspacePath: string;
   resolvedPath: string;
+  workspaceRoot: string;
   sizeBytes: number;
+  isDirectory?: boolean;
 };
 
 type WorkspaceLocatorFailure = {
@@ -98,6 +105,10 @@ class RecordArtifactInvocation extends BaseToolInvocation<
         };
       }
 
+      if (locator.isDirectory) {
+        return this.expandDirectoryLocator(locator);
+      }
+
       const artifact: ToolArtifact = {
         title: this.params.title.trim(),
         kind: this.params.kind,
@@ -133,6 +144,116 @@ class RecordArtifactInvocation extends BaseToolInvocation<
       artifacts: [artifact],
     };
   }
+
+  private async expandDirectoryLocator(
+    locator: WorkspaceLocatorSuccess,
+  ): Promise<ToolResult> {
+    if (pathHasSkippedDirectoryComponent(locator.workspacePath)) {
+      const message = [
+        `Failed to record artifact: "${locator.workspacePath}" is a skipped directory and cannot be recorded.`,
+        WORKSPACE_PATH_HINT,
+      ].join('\n');
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: {
+          message,
+          type: ToolErrorType.TARGET_IS_DIRECTORY,
+        },
+      };
+    }
+    let collected: {
+      files: string[];
+      truncated: boolean;
+      depthLimited: boolean;
+      unreadable: boolean;
+      skippedUnrecordable: number;
+    };
+    try {
+      collected = await collectRecordableWorkspaceFiles(
+        locator.resolvedPath,
+        locator.workspacePath,
+        locator.workspaceRoot,
+        (workspacePath) =>
+          isRecordableDerivedChild(
+            path.posix.basename(workspacePath),
+            workspacePath,
+          ),
+      );
+    } catch (error) {
+      const failure = pathInspectFailure(
+        error,
+        locator.resolvedPath,
+        locator.workspacePath,
+        `Failed to record artifact: could not inspect "${locator.workspacePath}" (${error instanceof Error ? error.message : String(error)}).`,
+      );
+      return {
+        llmContent: failure.message,
+        returnDisplay: failure.message,
+        error: {
+          message: failure.message,
+          type: failure.type,
+        },
+      };
+    }
+    if (collected.files.length === 0) {
+      const message = [
+        collected.depthLimited
+          ? `Failed to record artifact: "${locator.workspacePath}" is a directory whose recordable files are deeper than ${MAX_DIRECTORY_ARTIFACT_DEPTH} levels.`
+          : `Failed to record artifact: "${locator.workspacePath}" is a directory with no recordable files.`,
+        WORKSPACE_PATH_HINT,
+      ].join('\n');
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: {
+          message,
+          type: ToolErrorType.TARGET_IS_DIRECTORY,
+        },
+      };
+    }
+
+    if (metadataExceedsBudget(this.params.metadata)) {
+      const message =
+        'Failed to record artifact: metadata is too large to expand a directory.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: {
+          message,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
+    const parentTitle = this.params.title.trim();
+    const parentDescription = trimOptional(this.params.description);
+    const artifacts: ToolArtifact[] = [];
+    for (const workspacePath of collected.files) {
+      const title = path.posix.basename(workspacePath).trim();
+      const description =
+        parentDescription ||
+        (parentTitle && parentTitle !== title ? parentTitle : undefined);
+      artifacts.push({
+        title,
+        storage: 'workspace',
+        workspacePath,
+        metadata: {
+          ...this.params.metadata,
+          expandedFromDirectory: true,
+        },
+        ...(description ? { description } : {}),
+      });
+    }
+    const message = formatDirectoryExpansion(locator, {
+      ...collected,
+      files: artifacts.map((artifact) => artifact.workspacePath!),
+    });
+    return {
+      llmContent: message,
+      returnDisplay: message,
+      artifacts,
+    };
+  }
 }
 
 export class RecordArtifactTool extends BaseDeclarativeTool<
@@ -166,6 +287,7 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
               'audio',
               'pdf',
               'notebook',
+              'document',
               'other',
             ],
             description: 'Best-effort artifact type for client rendering.',
@@ -183,7 +305,7 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
           workspacePath: {
             type: 'string',
             description:
-              'Path relative to the current execution directory, or an absolute path inside the bound workspace. The tool verifies the file and stores a workspace-root-relative canonical path.',
+              'Path relative to the current execution directory, or an absolute path inside the bound workspace. The tool verifies a regular file, or expands a directory into one artifact per recordable file.',
           },
           managedId: {
             type: 'string',
@@ -543,6 +665,7 @@ function isArtifactKind(kind: string): kind is ToolArtifactKind {
     kind === 'audio' ||
     kind === 'pdf' ||
     kind === 'notebook' ||
+    kind === 'document' ||
     kind === 'other'
   );
 }
@@ -603,6 +726,70 @@ function formatWorkspaceSuccess(
     `workspacePath: ${locator.workspacePath}`,
     `resolvedPath: ${locator.resolvedPath}`,
   ].join('\n');
+}
+
+function formatDirectoryExpansion(
+  locator: WorkspaceLocatorSuccess,
+  collected: {
+    files: string[];
+    truncated: boolean;
+    depthLimited?: boolean;
+    unreadable?: boolean;
+    skippedUnrecordable?: number;
+  },
+): string {
+  const lines = [
+    `Expanded directory "${locator.workspacePath}" into ${collected.files.length} artifacts.`,
+    'status: available',
+    `workspacePath: ${locator.workspacePath}`,
+    `resolvedPath: ${locator.resolvedPath}`,
+    'files:',
+    ...collected.files.map((file) => `- ${file}`),
+  ];
+  if (collected.truncated) {
+    lines.push(`Recorded the first ${collected.files.length} files.`);
+  }
+  if (collected.depthLimited) {
+    lines.push(
+      `Skipped files deeper than ${MAX_DIRECTORY_ARTIFACT_DEPTH} directory levels.`,
+    );
+  }
+  if (collected.unreadable) {
+    lines.push('Skipped subdirectories that could not be read.');
+  }
+  if ((collected.skippedUnrecordable ?? 0) > 0) {
+    lines.push(
+      `Skipped ${collected.skippedUnrecordable} files whose names cannot be recorded as artifact titles.`,
+    );
+  }
+  return lines.join('\n');
+}
+
+function metadataExceedsBudget(
+  metadata: Record<string, string | number | boolean | null> | undefined,
+): boolean {
+  const withMarker = { ...metadata, expandedFromDirectory: true };
+  return Buffer.byteLength(JSON.stringify(withMarker), 'utf8') > 4096;
+}
+
+export function isRecordableDerivedChild(
+  title: string,
+  workspacePath: string,
+): boolean {
+  const trimmedTitle = title.trim();
+  const trimmedPath = workspacePath.trim();
+  if (title !== trimmedTitle || workspacePath !== trimmedPath) {
+    return false;
+  }
+  return (
+    trimmedTitle.length > 0 &&
+    trimmedTitle.length <= ARTIFACT_TITLE_MAX_LENGTH &&
+    trimmedPath.length <= ARTIFACT_WORKSPACE_PATH_MAX_LENGTH &&
+    !hasControlCharacter(trimmedTitle) &&
+    !hasUnsafeDisplayPayload(trimmedTitle) &&
+    !hasControlCharacter(trimmedPath) &&
+    !hasUnsafeDisplayPayload(trimmedPath)
+  );
 }
 
 function locatorFailure(
@@ -777,22 +964,14 @@ async function inspectWorkspaceCandidate(
     );
   }
 
-  let lst;
   try {
-    lst = await fs.lstat(candidate);
+    await fs.lstat(candidate);
   } catch (error) {
     return pathInspectFailure(
       error,
       candidate,
       rawPath,
       `Failed to record artifact: could not inspect "${candidate}" (${error instanceof Error ? error.message : String(error)}).`,
-    );
-  }
-
-  if (lst.isDirectory()) {
-    return locatorFailure(
-      ToolErrorType.TARGET_IS_DIRECTORY,
-      `Failed to record artifact: "${candidate}" is a directory, not a file.\n${WORKSPACE_PATH_HINT}`,
     );
   }
 
@@ -826,17 +1005,28 @@ async function inspectWorkspaceCandidate(
       `Failed to record artifact: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  if (!st.isFile()) {
+  if (!st.isFile() && !st.isDirectory()) {
     return locatorFailure(
-      st.isDirectory()
-        ? ToolErrorType.TARGET_IS_DIRECTORY
-        : ToolErrorType.TARGET_NOT_REGULAR_FILE,
+      ToolErrorType.TARGET_NOT_REGULAR_FILE,
       `Failed to record artifact: "${resolved}" is not a regular file.\n${WORKSPACE_PATH_HINT}`,
+    );
+  }
+
+  if (st.isDirectory() && path.resolve(resolved) === path.resolve(cwd)) {
+    return locatorFailure(
+      ToolErrorType.TARGET_IS_DIRECTORY,
+      `Failed to record artifact: "${rawPath}" is the workspace root, which cannot be recorded as a directory artifact.`,
     );
   }
 
   const workspacePath = toCanonicalWorkspaceArtifactPath(resolved, cwd);
   if (!workspacePath) {
+    if (st.isDirectory()) {
+      return locatorFailure(
+        ToolErrorType.TARGET_IS_DIRECTORY,
+        `Failed to record artifact: "${rawPath}" is the workspace root, which cannot be recorded as a directory artifact.`,
+      );
+    }
     return locatorFailure(
       ToolErrorType.PATH_NOT_IN_WORKSPACE,
       `Failed to record artifact: "${rawPath}" could not be converted to a workspace-root-relative path.\n${WORKSPACE_PATH_HINT}`,
@@ -861,7 +1051,9 @@ async function inspectWorkspaceCandidate(
     ok: true,
     workspacePath,
     resolvedPath: resolved,
-    sizeBytes: st.size,
+    workspaceRoot: root,
+    sizeBytes: st.isDirectory() ? 0 : st.size,
+    ...(st.isDirectory() ? { isDirectory: true } : {}),
   };
 }
 

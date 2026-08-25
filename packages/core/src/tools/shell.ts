@@ -30,7 +30,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { truncateToolOutput } from '../utils/truncation.js';
+import { truncateToolOutput } from './truncation.js';
 import {
   CommitAttributionService,
   type StagedFileInfo,

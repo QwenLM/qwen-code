@@ -13,6 +13,8 @@ const SAFE_DEFAULTS: OperatorReviewSettings = {
   comment: false,
   effort: undefined,
   reverseAuditRounds: undefined,
+  approachRounds: undefined,
+  sandbox: undefined,
 };
 
 export interface OperatorReviewSettings {
@@ -26,6 +28,15 @@ export interface OperatorReviewSettings {
   effort?: string;
   /** The raw `review.severityFloor` value when set — same caveats as effort. */
   severityFloor?: string;
+  /**
+   * The raw `review.sandbox` value when set — `off` | `auto` | `required`,
+   * unvalidated here for the same reason as the two above.
+   *
+   * Read through THIS loader on purpose: it skips the workspace scope, so a
+   * repository cannot ship a `.qwen/settings.json` that switches off the
+   * containment which exists to contain that repository's own code.
+   */
+  sandbox?: string;
   /**
    * The operator's reverse-audit round ceiling, when they set a real one.
    *
@@ -41,6 +52,15 @@ export interface OperatorReviewSettings {
    * topology can honour (it may only lower a tier, never raise it).
    */
   reverseAuditRounds?: number;
+  /**
+   * How many rounds a PR must reach before the review may say the approach
+   * itself is the open question, when the operator sets a real number.
+   *
+   * Only a positive integer survives re-validation; anything else reads as
+   * absent and the built-in default applies. Raising it makes the signal
+   * later; a large value effectively silences it.
+   */
+  approachRounds?: number;
 }
 
 /**
@@ -88,6 +108,7 @@ export function operatorReviewSettings(): OperatorReviewSettings {
   // non-boolean `attribution` falls back to the schema default (on); a
   // non-boolean `comment` never enables auto-posting.
   const rounds = review?.reverseAuditRounds;
+  const approach = review?.approachRounds;
   return {
     attribution:
       typeof review?.attribution === 'boolean' ? review.attribution : true,
@@ -97,9 +118,14 @@ export function operatorReviewSettings(): OperatorReviewSettings {
       typeof review?.severityFloor === 'string'
         ? review.severityFloor
         : undefined,
+    sandbox: typeof review?.sandbox === 'string' ? review.sandbox : undefined,
     reverseAuditRounds:
       typeof rounds === 'number' && Number.isInteger(rounds) && rounds > 0
         ? rounds
+        : undefined,
+    approachRounds:
+      typeof approach === 'number' && Number.isInteger(approach) && approach > 0
+        ? approach
         : undefined,
   };
 }

@@ -700,7 +700,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
       '%s reasoning effort',
       (model) => {
-        it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)(
+        it.each(['low', 'medium', 'high', 'xhigh'] as const)(
           'passes %s through as reasoning_effort',
           (effort) => {
             const generator = new DashScopeOpenAICompatibleProvider(
@@ -729,6 +729,105 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         );
       },
     );
+
+    describe.each([
+      'qwen3.8-max',
+      'qwen3.8-max-preview',
+      'qwen3.8-max-latest',
+      'qwen3.8-max-2026-01-15',
+    ])('%s reasoning effort ceiling', (model) => {
+      it('warns once however many requests the same provider builds', () => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model,
+            reasoning: { effort: 'max' },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+        const request = {
+          ...baseRequest,
+          model,
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0];
+
+        generator.buildRequest(request, 'first');
+        generator.buildRequest(request, 'second');
+
+        const clampWarnings = mockDebugLogger.warn.mock.calls.filter(
+          (call: unknown[]) =>
+            typeof call[0] === 'string' &&
+            call[0].includes('tiered-effort family'),
+        );
+        expect(clampWarnings).toHaveLength(1);
+      });
+
+      it('clamps the max tier to xhigh, the strongest tier DashScope accepts', () => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model,
+            reasoning: { effort: 'max' },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+
+        const result = generator.buildRequest(
+          {
+            ...baseRequest,
+            model,
+            reasoning: { effort: 'max' },
+          } as unknown as Parameters<typeof generator.buildRequest>[0],
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['reasoning_effort']).toBe('xhigh');
+      });
+    });
+
+    it('caps a non-qwen model on a DashScope host at the generic ceiling', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'vendor-compatible-model',
+          reasoning: { effort: 'max' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'vendor-compatible-model',
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
+
+    it('caps a GLM model served over DashScope, which is not a Z.ai host', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'glm-5.2',
+          reasoning: { effort: 'max' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'glm-5.2',
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
 
     it('lets extra_body override qwen3.8-max reasoning_effort', () => {
       const generator = new DashScopeOpenAICompatibleProvider(

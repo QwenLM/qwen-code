@@ -190,6 +190,24 @@ export function resolveGhHost(
 }
 
 /**
+ * The canonical spelling of a GitHub host for URL BUILDING: lowercase, the
+ * implicit `:443` dropped (leading zeros included), one trailing dot (FQDN
+ * form) dropped, and `www.github.com` folded onto `github.com`. A
+ * NON-default port SURVIVES — a GHE instance on :8443 serves its pages
+ * there, and stripping it would 404 the link. One home for every PR-page
+ * builder (compose-review's comment anchors and the reader's composeUrl),
+ * so a host-spelling change lands in one file and one review run can never
+ * print two textual spellings of the same PR page.
+ */
+export function normalizeGhHostForUrl(host: string): string {
+  return host
+    .toLowerCase()
+    .replace(/:0*443$/, '')
+    .replace(/\.$/, '')
+    .replace(/^www\.github\.com$/, 'github.com');
+}
+
+/**
  * Environment for `gh` child processes. `undefined` means "inherit the
  * parent env untouched"; with a host set, the inherited env is extended
  * with GH_HOST, which `gh` honours on every command.

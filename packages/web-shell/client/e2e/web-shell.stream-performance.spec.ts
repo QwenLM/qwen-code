@@ -5,6 +5,7 @@ import {
   createWebShellDaemonScenario,
   installMockDaemon,
   replayCompleteEvent,
+  thoughtTextEvent,
   turnCompleteEvent,
   userTextEvent,
   type MockDaemonController,
@@ -14,6 +15,7 @@ import {
 interface BrowserPerformanceMetrics {
   inputEvents: number[];
   longTasks: number[];
+  frameGaps: number[];
 }
 
 declare global {
@@ -27,6 +29,10 @@ const streamChunks = Number(process.env['WEB_SHELL_PERF_CHUNKS'] ?? 400);
 const streamIntervalMs = Number(
   process.env['WEB_SHELL_PERF_INTERVAL_MS'] ?? 10,
 );
+const streamKind =
+  process.env['WEB_SHELL_PERF_STREAM_KIND'] === 'thought'
+    ? 'thought'
+    : 'assistant';
 
 test.skip(
   process.env['WEB_SHELL_PERF'] !== '1',
@@ -58,9 +64,11 @@ test('keeps the composer responsive during deterministic streaming @perf', async
   const streamStartedAt = Date.now();
   let nextEventId = history.length + 1;
   let typingMs = 0;
+  const streamTextEvent =
+    streamKind === 'thought' ? thoughtTextEvent : assistantTextEvent;
   const streamEvents = Array.from({ length: streamChunks }, (_, index) => {
     const text = `${index}: ${'deterministic streaming text '.repeat(8)}\n`;
-    return assistantTextEvent(text, { id: nextEventId++ });
+    return streamTextEvent(text, { id: nextEventId++ });
   });
   streamEvents.push(
     assistantTextEvent('STREAM_COMPLETE_SENTINEL', { id: nextEventId++ }),
@@ -91,6 +99,7 @@ test('keeps the composer responsive during deterministic streaming @perf', async
   const metrics = await readPerformanceMetrics(page);
   const result = {
     historyTurns,
+    streamKind,
     streamChunks,
     streamIntervalMs,
     replayMs,
@@ -100,6 +109,9 @@ test('keeps the composer responsive during deterministic streaming @perf', async
     longTaskCount: metrics.longTasks.length,
     longTaskTotalMs: sum(metrics.longTasks),
     longTaskMaxMs: max(metrics.longTasks),
+    frameGapP95Ms: percentile(metrics.frameGaps, 0.95),
+    frameGapMaxMs: max(metrics.frameGaps),
+    frameGapOver34MsCount: metrics.frameGaps.filter((gap) => gap > 34).length,
     slowInputEventCount: metrics.inputEvents.length,
     slowInputEventP95Ms: percentile(metrics.inputEvents, 0.95),
     slowInputEventMaxMs: max(metrics.inputEvents),
@@ -136,8 +148,18 @@ async function installPerformanceObservers(page: Page): Promise<void> {
     const metrics: BrowserPerformanceMetrics = {
       inputEvents: [],
       longTasks: [],
+      frameGaps: [],
     };
     window.__webShellPerformanceMetrics = metrics;
+    let previousFrame: number | undefined;
+    const sampleFrame = (timestamp: number) => {
+      if (previousFrame !== undefined) {
+        metrics.frameGaps.push(timestamp - previousFrame);
+      }
+      previousFrame = timestamp;
+      requestAnimationFrame(sampleFrame);
+    };
+    requestAnimationFrame(sampleFrame);
 
     if (PerformanceObserver.supportedEntryTypes.includes('longtask')) {
       new PerformanceObserver((list) => {
@@ -173,6 +195,7 @@ async function resetPerformanceMetrics(page: Page): Promise<void> {
     if (metrics) {
       metrics.inputEvents.length = 0;
       metrics.longTasks.length = 0;
+      metrics.frameGaps.length = 0;
     }
   });
 }
@@ -205,6 +228,7 @@ async function readPerformanceMetrics(
       window.__webShellPerformanceMetrics ?? {
         inputEvents: [],
         longTasks: [],
+        frameGaps: [],
       },
     ),
   );

@@ -8,8 +8,8 @@
  * @fileoverview Stall watchdog + retry for workflow agent dispatches. A
  * workflow `agent()` can hang indefinitely if the model loops, the provider
  * stalls mid-stream, or a tool never returns. The subagent's own
- * `max_time_minutes` (10 min) is a coarse backstop; the stall watchdog is
- * finer-grained: it aborts a dispatch after `stallMs` (default 60s) of NO
+ * `max_time_minutes` (10 min, per attempt) is a coarse backstop; the stall
+ * watchdog is finer-grained: it aborts a dispatch after `stallMs` (default 3 min) of NO
  * observable progress, and the resilient wrapper retries up to
  * `MAX_STALL_ATTEMPTS` times before abandoning.
  *
@@ -40,8 +40,31 @@ import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../../utils/env.js';
 
-/** Default stall timeout: 60s of no progress (with no tool in flight). */
-export const DEFAULT_STALL_MS = 60_000;
+/**
+ * Default stall timeout: no progress (with no tool in flight) for this long
+ * ends the attempt.
+ *
+ * Sized against the `retryWithBackoff` silent retry ladder rather than against
+ * a guess at model latency. That ladder is the binding case, not the only
+ * watchdog-invisible wait: stream-side rate-limit sleeps
+ * (`RATE_LIMIT_RETRY_OPTIONS` in geminiChat.ts — 60s/120s/240s/300s, so two
+ * consecutive sleeps already reach 180s), a provider `Retry-After` honored
+ * unclamped on the normal HTTP path, and unattended-mode persistent backoff
+ * (up to 5 min per exponential sleep — but a provider `Retry-After` on that
+ * path is capped only at `PERSISTENT_CAP_MS`/6h, not at the 5 min
+ * `PERSISTENT_MAX_BACKOFF_MS`, so one 429 carrying `Retry-After: 7200` sleeps
+ * two hours) can all exceed this window and read as a stall on a
+ * request that is retrying exactly as designed. Making transport retries
+ * visible to the watchdog is the follow-up; this window does not cover them.
+ * `retryWithBackoff` sleeps 1.5s, 3s, 6s, 12s, 24s then
+ * 30s between attempts (`DEFAULT_RETRY_OPTIONS` in utils/retry.ts), and
+ * `agent-core` consumes each `retry` stream event without emitting anything the
+ * watchdog counts as progress. A plain 429/5xx ladder is therefore 76.5s of
+ * watchdog-invisible silence on a request that is healthy and retrying exactly
+ * as designed — comfortably past the previous 60s value, which elapsed during
+ * the ladder's sixth sleep.
+ */
+export const DEFAULT_STALL_MS = 180_000;
 
 /** Total attempts (initial + retries) for a single `agent()` dispatch. */
 export const MAX_STALL_ATTEMPTS = 3;
@@ -89,13 +112,22 @@ export interface StallWatchdogHandle {
  * flight the timer is held (a long tool call is not a stall). When the
  * timer elapses with no in-flight tool, it fires `controller.abort('stalled')`.
  *
- * The watchdog arms on the FIRST progress event, not at attach time. The
- * time-to-first-response window — connection setup, server-side queueing, and
- * a reasoning model's pre-first-token thinking — emits no events (`ROUND_START`
- * fires only AFTER `await sendMessageStream` resolves), so counting it would
- * false-trip on a healthy-but-slow first response and waste 3× tokens on the
- * retry loop. That window is instead bounded by the subagent's own
- * `max_time_minutes`; the watchdog's job is post-first-response streaming stalls.
+ * The watchdog arms on the first progress event rather than at attach time, but
+ * that excludes far less than it appears to. `ROUND_START` is emitted as soon as
+ * `await sendMessageStream(...)` resolves — and that call returns a lazily
+ * iterated async generator, so it resolves BEFORE the request reaches the wire;
+ * the generator body issues it on first iteration. The deferred arm therefore
+ * only skips round 1's pre-generator work (the send-lock drain, route
+ * resolution, and any auto-compaction), not the request itself. Connection
+ * setup, server-side queueing, and a reasoning model's pre-first-token thinking
+ * all elapse with the timer already running.
+ *
+ * So `stallMs` must be wide enough to cover a healthy first response, not just a
+ * mid-stream gap. The binding case this window is sized against is the
+ * `retryWithBackoff` silent retry ladder — see `DEFAULT_STALL_MS`, which also
+ * names the longer waits (stream-side rate-limit sleeps, an unclamped
+ * `Retry-After`, unattended backoff) that remain invisible to it. Once the provider streams anything at all, including
+ * thought deltas, `STREAM_TEXT` resets the timer.
  *
  * A `stallMs` of 0 means "no watchdog" — this returns an inert handle.
  */
@@ -161,10 +193,12 @@ export function attachStallWatchdog(
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
   emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
 
-  // Intentionally NOT armed here. The first `onActivity` (the first response
-  // event of round 1) arms it, so time-to-first-response is not counted as a
-  // stall (see the doc comment); first-response hangs are bounded by the
-  // subagent's `max_time_minutes`.
+  // Intentionally NOT armed here — the first `onActivity` arms it. Note this
+  // defers arming only past round 1's pre-request work, NOT past the request:
+  // `ROUND_START` fires before the call is on the wire (see the doc comment).
+  // A first-response hang is therefore caught by this watchdog, not left to
+  // the subagent's `max_time_minutes` (which is per attempt and resets on
+  // every stall retry, so it never bounds the sequence).
 
   return {
     stalled: () => fired,

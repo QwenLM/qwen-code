@@ -701,7 +701,6 @@ describe('SessionPicker', () => {
       getIdeMode: () => false,
       isTrustedFolder: () => false,
       getToolRegistry: () => ({ getTool: () => undefined }),
-      getContentGenerator: () => ({ useSummarizedThinking: () => false }),
     } as unknown as Config;
     const PREVIEW_SETTINGS_STUB = {
       merged: { ui: {} },

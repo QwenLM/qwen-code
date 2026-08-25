@@ -49,7 +49,7 @@ import {
 import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
-} from '../utils/chat-recording-failure.js';
+} from './chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 

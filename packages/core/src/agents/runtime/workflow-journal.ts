@@ -179,6 +179,8 @@ export function buildReplay(entries: JournalEntry[]): JournalReplay {
  * failure must not fail the dispatch).
  */
 export class WorkflowJournal {
+  private pending = Promise.resolve();
+
   constructor(readonly path: string) {}
 
   /** Load + parse all entries into replay maps. Empty maps if no file. */
@@ -194,6 +196,13 @@ export class WorkflowJournal {
 
   /** Append one entry. Rejects only on I/O error (callers `.catch`). */
   append(entry: JournalEntry): Promise<void> {
-    return writeLine(this.path, entry);
+    const operation = this.pending.then(() => writeLine(this.path, entry));
+    this.pending = operation.catch(() => undefined);
+    return operation;
+  }
+
+  /** Wait until every append issued so far has settled. */
+  drain(): Promise<void> {
+    return this.pending;
   }
 }

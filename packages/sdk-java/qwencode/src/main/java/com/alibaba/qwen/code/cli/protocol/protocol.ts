@@ -1,6 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { PermissionMode } from '@qwen-code/sdk';
+
+export type { PermissionMode };
+
 export interface Annotation {
   type: string;
   value: string;
@@ -120,7 +124,7 @@ export interface SDKSystemMessage {
     status: string;
   }>;
   model?: string;
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   slash_commands?: string[];
   qwen_code_version?: string;
   output_style?: string;
@@ -230,8 +234,6 @@ export interface SDKPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'yolo';
-
 /**
  * TODO: Align with `ToolCallConfirmationDetails`
  */
@@ -283,6 +285,7 @@ export interface MCPServerConfig {
   headers?: Record<string, string>;
   tcp?: string;
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   description?: string;
   includeTools?: string[];

@@ -1837,15 +1837,21 @@ export function convertOpenAIChunkToGemini(
 function mapOpenAIFinishReasonToGemini(
   openaiReason: string | null,
 ): FinishReason {
-  if (!openaiReason) return FinishReason.FINISH_REASON_UNSPECIFIED;
+  if (typeof openaiReason !== 'string') {
+    return FinishReason.FINISH_REASON_UNSPECIFIED;
+  }
   const mapping: Record<string, FinishReason> = {
     stop: FinishReason.STOP,
     length: FinishReason.MAX_TOKENS,
+    max_tokens: FinishReason.MAX_TOKENS,
     content_filter: FinishReason.SAFETY,
     function_call: FinishReason.STOP,
     tool_calls: FinishReason.STOP,
   };
-  return mapping[openaiReason] || FinishReason.FINISH_REASON_UNSPECIFIED;
+  return (
+    mapping[openaiReason.toLowerCase()] ||
+    FinishReason.FINISH_REASON_UNSPECIFIED
+  );
 }
 
 function mapGeminiFinishReasonToOpenAI(

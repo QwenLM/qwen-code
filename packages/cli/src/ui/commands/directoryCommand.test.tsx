@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { directoryCommand, getDirPathCompletions } from './directoryCommand.js';
 import {
   expandHomeDir,
+  loadServerHierarchicalMemory,
   type Config,
   type WorkspaceContext,
 } from '@qwen-code/qwen-code-core';
@@ -16,6 +17,15 @@ import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    loadServerHierarchicalMemory: vi.fn(),
+  };
+});
 
 describe('directoryCommand', () => {
   let mockContext: CommandContext;
@@ -237,6 +247,46 @@ describe('directoryCommand', () => {
         'context.includeDirectories',
         [existingPath],
       );
+    });
+
+    it('refreshes context file paths when reloading memory from include directories', async () => {
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+        memoryContent: 'reloaded memory',
+        fileCount: 2,
+        contextFilePaths: ['a/QWEN.md', '~/.qwen/QWEN.md'],
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/test/dir',
+      });
+      mockConfig.shouldLoadMemoryFromIncludeDirectories = () => true;
+      mockConfig.getFolderTrust = vi.fn().mockReturnValue(true);
+      mockConfig.getContextRuleExcludes = vi.fn().mockReturnValue([]);
+      mockConfig.setContextFilePaths = vi.fn();
+      mockConfig.setConditionalRulesRegistry = vi.fn();
+      mockContext.ui.setGeminiMdFileCount = vi.fn();
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(
+        mockContext,
+        path.normalize('/home/user/new-project'),
+      );
+
+      // Pin the CWD anchor (getWorkingDir, not process.cwd) and the new
+      // directory so an anchor regression can't slip through green.
+      expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
+        '/test/dir',
+        expect.arrayContaining([path.normalize('/home/user/new-project')]),
+        expect.anything(),
+        expect.anything(),
+        true,
+        'tree',
+        expect.anything(),
+      );
+      expect(mockConfig.setUserMemory).toHaveBeenCalledWith('reloaded memory');
+      expect(mockConfig.setContextFilePaths).toHaveBeenCalledWith([
+        'a/QWEN.md',
+        '~/.qwen/QWEN.md',
+      ]);
     });
 
     it('should not persist directories skipped by the workspace context', async () => {

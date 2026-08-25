@@ -13,7 +13,10 @@ import {
   type MutexInterface,
 } from 'async-mutex';
 import { Storage } from '../config/storage.js';
-import { getCurrentGeminiMdFilename, MEMORY_SECTION_HEADER } from './const.js';
+import {
+  getCurrentGeminiMdFilename,
+  MEMORY_SECTION_HEADER,
+} from '../utils/memory-constants.js';
 
 /**
  * Per-resolved-file mutex map. Two simultaneous `writeWorkspaceContextFile`

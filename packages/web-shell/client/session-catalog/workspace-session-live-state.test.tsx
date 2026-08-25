@@ -13,7 +13,10 @@ import {
   useSessionCatalogController,
   useSessionCatalogQuery,
 } from './session-catalog-hooks';
-import type { SessionCatalogQuery } from './session-catalog-store';
+import {
+  getSessionCatalogStore,
+  type SessionCatalogQuery,
+} from './session-catalog-store';
 import {
   SESSION_LIVE_STATE_ERROR_RETRY_MS,
   SESSION_LIVE_STATE_POLL_MS,
@@ -26,6 +29,7 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 function liveState(
   revision: number,
   hasActivePrompt = false,
+  updatedAt?: string,
 ): DaemonWorkspaceSessionLiveState {
   return {
     v: 1,
@@ -37,6 +41,7 @@ function liveState(
         hasActivePrompt,
         isWaitingForPermission: hasActivePrompt,
         isWaitingForUserQuestion: false,
+        ...(updatedAt !== undefined ? { updatedAt } : {}),
       },
     ],
   };
@@ -169,7 +174,7 @@ describe('useWorkspaceSessionLiveState', () => {
     expect(container.textContent).toBe('true:true:no-group');
   });
 
-  it('does not rescan the catalog for prompt admission, and coalesces turn completions', async () => {
+  it('does not rescan the catalog for prompt admission, and rate-limits unusable-watermark completions', async () => {
     await renderProbe();
     const catalogRequests = listSessions.mock.calls.length;
 
@@ -179,22 +184,244 @@ describe('useWorkspaceSessionLiveState', () => {
     });
     expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
 
-    // Turn completions refresh recency data (updatedAt) through the
-    // rate-limited invalidation path: one rescan per cooldown window.
+    // The live rows carry no updatedAt (old server / no running terminal
+    // yet), so completions fall back to the rate-limited reconcile path:
+    // one rescan per cooldown window.
     act(() => {
-      controller.turnCompleted('/work');
-      controller.turnCompleted('/work');
+      controller.turnCompleted('/work', 'session-a');
+      controller.turnCompleted('/work', 'session-a');
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
     });
     expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
 
-    act(() => controller.turnCompleted('/work'));
+    act(() => controller.turnCompleted('/work', 'session-a'));
     await act(async () => {
       await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
     });
     expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
+    // Falling back must still resolve the pending completion — a leaked
+    // entry would re-flag the invalidation on every poll and re-run a full
+    // rescan once per cooldown window, forever.
+    expect(
+      getSessionCatalogStore(client).snapshotSessionActivity('/work'),
+    ).toBeUndefined();
+  });
+
+  it('settles a turn completion from the live watermark without a catalog scan', async () => {
+    let stamp = '2026-08-17T00:00:01.000Z';
+    getLiveState.mockImplementation(async () => liveState(1, false, stamp));
+    await renderProbe();
+    const catalogRequests = listSessions.mock.calls.length;
+    const store = getSessionCatalogStore(client);
+
+    stamp = '2026-08-17T00:00:05.000Z';
+    act(() => controller.turnCompleted('/work', 'session-a'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+    expect(store.getSnapshot(query).page?.sessions[0]?.updatedAt).toBe(
+      '2026-08-17T00:00:05.000Z',
+    );
+
+    // Repeated completions keep settling in place — the full catalog scan
+    // stays retired for the recency path.
+    stamp = '2026-08-17T00:00:07.000Z';
+    act(() => controller.turnCompleted('/work', 'session-a'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+    expect(store.getSnapshot(query).page?.sessions[0]?.updatedAt).toBe(
+      '2026-08-17T00:00:07.000Z',
+    );
+  });
+
+  it('does not let an in-flight response settle a newer completion', async () => {
+    getLiveState.mockImplementation(async () =>
+      liveState(1, false, '2026-08-17T00:00:01.000Z'),
+    );
+    await renderProbe();
+    const catalogRequests = listSessions.mock.calls.length;
+    const store = getSessionCatalogStore(client);
+
+    let resolveInFlight!: (state: DaemonWorkspaceSessionLiveState) => void;
+    getLiveState.mockImplementationOnce(
+      () =>
+        new Promise<DaemonWorkspaceSessionLiveState>((resolve) => {
+          resolveInFlight = resolve;
+        }),
+    );
+    // The wake-driven request snapshots the first completion, then a second
+    // completion lands while that request is in flight.
+    act(() => controller.turnCompleted('/work', 'session-a'));
+    act(() => controller.turnCompleted('/work', 'session-a'));
+    await act(async () => {
+      resolveInFlight(liveState(1, false, '2026-08-17T00:00:02.000Z'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // The stale response must leave the newer completion pending.
+    expect(
+      store.snapshotSessionActivity('/work')?.get('session-a'),
+    ).toBeDefined();
+
+    getLiveState.mockImplementation(async () =>
+      liveState(1, false, '2026-08-17T00:00:03.000Z'),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+  });
+
+  it('falls back to the rate-limited reconcile when the completed session is not loaded', async () => {
+    getLiveState.mockImplementation(async () => ({
+      ...liveState(1),
+      sessions: [
+        ...liveState(1).sessions,
+        {
+          sessionId: 'session-unloaded',
+          clientCount: 1,
+          hasActivePrompt: false,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+          updatedAt: '2026-08-17T00:00:05.000Z',
+        },
+      ],
+    }));
+    await renderProbe();
+    const catalogRequests = listSessions.mock.calls.length;
+
+    // The row carries a valid watermark but is absent from the loaded
+    // active page, so recency must come from a full reconcile.
+    act(() => controller.turnCompleted('/work', 'session-unloaded'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
+    expect(
+      getSessionCatalogStore(client).snapshotSessionActivity('/work'),
+    ).toBeUndefined();
+
+    // With the completion resolved, an idle cooldown window must stay quiet
+    // — no further rescan may be re-triggered by leaked pending state.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS,
+      );
+    });
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
+  });
+
+  it('falls back when the completed session is absent from the live response', async () => {
+    await renderProbe();
+    const catalogRequests = listSessions.mock.calls.length;
+
+    // The live response only ever lists session-a; a completion for a
+    // session the daemon no longer reports live must fall back.
+    act(() => controller.turnCompleted('/work', 'session-ghost'));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
+    expect(
+      getSessionCatalogStore(client).snapshotSessionActivity('/work'),
+    ).toBeUndefined();
+  });
+
+  it('keeps a completion pending across a reconcile and settles on the next poll', async () => {
+    let revision = 1;
+    let stamp: string | undefined = undefined;
+    getLiveState.mockImplementation(async () =>
+      liveState(revision, false, stamp),
+    );
+    await renderProbe();
+    const store = getSessionCatalogStore(client);
+
+    // A version bump past the cooldown window starts a reconcile whose
+    // staged catalog fetch is held open.
+    let releaseStaged!: (page: DaemonSessionListPage) => void;
+    listSessions.mockImplementationOnce(
+      () =>
+        new Promise<DaemonSessionListPage>((resolve) => {
+          releaseStaged = resolve;
+        }),
+    );
+    revision = 2;
+    stamp = '2026-08-17T00:00:05.000Z';
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_RECONCILE_COOLDOWN_MS,
+      );
+    });
+
+    // The completion lands while the reconcile is in flight; its liveB read
+    // must not settle it (the staged page it commits may be staler than the
+    // liveB watermark).
+    act(() => controller.turnCompleted('/work', 'session-a'));
+    const liveReadsBeforeRelease = getLiveState.mock.calls.length;
+    await act(async () => {
+      releaseStaged(sessionPage());
+      for (let i = 0; i < 12; i += 1) await Promise.resolve();
+    });
+    // The reconcile's liveB read has happened, yet the completion is still
+    // pending — only a direct poll read may settle it.
+    expect(getLiveState.mock.calls.length).toBeGreaterThan(
+      liveReadsBeforeRelease,
+    );
+    expect(
+      store.snapshotSessionActivity('/work')?.get('session-a'),
+    ).toBeDefined();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+    expect(store.getSnapshot(query).page?.sessions[0]?.updatedAt).toBe(
+      '2026-08-17T00:00:05.000Z',
+    );
+  });
+
+  it('keeps a completion pending across a live-state failure and settles after recovery', async () => {
+    getLiveState.mockImplementation(async () =>
+      liveState(1, false, '2026-08-17T00:00:01.000Z'),
+    );
+    await renderProbe();
+    const catalogRequests = listSessions.mock.calls.length;
+    const store = getSessionCatalogStore(client);
+
+    getLiveState.mockRejectedValueOnce(new Error('offline'));
+    act(() => controller.turnCompleted('/work', 'session-a'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The failed request settles nothing; the completion waits out the
+    // error backoff.
+    expect(
+      store.snapshotSessionActivity('/work')?.get('session-a'),
+    ).toBeDefined();
+
+    getLiveState.mockImplementation(async () =>
+      liveState(1, false, '2026-08-17T00:00:06.000Z'),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(
+        SESSION_LIVE_STATE_ERROR_RETRY_MS + SESSION_LIVE_STATE_POLL_MS,
+      );
+    });
+    expect(store.snapshotSessionActivity('/work')).toBeUndefined();
+    expect(store.getSnapshot(query).page?.sessions[0]?.updatedAt).toBe(
+      '2026-08-17T00:00:06.000Z',
+    );
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
   });
 
   it('does not schedule a second catalog scan after a local session creation', async () => {
@@ -325,6 +552,157 @@ describe('useWorkspaceSessionLiveState', () => {
     });
     expect(getLiveState.mock.calls.length).toBeGreaterThan(1);
     expect(container.textContent).toBe('false:false:no-group');
+  });
+
+  it('lets an explicit refresh bypass live-state error backoff', async () => {
+    await renderProbe();
+    getLiveState.mockRejectedValueOnce(new Error('offline'));
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getLiveState).toHaveBeenCalledTimes(3);
+    expect(listSessions).toHaveBeenCalledTimes(1);
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getLiveState).toHaveBeenCalledTimes(5);
+    expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps internal fresh loads behind live-state error backoff', async () => {
+    getLiveState.mockRejectedValueOnce(new Error('offline'));
+    await renderProbe();
+    const liveRequests = getLiveState.mock.calls.length;
+    const catalogRequests = listSessions.mock.calls.length;
+
+    act(() => {
+      void getSessionCatalogStore(client)
+        .refresh(query)
+        .catch(() => undefined);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getLiveState).toHaveBeenCalledTimes(liveRequests);
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+  });
+
+  it('preserves an explicit refresh while a live-state request is in flight', async () => {
+    await renderProbe();
+    let rejectInFlight!: (error: Error) => void;
+    getLiveState.mockImplementationOnce(
+      () =>
+        new Promise<DaemonWorkspaceSessionLiveState>((_resolve, reject) => {
+          rejectInFlight = reject;
+        }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      rejectInFlight(new Error('offline'));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getLiveState).toHaveBeenCalledTimes(5);
+    expect(listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it('lets an explicit refresh bypass reconciliation error backoff', async () => {
+    await renderProbe();
+    listSessions.mockRejectedValueOnce(new Error('catalog offline'));
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(listSessions).toHaveBeenCalledTimes(2);
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getLiveState).toHaveBeenCalledTimes(5);
+    expect(listSessions).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps internal fresh loads behind reconciliation error backoff', async () => {
+    await renderProbe();
+    listSessions.mockRejectedValueOnce(new Error('catalog offline'));
+
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const catalogRequests = listSessions.mock.calls.length;
+
+    act(() => {
+      void getSessionCatalogStore(client)
+        .refresh(query)
+        .catch(() => undefined);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests);
+  });
+
+  it('preserves an explicit refresh during an in-flight live request', async () => {
+    await renderProbe();
+    listSessions.mockRejectedValueOnce(new Error('catalog offline'));
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const catalogRequests = listSessions.mock.calls.length;
+
+    let resolveInFlight!: (value: DaemonWorkspaceSessionLiveState) => void;
+    getLiveState.mockImplementationOnce(
+      () =>
+        new Promise<DaemonWorkspaceSessionLiveState>((resolve) => {
+          resolveInFlight = resolve;
+        }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SESSION_LIVE_STATE_POLL_MS);
+    });
+    act(() => controller.refreshWorkspace('/work'));
+    await act(async () => {
+      resolveInFlight(liveState(1));
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(listSessions).toHaveBeenCalledTimes(catalogRequests + 1);
   });
 
   it('keeps polling volatile state while catalog reconciliation is backed off', async () => {

@@ -34,6 +34,7 @@ import {
   SendMessageType,
   SYSTEM_REMINDER_OPEN,
   LoopType,
+  getToolCallFingerprint,
   CronScheduler,
   AUTONOMOUS_SENTINEL_CRON,
   AUTONOMOUS_SENTINEL_DYNAMIC,
@@ -251,7 +252,7 @@ describe('runNonInteractive', () => {
     getChatRecordingService: Mock;
     getChat: Mock;
     stripOrphanedUserEntriesFromHistory: Mock;
-    getHistoryFunctionResponseIds: Mock;
+    getHistoryToolCallFingerprints: Mock;
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
     addHistory: Mock;
@@ -329,7 +330,7 @@ describe('runNonInteractive', () => {
         recordToolCalls: vi.fn(),
       })),
       getChat: vi.fn(() => ({})),
-      getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
+      getHistoryToolCallFingerprints: vi.fn(() => new Map<string, string>()),
     };
 
     let currentModel = 'test-model';
@@ -695,6 +696,11 @@ describe('runNonInteractive', () => {
     const [parts, , , options] =
       mockGeminiClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(parts[0]?.text).toContain(
+      `<goal_runtime_data>\n{"goalId":"${options.goalPermit.goalId}","revision":${options.goalPermit.revision},"objective":"existing goal"}\n</goal_runtime_data>`,
+    );
+    expect(parts[0]?.text).toContain('contains no new real user input');
+    expect(parts[0]?.text).toContain('not evidence that the user supplied it');
     expect(options).toMatchObject({
       type: SendMessageType.Goal,
       goalOrigin: 'runtime',
@@ -709,6 +715,36 @@ describe('runNonInteractive', () => {
       `goal-runtime:${options.goalPermit.turnId}`,
     );
     expect(options.goalSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('includes verifier feedback in a scheduled Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            verifierFeedback: 'Need independent evidence',
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-feedback',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'Verifier feedback: Need independent evidence',
+    );
   });
 
   it('keeps the exact Goal permit through a ToolResult continuation', async () => {
@@ -2062,6 +2098,37 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('describes a chanting halt as output-or-reasoning repetition', async () => {
+    setupMetricsMock();
+    const events: ServerGeminiStreamEvent[] = [
+      {
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.CHANTING_IDENTICAL_SENTENCES },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Chant',
+      'prompt-id-chanting-loop',
+    );
+
+    expect(exitCode).toBe(1);
+    // Reasoning-stream chants fire CHANTING_IDENTICAL_SENTENCES while
+    // getResponseText filters reasoning out of visible output, so the
+    // headless label must name both channels — a halt on an empty stdout
+    // with an "output"-only label reads as a detector misfire.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the model repeated the same sentence in its output or reasoning',
+      ),
+    );
+  });
+
   it('shows the maxToolCallsPerTurn hint when the per-turn cap halts the run', async () => {
     setupMetricsMock();
     const events: ServerGeminiStreamEvent[] = [
@@ -3283,8 +3350,10 @@ describe('runNonInteractive', () => {
 
   it('should stop repeated duplicate provider tool-call responses from drain items', async () => {
     setupMetricsMock();
-    mockGeminiClient.getHistoryFunctionResponseIds.mockReturnValue(
-      new Set(['tool-drain']),
+    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+      new Map([
+        ['tool-drain', getToolCallFingerprint('testTool', { arg1: 'value1' })],
+      ]),
     );
 
     const notificationXml =
@@ -3375,8 +3444,13 @@ describe('runNonInteractive', () => {
 
   it('should ignore duplicate provider tool-call ids already present in chat history', async () => {
     setupMetricsMock();
-    mockGeminiClient.getHistoryFunctionResponseIds.mockReturnValue(
-      new Set(['tool-history']),
+    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+      new Map([
+        [
+          'tool-history',
+          getToolCallFingerprint('testTool', { arg1: 'value1' }),
+        ],
+      ]),
     );
     const toolCallEvent: ServerGeminiStreamEvent = {
       type: GeminiEventType.ToolCallRequest,
@@ -3423,6 +3497,74 @@ describe('runNonInteractive', () => {
     expect(duplicateParts[0].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-history"',
     );
+    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
+  });
+
+  it('executes an id-colliding tool call whose args differ from the handled call', async () => {
+    setupMetricsMock();
+    mockGeminiClient.getHistoryToolCallFingerprints.mockReturnValue(
+      new Map([
+        [
+          'tool-history',
+          getToolCallFingerprint('testTool', { arg1: 'value1' }),
+        ],
+      ]),
+    );
+    const toolCallEvent: ServerGeminiStreamEvent = {
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        callId: 'tool-history__qwen_dup_2',
+        providerCallId: 'tool-history',
+        name: 'testTool',
+        args: { arg1: 'value2' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-collision',
+      },
+    };
+    mockCoreExecuteToolCall.mockResolvedValueOnce({
+      callId: 'tool-history__qwen_dup_2',
+      responseParts: [
+        {
+          functionResponse: {
+            id: 'tool-history__qwen_dup_2',
+            name: 'testTool',
+            response: { output: 'fresh result' },
+          },
+        },
+      ],
+      resultDisplay: 'fresh result',
+      error: undefined,
+      errorType: undefined,
+    });
+
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Final answer' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 10 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use a tool',
+      'prompt-id-collision',
+    );
+
+    expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
+    const resultParts = mockGeminiClient.sendMessageStream.mock.calls[1][0];
+    expect(
+      JSON.stringify(resultParts[0].functionResponse?.response),
+    ).not.toContain('Duplicate provider tool call id');
     expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
@@ -7226,7 +7368,10 @@ describe('runNonInteractive', () => {
           callId: 'tool-side',
           providerCallId: 'tool-side',
           name: 'side_effect_tool',
-          args: { path: '/tmp/second' },
+          // Same args as the first call: an exact replay of the handled
+          // provider id. A different-args collision would be a fresh call
+          // and no longer receives a duplicate response.
+          args: { path: '/tmp/first' },
           isClientInitiated: false,
           prompt_id: 'prompt-id-dup-structured',
         },

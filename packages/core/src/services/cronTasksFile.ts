@@ -101,14 +101,14 @@ export interface DurableCronTask {
    */
   disabledByArchive?: boolean;
   /**
-   * Id of the dedicated session this task is bound to. A task created through
-   * the Web Shell management page mints its own session and stores its id here;
-   * the task then fires ONLY inside that session (not via the shared per-project
-   * durable owner), so the session's transcript is the task's run history, and
-   * archiving/deleting that session stops the task. Absent on tool-created
-   * (`cron_create`) and legacy tasks, which keep the shared-owner firing model.
+   * Id of the session this task is bound to. The task fires only inside that
+   * session, so its transcript is the task's run history. Absent on unbound
+   * tool-created and legacy tasks, which use the shared durable owner.
    */
   sessionId?: string;
+  /** False when the caller, rather than the task, owns the bound session.
+   * Absent means task-owned for backward compatibility. */
+  sessionOwnedByTask?: boolean;
   delivery?: CronTaskDelivery;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
@@ -486,6 +486,8 @@ function isValidTask(value: unknown): value is DurableCronTask {
     // would treat it as unbound, so a "bound" task would silently run unbound.
     (obj['sessionId'] === undefined ||
       (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
+    (obj['sessionOwnedByTask'] === undefined ||
+      typeof obj['sessionOwnedByTask'] === 'boolean') &&
     (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );

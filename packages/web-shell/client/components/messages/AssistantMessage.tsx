@@ -6,6 +6,10 @@ import {
 } from '../../customization';
 import { useI18n } from '../../i18n';
 import { formatTimestamp } from '../MessageTimestamp';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -57,16 +61,12 @@ export const AssistantMessage = memo(function AssistantMessage({
     }
   }, [branchPending, onBranchSession]);
   const handleCopy = useCallback(() => {
-    const write = navigator.clipboard?.writeText(content);
-    if (!write) {
-      return;
-    }
-    void write
+    void writeClipboardText(content)
       .then(() => {
         setCopied(true);
         window.setTimeout(() => setCopied(false), 2000);
       })
-      .catch(() => {});
+      .catch(warnClipboardWriteFailure);
   }, [content]);
   return (
     <div className={styles.message}>
@@ -223,6 +223,88 @@ function cacheThinkingTranslation(
   if (oldestKey !== undefined) thinkingTranslationCache.delete(oldestKey);
 }
 
+interface ThinkingSummaryHeaderProps {
+  thinkingActive: boolean;
+  thinkingExpanded: boolean;
+  /** Pre-localized running/done label, including the elapsed duration. */
+  summaryText: string;
+  /**
+   * Thought content for the zh-CN translate button. Omitted while streaming —
+   * the button is hidden then — so streamed content growth does not defeat the
+   * summary header's memo boundary.
+   */
+  translateContent?: string;
+  showTranslateButton: boolean;
+  generateContent?: SessionContentGenerator;
+  onToggle: () => void;
+}
+
+/**
+ * Collapsed thinking row: label, elapsed duration, and the streaming shine.
+ * Memoized so streamed thought deltas re-render only the expanded body (or
+ * nothing when collapsed) instead of this header on every chunk.
+ */
+const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
+  thinkingActive,
+  thinkingExpanded,
+  summaryText,
+  translateContent,
+  showTranslateButton,
+  generateContent,
+  onToggle,
+}: ThinkingSummaryHeaderProps) {
+  const { t } = useI18n();
+  return (
+    <div
+      className={`${styles.thinkingHeader}${
+        thinkingExpanded ? ` ${styles.thinkingHeaderExpanded}` : ''
+      }`}
+      onClick={(event) => {
+        if (event.currentTarget.contains(event.target as Node)) {
+          onToggle();
+        }
+      }}
+    >
+      <button
+        type="button"
+        className={styles.thinkingSummary}
+        aria-expanded={thinkingExpanded}
+        title={thinkingExpanded ? t('thinking.collapse') : t('thinking.expand')}
+      >
+        <span className={styles.thinkingSummaryIcon} aria-hidden="true">
+          <ThinkingDoneIcon />
+        </span>
+        <span
+          className={
+            thinkingActive
+              ? `${styles.thinkingSummaryText} ${styles.thinkingSummaryTextActive}`
+              : styles.thinkingSummaryText
+          }
+        >
+          {summaryText}
+        </span>
+      </button>
+      {showTranslateButton &&
+        translateContent !== undefined &&
+        generateContent && (
+          <ThinkingTranslateButton
+            content={translateContent}
+            generateContent={generateContent}
+            className={styles.translateButton}
+          />
+        )}
+      <span
+        className={
+          thinkingExpanded
+            ? styles.thinkingChevronDown
+            : styles.thinkingChevronRight
+        }
+        aria-hidden="true"
+      />
+    </div>
+  );
+});
+
 export const ThinkingMessage = memo(function ThinkingMessage({
   content,
   isStreaming,
@@ -278,6 +360,11 @@ export const ThinkingMessage = memo(function ThinkingMessage({
     setThinkingExpanded((v) => !v);
   }, []);
 
+  const summaryText = t(
+    thinkingSummaryKey,
+    thinkingDuration ? { duration: thinkingDuration } : {},
+  );
+
   return (
     <div
       className={`${styles.message}${
@@ -287,58 +374,19 @@ export const ThinkingMessage = memo(function ThinkingMessage({
       {content && (
         <div className={styles.thinking}>
           <div className={styles.thinkingBody}>
-            <div
-              className={`${styles.thinkingHeader}${
-                thinkingExpanded ? ` ${styles.thinkingHeaderExpanded}` : ''
-              }`}
-              onClick={(event) => {
-                if (event.currentTarget.contains(event.target as Node)) {
-                  handleToggle();
-                }
-              }}
-            >
-              <button
-                type="button"
-                className={styles.thinkingSummary}
-                aria-expanded={thinkingExpanded}
-                title={
-                  thinkingExpanded
-                    ? t('thinking.collapse')
-                    : t('thinking.expand')
-                }
-              >
-                <span className={styles.thinkingSummaryIcon} aria-hidden="true">
-                  <ThinkingDoneIcon />
-                </span>
-                <span
-                  className={
-                    thinkingActive
-                      ? `${styles.thinkingSummaryText} ${styles.thinkingSummaryTextActive}`
-                      : styles.thinkingSummaryText
-                  }
-                >
-                  {t(
-                    thinkingSummaryKey,
-                    thinkingDuration ? { duration: thinkingDuration } : {},
-                  )}
-                </span>
-              </button>
-              {language === 'zh-CN' && !thinkingActive && generateContent && (
-                <ThinkingTranslateButton
-                  content={content}
-                  generateContent={generateContent}
-                  className={styles.translateButton}
-                />
-              )}
-              <span
-                className={
-                  thinkingExpanded
-                    ? styles.thinkingChevronDown
-                    : styles.thinkingChevronRight
-                }
-                aria-hidden="true"
-              />
-            </div>
+            <ThinkingSummaryHeader
+              thinkingActive={thinkingActive}
+              thinkingExpanded={thinkingExpanded}
+              summaryText={summaryText}
+              translateContent={thinkingActive ? undefined : content}
+              showTranslateButton={
+                language === 'zh-CN' &&
+                !thinkingActive &&
+                generateContent !== undefined
+              }
+              generateContent={generateContent}
+              onToggle={handleToggle}
+            />
             {thinkingExpanded && (
               <div className={styles.thinkingExpandedClip}>
                 <div className={styles.thinkingExpandedInner}>

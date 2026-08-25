@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { MergeStrategy } from '../config/settingsSchema.js';
+export enum MergeStrategy {
+  // Replace the old value with the new value. This is the default.
+  REPLACE = 'replace',
+  // Concatenate arrays.
+  CONCAT = 'concat',
+  // Merge arrays, ensuring unique values.
+  UNION = 'union',
+  // Shallow merge objects.
+  SHALLOW_MERGE = 'shallow_merge',
+}
 
 export type Mergeable =
   | string

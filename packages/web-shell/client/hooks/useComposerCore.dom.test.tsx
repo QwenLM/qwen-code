@@ -27,6 +27,7 @@ function Harness({
   onSubmit,
   renderComposerTag,
   renderComposerTagTooltip,
+  onFileTagClick,
   parseUserMessageContent,
   followupState,
   sessionId,
@@ -40,6 +41,7 @@ function Harness({
   onSubmit: ReturnType<typeof vi.fn>;
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
+  onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
   parseUserMessageContent?: UserMessageContentParser;
   followupState?: {
     isVisible: boolean;
@@ -59,6 +61,7 @@ function Harness({
     editorTheme: {},
     renderComposerTag,
     renderComposerTagTooltip,
+    onFileTagClick,
     parseUserMessageContent,
     followupState,
     sessionId,
@@ -83,6 +86,7 @@ async function mount({
   onSubmit = vi.fn(),
   renderComposerTag,
   renderComposerTagTooltip,
+  onFileTagClick,
   parseUserMessageContent,
   followupState,
   sessionId,
@@ -96,6 +100,7 @@ async function mount({
   onSubmit?: ReturnType<typeof vi.fn>;
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
+  onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
   parseUserMessageContent?: UserMessageContentParser;
   followupState?: {
     isVisible: boolean;
@@ -125,6 +130,7 @@ async function mount({
             onSubmit={onSubmit}
             renderComposerTag={renderComposerTag}
             renderComposerTagTooltip={renderComposerTagTooltip}
+            onFileTagClick={onFileTagClick}
             parseUserMessageContent={parseUserMessageContent}
             followupState={followupState}
             sessionId={currentSessionId}
@@ -832,6 +838,24 @@ describe('useComposerCore paste', () => {
     expect(latest!.getText()).not.toContain('Pasted Content');
   });
 
+  it('ingests copied file references after a drop intent choice', async () => {
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['hello'], 'notes.txt', { type: 'text/plain' }),
+    ];
+
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
+    expect(latest!.pastedFiles).toMatchObject([
+      { name: 'notes.txt', data: files[1] },
+    ]);
+  });
+
   it('claims image drops, blocks submit while reading, and submits image-only', async () => {
     const onSubmit = vi.fn();
     await mount({ onSubmit });
@@ -889,8 +913,8 @@ describe('useComposerCore paste', () => {
     });
 
     expect(latest!.pastedFiles).toMatchObject([
-      { name: 'my_app.log', text: 'line1\nline2' },
-      { name: 'my_app.log-2', text: 'second' },
+      { name: 'my app.log', data: expect.any(File) },
+      { name: 'my app (1).log', data: expect.any(File) },
     ]);
     expect(latest!.hasAttachments).toBe(true);
 
@@ -899,8 +923,8 @@ describe('useComposerCore paste', () => {
       '',
       undefined,
       [
-        expect.objectContaining({ name: 'my_app.log' }),
-        expect.objectContaining({ name: 'my_app.log-2' }),
+        expect.objectContaining({ name: 'my app.log' }),
+        expect.objectContaining({ name: 'my app (1).log' }),
       ],
       expect.any(Function),
       undefined,
@@ -945,7 +969,7 @@ describe('useComposerCore paste', () => {
 
     expect(latest!.pastedFiles).toMatchObject([
       { name: 'app.log', text: 'a' },
-      { name: 'app.log-2', text: 'b' },
+      { name: 'app (1).log', text: 'b' },
     ]);
   });
 
@@ -1044,9 +1068,10 @@ describe('useComposerCore paste', () => {
     const onImageIngestionNotice = vi.fn();
     await mount({ onImageIngestionNotice });
     const first = new File(['first'], 'first.bmp', { type: 'image/x-bmp' });
-    const unsupported = new File(['zip'], 'archive.zip', {
+    const tooLarge = new File(['zip'], 'archive.zip', {
       type: 'application/zip',
     });
+    Object.defineProperty(tooLarge, 'size', { value: 8 * 1024 * 1024 + 1 });
     const second = new File(['second'], 'second.png', { type: 'image/png' });
     const drop = (files: File[]) => {
       const event = new Event('drop', { bubbles: true, cancelable: true });
@@ -1059,7 +1084,7 @@ describe('useComposerCore paste', () => {
     };
 
     act(() => {
-      drop([first, unsupported]);
+      drop([first, tooLarge]);
       drop([second]);
     });
     await waitForImageIngestion();
@@ -1092,7 +1117,13 @@ describe('useComposerCore paste', () => {
     };
 
     act(() => {
-      drop([new File(['zip'], 'archive.zip', { type: 'application/zip' })]);
+      const tooLarge = new File(['zip'], 'archive.zip', {
+        type: 'application/zip',
+      });
+      Object.defineProperty(tooLarge, 'size', {
+        value: 8 * 1024 * 1024 + 1,
+      });
+      drop([tooLarge]);
       drop([new File(['png'], 'photo.png', { type: 'image/png' })]);
     });
     await waitForImageIngestion();
@@ -1148,6 +1179,31 @@ describe('useComposerCore paste', () => {
 });
 
 describe('useComposerCore tags', () => {
+  it('makes only inline file tags previewable with the file click handler', async () => {
+    const onFileTagClick = vi.fn();
+    await mount({
+      composerInput: {
+        tags: [
+          { id: 'file:notes.txt', kind: 'file', value: 'notes.txt' },
+          { id: 'table:orders', kind: 'table', value: 'orders' },
+        ],
+        tagPlacement: 'inline',
+      },
+      onFileTagClick,
+    });
+
+    const chips = document.body.querySelectorAll('span[role="button"]');
+    expect(chips).toHaveLength(1);
+    act(() => (chips[0] as HTMLElement).click());
+    expect(onFileTagClick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tag: expect.objectContaining({ kind: 'file', value: 'notes.txt' }),
+        placement: 'composer',
+        readonly: false,
+      }),
+    );
+  });
+
   it('resubmits restored input annotations with the draft', async () => {
     const { onSubmit } = await mount();
     const inputAnnotations = [

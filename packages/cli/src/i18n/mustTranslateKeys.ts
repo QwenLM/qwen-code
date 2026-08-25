@@ -131,4 +131,5 @@ export const MUST_TRANSLATE_KEYS = [
   'best',
   'Token Trend',
   'In/Out',
+  'Unset',
 ] as const;

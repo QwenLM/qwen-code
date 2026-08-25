@@ -126,6 +126,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => ({
     refreshQueries: refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),
+    refreshWorkspace: vi.fn(),
     renamed: vi.fn(),
   }),
   useSessionCatalogPolling: () => undefined,

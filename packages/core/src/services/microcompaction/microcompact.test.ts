@@ -10,6 +10,7 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 
 import {
   evaluateTimeBasedTrigger,
+  isClearedMediaPlaceholder,
   microcompactHistory,
   MICROCOMPACT_CLEARED_MESSAGE,
   MICROCOMPACT_CLEARED_IMAGE_PREFIX,
@@ -140,6 +141,65 @@ describe('evaluateTimeBasedTrigger', () => {
   it('should return null for non-finite gap', () => {
     const result = evaluateTimeBasedTrigger(NaN, DEFAULT_SETTINGS);
     expect(result).toBeNull();
+  });
+});
+
+describe('isClearedMediaPlaceholder', () => {
+  it('matches the exact placeholder shape microcompaction emits', () => {
+    expect(
+      isClearedMediaPlaceholder('[Old inline media cleared: image/png]'),
+    ).toBe(true);
+    expect(
+      isClearedMediaPlaceholder(
+        '[Old inline media cleared: application/octet-stream]',
+      ),
+    ).toBe(true);
+  });
+
+  it('matches the empty-mime shape the producer can emit', () => {
+    // sanitizeMimeForPlaceholder returns '' for empty/whitespace-only/
+    // bracket-only mimeTypes, and the producer's `??` fallback only covers
+    // null/undefined, so a degenerate mimeType yields `[... cleared: ]`.
+    // The consumer must recognize that shape too, or a cleared media-only
+    // entry would be counted as a genuine prompt and desynchronize the
+    // rewind prompt count.
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: ]')).toBe(
+      true,
+    );
+  });
+
+  it('does not match a user prompt that merely begins with the prefix', () => {
+    expect(
+      isClearedMediaPlaceholder(
+        '[Old inline media cleared: image/png] why is this in my history?',
+      ),
+    ).toBe(false);
+    expect(isClearedMediaPlaceholder('[Old inline media cleared:')).toBe(false);
+    expect(isClearedMediaPlaceholder('hello world')).toBe(false);
+    expect(isClearedMediaPlaceholder('')).toBe(false);
+  });
+
+  it('does not match interiors the producer can never emit (newline/tab/CR)', () => {
+    // sanitizeMimeForPlaceholder normalizes \r/\n/\t to spaces before
+    // interpolation, so a generated placeholder never contains them.
+    // Accepting them would misclassify multi-line user text that starts
+    // with the prefix as a placeholder.
+    expect(
+      isClearedMediaPlaceholder(
+        '[Old inline media cleared: screenshot\nfrom staging]',
+      ),
+    ).toBe(false);
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: a\tb]')).toBe(
+      false,
+    );
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: a\rb]')).toBe(
+      false,
+    );
+    // …while the space-normalized interior the producer DOES emit for
+    // such a mimeType still matches.
+    expect(isClearedMediaPlaceholder('[Old inline media cleared: a b]')).toBe(
+      true,
+    );
   });
 });
 
@@ -1341,6 +1401,35 @@ describe('microcompactHistory', () => {
     expect(result.history[3]!.parts![0]!.inlineData?.data).toBe('NEWNEWNEWNEW');
     expect(result.meta!.toolsCleared).toBe(0);
     expect(result.meta!.mediaCleared).toBe(1);
+  });
+
+  it('emits a placeholder the consumer recognizes even for degenerate mimeTypes', () => {
+    // The producer's `?? 'application/octet-stream'` fallback only covers
+    // null/undefined; an empty or bracket-only mimeType survives
+    // sanitizeMimeForPlaceholder as ''. Whatever shape is emitted must
+    // round-trip through isClearedMediaPlaceholder, or a cleared media-only
+    // entry would later be counted as a genuine user prompt.
+    for (const mimeType of ['', '   ', ']', '[]']) {
+      const history: Content[] = [
+        makeUserMessage('look at this'),
+        makeInlineImage(mimeType, 'OLDOLDOLDOLD'),
+        makeUserMessage('and this'),
+        // Recent image so the degenerate one is not the keepRecent newest.
+        makeInlineImage('image/jpeg', 'NEWNEWNEWNEW'),
+      ];
+
+      const result = microcompactHistory(
+        history,
+        twoHoursAgo,
+        DEFAULT_SETTINGS,
+      );
+
+      const emitted = result.history[1]!.parts![0]!.text!;
+      expect(
+        isClearedMediaPlaceholder(emitted),
+        `emitted shape for mimeType ${JSON.stringify(mimeType)}: ${JSON.stringify(emitted)}`,
+      ).toBe(true);
+    }
   });
 
   it('does not reclear an already-cleared image part', () => {

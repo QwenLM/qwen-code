@@ -8,6 +8,7 @@ import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import { SessionNotFoundError } from './acp-session-bridge.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
@@ -47,15 +48,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         private readonly options: { runtimeBaseDir: string },
       ) {}
 
-      async getSessionLocation(
+      async findSessionIdIgnoringCase(
         sessionId: string,
-      ): Promise<'active' | undefined> {
+      ): Promise<string | undefined> {
         return (await sessionServiceMock.exists(
           this.cwd,
           this.options.runtimeBaseDir,
           sessionId,
         ))
-          ? 'active'
+          ? sessionId
           : undefined;
       }
 
@@ -222,6 +223,30 @@ describe('RequestedSessionIdAdmission', () => {
       });
     },
   );
+
+  it('treats a case-only transcript conflict as persisted occupancy', async () => {
+    const bridge = fakeBridge();
+    const admission = createRequestedSessionIdAdmission({
+      archiveCoordinator: new SessionArchiveCoordinator(),
+      getBridges: () => [bridge],
+      getPersistenceTargets: () => [
+        { workspaceCwd: '/one', runtimeBaseDir: '/runtime-one' },
+      ],
+    });
+    sessionServiceMock.exists.mockRejectedValueOnce(
+      new SessionIdCaseConflictError(SESSION_ID),
+    );
+
+    await expect(
+      admission.reserveCreate(SESSION_ID, {
+        bridge,
+        workspaceCwd: '/one',
+      }),
+    ).rejects.toMatchObject({
+      code: 'session_id_conflict',
+      details: { conflict: 'persisted' },
+    });
+  });
 
   it('shares restore claims only on the same bridge generation', () => {
     const firstBridge = fakeBridge();

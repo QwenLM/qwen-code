@@ -65,16 +65,16 @@ function normalizeTypeScript(name, source) {
       throw new Error(`expected one Node runtime import in ${name}, found ${matches}`)
     }
     output = output.replace(needle, 'import lib from "./node-runtime.js";')
-  }
-  if (name === "cua_driver_contract-ffi.ts") {
-    const needle = 'crateName: "cua_driver_contract"'
-    const matches = output.split(needle).length - 1
-    if (matches !== 1) {
-      throw new Error(`expected one contract Node library selector, found ${matches}`)
+    const librarySelector =
+      /const libPath = resolveLibPath\(\{\n\s+crateName: "[^"]+",\n\s+callerUrl: import\.meta\.url,\n\s+npmPackageBase: "[^"]+",\n\s+tripleStyle: "node",\n\s+\}\);/gu
+    const selectors = output.match(librarySelector)?.length ?? 0
+    if (selectors !== 1) {
+      throw new Error(`expected one Node library selector in ${name}, found ${selectors}`)
     }
-    // The contract namespace is linked into the SDK cdylib. UBRN 0.31.0-3
-    // cannot configure a shared cdylib name for an external component.
-    output = output.replace(needle, 'crateName: "cua_driver_sdk"')
+    output = output.replace(
+      librarySelector,
+      "const libPath = resolveLibPath();",
+    )
   }
   return output
 }
@@ -194,7 +194,7 @@ try {
       "--ts-dir",
       typescriptOutput,
       "--lib-package-base",
-      "@trycua/cua-driver",
+      "@qwen-code/cua-sdk",
       "--lib-node-triple",
       "--no-format",
     ],

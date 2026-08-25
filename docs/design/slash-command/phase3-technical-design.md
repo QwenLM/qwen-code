@@ -73,7 +73,7 @@ export type CommandSource =
 | ACP `argumentHint`                                   | 已映射到 `availableCommands[].input.hint`                                                               | `acp-integration/session/Session.ts`                             |
 | ACP source/supportedModes/subcommands/modelInvocable | 未暴露                                                                                                  | `acp-integration/session/Session.ts`                             |
 | 冲突处理                                             | extension 命令冲突时已重命名为 `extensionName.commandName`，非 extension 同名为后加载覆盖前加载         | `services/CommandService.ts`                                     |
-| `/doctor`                                            | 已实现，支持 `interactive` / `non_interactive` / `acp`                                                  | `ui/commands/doctorCommand.ts`、`utils/doctorChecks.ts`          |
+| `/doctor`                                            | 已实现，支持 `interactive` / `non_interactive` / `acp`                                                  | `ui/commands/doctorCommand.ts`、`ui/commands/doctorChecks.ts`    |
 
 ### 2.3 Claude Code 可借鉴点
 
@@ -548,7 +548,7 @@ type AcpSubcommandMeta = {
 - 模式：`['interactive', 'non_interactive', 'acp']`
 - interactive：展示 `HistoryItemDoctor`
 - non_interactive/acp：返回 JSON `message`
-- 诊断逻辑：`packages/cli/src/utils/doctorChecks.ts`
+- 诊断逻辑：`packages/cli/src/ui/commands/doctorChecks.ts`
 
 Phase 3 只需在 Help 和补全中为 `/doctor` 正确展示来源、mode；如需优化，可将 headless JSON 改为更适合人读的 Markdown，但这不是必需项。
 

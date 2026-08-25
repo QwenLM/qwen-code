@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as ClientLib from '@modelcontextprotocol/sdk/client/index.js';
-import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
+import * as ClientLib from '@modelcontextprotocol/client';
+import * as SdkClientStdioLib from '@modelcontextprotocol/client/stdio';
 import * as GenAiLib from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MCPServerConfig, type Config } from '../config/config.js';
@@ -21,8 +21,12 @@ import {
 import { SessionMcpView } from './session-mcp-view.js';
 import type { ToolRegistry } from './tool-registry.js';
 
-vi.mock('@modelcontextprotocol/sdk/client/index.js');
-vi.mock('@modelcontextprotocol/sdk/client/stdio.js');
+vi.mock('@modelcontextprotocol/client', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@modelcontextprotocol/client')>();
+  return { ...actual, Client: vi.fn() };
+});
+vi.mock('@modelcontextprotocol/client/stdio');
 vi.mock('@google/genai');
 
 // F2 (#4175 follow-up — W134): mocked so per-test overrides can make

@@ -5,7 +5,7 @@
  */
 
 import type { Content, Part } from '@google/genai';
-import { isSystemReminderContent } from '../utils/environmentContext.js';
+import { isSystemReminderContent } from './environmentContext.js';
 
 /**
  * Classification of how a session's last turn ended, computed from persisted

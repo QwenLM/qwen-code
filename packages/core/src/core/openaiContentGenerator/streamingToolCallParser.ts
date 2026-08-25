@@ -6,6 +6,7 @@
 
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { parseToolCallArguments } from '../tool-call-arguments.js';
 
 const debugLogger = createDebugLogger('STREAMING_TOOL_CALL_PARSER');
 
@@ -348,15 +349,7 @@ export class StreamingToolCallParser {
   hasInvalidToolCallArguments(): boolean {
     for (const [index, buffer] of this.buffers.entries()) {
       if (!this.toolCallMeta.get(index)?.name || buffer.length === 0) continue;
-
-      try {
-        const args: unknown = JSON.parse(buffer);
-        if (typeof args !== 'object' || args === null || Array.isArray(args)) {
-          return true;
-        }
-      } catch {
-        return true;
-      }
+      if (!parseToolCallArguments(buffer).ok) return true;
     }
     return false;
   }

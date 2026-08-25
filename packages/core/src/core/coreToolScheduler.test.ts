@@ -93,7 +93,7 @@ import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
-import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -146,10 +146,10 @@ const boundaryObserveMock = vi.hoisted(() =>
 const boundaryDiagnosticsEnabled = vi.hoisted(() => ({ value: false }));
 
 vi.mock(
-  '../utils/tool-result-boundary-diagnostics.js',
+  '../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../tools/tool-result-boundary-diagnostics.js')
     >()),
     isToolResultBoundaryDiagnosticsEnabled: () =>
       boundaryDiagnosticsEnabled.value,
@@ -1156,6 +1156,108 @@ describe('CoreToolScheduler', () => {
         }
       ).runtimeContentGeneratorViews.size,
     ).toBe(0);
+  });
+
+  it('does not leak the path-unescape rewrite into the caller-owned request args', async () => {
+    const readExecute = vi.fn().mockResolvedValue({
+      llmContent: 'read',
+      returnDisplay: 'read',
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            ToolNames.READ_FILE,
+            new MockTool({ name: ToolNames.READ_FILE, execute: readExecute }),
+          ],
+        ]),
+      });
+    // Callers pass args that may alias the model-emitted functionCall part
+    // stored in chat history; the scheduler's in-place PATH_ARG_KEYS
+    // unescape must land on its own cloned copy, or the rewrite leaks into
+    // history and skews the duplicate-replay fingerprints derived from it.
+    const callerArgs = { file_path: '/tmp/my\\ docs/a.txt' };
+    const callerRequest = {
+      callId: 'escaped-path-call',
+      name: ToolNames.READ_FILE,
+      args: callerArgs,
+      isClientInitiated: false,
+      prompt_id: 'prompt-escaped-path',
+    };
+
+    await scheduler.schedule([callerRequest], new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    expect(completedCalls[0].request.args['file_path']).toBe(
+      '/tmp/my docs/a.txt',
+    );
+    expect(callerArgs.file_path).toBe('/tmp/my\\ docs/a.txt');
+  });
+
+  it('clears the display list before awaiting the completion callback (#9420)', async () => {
+    // Regression: since v0.21.13 (#9121) the TUI's completion callback awaits
+    // the whole next model turn, so chaining the display-list clear after it
+    // pinned the just-completed tool group at the bottom of the virtualized
+    // list until the next tool call arrived. The clear must not depend on how
+    // long onAllToolCallsComplete takes.
+    const readExecute = vi.fn().mockResolvedValue({
+      llmContent: 'read',
+      returnDisplay: 'read',
+    });
+    let releaseCompletion: () => void = () => {};
+    const onAllToolCallsComplete = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseCompletion = resolve;
+        }),
+    );
+    const onToolCallsUpdate = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [
+          ToolNames.READ_FILE,
+          new MockTool({ name: ToolNames.READ_FILE, execute: readExecute }),
+        ],
+      ]),
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'clear-timing-call',
+          name: ToolNames.READ_FILE,
+          args: { file_path: 'a.txt' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-clear-timing',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    // The completion callback was invoked but is still pending: observers
+    // must already have seen the emptied display list at this point.
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+    expect(
+      onToolCallsUpdate.mock.calls.some(([calls]) => calls.length === 0),
+    ).toBe(true);
+
+    const callsBeforeRelease = onToolCallsUpdate.mock.calls.length;
+    releaseCompletion();
+    // The finally-block notify still fires after the callback resolves.
+    await vi.waitFor(() => {
+      expect(onToolCallsUpdate.mock.calls.length).toBeGreaterThan(
+        callsBeforeRelease,
+      );
+      expect(onToolCallsUpdate.mock.calls.at(-1)?.[0]).toEqual([]);
+    });
   });
 
   it('marks the budget-exempt plan reminder unchanged in the scheduler pass', async () => {
@@ -6362,6 +6464,136 @@ describe('CoreToolScheduler', () => {
       expect(nonSkillMessage).toContain('Did you mean');
       expect(nonSkillMessage).not.toContain('is a skill name');
     });
+
+    it('should explain how to enable list_directory when it is not registered', async () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file'],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('list_directory');
+      expect(message).toContain('disabled by default');
+      expect(message).toContain('tools.listDirectory.enabled');
+      // The coreTools allowlist advice is deliberately absent: setting
+      // tools.core to ["list_directory"] alone would exclude every other tool.
+      expect(message).not.toContain('coreTools');
+      // The generic Levenshtein path would suggest unrelated tools instead.
+      expect(message).not.toContain('Did you mean');
+
+      // Alias forms resolve to the same explanation instead of falling
+      // through to the Levenshtein path.
+      for (const alias of ['ListFiles', 'ReadFolder']) {
+        const aliasMessage =
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (scheduler as any).getToolNotFoundMessage(alias);
+        expect(aliasMessage).toContain('disabled by default');
+        expect(aliasMessage).toContain('tools.listDirectory.enabled');
+        expect(aliasMessage).not.toContain('Did you mean');
+      }
+    });
+
+    it('should attribute a missing list_directory to the workspace tools toggle when it is disabled there', async () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file'],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getDisabledTools: vi
+          .fn()
+          .mockReturnValue(new Set<string>(['list_directory'])),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('list_directory');
+      expect(message).toContain('disabled for this workspace');
+      expect(message).not.toContain('disabled by default');
+
+      // The toggle lookup must use the canonical name, so an aliased call in a
+      // workspace that turned the tool off gets the toggle message too — the
+      // enablement setting cannot lift a workspace disable.
+      const aliasMessage =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('ListFiles');
+      expect(aliasMessage).toContain('disabled for this workspace');
+      expect(aliasMessage).not.toContain('disabled by default');
+    });
+
+    it('should not claim list_directory is disabled when an alias is used for a registered tool', async () => {
+      const lsTool = {
+        name: 'list_directory',
+      } as unknown as AnyDeclarativeTool;
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file', 'list_directory'],
+        getTool: (name: string) =>
+          name === 'list_directory' ? lsTool : undefined,
+        ensureTool: async (name: string) =>
+          name === 'list_directory' ? lsTool : undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      // The registry lookup is keyed by canonical name, so an alias call misses
+      // even though the tool is enabled. It must fall through to the generic
+      // path, which names the tool, rather than telling the user to switch on a
+      // setting that is already on.
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('ListFiles');
+      expect(message).not.toContain('disabled by default');
+      expect(message).toContain('list_directory');
+      expect(message).toContain('Did you mean');
+    });
   });
 
   describe('excluded tools handling', () => {
@@ -9276,6 +9508,9 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(responseJson).toContain('"error"');
       expect(responseJson).toContain('Tool blocked by plan mode');
       expect(responseJson).toContain('write_file');
+      // list_directory is opt-in (off by default) — the block error must not
+      // steer the model toward a tool that is not registered.
+      expect(responseJson).not.toContain('list_directory');
       // Plan-required teammates get pivot-to-read-only then exit_plan_mode hint
       expect(responseJson).toContain('Do NOT retry');
       expect(responseJson).toContain('Pivot to read-only');
@@ -10713,6 +10948,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     inputFormat?: InputFormat;
     shouldAvoidPermissionPrompts?: boolean;
     experimentalZedIntegration?: boolean;
+    approvalMode?: ApprovalMode;
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
@@ -10758,7 +10994,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getSessionId: () => 'test-session-id',
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
-      getApprovalMode: () => ApprovalMode.YOLO,
+      getApprovalMode: () => options.approvalMode ?? ApprovalMode.YOLO,
       getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
@@ -10784,6 +11020,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getInputFormat: () => options.inputFormat ?? InputFormat.TEXT,
       getExperimentalZedIntegration: () =>
         options.experimentalZedIntegration ?? false,
+      getIdeMode: () => false,
       getShouldAvoidPermissionPrompts: () =>
         options.shouldAvoidPermissionPrompts ?? false,
       getTelemetryIncludeSensitiveSpanAttributes: () =>
@@ -12479,6 +12716,56 @@ describe('CoreToolScheduler telemetry spans', () => {
     const blocked = getBlockedSpans();
     expect(blocked).toHaveLength(1);
     expect(blocked[0].ended).toBe(true);
+  });
+
+  it('creates new confirmation details when a tool bounces after approval', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'ok',
+      returnDisplay: 'ok',
+    });
+    const messageBus = askMessageBus();
+    const approvalDetails: ToolCallConfirmationDetails[] = [];
+    const onToolCallsUpdate = vi.fn((calls: ToolCall[]) => {
+      for (const call of calls) {
+        if (
+          call.request.callId === 'approval-then-bounce' &&
+          call.status === 'awaiting_approval'
+        ) {
+          approvalDetails.push(call.confirmationDetails);
+        }
+      }
+    });
+    const { scheduler } = buildScheduler({
+      tools: [new MockEditTool(execute)],
+      messageBus,
+      disableHooks: false,
+      onToolCallsUpdate,
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'approval-then-bounce',
+          name: 'mockEditTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-approval-then-bounce',
+        },
+      ],
+      new AbortController().signal,
+    );
+    const initialWaiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    const initialDetails = initialWaiting.confirmationDetails;
+
+    await initialDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    await vi.waitFor(() => {
+      expect(approvalDetails).toHaveLength(2);
+      expect(approvalDetails[1]).not.toBe(initialDetails);
+    });
   });
 
   it('cancels the tool without executing when the user declines an ask', async () => {
@@ -17375,6 +17662,12 @@ describe('CoreToolScheduler activation wiring', () => {
   function buildSchedulerWithSkillManager(opts: {
     matchAndActivateByPaths: ReturnType<typeof vi.fn>;
     skillToolPresent: boolean;
+    /**
+     * What the owner DECLARED to the model, when it filters its declarations.
+     * `undefined` leaves the option off, which is the top-level session shape:
+     * the scheduler then falls back to the registry.
+     */
+    declaredHasSkillTool?: boolean;
     toolResult?: ToolResult;
     // Names the mock SkillManager.listSkills will report as available. When
     // omitted, defaults to ["tsx-helper"] which satisfies the common case.
@@ -17382,7 +17675,14 @@ describe('CoreToolScheduler activation wiring', () => {
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
+    addInlineAnnouncedSkillKeys: ReturnType<typeof vi.fn>;
   } {
+    // Exposed so the gate's SECOND effect is assertable. Consuming the
+    // announcement is what starves the parent: the orchestrator's
+    // `drainSkillAndCommandReminders` consumes exactly these keys, so a
+    // restricted subagent that marks them used hides the activation from the
+    // owner that can act on it — with no reminder of its own to show for it.
+    const addInlineAnnouncedSkillKeys = vi.fn();
     const fsTool = new MockTool({
       name: ToolNames.READ_FILE,
       execute: vi.fn().mockResolvedValue(
@@ -17460,7 +17760,7 @@ describe('CoreToolScheduler activation wiring', () => {
       },
       getDisabledSkillNames: () => new Set<string>(),
       getModelInvocableCommandsProvider: () => null,
-      addInlineAnnouncedSkillKeys: vi.fn(),
+      addInlineAnnouncedSkillKeys,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -17469,8 +17769,11 @@ describe('CoreToolScheduler activation wiring', () => {
       onToolCallsUpdate,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
+      ...(opts.declaredHasSkillTool === undefined
+        ? {}
+        : { hasSkillTool: () => opts.declaredHasSkillTool! }),
     });
-    return { scheduler, onAllToolCallsComplete };
+    return { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys };
   }
 
   function getResponseText(call: ToolCall): string {
@@ -17507,6 +17810,87 @@ describe('CoreToolScheduler activation wiring', () => {
     const responseText = getResponseText(completed[0]);
     expect(responseText).toContain('tsx-helper');
     expect(responseText).toContain('became available via the Skill tool');
+  });
+
+  it('stays silent when SkillTool is registered but was never declared', async () => {
+    // The defect this gate was written for, and the shape the registry cannot
+    // see. `SKILL` is registered unconditionally — no `forSubAgent` guard —
+    // so a subagent running an explicit `tools` list that omits it still has
+    // `getTool(SKILL)` return a tool. Reading the registry therefore held the
+    // gate permanently open, and the agent got a reminder naming a tool
+    // absent from its declarations: a wasted turn on `Tool "skill" not
+    // found`, and an announcement marked consumed on the shared Config, so
+    // the parent that CAN invoke it never learns the skill activated.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: true,
+        declaredHasSkillTool: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    const responseText = getResponseText(completed[0]);
+    expect(responseText).not.toContain('became available via the Skill tool');
+    expect(responseText).not.toContain('tsx-helper');
+    // The half that starves the parent. Moving this call outside the gate
+    // while leaving the text inside passes every other assertion here: the
+    // subagent stays silent AND the orchestrator's drain finds the key
+    // already consumed, so nobody announces the activation.
+    expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
+  });
+
+  it('announces when the owner declares SkillTool, whatever the registry holds', async () => {
+    // The other direction, so the predicate is not mistaken for a second
+    // "off" switch: an owner that declares the tool gets the reminder.
+    //
+    // `skillToolPresent: false` is the point. With both inputs true an
+    // implementation that AND-ed them would pass this too; with the registry
+    // saying no and the declaration saying yes, only an implementation that
+    // actually prefers the declaration survives.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: false,
+        declaredHasSkillTool: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(getResponseText(completed[0])).toContain(
+      'became available via the Skill tool',
+    );
+    // …and the announcement IS consumed here, so the parent does not repeat
+    // what this agent already showed. The pair is what makes the negative
+    // assertion above mean "not consumed" rather than "never consumed".
+    expect(addInlineAnnouncedSkillKeys).toHaveBeenCalled();
   });
 
   it('includes concrete result paths in skill activation candidates', async () => {

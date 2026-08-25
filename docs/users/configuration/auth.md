@@ -3,7 +3,7 @@
 Qwen Code's first-run `/auth` menu has three top-level options. Pick the one that matches how you want to run the CLI:
 
 - **Alibaba ModelStudio**: official recommended setup. Opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key).
-- **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, MiniMax, Z.AI, Idealab, ModelScope, OpenRouter, Requesty).
+- **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
 > [!note]
@@ -157,12 +157,12 @@ The key concept is **Model Providers** (`modelProviders`): Qwen Code supports mu
 
 #### Supported protocols
 
-| Protocol          | `modelProviders` key | Environment variables                                                                                | Providers                                                                                             |
-| ----------------- | -------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| OpenAI-compatible | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` (alias: `QWEN_MODEL`)                            | OpenAI, Azure OpenAI, OpenRouter, Requesty, ModelScope, Alibaba Cloud, any OpenAI-compatible endpoint |
-| Anthropic         | `anthropic`          | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`                                         | Anthropic Claude                                                                                      |
-| Google GenAI      | `gemini`             | `GEMINI_API_KEY`, `GEMINI_MODEL`                                                                     | Google Gemini                                                                                         |
-| Vertex AI         | `vertex-ai`          | `GOOGLE_API_KEY`, `GOOGLE_MODEL` (sets `GOOGLE_GENAI_USE_VERTEXAI=true`; uses the `gemini` protocol) | Google Vertex AI                                                                                      |
+| Protocol          | `modelProviders` key | Environment variables                                                                                                                                                                                                                                                                                 | Providers                                                                                             |
+| ----------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| OpenAI-compatible | `openai`             | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL` (alias: `QWEN_MODEL`)                                                                                                                                                                                                                             | OpenAI, Azure OpenAI, OpenRouter, Requesty, ModelScope, Alibaba Cloud, any OpenAI-compatible endpoint |
+| Anthropic         | `anthropic`          | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_MODEL`                                                                                                                                                                                                                                          | Anthropic Claude                                                                                      |
+| Google GenAI      | `gemini`             | `GEMINI_API_KEY`, `GEMINI_MODEL`                                                                                                                                                                                                                                                                      | Google Gemini                                                                                         |
+| Vertex AI         | `vertex-ai`          | `GOOGLE_API_KEY` or `GOOGLE_CLOUD_PROJECT` (+ optional `GOOGLE_CLOUD_LOCATION`), `GOOGLE_MODEL` (uses the `gemini` protocol; a keyless project-only setup is not auto-detected from the environment, so select the auth type explicitly with `--auth-type vertex-ai` or `security.auth.selectedType`) | Google Vertex AI                                                                                      |
 
 #### Step 1: Configure models and providers in `~/.qwen/settings.json`
 

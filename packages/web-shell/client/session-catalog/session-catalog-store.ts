@@ -129,6 +129,58 @@ function hasAutoLoadSubscriber(entry: CatalogEntry): boolean {
   );
 }
 
+// Mirrors the server's getSummaryActivityTime: activity is updatedAt with a
+// createdAt lower bound fallback, and an unparsable stamp sorts last.
+function getSessionActivityTime(session: DaemonSessionSummary): number {
+  const time = Date.parse(session.updatedAt ?? session.createdAt ?? '');
+  return Number.isFinite(time) ? time : 0;
+}
+
+function compareSessionsByActivity(
+  organized: boolean,
+  a: DaemonSessionSummary,
+  b: DaemonSessionSummary,
+): number {
+  if (organized) {
+    const byPinned = Number(b.isPinned === true) - Number(a.isPinned === true);
+    if (byPinned !== 0) return byPinned;
+  }
+  const byTime = getSessionActivityTime(b) - getSessionActivityTime(a);
+  if (byTime !== 0) return byTime;
+  return a.sessionId.localeCompare(b.sessionId);
+}
+
+// Only cursor-less, non-archived pages own an activity reorder: an archived
+// page never accepts a live activity stamp, and a cursored page's rows are
+// fenced by the cursor boundary, so a fresher row belongs to an earlier page.
+function ownsActivityReorder(entry: CatalogEntry): boolean {
+  return (
+    entry.query.options.archiveState !== 'archived' &&
+    entry.query.options.cursor === undefined
+  );
+}
+
+function liveSessionSnapshotsEqual(
+  previous: ReadonlyMap<string, DaemonSessionLiveState>,
+  next: ReadonlyMap<string, DaemonSessionLiveState>,
+): boolean {
+  if (previous.size !== next.size) return false;
+  for (const [sessionId, session] of next) {
+    const prior = previous.get(sessionId);
+    if (
+      !prior ||
+      prior.clientCount !== session.clientCount ||
+      prior.hasActivePrompt !== session.hasActivePrompt ||
+      prior.isWaitingForPermission !== session.isWaitingForPermission ||
+      prior.isWaitingForUserQuestion !== session.isWaitingForUserQuestion ||
+      prior.updatedAt !== session.updatedAt
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function getPollInterval(entry: CatalogEntry): number | undefined {
   let interval: number | undefined;
   for (const subscriber of entry.subscribers) {
@@ -153,8 +205,18 @@ export class SessionCatalogStore {
     'interactive' | 'invalidated'
   >();
   private readonly liveStateWakeHandlers = new Set<
-    (workspaceCwd: string) => void
+    (workspaceCwd: string, bypassRetry?: boolean) => void
   >();
+  private liveStateActivitySequence = 0;
+  private readonly liveStatePendingActivity = new Map<
+    string,
+    Map<string, number>
+  >();
+  private readonly liveSessionsByWorkspace = new Map<
+    string,
+    ReadonlyMap<string, DaemonSessionLiveState>
+  >();
+  private readonly liveSessionListeners = new Map<string, Set<() => void>>();
   private activeRequests = 0;
   private activeBackgroundRequests = 0;
   private queueSequence = 0;
@@ -183,6 +245,8 @@ export class SessionCatalogStore {
       else {
         this.liveStateWorkspaceUsers.delete(workspaceCwd);
         this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
+        this.liveStatePendingActivity.delete(workspaceCwd);
+        this.clearLiveSessions(workspaceCwd);
         for (const entry of this.entries.values()) {
           if (entry.query.workspaceCwd !== workspaceCwd) continue;
           this.resetPollSchedule(entry);
@@ -217,7 +281,9 @@ export class SessionCatalogStore {
     return kind;
   }
 
-  onLiveStateWake(handler: (workspaceCwd: string) => void): () => void {
+  onLiveStateWake(
+    handler: (workspaceCwd: string, bypassRetry?: boolean) => void,
+  ): () => void {
     this.liveStateWakeHandlers.add(handler);
     return () => {
       this.liveStateWakeHandlers.delete(handler);
@@ -229,23 +295,54 @@ export class SessionCatalogStore {
     this.requestLiveStateRefresh(workspaceCwd, 'interactive');
   }
 
-  requestWorkspaceLiveStateInvalidation(workspaceCwd: string): void {
+  recordSessionActivity(workspaceCwd: string, sessionId: string): void {
     if (!this.isWorkspaceLiveStateEnabled(workspaceCwd)) return;
-    this.requestLiveStateRefresh(workspaceCwd, 'invalidated');
+    let pending = this.liveStatePendingActivity.get(workspaceCwd);
+    if (!pending) {
+      pending = new Map();
+      this.liveStatePendingActivity.set(workspaceCwd, pending);
+    }
+    pending.set(sessionId, ++this.liveStateActivitySequence);
+    for (const handler of this.liveStateWakeHandlers) handler(workspaceCwd);
+  }
+
+  snapshotSessionActivity(
+    workspaceCwd: string,
+  ): ReadonlyMap<string, number> | undefined {
+    const pending = this.liveStatePendingActivity.get(workspaceCwd);
+    if (!pending || pending.size === 0) return undefined;
+    return new Map(pending);
+  }
+
+  resolveSessionActivity(
+    workspaceCwd: string,
+    sessionId: string,
+    sequence: number,
+  ): void {
+    const pending = this.liveStatePendingActivity.get(workspaceCwd);
+    // A completion recorded while the settling request was in flight bumps
+    // the sequence; that newer pending entry must survive this settle.
+    if (pending?.get(sessionId) !== sequence) return;
+    pending.delete(sessionId);
+    if (pending.size === 0) this.liveStatePendingActivity.delete(workspaceCwd);
   }
 
   private requestLiveStateRefresh(
     workspaceCwd: string,
     kind: 'interactive' | 'invalidated',
+    bypassRetry = false,
   ): void {
     if (
+      kind !== 'interactive' &&
       this.liveStateWorkspaceRefreshRequests.get(workspaceCwd) === 'interactive'
     ) {
       return;
     }
     this.liveStateWorkspaceRefreshRequests.set(workspaceCwd, kind);
     if (kind === 'interactive') {
-      for (const handler of this.liveStateWakeHandlers) handler(workspaceCwd);
+      for (const handler of this.liveStateWakeHandlers) {
+        handler(workspaceCwd, bypassRetry);
+      }
     }
   }
 
@@ -316,8 +413,14 @@ export class SessionCatalogStore {
     };
   }
 
-  async refresh(query: SessionCatalogQuery): Promise<DaemonSessionListPage> {
-    return this.requestFresh(this.getOrCreateEntry(query));
+  async refresh(
+    query: SessionCatalogQuery,
+    options: { interactive?: boolean } = {},
+  ): Promise<DaemonSessionListPage> {
+    return this.requestFresh(
+      this.getOrCreateEntry(query),
+      options.interactive === true,
+    );
   }
 
   async loadOnce(
@@ -358,13 +461,17 @@ export class SessionCatalogStore {
 
   invalidateWorkspace(
     workspaceCwd: string,
-    options: { background?: boolean } = {},
+    options: { background?: boolean; interactive?: boolean } = {},
   ): void {
     const background = options.background === true;
     const hidden = this.isHidden();
     const liveStateEnabled = this.isWorkspaceLiveStateEnabled(workspaceCwd);
     if (liveStateEnabled) {
-      this.requestLiveStateRefresh(workspaceCwd, 'invalidated');
+      this.requestLiveStateRefresh(
+        workspaceCwd,
+        options.interactive === true ? 'interactive' : 'invalidated',
+        options.interactive === true,
+      );
     }
     for (const entry of this.entries.values()) {
       if (entry.query.workspaceCwd !== workspaceCwd) continue;
@@ -430,18 +537,135 @@ export class SessionCatalogStore {
     }
   }
 
-  applyLiveState(
+  /**
+   * Apply a pin toggle optimistically to every loaded page of the workspace,
+   * so the store owns the optimistic state's lifetime (the R5-1 fix
+   * direction). Pinned-view pages gain or lose the row; every other page
+   * patches it in place. Because the toggle lands in the page data itself,
+   * later local writes (`patchSession`, `applyLiveState`) churn around it
+   * without dropping it, and only an authoritative refetch replaces it.
+   * Rolling back is the same operation with the opposite target.
+   */
+  applySessionPinToggle(
     workspaceCwd: string,
-    liveSessions: readonly DaemonSessionLiveState[],
+    session: DaemonSessionSummary,
+    toggle: { pinned: boolean; pinnedAt?: string },
   ): void {
-    const liveById = new Map(
-      liveSessions.map((session) => [session.sessionId, session]),
-    );
     for (const entry of this.entries.values()) {
       if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
         continue;
       }
+      const page = entry.snapshot.page;
+      const carriesRow = (candidate: DaemonSessionSummary): boolean =>
+        candidate.workspaceCwd === workspaceCwd &&
+        candidate.sessionId === session.sessionId;
+      if (entry.query.options.group === 'pinned') {
+        if (toggle.pinned) {
+          const pinnedSession: DaemonSessionSummary = {
+            ...session,
+            workspaceCwd,
+            isPinned: true,
+            ...(toggle.pinnedAt !== undefined
+              ? { pinnedAt: toggle.pinnedAt }
+              : {}),
+          };
+          const exists = page.sessions.some(carriesRow);
+          this.setSnapshot(entry, {
+            ...entry.snapshot,
+            page: {
+              ...page,
+              sessions: exists
+                ? page.sessions.map((candidate) =>
+                    carriesRow(candidate) ? pinnedSession : candidate,
+                  )
+                : [...page.sessions, pinnedSession],
+            },
+          });
+        } else if (page.sessions.some(carriesRow)) {
+          this.setSnapshot(entry, {
+            ...entry.snapshot,
+            page: {
+              ...page,
+              sessions: page.sessions.filter(
+                (candidate) => !carriesRow(candidate),
+              ),
+            },
+          });
+        }
+        continue;
+      }
+      if (!page.sessions.some(carriesRow)) continue;
+      this.setSnapshot(entry, {
+        ...entry.snapshot,
+        page: {
+          ...page,
+          sessions: page.sessions.map((candidate) => {
+            if (!carriesRow(candidate)) return candidate;
+            const next: DaemonSessionSummary = {
+              ...candidate,
+              isPinned: toggle.pinned,
+            };
+            if (toggle.pinned) {
+              if (toggle.pinnedAt !== undefined) {
+                next.pinnedAt = toggle.pinnedAt;
+              }
+            } else {
+              delete next.pinnedAt;
+            }
+            return next;
+          }),
+        },
+      });
+    }
+  }
+
+  getLiveSession(
+    workspaceCwd: string,
+    sessionId: string,
+  ): DaemonSessionLiveState | undefined {
+    return this.liveSessionsByWorkspace.get(workspaceCwd)?.get(sessionId);
+  }
+
+  hasLiveSessions(workspaceCwd: string): boolean {
+    return this.liveSessionsByWorkspace.has(workspaceCwd);
+  }
+
+  subscribeLiveSessions(
+    workspaceCwd: string,
+    listener: () => void,
+  ): () => void {
+    const existing = this.liveSessionListeners.get(workspaceCwd);
+    const listeners = existing ?? new Set<() => void>();
+    if (!existing) this.liveSessionListeners.set(workspaceCwd, listeners);
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.liveSessionListeners.delete(workspaceCwd);
+      }
+    };
+  }
+
+  applyLiveState(
+    workspaceCwd: string,
+    liveSessions: readonly DaemonSessionLiveState[],
+  ): ReadonlySet<string> {
+    this.recordLiveSessions(workspaceCwd, liveSessions);
+    const liveById = new Map(
+      liveSessions.map((session) => [session.sessionId, session]),
+    );
+    // Session ids whose live activity watermark was usable on a loaded,
+    // reorder-owning page (stamped or already at least as fresh). The settle
+    // loop consumes this instead of re-deriving the index and acceptance
+    // rules, so the two sites cannot drift apart.
+    const absorbed = new Set<string>();
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
+        continue;
+      }
+      const acceptsActivity = ownsActivityReorder(entry);
       let changed = false;
+      let activityAdvanced = false;
       const sessions = entry.snapshot.page.sessions.map((session) => {
         // A page can hold sessions from another workspace (the daemon merges
         // live runtime state); a workspace-scoped live-state response cannot
@@ -455,28 +679,85 @@ export class SessionCatalogStore {
         const isWaitingForPermission = live?.isWaitingForPermission ?? false;
         const isWaitingForUserQuestion =
           live?.isWaitingForUserQuestion ?? false;
+        // The daemon watermark only ever advances recency; an equal or older
+        // stamp (e.g. a staged page committed fresher data mid-flight) must
+        // not regress the row.
+        const liveUpdatedAt =
+          acceptsActivity && session.isArchived !== true
+            ? live?.updatedAt
+            : undefined;
+        const liveActivityTime =
+          liveUpdatedAt !== undefined ? Date.parse(liveUpdatedAt) : Number.NaN;
+        if (Number.isFinite(liveActivityTime)) absorbed.add(session.sessionId);
+        const updatedAt =
+          liveUpdatedAt !== undefined &&
+          Number.isFinite(liveActivityTime) &&
+          liveActivityTime > getSessionActivityTime(session)
+            ? liveUpdatedAt
+            : session.updatedAt;
         if (
           session.clientCount === clientCount &&
           session.hasActivePrompt === hasActivePrompt &&
           session.isWaitingForPermission === isWaitingForPermission &&
-          session.isWaitingForUserQuestion === isWaitingForUserQuestion
+          session.isWaitingForUserQuestion === isWaitingForUserQuestion &&
+          session.updatedAt === updatedAt
         ) {
           return session;
         }
         changed = true;
+        if (session.updatedAt !== updatedAt) activityAdvanced = true;
         return {
           ...session,
           clientCount,
           hasActivePrompt,
           isWaitingForPermission,
           isWaitingForUserQuestion,
+          ...(updatedAt !== undefined ? { updatedAt } : {}),
         };
       });
       if (!changed) continue;
+      if (activityAdvanced) {
+        sessions.sort((a, b) =>
+          compareSessionsByActivity(
+            entry.query.options.view === 'organized',
+            a,
+            b,
+          ),
+        );
+      }
       this.setSnapshot(entry, {
         ...entry.snapshot,
         page: { ...entry.snapshot.page, sessions },
       });
+    }
+    return absorbed;
+  }
+
+  // The live-state response lists every live session regardless of catalog
+  // paging; keep it so a per-session lookup never depends on the connected
+  // session happening to sit inside a loaded page (#9487).
+  private recordLiveSessions(
+    workspaceCwd: string,
+    liveSessions: readonly DaemonSessionLiveState[],
+  ): void {
+    const next = new Map<string, DaemonSessionLiveState>();
+    for (const session of liveSessions) {
+      next.set(session.sessionId, session);
+    }
+    const previous = this.liveSessionsByWorkspace.get(workspaceCwd);
+    if (previous && liveSessionSnapshotsEqual(previous, next)) return;
+    this.liveSessionsByWorkspace.set(workspaceCwd, next);
+    const listeners = this.liveSessionListeners.get(workspaceCwd);
+    if (listeners) {
+      for (const listener of [...listeners]) listener();
+    }
+  }
+
+  private clearLiveSessions(workspaceCwd: string): void {
+    if (!this.liveSessionsByWorkspace.delete(workspaceCwd)) return;
+    const listeners = this.liveSessionListeners.get(workspaceCwd);
+    if (listeners) {
+      for (const listener of [...listeners]) listener();
     }
   }
 
@@ -653,6 +934,9 @@ export class SessionCatalogStore {
     this.trailingRefreshTimers.clear();
     this.liveStateWorkspaceUsers.clear();
     this.liveStateWorkspaceRefreshRequests.clear();
+    this.liveStatePendingActivity.clear();
+    this.liveSessionsByWorkspace.clear();
+    this.liveSessionListeners.clear();
     this.entries.clear();
     this.queue.length = 0;
     this.removeVisibilityListener();
@@ -680,7 +964,10 @@ export class SessionCatalogStore {
     return entry;
   }
 
-  private requestFresh(entry: CatalogEntry): Promise<DaemonSessionListPage> {
+  private requestFresh(
+    entry: CatalogEntry,
+    bypassRetry = false,
+  ): Promise<DaemonSessionListPage> {
     entry.desiredRevision += 1;
     const revision = entry.desiredRevision;
     this.setSnapshot(entry, { ...entry.snapshot, stale: true });
@@ -689,7 +976,11 @@ export class SessionCatalogStore {
     );
     const promise = this.createWaiter(entry, revision, liveStateCoordinated);
     if (liveStateCoordinated) {
-      this.requestLiveStateRefresh(entry.query.workspaceCwd, 'interactive');
+      this.requestLiveStateRefresh(
+        entry.query.workspaceCwd,
+        'interactive',
+        bypassRetry,
+      );
       if (entry.waiters.some((waiter) => !waiter.liveStateCoordinated)) {
         this.ensureScheduled(entry, PRIORITY.interactive, false);
       }

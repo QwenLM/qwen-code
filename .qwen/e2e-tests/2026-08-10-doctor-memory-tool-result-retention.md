@@ -114,7 +114,7 @@ key entirely (no `null`), matching the readable output.
 Unreachable in normal operation (per-tool/global layers bound every result at
 or below its declared budget). Covered deterministically by unit tests:
 
-- `packages/core/src/utils/tool-result-retention.test.ts` (19 tests): counts,
+- `packages/core/src/tools/tool-result-retention.test.ts` (19 tests): counts,
   max, raw-char measurement of newline-dense outputs, strict `>` boundary
   at 2x budget + slack, sentinel skip (truncation prefix and
   `<persisted-output>` stubs on both `output` and `error` keys), per-tool

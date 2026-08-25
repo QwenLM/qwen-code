@@ -33,10 +33,7 @@ const repoRoot = resolve(
   '..',
 );
 
-const SKILL_PATH = join(
-  repoRoot,
-  'packages/core/src/skills/bundled/review/SKILL.md',
-);
+const SKILL_DIR = join(repoRoot, 'packages/core/src/skills/bundled/review');
 
 /** The `{target}` token, rendered per class exactly as the skill defines it. */
 const TARGETS = {
@@ -46,14 +43,31 @@ const TARGETS = {
 };
 
 describe('run pins match the bundled skill templates', () => {
-  const skill = existsSync(SKILL_PATH)
-    ? readFileSync(SKILL_PATH, 'utf8').replace(/\r\n/g, '\n')
+  // The skill is a corpus since #9787, and each oracle reads only the
+  // files the owning step is GUARANTEED to see: the composed-name template
+  // lives in the core SKILL.md (injected on every run), the report stems in
+  // references/persistence.md (the one reference loaded before Step 8 on
+  // every run that has a Step 8). Accepting a template from ANY corpus file
+  // would stay green on a move into a verdict-gated file that many runs
+  // never load, while those runs improvise artifact names.
+  const coreSkill = existsSync(join(SKILL_DIR, 'SKILL.md'))
+    ? readFileSync(join(SKILL_DIR, 'SKILL.md'), 'utf8').replace(/\r\n/g, '\n')
     : null;
+  const step8Corpus = (() => {
+    if (coreSkill === null) return null;
+    const persistence = join(SKILL_DIR, 'references', 'persistence.md');
+    return existsSync(persistence)
+      ? `${coreSkill}\n${readFileSync(persistence, 'utf8').replace(/\r\n/g, '\n')}`
+      : null;
+  })();
 
   // A sparse or partial checkout has no skill to read; the pins are still
   // covered by run.test.ts's own cases. Failing here would report a checkout
   // shape as a contract drift.
-  const itWithSkill = skill === null ? it.skip : it;
+  const itWithSkill = coreSkill === null ? it.skip : it;
+  // The stems oracle additionally reads references/persistence.md, so a
+  // checkout that has SKILL.md but not that file must skip it too.
+  const itWithStep8 = step8Corpus === null ? it.skip : it;
 
   itWithSkill('composedNameFor renders Step 6’s --out template', () => {
     // The template as the skill writes it, e.g.
@@ -66,7 +80,7 @@ describe('run pins match the bundled skill templates', () => {
     // class, so no future suffix character has to be foreseen.
     const m =
       /--out\s+\.qwen\/tmp\/(qwen-review-\{target\}-composed\.json)(?=\s|$)/.exec(
-        skill as string,
+        coreSkill as string,
       );
     // A null here means SKILL.md no longer writes that `--out` line: update
     // composedNameFor and this oracle together to the new template.
@@ -78,11 +92,11 @@ describe('run pins match the bundled skill templates', () => {
     }
   });
 
-  itWithSkill('reportPatternFor accepts Step 8’s report stems', () => {
+  itWithStep8('reportPatternFor accepts Step 8’s report stems', () => {
     // The stems as the skill lists them, e.g.
     //   `.qwen/reviews/<YYYY-MM-DD>-<HHMMSS>-pr-<number>.md`
     const stems = [
-      ...(skill as string).matchAll(
+      ...(step8Corpus as string).matchAll(
         /`\.qwen\/reviews\/<YYYY-MM-DD>-<HHMMSS>-([^`]+)\.md`/g,
       ),
     ].map((s) => s[1]);

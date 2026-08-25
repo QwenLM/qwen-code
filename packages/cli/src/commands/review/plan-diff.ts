@@ -25,7 +25,7 @@ import {
 import { REVIEW_TMP_DIR } from './lib/paths.js';
 import { planEffortField } from './lib/effort.js';
 import { HOSTNAME_RE } from './lib/gh.js';
-import type { ReviewEffort } from './parse-args.js';
+import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -194,15 +194,7 @@ export const planDiffCommand: CommandModule = {
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
       })
-      .option('effort', {
-        type: 'string',
-        choices: ['low', 'medium', 'high'],
-        describe:
-          'The review effort. `medium` (balanced) drops the adversarial ' +
-          'personas from the required roster; recorded in the plan so ' +
-          'check-coverage, agent-prompt --roster and compose-review all read ' +
-          'one value. Omit for the full (high) roster.',
-      }),
+      .option('effort', EFFORT_OPTION),
   handler: (argv) => {
     // The sibling handlers' contract: usage errors (a TypeError — the
     // malformed --host above) exit 2, everything else exits 1 — never an

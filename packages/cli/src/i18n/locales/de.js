@@ -444,6 +444,7 @@ export default {
   'Tool Output Truncation Lines': 'Zeilen für Werkzeugausgabe-Kürzung',
   'Folder Trust': 'Ordnervertrauen',
   'Tool Schema Compliance': 'Tool Schema-Konformität',
+  Unset: 'Nicht festgelegt',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
   'Auto (follow user input)': 'Automatisch (Benutzereingabe folgen)',
@@ -1529,6 +1530,7 @@ export default {
   'rejected — edit config to re-approve':
     'abgelehnt — Konfiguration bearbeiten, um erneut zu genehmigen',
   'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
+  'from nested agent': 'von verschachteltem Agent',
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',
   Running: 'Läuft',

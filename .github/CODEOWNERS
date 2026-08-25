@@ -9,8 +9,11 @@
 /.github/workflows/release.yml          @pomelo-nwu @wenshao
 /.github/workflows/finalize-release.yml @pomelo-nwu @wenshao
 
+# --- Security gate workflows require core maintainer approval ---
+/.github/workflows/security-checks.yml  @pomelo-nwu @wenshao
+
 # --- Core package ---
-/packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan @doudouOUC
+/packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan @doudouOUC @qqqys
 
 # --- CUA Driver & Mobile MCP ---
 /packages/cua-driver/  @LaZzyMan

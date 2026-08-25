@@ -252,6 +252,7 @@ export async function startInteractiveUI(
       exitOnCtrlC: false,
       isScreenReaderEnabled: config.getScreenReader(),
       alternateScreen: useVP,
+      ...(useVP ? { maxFps: 60 } : {}),
     },
   );
   if (useVP) {

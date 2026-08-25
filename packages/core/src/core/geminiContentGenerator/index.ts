@@ -5,12 +5,13 @@
  */
 
 import { GeminiContentGenerator } from './geminiContentGenerator.js';
+import { AuthType } from '../contentGenerator.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
-import { InstallationManager } from '../../utils/installationManager.js';
+import { InstallationManager } from '../../config/installationManager.js';
 
 export { GeminiContentGenerator } from './geminiContentGenerator.js';
 
@@ -48,7 +49,15 @@ export function createGeminiContentGenerator(
   const geminiContentGenerator = new GeminiContentGenerator(
     {
       apiKey: config.apiKey === '' ? undefined : config.apiKey,
-      vertexai: config.vertexai,
+      // Derive Vertex mode from the auth type rather than leaving it to the
+      // GOOGLE_GENAI_USE_VERTEXAI side effect: only the CLI pre-flight check
+      // writes that variable, and the session boot paths that skip it would
+      // otherwise build a client pointed at the Gemini API endpoint. Left
+      // undefined for the other auth types so the SDK keeps its own env
+      // fallback for them.
+      vertexai:
+        config.vertexai ??
+        (config.authType === AuthType.USE_VERTEX_AI ? true : undefined),
       httpOptions,
     },
     config,

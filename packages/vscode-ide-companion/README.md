@@ -25,7 +25,7 @@ Seamlessly integrate [Qwen Code](https://github.com/QwenLM/qwen-code) into Visua
 
 ## Requirements
 
-- Visual Studio Code 1.85.0 or newer (also works with Cursor, Windsurf, and other VS Code-based editors)
+- Visual Studio Code 1.96.0 or newer (also works with Cursor, Windsurf, and other VS Code-based editors)
 
 ## Quick Start
 

@@ -10,11 +10,30 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
-} from '../../utils/commands.js';
+  parseSlashCommand,
+} from '../commands/commands.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { MessageType } from '../types.js';
 import { isWaylandSession, writeOsc52 } from './clipboardUtils.js';
 import { toCodePoints } from './textUtils.js';
+
+/** Shared prefix for the context-files announcement INFO item.
+ * Used by both the emission site and the rewind re-arm matcher so the
+ * pairing is enforced by construction, not by exact-spelling coupling. */
+export const CONTEXT_FILES_ANNOUNCEMENT_PREFIX = 'Read context files:';
+
+/** Whether a history item is the context-files announcement. */
+export function isContextFilesAnnouncement(item: {
+  type: string;
+  text?: string;
+}): boolean {
+  return (
+    item.type === MessageType.INFO &&
+    typeof item.text === 'string' &&
+    item.text.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX)
+  );
+}
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -110,6 +129,55 @@ export const isBtwCommand = (query: string): boolean => {
   const trimmed = query.trim();
   return trimmed.length > 0 && BTW_COMMAND_RE.test(trimmed);
 };
+
+/**
+ * Whether a submission consumes the one-shot context-file announcement.
+ * Heuristically mirrors the downstream input classification so the latch
+ * is consumed by the submission most likely to start the first main model
+ * turn: blank input is dropped by the queue, /btw side-questions are
+ * deliberately exempt (they fork via runForkedAgent without advancing the
+ * main conversation — note ?btw is NOT exempt: it is not a slash command
+ * and goes to the main model as a plain query), shell-mode input is
+ * intercepted, and
+ * local slash commands resolve without a model turn — but model-invocable
+ * slash commands (skills) are expanded into a submit_prompt and routed
+ * before the shell-mode intercept, so they consume it even
+ * while shell mode is active. This is a prediction, not an admission
+ * guarantee; rare post-admission aborts and built-in submit_prompt
+ * commands without the modelInvocable flag are out of scope here.
+ */
+export function consumesContextAnnouncementLatch(
+  trimmedPrompt: string,
+  options: {
+    shellModeActive: boolean;
+    slashCommands: readonly SlashCommand[];
+  },
+): boolean {
+  if (trimmedPrompt.length === 0) {
+    return false;
+  }
+  // Only /btw forks (runForkedAgent, no main turn); ?btw is not a slash
+  // command and reaches the main model as a plain query, so it must
+  // consume the latch like any other prompt.
+  if (/^\/btw(?:\s|$)/.test(trimmedPrompt)) {
+    return false;
+  }
+  if (isSlashCommand(trimmedPrompt)) {
+    // Slash commands are routed before the shell-mode intercept, so shell
+    // mode does not exclude them; only the model-invocable ones (expanded
+    // into a submit_prompt) reach the model — user-invoked skills with
+    // disableModelInvocation and description-less extension commands also
+    // expand to submit_prompt but are deliberately exempt.
+    return (
+      parseSlashCommand(trimmedPrompt, options.slashCommands).commandToExecute
+        ?.modelInvocable === true
+    );
+  }
+  if (options.shellModeActive) {
+    return false;
+  }
+  return true;
+}
 
 const debugLogger = createDebugLogger('COMMAND_UTILS');
 

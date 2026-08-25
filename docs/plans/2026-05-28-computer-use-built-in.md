@@ -1,5 +1,10 @@
 # Computer Use Built-In Implementation Plan
 
+> [!IMPORTANT]
+> This is a historical plan for the removed built-in tool architecture. It is
+> superseded by [Computer Use Skill Integration](../design/2026-08-23-computer-use-skill.md)
+> and must not be used as current runtime or release guidance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make `open-computer-use` a zero-config built-in capability in qwen-code. 9 computer-use tools appear in the deferred tool list as `computer_use__click`, `computer_use__type_text`, etc. First invocation transparently installs the upstream npm binary, walks the user through macOS Accessibility / Screen Recording permissions if needed, and forwards the call to the upstream MCP server.

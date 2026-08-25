@@ -156,6 +156,7 @@ describe('MessageEmitter', () => {
           evidenceCursor: { recordId: 'cursor-1' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 1234,
           updatedAt: 1234,
         },

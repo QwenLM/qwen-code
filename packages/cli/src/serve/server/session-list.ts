@@ -10,6 +10,7 @@ import {
   SessionOrganizationError,
   Storage,
   readWorktreeSession,
+  readSessionPrs,
   type SessionArchiveState,
   type SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
@@ -399,6 +400,46 @@ async function enrichWorktreeSidecars(
   }
 }
 
+/**
+ * Enrich persisted session summaries with GitHub PR bindings from sidecar
+ * files so the binding survives daemon restarts. Same pattern as
+ * {@link enrichWorktreeSidecars}. Runs before the live merge, when the map
+ * only holds persisted summaries — {@link mergeLiveSessionSummary} merges
+ * these with the live entry's daemon-lifetime bindings.
+ */
+async function enrichPrSidecars(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  // Required (no default): silently defaulting to 'active' would let a
+  // future archived-listing call site that omits the argument enrich from
+  // the wrong chats dir and drop every binding.
+  archiveState: SessionArchiveState,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    signal?.throwIfAborted();
+    let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;
+    try {
+      const sidecarPath = sessionService.getPrSessionPathForArchiveState(
+        sessionId,
+        archiveState,
+      );
+      sidecar = signal
+        ? await readSessionPrs(sidecarPath, { signal })
+        : await readSessionPrs(sidecarPath);
+    } catch {
+      signal?.throwIfAborted();
+      sidecar = null;
+    }
+    if (sidecar) {
+      bySessionId.set(sessionId, {
+        ...summary,
+        prs: sidecar.map(({ number, url }) => ({ number, url })),
+      });
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -439,7 +480,7 @@ function mergeLiveSessionSummary(
   existing: BridgeSessionSummary,
   live: BridgeSessionSummary,
 ): BridgeSessionSummary {
-  return {
+  const merged: BridgeSessionSummary = {
     ...existing,
     ...live,
     createdAt: existing.createdAt,
@@ -455,6 +496,20 @@ function mergeLiveSessionSummary(
     hasActivePrompt: live.hasActivePrompt,
     isArchived: false,
   };
+  // The live entry only knows PR bindings from this daemon lifetime while the
+  // sidecar-enriched persisted summary holds the full history — merge by PR
+  // number (live url wins, live-only bindings sort latest) instead of letting
+  // the spread overwrite the history.
+  if (existing.prs || live.prs) {
+    const livePrs = live.prs ?? [];
+    merged.prs = [
+      ...(existing.prs ?? []).filter(
+        (p) => !livePrs.some((l) => l.number === p.number),
+      ),
+      ...livePrs,
+    ];
+  }
+  return merged;
 }
 
 function clonePersistedSummary(
@@ -514,6 +569,7 @@ async function loadAllPersistedSummaries(
     archiveState,
     signal,
   );
+  await enrichPrSidecars(bySessionId, sessionService, archiveState, signal);
   signal.throwIfAborted();
   return {
     sessions: [...bySessionId.values()],
@@ -1179,6 +1235,12 @@ async function listWorkspaceSessionsForResponseInRuntime(
   }
 
   await enrichWorktreeSidecars(
+    bySessionId,
+    sessionService,
+    archiveState,
+    readOptions.signal,
+  );
+  await enrichPrSidecars(
     bySessionId,
     sessionService,
     archiveState,

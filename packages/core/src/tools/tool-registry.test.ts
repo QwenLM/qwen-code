@@ -851,6 +851,43 @@ describe('ToolRegistry', () => {
         'web_fetch',
       );
     });
+
+    it('pinned reveal survives clearRevealedDeferredTools, discovered reveals do not', () => {
+      const registry = new ToolRegistry(new Config(baseConfigParams));
+      registry.registerTool(
+        new MockTool({ name: 'daemon-setup', shouldDefer: true }),
+      );
+      registry.registerTool(
+        new MockTool({ name: 'discovered', shouldDefer: true }),
+      );
+      registry.revealDeferredTool('daemon-setup');
+      registry.pinDeferredToolReveal('daemon-setup');
+      registry.revealDeferredTool('discovered');
+
+      registry.clearRevealedDeferredTools();
+
+      // The ToolSearch-discovered reveal is dropped by the reset...
+      expect(registry.isDeferredToolRevealed('discovered')).toBe(false);
+      expect(
+        registry.getFunctionDeclarations().map((d) => d.name),
+      ).not.toContain('discovered');
+      // ...but the pinned session-setup reveal survives it, so the fresh
+      // session's declaration list still offers the tool (a `/clear` whose
+      // budget-based preload withholds it would otherwise strand it).
+      expect(registry.isDeferredToolRevealed('daemon-setup')).toBe(true);
+      expect(registry.getFunctionDeclarations().map((d) => d.name)).toContain(
+        'daemon-setup',
+      );
+    });
+
+    it('pin for an unregistered tool reveals nothing on clear', () => {
+      const registry = new ToolRegistry(new Config(baseConfigParams));
+      registry.pinDeferredToolReveal('ghost');
+
+      registry.clearRevealedDeferredTools();
+
+      expect(registry.isDeferredToolRevealed('ghost')).toBe(false);
+    });
   });
 
   describe('getToolsByServer', () => {

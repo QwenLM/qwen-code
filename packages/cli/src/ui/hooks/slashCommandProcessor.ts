@@ -63,7 +63,7 @@ import {
   parseSlashCommand,
   parseStackedSlashCommands,
   MAX_STACKED_SKILLS,
-} from '../../utils/commands.js';
+} from '../commands/commands.js';
 import { AppEvent } from '../../utils/events.js';
 import { t } from '../../i18n/index.js';
 import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';

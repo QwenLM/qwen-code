@@ -169,7 +169,7 @@ vi.mock('./utils/events.js', async (importOriginal) => {
   };
 });
 
-vi.mock('./utils/sandbox.js', () => ({
+vi.mock('./serve/sandbox.js', () => ({
   sandbox_command: vi.fn(() => ''), // Default to no sandbox command
   start_sandbox: vi.fn(() => Promise.resolve()), // Mock as an async function that resolves
 }));
@@ -206,7 +206,7 @@ vi.mock('./startup/startup-prefetch.js', () => ({
     mockStartPostRenderPrefetches(...args),
 }));
 
-vi.mock('./utils/update-relaunch.js', () => ({
+vi.mock('./ui/update-relaunch.js', () => ({
   updateBeforeRelaunch: (...args: unknown[]) =>
     mockUpdateBeforeRelaunch(...args),
 }));
@@ -219,9 +219,11 @@ vi.mock('./acp-integration/acpAgent.js', () => ({
   runAcpAgent: (...args: unknown[]) => mockRunAcpAgent(...args),
 }));
 
-vi.mock('./utils/housekeeping/scheduler.js', async (importOriginal) => {
+vi.mock('./services/housekeeping/scheduler.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('./utils/housekeeping/scheduler.js')>();
+    await importOriginal<
+      typeof import('./services/housekeeping/scheduler.js')
+    >();
   return {
     ...actual,
     startNonInteractiveOpenAILogHousekeeping: (...args: unknown[]) =>
@@ -1232,7 +1234,7 @@ describe('gemini.tsx main function', () => {
     );
     const { loadSettings } = await import('./config/settings.js');
     const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
-    const { start_sandbox } = await import('./utils/sandbox.js');
+    const { start_sandbox } = await import('./serve/sandbox.js');
     const { relaunchOnExitCode } = await import('./utils/relaunch.js');
 
     vi.mocked(start_sandbox).mockClear();
@@ -1787,6 +1789,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       maxToolCalls: undefined,
       maxSubagentDepth: undefined,
       experimentalLsp: undefined,
+      restoreAskUserQuestion: undefined,
       channel: undefined,
       chatRecording: undefined,
       sessionId: undefined,
@@ -1913,6 +1916,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       maxToolCalls: undefined,
       maxSubagentDepth: undefined,
       experimentalLsp: undefined,
+      restoreAskUserQuestion: undefined,
       channel: undefined,
       chatRecording: undefined,
       sessionId: undefined,
@@ -2038,6 +2042,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       maxToolCalls: undefined,
       maxSubagentDepth: undefined,
       experimentalLsp: undefined,
+      restoreAskUserQuestion: undefined,
       channel: undefined,
       chatRecording: undefined,
       sessionId: undefined,
@@ -2159,6 +2164,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       maxToolCalls: undefined,
       maxSubagentDepth: undefined,
       experimentalLsp: undefined,
+      restoreAskUserQuestion: undefined,
       channel: undefined,
       chatRecording: undefined,
       sessionId: undefined,
@@ -2750,6 +2756,7 @@ describe('startInteractiveUI', () => {
       exitOnCtrlC: false,
       isScreenReaderEnabled: false,
       alternateScreen: true,
+      maxFps: 60,
     });
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)
@@ -2787,6 +2794,7 @@ describe('startInteractiveUI', () => {
 
     const [, options] = renderSpy.mock.calls[0];
     expect(options).toMatchObject({ alternateScreen: false });
+    expect(options).not.toHaveProperty('maxFps');
   });
 
   it('should not use alternate screen when stdout is not interactive', async () => {

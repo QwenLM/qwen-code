@@ -37,6 +37,7 @@ const goalSnapshot: GoalSnapshotV2 = {
     evidenceCursor: { recordId: 'record-1' },
     turnCount: 3,
     activeTimeMs: 12_000,
+    tokensUsed: 0,
     createdAt: 1,
     updatedAt: 2,
     lastReason: 'keep going',

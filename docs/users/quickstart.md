@@ -72,7 +72,7 @@ The first-run menu lets you connect a model provider. Choose one of:
   - **Coding Plan**: for individual developers, with an included weekly quota and diverse model options. See the [Coding Plan guide](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) ([intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)) for setup instructions.
   - **Token Plan**: usage-based billing with a dedicated endpoint, aimed at teams and companies.
   - **Standard API Key**: connect with an existing API key from Alibaba Cloud ModelStudio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)). See the API setup guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2974721)) for details.
-- **Third-party Providers** — choose a built-in provider (DeepSeek, MiniMax, Z.AI, ModelScope, OpenRouter, Requesty, and more) and connect with an API key.
+- **Third-party Providers** — choose a built-in provider (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty, and more) and connect with an API key.
 - **Custom Provider** — manually connect a local server, proxy, or unsupported provider.
 
 > ⚠️ **Note**: Qwen OAuth was discontinued on April 15, 2026. If you were previously using Qwen OAuth, please switch to one of the methods above.

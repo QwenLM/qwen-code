@@ -12,8 +12,8 @@ import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { Storage } from '../config/storage.js';
-import type { ForkedAgentResult } from '../utils/forkedAgent.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import type { ForkedAgentResult } from '../agents/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
@@ -28,7 +28,7 @@ import {
 } from './dreamAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
@@ -149,7 +149,6 @@ describe('dreamAgentPlanner', () => {
           'read_file',
           'grep_search',
           'glob',
-          'list_directory',
           'run_shell_command',
           'write_file',
           'edit',

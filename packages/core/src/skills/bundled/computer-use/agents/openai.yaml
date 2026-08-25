@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Computer Use'
+  short_description: 'Control desktop apps through the Qwen CUA SDK'
+  default_prompt: 'Use $computer-use to inspect and operate the requested desktop application safely.'

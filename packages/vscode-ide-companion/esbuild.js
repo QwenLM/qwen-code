@@ -209,12 +209,18 @@ async function main() {
   const webviewCtx = await esbuild.context({
     entryPoints: ['src/webview/index.tsx'],
     bundle: true,
-    format: 'iife',
+    // ES modules + splitting so the WebShell transcript renderer (and its
+    // heavy transitive deps) is a lazily-loaded chunk instead of inflating the
+    // entry bundle for every user. `splitting` requires ESM and an outdir.
+    format: 'esm',
+    splitting: true,
     minify: production,
     sourcemap: !production,
     sourcesContent: false,
     platform: 'browser',
-    outfile: 'dist/webview.js',
+    outdir: 'dist',
+    entryNames: 'webview',
+    chunkNames: 'chunks/[name]-[hash]',
     // @qwen-code/qwen-code-core is a peer dependency of @qwen-code/webui.
     // Since @qwen-code/webui marks it as external in its own Vite build, the
     // browser bundle must also mark it external to avoid bundling Node.js-only

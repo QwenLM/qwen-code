@@ -2,6 +2,10 @@ import { useEffect, useState } from 'react';
 import { CopyIcon, WifiIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import {
@@ -246,7 +250,11 @@ export function LocalControlSettingsCard() {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => void navigator.clipboard?.writeText(status.url!)}
+              onClick={() =>
+                void writeClipboardText(status.url!).catch(
+                  warnClipboardWriteFailure,
+                )
+              }
             >
               <CopyIcon aria-hidden="true" />
               {t('common.copy')}

@@ -170,7 +170,6 @@ describe('DiscoveredMCPTool', () => {
             [INVOCATION_CONTEXT_META_KEY]: invocationContext,
           },
         },
-        undefined,
         expect.objectContaining({ onprogress: expect.any(Function) }),
       );
     });
@@ -921,7 +920,7 @@ describe('DiscoveredMCPTool', () => {
       it('forwards parent abort into the combined signal passed to the direct SDK client', async () => {
         let capturedSignal: AbortSignal | undefined;
         const mockDirectCallTool = vi.fn<McpDirectClient['callTool']>(
-          async (_params, _schema, options) => {
+          async (_params, options) => {
             capturedSignal = options?.signal;
             return new Promise(() => {});
           },
@@ -1148,6 +1147,181 @@ describe('DiscoveredMCPTool', () => {
       const invocation = tool.build(params);
       const description = invocation.getDescription();
       expect(description).toBe('{"param":"testValue","param2":"anotherOne"}');
+    });
+  });
+
+  describe('MCP Apps display', () => {
+    const createAppTool = (
+      mcpClient: McpDirectClient,
+      appResourceUi?: Record<string, unknown>,
+    ) =>
+      new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mcpClient,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        false,
+        'ui://demo/dashboard',
+        appResourceUi,
+      );
+
+    it('loads an MCP App resource without changing model-visible content', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+          structuredContent: { revenue: 42 },
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://api.example.com'] },
+                  permissions: { clipboardWrite: {} },
+                },
+              },
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        resourceUri: 'ui://demo/dashboard',
+        html: '<main>Revenue</main>',
+        toolArguments: { param: 'test' },
+        fallbackText: 'Dashboard ready',
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('uses listing-level app metadata when resources/read omits content _meta', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient, {
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        html: '<main>Revenue</main>',
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      });
+    });
+
+    it('lets content-level app metadata win over listing-level defaults', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html;profile=mcp-app',
+              text: '<main>Revenue</main>',
+              _meta: {
+                ui: {
+                  csp: { connectDomains: ['https://content.example.com'] },
+                },
+              },
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient, {
+        csp: { connectDomains: ['https://listing.example.com'] },
+        permissions: { clipboardWrite: {} },
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'mcp_app',
+        csp: { connectDomains: ['https://content.example.com'] },
+      });
+      expect(
+        (result.returnDisplay as { permissions?: unknown }).permissions,
+      ).toBeUndefined();
+    });
+
+    it('falls back to the normal tool text when the app resource is invalid', async () => {
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => ({
+          contents: [
+            {
+              uri: 'ui://demo/dashboard',
+              mimeType: 'text/html',
+              text: '<main>Wrong MIME</main>',
+            },
+          ],
+        })),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+
+      expect(result.returnDisplay).toBe('Dashboard ready');
+    });
+
+    it('keeps the tool result when aborting the optional app resource fetch', async () => {
+      const controller = new AbortController();
+      const mcpClient: McpDirectClient = {
+        callTool: vi.fn(async () => ({
+          content: [{ type: 'text', text: 'Dashboard ready' }],
+        })),
+        readResource: vi.fn(async () => {
+          controller.abort();
+          throw new DOMException('Aborted', 'AbortError');
+        }),
+      };
+
+      const result = await createAppTool(mcpClient)
+        .build({ param: 'test' })
+        .execute(controller.signal);
+
+      expect(result.llmContent).toEqual([{ text: 'Dashboard ready' }]);
+      expect(result.returnDisplay).toBe('Dashboard ready');
     });
   });
 
@@ -1391,7 +1565,7 @@ describe('DiscoveredMCPTool', () => {
       // When callTool is called with an onprogress callback, it invokes
       // the callback to simulate the MCP server sending progress updates.
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn(async (_params, _schema, options) => {
+        callTool: vi.fn(async (_params, options) => {
           // Simulate 3 progress notifications from the MCP server
           for (let i = 1; i <= 3; i++) {
             await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1472,7 +1646,7 @@ describe('DiscoveredMCPTool', () => {
       ];
 
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn(async (_params, _schema, options) => {
+        callTool: vi.fn(async (_params, options) => {
           for (let i = 0; i < steps.length; i++) {
             await new Promise((resolve) => setTimeout(resolve, 10));
             options?.onprogress?.({
@@ -2464,7 +2638,7 @@ describe('DiscoveredMCPTool', () => {
       const discoverToolsForServer = vi.fn();
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn().mockImplementation(
-          (_params, _schema, options) =>
+          (_params, options) =>
             new Promise((_resolve, reject) => {
               options?.signal?.addEventListener(
                 'abort',
@@ -2588,7 +2762,7 @@ describe('DiscoveredMCPTool', () => {
       const idleTimeoutMs = 1000; // 1 second for testing
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn().mockImplementation(
-          (_params, _schema, options) =>
+          (_params, options) =>
             new Promise((_resolve, reject) => {
               // Simulate SDK behavior: reject when signal is aborted
               options?.signal?.addEventListener('abort', () => {
@@ -2642,7 +2816,7 @@ describe('DiscoveredMCPTool', () => {
         const idleTimeoutMs = 1000;
         const mockMcpClient: McpDirectClient = {
           callTool: vi.fn().mockImplementation(
-            (_params, _schema, options) =>
+            (_params, options) =>
               new Promise((_resolve, reject) => {
                 options?.signal?.addEventListener('abort', () => {
                   queueMicrotask(() => reject(options.signal?.reason));
@@ -2686,7 +2860,7 @@ describe('DiscoveredMCPTool', () => {
       let onProgressCallback: ((progress: any) => void) | undefined;
 
       const mockMcpClient: McpDirectClient = {
-        callTool: vi.fn().mockImplementation((_params, _schema, options) => {
+        callTool: vi.fn().mockImplementation((_params, options) => {
           onProgressCallback = options?.onprogress;
           return new Promise((resolve, reject) => {
             // Listen for abort signal to properly reject when timeout fires

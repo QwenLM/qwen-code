@@ -136,18 +136,18 @@ describe('resolveTestScope', () => {
   });
 
   it('discloses — softly, not as incompleteness — a member a negation excludes', () => {
-    // !packages/desktop is a separate toolchain with its own lockfile; a diff
+    // !packages/desktop-shell is a separate toolchain with its own lockfile; a diff
     // inside it cannot fail any included workspace's suite, so it earns no
     // incomplete-scope caveat. But its own suite was not run either, and
     // "nothing is silent" covers that: a softer line says what did not run.
     const scope = resolveTestScope({
-      changed: ['packages/desktop/src/main.rs'],
-      globs: ['packages/*', '!packages/desktop'],
+      changed: ['packages/desktop-shell/src/main.rs'],
+      globs: ['packages/*', '!packages/desktop-shell'],
       packages: PKGS,
       skipped: [],
     });
     expect(scope.workspaces).toEqual([]);
-    expect(scope.caveat).toContain('packages/desktop/src/main.rs');
+    expect(scope.caveat).toContain('packages/desktop-shell/src/main.rs');
     expect(scope.caveat).toContain('were not run');
     expect(scope.caveat).not.toContain('outside every workspace');
   });

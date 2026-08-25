@@ -29,6 +29,20 @@ const workflow = readFileSync(
 // hide behind the shim.
 const gnuDateShim = `date() { if [[ "$1" == '-u' && "$2" == '-d' && "$4" == '+%s' ]]; then node -e 'console.log(Math.floor(new Date(process.argv[1]).getTime()/1000))' "$3"; else command date "$@"; fi; }`;
 
+// The `wedged` predicate is defined once in the workflow and reused by the
+// in-flight count, the census, and the liveness re-dispatch guard; tests
+// replay it VERBATIM so a drift in any of them fails here.
+const zombieDef = workflow.match(/ZOMBIE_JQ='([\s\S]*?)'\n/)?.[1];
+
+// The SCAN_INFLIGHT program is extracted once and replayed by both the
+// foreign-dispatch test and the wedged-queue test — one copy, so a workflow
+// edit updates one extraction instead of drifting between two.
+const inflightProgram = workflow
+  .match(
+    /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
+  )?.[1]
+  ?.replace(/\n {12}/g, '\n');
+
 describe('fleet shepherd workflow', () => {
   it('runs checkout-free — every read goes through the API', () => {
     // The run step reads no repo files (the flake registry is gone with the
@@ -299,8 +313,12 @@ describe('fleet shepherd workflow', () => {
     expect(workflow).toContain(
       'run-list read failed; liveness lever and conflict dispatches skipped',
     );
+    // The FULL gate, including the wedge self-limit: a still-wedged recorded
+    // liveness run keeps it closed, so an ATTRIBUTED persistent wedge plants
+    // one corpse per snapshot window at worst, not one per watermark cycle (a
+    // run=none attribution fallback records no id the guard could see).
     expect(workflow).toContain(
-      '"${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}"',
+      '"${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" && "${PREV_LIVENESS_WEDGED}" == "0"',
     );
     // The watermark LIVES in the dashboard body: an unreadable body is
     // unknown watermark state, so the lever is skipped AND the body is not
@@ -488,6 +506,51 @@ exit 1`;
         ghScript: 'exit 1',
       }),
     ).toBe('true| ');
+    // A run wedged by AGE is still inspected — age alone proves jobless
+    // only for the wedge class that defined the threshold. When the runner
+    // pool is offline, queued runs hold live review-address jobs
+    // indefinitely, and the busy-set must keep deferring their PRs (the
+    // marker-failure safety net), so the jobs read decides, not the birthday.
+    expect(
+      runBusyWalk({
+        runs: [
+          {
+            databaseId: 102,
+            status: 'queued',
+            createdAt: '2026-08-19T05:01:14Z',
+          },
+        ],
+        ghScript: `printf '%s' '{"jobs":[{"status":"queued","name":"review-address (7127, ci/autofix-concurrent-fanout)"}]}'`,
+      }),
+    ).toBe('true| 7127 ');
+    // The wedge class that defined the threshold reads clean: zero jobs,
+    // nothing collected, BUSY_OK survives.
+    expect(
+      runBusyWalk({
+        runs: [
+          {
+            databaseId: 102,
+            status: 'queued',
+            createdAt: '2026-08-19T05:01:14Z',
+          },
+        ],
+        ghScript: `printf '%s' '{"jobs":[]}'`,
+      }),
+    ).toBe('true| ');
+    // And a FAILED jobs read on an old queued run stays fail-closed like any
+    // other run: busy-state unknown, conflict dispatches deferred this tick.
+    expect(
+      runBusyWalk({
+        runs: [
+          {
+            databaseId: 102,
+            status: 'queued',
+            createdAt: '2026-08-19T05:01:14Z',
+          },
+        ],
+        ghScript: 'exit 1',
+      }),
+    ).toBe('false| ');
   });
 
   it('behaviorally proves in-flight counting ignores foreign dispatches', () => {
@@ -497,17 +560,27 @@ exit 1`;
     // is created seconds from the liveness watermark, so any proximity
     // window would count its two-hour address run as in-flight liveness and
     // starve the watchdog.
-    const jqProgram = workflow
-      .match(
-        /SCAN_INFLIGHT="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" '([\s\S]*?)' \/tmp\/scan-runs\.json/,
-      )?.[1]
-      ?.replace(/\n {12}/g, '\n');
-    expect(jqProgram).toBeTruthy();
+    expect(inflightProgram).toBeTruthy();
+    expect(zombieDef).toBeTruthy();
+    const NOW = Math.floor(Date.parse('2026-07-18T08:00:05Z') / 1000);
     const count = (runs, lvrun) =>
-      execFileSync('jq', ['-r', '--arg', 'lvrun', lvrun, jqProgram], {
-        encoding: 'utf8',
-        input: JSON.stringify(runs),
-      }).trim();
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'lvrun',
+          lvrun,
+          '--arg',
+          'now',
+          String(NOW),
+          '--arg',
+          'zmin',
+          '30',
+          zombieDef + inflightProgram,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(runs) },
+      ).trim();
     const OURS = '900001';
     const run = (event, databaseId, createdAt, status = 'in_progress') => ({
       event,
@@ -553,6 +626,301 @@ exit 1`;
     expect(
       count([run('workflow_dispatch', 900001, '2026-07-18T07:59:58Z')], ''),
     ).toBe('0');
+  });
+
+  it('behaviorally proves a run wedged in queued is not in flight', () => {
+    // 2026-08-19: qwen-autofix.yml crossed GitHub's 500 KB workflow-file
+    // limit, and GitHub answered by CREATING runs it never started — queued
+    // forever, zero jobs, uncancellable through the API. The watchdog counted
+    // one of them as its own in-flight liveness dispatch and stopped
+    // dispatching for 18 hours ("last scan signal 1107m ago, in-flight: 1")
+    // while the loop was dark. A queued run older than ZOMBIE_QUEUED_MINUTES
+    // is wedged, not live, and must drop out of the count.
+    const censusProgram = workflow
+      .match(
+        /SCAN_ZOMBIES="\$\(jq -r --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
+      )?.[1]
+      ?.replace(/\n {12}/g, '\n');
+    const oldestProgram = workflow
+      .match(
+        /SCAN_ZOMBIE_OLDEST="\$\(jq -r --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
+      )?.[1]
+      ?.replace(/\n {12}/g, '\n');
+    expect(inflightProgram).toBeTruthy();
+    expect(censusProgram).toBeTruthy();
+    expect(oldestProgram).toBeTruthy();
+
+    const NOW = Math.floor(Date.parse('2026-08-20T00:00:00Z') / 1000);
+    const jq = (program, runs, extra, zmin = '30') =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          ...extra,
+          '--arg',
+          'now',
+          String(NOW),
+          '--arg',
+          'zmin',
+          zmin,
+          zombieDef + program,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(runs) },
+      ).trim();
+    const inflight = (runs, zmin) =>
+      jq(inflightProgram, runs, ['--arg', 'lvrun', '900001'], zmin);
+    const census = (runs) => jq(censusProgram, runs, []);
+    const oldest = (runs) => jq(oldestProgram, runs, []);
+    const run = (event, databaseId, createdAt, status) => ({
+      event,
+      databaseId,
+      createdAt,
+      status,
+    });
+
+    // A dispatch queued for four minutes is a runner queue, not a wedge.
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T23:56:00Z', 'queued'),
+      ]),
+    ).toBe('1');
+    // The observed failure: our own liveness dispatch, queued for 19 hours.
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T05:01:14Z', 'queued'),
+      ]),
+    ).toBe('0');
+    // Schedule runs wedge the same way and must not starve the watchdog either.
+    expect(
+      inflight([run('schedule', 900007, '2026-08-19T05:01:14Z', 'queued')]),
+    ).toBe('0');
+    // Boundary: exactly ZOMBIE_QUEUED_MINUTES old is wedged, a second younger
+    // is not — the cutoff is inclusive and has no dead zone.
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T23:30:00Z', 'queued'),
+      ]),
+    ).toBe('0');
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T23:30:01Z', 'queued'),
+      ]),
+    ).toBe('1');
+    // The repository-variable override is behaviorally live: the same
+    // 10-minute-old queued run is wedged at zmin=5 and in flight at zmin=15.
+    // A hardcoded threshold would pass this whole suite while silently
+    // ignoring a tuned variable mid-incident.
+    expect(
+      inflight(
+        [run('workflow_dispatch', 900001, '2026-08-19T23:50:00Z', 'queued')],
+        '5',
+      ),
+    ).toBe('0');
+    expect(
+      inflight(
+        [run('workflow_dispatch', 900001, '2026-08-19T23:50:00Z', 'queued')],
+        '15',
+      ),
+    ).toBe('1');
+    // Only QUEUED runs wedge. A review-address run legitimately runs for
+    // hours, and must keep deferring the watchdog for every one of them.
+    expect(
+      inflight([
+        run('workflow_dispatch', 900001, '2026-08-19T02:00:00Z', 'in_progress'),
+      ]),
+    ).toBe('1');
+    // Unknown age is not evidence of a wedge: an absent createdAt keeps the
+    // run in flight rather than licensing a duplicate dispatch.
+    expect(
+      inflight([
+        { event: 'workflow_dispatch', databaseId: 900001, status: 'queued' },
+      ]),
+    ).toBe('1');
+
+    // The census counts every wedged run whatever its event or attribution —
+    // it exists to make the wedge VISIBLE, which is what the incident lacked.
+    expect(
+      census([
+        run('workflow_dispatch', 1, '2026-08-19T01:04:50Z', 'queued'),
+        run('workflow_dispatch', 2, '2026-08-19T13:44:13Z', 'queued'),
+        run('pull_request_review', 3, '2026-08-19T05:14:09Z', 'queued'),
+        run('schedule', 4, '2026-08-19T23:55:00Z', 'queued'),
+        run('schedule', 5, '2026-08-19T20:00:00Z', 'completed'),
+      ]),
+    ).toBe('3');
+    // ...and the reported "oldest" is the EARLIEST wedged createdAt, not the
+    // newest — a sort|first→last mutant would flip the banner during the
+    // very incident it exists for.
+    expect(
+      oldest([
+        run('workflow_dispatch', 1, '2026-08-19T01:04:50Z', 'queued'),
+        run('workflow_dispatch', 2, '2026-08-19T13:44:13Z', 'queued'),
+        run('pull_request_review', 3, '2026-08-19T05:14:09Z', 'queued'),
+        run('schedule', 4, '2026-08-19T23:55:00Z', 'queued'),
+        run('schedule', 5, '2026-08-19T20:00:00Z', 'completed'),
+      ]),
+    ).toBe('2026-08-19T01:04:50Z');
+    // Nothing wedged → empty, never a bogus timestamp.
+    expect(
+      oldest([
+        run('workflow_dispatch', 6, '2026-08-19T23:56:00Z', 'queued'),
+        run('schedule', 7, '2026-08-19T20:00:00Z', 'completed'),
+      ]),
+    ).toBe('');
+  });
+
+  it('behaviorally proves the liveness gate refuses to stack on a wedged dispatch', () => {
+    // During a PERSISTENT wedge the watermark cycle would reopen the gate
+    // every 60 minutes and plant a fresh uncancellable queued dispatch per
+    // hour, each refreshing the very liveness watermark whose growing age
+    // exposed the incident. The guard looks at the RECORDED liveness run:
+    // still wedged in the snapshot → the gate stays closed. It lengthens
+    // the interval rather than blocking hard — once that run starts,
+    // completes, or leaves the snapshot window, the gate reopens on its own.
+    const prevWedgedProgram = workflow
+      .match(
+        /PREV_LIVENESS_WEDGED="\$\(jq -r --arg lvrun "\$\{PREV_LIVENESS_RUN\}" --arg now "\$\{NOW_EPOCH\}" --arg zmin "\$\{ZOMBIE_QUEUED_MINUTES\}" "\$\{ZOMBIE_JQ\}"'([\s\S]*?)' \/tmp\/scan-runs\.json/,
+      )?.[1]
+      ?.replace(/\n {12}/g, '\n');
+    expect(prevWedgedProgram).toBeTruthy();
+    const NOW = Math.floor(Date.parse('2026-08-20T00:00:00Z') / 1000);
+    const prevWedged = (runs, lvrun) =>
+      execFileSync(
+        'jq',
+        [
+          '-r',
+          '--arg',
+          'lvrun',
+          lvrun,
+          '--arg',
+          'now',
+          String(NOW),
+          '--arg',
+          'zmin',
+          '30',
+          zombieDef + prevWedgedProgram,
+        ],
+        { encoding: 'utf8', input: JSON.stringify(runs) },
+      ).trim();
+    const run = (event, databaseId, createdAt, status) => ({
+      event,
+      databaseId,
+      createdAt,
+      status,
+    });
+    // Our recorded liveness run, still wedged → the gate must stay closed.
+    expect(
+      prevWedged(
+        [run('workflow_dispatch', 900001, '2026-08-19T05:01:14Z', 'queued')],
+        '900001',
+      ),
+    ).toBe('1');
+    // The same run once GitHub starts it → the gate reopens.
+    expect(
+      prevWedged(
+        [
+          run(
+            'workflow_dispatch',
+            900001,
+            '2026-08-19T05:01:14Z',
+            'in_progress',
+          ),
+        ],
+        '900001',
+      ),
+    ).toBe('0');
+    // A wedged run that is NOT ours (a foreign dispatch) never blocks the
+    // watchdog — attribution stays by recorded run id.
+    expect(
+      prevWedged(
+        [run('workflow_dispatch', 900002, '2026-08-19T05:01:14Z', 'queued')],
+        '900001',
+      ),
+    ).toBe('0');
+    // No id recorded → nothing can be wedged by attribution.
+    expect(
+      prevWedged(
+        [run('workflow_dispatch', 900001, '2026-08-19T05:01:14Z', 'queued')],
+        '',
+      ),
+    ).toBe('0');
+    // The recorded run left the snapshot window → the gate reopens; the
+    // residual is the documented one absorbed duplicate scan.
+    expect(prevWedged([], '900001')).toBe('0');
+  });
+
+  it('reports and routes around wedged runs everywhere they matter', () => {
+    // Tunable without a deploy, and generous enough never to fire on an
+    // ordinary runner queue.
+    expect(workflow).toContain(
+      'ZOMBIE_QUEUED_MINUTES: "${{ vars.QWEN_SHEPHERD_ZOMBIE_QUEUED_MINUTES || \'30\' }}"',
+    );
+    // The tunable is operator-breakable — a non-numeric repo variable falls
+    // back to the default with a warning instead of failing every $zmin
+    // consumer open (mirrors AUTO_RELEASE_DAYS), and the guard runs BEFORE
+    // the first consumer (the census), not after.
+    const guardCondition = workflow.match(
+      /^ {10}(if \[\[ ! "\$\{ZOMBIE_QUEUED_MINUTES\}".*); then$/m,
+    )?.[1];
+    expect(guardCondition).toBeTruthy();
+    expect(guardCondition).toBe(
+      'if [[ ! "${ZOMBIE_QUEUED_MINUTES}" =~ ^[0-9]+$ ]] || [[ ${#ZOMBIE_QUEUED_MINUTES} -gt 3 ]] || [[ "${ZOMBIE_QUEUED_MINUTES}" =~ ^0+$ ]]',
+    );
+    // Replayed VERBATIM: zero is the degenerate lower bound — it wedges
+    // every queued run at birth — so it falls back like a non-numeric or
+    // oversized value instead of reaching the jq consumers.
+    const guardVerdict = (value) =>
+      spawnSync(
+        'bash',
+        [
+          '-c',
+          `ZOMBIE_QUEUED_MINUTES='${value}'; ${guardCondition}; then echo fallback; else echo keep; fi`,
+        ],
+        { encoding: 'utf8' },
+      ).stdout.trim();
+    expect(guardVerdict('0')).toBe('fallback');
+    expect(guardVerdict('00')).toBe('fallback');
+    expect(guardVerdict('000')).toBe('fallback');
+    expect(guardVerdict('abc')).toBe('fallback');
+    expect(guardVerdict('1000')).toBe('fallback');
+    expect(guardVerdict('1')).toBe('keep');
+    expect(guardVerdict('30')).toBe('keep');
+    expect(guardVerdict('999')).toBe('keep');
+    expect(workflow).toMatch(
+      /is not a positive integer or is too large; using 30"\n\s+ZOMBIE_QUEUED_MINUTES=30\n[\s\S]*?SCAN_ZOMBIES="/,
+    );
+    // The conflict lever's busy-set deliberately does NOT share the wedged
+    // exclusion: age alone proves jobless only for the wedge class that
+    // defined the threshold — offline runners keep live jobs queued
+    // indefinitely, so the jobs read decides, not the birthday.
+    expect(workflow).toContain(
+      'done < <(jq -r \'.[] | select(.status != "completed") | .databaseId\' /tmp/scan-runs.json 2> /dev/null)',
+    );
+    // Visible in the tick log and on the dashboard, not just in the count.
+    expect(workflow).toContain('wedged-queued: ${SCAN_ZOMBIES}');
+    expect(workflow).toContain(
+      "autofix run(s) stuck 'queued' for over ${ZOMBIE_QUEUED_MINUTES}m",
+    );
+    expect(workflow).toContain(
+      '${SCAN_ZOMBIES} autofix run(s) wedged in \\`queued\\`',
+    );
+    // The census is status+age only (no jobs read), so the banner must not
+    // assert the runs are jobless: an offline runner pool keeps live jobs
+    // queued just as long, and deleting them kills live work. The honest
+    // phrasing points at a jobs check before any deletion.
+    expect(workflow).not.toContain('GitHub never started them');
+    expect(workflow).toContain('gh run view <id> --json jobs');
+    // While the recorded liveness run stays wedged, the banner also names
+    // the paused re-dispatch gate AND its escape hatch: recovery from a
+    // persistent wedge leaves the gate closed until THAT run leaves the
+    // snapshot window, and nothing else tells oncall why scans stay dark.
+    // The remedy must name the ONE id whose deletion reopens the gate —
+    // the gate replay above proves deleting any other wedged run leaves it
+    // closed, so a generic 'delete the wedged run(s)' would be a trap.
+    expect(workflow).toContain(
+      'liveness re-dispatch stays paused while the recorded liveness run (id ${PREV_LIVENESS_RUN}) is among them',
+    );
+    expect(workflow).toContain('gh run delete ${PREV_LIVENESS_RUN}');
   });
 
   it('maintains one dashboard issue edited in place', () => {
@@ -1566,13 +1934,16 @@ exit 1`;
       (h) =>
         h.includes('a setup step failed') ||
         h.includes('will retry on the next scan') ||
-        h.includes('Could not produce a passing fix for this feedback'),
+        h.includes('Could not produce a passing fix for this feedback') ||
+        h.includes('deferred this item to a human under instruction') ||
+        h.includes('wrote a handoff but left a dirty workspace') ||
+        h.includes('wrote a handoff but the round HAS a commit'),
     );
     const unclassified = headlines.filter(
       (h) => !terminal.includes(h) && !transient.includes(h),
     );
     expect(terminal.length).toBe(5);
-    expect(transient).toHaveLength(4);
+    expect(transient).toHaveLength(7);
     expect(unclassified).toEqual([]);
     const matches = (h) =>
       execFileSync('jq', ['-rn', '--arg', 'b', h, `$b | test("${reasonRe}")`], {

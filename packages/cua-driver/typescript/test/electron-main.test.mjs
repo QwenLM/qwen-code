@@ -7,13 +7,34 @@ import { fileURLToPath } from "node:url"
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url))
 const electron = path.resolve(testDirectory, "../node_modules/.bin/electron")
+const libraryName =
+  process.platform === "darwin"
+    ? "libcua_driver_sdk.dylib"
+    : process.platform === "win32"
+      ? "cua_driver_sdk.dll"
+      : "libcua_driver_sdk.so"
+const nativeKey =
+  process.platform === "darwin"
+    ? "darwin-universal"
+    : process.platform === "win32"
+      ? `windows-${process.arch === "x64" ? "x86_64" : "arm64"}`
+      : `linux-${process.arch === "x64" ? "x86_64" : "arm64"}`
+const library = process.env.QWEN_CUA_SDK_NATIVE_DIR
+  ? path.resolve(process.env.QWEN_CUA_SDK_NATIVE_DIR, libraryName)
+  : path.resolve(testDirectory, "../.native", nativeKey, libraryName)
 const packageVersion = JSON.parse(
   readFileSync(path.resolve(testDirectory, "../package.json"), "utf8"),
 ).version
 
 test(
   "Electron main receives embedded connection values and cleans up lifecycle",
-  { skip: process.platform === "win32" || !existsSync(electron), timeout: 60_000 },
+  {
+    skip:
+      process.platform === "win32" ||
+      !existsSync(electron) ||
+      !existsSync(library),
+    timeout: 60_000,
+  },
   async () => {
     const command = process.platform === "linux" ? "xvfb-run" : electron
     const args = process.platform === "linux"

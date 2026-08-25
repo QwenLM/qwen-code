@@ -26,6 +26,7 @@ function snapshot(
       evidenceCursor: { recordId: 'record-1' },
       turnCount: 4,
       activeTimeMs: 12_000,
+      tokensUsed: 0,
       createdAt: 1_000,
       updatedAt: 13_000,
       ...(lastReason ? { lastReason } : {}),

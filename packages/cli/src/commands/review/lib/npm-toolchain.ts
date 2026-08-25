@@ -798,6 +798,9 @@ function runNpmToolchain(args: ToolchainRunArgs): BuildTestReport {
       installCmd,
       root,
       Math.min(perCommandMs, remainingMs()),
+      // The one command that needs the registry. Everything else this adapter
+      // runs is offline under the sandbox policy — see `containerCommand`.
+      'install',
     );
     results.install = install;
     if (install.timedOut) results.timedOut.push(install.command);

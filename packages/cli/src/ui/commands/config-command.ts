@@ -19,7 +19,7 @@ import {
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
-} from '../../utils/settingsUtils.js';
+} from '../../config/settingsUtils.js';
 
 const SETTABLE_TYPES = new Set(['boolean', 'string', 'number', 'enum']);
 

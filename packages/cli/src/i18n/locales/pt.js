@@ -467,6 +467,7 @@ export default {
     'Linhas de Truncamento de Saída de Ferramenta',
   'Folder Trust': 'Confiança de Pasta',
   'Tool Schema Compliance': 'Conformidade de Tool Schema',
+  Unset: 'Não definido',
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
@@ -1562,6 +1563,7 @@ export default {
     'rejeitado — edite a configuração para reaprovar',
   'Background agent needs approval':
     'Agente em segundo plano precisa de aprovação',
+  'from nested agent': 'do agent aninhado',
   'Approve or deny the request above': 'Aprove ou negue a solicitação acima',
   Running: 'Em execução',
   Pausing: 'Pausando',

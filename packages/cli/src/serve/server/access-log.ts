@@ -8,6 +8,7 @@ import { performance } from 'node:perf_hooks';
 import { context, ROOT_CONTEXT } from '@opentelemetry/api';
 import type { Application } from 'express';
 import type { DaemonLogContext, DaemonLogger } from '../daemon-logger.js';
+import { getDaemonTelemetryInboundTraceId } from './telemetry-context.js';
 
 const SESSION_ID_RE = /\/session\/([^/]+)/;
 const ACCESS_LOG_BURST = 60;
@@ -158,6 +159,11 @@ export function installAccessLogMiddleware(
         const clientId = rawClientId
           ? truncateUtf8(rawClientId, CLIENT_ID_MAX_BYTES)
           : undefined;
+        // With telemetry on, the daemon request span stamps the trace prefix
+        // on this line already; this field covers telemetry-off deployments,
+        // where it is the only traceId link between a daemon log line and the
+        // caller that sent the traceparent header.
+        const inboundTraceId = getDaemonTelemetryInboundTraceId(res);
         const ctx = {
           route: route.value,
           ...(route.originalBytes
@@ -179,6 +185,7 @@ export function installAccessLogMiddleware(
                   : {}),
               }
             : {}),
+          ...(inboundTraceId ? { traceId: inboundTraceId } : {}),
           status,
           durationMs: Math.max(0, Math.round(monotonicNow() - startMs)),
         };

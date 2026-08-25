@@ -56,6 +56,7 @@ import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { baseWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
+  sanitizedGitEnv,
   worktreeCreateFailureDetail,
   type SweepResult,
 } from './lib/worktree.js';
@@ -89,8 +90,16 @@ export interface BaseTreeArgs {
   build?: (worktree: string) => BuildTestReport;
 }
 
+// Sanitized env on both helpers: an exported GIT_DIR redirects repository
+// discovery for every call at once — the base tree would be added into the
+// redirected repository and its reuse check would read HEAD from it, an A/B
+// against the wrong program while every check against the given tree passes.
 function gitOut(cwd: string, ...args: string[]): string {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);
@@ -99,7 +108,11 @@ function gitOut(cwd: string, ...args: string[]): string {
 }
 
 function git(cwd: string, ...args: string[]): void {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
   if (r.error) throw r.error;
   if (r.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${r.stderr ?? ''}`);

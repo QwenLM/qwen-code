@@ -20,15 +20,34 @@ const observed = vi.hoisted(() => ({
   shouldThrow: false,
 }));
 
-vi.mock('../App', () => ({
-  CompactModeContext: createContext(false),
-  TodoDetailContext: createContext(new Map()),
-  TodoTimelineContext: createContext(new Map()),
-}));
+vi.mock('../WebShellContexts', () => {
+  const TodoTimelineContext = createContext(new Map());
+  const TodoDetailContext = createContext(new Map());
+  return {
+    CompactModeContext: createContext(false),
+    TodoDetailContext,
+    TodoTimelineContext,
+    TodoContextsProvider: ({
+      timeline,
+      details,
+      children,
+    }: {
+      timeline?: Map<string, unknown>;
+      details?: Map<string, unknown>;
+      children?: ReactNode;
+    }) => (
+      <TodoTimelineContext.Provider value={timeline ?? new Map()}>
+        <TodoDetailContext.Provider value={details ?? new Map()}>
+          {children}
+        </TodoDetailContext.Provider>
+      </TodoTimelineContext.Provider>
+    ),
+  };
+});
 
 vi.mock('./MessageList', async () => {
   const React = await import('react');
-  const { CompactModeContext } = await import('../App');
+  const { CompactModeContext } = await import('../WebShellContexts');
   const { useWebShellCustomization } = await import('../customization');
   const { useI18n } = await import('../i18n');
   const { useTheme } = await import('../themeContext');

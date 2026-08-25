@@ -520,6 +520,7 @@ export default {
   'Tool Output Truncation Lines': 'Lignes de troncature de sortie des outils',
   'Folder Trust': 'Confiance des dossiers',
   'Tool Schema Compliance': 'Conformité Tool Schema',
+  Unset: 'Non défini',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
   'Auto (follow user input)': "Auto (suivre l'entrée utilisateur)",
   'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
@@ -1600,6 +1601,7 @@ export default {
     'rejeté — modifiez la configuration pour réapprouver',
   'Background agent needs approval':
     "L'agent en arrière-plan nécessite une approbation",
+  'from nested agent': "de l'agent imbriqué",
   'Approve or deny the request above':
     'Approuvez ou refusez la demande ci-dessus',
   Running: 'En cours',

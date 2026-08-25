@@ -148,7 +148,7 @@ export function parseSidechannelMidTurnInjected(
   // Mirror the SDK normalizer's `hasRenderableItemContent`: a frame survives
   // when any item carries an image block OR a non-empty text block. The
   // degraded-media drain publishes `messages: ['']` whose items hold only the
-  // '[Attached media is no longer available]' text block — dropping it here
+  // '[Attachment is no longer available]' text block — dropping it here
   // while the normalizer renders it leaves the queued row unsettled until the
   // turn-end idle reconcile. Evaluate over the RAW items array exactly like
   // the normalizer (no index-alignment precondition), so the two consumers
@@ -166,6 +166,7 @@ export function parseSidechannelMidTurnInjected(
             !!block &&
             typeof block === 'object' &&
             ((block as Record<string, unknown>)['type'] === 'image' ||
+              (block as Record<string, unknown>)['type'] === 'resource' ||
               ((block as Record<string, unknown>)['type'] === 'text' &&
                 typeof (block as Record<string, unknown>)['text'] ===
                   'string' &&

@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
-import { serializeGoalStatusMessage } from './GoalStatusMessage';
 import { SystemMessage } from './SystemMessage';
 
 (
@@ -59,6 +57,119 @@ describe('SystemMessage — prompt_cancelled marker', () => {
     );
     expect(container.querySelector('[role="status"]')).toBeNull();
     expect(container.textContent).toContain('a plain note');
+  });
+});
+
+describe('SystemMessage — vision bridge notice', () => {
+  it('localizes a cancelled notice with egress details', () => {
+    const container = render(
+      <SystemMessage
+        content="English fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          modelName: 'qwen3.6-plus',
+          modelEndpoint: 'idealab.alibaba-inc.com',
+          egressOccurred: true,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '视觉桥接已取消。你的图片及提示词/上下文已发送至 qwen3.6-plus (idealab.alibaba-inc.com)。',
+    );
+    expect(container.textContent).not.toContain('English fallback');
+  });
+
+  it('falls back to daemon text for malformed metadata', () => {
+    const container = render(
+      <SystemMessage
+        content="Vision bridge fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{ status: 'unknown' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('Vision bridge fallback');
+  });
+
+  it('falls back to daemon text for malformed egress metadata', () => {
+    const container = render(
+      <SystemMessage
+        content="Vision bridge fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          egressOccurred: 'true',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('Vision bridge fallback');
+  });
+
+  it('falls back to daemon text for malformed image counts', () => {
+    const container = render(
+      <SystemMessage
+        content="Vision bridge fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{
+          status: 'ok',
+          convertedCount: Number.NaN,
+          omittedCount: 0,
+          egressOccurred: true,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('Vision bridge fallback');
+    expect(container.textContent).not.toContain('NaN 张图片');
+  });
+
+  it.each([
+    [
+      {
+        status: 'failed',
+        convertedCount: 0,
+        omittedCount: 0,
+        egressOccurred: false,
+      },
+      '视觉桥接（视觉模型）失败：视觉桥接无法运行。图片未被解析。',
+    ],
+    [
+      {
+        status: 'ok',
+        convertedCount: 2,
+        omittedCount: 1,
+        modelName: 'qwen-vl',
+        egressOccurred: true,
+      },
+      '已通过 qwen-vl 将 2 张图片转换为文本（已忽略 1 张图片）。你的图片及提示词/上下文已发送至该模型。',
+    ],
+  ])('localizes %s notices', (data, expected) => {
+    const container = render(
+      <SystemMessage
+        content="English fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={data}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(expected);
   });
 });
 
@@ -348,38 +459,6 @@ describe('SystemMessage — background notification i18n body', () => {
   });
 });
 
-describe('SystemMessage — goal status activation', () => {
-  const content = serializeGoalStatusMessage({
-    kind: 'set',
-    condition: 'Ship safely',
-    setAt: 1,
-  });
-
-  it('keeps the existing interactive event behavior by default', () => {
-    const handler = vi.fn();
-    window.addEventListener('web-shell-goal-status-active', handler);
-    const container = render(
-      <SystemMessage content={content} variant="info" isLatest />,
-    );
-    expect(container.textContent).toContain('Ship safely');
-    expect(handler).toHaveBeenCalledOnce();
-    window.removeEventListener('web-shell-goal-status-active', handler);
-  });
-
-  it('does not dispatch the goal event in readonly mode', () => {
-    const handler = vi.fn();
-    window.addEventListener('web-shell-goal-status-active', handler);
-    const container = render(
-      <TranscriptRenderModeProvider value="readonly">
-        <SystemMessage content={content} variant="info" isLatest />
-      </TranscriptRenderModeProvider>,
-    );
-    expect(container.textContent).toContain('Ship safely');
-    expect(handler).not.toHaveBeenCalled();
-    window.removeEventListener('web-shell-goal-status-active', handler);
-  });
-});
-
 describe('SystemMessage — inline images', () => {
   it('renders image thumbnails when images prop is provided', () => {
     const container = render(
@@ -439,5 +518,33 @@ describe('SystemMessage — inline images', () => {
     expect(imgs).toHaveLength(2);
     expect(imgs[0]?.getAttribute('src')).toBe('data:image/png;base64,img1');
     expect(imgs[1]?.getAttribute('src')).toBe('data:image/jpeg;base64,img2');
+  });
+
+  it('renders injected files with the ordinary user attachment row', () => {
+    const onAttachmentPreview = vi.fn();
+    const container = render(
+      <SystemMessage
+        content="explain this"
+        variant="info"
+        source="mid_turn_message_injected"
+        files={[
+          {
+            name: 'notes.txt',
+            mimeType: 'text/plain',
+            attachmentId: 'notes.txt',
+          },
+        ]}
+        onAttachmentPreview={onAttachmentPreview}
+      />,
+    );
+
+    const file = container.querySelector('[role="button"]') as HTMLElement;
+    expect(file.textContent).toContain('notes.txt');
+    act(() => file.click());
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'notes.txt',
+      mimeType: 'text/plain',
+      attachmentId: 'notes.txt',
+    });
   });
 });

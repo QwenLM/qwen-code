@@ -269,3 +269,8 @@ flatters every design; the floor is what makes the headline readable.
 - Recall can see older documents outside the shared 200-document scanner cap,
   but non-recall callers, including Forget, keep the existing capped scanner.
   A broader manageability pass is separate from this recall-only change.
+  Superseded for Forget: issue #9378 moved Forget to the uncapped scanner, with
+  a per-scope bound on the model-selection prompt so literal matches in each
+  scope reach the model first; any match, literal or semantic, ranked past that
+  bound is not offered to the model and can still be missed. Indexer, Status,
+  and Extraction remain capped.

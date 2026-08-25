@@ -82,6 +82,38 @@ describe('use-voice-input', () => {
     expect(warmup).not.toHaveBeenCalled();
   });
 
+  it('does not check microphone permission until a recording starts', async () => {
+    buffer = createBuffer();
+    const checkMicrophonePermission = vi.fn();
+    const recorder = {
+      start: vi.fn().mockResolvedValue(undefined),
+      stop: vi.fn().mockResolvedValue({
+        data: new Uint8Array([1]),
+        mimeType: 'audio/wav',
+      }),
+    };
+    const { result } = renderHook(() =>
+      useVoiceInput({
+        enabled: true,
+        mode: 'tap',
+        voiceModel: 'qwen3-asr-flash',
+        buffer,
+        createRecorder: vi.fn(() => recorder),
+        transcribe: vi.fn().mockResolvedValue(''),
+        warmup: vi.fn(),
+        checkMicrophonePermission,
+      }),
+    );
+
+    expect(checkMicrophonePermission).not.toHaveBeenCalled();
+
+    await act(async () => {
+      expect(result.current.handleKeypress(voiceKey)).toBe(true);
+    });
+
+    expect(checkMicrophonePermission).toHaveBeenCalledTimes(1);
+  });
+
   it('does not intercept Space when voice input is disabled', () => {
     buffer = createBuffer();
     const { result } = renderHook(() =>

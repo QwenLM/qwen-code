@@ -10,10 +10,12 @@ import type {
   DaemonErrorKind,
   DaemonMcpTransport,
   DaemonSessionArtifactChange,
+  DaemonSessionPrInfo,
   DaemonSkillToggleMutation,
   PermissionOutcome,
   PromptContentBlock,
 } from './types.js';
+import { isDaemonSessionPrInfo } from './session-pr.js';
 // Single source of truth: the daemon publisher owns the wire literal in
 // acp-bridge's dependency-free `daemonEventTypes` module. We re-export it so the
 // validator/reducer below, and the browser consumer via `@qwen-code/sdk/daemon`,
@@ -296,6 +298,7 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  prs?: DaemonSessionPrInfo[];
   [key: string]: unknown;
 }
 
@@ -2649,10 +2652,17 @@ function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
 function isSessionMetadataUpdatedData(
   value: unknown,
 ): value is DaemonSessionMetadataUpdatedData {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !isOptionalStringOrNull(value['displayName'])
+  ) {
+    return false;
+  }
+  const prs = value['prs'];
   return (
-    isRecord(value) &&
-    isNonEmptyString(value['sessionId']) &&
-    isOptionalStringOrNull(value['displayName'])
+    prs === undefined ||
+    (Array.isArray(prs) && prs.every(isDaemonSessionPrInfo))
   );
 }
 

@@ -1767,6 +1767,34 @@ describe('BaseJsonOutputAdapter', () => {
         expect(result).toBe('Tool result');
       });
 
+      it('maps mcp_app displays to fallbackText', () => {
+        const response = {
+          callId: 'app-1',
+          resultDisplay: {
+            type: 'mcp_app' as const,
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Revenue</main>',
+            toolResult: {
+              content: [{ type: 'text', text: 'Dashboard ready' }],
+            },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: {},
+              },
+            },
+          ],
+          error: undefined,
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe('Dashboard ready');
+      });
+
       it('includes the vision bridge disclosure with tool content', () => {
         const response = {
           callId: 'pdf-success',

@@ -33,10 +33,19 @@ import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
 import { volumeOf } from './lib/ledger.js';
+import {
+  LAND_WITH_RESIDUAL_RISK,
+  RECOMMENDATION_CODES,
+  type ConvergenceAssessment,
+  type Recommendation,
+} from './lib/convergence.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict
-  extends Omit<ComposeReviewResult, 'postedInline' | 'prevPostedInline'> {
+  extends Omit<
+    ComposeReviewResult,
+    'postedInline' | 'postedFresh' | 'prevPostedInline'
+  > {
   verdictLine: string;
   /**
    * Optional HERE, required on the composed result it is otherwise a copy
@@ -49,8 +58,27 @@ interface PersistedVerdict
    * here would advertise a field no artifact contains and license a
    * consumer into an always-undefined branch. The two-round window stays
    * recoverable from the marker chain inside `body`.
+   *
+   * `residualRisk` is NOT omitted, and for the reason its sibling
+   * `convergence` is not: the artifact is where a trimmed round's record
+   * lives. Not the same rank, though — `convergence` is rank 0 and sheds
+   * before everything, while this one is rank 2 and yields after the fold
+   * and the deferral display. What they share is that both CAN go, and the
+   * body is then not a copy of either. "The advisory rides the persisted body" is true of every round
+   * except the ones that most need the durable copy — a maintainer reading
+   * `.qwen/reviews` to make the `land-with-residual-risk` call would find a
+   * "did not fit" breadcrumb and no facts. The validator carries and
+   * shape-checks it below, so the type advertises nothing the artifact does
+   * not hold.
    */
   postedInline?: number;
+  /**
+   * Optional for the same reason as its sibling, and for one more: an
+   * artifact written before the convergence trend measured NEW findings
+   * carries only the total. Absence is preserved rather than defaulted —
+   * a round that recorded no fresh count is not a round that produced none.
+   */
+  postedFresh?: number;
 }
 
 export interface ReviewArtifactV1 {
@@ -202,6 +230,24 @@ function event(value: unknown, label: string): ReviewEvent {
   return value;
 }
 
+/**
+ * A recommendation code, checked against the closed set rather than cast
+ * into it. The set is a contract a caller wires actions to, and a cast
+ * writes whatever string it was handed into the durable record under a type
+ * that says otherwise — the shape every sibling closed vocabulary in this
+ * validator refuses.
+ */
+function recommendationCode(
+  value: unknown,
+  label: string,
+): Recommendation['code'] {
+  const code = string(value, label);
+  if (!(RECOMMENDATION_CODES as readonly string[]).includes(code)) {
+    throw new Error(`${label} must be one of the known recommendation codes.`);
+  }
+  return code as Recommendation['code'];
+}
+
 function validateVerdict(value: unknown): PersistedVerdict {
   const verdict = object(value, 'Composed verdict');
   const downgradedFrom = verdict['downgradedFrom'];
@@ -238,6 +284,35 @@ function validateVerdict(value: unknown): PersistedVerdict {
   // carries no deferredCount, and a mid-upgrade save must not fail over a
   // count that only affects display. A PRESENT value of any other wrong
   // shape is refused like every other field here.
+  // Same absence semantics as `deferredCount` below: a composed JSON written
+  // by a build predating the approach signal carries no field at all, and a
+  // mid-upgrade load must not fail over one that only affects display. A
+  // PRESENT value of the wrong shape is refused like every other field here.
+  const approachRaw = verdict['approachSignal'] ?? null;
+  if (approachRaw !== null) {
+    const signal = object(approachRaw, 'Composed verdict.approachSignal');
+    for (const key of ['round', 'src0', 'srcDiffLines'] as const) {
+      if (
+        typeof signal[key] !== 'number' ||
+        !Number.isInteger(signal[key]) ||
+        (signal[key] as number) <= 0
+      ) {
+        throw new Error(
+          `Composed verdict.approachSignal.${key} must be a positive integer.`,
+        );
+      }
+    }
+    if (typeof signal['growth'] !== 'number' || !(signal['growth'] >= 0)) {
+      throw new Error(
+        'Composed verdict.approachSignal.growth must be a non-negative number.',
+      );
+    }
+    if (typeof signal['nonConverged'] !== 'boolean') {
+      throw new Error(
+        'Composed verdict.approachSignal.nonConverged must be a boolean.',
+      );
+    }
+  }
   const deferredCount = verdict['deferredCount'] ?? 0;
   if (
     typeof deferredCount !== 'number' ||
@@ -280,6 +355,120 @@ function validateVerdict(value: unknown): PersistedVerdict {
   if (!postedAbsent && postedInline === undefined) {
     throw new Error(
       'Composed verdict.postedInline must be a non-negative integer.',
+    );
+  }
+  // The convergence paragraph is a clause the overflow ladder can shed —
+  // its last rank, so a body that shed it shed every other rank too — and
+  // the artifact is where a trimmed round's record lives. Dropped by this
+  // allow-list, the durable record of a round whose body shed it held
+  // neither copy.
+  const rawConvergence = verdict['convergence'];
+  let convergence: { en: string; zh: string } | undefined;
+  if (rawConvergence !== undefined && rawConvergence !== null) {
+    const c = object(rawConvergence, 'Composed verdict.convergence');
+    convergence = {
+      en: string(c['en'], 'Composed verdict.convergence.en'),
+      zh: string(c['zh'], 'Composed verdict.convergence.zh'),
+    };
+  }
+  // The machine-readable half of the observation. Dropped by this
+  // allow-list, a caller reading the durable record sees the prose and not
+  // the codes it would key on.
+  const rawRecs = verdict['recommendations'];
+  let recommendations: Recommendation[] | undefined;
+  if (rawRecs !== undefined && rawRecs !== null) {
+    if (!Array.isArray(rawRecs)) {
+      throw new Error('Composed verdict.recommendations must be an array.');
+    }
+    recommendations = rawRecs.map((entry, i) => {
+      const r = object(entry, `Composed verdict.recommendations[${i}]`);
+      return {
+        code: recommendationCode(
+          r['code'],
+          `Composed verdict.recommendations[${i}].code`,
+        ),
+        basis: string(
+          r['basis'],
+          `Composed verdict.recommendations[${i}].basis`,
+        ),
+      };
+    });
+  }
+  // Same reasoning as the paragraph above, and more so: this block is the
+  // FIRST thing the ladder sheds.
+  const rawHealth = verdict['health'];
+  let health: { en: string; zh: string } | undefined;
+  if (rawHealth !== undefined && rawHealth !== null) {
+    const h = object(rawHealth, 'Composed verdict.health');
+    health = {
+      en: string(h['en'], 'Composed verdict.health.en'),
+      zh: string(h['zh'], 'Composed verdict.health.zh'),
+    };
+  }
+  // The residual-risk advisory, carried for the same reason its sibling
+  // paragraph above is: rank 2 sheds before the not-reviewed disclosures, so
+  // the rounds that fire it are exactly the long, deep-work-list rounds whose
+  // body is most likely to drop it — and the durable record is then the only
+  // place the facts survive. Shape-checked rather than passed through: the
+  // composed JSON is a file on disk between two processes, and a consumer
+  // reading `criticals` off a hand-edited artifact must not read a string.
+  // The recommendation is pinned to the ONE code this module issues; a
+  // future second recommendation widens this check deliberately rather than
+  // arriving unannounced in a durable record.
+  const rawResidualRisk = verdict['residualRisk'];
+  let residualRisk: ConvergenceAssessment | undefined;
+  if (rawResidualRisk !== undefined && rawResidualRisk !== null) {
+    const r = object(rawResidualRisk, 'Composed verdict.residualRisk');
+    const shape = string(r['shape'], 'Composed verdict.residualRisk.shape');
+    if (shape !== 'persistently-critical') {
+      throw new Error(
+        "Composed verdict.residualRisk.shape must be 'persistently-critical'.",
+      );
+    }
+    const recommendation = string(
+      r['recommendation'],
+      'Composed verdict.residualRisk.recommendation',
+    );
+    if (recommendation !== LAND_WITH_RESIDUAL_RISK) {
+      throw new Error(
+        `Composed verdict.residualRisk.recommendation must be '${LAND_WITH_RESIDUAL_RISK}'.`,
+      );
+    }
+    // Through the ledger's own volume reader, like every other count that
+    // crosses this boundary: the caps are what keep a hand-edited artifact
+    // from re-displaying a number no round could have posted.
+    const counts: Record<'criticals' | 'fresh' | 'prevFresh', number> = {
+      criticals: 0,
+      fresh: 0,
+      prevFresh: 0,
+    };
+    for (const key of ['criticals', 'fresh', 'prevFresh'] as const) {
+      const n = volumeOf(r[key]);
+      if (n === undefined) {
+        throw new Error(
+          `Composed verdict.residualRisk.${key} must be a non-negative integer.`,
+        );
+      }
+      counts[key] = n;
+    }
+    // The caveat is a boolean the paragraph turns on, so absence reads as
+    // "not disclosed" rather than refusing an artifact written before the
+    // field existed — the same absence semantics its numeric siblings get
+    // one boundary up.
+    residualRisk = {
+      shape: 'persistently-critical',
+      recommendation: LAND_WITH_RESIDUAL_RISK,
+      ...counts,
+      prevTruncated: r['prevTruncated'] === true,
+    };
+  }
+  // The fresh count reads by the same rules as the total it is part of.
+  const rawFresh = verdict['postedFresh'];
+  const freshAbsent = rawFresh === undefined || rawFresh === null;
+  const postedFresh = freshAbsent ? undefined : volumeOf(rawFresh);
+  if (!freshAbsent && postedFresh === undefined) {
+    throw new Error(
+      'Composed verdict.postedFresh must be a non-negative integer.',
     );
   }
   // Absent reads as "no trim", the same absence semantics the sibling count
@@ -332,6 +521,11 @@ function validateVerdict(value: unknown): PersistedVerdict {
     deferredCount,
     floorEnforced: floorEnforced as number[],
     ...(postedInline === undefined ? {} : { postedInline }),
+    ...(postedFresh === undefined ? {} : { postedFresh }),
+    ...(convergence === undefined ? {} : { convergence }),
+    ...(recommendations === undefined ? {} : { recommendations }),
+    ...(health === undefined ? {} : { health }),
+    ...(residualRisk === undefined ? {} : { residualRisk }),
     lowSignal:
       lowSignal === null
         ? null
@@ -340,6 +534,20 @@ function validateVerdict(value: unknown): PersistedVerdict {
             srcDiffLines: (lowSignal as Record<string, number>)[
               'srcDiffLines'
             ]!,
+          },
+    approachSignal:
+      approachRaw === null
+        ? null
+        : {
+            round: (approachRaw as Record<string, number>)['round']!,
+            src0: (approachRaw as Record<string, number>)['src0']!,
+            srcDiffLines: (approachRaw as Record<string, number>)[
+              'srcDiffLines'
+            ]!,
+            growth: (approachRaw as Record<string, number>)['growth']!,
+            nonConverged: (approachRaw as Record<string, unknown>)[
+              'nonConverged'
+            ] as boolean,
           },
     verdictLine: nonEmptyString(
       verdict['verdictLine'],

@@ -14,6 +14,8 @@ import {
   MAX_STALL_ATTEMPTS,
   MAX_WORKFLOW_STALL_MS_ENV,
 } from './workflow-stall.js';
+import { DEFAULT_RETRY_OPTIONS } from '../../utils/retry.js';
+import { getRetryDelayMs } from '../../utils/retryPolicy.js';
 
 describe('resolveStallMs', () => {
   it('uses the per-call override when positive', () => {
@@ -46,6 +48,51 @@ describe('resolveStallMs', () => {
   it('ignores a negative per-call value (falls through to default)', () => {
     expect(resolveStallMs(-5, {})).toBe(DEFAULT_STALL_MS);
   });
+
+  // The default is not an arbitrary round number: it has to outlast the
+  // transport's own silent retry ladder, or a request that is retrying exactly
+  // as designed reads as a stall. `DEFAULT_RETRY_OPTIONS` in utils/retry.ts
+  // sleeps 1.5s, 3s, 6s, 12s, 24s, 30s between attempts, and agent-core
+  // consumes each `retry` stream event without emitting anything the watchdog
+  // counts as progress — so the whole ladder is one silent stretch.
+  //
+  // Asserting the relationship rather than the literal keeps this meaningful if
+  // either number is retuned later.
+  //
+  // The ladder is DERIVED from `DEFAULT_RETRY_OPTIONS`, not hand-copied: a
+  // local literal would keep this test green while a retune of the real
+  // options pushed the real ladder past the window — the exact false-stall
+  // regression this test exists to prevent. Mirrors retryWithBackoff's error
+  // path: `maxAttempts - 1` sleeps, `currentDelay` doubling from
+  // `initialDelayMs` under the `maxDelayMs` cap, each sleep run through
+  // `getRetryDelayMs` with the ±30% jitter that path applies.
+  const transportLadderMs = (random: () => number) => {
+    const { maxAttempts, initialDelayMs, maxDelayMs } = DEFAULT_RETRY_OPTIONS;
+    let currentDelay = initialDelayMs;
+    let total = 0;
+    for (let sleep = 1; sleep < maxAttempts; sleep++) {
+      total += getRetryDelayMs({
+        attempt: 1,
+        initialDelayMs: currentDelay,
+        maxDelayMs,
+        jitterRatio: 0.3,
+        random,
+      });
+      currentDelay = Math.min(maxDelayMs, currentDelay * 2);
+    }
+    return total;
+  };
+
+  it('outlasts the transport retry ladder it has to survive', () => {
+    const nominal = transportLadderMs(() => 0.5); // jitter cancels out
+    const worstCase = transportLadderMs(() => 1); // every sleep +30%, then capped
+    expect(nominal).toBe(76_500);
+    expect(worstCase).toBe(89_250);
+    // The window has to outlast the ladder on an UNLUCKY run, not just the
+    // nominal sum: a `DEFAULT_STALL_MS` retuned into the (76.5s, 89.25s] band
+    // would false-trip under jitter while a nominal-only assertion stayed green.
+    expect(DEFAULT_STALL_MS).toBeGreaterThan(worstCase);
+  });
 });
 
 describe('attachStallWatchdog', () => {
@@ -56,15 +103,19 @@ describe('attachStallWatchdog', () => {
     vi.useRealTimers();
   });
 
-  it('fires after stallMs of no activity once the first response has arrived', () => {
+  it('fires after stallMs of silence once armed (ROUND_START)', () => {
     const emitter = new AgentEventEmitter();
     const controller = new AbortController();
     const wd = attachStallWatchdog(emitter, controller, 1000);
-    // #8: not armed until the first progress event (the time-to-first-response
-    // window is not a stall) — so advancing past stallMs here does nothing.
+    // Not armed until the first progress event — so advancing past stallMs
+    // here does nothing. In a real dispatch that event is ROUND_START, which
+    // fires before the request reaches the wire (see the doc comment on
+    // `attachStallWatchdog`), so this pre-arm silence is only round 1's
+    // pre-generator work, NOT the time-to-first-token window — that window is
+    // watched, and is pinned by the test below.
     vi.advanceTimersByTime(2000);
     expect(wd.stalled()).toBe(false);
-    // First response arrives → watchdog arms; then silence trips it.
+    // ROUND_START arrives → watchdog arms; then silence trips it.
     emitter.emit(AgentEventType.ROUND_START, {} as never);
     vi.advanceTimersByTime(999);
     expect(wd.stalled()).toBe(false);
@@ -75,15 +126,36 @@ describe('attachStallWatchdog', () => {
     wd.dispose();
   });
 
-  it('does NOT fire during the time-to-first-response window (#8)', () => {
+  // Replaces a test that asserted the watchdog does not fire during the
+  // time-to-first-response window. That test never emitted ROUND_START, so it
+  // only proved that a silent emitter does not trip a watchdog that was never
+  // armed — and it encoded a model of the transport that is not true. In a real
+  // dispatch ROUND_START has already fired by this point: `sendMessageStream`
+  // returns a lazily iterated generator, so the `await` on it resolves before
+  // the request reaches the wire, and agent-core emits ROUND_START on the very
+  // next line. These two tests pin what actually happens.
+  it('does not arm before the first progress event', () => {
     const emitter = new AgentEventEmitter();
     const controller = new AbortController();
     const wd = attachStallWatchdog(emitter, controller, 1000);
-    // A reasoning model thinking for a long time before the first token emits
-    // no events; that must not be treated as a stall.
+    // Nothing emitted: the timer was never armed, so nothing can elapse.
     vi.advanceTimersByTime(10_000);
     expect(wd.stalled()).toBe(false);
     expect(controller.signal.aborted).toBe(false);
+    wd.dispose();
+  });
+
+  it('DOES count the time-to-first-token window, because ROUND_START precedes the request', () => {
+    const emitter = new AgentEventEmitter();
+    const controller = new AbortController();
+    const wd = attachStallWatchdog(emitter, controller, 1000);
+    // Exactly what agent-core does: emit ROUND_START immediately after
+    // `await sendMessageStream(...)` resolves — i.e. before any bytes are sent.
+    emitter.emit(AgentEventType.ROUND_START, {} as never);
+    // The provider is still connecting/queueing/thinking; no deltas yet.
+    vi.advanceTimersByTime(1001);
+    expect(wd.stalled()).toBe(true);
+    expect(controller.signal.reason).toBe('stalled');
     wd.dispose();
   });
 
@@ -157,8 +229,9 @@ describe('runStallResilient', () => {
       emitter: AgentEventEmitter,
     ): Promise<string> => {
       calls += 1;
-      // Emit a first response event so the watchdog arms (#8: the time-to-
-      // first-response window is not a stall), then go silent → it trips.
+      // Emit ROUND_START so the watchdog arms — in a real dispatch that fires
+      // before the request reaches the wire, so the time-to-first-token window
+      // IS watched — then go silent → it trips.
       emitter.emit(AgentEventType.ROUND_START, {} as never);
       await new Promise<void>((resolve) => {
         if (signal.aborted) return resolve();
@@ -187,8 +260,9 @@ describe('runStallResilient', () => {
     ): Promise<string> => {
       calls += 1;
       if (calls < 2) {
-        // First attempt stalls: emit a first response event to arm the
-        // watchdog (#8), then go silent until it aborts.
+        // First attempt stalls: emit ROUND_START to arm the watchdog — in a
+        // real dispatch that fires before the request reaches the wire — then
+        // go silent until it aborts.
         emitter.emit(AgentEventType.ROUND_START, {} as never);
         await new Promise<void>((resolve) => {
           if (signal.aborted) return resolve();

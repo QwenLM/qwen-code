@@ -19,6 +19,10 @@ import type {
   DaemonGitCommitDetail,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import { timeAgo } from '../../utils/timeAgo';
 import { DialogShell } from './DialogShell';
 import styles from './GitLogDialog.module.css';
@@ -60,13 +64,12 @@ function CommitRow({
   const cancelledRef = useRef(false);
 
   const copySha = () => {
-    void navigator.clipboard
-      .writeText(entry.sha)
+    void writeClipboardText(entry.sha)
       .then(() => {
         setCopied(true);
         setTimeout(() => setCopied(false), 1500);
       })
-      .catch(() => {});
+      .catch(warnClipboardWriteFailure);
   };
 
   useEffect(() => {

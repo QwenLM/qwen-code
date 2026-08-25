@@ -9,7 +9,7 @@ import {
   deleteNestedPropertySafe,
   getNestedProperty,
   setNestedPropertySafe,
-} from '../../../utils/settingsUtils.js';
+} from '../../settingsUtils.js';
 
 /**
  * Path mapping for boolean polarity migration (V2 disable* -> V3 enable*).

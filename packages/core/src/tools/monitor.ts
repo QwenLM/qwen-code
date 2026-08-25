@@ -54,7 +54,7 @@ import {
   isShellCommandReadOnlyASTInDirectory,
 } from '../utils/shellAstParser.js';
 import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
-import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 

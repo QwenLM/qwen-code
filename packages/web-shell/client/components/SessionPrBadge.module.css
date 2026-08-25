@@ -1,0 +1,33 @@
+.sessionPrBadge {
+  flex-shrink: 0;
+  align-self: center;
+  margin-left: 6px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: color-mix(
+    in srgb,
+    var(--color-accent-fg, #8b5cf6) 10%,
+    transparent
+  );
+  color: color-mix(
+    in srgb,
+    var(--color-accent-fg, #8b5cf6) 95%,
+    var(--foreground)
+  );
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.sessionPrBadge:hover {
+  background: color-mix(
+    in srgb,
+    var(--color-accent-fg, #8b5cf6) 18%,
+    transparent
+  );
+}

@@ -17,6 +17,18 @@ export type FinishReason = GenAiFinishReason;
 export const FinishReason = {
   STOP: 'STOP' as GenAiFinishReason,
   MAX_TOKENS: 'MAX_TOKENS' as GenAiFinishReason,
+  // Content-filter family (mirrors mapGeminiFinishReasonToOpenAI's
+  // 'content_filter' grouping) — the quiet-completion gate in geminiChat
+  // must keep all of these fatal.
+  SAFETY: 'SAFETY' as GenAiFinishReason,
+  RECITATION: 'RECITATION' as GenAiFinishReason,
+  BLOCKLIST: 'BLOCKLIST' as GenAiFinishReason,
+  PROHIBITED_CONTENT: 'PROHIBITED_CONTENT' as GenAiFinishReason,
+  SPII: 'SPII' as GenAiFinishReason,
+  IMAGE_SAFETY: 'IMAGE_SAFETY' as GenAiFinishReason,
+  IMAGE_RECITATION: 'IMAGE_RECITATION' as GenAiFinishReason,
+  IMAGE_PROHIBITED_CONTENT: 'IMAGE_PROHIBITED_CONTENT' as GenAiFinishReason,
+  IMAGE_OTHER: 'IMAGE_OTHER' as GenAiFinishReason,
 } as const;
 
 export type FunctionCallingConfigMode = GenAiFunctionCallingConfigMode;

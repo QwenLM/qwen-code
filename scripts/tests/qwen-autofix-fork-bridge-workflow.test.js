@@ -94,6 +94,25 @@ const expressionsIn = (text) => {
 const readsASecret = (text) =>
   expressionsIn(text).some((expression) => /\bsecrets\./.test(expression));
 
+// GitHub Actions reaches a property through the documented `[ ]` index
+// operator as readily as through `.`, on any segment of the path, so
+// `pull_request['maintainer_can_modify']` resolves to the same absent field
+// as the dot form and closes the gate just as permanently. Rewriting the
+// index form to the dot form first means one matcher covers every
+// combination of the two, at any depth, instead of enumerating spellings.
+// (A `fromJSON(toJSON(github.event.pull_request))` round-trip still evades
+// this — no textual guard catches that one; it needs a live payload.)
+const asDotAccess = (text) =>
+  text.replace(/\[\s*(['"])([A-Za-z_][A-Za-z0-9_]*)\1\s*\]/g, '.$2');
+
+// Four of the full-object-only names below are strict PREFIXES of fields the
+// simple object does deliver (`merged` ⊂ `merged_at`, `commits` ⊂ `commits_url`,
+// `comments` ⊂ `comments_url`, `review_comments` ⊂ `review_comments_url`), so a
+// substring test would also reject those legal conjuncts. Anchor on a word
+// boundary so only a reference to the field itself matches.
+const fullObjectOnlyReference = (field) =>
+  new RegExp(`pull_request\\.${field}\\b`);
+
 describe('qwen autofix fork bridge', () => {
   it('keeps the trigger name and dispatch target wired together', () => {
     // Cross-FILE contracts that no single file can be read to verify. Each
@@ -219,7 +238,6 @@ describe('qwen autofix fork bridge', () => {
         '&& github.event.pull_request.head.repo.full_name != github.repository',
         "&& github.event.pull_request.base.ref == 'main'",
         "&& github.event.pull_request.state == 'open'",
-        '&& github.event.pull_request.maintainer_can_modify == true',
         `&& (github.event.pull_request.user.login == (vars.AUTOFIX_BOT_LOGIN || '${BOT_FALLBACK}')`,
         `|| contains(toJSON(github.event.pull_request.labels.*.name), '"${TAKEOVER_LABEL}"'))`,
         `&& !contains(toJSON(github.event.pull_request.labels.*.name), '"${SKIP_LABEL}"')`,
@@ -254,6 +272,95 @@ describe('qwen autofix fork bridge', () => {
     expect(bridgeScript).toContain(
       'if [[ "${SIGNAL_REVIEWER}" != "${REVIEW_BOT}" ]]; then',
     );
+  });
+
+  it('gates the signal only on fields the review payload actually delivers', () => {
+    // `pull_request_review` delivers the SIMPLE pull-request object. These
+    // fields exist only on the FULL object the `pull_request` event sends, so
+    // in this gate each one evaluates to null — and `null == true` is false,
+    // which closes the gate for every delivery rather than for the case the
+    // author meant to exclude. That is not hypothetical: `maintainer_can_modify`
+    // sat in this gate from #8676 (2026-08-07) until this test was written, and
+    // across 300 signal runs not one reached the signal step.
+    //
+    // A silent always-false is the worst failure this file can have. The gate
+    // has no observable output when it holds — the whole job is one echo — so a
+    // gate that never opens is indistinguishable from a repository where no fork
+    // review happened to qualify. Fork reviews just quietly fall back to the
+    // cron backstop, and when THAT stalls they fall through entirely.
+    //
+    // Anything on this list that the chain genuinely needs belongs in the
+    // bridge, which reads live PR state with credentials this job deliberately
+    // does not hold (`permissions: {}`, no secrets, no checkout).
+    const fullObjectOnlyFields = [
+      'maintainer_can_modify',
+      'mergeable',
+      'mergeable_state',
+      'rebaseable',
+      'merged',
+      'merged_by',
+      'additions',
+      'deletions',
+      'changed_files',
+      'commits',
+      'comments',
+      'review_comments',
+    ];
+    for (const field of fullObjectOnlyFields) {
+      expect(asDotAccess(signalJob.if)).not.toMatch(
+        fullObjectOnlyReference(field),
+      );
+    }
+  });
+
+  // Every spelling GitHub Actions accepts for one field reference. The gate
+  // is written in the dot form today, but an edit in any of the others reaches
+  // the same absent field and closes the gate just as permanently, so the
+  // guard has to see through all of them — and through none of them reject a
+  // delivered field that a full-object name merely prefixes.
+  const referenceSpellings = (field) => [
+    `github.event.pull_request.${field}`,
+    `github.event.pull_request['${field}']`,
+    `github.event.pull_request["${field}"]`,
+    // Actions tolerates whitespace inside the index brackets, and so does
+    // `asDotAccess`. Without a spelling that carries it, the helper's two
+    // `\s*` are unpinned: deleting them leaves this file green while a gate
+    // written in the spaced form reaches the same absent field again.
+    `github.event.pull_request[ '${field}' ]`,
+    `github.event['pull_request'].${field}`,
+    `github.event['pull_request']['${field}']`,
+  ];
+
+  it('rejects a full-object field without rejecting the fields it prefixes', () => {
+    const prefixPairs = [
+      ['merged', 'merged_at'],
+      ['commits', 'commits_url'],
+      ['comments', 'comments_url'],
+      ['review_comments', 'review_comments_url'],
+    ];
+    for (const [fullObjectOnly, delivered] of prefixPairs) {
+      for (const spelling of referenceSpellings(delivered)) {
+        expect(asDotAccess(`${spelling} == null`)).not.toMatch(
+          fullObjectOnlyReference(fullObjectOnly),
+        );
+      }
+      for (const spelling of referenceSpellings(fullObjectOnly)) {
+        expect(asDotAccess(`${spelling} == false`)).toMatch(
+          fullObjectOnlyReference(fullObjectOnly),
+        );
+      }
+    }
+  });
+
+  it('sees a full-object field through the index operator', () => {
+    // The incident field, in the five non-dot spellings. Each is a legal
+    // expression resolving to the same absent property, so a guard blind to
+    // any of them lets the always-false gate return with this file green.
+    for (const spelling of referenceSpellings('maintainer_can_modify')) {
+      expect(asDotAccess(`${spelling} == true`)).toMatch(
+        fullObjectOnlyReference('maintainer_can_modify'),
+      );
+    }
   });
 
   it('keeps every identity literal pinned to qwen-autofix.yml', () => {

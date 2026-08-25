@@ -1,0 +1,14 @@
+{
+  "kinds": ["user", "thought", "assistant", "tool"],
+  "texts": [
+    "Inspect the contract",
+    "Checking identity",
+    "The contract is stable."
+  ],
+  "sourceRecordIds": [
+    ["user-1"],
+    ["assistant-1"],
+    ["assistant-1"],
+    ["tool-start", "tool-result"]
+  ]
+}

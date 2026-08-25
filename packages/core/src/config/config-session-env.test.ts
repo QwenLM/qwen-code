@@ -88,7 +88,7 @@ vi.mock('../ide/ide-client.js', () => ({
     }),
   },
 }));
-vi.mock('../memory/const.js', () => ({
+vi.mock('../utils/memory-constants.js', () => ({
   setGeminiMdFilename: vi.fn(),
 }));
 
@@ -434,5 +434,114 @@ describe('Config provider-qualified model identity', () => {
     new Config({ ...baseParams, model: 'other-model' });
 
     expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toBe(claimed);
+  });
+});
+
+describe('Config.getModelRouteIdentity (#9454 route key)', () => {
+  it('returns an identical identity across repeated calls for one configuration', async () => {
+    const { Config } = await import('./config.js');
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'steady-model',
+        apiKey: 'k',
+        baseUrl: 'https://provider-a.example/v1',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    const config = new Config({ ...baseParams });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    // Route-scoped caches (e.g. GeminiChat token counts) compare these
+    // strings for equality — the value must not drift between calls.
+    const first = config.getModelRouteIdentity();
+    expect(config.getModelRouteIdentity()).toBe(first);
+    expect(config.getModelRouteIdentity()).toBe(first);
+    expect(first).toMatch(/^steady-model@[0-9a-f]{8}$/);
+  });
+
+  it('keeps the `model@<sha-prefix>` digest shape for explicit route queries', async () => {
+    const { Config } = await import('./config.js');
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'active-model',
+        apiKey: 'k',
+        baseUrl: 'https://provider-a.example/v1',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    const config = new Config({ ...baseParams });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    // The readable model id stays the prefix; the discriminator is exactly
+    // eight hex characters, stable for one (auth type, endpoint) pair.
+    const explicit = config.getModelRouteIdentity('route-model', {
+      model: 'route-model',
+      authType: 'openai',
+      baseUrl: 'https://route.example/v1',
+    } as ContentGeneratorConfig);
+    expect(explicit).toMatch(/^route-model@[0-9a-f]{8}$/);
+    expect(
+      config.getModelRouteIdentity('route-model', {
+        model: 'route-model',
+        authType: 'openai',
+        baseUrl: 'https://route.example/v1',
+      } as ContentGeneratorConfig),
+    ).toBe(explicit);
+  });
+
+  it('does not mix the registry base URL into a non-active model identity', async () => {
+    // The registry-baseUrl fallback qualifies the ACTIVE model's route when
+    // its own generator config carries no baseUrl. A foreign model queried
+    // with its own configuration must not pick that fallback up — hashing
+    // the registry endpoint into another model's identity would invalidate
+    // its route-scoped state on unrelated registry changes.
+    const { Config } = await import('./config.js');
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'active-model',
+        apiKey: 'k',
+        // No baseUrl of its own: the active model falls back to the
+        // registry base URL below.
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    const config = new Config({ ...baseParams });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    const registrySpy = vi.spyOn(config, 'getCurrentModelRegistryBaseUrl');
+
+    const foreignGeneratorConfig = {
+      model: 'foreign-model',
+      authType: 'openai',
+    } as ContentGeneratorConfig;
+
+    registrySpy.mockReturnValue('https://registry.example/v1');
+    const activeWithRegistry = config.getModelRouteIdentity();
+    const foreignWithRegistry = config.getModelRouteIdentity(
+      'foreign-model',
+      foreignGeneratorConfig,
+    );
+
+    registrySpy.mockReturnValue(null);
+    const activeWithoutRegistry = config.getModelRouteIdentity();
+    const foreignWithoutRegistry = config.getModelRouteIdentity(
+      'foreign-model',
+      foreignGeneratorConfig,
+    );
+
+    // The fallback is load-bearing for the ACTIVE model…
+    expect(activeWithRegistry).toMatch(/^active-model@[0-9a-f]{8}$/);
+    expect(activeWithRegistry).not.toBe(activeWithoutRegistry);
+    // …but the foreign model's identity ignores the registry entirely.
+    expect(foreignWithRegistry).toMatch(/^foreign-model@[0-9a-f]{8}$/);
+    expect(foreignWithRegistry).toBe(foreignWithoutRegistry);
   });
 });

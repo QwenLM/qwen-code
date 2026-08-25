@@ -63,10 +63,10 @@ The cache decides _when_ it is worth asking. It never authorizes destruction, be
 
 ```
 qwen/control/session/close { sessionId, onlyIfUnheld: true }
-  → { closed: true, holds: [] } | { closed: false, holds: [...] }
+  → { sessionId, closed: true } | { sessionId, closed: false, holds: [...] }
 ```
 
-The child evaluates it under its own close gate, before anything destructive runs. It rejects known holds immediately, drains any turn that was already active when the gate closed, then evaluates the unfiltered collector again. The second read matters because an already-running out-of-scope turn such as cron can register a background shell while it drains. With the gate still held no new turn can start after that final read, so a hold cannot appear between final authorization and teardown **on the child side**. If either read finds holds, the gate is released and they are handed back; the daemon adopts them and backs off.
+The child evaluates it under its own close gate, before anything destructive runs. It rejects known holds immediately, drains any turn that was already active when the gate closed, then evaluates the unfiltered collector again. The second read matters because an already-running out-of-scope turn such as cron can register a background shell while it drains. With the gate still held no new turn can start after that final read, so a hold cannot appear between final authorization and teardown **on the child side**. If either read finds holds, the gate is released and they are handed back. The daemon adopts the returned hold set only when it stays within the same 1,024-hold per-Session bound as snapshots; an oversized refusal still retains the Session but does not replace the last valid cache.
 
 The daemon side needs its own cover, because the round trip is an await of up to ten seconds. A Session with a conditional close outstanding is marked in-flight, and every admission path — attach, prompt, rewind — refuses it exactly as it refuses one that is already closing. Without that, a prompt accepted during the round trip is lost when the teardown it raced completes; the previous synchronous guard-then-teardown sequence got this for free, and splitting it is what created the need to say so explicitly.
 
@@ -74,9 +74,9 @@ On timeout the daemon cannot tell whether the child closed. It does not retry in
 
 Explicit close, kill, shutdown, and channel exit keep their force semantics and do not go through this path.
 
-## One guard model, four triggers
+## One guard model, every trigger
 
-Four things can decide it is time to look at a Session: the last client detaching, a prompt settling, a terminal notification settling, and the idle reaper's TTL. Each brings its own policy, and none of them may weaken the shared part:
+Six event families can decide it is time to look at a Session: the last client detaching, a prompt settling, a terminal notification settling, an attach registration rolling back, a full child snapshot reporting the Session idle or omitting it, and the idle reaper's TTL. Each brings its own policy, and none of them may weaken the shared part:
 
 | Guard                                       | Why it is shared                                                                                                     |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |

@@ -41,7 +41,7 @@ The public integration split remains:
 The product boundary is reflected directly in packaging:
 
 - Python client applications import the Rust-backed SDK from `cua_driver`.
-- TypeScript client applications import it from `@trycua/cua-driver`.
+- TypeScript client applications import it from `@qwen-code/cua-sdk`.
 - Agents configure `cua-driver mcp` through their runtime's existing MCP client
   and do not import either language package.
 - The language-native MCP facades and their contract generator were removed.
@@ -121,9 +121,10 @@ The product boundary is reflected directly in packaging:
 - A built macOS arm64 wheel was installed into a clean Python 3.12 environment;
   `cua_driver.CuaDriver.connect(None)` loaded the packaged library and
   returned the canonical daemon socket path.
-- An actual 382.3 kB npm tarball (1.2 MB unpacked) was installed into a clean
-  project; the root imported without native code and
-  `@trycua/cua-driver` loaded the packaged dylib successfully.
+- A pre-rename 382.3 kB npm tarball (1.2 MB unpacked) was installed into a
+  clean project and loaded the packaged dylib successfully. That result used
+  the upstream npm identity and is historical only; it is not current Qwen
+  release evidence.
 - The macOS dylib install ID is the relocatable
   `@rpath/libcua_driver_sdk.dylib`, and release CI asserts it before signing.
 - After promoting the SDK to each package root, a fresh macOS arm64 wheel and
@@ -143,9 +144,25 @@ The product boundary is reflected directly in packaging:
 - Rust release artifacts now carry the SDK library on Linux, macOS, and
   Windows. The Python release matrix installs every built wheel and imports the
   generated binding before PyPI publication.
-- Release CI assembles optional native npm packages for every supported Node
-  OS/architecture from the verified Cua Driver release assets, smoke-tests the
-  installed root package, and publishes all artifacts at the Rust tag version.
-  A developer's host-local tarball is never published.
+- Release CI packs one platform-neutral `@qwen-code/cua-sdk` artifact,
+  clean-installs it against the verified Cua Driver release payload, and
+  publishes it at the Rust tag version only after the GitHub Release exists. A
+  developer's host-local tarball is never published.
 - MCP/CLI remains unchanged as the agent boundary; the language package roots
   are the Rust-backed application SDK.
+
+### Qwen-owned npm identity
+
+- The TypeScript SDK and `/computer-use` wrapper are one
+  `@qwen-code/cua-sdk` package. There is no driver npm package and there are no
+  platform npm packages.
+- The package version identifies the matching Qwen CUA Driver GitHub Release.
+  Its postinstall verifies `checksums.txt` before caching the SDK library and
+  Node runtime. It never imports or resolves the published upstream driver
+  package.
+- Release dry-run clean-installs that one tarball against the just-built native
+  payload. Production repeats the install against the public Qwen Release
+  before npm publication.
+- The frozen 0.12.6 TypeScript compatibility fixture keeps its historical
+  import unchanged and passes when the Qwen SDK tarball is installed under a
+  test-only npm alias. It is not a production dependency or publication target.

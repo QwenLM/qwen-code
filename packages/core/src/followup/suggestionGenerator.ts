@@ -16,7 +16,7 @@ import {
   getCacheSafeParamsSessionId,
   runForkedAgent,
   type CacheSafeParams,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -110,18 +110,15 @@ export async function generatePromptSuggestion(
     const cacheSafeSessionId = options?.enableCacheSharing
       ? getCacheSafeParamsSessionId()
       : undefined;
-    const cacheSafe =
-      cacheSafeSessionId === sessionId ? getCacheSafeParams() : null;
+    const cacheSafe = options?.enableCacheSharing
+      ? getCacheSafeParams(sessionId)
+      : null;
     // The cache-safe slot is a process-global: in a multi-session daemon it
     // can hold ANOTHER session's transcript + systemInstruction. Only use it
     // when it belongs to THIS session; otherwise fall back to the
     // session-safe base-LLM path (#9233).
-    const sessionCacheSafe =
-      cacheSafe && cacheSafe.sessionId === config.getSessionId()
-        ? cacheSafe
-        : null;
     const modelOverride = options?.model;
-    const cacheSharingState = sessionCacheSafe
+    const cacheSharingState = cacheSafe
       ? 'true'
       : cacheSafeSessionId
         ? 'session_mismatch'
@@ -129,10 +126,10 @@ export async function generatePromptSuggestion(
     debugLogger.debug(
       `Generating suggestion: cacheSharing=${cacheSharingState}, model=${modelOverride || '(default)'}`,
     );
-    const raw = sessionCacheSafe
+    const raw = cacheSafe
       ? await generateViaForkedQuery(
           config,
-          sessionCacheSafe,
+          cacheSafe,
           abortSignal,
           modelOverride,
         )

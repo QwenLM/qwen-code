@@ -14,7 +14,7 @@ import {
   DEFAULT_CONTEXT_FILENAME,
   MEMORY_SECTION_HEADER,
   setGeminiMdFilename,
-} from './const.js';
+} from '../utils/memory-constants.js';
 import { writeWorkspaceContextFile } from './writeContextFile.js';
 
 describe('writeWorkspaceContextFile', () => {

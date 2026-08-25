@@ -101,6 +101,19 @@ describe('resolveMergeBase', () => {
     expect(git.calls[1]).toBe('refExists refs/remotes/upstream/develop');
   });
 
+  it('propagates a mergeBase throw — a surface failure is not "none"', () => {
+    // The caller demotes on this propagation: a catch added HERE would fold
+    // a surface failure back into {sha: null} and let the deterministic
+    // reason be stamped over an exit that a re-run might fix.
+    const git = fakeGit({ refs: ['refs/remotes/origin/main'] });
+    git.mergeBase = () => {
+      throw new Error('surface unavailable');
+    };
+    expect(() => resolveMergeBase('origin', 'main', 'pr-head', git)).toThrow(
+      'surface unavailable',
+    );
+  });
+
   it('never merge-bases through an origin/<name> shadow tag', () => {
     // A tag literally named `origin/main` — a pushable, server-controlled
     // refname a plain clone auto-carries — resolves FIRST for the

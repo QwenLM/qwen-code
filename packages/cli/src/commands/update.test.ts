@@ -52,7 +52,7 @@ vi.mock('../utils/installationInfo.js', () => ({
   getInstallationInfo,
   resolveUpdateCommand,
 }));
-vi.mock('../utils/standalone-update.js', () => ({ performStandaloneUpdate }));
+vi.mock('../ui/standalone-update.js', () => ({ performStandaloneUpdate }));
 vi.mock('../utils/package.js', () => ({ getPackageJson }));
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStdoutLine,

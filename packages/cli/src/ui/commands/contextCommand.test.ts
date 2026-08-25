@@ -5,7 +5,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  getBuiltInOutputStyle,
+  getCoreSystemPrompt,
+  resolveInteractionMode,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import {
   collectContextData,
@@ -48,6 +55,8 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     }),
     getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
+    getSystemPrompt: vi.fn().mockReturnValue(undefined),
+    getOutputStyle: vi.fn().mockReturnValue(undefined),
     getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
@@ -57,6 +66,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getAutoCompactThreshold: vi.fn(),
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
     isInteractive: vi.fn().mockReturnValue(true),
+    getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
   } as unknown as Config;
 }
 
@@ -80,6 +90,8 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -89,6 +101,7 @@ describe('collectContextData (contextCommand)', () => {
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
+      getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
   });
 
@@ -203,6 +216,8 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -212,6 +227,7 @@ describe('collectContextData (contextCommand)', () => {
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
+      getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -249,6 +265,8 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -258,6 +276,7 @@ describe('collectContextData (contextCommand)', () => {
       getAutoCompactThreshold: vi.fn(),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
+      getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -274,6 +293,7 @@ describe('collectContextData (contextCommand)', () => {
     const config = {
       ...makeMockConfig(),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi
         .fn()
         .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
@@ -284,6 +304,58 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.memoryFiles).toHaveLength(1);
     expect(data.memoryFiles[0].path).toBe(t('auto memory'));
     expect(data.memoryFiles[0].tokens).toBeGreaterThan(0);
+  });
+
+  it('shortens home-dir memory marker paths to ~ in the breakdown', async () => {
+    // Memory markers store paths relative to the session working directory,
+    // which in ACP/daemon-served sessions differs from process.cwd(); global
+    // files must render as `~/...` instead of `../../..` chains.
+    const workingDir = path.join(os.tmpdir(), 'context-session-dir');
+    const globalFile = path.join(os.homedir(), '.qwen', 'QWEN.md');
+    const markerPath = path.relative(workingDir, globalFile);
+    const memory =
+      `--- Context from: ${markerPath} ---\n` +
+      `global rules\n` +
+      `--- End of Context from: ${markerPath} ---`;
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(memory),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.memoryFiles).toHaveLength(1);
+    expect(data.memoryFiles[0].path).toBe(path.join('~', '.qwen', 'QWEN.md'));
+  });
+
+  it('renders project-local markers as relative paths when workingDir != cwd', async () => {
+    // The resolve+format round-trip must anchor on the session working dir,
+    // not process.cwd(); a mutation that passes process.cwd() as the display
+    // anchor renders every project-local file as a ../.. chain.
+    const workingDir = path.join(os.tmpdir(), 'context-session-dir');
+    const memory =
+      `--- Context from: QWEN.md ---\n` +
+      `project rules\n` +
+      `--- End of Context from: QWEN.md ---\n` +
+      `--- Context from: docs/QWEN.md ---\n` +
+      `docs rules\n` +
+      `--- End of Context from: docs/QWEN.md ---`;
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(memory),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.memoryFiles).toHaveLength(2);
+    expect(data.memoryFiles[0].path).toBe('QWEN.md');
+    expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
   });
 
   it('excludes disabled skills from the detail breakdown', async () => {
@@ -388,6 +460,47 @@ describe('/context shows three-tier thresholds', () => {
     expect(data.breakdown.thresholds.auto).toBe(167_000);
     const text = formatContextUsageText(data);
     expect(text).not.toMatch(/Compaction thresholds/);
+  });
+
+  it('bills the active output style into the system-prompt estimate', async () => {
+    const concise = getBuiltInOutputStyle('Concise')!;
+    const plainConfig = makeMockConfig(200_000);
+    const styledConfig = {
+      ...makeMockConfig(200_000),
+      getOutputStyle: vi.fn().mockReturnValue(concise),
+    } as unknown as Config;
+
+    // No API token count, so breakdown.systemPrompt is the raw estimate
+    // rather than a scaled share — the style section shows up undiluted.
+    const plain = await collectContextData(plainConfig, false);
+    const styled = await collectContextData(styledConfig, false);
+
+    const tokenDelta =
+      styled.breakdown.systemPrompt - plain.breakdown.systemPrompt;
+    expect(tokenDelta).toBeGreaterThan(0);
+
+    // ...and the delta has to be the style layer itself, not incidental
+    // drift: estimateTokens bills ASCII at ~4 chars/token.
+    const mode = resolveInteractionMode(styledConfig);
+    const charDelta =
+      getCoreSystemPrompt(undefined, 'test-model', undefined, mode, concise)
+        .length -
+      getCoreSystemPrompt(undefined, 'test-model', undefined, mode, undefined)
+        .length;
+    expect(tokenDelta).toBeGreaterThan(charDelta / 4 - 5);
+    expect(tokenDelta).toBeLessThan(charDelta / 4 + 5);
+  });
+
+  it('estimates the custom system prompt used by the live client', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getSystemPrompt: vi.fn().mockReturnValue('CUSTOM'),
+      getOutputStyle: vi.fn().mockReturnValue(getBuiltInOutputStyle('Concise')),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.breakdown.systemPrompt).toBe(2);
   });
 
   it('propagates custom autoCompactThreshold through to /context thresholds', async () => {

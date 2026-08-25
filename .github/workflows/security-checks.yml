@@ -46,12 +46,10 @@ jobs:
       - name: 'Install dependencies'
         run: 'npm ci --ignore-scripts --no-audit --progress=false'
 
-      # Reporting-only for now: the current baseline already contains high
-      # severity findings, so failing the check would block every PR. Remove
-      # continue-on-error once the baseline is clean to make this a hard gate,
-      # and update scripts/tests/security-workflows.test.js with that policy.
+      # Hard gate: the high-severity baseline is clean, so any new high CVE
+      # fails the check. Keep scripts/tests/security-workflows.test.js in
+      # sync with this policy.
       - name: 'Audit production dependencies'
-        continue-on-error: true
         run: |
           status=0
           npm audit --omit=dev --audit-level=high || status=$?
@@ -82,15 +80,11 @@ jobs:
       # Incremental gate: the action scans commits introduced by the PR or
       # push and only fails on secrets TruffleHog could actively verify,
       # keeping false positives out. Branch-creating pushes have no base
-      # commit to diff from, so they are skipped explicitly. Reporting-only
-      # for the first runs; remove continue-on-error once the history has been
-      # triaged, and update scripts/tests/security-workflows.test.js with
-      # that policy.
+      # commit to diff from, so they are skipped explicitly.
       # `version` pins the scanner image; without it the action runs `latest`.
       - name: 'Scan for verified secrets'
         if: "github.event_name == 'pull_request' || github.event.before != '0000000000000000000000000000000000000000'"
         uses: 'trufflesecurity/trufflehog@6f3c981e7b77f235fd2702dd74af25fc4b72bf11' # v3.96.0
-        continue-on-error: true
         with:
           version: '3.96.0'
           extra_args: '--only-verified'

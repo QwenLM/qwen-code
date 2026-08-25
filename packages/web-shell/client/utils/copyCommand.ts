@@ -1,4 +1,5 @@
 import type { Message } from '../adapters/types';
+import { writeClipboardText } from './clipboard';
 
 interface FencedCodeBlock {
   lang: string | null;
@@ -359,10 +360,7 @@ function getLastAssistantOutput(messages: readonly Message[]): string | null {
 }
 
 function defaultClipboardWriter(text: string): Promise<void> {
-  if (typeof navigator === 'undefined' || !navigator.clipboard?.writeText) {
-    return Promise.reject(new Error('Clipboard API is not available'));
-  }
-  return navigator.clipboard.writeText(text);
+  return writeClipboardText(text);
 }
 
 export async function copyFromLastAssistantMessage(

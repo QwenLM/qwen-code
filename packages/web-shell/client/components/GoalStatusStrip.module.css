@@ -1,0 +1,114 @@
+.root {
+  container-type: inline-size;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: calc(100% - 32px);
+  min-width: 0;
+  min-height: 42px;
+  box-sizing: border-box;
+  margin: 0 auto -8px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  background: var(--background);
+  color: var(--muted-foreground);
+}
+
+.target {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--foreground) 62%, var(--muted-foreground));
+}
+
+.summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.status {
+  flex: 0 0 auto;
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.activity,
+.objective {
+  color: var(--muted-foreground);
+}
+
+.activity,
+.separator,
+.elapsed {
+  flex: 0 0 auto;
+}
+
+.objective {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.separator,
+.elapsed {
+  color: color-mix(in srgb, var(--muted-foreground) 78%, transparent);
+}
+
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.action {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.action:hover:not(:disabled),
+.action:focus-visible:not(:disabled) {
+  outline: none;
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.action:focus-visible:not(:disabled) {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
+.action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/*
+ * `.root` establishes the container, so it can only style its DESCENDANTS from
+ * here — an element is never its own container query target. Compacting the
+ * strip's own gap/padding would need a separate outer element carrying
+ * `container-type`; until then keep this block to what actually resolves,
+ * rather than leaving half a responsive rule that silently does nothing.
+ */
+@container (max-width: 620px) {
+  .activity,
+  .separator,
+  .elapsed {
+    display: none;
+  }
+}

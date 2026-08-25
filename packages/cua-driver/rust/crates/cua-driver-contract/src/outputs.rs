@@ -18,6 +18,43 @@ pub trait ToolOutput: Serialize + DeserializeOwned + JsonSchema {
     }
 }
 
+/// Schema for the refusal payload a tool emits alongside `isError: true`.
+///
+/// Refusals answer with a diagnostic shape rather than the success shape, and
+/// two are in service: `{"status":"refused","refusal":{code,message,detail}}`
+/// on the element-token and daemon paths, and `{"code":…,"effect":"refused",…}`
+/// on the window-target paths. Both carry tool-specific diagnostic keys, so the
+/// envelope stays open — the marker keys are what make it recognisably a
+/// refusal rather than a malformed success.
+pub fn refusal_envelope_schema() -> Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": true,
+        "anyOf": [
+            {"required": ["refusal"]},
+            {"required": ["status"]},
+            {"required": ["code"]},
+        ],
+    })
+}
+
+/// Wrap a success schema into the shape advertised as the MCP `outputSchema`.
+///
+/// MCP requires every `structuredContent` a tool emits to validate against its
+/// advertised `outputSchema` — including payloads that accompany
+/// `isError: true`. Advertising the success shape alone made strict clients
+/// reject refusals outright, replacing the actionable message the driver had
+/// already placed in `content` ("element_token is stale; call get_window_state
+/// again to refresh") with an opaque schema-validation error. Agents then had
+/// no signal to re-snapshot and fell back to blind pixel clicking.
+///
+/// The success variant is kept exactly as generated — still closed, so success
+/// payloads stay strictly checked — and the refusal envelope joins it as a
+/// sibling variant.
+pub fn advertised_output_schema(success: Value) -> Value {
+    serde_json::json!({ "type": "object", "anyOf": [success, refusal_envelope_schema()] })
+}
+
 fn output_schema_with_additional_properties<T: JsonSchema>(additional_properties: bool) -> Value {
     let mut settings = SchemaSettings::draft2020_12();
     settings.inline_subschemas = true;
@@ -81,6 +118,59 @@ pub struct SessionStateOutput {
 }
 
 impl ToolOutput for SessionStateOutput {}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleState {
+    Active,
+    Ending,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionClientKindOutput {
+    Cli,
+    Direct,
+    Mcp,
+    PythonSdk,
+    TypescriptSdk,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Enum)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTransportOutput {
+    Cli,
+    Daemon,
+    McpStdio,
+    McpHttp,
+}
+
+/// Content-free lifecycle state safe for an ordinary agent transport.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Record)]
+pub struct SessionOutput {
+    /// Sanitized public label, or null for an unnamed implicit session.
+    #[schemars(required, schema_with = "nullable_string_schema")]
+    pub session: Option<String>,
+    pub implicit: bool,
+    pub state: SessionLifecycleState,
+    pub client_kind: SessionClientKindOutput,
+    pub transport: SessionTransportOutput,
+    pub cursor_visible: bool,
+    pub recording_active: bool,
+    pub idle_seconds: u64,
+    pub expires_in_seconds: u64,
+}
+
+impl ToolOutput for SessionOutput {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Record)]
+pub struct ListSessionsOutput {
+    pub sessions: Vec<SessionOutput>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
+    pub next_cursor: Option<String>,
+}
+
+impl ToolOutput for ListSessionsOutput {}
 
 /// Successful structured result returned by `start_session`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, uniffi::Record)]
@@ -227,6 +317,109 @@ impl ToolOutput for DesktopStateOutput {
 
 fn png_mime_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     schemars::json_schema!({ "const": "image/png" })
+}
+
+/// Versioned `accessibility.observation_revision.v1` envelope attached to a
+/// `get_window_state` success when the caller opted in. Platform runtimes add
+/// diagnostic fields beyond this committed core; they flow into `extensions`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct ObservationRevisionOutput {
+    #[schemars(schema_with = "observation_revision_capability_schema")]
+    pub capability: String,
+    #[schemars(schema_with = "integer_schema")]
+    pub version: u64,
+    #[schemars(schema_with = "string_schema_required")]
+    pub serializer_version: String,
+    #[schemars(schema_with = "string_schema_required")]
+    pub projection_version: String,
+    #[schemars(schema_with = "observation_revision_mode_schema")]
+    pub mode: String,
+    #[schemars(schema_with = "string_schema_required")]
+    pub lineage_id: String,
+    #[schemars(schema_with = "string_schema_required")]
+    pub revision_id: String,
+    /// Base the driver actually diffed against. Absent on full responses
+    /// without a usable base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_schema")]
+    pub base_revision_id: Option<String>,
+    /// Whether emitted element tokens are stable revision tokens that survive
+    /// compatible diffs. False means the response is a non-retained full.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stable_element_ids: Option<bool>,
+    /// Closed reason naming why a full resynchronization was required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "string_schema")]
+    pub resync_reason: Option<String>,
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, Value>,
+}
+
+impl ObservationRevisionOutput {
+    fn validate(&self) -> Result<(), String> {
+        if self.capability != "accessibility.observation_revision.v1" {
+            return Err(
+                "observation_revision.capability must be accessibility.observation_revision.v1"
+                    .into(),
+            );
+        }
+        if self.version != 1 {
+            return Err("observation_revision.version must be 1".into());
+        }
+        if self.serializer_version.is_empty() || self.projection_version.is_empty() {
+            return Err(
+                "observation_revision serializer_version and projection_version must be non-empty"
+                    .into(),
+            );
+        }
+        if !matches!(self.mode.as_str(), "full" | "diff" | "no_change") {
+            return Err("observation_revision.mode must be full, diff, or no_change".into());
+        }
+        if self.lineage_id.is_empty() || self.revision_id.is_empty() {
+            return Err("observation_revision lineage_id and revision_id must be non-empty".into());
+        }
+        if matches!(self.mode.as_str(), "diff" | "no_change") && self.base_revision_id.is_none() {
+            return Err(
+                "observation_revision diff/no_change responses must name their base_revision_id"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn observation_revision_capability_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "const": "accessibility.observation_revision.v1" })
+}
+
+fn observation_revision_mode_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "string", "enum": ["full", "diff", "no_change"] })
+}
+
+fn string_schema_required(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({ "type": "string", "minLength": 1 })
+}
+
+/// Portable projection of a `get_window_state` success. The snapshot payload
+/// (markdown rendering, structured elements, screenshot fields) remains
+/// platform-owned and still converging, so only the versioned observation
+/// revision envelope is committed here; everything else flows through
+/// `extensions` unvalidated.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct WindowStateOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_revision: Option<ObservationRevisionOutput>,
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, Value>,
+}
+
+impl ToolOutput for WindowStateOutput {
+    fn validate(&self) -> Result<(), String> {
+        match &self.observation_revision {
+            Some(revision) => revision.validate(),
+            None => Ok(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]

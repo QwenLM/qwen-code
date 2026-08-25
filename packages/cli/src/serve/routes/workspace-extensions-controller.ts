@@ -99,6 +99,8 @@ export type ExtensionMutationEvent = {
   source?: string;
   name?: string;
   version?: string;
+  credentialPersistence?: 'stored' | 'one_time';
+  credentialStorage?: 'keychain' | 'encrypted_file';
   updated?: boolean;
   reason?: string;
   states?: Record<string, string>;
@@ -1033,7 +1035,8 @@ export function createExtensionsController(
             version: ext.version,
             isActive: ext.isActive,
             path: ext.path,
-            ...(ext.installMetadata?.source
+            ...(ext.installMetadata?.source &&
+            ext.installMetadata.type !== 'snapshot'
               ? {
                   source: redactExtensionDisplaySource(
                     ext.installMetadata.source,
@@ -1052,7 +1055,17 @@ export function createExtensionsController(
             ...(ext.installMetadata?.autoUpdate !== undefined
               ? { autoUpdate: ext.installMetadata.autoUpdate }
               : {}),
-            updateState: ext.installMetadata ? 'unknown' : 'not updatable',
+            ...(ext.installMetadata?.type === 'snapshot'
+              ? { credentialPersistence: 'one_time' as const }
+              : ext.installMetadata?.credentialPersistence === 'stored'
+                ? { credentialPersistence: 'stored' as const }
+                : {}),
+            updateState:
+              ext.installMetadata?.type === 'snapshot'
+                ? 'not updatable'
+                : ext.installMetadata
+                  ? 'unknown'
+                  : 'not updatable',
             capabilities,
             details: {
               mcpServers: ext.mcpServers ? Object.keys(ext.mcpServers) : [],

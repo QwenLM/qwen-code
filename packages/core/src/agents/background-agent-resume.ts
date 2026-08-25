@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Content, Part } from '@google/genai';
-import type { Config } from '../config/config.js';
+import type { ApprovalModeValue, Config } from '../config/config.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -35,7 +35,7 @@ import {
   buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
   getInitialChatHistory,
-} from '../utils/environmentContext.js';
+} from '../core/environmentContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
@@ -44,7 +44,10 @@ import {
 } from '../hooks/stopHookCap.js';
 import { toModelVisibleSubagentResult } from './subagent-result.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
-import { createApprovalModeOverride } from '../tools/agent/agent.js';
+import {
+  createApprovalModeOverride,
+  stampBackgroundPromptPolicy,
+} from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
 import {
   FORK_AGENT,
@@ -103,8 +106,6 @@ const WORKTREE_ISOLATION_BLOCKED_REASON =
   'Background task worktree isolation cannot be reconstructed after session restore.';
 const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
   'Background task isolation metadata is incompatible.';
-
-type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
 
 /**
  * Returns true when the subagent's effective tool surface will include the
@@ -922,9 +923,7 @@ export class BackgroundAgentResumeService {
         target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
           this.config.isInteractive(),
       );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const bgConfig = Object.create(activeAgentConfig) as any;
-      bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
+      stampBackgroundPromptPolicy(activeAgentConfig, shouldBubble);
 
       const records = await jsonl.read<ChatRecord>(outputFile);
       const recovery = recoverTranscript(records);
@@ -939,7 +938,7 @@ export class BackgroundAgentResumeService {
           ]
         : [
             ...(
-              await getInitialChatHistory(bgConfig as Config, undefined, {
+              await getInitialChatHistory(activeAgentConfig, undefined, {
                 includeDeferredToolsReminder: false,
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
@@ -985,7 +984,7 @@ export class BackgroundAgentResumeService {
       let subagent: AgentHeadless;
       if (target.isFork) {
         subagent = await this.createResumedForkSubagent(
-          bgConfig as Config,
+          activeAgentConfig,
           bgEventEmitter,
           resumeHistory ?? [],
           currentForkRuntime!,
@@ -998,7 +997,7 @@ export class BackgroundAgentResumeService {
             : target.subagentConfig!;
         const result = await this.config
           .getSubagentManager()
-          .createAgentHeadless(resumeSubagentConfig, bgConfig as Config, {
+          .createAgentHeadless(resumeSubagentConfig, activeAgentConfig, {
             eventEmitter: bgEventEmitter,
             promptConfigOverrides: {
               initialMessages: resumeHistory,

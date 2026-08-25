@@ -57,21 +57,26 @@ vi.mock('../utils/errorReporting', () => ({
 describe('findRepeatedDuplicateProviderToolCall', () => {
   const getProviderCallId = (item: { providerCallId?: string }) =>
     item.providerCallId;
+  const replayOf =
+    (...handledIds: string[]) =>
+    (item: { providerCallId?: string }) =>
+      item.providerCallId !== undefined &&
+      handledIds.includes(item.providerCallId);
 
-  it('finds a handled provider id that already received a synthetic response', () => {
+  it('finds a replayed provider id that already received a synthetic response', () => {
     const items = [{ providerCallId: 'fresh' }, { providerCallId: 'handled' }];
 
     expect(
       findRepeatedDuplicateProviderToolCall(
         items,
         getProviderCallId,
-        new Set(['handled']),
+        replayOf('handled'),
         new Set(['handled']),
       ),
     ).toBe(items[1]);
   });
 
-  it('finds a handled provider id repeated within the same batch', () => {
+  it('finds a replayed provider id repeated within the same batch', () => {
     const items = [
       { providerCallId: 'handled' },
       { providerCallId: 'fresh' },
@@ -82,7 +87,7 @@ describe('findRepeatedDuplicateProviderToolCall', () => {
       findRepeatedDuplicateProviderToolCall(
         items,
         getProviderCallId,
-        new Set(['handled']),
+        replayOf('handled'),
         new Set<string>(),
       ),
     ).toBe(items[0]);
@@ -95,8 +100,21 @@ describe('findRepeatedDuplicateProviderToolCall', () => {
       findRepeatedDuplicateProviderToolCall(
         items,
         getProviderCallId,
-        new Set(['handled']),
+        replayOf('handled'),
         new Set<string>(),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('ignores id collisions the replay predicate rejects, even after a synthetic response', () => {
+    const items = [{ providerCallId: 'handled' }];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        () => false,
+        new Set(['handled']),
       ),
     ).toBeUndefined();
   });

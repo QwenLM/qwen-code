@@ -990,10 +990,11 @@ export class SubagentManager {
    * a wrapper above `runtimeContext` already rebuilt one (typically
    * `agent.ts:createApprovalModeOverride`, which marks itself via a
    * Symbol-keyed flag — Symbol lookup walks the prototype chain, so
-   * this also catches wrapper-on-wrapper layering like
-   * `bgConfig = Object.create(agentConfig)` from the background path).
-   * Rebuilding twice would waste work, leak listeners on shared
-   * managers, and split caches across registry layers.
+   * this also catches wrapper-on-wrapper layering like the background
+   * launch passing its stamped `createApprovalModeOverride` override
+   * directly as `runtimeContext`). Rebuilding twice would waste work,
+   * leak listeners on shared managers, and split caches across registry
+   * layers.
    */
   private async buildSubagentContextOverride(
     runtimeContext: Config,

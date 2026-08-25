@@ -22,7 +22,7 @@ import {
   AGENT_CONTEXT_FILENAME,
   DEFAULT_CONTEXT_FILENAME,
   setGeminiMdFilename,
-} from './const.js';
+} from '../utils/memory-constants.js';
 import {
   didWriteManagedMemory,
   didWriteProjectContextFile,

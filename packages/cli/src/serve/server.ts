@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import {
   hashDaemonWorkspace,
+  readCronTasks,
   Storage,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
@@ -66,6 +67,7 @@ import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
 import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
+  createSpawnChannelFactory,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
   type AcpSessionBridge,
@@ -77,10 +79,12 @@ import {
   type ChannelWebhookConfigSource,
   type ServeOptions,
 } from './types.js';
+import { acpChildExtraArgs } from './acp-child-extra-args.js';
 import {
   mountWebShellAssets,
   mountWebShellSpaFallback,
 } from './web-shell-static.js';
+import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
   mountWorkspaceMemoryRoutes,
   mountWorkspaceQualifiedMemoryRoutes,
@@ -127,6 +131,7 @@ import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
+  collectBoundSessionIds,
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
 } from './scheduled-task-keepalive.js';
@@ -181,7 +186,10 @@ import {
   parseClientIdHeader,
   safeBody,
 } from './server/request-helpers.js';
-import { daemonTelemetryMiddleware } from './server/telemetry.js';
+import {
+  daemonInboundTraceIdCaptureMiddleware,
+  daemonTelemetryMiddleware,
+} from './server/telemetry.js';
 import { installAccessLogMiddleware } from './server/access-log.js';
 import { setupDeviceFlowRegistry } from './server/device-flow-registry.js';
 import {
@@ -606,6 +614,9 @@ export interface ServeAppDeps {
   liveHostInstaller?: LiveHostInstaller;
   liveSessionCoordinator?: LiveSessionCoordinator;
   liveConversationWorkspace?: ConversationWorkspace;
+  readLiveConversationScheduledTasks?: () => Promise<
+    readonly DurableCronTask[]
+  >;
   liveDiscoveryStableBaseDir?: string;
   conversationRuntimeOwnershipFactory?: (
     pid: number,
@@ -1014,10 +1025,15 @@ export function createServeApp(
   const defaultSessionOwnerIndex = !injectedWorkspaceRegistry
     ? createWorkspaceSessionOwnerIndex()
     : undefined;
+  const acpChildArgs = acpChildExtraArgs(opts);
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      sessionAttachmentsRoot: path.join(
+        new Storage(boundWorkspace).getProjectTempDir(),
+        'attachments',
+      ),
       maxSessions: opts.maxSessions,
       ...(totalSessionAdmission
         ? { freshSessionAdmission: totalSessionAdmission.admit }
@@ -1036,6 +1052,16 @@ export function createServeApp(
       initializeTimeoutMs: opts.initializeTimeoutMs,
       sessionRestoreTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
+      ...(opts.restoreAskUserQuestion === true
+        ? { restoreAskUserQuestion: true }
+        : {}),
+      ...(acpChildArgs
+        ? {
+            channelFactory: createSpawnChannelFactory({
+              extraArgs: acpChildArgs,
+            }),
+          }
+        : {}),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1470,6 +1496,25 @@ export function createServeApp(
   if (liveVoiceEnabled) {
     serveAppLifecycle.setBootStarter(startConversationRuntimeBoot);
   }
+  if (deps.manageScheduledTaskSessions && deps.liveConversationWorkspace) {
+    const readTasks =
+      deps.readLiveConversationScheduledTasks ??
+      (() => readCronTasks(deps.liveConversationWorkspace!.rootPath));
+    void readTasks()
+      .then((tasks) => {
+        if (collectBoundSessionIds(tasks).length > 0) {
+          return startConversationRuntimeBoot();
+        }
+        return undefined;
+      })
+      .catch((error) => {
+        process.stderr.write(
+          `qwen serve: failed to restore the Conversations runtime for scheduled tasks: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+      });
+  }
   const ensureConversationRuntimeWithLifecycle = async () => {
     await serveAppLifecycle.startBoot(startConversationRuntimeBoot);
     if (!liveRuntimeBootResult) {
@@ -1722,6 +1767,12 @@ export function createServeApp(
 
   installAccessLogMiddleware(app, daemonLog);
 
+  // Capture the caller trace id BEFORE authenticate / rate limiter / body
+  // parser: those layers short-circuit (401/429/400) before the telemetry
+  // middleware ever runs, and the access log still needs the captured id
+  // to join their log lines (and 404s) with the caller's trace.
+  app.use(daemonInboundTraceIdCaptureMiddleware);
+
   // Serve the Web Shell static assets (/ and /assets) BEFORE bearerAuth. The
   // static shell carries no secrets and a browser cannot attach an
   // Authorization header to a `<script src>` subresource or an address-bar
@@ -1750,6 +1801,7 @@ export function createServeApp(
       : [];
   if (webShellDir) {
     mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
+    mountMcpAppSandbox(app);
   }
 
   if (deps.enqueueChannelWebhookTask) {
@@ -2613,6 +2665,7 @@ export function createServeApp(
         ? workspaceRegistry.primaryEntry.current?.runtime
         : undefined,
     cleanupSession,
+    workspaceRegistry,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
@@ -2715,7 +2768,6 @@ export function createServeApp(
     // own cron file + bridge.
     const keepaliveStops = new Map<string, () => void>();
     const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
-      if (runtime.provenance === 'live-conversation') return;
       const trusted = runtime.primary
         ? isPrimaryWorkspaceTrusted()
         : runtime.trusted;

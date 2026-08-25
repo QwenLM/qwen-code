@@ -13,6 +13,7 @@ import { ArenaEventType } from './arena-events.js';
 import { ArenaSessionStatus, ARENA_MAX_AGENTS } from './types.js';
 import { AgentStatus } from '../runtime/agent-types.js';
 import { ApprovalMode } from '../../config/config.js';
+import { getBuiltInOutputStyle } from '../../core/output-styles.js';
 
 const hoistedMockSetupWorktrees = vi.hoisted(() => vi.fn());
 const hoistedMockCleanupSession = vi.hoisted(() => vi.fn());
@@ -72,6 +73,7 @@ const createMockConfig = (
   getModel: () => 'test-model',
   getSessionId: () => 'test-session',
   getUserMemory: () => '',
+  getOutputStyle: (): ReturnType<typeof getBuiltInOutputStyle> => undefined,
   getAutoMemoryPrompt: () => '',
   getToolRegistry: () => ({
     getFunctionDeclarations: () => [],
@@ -405,7 +407,7 @@ describe('ArenaManager', () => {
       }
     });
 
-    it('builds the in-process worker system prompt in headless interaction mode', async () => {
+    it('builds the in-process worker prompt with headless mode and the active style', async () => {
       // Arena workers run non-interactively, so ArenaManager passes 'headless'
       // as the interaction mode (4th arg) to getCoreSystemPrompt. A regression
       // that drops that argument would fall back to the interactive prompt,
@@ -413,6 +415,10 @@ describe('ArenaManager', () => {
       // Assert on the produced prompt: the headless variant carries a
       // single-turn marker that is absent from every other interaction mode.
       mockBackend.type = 'in-process';
+      mockConfig = {
+        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
+        getOutputStyle: () => getBuiltInOutputStyle('Concise'),
+      };
       const manager = new ArenaManager(mockConfig as never);
 
       await manager.start(createValidStartOptions());
@@ -429,6 +435,7 @@ describe('ArenaManager', () => {
         expect(systemPrompt).toContain(
           'This is a non-interactive, single-turn run',
         );
+        expect(systemPrompt).toContain('# Output Style: Concise');
       }
     });
 

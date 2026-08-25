@@ -8,7 +8,7 @@ import type { PartListUnion } from '@google/genai';
 import {
   parseSlashCommand,
   parseStackedSlashCommands,
-} from './utils/commands.js';
+} from './ui/commands/commands.js';
 import {
   Logger,
   uiTelemetryService,

@@ -77,6 +77,49 @@ describe('<CompressionMessage />', () => {
     });
   });
 
+  // Issue #9309: /compress-fast and /compress report on different scales
+  // (API-reported baseline vs local history-only estimate), so estimated
+  // numbers must be visibly marked to keep consecutive banners from reading
+  // as lost context.
+  describe('estimated token counts', () => {
+    it('marks an estimated new count with a ~ prefix', () => {
+      const props = createCompressionProps({
+        originalTokenCount: 100,
+        newTokenCount: 50,
+        compressionStatus: CompressionStatus.COMPRESSED,
+        newTokenCountIsEstimated: true,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+
+      expect(lastFrame()).toContain('compressed from 100 to ~50 tokens');
+    });
+
+    it('marks an estimated original count with a ~ prefix', () => {
+      const props = createCompressionProps({
+        originalTokenCount: 100,
+        newTokenCount: 50,
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCountIsEstimated: true,
+        newTokenCountIsEstimated: true,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+
+      expect(lastFrame()).toContain('compressed from ~100 to ~50 tokens');
+    });
+
+    it('does not mark authoritative counts', () => {
+      const props = createCompressionProps({
+        originalTokenCount: 100,
+        newTokenCount: 50,
+        compressionStatus: CompressionStatus.COMPRESSED,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+
+      expect(lastFrame()).toContain('compressed from 100 to 50 tokens');
+      expect(lastFrame()).not.toContain('~');
+    });
+  });
+
   describe('skipped compression (tokens increased or same)', () => {
     it('renders skip message when compression would increase token count', () => {
       const props = createCompressionProps({

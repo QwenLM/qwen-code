@@ -19,6 +19,10 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import type { WorkflowMeta } from './runtime/workflow-sandbox.js';
 import {
   isTerminalWorkflowStatus,
+  type WorkflowDispatchTrace,
+  type WorkflowEvent,
+  type WorkflowPhaseVisit,
+  type WorkflowRunStartMode,
   type WorkflowTask,
   type WorkflowTerminalStatus,
 } from './workflow-run-registry.js';
@@ -31,11 +35,21 @@ export const MAX_RETAINED_SNAPSHOTS = 30;
 /** JSON-serializable projection of a terminal workflow run. */
 export interface WorkflowSnapshot {
   runId: string;
+  /** Human-readable fallback when a workflow has no exported meta block. */
+  description?: string;
+  /** Prior run used by retry or rerun. Absent on legacy snapshots. */
+  sourceRunId?: string;
+  /** How this run was started from sourceRunId. */
+  startMode?: WorkflowRunStartMode;
   meta: WorkflowMeta | null;
   status: WorkflowTerminalStatus;
   script: string;
   scriptPath?: string;
   phases: string[];
+  /** Absent on snapshots written before workflow graph tracing existed. */
+  phaseVisits?: WorkflowPhaseVisit[];
+  /** Absent on snapshots written before workflow graph tracing existed. */
+  dispatches?: WorkflowDispatchTrace[];
   agentsDispatched: number;
   agentsCompleted: number;
   tokensSpent: number;
@@ -43,6 +57,8 @@ export interface WorkflowSnapshot {
   /** `perPhaseTokens` flattened to `[phaseOrNull, tokens]` pairs. */
   perPhaseTokens: Array<[string | null, number]>;
   recentLogs: string[];
+  /** Absent on snapshots written before runtime event tracing existed. */
+  events?: WorkflowEvent[];
   startTime: number;
   endTime?: number;
   result?: unknown;
@@ -56,17 +72,26 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
   }
   return {
     runId: task.runId,
+    description: task.description,
+    sourceRunId: task.sourceRunId,
+    startMode: task.startMode,
     meta: task.meta,
     status: task.status,
     script: task.script ?? '',
     scriptPath: task.scriptPath,
     phases: [...task.phases],
+    phaseVisits: task.phaseVisits.map((visit) => ({ ...visit })),
+    dispatches: task.dispatches.map((dispatch) => ({
+      ...dispatch,
+      dependsOn: [...dispatch.dependsOn],
+    })),
     agentsDispatched: task.agentsDispatched,
     agentsCompleted: task.agentsCompleted,
     tokensSpent: task.tokensSpent,
     tokenBudgetTotal: task.tokenBudgetTotal,
     perPhaseTokens: Array.from(task.perPhaseTokens.entries()),
     recentLogs: [...task.recentLogs],
+    events: task.events.map((event) => ({ ...event })),
     startTime: task.startTime,
     endTime: task.endTime,
     result: safeResult(task.result),
@@ -136,13 +161,244 @@ export async function listWorkflowSnapshots(
   for (const file of files) {
     try {
       const raw = await fs.readFile(`${dir}/${file}`, 'utf8');
-      snapshots.push(JSON.parse(raw) as WorkflowSnapshot);
+      const parsed: unknown = JSON.parse(raw);
+      if (!isWorkflowSnapshot(parsed)) {
+        debugLogger.warn(`skipping invalid workflow snapshot ${file}`);
+        continue;
+      }
+      snapshots.push(parsed);
     } catch (e) {
       debugLogger.warn(`skipping unparseable snapshot ${file}: ${e}`);
     }
   }
   snapshots.sort((a, b) => (b.startTime ?? 0) - (a.startTime ?? 0));
   return snapshots;
+}
+
+/**
+ * Delete one persisted run summary and its resume journal. The run id must be
+ * a well-formed workflow run id because both targets live below the project
+ * runs dir.
+ * Returns true when the safe target is absent after this call.
+ */
+export async function deleteWorkflowSnapshot(
+  config: Config,
+  runId: string,
+): Promise<boolean> {
+  const storage = config.storage;
+  if (!storage || !/^wf_[0-9a-f]+$/.test(runId)) return false;
+  try {
+    await fs.rm(`${storage.getWorkflowRunsDir()}/${runId}`, {
+      recursive: true,
+      force: true,
+    });
+  } catch (error) {
+    debugLogger.warn(`delete workflow journal failed for ${runId}: ${error}`);
+    return false;
+  }
+  try {
+    await fs.unlink(storage.getWorkflowRunSnapshotPath(runId));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.warn(`deleteWorkflowSnapshot failed for ${runId}: ${error}`);
+      return false;
+    }
+  }
+  return true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === 'string';
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((item) => typeof item === 'string')
+  );
+}
+
+function isWorkflowMeta(value: unknown): value is WorkflowMeta | null {
+  if (value === null) return true;
+  if (!isRecord(value)) return false;
+  if (
+    typeof value['name'] !== 'string' ||
+    typeof value['description'] !== 'string' ||
+    !isOptionalString(value['whenToUse'])
+  ) {
+    return false;
+  }
+  const phases = value['phases'];
+  return (
+    phases === undefined ||
+    (Array.isArray(phases) &&
+      phases.every(
+        (phase) =>
+          isRecord(phase) &&
+          typeof phase['title'] === 'string' &&
+          isOptionalString(phase['detail']) &&
+          isOptionalString(phase['model']),
+      ))
+  );
+}
+
+function isWorkflowPhaseVisit(value: unknown): value is WorkflowPhaseVisit {
+  return (
+    isRecord(value) &&
+    typeof value['id'] === 'string' &&
+    isFiniteNumber(value['index']) &&
+    typeof value['title'] === 'string' &&
+    isFiniteNumber(value['startedAt']) &&
+    (value['endedAt'] === undefined || isFiniteNumber(value['endedAt']))
+  );
+}
+
+function isWorkflowDispatch(value: unknown): value is WorkflowDispatchTrace {
+  if (!isRecord(value)) return false;
+  const status = value['status'];
+  return (
+    typeof value['id'] === 'string' &&
+    (value['phaseVisitId'] === null ||
+      typeof value['phaseVisitId'] === 'string') &&
+    typeof value['label'] === 'string' &&
+    typeof value['prompt'] === 'string' &&
+    isOptionalString(value['subagentId']) &&
+    (status === 'queued' ||
+      status === 'running' ||
+      status === 'completed' ||
+      status === 'failed' ||
+      status === 'cancelled' ||
+      status === 'cached') &&
+    isStringArray(value['dependsOn']) &&
+    isFiniteNumber(value['queuedAt']) &&
+    (value['startedAt'] === undefined || isFiniteNumber(value['startedAt'])) &&
+    (value['endedAt'] === undefined || isFiniteNumber(value['endedAt'])) &&
+    isOptionalString(value['error'])
+  );
+}
+
+function hasOnlyKeys(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): boolean {
+  const allowed = new Set(keys);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isWorkflowEvent(value: unknown): value is WorkflowEvent {
+  if (
+    !isRecord(value) ||
+    typeof value['id'] !== 'string' ||
+    !isFiniteNumber(value['at']) ||
+    typeof value['type'] !== 'string'
+  ) {
+    return false;
+  }
+  const base = ['id', 'type', 'at'];
+  switch (value['type']) {
+    case 'phase-started':
+      return (
+        hasOnlyKeys(value, [...base, 'phaseVisitId', 'title']) &&
+        typeof value['phaseVisitId'] === 'string' &&
+        typeof value['title'] === 'string'
+      );
+    case 'phase-completed':
+      return (
+        hasOnlyKeys(value, [...base, 'phaseVisitId']) &&
+        typeof value['phaseVisitId'] === 'string'
+      );
+    case 'dispatch-queued':
+    case 'dispatch-started':
+    case 'dispatch-completed':
+    case 'dispatch-cancelled':
+    case 'dispatch-cached':
+      return (
+        hasOnlyKeys(value, [...base, 'dispatchId']) &&
+        typeof value['dispatchId'] === 'string'
+      );
+    case 'dispatch-failed':
+      return (
+        hasOnlyKeys(value, [...base, 'dispatchId', 'error']) &&
+        typeof value['dispatchId'] === 'string' &&
+        typeof value['error'] === 'string'
+      );
+    case 'log':
+      return (
+        hasOnlyKeys(value, [...base, 'message']) &&
+        typeof value['message'] === 'string'
+      );
+    case 'approval-requested':
+    case 'approval-settled':
+      return (
+        hasOnlyKeys(value, [...base, 'name', 'dispatchId']) &&
+        typeof value['name'] === 'string' &&
+        isOptionalString(value['dispatchId'])
+      );
+    case 'workflow-completed':
+    case 'workflow-cancelled':
+      return hasOnlyKeys(value, base);
+    case 'workflow-failed':
+      return (
+        hasOnlyKeys(value, [...base, 'error']) &&
+        typeof value['error'] === 'string'
+      );
+    default:
+      return false;
+  }
+}
+
+function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
+  if (!isRecord(value)) return false;
+  const status = value['status'];
+  const phaseVisits = value['phaseVisits'];
+  const dispatches = value['dispatches'];
+  const events = value['events'];
+  const perPhaseTokens = value['perPhaseTokens'];
+  return (
+    typeof value['runId'] === 'string' &&
+    value['runId'].length > 0 &&
+    isOptionalString(value['description']) &&
+    isOptionalString(value['sourceRunId']) &&
+    (value['startMode'] === undefined ||
+      value['startMode'] === 'retry' ||
+      value['startMode'] === 'rerun') &&
+    isWorkflowMeta(value['meta']) &&
+    (status === 'completed' || status === 'failed' || status === 'cancelled') &&
+    typeof value['script'] === 'string' &&
+    isOptionalString(value['scriptPath']) &&
+    isStringArray(value['phases']) &&
+    (phaseVisits === undefined ||
+      (Array.isArray(phaseVisits) &&
+        phaseVisits.every(isWorkflowPhaseVisit))) &&
+    (dispatches === undefined ||
+      (Array.isArray(dispatches) && dispatches.every(isWorkflowDispatch))) &&
+    (events === undefined ||
+      (Array.isArray(events) && events.every(isWorkflowEvent))) &&
+    isFiniteNumber(value['agentsDispatched']) &&
+    isFiniteNumber(value['agentsCompleted']) &&
+    isFiniteNumber(value['tokensSpent']) &&
+    (value['tokenBudgetTotal'] === null ||
+      isFiniteNumber(value['tokenBudgetTotal'])) &&
+    Array.isArray(perPhaseTokens) &&
+    perPhaseTokens.every(
+      (entry) =>
+        Array.isArray(entry) &&
+        entry.length === 2 &&
+        (entry[0] === null || typeof entry[0] === 'string') &&
+        isFiniteNumber(entry[1]),
+    ) &&
+    isStringArray(value['recentLogs']) &&
+    isFiniteNumber(value['startTime']) &&
+    (value['endTime'] === undefined || isFiniteNumber(value['endTime'])) &&
+    isOptionalString(value['error'])
+  );
 }
 
 /** Remove the oldest snapshots beyond the retention cap. */

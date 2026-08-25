@@ -221,6 +221,7 @@ export function createMigratedGoalState(
         evidenceCursor: { recordId: input.recordUuid },
         turnCount: 0,
         activeTimeMs: 0,
+        tokensUsed: 0,
         createdAt: input.now,
         updatedAt: input.now,
       },

@@ -142,7 +142,7 @@ public static void runTransportOptionsExample() {
             .setIncludePartialMessages(true)
             .setTurnTimeout(new Timeout(120L, TimeUnit.SECONDS))
             .setMessageTimeout(new Timeout(90L, TimeUnit.SECONDS))
-            .setAllowedTools(Arrays.asList("read_file", "write_file", "list_directory"));
+            .setAllowedTools(Arrays.asList("read_file", "write_file", "glob"));
 
     List<String> result = QwenCodeCli.simpleQuery("who are you, what are your capabilities?", options);
     result.forEach(logger::info);
@@ -220,6 +220,7 @@ The SDK supports different permission modes for controlling tool execution:
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
 - **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
+- **`auto`**: An LLM classifier approves tool calls.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Session Event Consumers and Assistant Content Consumers

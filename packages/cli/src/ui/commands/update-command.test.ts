@@ -45,7 +45,7 @@ vi.mock('../../utils/processUtils.js', () => ({
   HOST_UPDATE_RELAUNCH_ENV_VAR: 'QWEN_CODE_HOST_UPDATE_RELAUNCH',
   relaunchForUpdate,
 }));
-vi.mock('../../utils/standalone-update.js', () => ({
+vi.mock('../standalone-update.js', () => ({
   performStandaloneUpdate,
 }));
 vi.mock('../../utils/installationInfo.js', () => ({

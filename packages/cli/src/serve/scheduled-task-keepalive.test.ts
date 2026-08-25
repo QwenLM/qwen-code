@@ -698,9 +698,14 @@ describe('scheduled-task keepalive', () => {
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
   });
 
-  it('renames a bound session without ⏰ prefix exactly once', async () => {
+  it('renames task-owned sessions once without renaming caller-owned ones', async () => {
     await updateCronTasks(workspace, () => [
       task({ id: 'bound-1', sessionId: 'existing-sess', prompt: 'lint' }),
+      task({
+        id: 'caller-bound',
+        sessionId: 'caller-sess',
+        sessionOwnedByTask: false,
+      }),
     ]);
     const names: Array<[string, { displayName?: string }]> = [];
     const naming = {

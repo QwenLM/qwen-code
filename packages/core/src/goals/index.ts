@@ -69,3 +69,8 @@ export * from './goal-checkpoint-verifier.js';
 export * from './goal-verifier.js';
 export * from './goal-runtime.js';
 export { goalTurnContext } from './goal-turn-context.js';
+export {
+  buildGoalContinuationParts,
+  renderGoalContinuationPrompt,
+} from './goal-continuation-prompt.js';
+export type { GoalContinuationPromptInput } from './goal-continuation-prompt.js';

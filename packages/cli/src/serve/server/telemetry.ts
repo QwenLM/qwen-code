@@ -4,13 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { performance } from 'node:perf_hooks';
 import {
+  emitDaemonLog,
+  extractDaemonHttpTraceContext,
+  extractInboundTraceId,
   hashDaemonWorkspace,
+  isTelemetrySdkInitialized,
   recordDaemonError,
   recordDaemonHttpRequest,
   recordDaemonHttpResponse,
   withDaemonRequestSpan,
 } from '@qwen-code/qwen-code-core';
+import { sanitizeLogText } from '@qwen-code/channel-base';
 import type { NextFunction, Request, Response } from 'express';
 import {
   CLIENT_ID_HEADER,
@@ -18,6 +24,14 @@ import {
   getDeferredRuntimeRequestTiming,
   MAX_CLIENT_ID_LENGTH,
 } from './request-helpers.js';
+import {
+  daemonInboundTraceIdContext,
+  daemonTelemetryResponseContext,
+  type InboundTraceIdResponse,
+  type TelemetryResponse,
+} from './telemetry-context.js';
+
+export { getDaemonTelemetryInboundTraceId } from './telemetry-context.js';
 
 type LegacySessionTelemetryAttribution = 'handler_resolved' | 'pre_resolved';
 
@@ -169,6 +183,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/goal',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/goal',
+  },
+  {
+    method: 'GET',
+    path: '/session/:id/goal',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/goal',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/goal/clear',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/goal/clear',
@@ -181,21 +207,21 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
-    path: '/session/:id/media',
+    path: '/session/:id/attachments',
     attribution: 'handler_resolved',
-    route: 'POST /session/:id/media',
+    route: 'POST /session/:id/attachments',
   },
   {
     method: 'GET',
-    path: '/session/:id/media/:mediaId',
+    path: '/session/:id/attachments/:attachmentId',
     attribution: 'handler_resolved',
-    route: 'GET /session/:id/media/:mediaId',
+    route: 'GET /session/:id/attachments/:attachmentId',
   },
   {
     method: 'DELETE',
-    path: '/session/:id/media/:mediaId',
+    path: '/session/:id/attachments/:attachmentId',
     attribution: 'handler_resolved',
-    route: 'DELETE /session/:id/media/:mediaId',
+    route: 'DELETE /session/:id/attachments/:attachmentId',
   },
   {
     method: 'POST',
@@ -391,16 +417,6 @@ interface ResolvedDaemonTelemetryRoute {
   permissionRequestId?: string;
   attribution?: LegacySessionTelemetryAttribution;
 }
-
-interface DaemonTelemetryResponseContext {
-  workspaceCwd?: string;
-}
-
-const daemonTelemetryResponseContext = Symbol('daemonTelemetryResponseContext');
-
-type TelemetryResponse = Response & {
-  [daemonTelemetryResponseContext]?: DaemonTelemetryResponseContext;
-};
 
 function decodePathSegment(value: string): string {
   try {
@@ -707,6 +723,39 @@ export function resolveDaemonTelemetryRoute(
   return undefined;
 }
 
+// The rejected-traceparent breadcrumb is rate-limited like the access
+// log: an attacker (or a broken client) can send invalid traceparent headers
+// on every request, and an unbounded DEBUG emit per request would let
+// crafted traffic flood the daemon log.
+const TRACEPARENT_BREADCRUMB_BURST = 60;
+const TRACEPARENT_BREADCRUMB_REFILL_PER_SECOND = 2;
+
+/**
+ * Capture the caller trace id from a valid inbound `traceparent` header in
+ * both telemetry modes. Mounted before auth, rate limiting, and body
+ * parsing so the access log line of a request short-circuited at those
+ * layers (401/429/400) — or one matching no route (404) — still joins the
+ * caller's trace. The id is stored under its own symbol (see
+ * telemetry-context.ts): creating the telemetry response context would
+ * flip the handler-resolved workspace attribution gate.
+ */
+export function daemonInboundTraceIdCaptureMiddleware(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  try {
+    const inboundTraceId = extractInboundTraceId(req.headers);
+    if (inboundTraceId !== undefined) {
+      (res as InboundTraceIdResponse)[daemonInboundTraceIdContext] =
+        inboundTraceId;
+    }
+  } catch {
+    // Telemetry must not affect request handling.
+  }
+  next();
+}
+
 export function daemonTelemetryMiddleware(
   resolveWorkspaceCwd: (req: Request) => string | undefined,
   // Optional in-process sink for the Daemon Status dashboard's time-series
@@ -718,6 +767,25 @@ export function daemonTelemetryMiddleware(
   recordRequest?: (durationMs: number, statusCode: number) => void,
 ): (req: Request, res: Response, next: NextFunction) => void {
   const workspaceHashByCwd = new Map<string, string>();
+  // The rejected-traceparent breadcrumb is rate-limited per middleware
+  // instance like the access log: an attacker (or a broken client) can send
+  // invalid traceparent headers on every request, and an unbounded DEBUG
+  // emit per request would let crafted traffic flood the daemon log.
+  let breadcrumbTokens = TRACEPARENT_BREADCRUMB_BURST;
+  let breadcrumbRefillBaseline = performance.now();
+  const acquireBreadcrumbToken = (): boolean => {
+    const now = Math.max(performance.now(), breadcrumbRefillBaseline);
+    breadcrumbTokens = Math.min(
+      TRACEPARENT_BREADCRUMB_BURST,
+      breadcrumbTokens +
+        ((now - breadcrumbRefillBaseline) / 1_000) *
+          TRACEPARENT_BREADCRUMB_REFILL_PER_SECOND,
+    );
+    breadcrumbRefillBaseline = now;
+    if (breadcrumbTokens < 1) return false;
+    breadcrumbTokens -= 1;
+    return true;
+  };
   const resolveWorkspaceHash = (workspaceCwd: string): string => {
     const existing = workspaceHashByCwd.get(workspaceCwd);
     if (existing !== undefined) return existing;
@@ -754,10 +822,60 @@ export function daemonTelemetryMiddleware(
         : undefined;
     const deferredRuntime = getDeferredRuntimeRequestTiming(req);
     const startMs = deferredRuntime?.startedAt.getTime() ?? Date.now();
+    // With telemetry on, extract the full W3C context (span parent + forced
+    // sampling). The camelCase `traceId` access-log field is captured by
+    // daemonInboundTraceIdCaptureMiddleware (mounted pre-auth) in both
+    // modes, so one log query shape works for every deployment; with
+    // telemetry on the span-derived snake_case prefix carries the same id
+    // redundantly, while telemetry-off logs have it as their only carrier —
+    // no telemetry config, no trace backend needed.
+    let parentContext: ReturnType<typeof extractDaemonHttpTraceContext>;
+    if (isTelemetrySdkInitialized()) {
+      try {
+        parentContext = extractDaemonHttpTraceContext(req.headers);
+      } catch {
+        // Telemetry must not affect request handling.
+        parentContext = undefined;
+      }
+      try {
+        const inboundTraceparent = req.headers?.['traceparent'];
+        if (
+          !parentContext &&
+          typeof inboundTraceparent === 'string' &&
+          inboundTraceparent.length > 0 &&
+          acquireBreadcrumbToken()
+        ) {
+          // Leave a breadcrumb when a present-but-invalid header is rejected,
+          // so a broken cross-service join is diagnosable from daemon logs
+          // alone instead of requiring a request replay. Traceparent carries
+          // only trace-id/span-id/flags — no user content — so recording the
+          // rejected value is privacy-safe and shows *why* the join failed.
+          // sanitizeLogText truncates and also neutralizes control characters
+          // so a crafted header cannot forge log structure.
+          emitDaemonLog(
+            'Rejected invalid inbound traceparent header.',
+            {
+              'http.route': route.route,
+              'http.request.header.traceparent': sanitizeLogText(
+                inboundTraceparent,
+                128,
+              ),
+            },
+            {
+              eventName: 'qwen-code.daemon.traceparent.invalid',
+              severityNumber: 5, // SeverityNumber.DEBUG
+            },
+          );
+        }
+      } catch {
+        // Telemetry must not affect request handling (covers the log emit
+        // AND the header sanitization above it).
+      }
+    }
     const telemetryRes = res as TelemetryResponse;
     if (route.attribution === 'handler_resolved') {
       try {
-        telemetryRes[daemonTelemetryResponseContext] = {};
+        telemetryRes[daemonTelemetryResponseContext] ??= {};
       } catch {
         // Telemetry must not affect request handling.
       }
@@ -772,6 +890,7 @@ export function daemonTelemetryMiddleware(
           ? { permissionRequestId: route.permissionRequestId }
           : {}),
         ...(clientId ? { clientId } : {}),
+        ...(parentContext ? { parentContext } : {}),
         ...(deferredRuntime?.waitMs !== undefined
           ? {
               startTime: deferredRuntime.startedAt,

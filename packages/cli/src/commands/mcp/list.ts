@@ -11,12 +11,12 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
 import {
   MCPServerStatus,
+  createMcpClient,
   createTransport,
   ExtensionManager,
   isGatedMcpScope,
   runWithTimeout,
 } from '@qwen-code/qwen-code-core';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { assembleMcpServers } from '../../config/mcpServers.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
@@ -26,7 +26,11 @@ const COLOR_GREEN = '\u001b[32m';
 const COLOR_YELLOW = '\u001b[33m';
 const COLOR_RED = '\u001b[31m';
 const RESET_COLOR = '\u001b[0m';
-const MCP_CONNECT_TIMEOUT_MS = 5000;
+// Stdio `createMcpClient` spends up to 5s on `server/discover` before
+// falling back to `initialize`. The list probe must keep leftover
+// budget for that handshake, or silent legacy servers time out as
+// Disconnected after R13-1 started sharing the session factory.
+const MCP_CONNECT_TIMEOUT_MS = 10_000;
 
 interface McpConnectionResult {
   status: MCPServerStatus;
@@ -74,10 +78,7 @@ async function testMCPConnection(
   serverName: string,
   config: MCPServerConfig,
 ): Promise<McpConnectionResult> {
-  const client = new Client({
-    name: 'mcp-test-client',
-    version: '0.0.1',
-  });
+  const client = createMcpClient('mcp-test-client', config);
 
   let transport;
   try {
@@ -97,9 +98,9 @@ async function testMCPConnection(
       `MCP connection for ${serverName}`,
     );
 
-    // Test basic MCP protocol by pinging the server
-    await client.ping();
-
+    // Connect + version negotiation is the liveness proof. `ping` is
+    // absent from the 2026 request registry, so an unconditional ping
+    // marks working modern servers Disconnected.
     await client.close();
     return { status: MCPServerStatus.CONNECTED, timedOut: false };
   } catch (error) {
