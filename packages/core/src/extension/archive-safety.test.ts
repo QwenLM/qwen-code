@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_ARCHIVE_ENTRIES,
   MAX_ARCHIVE_EXPANDED_BYTES,
+  assertDirectorySymlinksAreSafe,
   assertTarArchiveLinksAreSafe,
 } from './archive-safety.js';
 
@@ -391,6 +392,33 @@ describe('assertTarArchiveLinksAreSafe', () => {
         assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
       ).rejects.toThrow('4 unsupported link entries');
     });
+
+    it.runIf(process.platform !== 'win32')(
+      'rejects unsafe symlinks in a restructured extracted tree',
+      async () => {
+        const directoryCase = path.join(root, 'directory-case');
+        await fs.mkdir(path.join(directoryCase, 'target'), { recursive: true });
+        await fs.symlink('target', path.join(directoryCase, 'link'));
+        await expect(
+          assertDirectorySymlinksAreSafe(directoryCase),
+        ).rejects.toThrow('unsupported link entry');
+
+        const danglingCase = path.join(root, 'dangling-case');
+        await fs.mkdir(danglingCase);
+        await fs.symlink('missing', path.join(danglingCase, 'link'));
+        await expect(
+          assertDirectorySymlinksAreSafe(danglingCase),
+        ).rejects.toThrow('unsupported link entry');
+
+        const cycleCase = path.join(root, 'cycle-case');
+        await fs.mkdir(cycleCase);
+        await fs.symlink('b', path.join(cycleCase, 'a'));
+        await fs.symlink('a', path.join(cycleCase, 'b'));
+        await expect(assertDirectorySymlinksAreSafe(cycleCase)).rejects.toThrow(
+          'unsupported link entry',
+        );
+      },
+    );
 
     it('counts materialized symlink targets toward the expanded-size limit', async () => {
       const archive = path.join(root, 'materialized-size.tar');

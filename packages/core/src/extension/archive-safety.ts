@@ -29,6 +29,8 @@ export interface TarArchiveSafetyOptions {
    * archive, instead of rejecting every link entry. Kept off by default so
    * local, npm, and release archives keep their pre-existing fail-closed
    * behavior; enable it only for the public GitHub archive fallback.
+   * Callers that move or flatten the extracted tree must then run
+   * `assertDirectorySymlinksAreSafe` against the final layout.
    *
    * Hard links stay unsupported either way: a hard-link entry names another
    * archive entry rather than a path on disk, so it needs a different
@@ -231,6 +233,8 @@ export async function assertTarArchiveLinksAreSafe(
       continue;
     }
     if (enforceResourceLimits) {
+      // copyExtension dereferences links later, so each accepted link can
+      // materialize another full copy of its target.
       expandedBytes += target.size;
       if (expandedBytes > MAX_ARCHIVE_EXPANDED_BYTES) {
         throw new Error(
