@@ -383,6 +383,22 @@ describe('assertTarArchiveLinksAreSafe', () => {
       ).rejects.toThrow('unsupported link entry');
     });
 
+    it.runIf(process.platform !== 'win32')(
+      'rejects an ambiguous literal-backslash target',
+      async () => {
+        const archive = path.join(root, 'literal-backslash.tar');
+        await writeCraftedTar(archive, [
+          createTarFileHeader('dir/file', 0),
+          createTarFileHeader('dir\\file', 0),
+          symlinkHeader('alias', 'dir\\file'),
+        ]);
+
+        await expect(
+          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+        ).rejects.toThrow('unsupported link entry');
+      },
+    );
+
     it('rejects a UNC target without requiring Windows symlink support', async () => {
       const archive = path.join(root, 'unc-target.tar');
       await writeCraftedTar(archive, [

@@ -69,13 +69,12 @@ function resolveContainedSymlinkTarget(
   entryPath: string,
   linkPath: string | undefined,
 ): string | undefined {
-  if (!linkPath) return undefined;
+  if (!linkPath || linkPath.includes('\\')) return undefined;
   const normalizedEntry = normalizeArchiveEntryPath(entryPath);
-  const normalizedLinkPath = linkPath.replaceAll('\\', '/');
   if (
     path.posix.isAbsolute(normalizedEntry) ||
     WINDOWS_ABSOLUTE_PATH.test(entryPath) ||
-    path.posix.isAbsolute(normalizedLinkPath) ||
+    path.posix.isAbsolute(linkPath) ||
     WINDOWS_ABSOLUTE_PATH.test(linkPath)
   ) {
     return undefined;
@@ -85,7 +84,7 @@ function resolveContainedSymlinkTarget(
   // `link.md -> ../real.md` does not.
   const containingDirectory = path.posix.dirname(normalizedEntry);
   const resolved = path.posix.normalize(
-    path.posix.join(containingDirectory, normalizedLinkPath),
+    path.posix.join(containingDirectory, linkPath),
   );
   if (
     resolved === '.' ||
