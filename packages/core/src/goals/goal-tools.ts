@@ -6,7 +6,10 @@
 
 import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
 import type { ToolInvocation, ToolResult } from '../tools/tools.js';
-import { GOAL_EVIDENCE_REFERENCE_LIMIT } from './goal-evidence.js';
+import {
+  capPreviewBytes,
+  GOAL_EVIDENCE_REFERENCE_LIMIT,
+} from './goal-evidence.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -32,7 +35,24 @@ export interface GoalToolConfig {
   getGoalRuntime(): GoalRuntime;
 }
 
-export type GetGoalToolParams = Record<string, never>;
+export interface GetGoalToolParams {
+  /**
+   * `summary` (default) keeps the payload small on every read: checkpoint
+   * claims collapse to a count (their previews are already catalog entries),
+   * and entries from earlier turns carry previews capped at
+   * SUMMARY_PREVIEW_BYTE_LIMIT. `full` returns the whole catalog and the
+   * checkpoint verbatim. Entry uuids are identical in both views.
+   */
+  view?: 'summary' | 'full';
+}
+
+/**
+ * Preview bytes an earlier-turn entry keeps in the summary view. Enough to
+ * recognise what a record is ("12 tests passed", "wrote src/x.ts") without
+ * re-sending the 240-byte preview on every read of a Goal that has been
+ * running for a while -- one call used to cost the whole bounded catalog.
+ */
+const SUMMARY_PREVIEW_BYTE_LIMIT = 80;
 
 export interface UpdateGoalToolParams {
   status: 'complete' | 'blocked';
@@ -96,7 +116,12 @@ class GetGoalInvocation extends BaseToolInvocation<
     ) {
       throw staleGoalTurnError();
     }
-    const payload = projectWorkerView(view, snapshot);
+    const payload = projectWorkerView(
+      view,
+      snapshot,
+      this.permit,
+      this.params.view ?? 'summary',
+    );
     return {
       llmContent: JSON.stringify(payload),
       returnDisplay: `Active goal · revision ${view.revision}`,
@@ -114,11 +139,17 @@ export class GetGoalTool extends BaseDeclarativeTool<
     super(
       GetGoalTool.Name,
       ToolDisplayNames.GET_GOAL,
-      'Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, and lastReason when one was recorded) of the session\'s most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.',
+      `Read the current Goal identity, objective, evidence cursor, and bounded evidence-reference catalog for this permitted Goal turn. The default "summary" view keeps every read small: checkpoint claims are reported as a count (each claim is already an evidenceCatalog entry with its own preview), entries from this turn and checkpoint entries keep full previews, and entries from earlier turns carry previews shortened to ${SUMMARY_PREVIEW_BYTE_LIMIT} bytes. Every entry uuid is present in both views and is valid for update_goal; request view "full" only when a shortened preview is not enough to decide what to cite. Outside a permitted Goal turn it reports "active": false together with "lastGoal", a scalar summary (goalId, revision, status, turnCount, activeTimeMs, tokensUsed, and lastReason when one was recorded) of the session's most recent Goal, so a Goal that has already stopped can still be inspected. It never returns uncited transcript history or changes Goal state. Use the result silently; do not narrate or acknowledge the retrieval to the user.`,
       Kind.Read,
       {
         type: 'object',
-        properties: {},
+        properties: {
+          view: {
+            type: 'string',
+            enum: ['summary', 'full'],
+            description: `summary (default): checkpoint claims as a count, full previews only for this turn and checkpoint entries, ${SUMMARY_PREVIEW_BYTE_LIMIT}-byte previews for earlier turns. full: the whole catalog and checkpoint verbatim. Uuids are identical in both.`,
+          },
+        },
         additionalProperties: false,
       },
     );
@@ -461,15 +492,77 @@ function staleGoalTurnError(): Error {
   return new Error(STALE_GOAL_TURN_MESSAGE);
 }
 
-function projectWorkerView(view: GoalWorkerView, snapshot: GoalSnapshotV2) {
+function projectWorkerView(
+  view: GoalWorkerView,
+  snapshot: GoalSnapshotV2,
+  permit: GoalTurnPermit,
+  detail: NonNullable<GetGoalToolParams['view']>,
+) {
+  const full = detail === 'full';
   return {
     active: true,
-    snapshot: structuredClone(snapshot),
+    view: detail,
+    snapshot: full ? structuredClone(snapshot) : summarizeSnapshot(snapshot),
     ...(view.evidenceCatalog
-      ? { evidenceCatalog: structuredClone(view.evidenceCatalog) }
+      ? {
+          evidenceCatalog: full
+            ? structuredClone(view.evidenceCatalog)
+            : summarizeCatalog(view.evidenceCatalog, permit),
+        }
       : {}),
     ...(view.verifierFeedback
       ? { verifierFeedback: view.verifierFeedback }
       : {}),
+  };
+}
+
+/**
+ * The checkpoint's claims are the largest thing a Goal record carries -- up to
+ * 32 claims of up to 2,000 characters -- and every one of them is already in
+ * the catalog as a `goal_checkpoint` entry with a preview and the same uuid.
+ * The summary keeps the checkpoint's identity and drops the duplicate text.
+ */
+function summarizeSnapshot(snapshot: GoalSnapshotV2) {
+  const goal = snapshot.goal;
+  const checkpoint = goal?.evidenceCheckpoint;
+  if (!goal || !checkpoint) return structuredClone(snapshot);
+  // Collapse the claims to their count before cloning, not after: the claims
+  // are the bulk of a checkpoint and none of them survives the summary.
+  const { claims, ...checkpointRest } = checkpoint;
+  return structuredClone({
+    ...snapshot,
+    goal: {
+      ...goal,
+      evidenceCheckpoint: { ...checkpointRest, claimCount: claims.length },
+    },
+  });
+}
+
+function summarizeCatalog(
+  catalog: NonNullable<GoalWorkerView['evidenceCatalog']>,
+  permit: GoalTurnPermit,
+) {
+  let shortenedPreviews = 0;
+  const entries = catalog.entries.map((entry) => {
+    // Checkpoint claims are the compacted proof of everything before the
+    // window, and this turn's entries are the ones a proposal cites next; both
+    // keep their full preview. Earlier turns only need to be recognisable.
+    if (
+      entry.provenance === 'goal_checkpoint' ||
+      entry.turnId === permit.turnId
+    ) {
+      return { ...entry };
+    }
+    const preview = capPreviewBytes(entry.preview, SUMMARY_PREVIEW_BYTE_LIMIT);
+    if (preview !== entry.preview) shortenedPreviews += 1;
+    return { ...entry, preview };
+  });
+  // Clone only what survives the summary; the entries above are rebuilt from
+  // the originals, so cloning them first would allocate and drop the copy.
+  const { entries: _entries, ...catalogRest } = catalog;
+  return {
+    ...structuredClone(catalogRest),
+    entries,
+    ...(shortenedPreviews > 0 ? { shortenedPreviews } : {}),
   };
 }

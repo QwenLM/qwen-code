@@ -8255,7 +8255,7 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.getStats).toHaveBeenCalled();
     // Docked right panel on the main chat view renders in the container.
     expect(container.textContent).toContain('Token Usage');
-    expect(container.textContent).toContain('qwen-plus (hybrid)');
+    expect(container.textContent).toContain('qwen-plus::hybrid');
   });
 
   it('wires the composer context ring from the connection and opens /context on click', async () => {
@@ -17950,7 +17950,7 @@ describe('App session callbacks', () => {
     // The right panel (floating drawer on split view) opened with the token
     // usage tab and its live data, portaled into document.body.
     expect(document.body.textContent).toContain('Token Usage');
-    expect(document.body.textContent).toContain('qwen-plus (hybrid)');
+    expect(document.body.textContent).toContain('qwen-plus::hybrid');
     expect(document.body.textContent).toContain('600K');
   });
 
