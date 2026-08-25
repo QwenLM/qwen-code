@@ -247,6 +247,8 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   Artifact: 'artifact',
   record_artifact: 'record_artifact',
   RecordArtifact: 'record_artifact',
+  report_findings: 'report_findings',
+  ReportFindings: 'report_findings',
   request_shutdown: 'request_shutdown',
   RequestShutdown: 'request_shutdown',
 
