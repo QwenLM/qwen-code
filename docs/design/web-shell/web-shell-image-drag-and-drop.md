@@ -510,8 +510,8 @@ BMP 以 `image/bmp` 进入缩略图 data URL 和 daemon image block。Core 的
 > 及其 BMP 尺寸解析）已作为孤儿代码删除。BMP 支持现在仅依赖 `SUPPORTED_IMAGE_MIME_TYPES`
 > 接受清单与 converter 透传；token 计数使用 `compactionInputSlimming.ts` 中的固定
 > `DEFAULT_IMAGE_TOKEN_ESTIMATE`。下文对 BMP 路径的 E2E/人工验收要求不变。
-浏览器若不能解码缩略图，不影响附件数据传输，但 E2E 必须覆盖 Chromium 解码，
-Firefox/Linux 必须完成人工验收。
+> 浏览器若不能解码缩略图，不影响附件数据传输，但 E2E 必须覆盖 Chromium 解码，
+> Firefox/Linux 必须完成人工验收。
 
 提交后的 user transcript 还经过 `isSafeImageSrc`，因此其被动位图 data-URI allowlist 必须
 加入精确的 `image/bmp;base64,`，否则 composer 预览可见而 user message 会静默隐藏 BMP。

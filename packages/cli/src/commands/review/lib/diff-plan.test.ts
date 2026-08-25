@@ -56,7 +56,7 @@ describe('classifyPath', () => {
   it('recognises generated and vendored files', () => {
     const paths = [
       'package-lock.json',
-      'packages/desktop/bun.lock',
+      'packages/desktop-shell/bun.lock',
       'packages/vscode-ide-companion/NOTICES.txt',
       'dist/bundle.min.js',
       'vendor/lib.go',

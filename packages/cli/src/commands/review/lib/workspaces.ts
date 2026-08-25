@@ -79,10 +79,10 @@ export function workspaceDirFor(
   const norm = filePath.replace(/^\.\//, '');
   let owner: string | null = null;
   // The owners that came before the current one — where a negation falls back
-  // TO. When a negation excludes a NESTED member (`packages/desktop/*` claimed
-  // `packages/desktop/src`, then `!packages/desktop/src` excluded it), the
+  // TO. When a negation excludes a NESTED member (`packages/desktop-shell/*` claimed
+  // `packages/desktop-shell/src`, then `!packages/desktop-shell/src` excluded it), the
   // still-included outer member keeps owning the file: npm keeps
-  // `packages/desktop` in the graph, and its test runner collects `src/**`.
+  // `packages/desktop-shell` in the graph, and its test runner collects `src/**`.
   // Falling back to the previous owner is what lets that suite feel the
   // change instead of the file being declared felt by nothing.
   const previous: Array<string | null> = [];
@@ -111,15 +111,15 @@ export function workspaceDirFor(
       }
     } else if (dir === owner) {
       // A negation only excludes the file when it excludes the member that
-      // currently owns it. `!packages/desktop/*` matches a deeper pseudo-dir
+      // currently owns it. `!packages/desktop-shell/*` matches a deeper pseudo-dir
       // than `packages/*` does, and npm keeps the member itself in the graph
       // (a glob with a subpath cannot match a dir with no subpath), so the
       // member's suite can still feel a change there. When the negation DOES
       // exclude the owner, ownership falls back to the previous, outer member
       // — only a negation of THAT one leaves the file owned by nothing. (The
       // pop does not re-check the popped owner against negations already
-      // walked past: a contrived ordering like `!packages/desktop` BEFORE
-      // `!packages/desktop/src` can resurrect an excluded owner. Realistic
+      // walked past: a contrived ordering like `!packages/desktop-shell` BEFORE
+      // `!packages/desktop-shell/src` can resurrect an excluded owner. Realistic
       // orderings — the outer negation written last — are exact.)
       owner = previous.pop() ?? null;
     }
@@ -132,11 +132,11 @@ export function workspaceDirFor(
  * every member.
  *
  * Such a file belongs to a workspace the npm graph does not contain — this
- * repo's `!packages/desktop` is a separate bun workspace with its own
+ * repo's `!packages/desktop-shell` is a separate toolchain with its own
  * lockfile — so no included workspace's tests can feel a change to it, and it
  * must not earn the incomplete-scope caveat a genuinely outside file does. A
  * file whose nested member is negated while an OUTER member survives
- * (`!packages/desktop/src` under `packages/desktop`) is NOT excluded here:
+ * (`!packages/desktop-shell/src` under `packages/desktop-shell`) is NOT excluded here:
  * `workspaceDirFor` falls back to the outer member, whose suite collects it.
  */
 export function isNegationExcluded(
@@ -351,8 +351,8 @@ export function readWorkspacePackages(root: string): WorkspaceGraph {
     if (!existsSync(manifest)) continue;
     if (workspaceDirFor(`${dir}/package.json`, globs) !== dir) {
       // A directory a negation excludes is not a workspace, and its own
-      // `package.json` says nothing about that — `packages/desktop` is a
-      // separate bun workspace with its own lockfile, and building it from
+      // `package.json` says nothing about that — `packages/desktop-shell` is a
+      // separate toolchain with its own lockfile, and building it from
       // here fails. The tell: the POSITIVE globs alone still make the dir its
       // own owner, so a negation is what took the ownership away.
       const positives = globs.filter((g) => !g.startsWith('!'));
