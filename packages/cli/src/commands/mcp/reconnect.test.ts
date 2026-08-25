@@ -630,4 +630,59 @@ describe('mcp reconnect command', () => {
       expect(mockProcessExit).toHaveBeenCalledWith(1);
     });
   });
+
+  describe('workspace trust in the throwaway config (issue #9944)', () => {
+    // createMinimalConfig must carry the real workspace trust state so the
+    // untrusted-skip branch is reachable and consistent with a normal
+    // session's discovery gate, which skips MCP servers in untrusted folders.
+    it('passes an untrusted workspace to the reconnect config', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(MockedConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trustedFolder: false,
+        }),
+      );
+    });
+
+    it('defaults to trusted when workspace trust is undecided', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+      mockedIsWorkspaceTrusted.mockReturnValue({
+        isTrusted: undefined,
+        source: undefined,
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(MockedConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trustedFolder: true,
+        }),
+      );
+    });
+  });
 });

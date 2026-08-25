@@ -78,6 +78,12 @@ async function createMinimalConfig(): Promise<Config> {
     pendingMcpServers: getPendingGatedMcpServers(mcpServers, cwd),
     fileDiscoveryService: fileService,
     mcpServerCommand: settings.merged.mcp?.serverCommand,
+    // Mirror a real session's trust gate: discovery skips MCP servers in an
+    // untrusted workspace, so the throwaway Config must carry the same trust
+    // state. Without it `isTrustedFolder()` defaults to true here, the
+    // untrusted-skip reporting below becomes unreachable, and this command
+    // would attempt connections a normal session would not (issue #9944).
+    trustedFolder: isWorkspaceTrusted(settings.merged).isTrusted ?? true,
     ...(fileFiltering !== undefined ? { fileFiltering } : {}),
   });
 
