@@ -17,6 +17,7 @@ import {
   isTempDirPath,
 } from '../utils/paths.js';
 import { FatalConfigError, isNodeError } from '../utils/errors.js';
+import { isPidAlive } from '../utils/process-liveness.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -676,6 +677,15 @@ export class Storage {
   private static readonly ORPHAN_STALE_AGE_MS = 24 * 60 * 60 * 1000;
 
   /**
+   * Staleness for the cross-process entry lock — deliberately NOT
+   * ORPHAN_STALE_AGE_MS. The longest legitimate hold is one rmSync of a
+   * large entry (minutes); a holder SIGKILLed mid-deletion — the crash
+   * class this feature exists for — must self-heal quickly, not block
+   * every resume of the entry for a day.
+   */
+  private static readonly LOCK_STALE_AGE_MS = 30 * 60 * 1000;
+
+  /**
    * Marker file recording when an entry's non-temp cwds were first seen
    * gone. Its mtime is the grace anchor; a resume claim renews the grace
    * episode before reading the transcript.
@@ -686,16 +696,28 @@ export class Storage {
    * Claims a local transcript for reading by refreshing an existing cleanup
    * marker. Cleanup takes the same cross-process lock before its final checks,
    * so it either deletes first or observes the renewed grace window.
+   * Fresh (unmarked) entries still take the lock non-blockingly for the
+   * duration of the read, so the shutdown deletion leg — which takes the
+   * same lock before rmSync — observes the reader and bails.
    */
   async runWithProjectDirReadClaim<T>(operation: () => Promise<T>): Promise<T> {
     const entryPath = this.getProjectDir();
     const markerPath = path.join(entryPath, Storage.ORPHAN_MARKER_FILE);
+    let marked: boolean;
     try {
-      if (!fs.statSync(entryPath).isDirectory() || !fs.existsSync(markerPath)) {
-        return operation();
-      }
+      marked =
+        fs.statSync(entryPath).isDirectory() && fs.existsSync(markerPath);
     } catch {
       return operation();
+    }
+    if (!marked) {
+      const release = await Storage.acquireProjectDirLock(entryPath, false);
+      if (!release) return operation();
+      try {
+        return await operation();
+      } finally {
+        await release().catch(() => {});
+      }
     }
     const release = await Storage.acquireProjectDirLock(entryPath, true);
     if (!release) return operation();
@@ -704,8 +726,11 @@ export class Storage {
         const now = new Date();
         fs.utimesSync(markerPath, now, now);
       }
-    } catch (error) {
-      if (!(isNodeError(error) && error.code === 'ENOENT')) throw error;
+    } catch {
+      // Renewal is best-effort: a failed utimes (ENOENT when the sweep
+      // races us, EROFS/EACCES on a degraded mount, EIO/ENOSPC) must not
+      // abort the read — the same filesystem error would block the
+      // sweep's rmSync equally, so the claim-less read is safe.
     } finally {
       await release().catch(() => {});
     }
@@ -933,7 +958,7 @@ export class Storage {
         path.join(lockRoot, path.basename(entryPath)),
         {
           realpath: false,
-          stale: Storage.ORPHAN_STALE_AGE_MS,
+          stale: Storage.LOCK_STALE_AGE_MS,
           update: 60_000,
           retries: waitForLock
             ? { retries: 20, minTimeout: 10, maxTimeout: 100 }
@@ -941,18 +966,51 @@ export class Storage {
         },
       );
     } catch (error) {
+      // ELOCKED (retry budget out) and EEXIST (lock raced into existence)
+      // mean contention, not failure: a read claim degrades to the
+      // unclaimed read, and a deletion caller keeps the entry.
       if (
         waitForLock &&
         !(
           isNodeError(error) &&
           (error.code === 'EACCES' ||
             error.code === 'EPERM' ||
-            error.code === 'EROFS')
+            error.code === 'EROFS' ||
+            error.code === 'ELOCKED' ||
+            error.code === 'EEXIST')
         )
       ) {
         throw error;
       }
       return undefined;
+    }
+  }
+
+  /**
+   * Non-blocking variant of the entry lock for deletion paths: returns
+   * undefined when another holder — a claimed transcript reader or a
+   * concurrent sweep — has it, in which case the caller keeps the entry.
+   */
+  static tryAcquireProjectDirLock(
+    entryPath: string,
+  ): Promise<(() => Promise<void>) | undefined> {
+    return Storage.acquireProjectDirLock(entryPath, false);
+  }
+
+  /**
+   * True when the entry carries an orphan marker still inside its grace
+   * window — a resume claim renewed it, so deletion paths must bail.
+   */
+  static hasFreshOrphanMarker(entryPath: string): boolean {
+    try {
+      return (
+        Date.now() -
+          fs.statSync(path.join(entryPath, Storage.ORPHAN_MARKER_FILE))
+            .mtimeMs <=
+        Storage.ORPHAN_STALE_AGE_MS
+      );
+    } catch {
+      return false;
     }
   }
 
@@ -1270,7 +1328,7 @@ export class Storage {
         if (
           typeof parsed.pid === 'number' &&
           Number.isInteger(parsed.pid) &&
-          Storage.isPidAlive(parsed.pid)
+          isPidAlive(parsed.pid)
         ) {
           return true;
         }
@@ -1279,21 +1337,6 @@ export class Storage {
       }
     }
     return false;
-  }
-
-  private static isPidAlive(pid: number): boolean {
-    // Corrupted sidecars can carry 0/-1, and on POSIX kill(0,0) targets
-    // the caller's own process group — never treat those as live.
-    if (pid <= 0) return false;
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      // ESRCH/EPERM both mean "not our session": either the pid is gone,
-      // or it belongs to another uid — in this per-user runtime tree
-      // that cannot be the session that wrote the sidecar.
-      return false;
-    }
   }
 
   /**

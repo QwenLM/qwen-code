@@ -5729,7 +5729,7 @@ export class Config {
               recordedCwds.length > 0 &&
               recordedCwds.every((cwd) => isTempDirPath(cwd)) &&
               !Storage.hasLiveSession(projectDir, false);
-            if (disposable) {
+            if (disposable && !Storage.hasFreshOrphanMarker(projectDir)) {
               try {
                 await this.salvageSessionUsage(projectDir);
               } catch {
@@ -5745,19 +5745,35 @@ export class Config {
               // its claim has its sidecar on disk before any record
               // append, so the windowless liveness gate sees it, and
               // the ownership gate catches differently-named artifacts.
-              if (
-                !Storage.hasLiveSession(projectDir, false) &&
-                Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)
-              ) {
-                fs.rmSync(projectDir, {
-                  recursive: true,
-                  force: true,
-                });
-                this.debugLogger.info(
-                  `Orphan project snapshot removed at shutdown: ${path.basename(
-                    projectDir,
-                  )}`,
-                );
+              // The resume-read fence applies here too: a fresh orphan
+              // marker means a reader renewed its grace, and the entry
+              // lock is held by a claimed transcript reader (readers
+              // hold it for the whole read) or a concurrent sweep.
+              const releaseLock =
+                await Storage.tryAcquireProjectDirLock(projectDir);
+              if (releaseLock) {
+                try {
+                  if (
+                    !Storage.hasFreshOrphanMarker(projectDir) &&
+                    !Storage.hasLiveSession(projectDir, false) &&
+                    Storage.containsOnlySessionArtifacts(
+                      projectDir,
+                      this.sessionId,
+                    )
+                  ) {
+                    fs.rmSync(projectDir, {
+                      recursive: true,
+                      force: true,
+                    });
+                    this.debugLogger.info(
+                      `Orphan project snapshot removed at shutdown: ${path.basename(
+                        projectDir,
+                      )}`,
+                    );
+                  }
+                } finally {
+                  await releaseLock().catch(() => {});
+                }
               }
             }
           }

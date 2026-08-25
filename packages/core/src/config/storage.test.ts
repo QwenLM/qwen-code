@@ -20,6 +20,7 @@ const mockRealpathSync = vi.hoisted(() =>
 );
 const mockReaddirSync = vi.hoisted(() => vi.fn());
 const mockMkdirSync = vi.hoisted(() => vi.fn());
+const mockUtimesSync = vi.hoisted(() => vi.fn());
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -35,11 +36,16 @@ vi.mock('node:fs', async (importOriginal) => {
   mockMkdirSync.mockImplementation(
     (...args: Parameters<typeof actual.mkdirSync>) => actual.mkdirSync(...args),
   );
+  mockUtimesSync.mockImplementation(
+    (...args: Parameters<typeof actual.utimesSync>) =>
+      actual.utimesSync(...args),
+  );
   const mocked = {
     ...actual,
     realpathSync: mockRealpathSync,
     readdirSync: mockReaddirSync,
     mkdirSync: mockMkdirSync,
+    utimesSync: mockUtimesSync,
   };
   return {
     ...mocked,
@@ -893,6 +899,99 @@ describe('Storage – cleanOrphanProjectDirs', () => {
 
     expect(actualFs.existsSync(resumeStorage.getProjectDir())).toBe(true);
     expect(result.removed).not.toContain(entryName);
+  });
+
+  it('degrades to the unclaimed read when the entry lock is contended (R18-1)', async () => {
+    // A crashed sweep or a slow multi-GiB rmSync can hold the entry
+    // lock; the read claim must wait out its retry budget and then
+    // degrade to the unclaimed read instead of failing the resume.
+    const resumeStorage = new Storage(goneCwd);
+    const entryName = path.basename(resumeStorage.getProjectDir());
+    writeSession(entryName, goneCwd);
+    actualFs.writeFileSync(
+      path.join(projectsDir, entryName, '.qwen-orphan-since'),
+      '',
+    );
+    const lockRoot = path.join(baseDir, 'tmp', 'orphan-cleanup-locks');
+    const lockDir = path.join(lockRoot, `${entryName}.lock`);
+    actualFs.mkdirSync(lockDir, { recursive: true });
+    try {
+      const result = await resumeStorage.runWithProjectDirReadClaim(
+        async () => 'READ_OK',
+      );
+      expect(result).toBe('READ_OK');
+    } finally {
+      actualFs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  it('reads on when the marker renewal fails with a permission error (R18-2)', async () => {
+    // Renewal is best-effort: a marker left root-owned by a sudo run
+    // (or an entry on a read-only remount) makes utimes fail while the
+    // transcript stays readable — the read must not be aborted.
+    const resumeStorage = new Storage(goneCwd);
+    const entryName = path.basename(resumeStorage.getProjectDir());
+    writeSession(entryName, goneCwd);
+    actualFs.writeFileSync(
+      path.join(projectsDir, entryName, '.qwen-orphan-since'),
+      '',
+    );
+    const utimesSpy = mockUtimesSync.mockImplementation(() => {
+      const error = new Error(
+        'EPERM: operation not permitted, utimes',
+      ) as NodeJS.ErrnoException;
+      error.code = 'EACCES';
+      throw error;
+    });
+    try {
+      const result = await resumeStorage.runWithProjectDirReadClaim(
+        async () => 'READ_OK',
+      );
+      expect(result).toBe('READ_OK');
+    } finally {
+      utimesSpy.mockImplementation(
+        (...args: Parameters<typeof actualFs.utimesSync>) =>
+          actualFs.utimesSync(...args),
+      );
+    }
+  });
+
+  it('holds the entry lock for the whole read of a fresh entry (R18-4)', async () => {
+    // Fresh entries have no orphan marker to renew, so the read claim
+    // takes the entry lock non-blockingly for the duration of the read:
+    // the shutdown deletion leg takes the same lock before rmSync and
+    // must be able to observe the reader.
+    const resumeStorage = new Storage(aliveCwd);
+    const entryName = path.basename(resumeStorage.getProjectDir());
+    writeSession(entryName, aliveCwd);
+    const lockDir = path.join(
+      baseDir,
+      'tmp',
+      'orphan-cleanup-locks',
+      `${entryName}.lock`,
+    );
+    let heldDuringRead = false;
+    await resumeStorage.runWithProjectDirReadClaim(async () => {
+      heldDuringRead = actualFs.existsSync(lockDir);
+    });
+    expect(heldDuringRead).toBe(true);
+    expect(actualFs.existsSync(lockDir)).toBe(false);
+  });
+
+  it('treats an EPERM sidecar pid as live (R18-3)', async () => {
+    // pid 1 is root-owned: kill(1, 0) by a non-root sweep fails EPERM,
+    // which the shared liveness helper reads as alive — a false-dead
+    // here would let one uid's sweep delete another's live session out
+    // of a HOME-keyed (not uid-keyed) runtime tree.
+    const entry = 'eperm-sidecar-sess';
+    writeSession(entry, aliveCwd);
+    actualFs.writeFileSync(
+      path.join(projectsDir, entry, 'chats', 'session-1.runtime.json'),
+      JSON.stringify({ pid: 1 }),
+    );
+    expect(Storage.hasLiveSession(path.join(projectsDir, entry), false)).toBe(
+      true,
+    );
   });
 
   it('keeps fresh entries even when their cwd is gone (grace window)', async () => {

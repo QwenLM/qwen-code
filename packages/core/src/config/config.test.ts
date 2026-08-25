@@ -7764,6 +7764,7 @@ describe('Server Config (config.ts)', () => {
   describe('Config shutdown temp project cleanup (issue #7906)', () => {
     let rmSpy: MockInstance;
     let tmpdirSpy: MockInstance | undefined;
+    let lockSpy: MockInstance;
 
     beforeEach(() => {
       // Pin the temp root: the merge-queue legs put the ambient temp
@@ -7784,10 +7785,18 @@ describe('Server Config (config.ts)', () => {
         path.join(os.tmpdir(), 'qwen-shutdown-test-runtime'),
       );
       rmSpy = vi.spyOn(fs, 'rmSync').mockImplementation(() => undefined);
+      // The deletion leg takes the entry lock non-blockingly; this
+      // file's fs mock makes the real proper-lockfile call
+      // unpredictable, so grant the lock by default and let individual
+      // tests simulate contention.
+      lockSpy = vi
+        .spyOn(Storage, 'tryAcquireProjectDirLock')
+        .mockResolvedValue(async () => {});
     });
 
     afterEach(() => {
       rmSpy.mockRestore();
+      lockSpy.mockRestore();
       tmpdirSpy?.mockRestore();
       Storage.setRuntimeBaseDir(null);
     });
@@ -7905,6 +7914,83 @@ describe('Server Config (config.ts)', () => {
         await config.shutdown();
 
         expect(liveSpy).toHaveBeenCalledTimes(2);
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+        liveSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when a resume claim renewed the orphan marker (R18-4)', async () => {
+      // The resume-read fence must not be bypassed by the shutdown leg:
+      // a fresh marker means a reader renewed its grace episode, so the
+      // leg bails both before salvage and in the final re-check.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(true);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      const liveSpy = vi
+        .spyOn(Storage, 'hasLiveSession')
+        .mockReturnValue(false);
+      const markerSpy = vi
+        .spyOn(Storage, 'hasFreshOrphanMarker')
+        .mockReturnValue(true);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-marker-fence-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+        liveSpy.mockRestore();
+        markerSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when the entry lock is held by a reader (R18-4)', async () => {
+      // Claimed transcript readers hold the entry lock for the whole
+      // read; the leg takes it non-blockingly and must bail when it is
+      // held instead of deleting out from under the read.
+      lockSpy.mockResolvedValueOnce(undefined);
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(true);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      const liveSpy = vi
+        .spyOn(Storage, 'hasLiveSession')
+        .mockReturnValue(false);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-lock-fence-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
         expect(rmSpy).not.toHaveBeenCalledWith(
           config.storage.getProjectDir(),
           expect.anything(),
