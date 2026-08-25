@@ -147,12 +147,13 @@ jobs:
 
       - name: 'Verify Aliyun OSS Release Assets'
         env:
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          ALIYUN_OSS_ACCELERATE_BASE_URL: "${{ vars.ALIYUN_OSS_ACCELERATE_BASE_URL || 'https://qwen-code-assets.oss-accelerate.aliyuncs.com' }}"
           RELEASE_TAG: '${{ env.RELEASE_TAG }}'
         run: |-
           set -euo pipefail
 
-          npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"
+          # Accelerated read-back; the public path stays canaried by the small hosted-asset verify below.
+          npm run verify:installation-release -- --base-url "${ALIYUN_OSS_ACCELERATE_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"
 
       - name: 'Sync Hosted Installation Assets to Aliyun OSS'
         if: |-

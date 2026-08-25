@@ -161,11 +161,12 @@ jobs:
 
       - name: 'Verify versioned assets on Aliyun OSS'
         env:
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          ALIYUN_OSS_ACCELERATE_BASE_URL: "${{ vars.ALIYUN_OSS_ACCELERATE_BASE_URL || 'https://qwen-code-assets.oss-accelerate.aliyuncs.com' }}"
           VERSION: '${{ steps.release.outputs.version }}'
         run: |
           set -euo pipefail
-          base="$ALIYUN_OSS_PUBLIC_BASE_URL/live-host/v${VERSION}"
+          # Accelerated read-back; the public path stays canaried by the small latest-manifest verify below.
+          base="$ALIYUN_OSS_ACCELERATE_BASE_URL/live-host/v${VERSION}"
           directory="$(mktemp -d)"
           trap 'rm -rf "$directory"' EXIT
           for asset in Qwen-Live-Host-manifest.json Qwen-Live-Host-arm64.zip Qwen-Live-Host-x64.zip; do

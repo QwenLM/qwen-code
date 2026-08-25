@@ -165,11 +165,12 @@ jobs:
 
       - name: 'Verify versioned assets on Aliyun OSS'
         env:
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          ALIYUN_OSS_ACCELERATE_BASE_URL: "${{ vars.ALIYUN_OSS_ACCELERATE_BASE_URL || 'https://qwen-code-assets.oss-accelerate.aliyuncs.com' }}"
           VERSION: '${{ steps.release.outputs.version }}'
         run: |
           set -euo pipefail
-          base="${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}"
+          # Accelerated read-back; the public path stays canaried by the small latest-manifest verify below.
+          base="${ALIYUN_OSS_ACCELERATE_BASE_URL}/desktop/v${VERSION}"
           directory="$(mktemp -d)"
           trap 'rm -rf "$directory"' EXIT
           cp dist/desktop/SHA256SUMS.txt "$directory/SHA256SUMS.txt"

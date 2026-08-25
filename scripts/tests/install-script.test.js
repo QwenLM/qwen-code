@@ -2336,7 +2336,7 @@ describe('standalone release packaging', () => {
       'curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}"',
     );
     expect(ossWorkflow).toContain(
-      'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"',
+      'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_ACCELERATE_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"',
     );
     expect(ossWorkflow).toContain(
       'latest_version="$(curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d',
