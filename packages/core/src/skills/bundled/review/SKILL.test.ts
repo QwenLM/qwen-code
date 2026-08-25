@@ -1301,6 +1301,14 @@ describe('bundled review skill', () => {
       'the tracked tree is clean, but untracked files were not enumerated (--no-untracked)',
     );
     expect(body).toContain('for the `--no-untracked` shape do NOT re-run');
+    // The round-16 shape: the SAME flag withholds the two incremental stops
+    // — their comparisons cover tracked content only, and the gate admits no
+    // narrower round than the cache, so a brand-new file is invisible to
+    // both. Same signature, its own sentence, and the same no-re-run branch
+    // the clean-tree shape rides.
+    expect(body).toContain(
+      'The incremental scope kept nothing to review, but untracked files were not enumerated (--no-untracked)',
+    );
   });
   it('keys the local cache write to the marker\u2019s withholding conditions', () => {
     // R8-2: the local fail-closed LIST was "completed" three times and a

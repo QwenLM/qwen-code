@@ -680,6 +680,58 @@ describe('capture-local — the decided stops are machine-readable', () => {
     const second = capture({ untracked: false });
     expect(second['nothingToReview']).toBeUndefined();
   });
+
+  it('withholds BOTH incremental stops under --no-untracked, out loud', () => {
+    // R16-1: the unchanged-since-last-round and scope-emptied stops lacked
+    // the `--no-untracked` exclusion their sibling clean-tree stop carries.
+    // The anchor gate's untracked clause only refuses a NARROWER round than
+    // the cache, so two narrow rounds pass it and either stop decides
+    // "nothing to review" over untracked content neither round enumerated:
+    // round 1 promotes a candidate with `untracked: false`, new untracked
+    // work appears, the tracked content stays byte-identical (or the change
+    // is discarded), and the loop stops while the brand-new file is never
+    // seen. Both stops follow the sibling: withheld, out loud.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a', untracked: false }),
+      'model-a',
+    );
+    // Brand-new untracked work, invisible to BOTH rounds.
+    write('pending-work.ts', 'export const untrackedEdit = 1;\n');
+
+    // Arm 1: tracked content byte-identical — unchanged-since-last-round.
+    const unchanged = capture({
+      cache: cachePath,
+      model: 'model-a',
+      untracked: false,
+    });
+    expect(unchanged.incremental).toBeDefined();
+    expect(unchanged.chunks.length).toBe(0);
+    expect(unchanged['nothingToReview']).toBeUndefined();
+    expect(
+      existsSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json')),
+    ).toBe(false);
+    const err = stderrLines.join('\n');
+    expect(err).toContain(
+      'untracked files were not enumerated (--no-untracked)',
+    );
+    expect(err).toContain('NOT a decided nothing-to-review');
+
+    // Arm 2: discard the tracked changes — scope-emptied.
+    stderrLines.length = 0;
+    git('checkout', '--', '.');
+    const emptied = capture({
+      cache: cachePath,
+      model: 'model-a',
+      untracked: false,
+    });
+    expect(emptied.incremental).toBeDefined();
+    expect(emptied.chunks.length).toBe(0);
+    expect(emptied['nothingToReview']).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain(
+      'untracked files were not enumerated (--no-untracked)',
+    );
+  });
 });
 
 describe('capture-local — --cache takes the DIRECTORY', () => {
