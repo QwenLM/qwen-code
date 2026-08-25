@@ -18,6 +18,9 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   buildSelectionIdentity,
+  launchPlanToken,
+  planIdentityToken,
+  planTokenLine,
   selectionDigest,
   selectionDrift,
   SELECTION_SCHEMA_VERSION,
@@ -137,6 +140,61 @@ describe('selectionDrift', () => {
   it('refuses a `selection` that is not an object', () => {
     expect(selectionDrift('nope', DIFF, CHUNKS)).toMatch(/not an object/);
     expect(selectionDrift([identity], DIFF, CHUNKS)).toMatch(/not an object/);
+  });
+});
+
+describe('planIdentityToken', () => {
+  const identity = buildSelectionIdentity(DIFF, CHUNKS, 200);
+
+  it('is null on any plan without a readable identity', () => {
+    // The seal fails open on token absence — absence of evidence, the same
+    // rule `selectionDrift` states. Unknown schemas and garbled shapes are
+    // not readable either: a token derived from a field the reader cannot
+    // interpret would seal records to a plan the reader refused.
+    expect(planIdentityToken(undefined)).toBeNull();
+    expect(planIdentityToken(null)).toBeNull();
+    expect(planIdentityToken('nope')).toBeNull();
+    expect(planIdentityToken([identity])).toBeNull();
+    expect(
+      planIdentityToken({
+        ...identity,
+        schemaVersion: 'qwen.review-selection/v2',
+      }),
+    ).toBeNull();
+    expect(
+      planIdentityToken({ schemaVersion: SELECTION_SCHEMA_VERSION }),
+    ).toBeNull();
+  });
+
+  it('moves when the diff text moves — the modify-only re-plan', () => {
+    const moved = buildSelectionIdentity(
+      `${DIFF}+one more line\n`,
+      CHUNKS,
+      201,
+    );
+    expect(planIdentityToken(moved)).not.toBe(planIdentityToken(identity));
+  });
+
+  it('moves when the boundaries move — the re-chunk', () => {
+    const rechunked = buildSelectionIdentity(
+      DIFF,
+      [chunk(1, 1, 120), chunk(2, 121, 200)],
+      200,
+    );
+    expect(planIdentityToken(rechunked)).not.toBe(planIdentityToken(identity));
+  });
+
+  it('is a short hex token', () => {
+    expect(planIdentityToken(identity)).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it('writes and reads back through the launch line', () => {
+    const line = planTokenLine(identity);
+    expect(line).toBe(`Plan identity: ${planIdentityToken(identity)}`);
+    expect(launchPlanToken(`before\n${line}\nafter`)).toBe(
+      planIdentityToken(identity),
+    );
+    expect(launchPlanToken('a launch with no marker')).toBeNull();
   });
 });
 

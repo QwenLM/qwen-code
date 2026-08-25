@@ -72,6 +72,8 @@ import {
   SHELL_MODEL_LAYERS,
 } from './lib/audit-layers.js';
 import { REVERSE_AUDIT_IDENTITY } from './lib/layer-audit-gate.js';
+import { buildSelectionIdentity, planIdentityToken } from './lib/selection.js';
+import type { DiffChunk } from './lib/diff-plan.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
@@ -3909,6 +3911,31 @@ describe('buildChunkLaunchPrompt — the 87-kilobyte problem', () => {
     const p = buildChunkLaunchPrompt(PLAN, 13, '/tmp/x.brief.md');
     expect(p).toContain('say what you examined');
     expect(p).not.toMatch(/say ["`\u2018\u201c]No issues found/i);
+  });
+
+  it('carries the plan identity token when the plan carries an identity', () => {
+    // A same-session re-plan keeps the count and can keep every window, so
+    // the coverage seal cannot order a fence-surviving record by those —
+    // it orders by this token instead (see lib/selection.ts). The builder
+    // is the token's only writer; the seal reads it back.
+    const selection = buildSelectionIdentity(
+      'diff --git a/a.ts b/a.ts\n@@ -1,1 +1,1 @@\n+x\n',
+      PLAN.chunks as unknown as DiffChunk[],
+      4202,
+    );
+    const p = buildChunkLaunchPrompt(
+      { ...PLAN, selection },
+      13,
+      '/tmp/x.brief.md',
+    );
+    expect(p).toContain(`Plan identity: ${planIdentityToken(selection)}`);
+  });
+
+  it('writes no token line for a plan without an identity', () => {
+    // Hand-edited and degraded plans carry no identity; their launches keep
+    // the older seals, so the builder must not invent a token.
+    const p = buildChunkLaunchPrompt(PLAN, 13, '/tmp/x.brief.md');
+    expect(p).not.toContain('Plan identity:');
   });
 });
 

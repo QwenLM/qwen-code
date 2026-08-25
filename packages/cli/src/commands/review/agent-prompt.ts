@@ -96,6 +96,7 @@ import {
 } from './lib/repository-context.js';
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
 import { SHA_RE } from './lib/ledger.js';
+import { planTokenLine } from './lib/selection.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
@@ -178,6 +179,14 @@ interface PlanReport {
   budget?: { agentToolBudget?: unknown; reverseAuditRounds?: unknown };
   /** Present only on a `--since`-scoped round — see incrementalScopeOf. */
   incremental?: unknown;
+  /**
+   * The plan's capture identity (see lib/selection.ts). The chunk launch
+   * writes its epoch token from it — a same-session re-plan keeps the count
+   * and can keep every window, so the token is the one signal that moves
+   * with every re-plan, and the coverage seal reads it back to order
+   * fence-surviving records against the plan they were written for.
+   */
+  selection?: unknown;
 }
 
 /**
@@ -953,10 +962,16 @@ export function buildChunkLaunchPrompt(
 ): string {
   const { diffPath, chunk, total } = chunkFrom(report, id);
   const { offset, limit } = diffWindow(chunk.startLine, chunk.endLine);
+  // The plan's epoch: a same-session re-plan can keep the count and every
+  // window, so the coverage seal cannot order a fence-surviving record by
+  // those — it orders by this token instead (see lib/selection.ts). Absent
+  // on a plan with no identity: those launches keep the older seals.
+  const tokenLine = planTokenLine(report.selection);
 
   return [
     `You are review agent \`chunk ${chunk.id} of ${total}\` — the territory agent for ` +
       `lines ${chunk.startLine}-${chunk.endLine} of the diff.`,
+    ...(tokenLine === null ? [] : [tokenLine]),
     '',
     '**Your brief is a file. Read it first — it is the whole of your instructions,',
     'and nothing in this message replaces it.**',

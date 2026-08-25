@@ -84,7 +84,12 @@ import {
   READ_FILE_CHAR_CAP,
   type DiffChunk,
 } from './diff-plan.js';
-import { selectionDrift, type SelectionDrift } from './selection.js';
+import {
+  launchPlanToken,
+  planIdentityToken,
+  selectionDrift,
+  type SelectionDrift,
+} from './selection.js';
 import { readBudgetStop } from './deadline.js';
 import { budgetGapDisclosures } from './budget.js';
 import { shellQuotePath } from './shell-quote.js';
@@ -731,6 +736,12 @@ export function coverageFromTranscripts(
   );
   const records = liveRecords(allRecords);
   const built = readRecordedPrompts(planPath);
+  // The plan's epoch token — see `planIdentityToken`. `null` on a plan with
+  // no readable identity: the seal below fails open on absence, the same
+  // rule the drift check states.
+  const planToken = planIdentityToken(
+    (plan as { selection?: unknown }).selection,
+  );
 
   const blindAgents: string[] = [];
   const idleAgents: string[] = [];
@@ -789,6 +800,21 @@ export function coverageFromTranscripts(
    */
   const chunkAgents = new Map<number, string[]>();
   const chunkCauses = new Map<number, Set<ChunkFailureClass>>();
+  // Was this launch written against THIS plan? An identity-carrying plan
+  // writes its epoch token into every chunk launch it builds
+  // (`buildChunkLaunchPrompt`): a launch marked with ANOTHER plan's token
+  // is positively the old plan's, which windows, counts and reads cannot
+  // prove — a modify-only re-plan keeps every window, so a fence-surviving
+  // record of the old plan passes the geometry seals with its old cause
+  // intact. A marker-less launch — one from before the mechanism, or a
+  // paraphrase that dropped the line — keeps the geometry seals alone,
+  // exactly the pre-token posture; a plan with no identity checks nothing,
+  // the absence rule the drift check states.
+  const launchOfThisPlan = (launch: string): boolean => {
+    if (planToken === null) return true;
+    const carried = launchPlanToken(launch);
+    return carried === null || carried === planToken;
+  };
   // The plan identity a `chunk N of M` launch was written against — the
   // same seal the declaration branch applies below. A stale record's id can
   // collide with a planned chunk's, and a cause or agent keyed through the
@@ -800,7 +826,8 @@ export function coverageFromTranscripts(
   // assigned under this plan.
   const sealedToThisPlan = (rec: AgentRecord, chunkId: number): boolean =>
     plan.chunks.some((c) => c.id === chunkId) &&
-    assignedChunkTotal(rec) === plan.chunks.length;
+    assignedChunkTotal(rec) === plan.chunks.length &&
+    launchOfThisPlan(rec.launchPrompt);
   const noteChunkAgent = (
     rec: AgentRecord,
     c: number | null,
@@ -1011,6 +1038,31 @@ export function coverageFromTranscripts(
     );
   };
 
+  /**
+   * Does the plan's own measurement contradict the declaration?
+   *
+   * `maxLineChars` is the planner's walk of these same lines — the exact
+   * fact the declaration claims — and the builder hands the declaration
+   * template only to chunks whose longest line exceeds the read cap.
+   * Metadata saying every line fits proves the declaration false on THIS
+   * plan; admitted anyway, it pinned `declared-uncoverable` over a chunk
+   * the plan's own input shows is spannable, and `uncoverable.add` erased
+   * the coverage the walk credited. The refutation guard's metadata read,
+   * mirrored: there it ENABLES refutation, here it REFUSES admission.
+   * `> 0` keeps a hand-zeroed plan on the fail-open path the
+   * absent-metadata shape rides; the truncatable shape (`> cap`) is the
+   * honest declarer's, and stays admitted.
+   */
+  const planContradictsDeclaration = (chunkId: number): boolean => {
+    const c = plan.chunks.find((k) => k.id === chunkId);
+    return (
+      c !== undefined &&
+      c.maxLineChars !== undefined &&
+      c.maxLineChars > 0 &&
+      c.maxLineChars <= READ_FILE_CHAR_CAP
+    );
+  };
+
   const refutedByReturnedSpanningRead = (chunkId: number): boolean => {
     const c = plan.chunks.find((k) => k.id === chunkId);
     if (c === undefined) return false;
@@ -1028,13 +1080,19 @@ export function coverageFromTranscripts(
     return records.some(
       (r) =>
         r.returned &&
-        // Not the declarers of this chunk: the declarer's own spanning read
-        // is the read the launch prompt spelled out and the declaration
-        // answered — every production declaration would otherwise refute
-        // itself — and two honest declarers refute each other the same way.
-        // Same-shape records exclude each other here exactly as they do at
-        // the `chunkSatisfied` call site below.
-        !declaresOwnUncoverable(r, chunkId) &&
+        // Not the declarers of this chunk — keyed on the record's own
+        // ASSIGNMENT, the way `certifies()` keys: the declarer's own
+        // spanning read is the read the launch prompt spelled out and the
+        // declaration answered — every production declaration would
+        // otherwise refute itself — and two honest declarers refute each
+        // other the same way. Same-shape records exclude each other here
+        // exactly as they do at the `chunkSatisfied` call site below. A
+        // record assigned elsewhere is not a declarer even when its prose
+        // QUOTES the declaration — an indented quote starts a line, so the
+        // regex alone matches it — and excluding quoters can only remove
+        // refuters: the whole-diff agents whose reads span every chunk are
+        // the likeliest quoters and the likeliest refuters at once.
+        !(assignedChunk(r) === chunkId && declaresOwnUncoverable(r, chunkId)) &&
         merge(r.diffReads).some(([s, e]) => s <= c.startLine && e >= c.endLine),
     );
   };
@@ -1311,10 +1369,14 @@ export function coverageFromTranscripts(
       // declarer's own reads are the last seal: told the right window but
       // demonstrably reading elsewhere is a repairable failure wearing an
       // impossible verdict — see `declarerReadItsChunk`.
+      // The plan's own measurement is the mirror-image seal: metadata
+      // saying every line fits contradicts the declaration outright — see
+      // `planContradictsDeclaration`.
       if (
         sealedToThisPlan(rec, chunk) &&
         declarationStillOnTerritory(told, chunk) &&
         declarerReadItsChunk(rec, chunk) &&
+        !planContradictsDeclaration(chunk) &&
         !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk)) &&
         !refutedByReturnedSpanningRead(chunk)
       ) {

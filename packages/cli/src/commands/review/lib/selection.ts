@@ -96,6 +96,58 @@ export function buildSelectionIdentity(
 }
 
 /**
+ * The plan epoch a chunk launch carries, or `null` when the plan carries no
+ * readable identity.
+ *
+ * Windows, counts and reads cannot order a transcript against a same-session
+ * re-plan — a modify-only commit keeps every window, and the record carries
+ * no plan epoch — so the launch carries one. The token mixes BOTH halves of
+ * the capture identity because a modify-only rewrite moves
+ * `sourceArtifactSha256` alone and a re-chunk moves `selectionSha256` alone:
+ * a token keyed on either half would call one of the two plans the same.
+ * `buildChunkLaunchPrompt` writes the line (`planTokenLine`); the coverage
+ * seal reads it back (`launchPlanToken`) and refuses a launch marked with
+ * another plan's token.
+ *
+ * `null` on absence and on any shape `selectionDrift` would not read — the
+ * seal fails open on token absence exactly the way the drift check does:
+ * absence of evidence, not evidence of staleness.
+ */
+export function planIdentityToken(selection: unknown): string | null {
+  if (selection === undefined || selection === null) return null;
+  if (typeof selection !== 'object' || Array.isArray(selection)) return null;
+  const id = selection as Partial<SelectionIdentity>;
+  if (id.schemaVersion !== SELECTION_SCHEMA_VERSION) return null;
+  if (
+    typeof id.sourceArtifactSha256 !== 'string' ||
+    typeof id.selectionSha256 !== 'string'
+  ) {
+    return null;
+  }
+  return `${id.sourceArtifactSha256.slice(0, 8)}${id.selectionSha256.slice(
+    0,
+    8,
+  )}`;
+}
+
+/** The marker a token-bearing launch writes, defined once for writer and reader. */
+export const PLAN_TOKEN_LABEL = 'Plan identity:';
+
+/** The launch line an identity-carrying plan earns; `null` on every other plan. */
+export function planTokenLine(selection: unknown): string | null {
+  const token = planIdentityToken(selection);
+  return token === null ? null : `${PLAN_TOKEN_LABEL} ${token}`;
+}
+
+const PLAN_TOKEN_RE = new RegExp(`${PLAN_TOKEN_LABEL} ([0-9a-f]{16})\\b`);
+
+/** The token a launch prompt carries, or `null` when it carries no marker. */
+export function launchPlanToken(launchPrompt: string): string | null {
+  const m = PLAN_TOKEN_RE.exec(launchPrompt);
+  return m === null ? null : m[1];
+}
+
+/**
  * What a reader found when it checked a plan's identity against reality, or
  * `null` when everything matched.
  *
