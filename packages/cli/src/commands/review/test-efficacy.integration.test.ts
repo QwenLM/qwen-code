@@ -294,8 +294,10 @@ describe('fixture git-config isolation', () => {
 
 describe('the review worktree is the first pointer a probe run trusts', () => {
   it('refuses to create a probe tree through a rewritten gitfile', async () => {
-    // `worktree add` is the FIRST host-side git WRITE of the probe phase, and
-    // it resolves the repository through the REVIEW worktree's own gitfile —
+    // `worktree add` is the first host-side git write of the probe phase that
+    // CHECKS FILES OUT — `discardWorktree` above writes too, but materialises
+    // nothing, so no filter runs there — and it resolves the repository
+    // through the REVIEW worktree's own gitfile —
     // which lives inside the directory the sandbox mounts read-write, and
     // which the build/test phase already gave the PR's code a chance to
     // rewrite. It checks files out, so it runs whatever filter the pointer
@@ -356,6 +358,79 @@ describe('the review worktree is the first pointer a probe run trusts', () => {
       readFileSync(join(repo, 'out.json'), 'utf8'),
     ) as Record<string, unknown>;
     expect(JSON.stringify(out)).toContain('review temp dir');
+  });
+});
+
+describe('the revert phase is reached after the gates refuse', () => {
+  it('refuses to revert through a gitfile the probe run rewrote', async () => {
+    // The route R1-13 names: a restore refusal becomes `inconclusive` without
+    // throwing, and the mutation phase's catch continues on purpose so the
+    // revert probe still runs — so the revert is reached PRECISELY WHEN the
+    // earlier gates fired. Guarding the first two writes and not this one
+    // leaves the route open exactly where the others closed it.
+    //
+    // The rewrite is done by the PR's own suite, which is who does it in
+    // production: the fake runner below runs with the probe tree as its cwd.
+    write('package.json', '{"private":true,"workspaces":["packages/*"]}\n');
+    write('packages/lib/src/f.ts', 'export const f = () => 1;\n');
+    const base = commitAll('base');
+    write('packages/lib/src/f.ts', 'export const f = () => 2;\n');
+    write(
+      'packages/lib/src/f.test.ts',
+      'import { f } from "./f.js"; import { it, expect } from "vitest"; it("t", () => expect(typeof f).toBe("function"));\n',
+    );
+    commitAll('pr');
+    const wt = join(repo, '.qwen', 'tmp', 'review-pr-1');
+    mkdirSync(dirname(wt), { recursive: true });
+    git(repo, 'worktree', 'add', '-q', '--detach', wt, 'HEAD');
+    writeFileSync(
+      join(repo, 'report.json'),
+      JSON.stringify({
+        files: [
+          { path: 'packages/lib/src/f.ts', kind: 'source' },
+          { path: 'packages/lib/src/f.test.ts', kind: 'test' },
+        ],
+      }),
+    );
+
+    // A runner that rewrites its own tree's `.git` the first time it is
+    // asked to run anything, then answers normally.
+    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+    mkdirSync(planted, { recursive: true });
+    writeFileSync(
+      vitestScript(),
+      `#!/usr/bin/env node
+import fs from 'node:fs';
+import path from 'node:path';
+try {
+  const dotGit = path.join(process.cwd(), '.git');
+  if (fs.existsSync(dotGit) && fs.lstatSync(dotGit).isFile()) {
+    fs.writeFileSync(dotGit, 'gitdir: ${planted}\\n');
+  }
+} catch {}
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = readFileSync(join(repo, 'out.json'), 'utf8');
+    // Whichever gate spoke, the run must not have reverted through the
+    // rewritten pointer — and the refusal must name why.
+    expect(out).toContain('review temp dir');
   });
 });
 

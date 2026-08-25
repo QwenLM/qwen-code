@@ -2662,12 +2662,20 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // Clear a stale probe tree left by a crashed run — it would fail `add`.
       // Its stderr is kept to explain a subsequent `add` failure.
       sweep = discardWorktree(worktree, probeTree);
-      // The FIRST host-side git write of this phase, and it resolves the
-      // repository through the REVIEW worktree's own gitfile — a second
-      // rewritable pointer inside the same read-write mount, written by the
-      // build/test phase that already ran the PR's code. `worktree add` checks
-      // files out, so it runs whatever `filter.<x>.smudge` that pointer leads
-      // to, on the host, before any gate inside the restore below could fire.
+      // The first host-side git write of this phase that CHECKS FILES OUT,
+      // and it resolves the repository through the REVIEW worktree's own
+      // gitfile — a second rewritable pointer inside the same read-write
+      // mount, written by the build/test phase that already ran the PR's code.
+      // Checking out is what runs `filter.<x>.smudge`, so this is where a
+      // planted pointer becomes host execution, before any gate inside the
+      // restore below could fire.
+      //
+      // Not "the first git write": `discardWorktree` above already runs
+      // `worktree remove --force` and `worktree unlock` with this same cwd.
+      // Those materialise nothing, so no filter and no hook runs — but the
+      // distinction is the whole reason this gate can sit here rather than
+      // above them, and a maintainer adding a checkout above it on the
+      // strength of a looser sentence would reopen the route.
       const untrusted = untrustedGitfile(worktree, mountRootFor);
       if (untrusted !== null) {
         throw new Error(`refusing to create a probe tree: ${untrusted}`);
@@ -2986,6 +2994,22 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
             'the probe tree no longer resolves to itself (a symlink at its ' +
               'root), so the revert would run against whatever it points at',
           );
+        }
+        // ...and the tree's REPOSITORY must still be its own. The check above
+        // asks the same question of the directory and answers it with an
+        // lstat walk, which a rewritten gitfile passes untouched: no symlink
+        // is involved, the tree resolves to itself, and the `checkout` below
+        // still runs through whatever repository that pointer names —
+        // executing its filters on the host.
+        //
+        // This phase is reached PRECISELY WHEN the gates fired: a restore
+        // refusal becomes `inconclusive` without throwing, and the mutation
+        // phase's catch continues on purpose "so the revert probe below still
+        // runs". Guarding the first two writes and not this one leaves the
+        // route open exactly where the other two closed it.
+        const untrusted = untrustedGitfile(probeTree, mountRootFor);
+        if (untrusted !== null) {
+          throw new Error(`refusing to revert: ${untrusted}`);
         }
         // "Revert to base" is two operations, confined to the throwaway tree. A
         // file the PR MODIFIED is checked out from base; a file the PR ADDED did

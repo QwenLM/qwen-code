@@ -29,10 +29,11 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, relative, sep } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
   adminEntryInsideReviewTmp,
+  untrustedGitfile,
   discardWorktree,
   exposeDependencies,
   sanitizedGitEnv,
@@ -1871,6 +1872,72 @@ describe('worktreeCreateFailureDetail', () => {
     expect(worktreeCreateFailureDetail('probe', 'boom', '')).toBe(
       'probe worktree could not be created: boom',
     );
+  });
+});
+
+describe('untrustedGitfile', () => {
+  const made: string[] = [];
+  const tmp = () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-gitfile-')));
+    made.push(dir);
+    return dir;
+  };
+  afterEach(() => {
+    for (const dir of made.splice(0))
+      rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** The pipeline's own shape: a gitfile naming an entry under `.git/worktrees`. */
+  const pipelineTree = (repo: string) => {
+    const tree = join(repo, '.qwen', 'tmp', 'review-pr-1');
+    const entry = join(repo, '.git', 'worktrees', 'review-pr-1');
+    mkdirSync(tree, { recursive: true });
+    mkdirSync(entry, { recursive: true });
+    writeFileSync(join(tree, '.git'), `gitdir: ${entry}\n`);
+    return { tree, entry, mount: () => join(repo, '.qwen', 'tmp') };
+  };
+
+  it('ADMITS an intact pipeline gitfile, relative spelling included', () => {
+    // The admit path, which nothing exercised: every refusal case here would
+    // also refuse under a mutation that mangles the parsed target — realpath
+    // fails, the location check fails closed, and the expected refusal still
+    // happens — while in production the same mangling refuses every healthy
+    // tree. Only asserting the ADMIT distinguishes the two.
+    const repo = tmp();
+    const { tree, entry, mount } = pipelineTree(repo);
+    expect(untrustedGitfile(tree, mount)).toBeNull();
+
+    // Git writes this pointer relative when it can, so the parse has to
+    // resolve against the TREE, not the process cwd.
+    writeFileSync(
+      join(tree, '.git'),
+      `gitdir: ${relative(tree, entry)}\n`.split(sep).join('/'),
+    );
+    expect(untrustedGitfile(tree, mount)).toBeNull();
+  });
+
+  it('refuses the two shapes reviewed code can write', () => {
+    const repo = tmp();
+    const { tree, mount } = pipelineTree(repo);
+    // A pointer into the mount...
+    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+    mkdirSync(planted, { recursive: true });
+    writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
+    expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
+
+    // ...and `.git` replaced by a directory, which skips every gate written
+    // for the gitfile shape.
+    rmSync(join(tree, '.git'), { force: true });
+    mkdirSync(join(tree, '.git'));
+    expect(untrustedGitfile(tree, mount)).toContain('not the gitfile');
+  });
+
+  it('says nothing at all outside a mount', () => {
+    // A plain checkout's `.git` IS a directory; refusing that would refuse
+    // every ordinary repository.
+    const repo = tmp();
+    mkdirSync(join(repo, '.git'));
+    expect(untrustedGitfile(repo, () => null)).toBeNull();
   });
 });
 
