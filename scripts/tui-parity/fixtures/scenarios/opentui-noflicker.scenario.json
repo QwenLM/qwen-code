@@ -7,7 +7,8 @@
   "timeoutMs": 60000,
   "input": [
     { "data": "用一句话介绍你自己", "delayMs": 2000 },
-    { "data": "\r", "delayMs": 2000 }
+    { "data": "\r", "delayMs": 2000 },
+    { "data": "/quit\r", "delayMs": 20000 }
   ],
   "env": { "TERM": "xterm-256color" },
   "compareParams": [],

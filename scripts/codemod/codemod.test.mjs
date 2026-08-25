@@ -147,6 +147,31 @@ test('ignore: generics, foreign tags and strings untouched', () => {
   assert.equal(res.output, src);
 });
 
+test('regex mask: closing-tag slash is not a regex start', () => {
+  const src = 'const a = <Box>x</Box>; const b = <Text>y</Text>; const half = n / 2;';
+  const res = transformSource(src);
+  assert.equal(
+    res.output,
+    'const a = <box>x</box>; const b = <text>y</text>; const half = n / 2;',
+  );
+  assert.equal(res.stats.text, 1);
+  assert.equal(res.notes.length, 0);
+});
+
+test('manual: string style value with backslash is not copied verbatim', () => {
+  const src = 'const x = <Box margin="a\\b" padding={1}>x</Box>';
+  const res = transformSource(src);
+  assert.equal(res.output, 'const x = <box margin="a\\b" padding={1}>x</box>');
+  assert.ok(res.notes.some((nt) => /escape\/entity semantics/.test(nt.msg)));
+});
+
+test('manual: string style value with HTML entity is not copied verbatim', () => {
+  const src = 'const x = <Box margin="1&nbsp;2">x</Box>';
+  const res = transformSource(src);
+  assert.equal(res.output, 'const x = <box margin="1&nbsp;2">x</box>');
+  assert.ok(res.notes.some((nt) => /escape\/entity semantics/.test(nt.msg)));
+});
+
 if (failures > 0) {
   console.error(`# ${failures}/${count} test(s) failed`);
   process.exit(1);

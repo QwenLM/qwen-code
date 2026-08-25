@@ -455,6 +455,35 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('redacts the echoed prompt through sanitizeSensitiveText (R1-79)', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'user_prompt_submit_blocked',
+        value: {
+          reason: 'blocked by policy',
+          originalPrompt: 'sk-abcdefghijklmnopqrstuvw run the deploy',
+        },
+      } as unknown as AnyEv);
+      expect(out[0]).toMatchObject({ type: 'warning' });
+      const text = (out[0] as { text: string }).text;
+      expect(text).not.toContain('sk-abcdefghijklmnopqrstuvw');
+    });
+
+    it('truncates the echoed prompt at 200 chars (R1-79)', () => {
+      const map = createEventMapper();
+      const long = 'x'.repeat(300);
+      const out = map({
+        type: 'user_prompt_submit_blocked',
+        value: { reason: 'blocked', originalPrompt: long },
+      } as unknown as AnyEv);
+      const text = (out[0] as { text: string }).text;
+      const echoed = text.slice(
+        text.lastIndexOf('Original prompt: ') + 'Original prompt: '.length,
+      );
+      expect(echoed.length).toBe(200);
+      expect(echoed.endsWith('...')).toBe(true);
+    });
+
     it('maps stop_hook_loop to the hook error text', () => {
       const map = createEventMapper();
       const out = map({

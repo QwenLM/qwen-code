@@ -37,6 +37,15 @@ describe('decodeCapturedInput', () => {
     );
   });
 
+  it('strips SS3 function-key sequences whole (F1-F4) instead of leaking the payload', () => {
+    // The capture filter preserves ESC O P/Q/R/S as user input, so decoding
+    // must remove the whole sequence: the C0 pass would otherwise drop only
+    // the bare ESC and leave the O+letter in the composer (R1-74).
+    expect(
+      decodeCapturedInput(Buffer.from('a\u001BOPb\u001BOQc\u001BORd\u001BOSe')),
+    ).toBe('abcde');
+  });
+
   it('preserves multibyte (CJK) input', () => {
     expect(decodeCapturedInput(Buffer.from('你好，世界'))).toBe('你好，世界');
   });

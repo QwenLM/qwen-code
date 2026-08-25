@@ -74,6 +74,33 @@ describe('foldLiveEvent segment-end (finished parity)', () => {
   });
 });
 
+describe('foldLiveEvent tool-description (invocation getDescription, R1-104)', () => {
+  it('overlays the real description onto the running tool item', () => {
+    const items = foldLiveEvent([runningTool('t9')], {
+      type: 'tool-description',
+      id: 't9',
+      description: 'Running `npm test` in ./pkg',
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: 'tool',
+      id: 't9',
+      description: 'Running `npm test` in ./pkg',
+    });
+  });
+
+  it('ignores descriptions for unknown call ids', () => {
+    const items = foldLiveEvent([runningTool('t1')], {
+      type: 'tool-description',
+      id: 'missing',
+      description: 'orphan',
+    });
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ id: 't1' });
+    expect((items[0] as LiveToolItem).description).toBeUndefined();
+  });
+});
+
 describe('foldLiveEvent done (turn end)', () => {
   it('settles open tools as skipped at true turn end', () => {
     const items = foldLiveEvent([runningTool()], { type: 'done' });

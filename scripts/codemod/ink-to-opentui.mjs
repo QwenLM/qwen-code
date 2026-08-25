@@ -65,9 +65,14 @@ function buildMask(src) {
   let lastCodeChar = '';
   let wordBuf = '';
 
+  // '<' and '>' are deliberately absent: in JSX-bearing sources a '/' right
+  // after a closing tag (`</View> ... /`) or an opening bracket would start
+  // scanRegex, mask past the tag, and swallow everything up to the next
+  // stray '/'. A regex literal after a comparison operator (`a < /re/`) is
+  // not a shape real code writes.
   const REGEX_PRECEDING = new Set([
     '(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';',
-    '+', '-', '*', '%', '~', '^', '<', '>',
+    '+', '-', '*', '%', '~', '^',
   ]);
   const REGEX_KEYWORDS = new Set([
     'return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete',
@@ -502,8 +507,21 @@ function planStyleCollection(src, code, comment, open, notes) {
   for (const idx of collectedIdx) {
     const a = attrs[idx];
     let raw;
-    if (a.kind === 'string') raw = src.slice(a.valueStart, a.valueEnd);
-    else if (a.kind === 'expr') {
+    if (a.kind === 'string') {
+      raw = src.slice(a.valueStart, a.valueEnd);
+      // A JSX string attribute and the JS string literal it gets pasted
+      // into decode '\' escapes and '&…;' entities with opposite
+      // semantics (JSX keeps a lone backslash literal and decodes
+      // entities; JS re-parses escapes and keeps entities literal), so a
+      // value carrying either marker cannot be copied verbatim into the
+      // generated style object.
+      const inner = raw.length >= 2 ? raw.slice(1, -1) : '';
+      if (inner.includes('\\') || inner.includes('&')) {
+        return manual(
+          `style prop '${a.name}' has a string value with JSX-specific escape/entity semantics`,
+        );
+      }
+    } else if (a.kind === 'expr') {
       raw = src.slice(a.innerStart, a.innerEnd).trim();
       if (raw === '') return manual(`empty expression for style prop '${a.name}'`);
     } else {

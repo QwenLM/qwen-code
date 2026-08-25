@@ -31,6 +31,7 @@ import {
   toolCardDescription,
   toolCardName,
   toolCardSummarySuffix,
+  toolCardText,
   toolStatusMeta,
   truncateResultDisplayChars,
   truncateTokenLine,
@@ -114,6 +115,20 @@ describe('toolCardDescription (invocation getDescription parity)', () => {
     expect(toolCardDescription('run_shell_command')).toBe('');
     expect(toolCardDescription('run_shell_command', 'not json')).toBe('');
     expect(toolCardDescription('some_other_tool', '{}')).toBe('');
+  });
+});
+
+describe('toolCardText (card one-liner sanitize, R1-105)', () => {
+  it('collapses newlines and surrounding whitespace to single spaces', () => {
+    expect(toolCardText('line one\n  line two\n')).toBe('line one line two');
+  });
+
+  it('neutralizes ANSI escapes and control bytes into inert text', () => {
+    // Escapes become visible \uXXXX sequences, never live control bytes.
+    expect(toolCardText('run\u001b[31m red\u001b[0m')).toBe(
+      'run\\u001b[31m red\\u001b[0m',
+    );
+    expect(toolCardText('a\u0007b')).toBe('a\\u0007b');
   });
 });
 

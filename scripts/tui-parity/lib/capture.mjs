@@ -7,6 +7,12 @@ const KILL_GRACE_MS = 1000;
 const TREE_VERIFY_ATTEMPTS = 8;
 const TREE_VERIFY_INTERVAL_MS = 250;
 
+// POSIX single-quote escaping for the util-linux `script -c` command
+// string, which is re-parsed by a shell.
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 // The native PTY backend comes from @lydell/node-pty, a declared repository
 // dependency. TUI_PARITY_NO_PTY=1 forces unavailability to exercise the
 // refusal path in tests.
@@ -31,7 +37,22 @@ export function loadPtyBackend() {
 // Wrap script(1) so it exposes the node-pty-like interface (onData/kill/p).
 function spawnScriptPty(cmd, args, opts = {}) {
   const tmp = `/tmp/tui-parity-script-${randomUUID()}.log`;
-  const child = spawn('script', ['-q', tmp, cmd, ...args], {
+  // BSD script(1) (macOS) takes the command as trailing positionals;
+  // util-linux script(1) rejects that ("unexpected number of arguments")
+  // and needs `-c` with one shell command string (quote each argv piece so
+  // spaces survive the extra shell parse). `-e` propagates the child's
+  // exit status, matching the node-pty path's semantics.
+  const darwin = process.platform === 'darwin';
+  const scriptArgs = darwin
+    ? ['-q', tmp, cmd, ...args]
+    : [
+        '-q',
+        '-e',
+        '-c',
+        [cmd, ...args].map(shellQuote).join(' '),
+        tmp,
+      ];
+  const child = spawn('script', scriptArgs, {
     env: opts.env ?? process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });

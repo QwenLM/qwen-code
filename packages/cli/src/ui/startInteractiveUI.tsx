@@ -89,13 +89,26 @@ export async function startInteractiveUI(
   const screenReaderMode = (
     await import('./opentui/a11y-screen-reader.js')
   ).isScreenReaderEnabled(config.getScreenReader());
-  if (!screenReaderMode && isExperimentalRenderer(pickRenderer())) {
+  // Both renderer branches need the version (window title / session
+  // registry), so fetch it once here instead of duplicating the call.
+  const version = await getCliVersion();
+  // --json-fd/--json-file ride the ink DualOutputBridge (useGeminiStream
+  // publishes every stream event through it); the OpenTUI backend has no
+  // bridge yet, so a JSON-output launch falls back to ink instead of
+  // silently dropping the event stream.
+  const jsonOutputRequested =
+    config.getJsonFd?.() != null || config.getJsonFile?.() != null;
+  if (
+    !screenReaderMode &&
+    !jsonOutputRequested &&
+    isExperimentalRenderer(pickRenderer())
+  ) {
     const { probeOpenTuiRuntime, ensureOpenTuiRuntimeSupported } = await import(
       './render/runtime-gate.js'
     );
     if (probeOpenTuiRuntime().supported) {
       // Remote input (--input-file) is wired through to the opentui backend;
-      // the watcher is shut down when the interactive session exits.
+      // the watcher is shut down in the exit-cleanup drain below.
       const { startOpenTuiUI } = await import('./render/opentui-entry.js');
       const inputFile = config.getInputFile?.();
       const remoteInputWatcher = inputFile
@@ -114,9 +127,29 @@ export async function startInteractiveUI(
               config.isTelemetryInitializationDeferred(),
           },
         });
-      } finally {
+      } catch (err) {
+        // Mount failed: the exit drain below never runs, so the watcher we
+        // created must be released here.
         remoteInputWatcher?.shutdown();
+        throw err;
       }
+      // startOpenTuiUI resolves at MOUNT, not exit (@opentui/react's Root
+      // has no exit awaitable), so session-long cleanup must live in the
+      // exit drain — exactly where ink registers it: the watcher stays
+      // alive for the whole session, then shuts down after the renderer
+      // teardown that startOpenTuiUI already registered.
+      registerCleanup(() => remoteInputWatcher?.shutdown());
+      // Session registry (ink tail parity): `qwen sessions ps` reads these
+      // records. Announced only after the exit cleanup above is armed, and
+      // unregistered last — the same ordering the ink tail guarantees.
+      config.trackSessionRegistration(
+        registerSession({
+          sessionId: config.getSessionId(),
+          cwd: config.getTargetDir(),
+          qwenVersion: version,
+        }),
+      );
+      registerCleanup(() => config.unregisterSessionRegistry());
       return;
     }
     // An explicit `QWEN_TUI_RENDERER=opentui` on an unsupported runtime must
@@ -127,8 +160,22 @@ export async function startInteractiveUI(
     }
     // fall through to ink
   }
+  // An explicit `QWEN_TUI_RENDERER=opentui` combined with JSON-output flags
+  // is contradictory: silently downgrading to ink would hide that the
+  // requested renderer never ran, so fail loudly instead (the default
+  // launch above already fell back to ink without this error).
+  if (
+    !screenReaderMode &&
+    jsonOutputRequested &&
+    isExperimentalRenderer(pickRenderer()) &&
+    rendererExplicitlyRequested()
+  ) {
+    writeStderrLine(
+      'Error: --json-fd/--json-file require the ink renderer; unset QWEN_TUI_RENDERER=opentui to use JSON output.',
+    );
+    process.exit(1);
+  }
 
-  const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
 
   // Write a small runtime.json sidecar next to the chat log so external

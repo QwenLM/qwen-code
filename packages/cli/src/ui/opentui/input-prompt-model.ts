@@ -39,8 +39,13 @@ import {
 } from '../commands/types.js';
 import {
   findMidInputSlashCommand,
+  isMidInputCompletableCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
+import {
+  isStackedSkillCompletableCommand,
+  isValidStackedSkillPrefix,
+} from '../../utils/commands.js';
 import { getCommandDisplayName } from '../../services/commandMetadata.js';
 import { toCodePoints } from '../utils/textUtils.js';
 import type { InputHistory } from './input-history.js';
@@ -62,6 +67,11 @@ export interface CompletionTarget {
   start: number;
   /** Code-point column on the cursor line where replacement ends. */
   end: number;
+  /** SLASH-only completion surface (ink slashCompletionContext parity): a
+   * mid-input token completes against a filtered command pool, a
+   * stacked-skill continuation against another; line-led commands see the
+   * full registry. */
+  slashContext?: 'mid-input' | 'stacked-skill';
 }
 
 /** Escape-aware space scan shared by the forward/backward AT scans. */
@@ -72,6 +82,22 @@ function isUnescapedSpace(codePoints: string[], index: number): boolean {
     backslashCount++;
   }
   return backslashCount % 2 === 0;
+}
+
+/**
+ * ink isExactMidInputModelInvocableCommand port (useCommandCompletion): a
+ * canonical-name exact match routes through the ghost-text fallback instead
+ * of the dropdown, so an altName still surfaces via fzf there.
+ */
+function isExactMidInputModelInvocableCommand(
+  partialCommand: string,
+  slashCommands: readonly SlashCommand[],
+): boolean {
+  const query = partialCommand.toLowerCase();
+  return slashCommands.some(
+    (cmd) =>
+      isMidInputCompletableCommand(cmd) && cmd.name.toLowerCase() === query,
+  );
 }
 
 /**
@@ -87,6 +113,7 @@ export function detectCompletionTarget(
   cursorCol: number,
   text: string,
   cursorOffset: number,
+  slashCommands: readonly SlashCommand[] = [],
 ): CompletionTarget | null {
   const currentLine = lines[cursorRow] || '';
   const codePoints = toCodePoints(currentLine);
@@ -117,6 +144,10 @@ export function detectCompletionTarget(
   }
 
   // Mid-input slash token (preceded by whitespace, cursor at the token end).
+  // ink gating (useCommandCompletion): the token completes only as a
+  // stacked-skill continuation or regular mid-input text — not as the
+  // line-led command itself and not as a slash argument — and an exact
+  // model-invocable name suppresses the dropdown (ghost text owns it).
   const midCmd = findMidInputSlashCommand(text, cursorOffset);
   if (midCmd) {
     const lineStartOffset = toCodePoints(
@@ -125,12 +156,34 @@ export function detectCompletionTarget(
     const startOnLine =
       midCmd.startPos - (cursorRow === 0 ? 0 : lineStartOffset + 1);
     if (startOnLine >= 0) {
-      return {
-        mode: CompletionMode.SLASH,
-        query: midCmd.token,
-        start: startOnLine,
-        end: startOnLine + midCmd.token.length,
-      };
+      const beforeToken = codePoints.slice(0, startOnLine).join('');
+      const isInitialCommandOnFirstLine =
+        cursorRow === 0 &&
+        isSlashCommand(currentLine.trim()) &&
+        beforeToken.trim().length === 0;
+      const prefix = toCodePoints(text).slice(0, midCmd.startPos).join('');
+      const isStackedSkill =
+        !isInitialCommandOnFirstLine &&
+        isValidStackedSkillPrefix(prefix, slashCommands);
+      const isSlashLedInput = isSlashCommand(prefix.trimStart());
+      const isRegularMidInput =
+        !isInitialCommandOnFirstLine && !isSlashLedInput;
+      if (
+        isStackedSkill ||
+        (isRegularMidInput &&
+          !isExactMidInputModelInvocableCommand(
+            midCmd.partialCommand,
+            slashCommands,
+          ))
+      ) {
+        return {
+          mode: CompletionMode.SLASH,
+          query: midCmd.token,
+          start: startOnLine,
+          end: startOnLine + midCmd.token.length,
+          slashContext: isStackedSkill ? 'stacked-skill' : 'mid-input',
+        };
+      }
     }
   }
 
@@ -146,6 +199,25 @@ export function detectCompletionTarget(
   }
 
   return null;
+}
+
+/**
+ * Command pool for a SLASH target (ink slashCommandsForCompletion parity):
+ * mid-input tokens see only model-invocable non-hidden commands,
+ * stacked-skill continuations only stacked-skill commands, and line-led
+ * commands the full registry.
+ */
+export function slashCommandPool(
+  target: CompletionTarget,
+  slashCommands: readonly SlashCommand[],
+): readonly SlashCommand[] {
+  if (target.slashContext === 'stacked-skill') {
+    return slashCommands.filter(isStackedSkillCompletableCommand);
+  }
+  if (target.slashContext === 'mid-input') {
+    return slashCommands.filter(isMidInputCompletableCommand);
+  }
+  return slashCommands;
 }
 
 /**

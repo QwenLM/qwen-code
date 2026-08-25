@@ -92,9 +92,12 @@ export function renderFinalScreen(raw, { rows = 24, columns = 80 } = {}) {
         j += 1;
       }
       const paramStart = j;
+      // `:` is the CSI sub-parameter separator (SGR `38:2::r:g:b`); without
+      // it the scan stops at the first colon and the rest of the sequence
+      // leaks into the grid as printable text.
       while (
         j < raw.length &&
-        ((raw[j] >= '0' && raw[j] <= '9') || raw[j] === ';')
+        ((raw[j] >= '0' && raw[j] <= '9') || raw[j] === ';' || raw[j] === ':')
       ) {
         j += 1;
       }
@@ -233,6 +236,37 @@ export function renderFinalScreen(raw, { rows = 24, columns = 80 } = {}) {
       cur.r = 0;
       cur.c = 0;
       i += 2;
+      continue;
+    }
+
+    // String sequences (DCS `ESC P`, SOS `ESC X`, PM `ESC ^`, APC `ESC _`):
+    // consume through ST (`ESC \`) or BEL so payloads stay out of the grid.
+    if (next === 'P' || next === 'X' || next === '^' || next === '_') {
+      let j = i + 2;
+      while (j < raw.length) {
+        if (raw[j] === '\x07') {
+          j += 1;
+          break;
+        }
+        if (raw[j] === '\x1b' && raw[j + 1] === '\\') {
+          j += 2;
+          break;
+        }
+        j += 1;
+      }
+      i = j;
+      continue;
+    }
+
+    // Intermediate-byte sequences (charset designation `ESC ( B`,
+    // `ESC ) 0`, …): consume ESC + the 0x20–0x2F intermediates + the final
+    // byte. The old 2-byte fallback below leaked the tail (e.g. `B`) into
+    // the grid as printable text.
+    if (next >= ' ' && next <= '/') {
+      let j = i + 1;
+      while (j < raw.length && raw[j] >= ' ' && raw[j] <= '/') j += 1;
+      if (j < raw.length) j += 1;
+      i = j;
       continue;
     }
 

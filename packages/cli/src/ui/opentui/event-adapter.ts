@@ -29,6 +29,7 @@ import type {
 import type { StreamEvent } from '../model/streaming-model.js';
 import type { TodoItem } from '../components/TodoDisplay.js';
 import type { CompressionProps } from '../types.js';
+import { sanitizeSensitiveText } from '../utils/textUtils.js';
 
 /**
  * Neutral-model union extension: tool detail events the backend folds into
@@ -38,6 +39,12 @@ import type { CompressionProps } from '../types.js';
 export type OpenTuiStreamEvent =
   | StreamEvent
   | { type: 'tool-args'; id: string; args: string }
+  /** Real invocation description (live sessions only): the scheduler's
+   * tracked call carries the invocation object, so the card title is the
+   * tool's own `getDescription()` (ink mapToDisplay parity) instead of a
+   * hand-rolled args guess. Yields after `tool-start` once the scheduler
+   * builds the invocation. */
+  | { type: 'tool-description'; id: string; description: string }
   | {
       type: 'tool-result';
       id: string;
@@ -528,7 +535,9 @@ export function createEventMapper(
           type: 'warning',
           text:
             `✕ UserPromptSubmit operation blocked by hook:\n${v.reason}\n\n` +
-            `Original prompt: ${v.originalPrompt}`,
+            // ink redacts the echoed prompt (HistoryItemDisplay): sensitive
+            // patterns masked and the text capped at 200 chars.
+            `Original prompt: ${sanitizeSensitiveText(v.originalPrompt)}`,
         });
         break;
       }

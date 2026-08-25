@@ -61,3 +61,19 @@ test('inserts and deletes lines', () => {
     'X\na\nb\nc',
   );
 });
+
+test('SGR colon sub-parameters are consumed, not printed', () => {
+  const raw = `${ESC}[38:2::255:0:0mred${ESC}[0m`;
+  assert.equal(renderFinalScreen(raw, screen), 'red');
+});
+
+test('charset designation consumes the final byte', () => {
+  assert.equal(renderFinalScreen(`${ESC}(Bok`, screen), 'ok');
+});
+
+test('string sequence payloads stay out of the grid', () => {
+  for (const finalByte of ['P', 'X', '^', '_']) {
+    const raw = `${ESC}${finalByte}payload${ESC}\\ok`;
+    assert.equal(renderFinalScreen(raw, screen), 'ok', `ESC ${finalByte}`);
+  }
+});

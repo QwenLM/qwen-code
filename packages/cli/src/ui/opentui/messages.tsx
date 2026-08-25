@@ -28,7 +28,11 @@
 import { C } from './theme.js';
 import { TOOL_DISPLAY_BY_NAME } from '../utils/tool-display-map.js';
 import { ICON } from '../constants.js';
-import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
+import {
+  getCachedStringWidth,
+  sanitizeMultilineForDisplay,
+  toCodePoints,
+} from '../utils/textUtils.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiToken } from '@qwen-code/qwen-code-core';
 import type { LiveToolItem } from './live-session-model.js';
@@ -152,11 +156,19 @@ export function toolCardSummarySuffix(
 }
 
 /**
- * Reconstructs the invocation description from the tool-call args (the live
- * event stream carries args, not the core `getDescription()` string):
- * parity of ShellToolInvocation.getDescription for the shell tool and of the
- * path-based descriptions for the file tools.
+ * Reconstructs the invocation description from the tool-call args for
+ * streams that carry no scheduler invocation (scripted/demo replay): parity
+ * of the common getDescription() shapes for the built-in tools. Live
+ * sessions instead carry the real description (tool-description event) and
+ * never read this fallback.
  */
+/** One-line, sanitized card text: fold newlines, then neutralize ANSI
+ * sequences and bare control bytes (model-controlled args must not reach
+ * the terminal raw). */
+export function toolCardText(v: string): string {
+  return sanitizeMultilineForDisplay(v.replace(/\s*\n\s*/g, ' ').trim());
+}
+
 export function toolCardDescription(rawName: string, args?: string): string {
   let parsed: Record<string, unknown> = {};
   try {
@@ -166,7 +178,7 @@ export function toolCardDescription(rawName: string, args?: string): string {
   }
   const str = (v: unknown): string | undefined =>
     typeof v === 'string' && v.length > 0 ? v : undefined;
-  const oneLine = (v: string) => v.replace(/\s*\n\s*/g, ' ').trim();
+  const oneLine = toolCardText;
   switch (rawName) {
     case 'run_shell_command': {
       const cmd = str(parsed['command'] ?? parsed['cmd']);

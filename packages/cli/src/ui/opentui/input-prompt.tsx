@@ -88,6 +88,7 @@ import {
   normalizePastedText,
   parsePastePlaceholder,
   parseSlashCommandQuery,
+  slashCommandPool,
   slashCompletionPositions,
   subcommandSuggestions,
   suggestionWindow,
@@ -338,6 +339,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       cursor.col,
       text,
       cursor.offset,
+      commandsRef.current,
     );
 
     const restored = historyRestoredTextRef.current;
@@ -362,7 +364,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     suggestionNavigatedRef.current = false;
 
     if (target.mode === CompletionMode.SLASH) {
-      const parsed = parseSlashCommandQuery(target.query, commandsRef.current);
+      // Mid-input / stacked-skill tokens complete against the filtered pool
+      // (ink slashCommandsForCompletion parity); line-led commands see the
+      // full registry.
+      const pool = slashCommandPool(target, commandsRef.current);
+      const parsed = parseSlashCommandQuery(target.query, pool);
       slashStateRef.current = {
         range: slashCompletionPositions(target.query, parsed),
         perfect: isPerfectSlashMatch(parsed),
@@ -481,6 +487,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         cursor.col,
         text,
         cursor.offset,
+        commandsRef.current,
       );
       if (!target) return;
       suggestionNavigatedRef.current = false;
@@ -494,11 +501,26 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           : undefined,
       );
       if (applied.submitNow) {
+        // Same cleanup as the real submit path (handleSubmit): expand pending
+        // paste placeholders, collect attachments, then clear everything —
+        // an accepted completion must not leave placeholders or chips behind.
+        let finalText = applied.submitNow;
+        if (pendingPastesRef.current.size > 0) {
+          finalText = expandPendingPastePlaceholders(
+            finalText,
+            pendingPastesRef.current,
+          );
+          pendingPastesRef.current.clear();
+          activePlaceholderIdsRef.current.clear();
+        }
+        const images = attachments.map((a) => a.path);
         el.clear();
+        setTextVersion((v) => v + 1);
         historyRef.current?.reset();
         historyRestoredTextRef.current = null;
         setSuggestions([]);
-        onSubmit(applied.submitNow);
+        setAttachments([]);
+        onSubmit(finalText, images.length > 0 ? images : undefined);
         return;
       }
       // Directory accepts keep the dropdown closed until the query changes
@@ -512,7 +534,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       };
       apply();
     },
-    [suggestions, applyTextToEditor, onSubmit],
+    [suggestions, applyTextToEditor, onSubmit, attachments],
   );
 
   // ── Ctrl+V / Cmd+V: clipboard image → temp file → attachment chip ──────

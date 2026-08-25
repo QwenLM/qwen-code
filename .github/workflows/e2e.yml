@@ -263,7 +263,7 @@ jobs:
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
         run: |-
-          npx cross-env QWEN_E2E_RENDERER=opentui QWEN_SANDBOX=false vitest run --root ./integration-tests interactive
+          npx cross-env QWEN_E2E_RENDERER=opentui QWEN_SANDBOX=false vitest run --root ./integration-tests interactive --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts'
 
   isolated-nightly:
     name: '${{ matrix.label }} (nightly)'

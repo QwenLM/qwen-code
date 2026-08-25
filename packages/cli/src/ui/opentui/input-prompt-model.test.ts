@@ -19,6 +19,7 @@ import {
   applyCompletion,
   commandCompletionItemsToSuggestions,
   decideSubmit,
+  detectCompletionTarget,
   expandPendingPastePlaceholders,
   freePastePlaceholderId,
   isLargePaste,
@@ -28,6 +29,7 @@ import {
   normalizePastedText,
   parsePastePlaceholder,
   parseSlashCommandQuery,
+  slashCommandPool,
   slashCompletionPositions,
   slashSuggestions,
   subcommandSuggestions,
@@ -76,6 +78,104 @@ const TEST_COMMANDS: readonly SlashCommand[] = [
   }),
   cmd({ name: 'hidden-cmd', hidden: true }),
 ];
+
+// Gating fixtures (R1-86): a model-invocable command whose canonical name
+// suppresses the mid-input dropdown, a SKILL-kind command for stacked-skill
+// continuations, and a regular command to make the input slash-led.
+const GATING_COMMANDS: readonly SlashCommand[] = [
+  cmd({ name: 'memory', modelInvocable: true }),
+  cmd({ name: 'memory-sub', modelInvocable: true, hidden: true }),
+  cmd({ name: 'skill-a', kind: CommandKind.SKILL }),
+  cmd({ name: 'review' }),
+];
+
+describe('detectCompletionTarget mid-input gating (useCommandCompletion port, R1-86)', () => {
+  const detect = (text: string, cursorOffset: number) => {
+    const lines = text.split('\n');
+    const before = text.slice(0, cursorOffset);
+    const row = before.split('\n').length - 1;
+    const col = before.length - (row > 0 ? before.lastIndexOf('\n') + 1 : 0);
+    return detectCompletionTarget(
+      lines,
+      row,
+      col,
+      text,
+      cursorOffset,
+      GATING_COMMANDS,
+    );
+  };
+
+  it('completes a token in regular mid-input text', () => {
+    expect(detect('hello /me', 9)).toEqual({
+      mode: CompletionMode.SLASH,
+      query: '/me',
+      start: 6,
+      end: 9,
+      slashContext: 'mid-input',
+    });
+  });
+
+  it('does not offer mid-input completion for a slash-led argument', () => {
+    // `/review /sto` falls through to the line-led target (the whole first
+    // line), never to a mid-input pool — ink's isSlashLedInput gate.
+    const target = detect('/review /sto', 12);
+    expect(target?.mode).toBe(CompletionMode.SLASH);
+    expect(target?.slashContext).toBeUndefined();
+    expect(target?.query).toBe('/review /sto');
+  });
+
+  it('suppresses an exact model-invocable name (ghost text owns it)', () => {
+    expect(detect('hello /memory', 13)).toBeNull();
+  });
+
+  it('completes a stacked-skill continuation with its own context', () => {
+    expect(detect('/skill-a /sk', 12)).toEqual({
+      mode: CompletionMode.SLASH,
+      query: '/sk',
+      start: 9,
+      end: 12,
+      slashContext: 'stacked-skill',
+    });
+  });
+});
+
+describe('slashCommandPool (ink slashCommandsForCompletion port, R1-86)', () => {
+  it('mid-input sees only model-invocable non-hidden commands', () => {
+    const pool = slashCommandPool(
+      {
+        mode: CompletionMode.SLASH,
+        query: '/me',
+        start: 6,
+        end: 9,
+        slashContext: 'mid-input',
+      },
+      GATING_COMMANDS,
+    );
+    expect(pool.map((c) => c.name)).toEqual(['memory']);
+  });
+
+  it('stacked-skill continuations see only skill commands', () => {
+    const pool = slashCommandPool(
+      {
+        mode: CompletionMode.SLASH,
+        query: '/sk',
+        start: 9,
+        end: 12,
+        slashContext: 'stacked-skill',
+      },
+      GATING_COMMANDS,
+    );
+    expect(pool.map((c) => c.name)).toEqual(['skill-a']);
+  });
+
+  it('line-led commands see the full registry', () => {
+    const pool = slashCommandPool(
+      { mode: CompletionMode.SLASH, query: '/he', start: 0, end: 3 },
+      GATING_COMMANDS,
+    );
+    expect(pool).toHaveLength(GATING_COMMANDS.length);
+  });
+});
 
 describe('decideSubmit (`\\`+Enter continuation)', () => {
   it('submits ordinary text', () => {

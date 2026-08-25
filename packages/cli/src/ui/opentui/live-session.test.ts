@@ -78,19 +78,28 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
           );
         } else {
           // Emit one awaiting_approval update per call (twice, to prove the
-          // live-session dedupe), then complete the calls.
+          // live-session dedupe). A call with `__invocationDesc` args also
+          // carries a scheduler-style invocation whose getDescription feeds
+          // the tool-description event (R1-104).
           for (let i = 0; i < 2; i++) {
             await this.opts.onToolCallsUpdate?.(
-              calls.map((c) => ({
-                status: 'awaiting_approval',
-                request: c,
-                confirmationDetails: {
-                  type: 'ask_user_question',
-                  title: '',
-                  questions: [],
-                  onConfirm: async () => {},
-                },
-              })),
+              calls.map((c) => {
+                const desc = ((c.args ?? {}) as { __invocationDesc?: string })
+                  .__invocationDesc;
+                return {
+                  status: 'awaiting_approval',
+                  request: c,
+                  ...(desc
+                    ? { invocation: { getDescription: () => desc } }
+                    : {}),
+                  confirmationDetails: {
+                    type: 'ask_user_question',
+                    title: '',
+                    questions: [],
+                    onConfirm: async () => {},
+                  },
+                };
+              }),
             );
           }
         }
@@ -385,6 +394,70 @@ describe('livePromptEvents', () => {
         title: 'Hook requested confirmation to run',
       },
     });
+  });
+
+  it('pushes the real invocation description once per callId (R1-104)', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'd1',
+            name: 'run_shell_command',
+            args: { __invocationDesc: 'Running `npm test` in ./pkg' },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'run'),
+    )) as OpenTuiStreamEvent[];
+
+    // The fake scheduler reports the waiting call twice; the invocation
+    // description rides the stream exactly once per callId (descriptionSeen
+    // dedupe, ink mapToDisplay parity).
+    const descs = events.filter((e) => e.type === 'tool-description');
+    expect(descs).toEqual([
+      {
+        type: 'tool-description',
+        id: 'd1',
+        description: 'Running `npm test` in ./pkg',
+      },
+    ]);
+  });
+
+  it('emits no tool-description without an invocation (R1-104)', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: { callId: 'p1', name: 'run_shell_command', args: {} },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+
+    const events = (await drain(
+      livePromptEvents(config, 'run'),
+    )) as OpenTuiStreamEvent[];
+
+    expect(events.some((e) => e.type === 'tool-description')).toBe(false);
   });
 
   describe('tool execution live output (outputUpdateHandler)', () => {

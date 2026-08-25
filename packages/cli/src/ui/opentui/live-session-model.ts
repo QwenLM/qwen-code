@@ -24,6 +24,9 @@ export type ToolConfirmState = 'pending' | 'approved' | 'rejected';
 
 export type LiveToolItem = Extract<HistoryItem, { kind: 'tool' }> & {
   args?: string;
+  /** Real invocation description (scheduler's getDescription, ink
+   * mapToDisplay parity) — takes precedence over the args-based fallback. */
+  description?: string;
   confirm?: ToolConfirmState;
   /** Structured FileDiff result: the card renders colored diff lines inline
    * (ink DiffResultRenderer parity) instead of the flattened output text. */
@@ -245,6 +248,14 @@ export function foldLiveEvent(
       if (i >= 0) {
         const t = items[i] as LiveToolItem;
         items[i] = { ...t, args: ev.args };
+      }
+      return items;
+    }
+    case 'tool-description': {
+      const i = findToolIndex(items, ev.id);
+      if (i >= 0) {
+        const t = items[i] as LiveToolItem;
+        items[i] = { ...t, description: ev.description };
       }
       return items;
     }

@@ -5,15 +5,12 @@
  */
 
 /**
- * Renderer-dispatch contract test with two runners:
- *
- *   node --experimental-strip-types \
- *     packages/cli/src/ui/render/dispatch.test.ts
- *
- * runs the assertions directly (Node's type stripping requires the
- * explicit `.ts` extension below and never rewrites `.js` specifiers).
- * Under vitest the same assertions are wrapped in a suite instead, so the
- * file is not reported as an empty test suite there.
+ * Renderer-dispatch contract test. Run through vitest (the `describe`
+ * guard keeps the assertions wrappable in a suite there). A plain
+ * `node --experimental-strip-types` run of this file cannot work: the
+ * NodeNext `.js` specifiers only resolve after a build or through vitest's
+ * `.js` → `.ts` rewrite, and Node's type stripping does neither — so no
+ * standalone runner command is documented here.
  */
 
 import assert from 'node:assert/strict';

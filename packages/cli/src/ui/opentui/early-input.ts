@@ -32,9 +32,16 @@ export function decodeCapturedInput(buffer: Buffer): string {
   // characters (and the ESC sequences they may lead) so stray Ctrl+C /
   // carriage-return / escape bytes don't corrupt the composer.
   /* eslint-disable no-control-regex -- stripping C0 control bytes is the point. */
-  return text
-    .replace(/\u001B\[[0-9;?]*[A-Za-z]/g, '') // CSI sequences (arrows, etc.)
-    .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '');
+  return (
+    text
+      .replace(/\u001B\[[0-9;?]*[A-Za-z]/g, '') // CSI sequences (arrows, etc.)
+      // SS3 function-key sequences (F1-F4 etc., ESC O + final) survive the
+      // capture filter as user input (classifyEscapeSequence preserves them);
+      // strip the whole sequence here or the C0 pass below removes the bare
+      // ESC and leaks the O+letter payload into the composer.
+      .replace(/\u001BO[A-Za-z]/g, '')
+      .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/g, '')
+  );
   /* eslint-enable no-control-regex */
 }
 

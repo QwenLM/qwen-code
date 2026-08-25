@@ -363,6 +363,9 @@ export async function* livePromptEvents(
     };
 
     let completed: LooseCompletedCall[] = [];
+    // callIds whose real invocation description already went out (one per
+    // call, ink mapToDisplay parity).
+    const descriptionSeen = new Set<string>();
     const scheduler = new CoreToolScheduler({
       config,
       getPreferredEditor: () => undefined,
@@ -371,6 +374,22 @@ export async function* livePromptEvents(
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
+        // Real invocation descriptions (ink mapToDisplay): the card title is
+        // the tool's own getDescription() off the tracked call's invocation,
+        // not a hand-rolled args guess. Pushed once per callId, as soon as
+        // the scheduler builds the invocation (validating onward).
+        for (const c of calls) {
+          const callId = c.request.callId;
+          if (descriptionSeen.has(callId)) continue;
+          const invocation = 'invocation' in c ? c.invocation : undefined;
+          if (!invocation) continue;
+          descriptionSeen.add(callId);
+          live.push({
+            type: 'tool-description',
+            id: callId,
+            description: invocation.getDescription(),
+          });
+        }
         if (!options?.onWaitingCall) return;
         // Mirror the calls still awaiting approval: one that left the state
         // (resolved, or bounced back by a PreToolUse 'ask' hook under the

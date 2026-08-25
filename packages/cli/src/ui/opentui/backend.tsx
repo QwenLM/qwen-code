@@ -26,6 +26,7 @@ import {
   toolCardDescription,
   toolCardName,
   toolCardSummarySuffix,
+  toolCardText,
   toolStatusMeta,
   tailWindow,
   maxHistoryItemRows,
@@ -280,7 +281,15 @@ function ToolCard(props: {
   // and the description from the invocation args (`echo X (Echo X)`). Live
   // events carry no description string, so scripted/demo titles fall back.
   const displayName = toolCardName(item.tool);
-  const argsDescription = toolCardDescription(item.tool, item.args);
+  // Real invocation description first (live sessions: the scheduler's
+  // getDescription rides the tool-description event, ink mapToDisplay
+  // parity); the args reconstruction only covers scripted/demo streams.
+  const realDescription = item.description
+    ? toolCardText(item.description)
+    : '';
+  const argsDescription = realDescription
+    ? ''
+    : toolCardDescription(item.tool, item.args);
   let fallbackDescription =
     item.title && item.title !== item.tool && item.title !== displayName
       ? item.title
@@ -2858,7 +2867,8 @@ function App({
 
   // Remote input (--input-file): route external `submit` commands into the
   // same path as typed prompts. confirmation_response is not wired yet — it
-  // needs a DualOutputBridge on this renderer first.
+  // needs a DualOutputBridge on this renderer first; until then
+  // startInteractiveUI routes --json-fd/--json-file launches to ink.
   useEffect(() => {
     if (!remoteInputWatcher) return;
     remoteInputWatcher.setSubmitFn((text: string) => {
