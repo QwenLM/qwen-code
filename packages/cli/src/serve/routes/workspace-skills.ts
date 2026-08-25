@@ -12,7 +12,7 @@ import {
 } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
 } from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
@@ -326,7 +326,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     '/workspaces/:workspace/skills/install',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
@@ -357,7 +357,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     '/workspaces/:workspace/skills/:name',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
@@ -397,7 +397,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     '/workspaces/:workspace/skills/enable',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
@@ -427,7 +427,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     '/workspaces/:workspace/skills/:name/enable',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,

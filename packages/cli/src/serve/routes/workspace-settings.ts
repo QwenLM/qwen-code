@@ -25,7 +25,7 @@ import {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -558,7 +558,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
   const allowedKeys = getAllowedKeys(false);
 
   app.get('/workspaces/:workspace/settings', (req: Request, res: Response) => {
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedRuntime(
       deps.workspaceRegistry,
       req,
       res,
@@ -587,7 +587,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     '/workspaces/:workspace/settings',
     deps.mutate({ strict: true }),
     async (req: Request, res: Response) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,

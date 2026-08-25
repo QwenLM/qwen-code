@@ -14,7 +14,7 @@ import {
   validateMcpRuntimeServerName,
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
-import { resolveTrustedWorkspaceRuntimeFromParam } from '../workspace-route-runtime.js';
+import { resolveTrustedRuntime } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface RegisterWorkspaceMcpControlRoutesDeps {
@@ -364,7 +364,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/initialize',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
@@ -386,7 +386,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/reload',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
@@ -410,7 +410,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/:server/restart',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
@@ -489,7 +489,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       `/workspaces/:workspace/mcp/:server/${routeAction}`,
       deps.mutate({ strict: true }),
       async (req, res) => {
-        const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+        const runtime = resolveTrustedRuntime(
           deps.workspaceRegistry,
           req,
           res,
@@ -537,7 +537,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/servers',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
@@ -593,7 +593,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/servers/:name',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
