@@ -4434,6 +4434,50 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
     });
 
+    it('counts media-only prompts in the legacy positional rewind space', () => {
+      // A media-only prompt pushes a recording boundary (recordUserMessage)
+      // and a turn-start snapshot (#snapshotTurnStart) exactly like a text
+      // prompt, so the positional enumeration must count it too: skipping
+      // it strands a permanent +1 surplus that fails every later legacy
+      // rewind closed until /clear.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'QUJD' } }],
+        },
+        { role: 'model', parts: [{ text: 'image reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      const snap = (promptId: string, minutes: number) => ({
+        promptId,
+        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
+        trackedFileBackups: {},
+      });
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        snap('snap-0', 0),
+        snap('snap-1', 1),
+      ]);
+
+      expect(session.getRewindableSnapshotTargets()).toEqual([
+        { promptId: 'snap-0', turnIndex: 0 },
+        { promptId: 'snap-1', turnIndex: 1 },
+      ]);
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 2,
+        promptId: 'snap-1',
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+    });
+
     it('preserves startup context when rewinding to the first user turn', () => {
       const history: Content[] = [
         {

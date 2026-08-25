@@ -4251,7 +4251,18 @@ export class Session implements SessionContext {
     // a TUI user turn. Here the placeholders MUST stay counted: ACP rewind
     // maps against per-prompt file-history snapshots, which ARE created for
     // media-only prompts. Do not mirror that exclusion into this twin.
-    return content.parts.some((part) => 'text' in part && part.text);
+    // Unclear media parts count for the same reason: a media-only prompt
+    // pushes a recording boundary (recordUserMessage) and a turn-start
+    // snapshot (#snapshotTurnStart) exactly like a text prompt, so leaving
+    // it out of the positional enumeration strands a permanent +1 surplus
+    // that fails every later legacy rewind closed until /clear and hides
+    // the turn from the staleness fingerprint below.
+    return content.parts.some(
+      (part) =>
+        ('text' in part && !!part.text) ||
+        'inlineData' in part ||
+        'fileData' in part,
+    );
   }
 
   async cancelPendingPrompt(): Promise<void> {
