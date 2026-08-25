@@ -529,6 +529,7 @@ type StopContinuationResult =
   | {
       kind: 'terminal';
       stopReason: PromptResponse['stopReason'];
+      loopProtectionStopped?: boolean;
       supersededAutomaticContinuation?: boolean;
     };
 
@@ -4440,10 +4441,11 @@ export class Session implements SessionContext {
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
   ): Promise<PromptResponse> {
+    let managedMemoryRecallStarted = false;
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
-      async () => {
+      async (): Promise<PromptResponse> => {
         await this.assertCanStartTurn();
         if (pendingSend.signal.aborted) {
           return { stopReason: 'cancelled' };
@@ -4479,7 +4481,7 @@ export class Session implements SessionContext {
             messageType: 'acp_prompt',
             ...(parentContext ? { parentContext } : {}),
           },
-          async () => {
+          async (): Promise<PromptResponse> => {
             // Extract text from all text blocks to construct the full prompt text for logging
             const promptText = params.prompt
               .filter((block) => block.type === 'text')
@@ -4796,6 +4798,11 @@ export class Session implements SessionContext {
             // call, one persisted transcript record per lap — until someone
             // pauses or clears the goal.
             const isRuntimeContinuation = goalTurn?.origin === 'runtime';
+            const isFreshUserTurn =
+              !isRetry &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isRuntimeContinuation;
             if (
               !isContinue &&
               !isRestoreAskUserQuestion &&
@@ -4847,6 +4854,13 @@ export class Session implements SessionContext {
               }
             }
 
+            if (isFreshUserTurn) {
+              managedMemoryRecallStarted = true;
+              this.config
+                .getGeminiClient()
+                .beginManagedAutoMemoryRecall(promptText, pendingSend.signal);
+            }
+
             if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
               this.#resetTodoStopGuardBackgroundLineage();
             }
@@ -4891,6 +4905,14 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
+            if (isFreshUserTurn) {
+              const memory = await this.config
+                .getGeminiClient()
+                .consumeManagedAutoMemoryRecall('initial');
+              if (memory?.prompt) {
+                systemReminders.unshift({ text: memory.prompt });
+              }
+            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on
@@ -5447,7 +5469,41 @@ export class Session implements SessionContext {
                   getActiveInteractionSpan(),
                 );
               }
-              return result;
+              if (
+                isFreshUserTurn &&
+                result.stopReason === 'end_turn' &&
+                !result.loopProtectionStopped &&
+                this.config.getManagedAutoMemoryEnabled()
+              ) {
+                const memoryManager = this.config.getMemoryManager();
+                const history = this.#getCurrentChat().getHistoryShallow();
+                void memoryManager
+                  .scheduleExtract({
+                    projectRoot: this.config.getProjectRoot(),
+                    sessionId: this.config.getSessionId(),
+                    history,
+                    config: this.config,
+                  })
+                  .catch((error: unknown) => {
+                    debugLogger.warn(
+                      'Failed to schedule ACP managed auto-memory extraction.',
+                      error,
+                    );
+                  });
+                void memoryManager
+                  .scheduleDream({
+                    projectRoot: this.config.getProjectRoot(),
+                    sessionId: this.config.getSessionId(),
+                    config: this.config,
+                  })
+                  .catch((error: unknown) => {
+                    debugLogger.warn(
+                      'Failed to schedule ACP managed auto-memory dream.',
+                      error,
+                    );
+                  });
+              }
+              return { stopReason: result.stopReason };
             } finally {
               logConversationFinishedEvent(
                 this.config,
@@ -5475,7 +5531,11 @@ export class Session implements SessionContext {
             result.stopReason === 'cancelled' ? 'cancelled' : 'ok',
         );
       },
-    );
+    ).finally(() => {
+      if (managedMemoryRecallStarted) {
+        this.config.getGeminiClient().finishManagedAutoMemoryRecall();
+      }
+    });
   }
 
   async #handleStopHookLoop(
@@ -5487,7 +5547,10 @@ export class Session implements SessionContext {
     modelOverride?: string,
     responseCapture?: AgentResponseCapture,
     rejectOnLoopDetected = false,
-  ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
+  ): Promise<{
+    stopReason: PromptResponse['stopReason'];
+    loopProtectionStopped?: boolean;
+  }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
@@ -5556,7 +5619,7 @@ export class Session implements SessionContext {
             },
           );
           if (continuation.kind === 'terminal') {
-            return { stopReason: continuation.stopReason };
+            return continuation;
           }
           continue;
         }
@@ -5656,7 +5719,7 @@ export class Session implements SessionContext {
               },
             );
             if (continuation.kind === 'terminal') {
-              return { stopReason: continuation.stopReason };
+              return continuation;
             }
             continue;
           }
@@ -5795,7 +5858,7 @@ export class Session implements SessionContext {
         stopHookReasons = stopHookReasons.slice(0, -1);
       }
       if (continuation.kind === 'terminal') {
-        return { stopReason: continuation.stopReason };
+        return continuation;
       }
     }
   }
@@ -6395,6 +6458,7 @@ export class Session implements SessionContext {
             stopReason: options.rejectOnLoopDetected
               ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
               : getAbortAwareEndTurnStopReason(pendingSend.signal),
+            loopProtectionStopped: true,
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -6409,6 +6473,18 @@ export class Session implements SessionContext {
           options.rejectOnLoopDetected ?? false,
         );
         nextMessage = nextAfterTools.message;
+        if (nextAfterTools.stoppedByRepeatedToolFailure) {
+          return {
+            kind: 'terminal',
+            stopReason: options.rejectOnLoopDetected
+              ? cancelledOrThrowLoopDetected(pendingSend.signal, toolLoopState)
+              : getAbortAwareEndTurnStopReason(pendingSend.signal),
+            loopProtectionStopped: true,
+            ...(supersededAutomaticContinuation
+              ? { supersededAutomaticContinuation: true }
+              : {}),
+          };
+        }
         if (nextAfterTools.hadMidTurnUserInput) {
           nextGuardContinuation = undefined;
           continue;
@@ -6848,6 +6924,16 @@ export class Session implements SessionContext {
         `Send aborted after pre-send validation for prompt ${promptId}`,
       );
       return { responseStream: null, stopReason: 'cancelled' };
+    }
+
+    if (message[0]?.functionResponse) {
+      const memory =
+        await geminiClient.consumeManagedAutoMemoryRecall('tool_result');
+      if (memory?.prompt) {
+        message = insertAfterFunctionResponses(message, [
+          { text: memory.prompt },
+        ]);
+      }
     }
 
     const chat = this.#getCurrentChat();
@@ -9868,11 +9954,6 @@ export class Session implements SessionContext {
    * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
    * the ACP path bypasses that code, so without this helper plan mode is
    * silently inert and subagent/arena sessions lose context.
-   *
-   * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
-   * included here. Managed auto-memory requires a prefetch pipeline that
-   * lives in `GeminiClient`, and porting it into the ACP path is tracked
-   * separately as part of the broader middleware-alignment work.
    */
   async #buildInitialSystemReminders(): Promise<Part[]> {
     const reminders: Part[] = [];
@@ -11930,6 +12011,9 @@ export class Session implements SessionContext {
         executionStatus,
       });
     } finally {
+      if (terminalStatus && terminalStatus !== 'cancelled') {
+        this.config.getGeminiClient().recordCompletedToolCall(toolName, args);
+      }
       if (terminalStatus === 'cancelled') {
         endToolSpan(toolSpan, { success: false, cancelled: true });
       } else {
