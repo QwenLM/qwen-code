@@ -87,6 +87,8 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   ACTIVE_WORK_STALE_INTERVALS,
+  CHANNEL_LIVENESS_META_KEY,
+  CHANNEL_LIVENESS_VERSION,
   gradeActiveWorkCoverage,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
@@ -94,6 +96,11 @@ import {
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
 } from './bridgeTypes.js';
+import {
+  CHANNEL_LIVENESS_INTERVAL_MS,
+  CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+  CHANNEL_LIVENESS_TIMEOUT_CODE,
+} from './channel-liveness.js';
 import {
   ApprovalMode,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -272,6 +279,18 @@ function activeWorkInitializeResponse(
         categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
         ...overrides,
       },
+    },
+  };
+}
+
+function channelLivenessInitializeResponse(): InitializeResponse {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    agentInfo: { name: 'channel-liveness-agent', version: '0' },
+    authMethods: [],
+    agentCapabilities: {},
+    _meta: {
+      [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
     },
   };
 }
@@ -11855,6 +11874,155 @@ describe('createAcpSessionBridge', () => {
     // pattern as the BkUyD test above. The test runner GCs the
     // dangling promises when this `it` returns.
     void killPromise;
+  });
+
+  describe('channel liveness', () => {
+    it('advertises v1 but stays disabled when the child does not acknowledge it', async () => {
+      vi.useFakeTimers();
+      try {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        expect(handle.agent.initializeCalls[0]?._meta).toMatchObject({
+          [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
+        });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS + CHANNEL_LIVENESS_PROBE_TIMEOUT_MS * 2,
+        );
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({
+            method: SERVE_STATUS_EXT_METHODS.channelPing,
+          }),
+        );
+        expect(handle.killed).toBe(false);
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('fails the transport after two unanswered channel probes', async () => {
+      vi.useFakeTimers();
+      try {
+        const event = vi.fn();
+        const channelLifecycle = vi.fn();
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        const baseKill = handle.channel.kill;
+        const transportFail = vi.fn((error: unknown) => {
+          void baseKill();
+          return error;
+        });
+        handle.channel = {
+          ...handle.channel,
+          transportGuard: {
+            maxActiveHandlers: 10,
+            maxActiveHandlerBytes: 1024 * 1024,
+            reserveOutboundOperation: () => () => {},
+            reservePreparedResponse: () => {},
+            fail: transportFail,
+          },
+        };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionScope: 'thread',
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle,
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(bridge.sessionCount).toBe(2);
+        const firstEvents: BridgeEvent[] = [];
+        const secondEvents: BridgeEvent[] = [];
+        const firstDrain = (async () => {
+          for await (const event of bridge.subscribeEvents(first.sessionId)) {
+            firstEvents.push(event);
+          }
+        })();
+        const secondDrain = (async () => {
+          for await (const event of bridge.subscribeEvents(second.sessionId)) {
+            secondEvents.push(event);
+          }
+        })();
+
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_INTERVAL_MS);
+        const firstProbeCalls = handle.agent.extMethodCalls.filter(
+          ({ method }) => method === SERVE_STATUS_EXT_METHODS.channelPing,
+        );
+        expect(firstProbeCalls).toEqual([
+          {
+            method: SERVE_STATUS_EXT_METHODS.channelPing,
+            params: { v: CHANNEL_LIVENESS_VERSION, nonce: 0 },
+          },
+        ]);
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+        expect(transportFail).not.toHaveBeenCalled();
+        expect(
+          handle.agent.extMethodCalls.filter(
+            ({ method }) => method === SERVE_STATUS_EXT_METHODS.channelPing,
+          ),
+        ).toHaveLength(2);
+
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+        await handle.channel.exited;
+        await Promise.all([firstDrain, secondDrain]);
+
+        expect(transportFail).toHaveBeenCalledOnce();
+        expect(transportFail.mock.calls[0]?.[0]).toMatchObject({
+          code: CHANNEL_LIVENESS_TIMEOUT_CODE,
+        });
+        expect(bridge.sessionCount).toBe(0);
+        expect(firstEvents.at(-1)).toMatchObject({
+          type: 'session_died',
+          data: { sessionId: first.sessionId, reason: 'channel_closed' },
+        });
+        expect(secondEvents.at(-1)).toMatchObject({
+          type: 'session_died',
+          data: { sessionId: second.sessionId, reason: 'channel_closed' },
+        });
+        expect(channelLifecycle).toHaveBeenCalledWith('exit', false);
+        expect(event).toHaveBeenCalledWith(
+          'channel.liveness_failed',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.session_count': 2,
+            'qwen-code.daemon.channel.transport_error_code':
+              CHANNEL_LIVENESS_TIMEOUT_CODE,
+          }),
+        );
+        expect(event).toHaveBeenCalledWith(
+          'channel.exited',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.transport_failed': true,
+            'qwen-code.daemon.channel.transport_failure_initiated_teardown': true,
+            'qwen-code.daemon.channel.transport_error_code':
+              CHANNEL_LIVENESS_TIMEOUT_CODE,
+          }),
+        );
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('transport failure marks the channel dying before process exit', async () => {
@@ -26794,8 +26962,12 @@ describe('createAcpSessionBridge', () => {
         expect(stderrSpy).toHaveBeenCalledWith(
           expect.stringContaining('updated session metadata'),
         );
+        // The audit line prints the id through JSON.stringify, which escapes
+        // the backslashes of a Windows-spelled session id.
         expect(stderrSpy).toHaveBeenCalledWith(
-          expect.stringContaining(session.sessionId),
+          expect.stringContaining(
+            JSON.stringify(session.sessionId).slice(1, -1),
+          ),
         );
         expect(stderrSpy).toHaveBeenCalledWith(
           expect.stringContaining('pr=9517'),

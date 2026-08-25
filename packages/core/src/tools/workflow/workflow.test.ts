@@ -21,6 +21,7 @@ import {
   WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
+import { ToolErrorType } from '../tool-error.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
 
@@ -373,6 +374,26 @@ await agent('scan package.json')
         tool.build({ script: 'await agent("x")' } as never).getDescription(),
       ).toContain('chars)');
     });
+  });
+
+  // A script that never compiled has no run behind it. Reporting it as a
+  // failed workflow sends the model looking for a runId that was never
+  // minted, and reads as "the orchestration broke" when the real problem is
+  // a typo it can fix and re-send.
+  it('reports an uncompilable script as not launched, not as a failure', async () => {
+    const { config } = configWithRegistry();
+    const tool = new WorkflowTool(config);
+    const result = await tool
+      .build({ script: "const x: string = 'a';\nawait agent(x);" } as never)
+      .execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+    const text = JSON.stringify(result.llmContent);
+    expect(text).toContain('was not launched');
+    expect(text).toContain('plain JavaScript');
+    // No run happened, so there is no run id to hand back.
+    expect(result.workflowRunId).toBeUndefined();
+    expect(text).not.toContain('Workflow failed');
   });
 
   // The tool description is not the only model-visible copy of the caps —
