@@ -636,6 +636,12 @@ describe('agent-prompt (command boundary)', () => {
       expect(briefText).toContain('### Incidental findings');
       expect(briefText).toContain('review ab-drive');
       expect(briefText).toContain('revert-hunk');
+      // The revert-hunk paragraph must distinguish a genuine coupling
+      // refusal (carries `conflict`) from a harness/invocation failure
+      // (carries `harnessFailure`): dropping this tells the verifier to
+      // quote a mistyped --tree as a fact about the diff.
+      expect(briefText).toContain('carries `conflict`');
+      expect(briefText).toContain('`harnessFailure: true`');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
