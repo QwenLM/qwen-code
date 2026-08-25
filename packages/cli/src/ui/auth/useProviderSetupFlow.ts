@@ -69,6 +69,14 @@ export interface ModelIdsEditContext {
    * can sit in the buffer twice, and the caret can move between the copies.
    */
   activeCustomModelSegment?: number;
+  /**
+   * The index of the caret's occurrence in `customModelIds` — the filtered
+   * stream in its own coordinates. `activeCustomModelSegment` counts raw
+   * segments, and once an empty segment shifts the two apart it can no
+   * longer say which copy of a duplicate id the caret is in; the freeze
+   * anchors to this occurrence.
+   */
+  activeCustomModelOccurrence?: number;
   removedRecommendationId?: string;
 }
 
@@ -294,11 +302,16 @@ export function useProviderSetupFlow(
   // tokens being typed, not tokens merely navigated to.
   const activeTokenEditTouchedRef = useRef(false);
   // The token occurrence the last text edit touched, as the caret's segment
-  // index in the raw custom-ids text plus the id it owned. Caret reports
-  // compare against it to tell "still inside the token being typed" from
-  // "moved to another token" — the id alone cannot, because the same id can
-  // sit in the buffer twice.
-  const editedTokenRef = useRef<{ segment: number; id: string } | null>(null);
+  // index in the raw custom-ids text plus the id it owned, and the same
+  // occurrence's index in the filtered `customModelIds` stream. Caret
+  // reports compare against it to tell "still inside the token being typed"
+  // from "moved to another token" — the id alone cannot, because the same
+  // id can sit in the buffer twice.
+  const editedTokenRef = useRef<{
+    segment: number;
+    id: string;
+    occurrence?: number;
+  } | null>(null);
   const customModelIdsRef = useRef<string[]>([]);
   // The id `applyDiscoveredModels` checked on the user's behalf when the prune
   // emptied the selection. It is the wizard's pick, so it is stripped back out
@@ -390,6 +403,7 @@ export function useProviderSetupFlow(
           ? {
               segment: context.activeCustomModelSegment,
               id: context.activeCustomModelId,
+              occurrence: context.activeCustomModelOccurrence,
             }
           : null;
       liveModelIdsRef.current = value;
@@ -578,7 +592,18 @@ export function useProviderSetupFlow(
           activeTokenEditTouchedRef.current &&
           id === activeCustomModelIdRef.current
         ) {
-          const occurrenceAt = customModelIdsRef.current.indexOf(id);
+          // Anchor the freeze to the occurrence under the CARET, not to
+          // the first copy of the id: the keep clause shields that
+          // occurrence, and the step's re-derive keeps it while dropping
+          // the earlier twins — a freeze pinned to another copy would
+          // track a segment the screen no longer shows.
+          const edited = editedTokenRef.current;
+          const occurrenceAt =
+            edited !== null &&
+            edited.id === id &&
+            edited.occurrence !== undefined
+              ? edited.occurrence
+              : customModelIdsRef.current.indexOf(id);
           frozenTokenRef.current = {
             id,
             value: id,
@@ -618,13 +643,24 @@ export function useProviderSetupFlow(
       // keeping every copy would leave a phantom twin in the stream that
       // the on-screen text no longer has, and the latch would diff the
       // next edit against it and clear a freeze that legitimately grew.
+      // Of a repeated frozen id it keeps the copy under the caret, which is
+      // also the copy the re-derive shields.
       if (listChanged || selectionChanged) {
+        const frozenSegment = frozenTokenRef.current?.segment;
         const reseeded: string[] = [];
-        for (const custom of customsBeforeSwap) {
+        for (const [index, custom] of customsBeforeSwap.entries()) {
           const survives =
             custom === frozenId ||
             (!builtIn.has(custom) && !served.has(custom));
-          if (survives && !reseeded.includes(custom)) {
+          if (!survives) continue;
+          // A repeated frozen id collapses to the copy under the caret —
+          // the one `resplitCustomModelIdsText` shields — so the latch and
+          // the screen keep naming the same occurrence.
+          const isFrozenTwin =
+            custom === frozenId &&
+            frozenSegment !== undefined &&
+            index !== frozenSegment;
+          if (!isFrozenTwin && !reseeded.includes(custom)) {
             reseeded.push(custom);
           }
         }

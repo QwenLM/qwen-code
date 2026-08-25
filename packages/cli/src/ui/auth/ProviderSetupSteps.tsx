@@ -365,6 +365,28 @@ export function resplitCustomModelIdsText(
     : body;
 }
 
+/**
+ * The caret's segment index among the non-empty comma segments — the
+ * coordinates of the hook's `customModelIds` stream, which drops empty
+ * segments. `segmentIndexAtCaret` counts raw segments, and once an empty
+ * segment shifts the two apart it can no longer say which copy of a
+ * duplicate id the caret is in. Undefined when the caret's own segment is
+ * empty and carries no id.
+ */
+function occurrenceIndexAtCaret(
+  text: string,
+  caret: number,
+): number | undefined {
+  const segments = text.split(',');
+  const rawIndex = segmentIndexAtCaret(text, caret);
+  if (segments[rawIndex]?.trim() === '') return undefined;
+  let occurrence = 0;
+  for (let i = 0; i < rawIndex; i++) {
+    if ((segments[i] ?? '').trim() !== '') occurrence++;
+  }
+  return occurrence;
+}
+
 function segmentIndexAtCaret(text: string, caret: number): number {
   const clamped = Math.max(0, Math.min(caret, cpLen(text)));
   const segments = commaSegmentsWithOffsets(text);
@@ -684,6 +706,9 @@ function ModelIdsStep({
             : undefined,
           activeCustomModelSegment: editingCustomInput
             ? segmentIndexAtCaret(customText, modelIdsCaretRef.current)
+            : undefined,
+          activeCustomModelOccurrence: editingCustomInput
+            ? occurrenceIndexAtCaret(customText, modelIdsCaretRef.current)
             : undefined,
           ...(removedRecommendationId ? { removedRecommendationId } : {}),
         },

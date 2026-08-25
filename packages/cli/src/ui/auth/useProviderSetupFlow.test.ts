@@ -3363,4 +3363,89 @@ describe('useProviderSetupFlow model discovery', () => {
     expect(restored).not.toContain(RETIRED_ID);
     expect(restored).toContain(divergent);
   });
+
+  it('keeps a default whose frozen occurrence is the last of duplicate ids', async () => {
+    // R22-1, round 31. The freeze anchored to the FIRST copy of the
+    // shielded id and the reseed deduped repeated ids to the first
+    // surviving copy, while the keep clause shields the occurrence under
+    // the CARET and the step's re-derive keeps the active (later) twin.
+    // With the caret in the last copy, the latch tracked a segment the
+    // screen no longer showed, cleared on the first growth keystroke, and
+    // the commit delta dropped the frozen default from the baseline — the
+    // next pair change restored a selection silently missing it.
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock
+      .mockReturnValueOnce(
+        new Promise<ModelDiscoveryResult>((resolve) => {
+          resolveLookup = resolve;
+        }),
+      )
+      .mockResolvedValueOnce(discovered(BUILT_IN_IDS));
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+
+    // The buffer holds the unserved built-in twice; the caret sits in the
+    // LAST copy when the lookup resolves.
+    act(() =>
+      result.current.changeModelIds(
+        [...BUILT_IN_IDS, RETIRED_ID, 'my-alias', RETIRED_ID].join(', '),
+        {
+          customModelIds: [RETIRED_ID, 'my-alias', RETIRED_ID],
+          activeCustomModelId: RETIRED_ID,
+          activeCustomModelSegment: 2,
+          activeCustomModelOccurrence: 2,
+        },
+      ),
+    );
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    expect(normalizeModelIds(result.current.state.modelIds)).toContain(
+      RETIRED_ID,
+    );
+
+    // The re-derive drops the inactive first copy and keeps the active
+    // last one — on screen `my-alias, RETIRED_ID` — and the user grows
+    // the frozen token.
+    const grown = `${RETIRED_ID}-x`;
+    act(() =>
+      result.current.changeModelIds(
+        normalizeModelIds([...SERVED_IDS, 'my-alias', grown].join(', ')).join(
+          ', ',
+        ),
+        {
+          customModelIds: ['my-alias', grown],
+          activeCustomModelId: grown,
+          activeCustomModelSegment: 1,
+          activeCustomModelOccurrence: 1,
+        },
+      ),
+    );
+    act(() => {
+      result.current.goBack();
+    });
+
+    act(() => {
+      result.current.goBack();
+    });
+    act(() => result.current.selectBaseUrl(CODING_PLAN_GLOBAL_BASE_URL));
+    await act(async () => {
+      result.current.submitApiKey('sk-sp-test-key');
+    });
+    await waitFor(() => expect(result.current.state.step).toBe('models'));
+    await waitFor(() =>
+      expect(fetchProviderModelIdsMock).toHaveBeenCalledTimes(2),
+    );
+
+    const restored = normalizeModelIds(result.current.state.modelIds);
+    expect(restored).toContain(RETIRED_ID);
+    expect(restored).toContain(grown);
+  });
 });

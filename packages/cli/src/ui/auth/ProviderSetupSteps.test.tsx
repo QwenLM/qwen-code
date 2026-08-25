@@ -1202,6 +1202,61 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('reports the caret occurrence in the filtered custom-ids stream', async () => {
+    // The growth latch follows the frozen OCCURRENCE through the filtered
+    // `customModelIds` stream; with the id in the buffer twice the step
+    // must name which copy owns the caret — the raw segment index alone
+    // cannot once empty segments shift the two apart (see the next test).
+    const changeModelIds = vi.fn();
+    const flow = createModelIdsFlow({ modelIds: '', changeModelIds });
+
+    const { unmount } = renderWithProviders(<ProviderSetupSteps flow={flow} />);
+
+    for (const char of 'alpha,beta,alpha') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+
+    expect(changeModelIds).toHaveBeenLastCalledWith(
+      'alpha, beta',
+      expect.objectContaining({
+        customModelIds: ['alpha', 'beta', 'alpha'],
+        activeCustomModelId: 'alpha',
+        activeCustomModelSegment: 2,
+        activeCustomModelOccurrence: 2,
+      }),
+    );
+    unmount();
+  });
+
+  it('translates the caret segment past empty ones for the occurrence', async () => {
+    // A bare leading comma shifts the raw caret segment one past the
+    // filtered stream's index of the same token; the occurrence must be
+    // the filtered index, or the freeze anchors to a phantom slot.
+    const changeModelIds = vi.fn();
+    const flow = createModelIdsFlow({ modelIds: '', changeModelIds });
+
+    const { unmount } = renderWithProviders(<ProviderSetupSteps flow={flow} />);
+
+    for (const char of ',alpha') {
+      await act(async () => {
+        pressLatestKey(char, char);
+      });
+    }
+
+    expect(changeModelIds).toHaveBeenLastCalledWith(
+      'alpha',
+      expect.objectContaining({
+        customModelIds: ['alpha'],
+        activeCustomModelId: 'alpha',
+        activeCustomModelSegment: 1,
+        activeCustomModelOccurrence: 0,
+      }),
+    );
+    unmount();
+  });
+
   it('reports pure caret moves and leaving the custom input', async () => {
     const changeActiveCustomModelId = vi.fn();
     const flow = createModelIdsFlow({
