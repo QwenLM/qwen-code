@@ -650,6 +650,13 @@ export async function runNonInteractive(
     const bindGoalHost = () => {
       goalHostUnbind ??= config.bindGoalTurnHost(goalHost);
     };
+    const markGoalTurnDelivered = (turn: HeadlessGoalTurn): void => {
+      try {
+        config.getGoalRuntime().markTurnDelivered(turn.turnKey);
+      } catch {
+        // Goal runtime is optional during early initialization.
+      }
+    };
     let settlingGoalTurn: HeadlessGoalTurn | undefined;
     let goalTurnSettlement: Promise<void> | undefined;
     const failClosedActiveGoalTurn = (reason: string): Promise<void> => {
@@ -1205,6 +1212,7 @@ export async function runNonInteractive(
                   'The Goal runtime did not schedule a continuation.',
                 );
               }
+              markGoalTurnDelivered(activeGoalTurn);
               initialPartList = buildGoalContinuationParts(activeGoalTurn);
               slashHandled = true;
               break;
@@ -2492,6 +2500,7 @@ export async function runNonInteractive(
             const nextGoalTurn = queuedGoalTurns.shift();
             if (nextGoalTurn) {
               activeGoalTurn = nextGoalTurn;
+              markGoalTurnDelivered(nextGoalTurn);
               isFirstGoalSegment = true;
               currentMessages = [
                 {
@@ -2522,6 +2531,7 @@ export async function runNonInteractive(
             const nextGoalTurn = queuedGoalTurns.shift();
             if (nextGoalTurn) {
               activeGoalTurn = nextGoalTurn;
+              markGoalTurnDelivered(nextGoalTurn);
               isFirstGoalSegment = true;
               currentMessages = [
                 {

@@ -497,6 +497,7 @@ describe('Session', () => {
     subscribe: ReturnType<typeof vi.fn>;
     beginTurn: ReturnType<typeof vi.fn>;
     releaseTurn: ReturnType<typeof vi.fn>;
+    markTurnDelivered: ReturnType<typeof vi.fn>;
     permitForTurn: ReturnType<typeof vi.fn>;
     getVerifierFeedback: ReturnType<typeof vi.fn>;
     finishTurn: ReturnType<typeof vi.fn>;
@@ -741,6 +742,7 @@ describe('Session', () => {
       subscribe: vi.fn().mockReturnValue(() => {}),
       beginTurn: vi.fn(),
       releaseTurn: vi.fn().mockResolvedValue(false),
+      markTurnDelivered: vi.fn(),
       permitForTurn: vi.fn(),
       getVerifierFeedback: vi.fn(),
       finishTurn: vi.fn().mockResolvedValue(undefined),
@@ -18625,6 +18627,7 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          objectiveUpdated: true,
           verifierFeedback: 'Need independent evidence',
         });
 
@@ -18657,6 +18660,11 @@ describe('Session', () => {
               }),
               expect.objectContaining({
                 text: expect.stringContaining(
+                  'The Goal objective changed since your last turn',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
                   'Verifier feedback: Need independent evidence',
                 ),
               }),
@@ -18664,6 +18672,9 @@ describe('Session', () => {
           }),
           expect.any(String),
           permit,
+        );
+        expect(mockGoalRuntime.markTurnDelivered).toHaveBeenCalledWith(
+          'goal-runtime:turn-1',
         );
         expect(
           mockChatRecordingService.recordGoalRuntimeMessage,

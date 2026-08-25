@@ -20,9 +20,8 @@ export interface GoalContinuationPromptInput {
   /** The authoritative objective the runtime holds right now. */
   objective: string;
   /**
-   * True on the first continuation after the objective actually changed --
-   * an edit that bumped the revision, or a replace that minted a new Goal
-   * over a previous one. See `OBJECTIVE_UPDATED_LINE` for why this is
+   * True on the first continuation carrying an objective the model has not
+   * been handed before. See `OBJECTIVE_UPDATED_LINE` for why this is
    * one-shot rather than standing.
    */
   objectiveUpdated?: boolean;

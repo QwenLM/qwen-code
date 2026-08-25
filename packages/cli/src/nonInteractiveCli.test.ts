@@ -747,6 +747,39 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('carries the objective-updated notice into a scheduled Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    const deliveredSpy = vi.spyOn(goalRuntime, 'markTurnDelivered');
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            objectiveUpdated: true,
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-notice',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts, , , options] =
+      mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'The Goal objective changed since your last turn',
+    );
+    expect(deliveredSpy).toHaveBeenCalledWith(options.goalTurnKey);
+  });
+
   it('keeps the exact Goal permit through a ToolResult continuation', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);

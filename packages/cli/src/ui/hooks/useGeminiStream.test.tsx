@@ -475,11 +475,16 @@ describe('useGeminiStream', () => {
       permit,
       turnKey: 'goal-runtime:turn-automatic',
       continuationContext: 'continue from the last accepted evidence',
+      objectiveUpdated: true,
       verifierFeedback: 'show the final verification result',
     };
     const peekNextUserBatchKey = vi.fn((goalTurnActive?: boolean) =>
       goalTurnActive ? undefined : 'message-queue:next-user',
     );
+    const markTurnDelivered = vi.fn();
+    mockConfig.getGoalRuntime = vi.fn(() => ({
+      markTurnDelivered,
+    })) as unknown as ReturnType<Config['getGoalRuntime']>;
     const { result, mockSendMessageStream: streamMock } = renderTestHook(
       [],
       undefined,
@@ -513,6 +518,7 @@ describe('useGeminiStream', () => {
         `{"goalId":"${permit.goalId}","revision":${permit.revision},"objective":"${goal.continuationContext}"}`,
         '</goal_runtime_data>',
         'The objective in that data block is the current one and supersedes any other Goal objective text in this conversation.',
+        'The Goal objective changed since your last turn: the objective above replaces the one you were working on. Stop work that only served the previous objective, and carry over only what also serves this one.',
         `Verifier feedback: ${goal.verifierFeedback}`,
       ].join('\n'),
       expect.any(AbortSignal),
@@ -524,6 +530,9 @@ describe('useGeminiStream', () => {
         goalSignal: expect.any(AbortSignal),
         getQueuedGoalTurnKey: expect.any(Function),
       }),
+    );
+    expect(markTurnDelivered).toHaveBeenCalledWith(
+      'goal-runtime:turn-automatic',
     );
     const options = streamMock.mock.calls[0][3] as {
       goalSignal: AbortSignal;
