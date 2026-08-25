@@ -5798,6 +5798,178 @@ describe('DingtalkChannel outbound image delivery', () => {
   });
 });
 
+describe('DingtalkChannel outbound file projection', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function segment(segmentId = 'segment-1'): ChannelOutputSegmentContext {
+    return {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId,
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid123',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    };
+  }
+
+  it('redacts reserved file output from plain replies', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+
+    await channel.sendMessage(
+      'cid123',
+      'before\n[FILE: /workspace/report.txt]\nafter',
+    );
+
+    const body = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(body.markdown.text).toContain('before\n\nafter');
+    expect(body.markdown.text).toContain('[File delivery unavailable]');
+    expect(body.markdown.text).not.toContain('[FILE:');
+    expect(body.markdown.text).not.toContain('/workspace/report.txt');
+  });
+
+  it.each([
+    ['reserved opening', '[FILE:', ''],
+    ['split reserved opening', '[FI', 'LE: '],
+  ])(
+    'keeps paths hidden when block streaming splits the %s',
+    async (_name, first, second) => {
+      const channel = createChannel({ blockStreaming: 'on' });
+      seedWebhook(channel, 'cid123');
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}'));
+      const send = (
+        channel as unknown as {
+          sendResponseMessage(
+            chatId: string,
+            text: string,
+            sessionId: string,
+          ): Promise<void>;
+        }
+      ).sendResponseMessage.bind(channel);
+
+      await send('cid123', first, 'session-1');
+      await send(
+        'cid123',
+        `${second}/workspace/private-report.txt]`,
+        'session-1',
+      );
+
+      expect(JSON.stringify(fetchSpy.mock.calls)).not.toContain(
+        '/workspace/private-report.txt',
+      );
+      expect(JSON.stringify(fetchSpy.mock.calls)).toContain(
+        'File delivery unavailable',
+      );
+      await getOutputSegmentEndHook(channel)(
+        'cid123',
+        'session-1',
+        segment(),
+        'completed',
+      );
+      expect(
+        (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+          .blockFileProjectors.size,
+      ).toBe(0);
+    },
+  );
+
+  it('feeds status presentation only projected chunks and final text', async () => {
+    const channel = createChannel();
+    const projected: string[] = [];
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          appendOutput: (_segment: unknown, chunk: string) => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = {
+      appendOutput: (_segment, chunk) => projected.push(chunk),
+      closeOutput,
+    };
+    const context = segment();
+    const chunks = ['before\n[FI', 'LE: /workspace/report.txt]', '\nafter'];
+    for (const chunk of chunks) {
+      getChunkHook(channel)('cid123', chunk, 'session-1', context);
+    }
+    await getCompleteHook(channel)(
+      'cid123',
+      chunks.join(''),
+      'session-1',
+      context,
+    );
+
+    expect(projected.join('')).toBe('before\n\nafter');
+    expect(closeOutput.mock.calls[0]?.[1]).toBe(
+      'before\n\nafter\n[File delivery unavailable]',
+    );
+    expect(JSON.stringify(closeOutput.mock.calls)).not.toContain(
+      '/workspace/report.txt',
+    );
+  });
+
+  it('fails closed on final divergence and discards terminal segments', async () => {
+    const channel = createChannel();
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          appendOutput: () => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = { appendOutput: () => {}, closeOutput };
+    const context = segment();
+    getChunkHook(channel)('cid123', 'streamed text', 'session-1', context);
+    await getCompleteHook(channel)(
+      'cid123',
+      'different final text',
+      'session-1',
+      context,
+    );
+    expect(closeOutput.mock.calls[0]?.[1]).toBe(
+      'different final text\n[File delivery unavailable]',
+    );
+
+    for (const [index, reason] of (
+      ['cancelled', 'failed'] as const
+    ).entries()) {
+      const ended = segment(`segment-${index + 2}`);
+      getChunkHook(channel)(
+        'cid123',
+        '[FILE: /workspace/a.txt]',
+        'session-1',
+        ended,
+      );
+      await getOutputSegmentEndHook(channel)(
+        'cid123',
+        'session-1',
+        ended,
+        reason,
+      );
+    }
+    expect(
+      (channel as unknown as { fileProjectors: Map<string, unknown> })
+        .fileProjectors.size,
+    ).toBe(0);
+  });
+});
+
 describe('DingtalkChannel proactive send', () => {
   afterEach(() => {
     vi.restoreAllMocks();

@@ -27,6 +27,7 @@ import {
   replaceImageMarkers,
   uploadDingTalkImage,
 } from './outbound-image.js';
+import { OutboundFileProjector, projectFileText } from './outbound-file.js';
 import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
@@ -701,6 +702,14 @@ export class DingtalkChannel extends ChannelBase {
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
   private readonly cardRunBySession = new Map<string, string>();
   private readonly cardRuns = new Map<string, CardRunCorrelation>();
+  private readonly fileProjectors = new Map<
+    string,
+    { runId: string; sessionId: string; projector: OutboundFileProjector }
+  >();
+  private readonly blockFileProjectors = new Map<
+    string,
+    { projector: OutboundFileProjector; reportedMarkers: number }
+  >();
 
   constructor(
     name: string,
@@ -1045,9 +1054,29 @@ export class DingtalkChannel extends ChannelBase {
     return isGroup && !conversationId;
   }
 
-  private async prepareOutgoingText(text: string): Promise<string> {
-    const markers = findImageMarkers(text);
-    if (markers.length === 0) return text;
+  private projectOutgoingFileText(
+    text: string,
+    streamed?: OutboundFileProjector,
+  ): string {
+    const projection = projectFileText(text);
+    let notice = projection.markerCount > 0;
+    if (streamed) {
+      streamed.complete();
+      const streamedResult = streamed.result('');
+      notice ||= streamedResult.markerCount > 0 || !streamed.matches(text);
+    }
+    if (!notice) return projection.text;
+    const safe = projection.text.trimEnd();
+    return `${safe}${safe ? '\n' : ''}[File delivery unavailable]`;
+  }
+
+  private async prepareOutgoingText(
+    text: string,
+    streamed?: OutboundFileProjector,
+  ): Promise<string> {
+    const fileSafeText = this.projectOutgoingFileText(text, streamed);
+    const markers = findImageMarkers(fileSafeText);
+    if (markers.length === 0) return fileSafeText;
 
     const replacements: string[] = [];
     for (const marker of markers) {
@@ -1095,7 +1124,7 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
 
-    return replaceImageMarkers(text, markers, replacements);
+    return replaceImageMarkers(fileSafeText, markers, replacements);
   }
 
   private async sendReply(
@@ -1551,6 +1580,10 @@ export class DingtalkChannel extends ChannelBase {
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
+    this.blockFileProjectors.delete(sessionId);
+    for (const [segmentId, state] of this.fileProjectors) {
+      if (state.sessionId === sessionId) this.fileProjectors.delete(segmentId);
+    }
     const bufferedTargets = this.bufferedMentionTargetsBySession.get(sessionId);
     if (bufferedTargets) {
       this.bufferedMentionTargetsBySession.delete(sessionId);
@@ -1609,6 +1642,7 @@ export class DingtalkChannel extends ChannelBase {
       if (event.messageId) this.mentionTargets.delete(event.messageId);
       this.stopReaction(event.chatId, event.messageId, event.sessionId);
       if (event.runId) {
+        this.deleteFileProjectorsForRun(event.runId);
         if (event.type === 'failed') {
           this.interactionPresenter?.terminalizeRun(
             event.runId,
@@ -1751,6 +1785,7 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    this.blockFileProjectors.delete(sessionId);
     this.sessionMentionTargets.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
   }
@@ -1760,6 +1795,33 @@ export class DingtalkChannel extends ChannelBase {
     text: string,
     sessionId: string,
   ): Promise<void> {
+    if (this.config.blockStreaming === 'on') {
+      let state = this.blockFileProjectors.get(sessionId);
+      if (!state) {
+        state = {
+          projector: new OutboundFileProjector(),
+          reportedMarkers: 0,
+        };
+        this.blockFileProjectors.set(sessionId, state);
+      }
+      let outgoingText = state.projector.append(text);
+      if (state.projector.hasReservedLine() && text.endsWith(']')) {
+        outgoingText += state.projector.complete();
+      }
+      const result = state.projector.result(outgoingText);
+      if (result.markerCount > state.reportedMarkers) {
+        const safe = outgoingText.trimEnd();
+        outgoingText = `${safe}${safe ? '\n' : ''}[File delivery unavailable]`;
+        state.reportedMarkers = result.markerCount;
+      }
+      if (!outgoingText.trim()) return;
+      const atUserId = this.atSender
+        ? this.sessionMentionTargets.get(sessionId)
+        : undefined;
+      if (atUserId) this.sessionMentionTargets.delete(sessionId);
+      await this.sendReply(chatId, outgoingText, atUserId);
+      return;
+    }
     const atUserId = this.atSender
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
@@ -1786,8 +1848,12 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
+    const streamed = segment
+      ? this.fileProjectors.get(segment.segmentId)?.projector
+      : undefined;
+    if (segment) this.fileProjectors.delete(segment.segmentId);
+    const outgoingText = await this.prepareOutgoingText(text, streamed);
     if (segment && this.interactionPresenter) {
-      const outgoingText = await this.prepareOutgoingText(text);
       if (
         await this.interactionPresenter.closeOutput(
           segment.segmentId,
@@ -1799,15 +1865,17 @@ export class DingtalkChannel extends ChannelBase {
         return;
       }
     }
-    await this.sendResponseMessage(chatId, text, sessionId);
+    await this.sendResponseMessage(chatId, outgoingText, sessionId);
   }
 
   protected override onOutputSegmentEnd(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     segment: ChannelOutputSegmentContext,
     reason: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {
+    this.blockFileProjectors.delete(sessionId);
+    this.fileProjectors.delete(segment.segmentId);
     if (!this.interactionPresenter) return;
     return this.interactionPresenter
       .closeOutput(segment.segmentId, '', reason, segment)
@@ -1820,7 +1888,24 @@ export class DingtalkChannel extends ChannelBase {
     _sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    if (segment) this.interactionPresenter?.appendOutput(segment, chunk);
+    if (!segment) return;
+    let state = this.fileProjectors.get(segment.segmentId);
+    if (!state) {
+      state = {
+        runId: segment.runId,
+        sessionId: segment.sessionId,
+        projector: new OutboundFileProjector(),
+      };
+      this.fileProjectors.set(segment.segmentId, state);
+    }
+    const safe = state.projector.append(chunk);
+    if (safe) this.interactionPresenter?.appendOutput(segment, safe);
+  }
+
+  private deleteFileProjectorsForRun(runId: string): void {
+    for (const [segmentId, state] of this.fileProjectors) {
+      if (state.runId === runId) this.fileProjectors.delete(segmentId);
+    }
   }
 
   protected override async presentUserInputRequest(
