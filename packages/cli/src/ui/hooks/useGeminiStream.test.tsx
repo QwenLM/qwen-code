@@ -12936,6 +12936,225 @@ describe('useGeminiStream', () => {
       releaseMainEnd?.();
     });
 
+    it('does not let a ?btw continuation submit overwrite the cancel settlement identity', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+
+      let releaseMain: (() => void) | undefined;
+      const holdMain = new Promise<void>((resolve) => {
+        releaseMain = resolve;
+      });
+      let releaseBtwEnd: (() => void) | undefined;
+      const holdBtwEnd = new Promise<void>((resolve) => {
+        releaseBtwEnd = resolve;
+      });
+      let releaseContinuationEnd: (() => void) | undefined;
+      const holdContinuationEnd = new Promise<void>((resolve) => {
+        releaseContinuationEnd = resolve;
+      });
+
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          // Foreground turn: stays open until released after the first
+          // ?btw batch completes.
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'main working',
+            };
+            await holdMain;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        if (streamCallCount === 2) {
+          // Concurrent ?btw stream: arms the deferral (owner = its minted
+          // prompt id), then ends after the ToolCallRequest like a real
+          // tool-turn response.
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'btw thinking' },
+            };
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'btw-tc1',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: mockSendMessageStream.mock.calls[1]?.[2],
+              },
+            };
+            await holdBtwEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        // The surviving ?btw stream's ToolResult continuation: its
+        // re-armed deferral must survive a foreground Esc.
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: {
+              subject: '',
+              description: 'btw continuation thinking',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'btw-tc2',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: mockSendMessageStream.mock.calls[2]?.[2],
+            },
+          };
+          await holdContinuationEnd;
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      const btwPromptId = mockSendMessageStream.mock.calls[1]?.[2] as string;
+      expect(btwPromptId).toBeDefined();
+      await waitForDeferralEstablished(result);
+
+      // The first batch completes while both streams are still open: the
+      // fold commits the btw thought, and handleCompletedTools defers the
+      // ToolResult submit until the active stream count drains to zero.
+      await act(async () => {
+        await getOnComplete()?.([
+          successfulReadToolCall(btwPromptId, 'btw-tc1'),
+        ]);
+      });
+      let thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('btw thinking');
+
+      // Release the foreground turn, then the btw stream: the drain at
+      // zero active streams submits the ToolResult continuation, whose
+      // stream re-arms the deferral with the btw prompt id.
+      await act(async () => {
+        releaseMain?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        releaseBtwEnd?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3),
+      );
+      // The continuation carries the btw stream's own prompt id.
+      expect(mockSendMessageStream.mock.calls[2]?.[2]).toBe(btwPromptId);
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'gemini_thought',
+              finalized: true,
+            }),
+          ]),
+        );
+      });
+
+      // Esc cancels the foreground turn. The continuation's detached
+      // controller survives (foreground-only abort), and the settlement
+      // must NOT resolve the continuation-owned deferral — even though the
+      // continuation submit is the most recent admission and (pre-fix)
+      // overwrote activeInteractionPromptIdRef with the btw prompt id,
+      // matching the armed owner.
+      await act(async () => {
+        result.current.cancelOngoingRequest();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // No new thought commit at cancel time: the fold above is the only
+      // one. Pre-fix the settlement resolved the surviving stream's armed
+      // deferral and committed its frozen thought here.
+      thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Request cancelled.',
+        }),
+        expect.any(Number),
+      );
+      // The deferral stays armed for the surviving stream.
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini_thought', finalized: true }),
+        ]),
+      );
+
+      // The surviving continuation batch completes and folds its own
+      // thought.
+      await act(async () => {
+        await getOnComplete()?.([
+          successfulReadToolCall(btwPromptId, 'btw-tc2'),
+        ]);
+      });
+      thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(2);
+      expect(thoughtCommits[1][0].text).toContain('btw continuation thinking');
+      expect(thoughtCommits[1][0].toolSummary).toBe('Read /foo');
+      const groupCalls = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groupCalls).toHaveLength(2);
+      expect(groupCalls[1][0].display?.mergedIntoThought).toBe(true);
+
+      releaseContinuationEnd?.();
+    });
+
     // Deferral-ACTIVE resolution tests: with no deferral active,
     // abortThoughtMergeDeferral behaves identically to the old
     // commitPendingThought, so every site below must be exercised with a

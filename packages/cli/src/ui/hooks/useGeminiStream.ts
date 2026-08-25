@@ -4035,7 +4035,16 @@ export const useGeminiStream = (
         promptIdSequenceRef.current = next;
         prompt_id = config.getSessionId() + '########' + next;
       }
-      if (!allowConcurrentBtwDuringResponse) {
+      // A detached continuation (a surviving ?btw stream's ToolResult
+      // resubmit) must not overwrite the foreground identity either —
+      // cancelOngoingRequest settles the merge deferral keyed on this ref,
+      // and the foreground-only abort above leaves the continuation's
+      // stream and armed deferral alive; if this ref held the
+      // continuation's prompt id, Esc would settle the SURVIVING stream's
+      // deferral (re-homing its frozen thought under the cancelled turn
+      // and stranding its batch without the fold). Mirror the
+      // abortControllerRef gate directly above.
+      if (!allowConcurrentBtwDuringResponse && !isDetachedToolContinuation) {
         activeInteractionPromptIdRef.current = prompt_id;
         if (
           submitType !== SendMessageType.ToolResult &&
