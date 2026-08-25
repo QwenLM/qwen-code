@@ -5422,20 +5422,39 @@ jobs:
               return 0
             fi
             local upload_cmd=()
+            local upload_path="${PATH}"
+            local trusted_bin=''
             if [ -n "${VERIFY_ASSETS_UPLOADER:-}" ]; then
               upload_cmd=("$uploader")
             else
-              upload_cmd=(node "$uploader")
+              # Resolve node under the inherited PATH BEFORE any shared
+              # temp dir comes into play: the containerized verify job runs
+              # PR code with $RUNNER_TEMP bind-mounted from this pool, so a
+              # planted fake `node` there must not win interpreter
+              # resolution in this privileged step (PATH hijack). ossutil
+              # gets the same treatment: run a fresh job-private copy of the
+              # sha256-verified binary installed above instead of resolving
+              # it through the PR-writable $RUNNER_TEMP.
+              local node_bin
+              node_bin="$(command -v node || true)"
+              upload_cmd=("$node_bin" "$uploader")
+              trusted_bin="$(mktemp -d || true)"
+              if [ -n "$trusted_bin" ]; then
+                install -m 0755 "${RUNNER_TEMP:-/tmp}/ossutil" "$trusted_bin/ossutil" 2>/dev/null || true
+                upload_path="$trusted_bin"
+              fi
             fi
-            if ! PATH="${RUNNER_TEMP:-/tmp}:${PATH}" "${upload_cmd[@]}" \
+            if ! PATH="$upload_path" "${upload_cmd[@]}" \
               --bucket "$ALIYUN_OSS_BUCKET" \
               --config "${RUNNER_TEMP:-/tmp}/.ossutilconfig" \
               --prefix "$prefix" \
               "$stage_dir"/*.png; then
+              if [ -n "$trusted_bin" ]; then rm -rf "$trusted_bin"; fi
               echo "::warning::Failed to upload evidence images; posting a text-only report." >&2
               EVIDENCE_SECTION=''
               return 0
             fi
+            if [ -n "$trusted_bin" ]; then rm -rf "$trusted_bin"; fi
             local raw_base="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${prefix}"
             EVIDENCE_SECTION=$'### Evidence images\n\n'
             for f in "$stage_dir"/*.png; do

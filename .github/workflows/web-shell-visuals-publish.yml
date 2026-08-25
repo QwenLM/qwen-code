@@ -220,11 +220,22 @@ jobs:
           RAW_BASE=''
           if [ "${HAS_IMAGES}" = "1" ]; then
             ASSET_PREFIX="pr-assets/web-shell-visuals/${PR}/${RUN_HEAD_SHA}"
-            PATH="${RUNNER_TEMP}:${PATH}" node scripts/upload-aliyun-oss-assets.js \
+            # Same PATH discipline as qwen-triage.yml's publish-verify: never
+            # resolve node or ossutil through the shared $RUNNER_TEMP. node
+            # is resolved under the inherited PATH and ossutil runs from a
+            # fresh job-private copy of the sha256-verified binary installed
+            # above. Not exploitable on today's ephemeral runners, but the
+            # shape must not regress if this job ever moves to a persistent
+            # pool.
+            node_bin="$(command -v node)"
+            trusted_bin="$(mktemp -d)"
+            install -m 0755 "${RUNNER_TEMP}/ossutil" "$trusted_bin/ossutil"
+            PATH="$trusted_bin" "$node_bin" scripts/upload-aliyun-oss-assets.js \
               --bucket "${ALIYUN_OSS_BUCKET}" \
               --config "${RUNNER_TEMP}/.ossutilconfig" \
               --prefix "${ASSET_PREFIX}" \
               "${STAGE}"/*
+            rm -rf "$trusted_bin"
             RAW_BASE="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${ASSET_PREFIX}"
             echo "Web-shell visuals hosted at ${RAW_BASE}."
           fi
