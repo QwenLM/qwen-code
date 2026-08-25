@@ -20,7 +20,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { getNpmCliPath } from '../../utils/installationInfo.js';
-import { getNestedProperty } from '../../utils/settingsUtils.js';
+import { getNestedProperty } from '../../config/settingsUtils.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   MAX_READ_BYTES,
