@@ -38,6 +38,7 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
   collectInlineImages,
@@ -631,7 +632,10 @@ function convertToHistoryItems(
     });
   }
 
-  return items;
+  // A report_findings re-report REPLACES the earlier list — restored
+  // transcripts collapse the superseded displays so the initial report and
+  // its outcome re-report do not render two checklists at once.
+  return coalesceFindingsHistoryItems(items);
 }
 
 /**
