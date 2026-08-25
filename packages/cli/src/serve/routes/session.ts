@@ -154,6 +154,7 @@ import {
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
+import { redactWorkflowsFromSupportedCommands } from '../workflow-session-gate.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -4236,10 +4237,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/supported-commands',
       async (_req, res, sessionId, runtime) => {
+        const status =
+          await runtime.bridge.getSessionSupportedCommandsStatus(sessionId);
         res
           .status(200)
           .json(
-            await runtime.bridge.getSessionSupportedCommandsStatus(sessionId),
+            runtime.trusted
+              ? status
+              : redactWorkflowsFromSupportedCommands(status),
           );
       },
     ),
@@ -4416,6 +4421,10 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (kind === 'workflow' && !runtime.trusted) {
+          res.status(200).json({ cancelled: false, reason: 'disabled' });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         res
@@ -4458,6 +4467,10 @@ export function registerSessionRoutes(
             error:
               '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
           });
+          return;
+        }
+        if (!runtime.trusted) {
+          res.status(200).json({ changed: false });
           return;
         }
         const clientId = parseClientIdHeader(req, res);

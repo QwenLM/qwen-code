@@ -9110,7 +9110,7 @@ describe('createServeApp', () => {
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, primaryWorkspaceTrusted: true },
       );
 
       const contextRes = await request(app)
@@ -9414,7 +9414,7 @@ describe('createServeApp', () => {
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, primaryWorkspaceTrusted: true },
       );
 
       const res = await request(app)
@@ -9447,7 +9447,7 @@ describe('createServeApp', () => {
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, primaryWorkspaceTrusted: true },
       );
 
       const pauseRes = await request(app)
@@ -9507,6 +9507,85 @@ describe('createServeApp', () => {
         { sessionId: 's-1', taskId: 'task-1', action: 'delete-history' },
         { sessionId: 's-1', taskId: 'deep-review', action: 'run-saved' },
       ]);
+    });
+
+    it('fails the Workflow surfaces closed for an untrusted primary workspace', async () => {
+      const bridge = fakeBridge({
+        sessionSupportedCommandsImpl: async (sessionId) => ({
+          v: 1 as const,
+          sessionId,
+          availableCommands: [
+            {
+              name: 'init',
+              description: 'Initialize',
+              input: null,
+              _meta: { source: 'builtin' },
+            },
+            {
+              name: 'workflows',
+              description: 'Manage workflows',
+              input: null,
+              _meta: { source: 'builtin' },
+            },
+          ],
+          availableSkills: [],
+          workflowsEnabled: true,
+          savedWorkflows: [{ name: 'slow-phases', source: 'project' as const }],
+        }),
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+        controlSessionWorkflowTaskImpl: async () => ({
+          changed: true,
+          status: 'running',
+          taskId: 'wf-1',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'primary-id',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              trusted: false,
+              bridge,
+            }),
+          ]),
+        },
+      );
+
+      const commandsRes = await request(app)
+        .get('/session/s-1/supported-commands')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      const runSavedRes = await request(app)
+        .post('/session/s-1/tasks/slow-phases/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'run-saved' });
+      const cancelRes = await request(app)
+        .post('/session/s-1/tasks/wf-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ kind: 'workflow' });
+
+      expect(commandsRes.status).toBe(200);
+      expect(commandsRes.body).toMatchObject({
+        workflowsEnabled: false,
+        savedWorkflows: [],
+      });
+      expect(commandsRes.body.availableCommands).toEqual([
+        expect.objectContaining({ name: 'init' }),
+      ]);
+      expect(runSavedRes.status).toBe(200);
+      expect(runSavedRes.body).toEqual({ changed: false });
+      expect(cancelRes.status).toBe(200);
+      expect(cancelRes.body).toEqual({ cancelled: false, reason: 'disabled' });
+      expect(bridge.controlSessionWorkflowTaskCalls).toEqual([]);
+      expect(bridge.cancelSessionTaskCalls).toEqual([]);
     });
 
     it.each([
