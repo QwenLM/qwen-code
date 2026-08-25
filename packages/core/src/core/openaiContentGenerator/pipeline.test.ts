@@ -2404,6 +2404,47 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBe(false);
     });
 
+    it('emits enable_thinking:false for GLM on the implicit default DashScope route', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        authType: AuthType.USE_OPENAI,
+        baseUrl: undefined,
+        model: 'glm-5.2',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'glm-5.2',
+        contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Summarize' },
+      ]);
+      (mockProvider.buildRequest as Mock).mockImplementation((request) => ({
+        ...request,
+        enable_thinking: true,
+      }));
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
     it('emits enable_thinking:false on DashScope hostname when reasoning is configured to false', async () => {
       // Config-level opt-out (`reasoning: false`) should also disable
       // qwen3 thinking, mirroring the DeepSeek pair above.

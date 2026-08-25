@@ -38,6 +38,7 @@ import {
   isTieredEffortWireModel,
 } from '../modalityDefaults.js';
 import {
+  DEFAULT_DASHSCOPE_BASE_URL,
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   DEFAULT_STREAM_MAX_LIFETIME_MS,
   MAX_STREAM_GUARD_TIMEOUT_MS,
@@ -1137,10 +1138,13 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
+    const reasoningBaseUrl =
+      this.contentGeneratorConfig.baseUrl ??
+      (isDashScope ? DEFAULT_DASHSCOPE_BASE_URL : undefined);
     const modelReasoning = resolveModelReasoningConfiguration({
       modelId: model,
       authType: this.contentGeneratorConfig.authType,
-      baseUrl: this.contentGeneratorConfig.baseUrl,
+      baseUrl: reasoningBaseUrl,
     });
     const thinkingMandatory =
       this.requiresThinking(model) || modelReasoning?.canDisable === false;
@@ -1231,9 +1235,10 @@ export class ContentGenerationPipeline {
         delete typed['enable_thinking'];
         typed['thinking'] = { type: 'disabled' };
       } else {
-        const endpoint = classifyModelReasoningEndpoint(
-          this.contentGeneratorConfig,
-        );
+        const endpoint = classifyModelReasoningEndpoint({
+          authType: this.contentGeneratorConfig.authType,
+          baseUrl: reasoningBaseUrl,
+        });
         const canDisable =
           modelReasoning?.toggleOnly || modelReasoning?.canDisable !== false;
         if (

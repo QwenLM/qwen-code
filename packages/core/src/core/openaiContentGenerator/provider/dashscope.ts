@@ -384,7 +384,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const modelReasoning = resolveModelReasoningConfiguration({
       modelId: wireModel,
       authType: this.contentGeneratorConfig.authType,
-      baseUrl: this.contentGeneratorConfig.baseUrl,
+      baseUrl:
+        this.contentGeneratorConfig.baseUrl ?? DEFAULT_DASHSCOPE_BASE_URL,
     });
     // Nullish thinking knobs carry no intent. Sanitize extra_body wherever a
     // registry configuration or the tiered-qwen mapping decides the wire

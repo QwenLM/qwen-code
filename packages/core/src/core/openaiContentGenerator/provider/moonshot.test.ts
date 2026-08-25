@@ -137,6 +137,32 @@ describe('MoonshotOpenAICompatibleProvider', () => {
     expect(result['reasoning']).toBeUndefined();
   });
 
+  it.each([
+    ['https://api.moonshot.cn/v1', 'kimi-k2.7-code'],
+    ['https://api.moonshot.cn/v1', 'kimi-k2.7-code-highspeed'],
+    ['https://api.moonshot.ai/v1', 'kimi-k2.7-code'],
+    ['https://api.moonshot.ai/v1', 'kimi-k2.7-code-highspeed'],
+  ])(
+    'drops stale reasoning effort for mandatory-thinking %s %s',
+    (baseUrl, model) => {
+      const result = makeProvider({
+        baseUrl,
+        model,
+        thinkingMandatory: true,
+      }).buildRequest(
+        {
+          model,
+          messages: [{ role: 'user', content: 'hello' }],
+          reasoning: { effort: 'high', budget_tokens: 4096 },
+        } as unknown as OpenAI.Chat.ChatCompletionCreateParams,
+        'prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBeUndefined();
+      expect(result['reasoning']).toEqual({ budget_tokens: 4096 });
+    },
+  );
+
   it('clamps a stale Kimi K3 tier and keeps sibling reasoning fields', () => {
     const result = makeProvider().buildRequest(
       {

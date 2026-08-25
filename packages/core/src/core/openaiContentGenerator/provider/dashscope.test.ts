@@ -841,6 +841,30 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       },
     );
 
+    it('uses the default DashScope route when baseUrl is unset', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: undefined,
+          model: 'glm-5.2',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'glm-5.2',
+          reasoning: { effort: 'high' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning_effort']).toBe('high');
+      expect(result['reasoning']).toBeUndefined();
+    });
+
     it.each([
       {
         model: 'qwen3.8-max',

@@ -12506,7 +12506,14 @@ class QwenAgent implements Agent {
     ) {
       return undefined;
     }
-    return reasoning?.thinking ? reasoning : undefined;
+    const currentEffort = config.getReasoningEffort?.();
+    return reasoning?.thinking &&
+      (reasoning.toggleOnly ||
+        reasoning.canDisable === false ||
+        !currentEffort ||
+        reasoning.efforts.includes(currentEffort))
+      ? reasoning
+      : undefined;
   }
 
   private buildSelectableModelOptions(config: Config) {

@@ -44,7 +44,9 @@ export class MoonshotOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
       baseUrl: this.contentGeneratorConfig.baseUrl,
     });
     if (!reasoning) {
-      return baseRequest;
+      return this.contentGeneratorConfig.thinkingMandatory
+        ? rewriteReasoningEffort(baseRequest, undefined)
+        : baseRequest;
     }
     const nested = (baseRequest as unknown as Record<string, unknown>)[
       'reasoning'

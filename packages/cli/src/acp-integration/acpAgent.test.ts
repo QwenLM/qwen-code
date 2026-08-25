@@ -7474,7 +7474,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
-  it('canonicalizes stale qwen3.8-max effort in the ACP option', async () => {
+  it('keeps the fallback reset for a stale qwen3.8-max effort', async () => {
     const sessionId = 'qwen38-reasoning-session';
     const innerConfig = await setupSessionMocks(sessionId);
     const generation: {
@@ -7485,15 +7485,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     innerConfig.getReasoningEffort = vi.fn(() =>
       generation.reasoning ? generation.reasoning.effort : undefined,
     );
-    innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
-      const current = generation.reasoning;
-      generation.reasoning = effort
-        ? { ...(current || {}), effort }
-        : undefined;
-    });
-    innerConfig.setReasoningDisabled = vi.fn((disabled: boolean) => {
-      generation.reasoning = disabled ? false : undefined;
-    });
+    innerConfig.setReasoningEffort = vi.fn(
+      (effort: string | undefined, recordDefaultOverride?: boolean) => {
+        const current = generation.reasoning;
+        if (!current) return;
+        if (effort) {
+          generation.reasoning = { ...current, effort };
+          return;
+        }
+        const { effort: _drop, ...rest } = current;
+        generation.reasoning = Object.keys(rest).length > 0 ? rest : undefined;
+        expect(recordDefaultOverride).toBe(true);
+      },
+    );
 
     const { agent, agentPromise } = await bootAcpAgent();
     try {
@@ -7507,66 +7511,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           options: Array<{ value: string }>;
         }>;
       };
-      const option = session.configOptions.find(
+      const reasoningOption = session.configOptions.find(
         (item) => item.id === 'reasoning_effort',
       );
       expect(
         session.configOptions.filter((item) => item.id === 'effort'),
       ).toEqual([]);
-      expect(option).toMatchObject({
-        currentValue: 'xhigh',
-      });
-      expect(option?.options.map(({ value }) => value)).toContain('none');
-
-      const medium = (await agent.setSessionConfigOption({
-        sessionId,
-        configId: 'reasoning_effort',
-        value: 'medium',
-      })) as SetSessionConfigOptionResponse;
-      expect(generation.reasoning).toEqual({
-        effort: 'medium',
-        budget_tokens: 4096,
-      });
-      expect(innerConfig.setReasoningEffort).toHaveBeenLastCalledWith('medium');
-      expect(
-        medium.configOptions.find((item) => item.id === 'reasoning_effort')
-          ?.currentValue,
-      ).toBe('medium');
-
-      const disabled = (await agent.setSessionConfigOption({
-        sessionId,
-        configId: 'reasoning_effort',
-        value: 'none',
-      })) as SetSessionConfigOptionResponse;
-      expect(generation.reasoning).toBe(false);
-      expect(innerConfig.setReasoningDisabled).toHaveBeenLastCalledWith(true);
-      expect(
-        disabled.configOptions.find((item) => item.id === 'reasoning_effort')
-          ?.currentValue,
-      ).toBe('none');
-
-      const enabled = (await agent.setSessionConfigOption({
-        sessionId,
-        configId: 'reasoning_effort',
-        value: 'medium',
-      })) as SetSessionConfigOptionResponse;
-      expect(generation.reasoning).toEqual({ effort: 'medium' });
-      expect(innerConfig.setReasoningDisabled).toHaveBeenLastCalledWith(false);
-      expect(
-        enabled.configOptions.find((item) => item.id === 'reasoning_effort')
-          ?.currentValue,
-      ).toBe('medium');
-
-      await expect(
-        agent.setSessionConfigOption({
-          sessionId,
-          configId: 'reasoning_effort',
-          value: 'high',
-        }),
-      ).rejects.toThrow(
-        'Unknown reasoning effort: high. Choose one of: none, low, medium, xhigh',
+      expect(reasoningOption?.currentValue).toBe('high');
+      expect(reasoningOption?.options.map(({ value }) => value)).toContain(
+        'default',
       );
-      expect(generation.reasoning).toEqual({ effort: 'medium' });
+
+      await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+      });
+
+      expect(innerConfig.setReasoningEffort).toHaveBeenLastCalledWith(
+        undefined,
+        true,
+      );
+      expect(generation.reasoning).toEqual({ budget_tokens: 4096 });
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
