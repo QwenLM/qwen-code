@@ -279,13 +279,25 @@ describe('AuthMessageHandler', () => {
       'kimi-for-coding',
       'kimi-for-coding-highspeed',
     ];
-    const seeded = [...defaults, 'my-custom'];
+    // The attributable baseUrl-less legacy entry (legacy-custom,
+    // KIMI_CODE_API_KEY) is seeded alongside the stamped custom: kimi is an
+    // array-baseUrl MERGE provider, so the endpointScoped filter must admit
+    // it via attribution, the merge branch must stamp it with the submitted
+    // endpoint, and its id must be threaded through migratedLegacyModelIds
+    // so buildInstallPlan claims the stored original (kimi variant of the
+    // R34-4 × R45-5 free-form test below).
+    const seeded = [...defaults, 'my-custom', 'legacy-custom'];
     const savedCustom = {
       id: 'my-custom',
       name: '[Kimi Code] my-custom',
       baseUrl: codingUrl,
       envKey: 'KIMI_CODE_API_KEY',
       generationConfig: { contextWindowSize: 12345 },
+    };
+    const legacyCustom = {
+      id: 'legacy-custom',
+      name: '[Kimi Code] legacy-custom',
+      envKey: 'KIMI_CODE_API_KEY',
     };
     mockShowQuickPick
       .mockResolvedValueOnce({ value: 'kimi' })
@@ -314,11 +326,7 @@ describe('AuthMessageHandler', () => {
             baseUrl: `${codingUrl}/`,
             generationConfig: { contextWindowSize: 99999 },
           },
-          {
-            id: 'legacy-custom',
-            name: '[Kimi Code] legacy-custom',
-            envKey: 'KIMI_CODE_API_KEY',
-          },
+          legacyCustom,
           {
             id: 'api-custom',
             name: '[Kimi API] api-custom',
@@ -341,7 +349,8 @@ describe('AuthMessageHandler', () => {
       expect.objectContaining({
         baseUrl: codingUrl,
         modelIds: seeded,
-        preserveModels: [savedCustom],
+        preserveModels: [savedCustom, { ...legacyCustom, baseUrl: codingUrl }],
+        migratedLegacyModelIds: ['legacy-custom'],
       }),
     );
   });
@@ -448,6 +457,67 @@ describe('AuthMessageHandler', () => {
     expect(inputs.modelIds).not.toContain('legacy-custom');
     expect(inputs.preserveModels ?? []).toEqual([]);
     expect(inputs.migratedLegacyModelIds).toBeUndefined();
+  });
+
+  it('adopts an explicitly typed floating baseUrl-less entry through adoptedFloatingModelIds (R45-2 twin)', async () => {
+    // This surface never seeded the floating entry (the test above), but when
+    // the user explicitly types its id into the models field the submission
+    // adopts it: stamped into preserveModels and threaded through
+    // adoptedFloatingModelIds so buildInstallPlan claims the stored original
+    // — without the channel the stamped copy is written while the original
+    // can never be claimed, a permanent duplicate with the generationConfig
+    // stranded (mirrors acpAgent/serve).
+    const customUrl = 'https://my-proxy.example.com/v1';
+    const floatingCustom = {
+      id: 'floaty',
+      name: 'floaty',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI', // prefix-only: names no endpoint
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'no' });
+    mockShowInputBox
+      .mockResolvedValueOnce(customUrl)
+      .mockResolvedValueOnce('sk-custom-openai')
+      .mockResolvedValueOnce('floaty');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+      () => ({ openai: [floatingCustom] }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        baseUrl: customUrl,
+        modelIds: ['floaty'],
+        preserveModels: [
+          expect.objectContaining({
+            id: 'floaty',
+            baseUrl: customUrl,
+            envKey: generateCustomEnvKey(AuthType.USE_OPENAI, customUrl),
+            generationConfig: { contextWindowSize: 54321 },
+          }),
+        ],
+        adoptedFloatingModelIds: ['floaty'],
+      }),
+    );
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.not.objectContaining({
+        migratedLegacyModelIds: expect.anything(),
+      }),
+    );
   });
 
   it('carries a fail-closed shared-key baseUrl-less entry through UNSTAMPED on a non-merge provider (R45-4)', async () => {

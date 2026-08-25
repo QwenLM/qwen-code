@@ -375,6 +375,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     let modelIds: string[];
     let preserveModels: ProviderModelConfig[] | undefined;
     let migratedLegacyModelIds: string[] | undefined;
+    let adoptedFloatingModelIds: string[] | undefined;
     if (shouldShowStep(provider, 'models')) {
       const defaults = getDefaultModelIds(provider, baseUrl);
       const defaultIdSet = new Set(defaults);
@@ -384,15 +385,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
         protocol,
       );
       const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
-      const isSelectedEndpointModel = (model: ProviderModelConfig) => {
-        const endpointScoped =
-          provider.mergeModelsByIdentity && Array.isArray(provider.baseUrl);
-        return endpointScoped
-          ? model.baseUrl !== undefined &&
-              normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint
-          : model.baseUrl === undefined ||
-              normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint;
-      };
       // Endpoint attribution for baseUrl-less legacy entries (R45-4, R45-5),
       // mirroring the CLI dialog / ACP / serve gates. An entry whose env key
       // fails attribution (a floating key, or a fail-closed shared key naming
@@ -403,12 +395,32 @@ export class AuthMessageHandler extends BaseMessageHandler {
       // permanent duplicate. The non-merge branch below still carries the
       // fail-closed entries through UNSTAMPED so a non-merge plan's unscoped
       // ownsModel does not delete them.
-      const { namesSelectedEndpoint, namesSiblingEndpoint } =
+      const { endpointEnvKey, namesSelectedEndpoint, namesSiblingEndpoint } =
         legacyEnvKeyAttribution(
           provider,
           protocol ?? provider.protocol,
           baseUrl,
         );
+      const isSelectedEndpointModel = (model: ProviderModelConfig) => {
+        const endpointScoped =
+          provider.mergeModelsByIdentity && Array.isArray(provider.baseUrl);
+        return endpointScoped
+          ? // An attributable baseUrl-less legacy entry belongs to the
+            // selected endpoint exactly like a stamped one: admitting it
+            // here lets the merge branch below stamp it and record it in
+            // migratedLegacyModelIds. Dropping every baseUrl-less entry
+            // BEFORE the attribution filter wired that stamp/migrate path
+            // dead for exactly the array-baseUrl merge providers it was
+            // written for (the Kimi/Xiaomi presets), leaving the entry
+            // unseeded and unclaimed — a permanent duplicate re-created on
+            // every reconnect.
+            (model.baseUrl !== undefined &&
+              normalizeBaseUrlForMatching(model.baseUrl) ===
+                selectedEndpoint) ||
+              (model.baseUrl === undefined && namesSelectedEndpoint(model))
+          : model.baseUrl === undefined ||
+              normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint;
+      };
       const restoredModels = (
         existing?.models.filter(isSelectedEndpointModel) ?? []
       )
@@ -454,7 +466,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       const selectedIdSet = new Set(modelIds);
       if (provider.mergeModelsByIdentity) {
         const migrated: string[] = [];
-        preserveModels = restoredModels
+        const restoredPreserved = restoredModels
           .filter(
             (model) =>
               !defaultIdSet.has(model.id) && selectedIdSet.has(model.id),
@@ -474,7 +486,41 @@ export class AuthMessageHandler extends BaseMessageHandler {
             }
             return model;
           });
+        // Floating adoption: a baseUrl-less entry whose env key names NO
+        // endpoint never passes the attribution gate above, so it is never
+        // seeded — but when the user explicitly types its id into the
+        // models field the submission adopts it: stamp it into
+        // preserveModels and thread its id through
+        // adoptedFloatingModelIds so buildInstallPlan claims the stored
+        // original (without the channel the stamped copy is written while
+        // the original can never be claimed — a permanent duplicate with
+        // the rich generationConfig stranded). Mirrors the ACP/serve
+        // adoption channel; sibling/fail-closed keys are never adoptable.
+        const adopted: string[] = [];
+        const adoptedModels = (existing?.models ?? []).flatMap((model) => {
+          if (
+            model.baseUrl !== undefined ||
+            !selectedIdSet.has(model.id) ||
+            defaultIdSet.has(model.id) ||
+            namesSelectedEndpoint(model) ||
+            namesSiblingEndpoint(model)
+          ) {
+            return [];
+          }
+          adopted.push(model.id);
+          return [
+            {
+              ...model,
+              baseUrl,
+              // Adoption re-keys the entry to the selected endpoint's key
+              // (R39-6), matching the ACP/serve stamp semantics.
+              ...(endpointEnvKey ? { envKey: endpointEnvKey } : {}),
+            },
+          ];
+        });
+        preserveModels = [...restoredPreserved, ...adoptedModels];
         if (migrated.length > 0) migratedLegacyModelIds = migrated;
+        if (adopted.length > 0) adoptedFloatingModelIds = [...new Set(adopted)];
       } else {
         preserveModels = existing?.models.flatMap((model) => {
           // A baseUrl-less legacy entry whose env key fails attribution
@@ -555,6 +601,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
         : {}),
       ...(migratedLegacyModelIds && migratedLegacyModelIds.length > 0
         ? { migratedLegacyModelIds }
+        : {}),
+      ...(adoptedFloatingModelIds && adoptedFloatingModelIds.length > 0
+        ? { adoptedFloatingModelIds }
         : {}),
       advancedConfig,
     });

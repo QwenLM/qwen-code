@@ -1169,6 +1169,161 @@ describe('buildProviderSetupInputs', () => {
       written!.filter((model) => model['id'] === 'deepseek-v4-custom'),
     ).toHaveLength(1);
   });
+
+  it('leaves a floating same-id original unclaimed on an implicit reconnect (R39-3 × R39-7)', async () => {
+    // The R39-7 collapse branch pushed a FLOATING (unattributable)
+    // baseUrl-less entry's id into adoptedFloatingModelIds even on an
+    // implicit (defaults-only) reconnect — id collision alone decided
+    // deletion: buildInstallPlan's adoption channel owned and permanently
+    // deleted the floating original (env-key binding and generationConfig
+    // lost), contradicting R39-3 ("a key that names no endpoint survives
+    // every connect") and this route's rule that implicit reconnects never
+    // adopt. Only an EXPLICIT selection requesting the id adopts.
+    const aBaseUrl = 'https://a.example/v1';
+    const aEnvKey = qwenCore.generateCustomEnvKey(
+      qwenCore.AuthType.USE_OPENAI,
+      aBaseUrl,
+    );
+    const floating = {
+      id: 'x',
+      name: 'x',
+      // Prefix-only key: names no endpoint.
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const stamped = {
+      id: 'x',
+      name: 'x',
+      baseUrl: aBaseUrl,
+      envKey: aEnvKey,
+      generationConfig: { contextWindowSize: 22222 },
+    };
+
+    const implicit = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-a',
+        baseUrl: aBaseUrl,
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [floating, stamped],
+      },
+    );
+    // Implicit arm: the stamped twin is preserved, the floating original is
+    // dropped from the plan UNCLAIMED — no adoption channel fires.
+    expect(implicit.preserveModels).toEqual([stamped]);
+    expect(implicit.adoptedFloatingModelIds).toBeUndefined();
+
+    // End-to-end: the floating original survives the implicit reconnect.
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [floating, stamped],
+    });
+    const plan = qwenCore.buildInstallPlan(qwenCore.customProvider, {
+      ...implicit,
+      apiKey: 'sk-a',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[aEnvKey];
+    }
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    expect(written).toContainEqual(floating);
+    expect(written).toContainEqual(stamped);
+    expect(written).toHaveLength(2);
+
+    // Control: an explicit selection requesting the id still adopts.
+    const explicit = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-a',
+        baseUrl: aBaseUrl,
+        modelIds: ['x'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [floating, stamped],
+      },
+    );
+    expect(explicit.adoptedFloatingModelIds).toEqual(['x']);
+  });
+
+  it('collapses a same-id legacy+stamped pair on a NON-MERGE provider reconnect (R39-7 non-merge twin)', async () => {
+    // The non-merge branch never applied the R39-7 collapse: a baseUrl-less
+    // legacy entry was stamped and preserved beside its existing stamped
+    // same-id twin, and applyModelProvidersPatch wrote both — two identical
+    // (id, baseUrl) entries persisting permanently, re-preserved on every
+    // reconnect.
+    const provider = qwenCore.findProviderById('deepseek');
+    expect(provider).toBeDefined();
+    const baseUrl = 'https://api.deepseek.com';
+    const legacy = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const stamped = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      baseUrl,
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 22222 },
+    };
+
+    const implicit = buildProviderSetupInputs(
+      { providerId: 'deepseek', apiKey: 'sk-deepseek' },
+      provider!,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacy, stamped],
+      },
+    );
+    // The stamped twin wins; the legacy original is dropped (the plan's
+    // unscoped ownsModel removes the stored original), so preserveModels
+    // carries ONE entry.
+    expect(implicit.preserveModels).toEqual([stamped]);
+
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [legacy, stamped],
+    });
+    const plan = qwenCore.buildInstallPlan(provider!, {
+      ...implicit,
+      apiKey: 'sk-deepseek',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env['DEEPSEEK_API_KEY'];
+    }
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    expect(
+      written!.filter((model) => model['id'] === 'legacy-custom'),
+    ).toHaveLength(1);
+  });
 });
 
 describe('createBoundChannelDeliveryHandler', () => {

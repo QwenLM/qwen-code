@@ -14549,6 +14549,284 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('qwen/providers/list does not expose a legacy entry attributable to a non-restored endpoint, and connect scopes claims to the exposed seed (R42-1 × R41-3)', async () => {
+    // readExistingProviderConfig restores the FIRST saved model's endpoint;
+    // a baseUrl-less legacy entry attributable to a DIFFERENT endpoint is
+    // exposed on no seeding surface. qwen/providers/connect used to claim
+    // every attributable-but-absent entry as an informed deselection
+    // (R41-3) and never passed roundTrippedLegacyModelIds — so a client
+    // reconnect at the entry's own endpoint deleted an entry it was never
+    // shown. The connect route now threads the seeded ids and scopes the
+    // pure-absence claim to them (plus generated-default supersession).
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const customEnvKey = (protocol: string, baseUrl: string) =>
+      `QWEN_CUSTOM_API_KEY_${protocol}_${baseUrl.replace(/[^A-Za-z0-9]/g, '_')}`;
+    const aBaseUrl = 'https://a.example.com/v1';
+    const bBaseUrl = 'https://b.example.com/v1';
+    const stampedAtA = {
+      id: 'stamped-a',
+      name: 'stamped-a',
+      baseUrl: aBaseUrl,
+      envKey: customEnvKey('openai', aBaseUrl),
+    };
+    const legacyAtB = {
+      id: 'legacy-b',
+      name: 'legacy-b',
+      envKey: customEnvKey('openai', bBaseUrl),
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [stampedAtA, legacyAtB] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    // Mirror the built-in findProviderById fixture exactly so the list-time
+    // seed and the connect handler attribute identically.
+    providers.push({
+      id: 'custom-openai-compatible',
+      label: 'Custom Provider',
+      description: 'Manually connect a custom provider',
+      protocol: 'openai',
+      protocolOptions: ['openai', 'anthropic', 'gemini'],
+      baseUrl: undefined,
+      envKey: (protocol: string, baseUrl: string) =>
+        `QWEN_CUSTOM_API_KEY_${protocol}_${baseUrl.replace(
+          /[^A-Za-z0-9]/g,
+          '_',
+        )}`,
+      models: undefined,
+      modelsEditable: true,
+      modelNamePrefix: '',
+      mergeModelsByIdentity: true,
+      uiGroup: 'third-party',
+      ownsModel: (model: { envKey?: string }) =>
+        typeof model.envKey === 'string' &&
+        model.envKey.startsWith('QWEN_CUSTOM_API_KEY_'),
+    });
+
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      // The list-time seed exposes only the restored endpoint's entry; the
+      // B-attributable legacy id appears on NO seeding surface.
+      const listed = (await agent.extMethod('qwen/providers/list', {})) as {
+        providers: Array<{
+          id: string;
+          existingConfig?: Record<string, unknown>;
+        }>;
+      };
+      const custom = listed.providers.find(
+        (p) => p.id === 'custom-openai-compatible',
+      );
+      expect(custom?.existingConfig?.['modelIds']).toEqual(['stamped-a']);
+      expect(custom?.existingConfig?.['modelIdsByBaseUrl']).toEqual({
+        [aBaseUrl]: ['stamped-a'],
+      });
+      const byProtocol = custom?.existingConfig?.[
+        'modelIdsByBaseUrlByProtocol'
+      ] as Record<string, Record<string, string[]>> | undefined;
+      for (const view of Object.values(byProtocol ?? {})) {
+        for (const ids of Object.values(view)) {
+          expect(ids).not.toContain('legacy-b');
+        }
+      }
+
+      // Reconnect at the entry's OWN endpoint with an explicit selection
+      // omitting it: the omission carries no informed intent (the seed
+      // never exposed it), so no migratedLegacyModelIds claim fires and the
+      // round-trip set is threaded through.
+      vi.mocked(buildInstallPlan).mockClear();
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'custom-openai-compatible',
+          protocol: 'openai',
+          baseUrl: bBaseUrl,
+          apiKey: 'sk-b-new',
+          modelIds: ['b-model'],
+        }),
+      ).resolves.toMatchObject({
+        success: true,
+        providerId: 'custom-openai-compatible',
+      });
+
+      expect(buildInstallPlan).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'custom-openai-compatible' }),
+        expect.objectContaining({
+          roundTrippedLegacyModelIds: ['stamped-a'],
+        }),
+      );
+      expect(buildInstallPlan).not.toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'custom-openai-compatible' }),
+        expect.objectContaining({
+          migratedLegacyModelIds: expect.arrayContaining(['legacy-b']),
+        }),
+      );
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('qwen/providers/connect adopts a colliding floating original only when the explicit selection requests it (R39-3 × R39-7)', async () => {
+    // The R39-7 collapse branch used to push a FLOATING (unattributable)
+    // baseUrl-less entry's id into adoptedFloatingModelIds even without an
+    // explicit request of its id — id collision alone decided deletion,
+    // losing the floating original's env-key binding and generationConfig
+    // (R39-3). The serve twin's implicit arm is covered in
+    // run-qwen-serve.test.ts; on this route an implicit free-form reconnect
+    // has no defaults to resolve, so both arms here are explicit: adoption
+    // fires ONLY when the selection requests the id.
+    const floating = {
+      id: 'floaty',
+      name: 'floaty',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI', // prefix-only: names no endpoint
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const stamped = {
+      id: 'floaty',
+      name: 'floaty',
+      baseUrl: 'https://a.example.com/v1',
+      envKey: 'QWEN_CUSTOM_API_KEY_openai_https_a_example_v1',
+      generationConfig: { contextWindowSize: 22222 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [floating, stamped] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    // Explicit selection NOT requesting the id: the stamped twin is claimed
+    // by the selection (dropped from preserveModels), and the floating
+    // original must be left UNCLAIMED — no adoption without a request.
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        baseUrl: 'https://a.example.com/v1',
+        apiKey: 'sk-a',
+        modelIds: ['other-model'],
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'custom-openai-compatible',
+    });
+    expect(buildInstallPlan).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        adoptedFloatingModelIds: expect.anything(),
+      }),
+    );
+    expect(buildInstallPlan).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        preserveModels: expect.arrayContaining([
+          expect.objectContaining({ id: 'floaty' }),
+        ]),
+      }),
+    );
+
+    // Control: requesting the id adopts through the dedicated channel.
+    vi.mocked(buildInstallPlan).mockClear();
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        baseUrl: 'https://a.example.com/v1',
+        apiKey: 'sk-a',
+        modelIds: ['floaty'],
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'custom-openai-compatible',
+    });
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        adoptedFloatingModelIds: ['floaty'],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect collapses a same-id legacy+stamped pair on a NON-MERGE provider (R39-7 non-merge twin)', async () => {
+    // The non-merge branch computed stampedIdsAtSelectedEndpoint but never
+    // consulted it: a baseUrl-less legacy entry was stamped and preserved
+    // beside its existing stamped same-id twin — two identical (id, baseUrl)
+    // entries persisted permanently (the exact defect confirmed in serve's
+    // buildProviderSetupInputs non-merge branch, re-created in this route).
+    const legacy = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const stamped = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      baseUrl: 'https://api.deepseek.com',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 22222 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [legacy, stamped] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    // Implicit reconnect: only the stamped twin reaches preserveModels.
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({ preserveModels: [stamped] }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/providers/connect preserves a same-id proxy model for a non-merge provider', async () => {
     const baseSettings = makeSessionSettings();
     const proxyModel = {

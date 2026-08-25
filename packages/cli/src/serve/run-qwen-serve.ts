@@ -1977,6 +1977,17 @@ export function buildProviderSetupInputs(
       ) {
         return [model];
       }
+      if (
+        model.baseUrl === undefined &&
+        stampedIdsAtSelectedEndpoint.has(model.id)
+      ) {
+        // R39-7 twin collapse (twin of the merge branch below): a same-id
+        // stamped entry at the selected endpoint wins; the plan's UNSCOPED
+        // ownsModel removes the stored original, so carrying the stamped
+        // copy beside the twin would persist two identical (id, baseUrl)
+        // entries permanently, re-preserved on every reconnect.
+        return [];
+      }
       const belongsToAnotherEndpoint =
         helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) !==
         selectedEndpoint;
@@ -2010,9 +2021,19 @@ export function buildProviderSetupInputs(
         // stored original so the pair collapses to the twin instead of
         // persisting as two permanent duplicate (id, baseUrl) entries.
         // Attributable entries claim via migratedLegacyModelIds; a floating
-        // original only through the dedicated adoption channel (R45-2).
-        if (attributable) migratedLegacyModelIds.push(model.id);
-        else adoptedFloatingModelIds.push(model.id);
+        // original only through the dedicated adoption channel (R45-2) —
+        // and ONLY when an explicit selection requested its id: an implicit
+        // (defaults-only) reconnect must not adopt a floating entry (R39-3,
+        // "a key that names no endpoint survives every connect" — and this
+        // route's own rule that implicit reconnects never adopt). Id
+        // collision alone is not intent: on an implicit reconnect the entry
+        // is left unclaimed, so the pair state predating this connect is
+        // left as-is instead of being deleted.
+        if (attributable) {
+          migratedLegacyModelIds.push(model.id);
+        } else if (hasExplicitModelIds && requestedIds.has(model.id)) {
+          adoptedFloatingModelIds.push(model.id);
+        }
         return [];
       }
       const shouldPreserve =

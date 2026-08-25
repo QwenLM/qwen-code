@@ -19,6 +19,7 @@ import {
   AuthType,
   customProvider,
   findProviderById,
+  generateCustomEnvKey,
 } from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
@@ -666,6 +667,78 @@ describe('AuthDialog', { timeout: 15000 }, () => {
     expect(
       proto.migratedLegacyModelIdsByProtocol.get(AuthType.USE_OPENAI),
     ).toEqual(['legacy-custom']);
+  });
+
+  it('computes per-protocol preserve for a baseUrl-less-first custom bucket like the flat view', () => {
+    // A free-form bucket whose FIRST saved model has no baseUrl resolves the
+    // bucket endpoint to '' exactly like the flat view's initialBaseUrl. The
+    // per-protocol view used to gate attribution and the preserve
+    // computation on protoBaseUrl truthiness while the flat view gated on
+    // `initialBaseUrl === undefined` — for '' the flat view computed
+    // preserveModels but the per-protocol view produced none, so any
+    // protocol switch and back emptied preserveModels at submit while the
+    // stamped rich entries' generationConfig was silently reset.
+    const floating = {
+      id: 'floaty',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI', // prefix-only: floating
+    };
+    const rich = {
+      id: 'm1-rich',
+      baseUrl: 'https://x.example/v1',
+      envKey: generateCustomEnvKey(AuthType.USE_OPENAI, 'https://x.example/v1'),
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const modelProviders = { [AuthType.USE_OPENAI]: [floating, rich] };
+
+    const flat = getExistingProviderSetup(customProvider, modelProviders);
+    expect(flat.initialBaseUrl).toBe('');
+    expect(flat.preserveModels).toEqual([rich]);
+
+    const proto = getProtocolSetups(customProvider, modelProviders);
+    // Gate aligned: the per-protocol view carries the same rich entry...
+    expect(proto.preserveModelsByProtocol.get(AuthType.USE_OPENAI)).toEqual([
+      rich,
+    ]);
+    // ...while '' still stays out of baseUrlByProtocol (R39-4).
+    expect(proto.baseUrlByProtocol.has(AuthType.USE_OPENAI)).toBe(false);
+    // The floating entry is seeded on neither view.
+    expect(flat.customModelIds).toEqual([]);
+  });
+
+  it('keeps a stale-URL array-provider entry prefilled under its own URL (no re-keying)', () => {
+    // An entry stamped at a URL matching NO preset option (hand-edited
+    // settings, an earlier iteration's stamp) must not be re-keyed under
+    // the first option in the per-endpoint maps (that polluted the first
+    // option's id map through the protocol stash); it is keyed under its
+    // own URL and still prefilled, and the submit path migrates it
+    // (useProviderSetupFlow stale-stamped handling + buildInstallPlan's
+    // stale-stamped claim clause) instead of writing a second copy beside
+    // the unclaimed original.
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+    const staleOriginal = {
+      id: 'kimi-k3',
+      name: '[Kimi API] kimi-k3',
+      baseUrl: 'https://stale.example/v1',
+      envKey: 'MOONSHOT_API_KEY',
+    };
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [staleOriginal],
+    });
+
+    expect(setup.initialBaseUrl).toBe('https://stale.example/v1');
+    // Prefilled: the id is user-visible in the models field.
+    expect(setup.customModelIds).toEqual(['kimi-k3']);
+    // Keyed under its OWN URL — NOT re-keyed under the first option.
+    expect(
+      setup.modelIdsByBaseUrl.get('https://api.kimi.com/coding/v1'),
+    ).toBeUndefined();
+    expect(setup.modelIdsByBaseUrl.get('https://stale.example/v1')).toEqual([
+      'kimi-k3',
+    ]);
+    // Carried so the submit path can migrate it.
+    expect(setup.preserveModels).toEqual([staleOriginal]);
   });
 
   it('seeds no trims or customs for a provider without saved models', () => {

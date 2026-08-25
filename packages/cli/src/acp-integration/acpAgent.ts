@@ -1755,16 +1755,24 @@ function readExistingProviderConfig(
         baseUrlByProtocol[proto] = sanitizeProviderBaseUrl(protoBaseUrl);
       }
       // Attribution for this protocol bucket's endpoint, to gate baseUrl-less
-      // seeds exactly like the top-level surfaces (R45-1).
-      const protoAttribution = protoBaseUrl
-        ? legacyEnvKeyAttribution(config, proto, protoBaseUrl)
-        : undefined;
+      // seeds exactly like the top-level surfaces (R45-1). Computed
+      // UNCONDITIONALLY: a free-form bucket whose saved models carry no
+      // baseUrl resolves protoBaseUrl to '' exactly like the top-level
+      // restored endpoint does, and the truthiness gate skipped attribution
+      // for that bucket — so the per-protocol view never exposed those
+      // entries while the top-level seed did, and a client switching
+      // protocol submitted without them (the connect route then claimed the
+      // omission as informed deselection for entries it never surfaced).
+      const protoAttribution = legacyEnvKeyAttribution(
+        config,
+        proto,
+        protoBaseUrl,
+      );
       const byEndpoint: Record<string, string[]> = {};
       for (const model of savedForProto.models) {
         if (
           model.baseUrl === undefined &&
           !(
-            protoAttribution &&
             (config.ownsModel ? config.ownsModel(model) : true) &&
             protoAttribution.namesSelectedEndpoint(model)
           )
@@ -1835,6 +1843,47 @@ function readExistingProviderConfig(
   };
 }
 
+// The model ids the list-time seed (readExistingProviderConfig) exposes to
+// the client across ALL its surfaces — top-level modelIds, modelIdsByBaseUrl,
+// and the per-protocol views. The connect route threads this set as
+// roundTrippedLegacyModelIds so buildInstallPlan treats omission from the
+// submission as deselection intent ONLY for entries the client was actually
+// shown, and its R41-3 absence claim below is scoped the same way: a
+// baseUrl-less legacy entry the seed never exposed (e.g. attributable to a
+// non-restored endpoint the client never received models for) must not be
+// claimed as an informed deselection on reconnect (R42-1's guarantee, which
+// the serve route establishes with an empty set).
+function collectSeededModelIds(
+  existingConfig: Record<string, unknown> | undefined,
+): string[] {
+  if (!existingConfig) return [];
+  const ids = new Set<string>();
+  const addAll = (list: unknown) => {
+    if (!Array.isArray(list)) return;
+    for (const id of list) {
+      if (typeof id === 'string') ids.add(id);
+    }
+  };
+  addAll(existingConfig['modelIds']);
+  const byBaseUrl = existingConfig['modelIdsByBaseUrl'];
+  if (byBaseUrl && typeof byBaseUrl === 'object') {
+    for (const list of Object.values(byBaseUrl as Record<string, unknown>)) {
+      addAll(list);
+    }
+  }
+  const byProtocol = existingConfig['modelIdsByBaseUrlByProtocol'];
+  if (byProtocol && typeof byProtocol === 'object') {
+    for (const view of Object.values(byProtocol as Record<string, unknown>)) {
+      if (view && typeof view === 'object') {
+        for (const list of Object.values(view as Record<string, unknown>)) {
+          addAll(list);
+        }
+      }
+    }
+  }
+  return [...ids];
+}
+
 // Resolves the raw, stored API key for a provider for server-side use only
 // (never serialized to the client). Used so `qwen/providers/connect` can keep
 // the existing key when the client updates other fields without resubmitting it.
@@ -1894,6 +1943,7 @@ function readProviderSetupInputs(
     baseUrl: string,
   ) => string | undefined,
   modelProviders?: Record<string, unknown>,
+  roundTrippedLegacyModelIds?: readonly string[],
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
     | AuthType
@@ -1988,6 +2038,14 @@ function readProviderSetupInputs(
   // by an explicit selection that requests its id.
   const { namesSelectedEndpoint, namesSiblingEndpoint } =
     legacyEnvKeyAttribution(config, protocol ?? config.protocol, baseUrl);
+  // The ids the list-time seed actually exposed to the client (threaded from
+  // the connect handler, which computes them off readExistingProviderConfig).
+  // Absence from the submission is informed deselection only for these; an
+  // entry no seeding surface exposed is protected from every claim channel
+  // below (twin of serve's roundTrippedLegacyModelIds: [] defense, scoped to
+  // this route's real exposure instead of an empty set because this route
+  // DOES seed existingConfig).
+  const roundTrippedSet = new Set(roundTrippedLegacyModelIds ?? []);
   // Ids of baseUrl-less entries whose stored original this run replaces with
   // a copy stamped at the selected endpoint (R39-7 collapse included).
   // buildInstallPlan claims baseUrl-less entries by id-collision ONLY for
@@ -2031,12 +2089,37 @@ function readProviderSetupInputs(
       ) {
         return [model];
       }
+      if (
+        model.baseUrl === undefined &&
+        stampedIdsAtSelectedEndpoint.has(model.id)
+      ) {
+        // R39-7 twin collapse (twin of the merge branch below): a same-id
+        // stamped entry at the selected endpoint wins; the plan's UNSCOPED
+        // ownsModel removes the stored original, so carrying the stamped
+        // copy beside the twin would persist two identical (id, baseUrl)
+        // entries permanently.
+        return [];
+      }
       const belongsToAnotherEndpoint =
         normalizeBaseUrlForMatching(preserved.baseUrl) !== selectedEndpoint;
       const shouldPreserve =
         belongsToAnotherEndpoint ||
         (!defaultModelIdSet.has(preserved.id) &&
           (!hasExplicitModelIds || requestedModelIdSet.has(preserved.id)));
+      if (
+        !shouldPreserve &&
+        model.baseUrl === undefined &&
+        namesSelectedEndpoint(model) &&
+        !defaultModelIdSet.has(model.id) &&
+        !roundTrippedSet.has(model.id)
+      ) {
+        // An attributable entry the list-time seed never exposed cannot
+        // carry informed deselection intent in its absence: carry it through
+        // UNSTAMPED (like a fail-closed entry above) so the unscoped
+        // ownsModel writes it back instead of deleting an entry the client
+        // was never shown.
+        return [model];
+      }
       return shouldPreserve ? [preserved] : [];
     }
     if (model.baseUrl === undefined) {
@@ -2052,9 +2135,18 @@ function readProviderSetupInputs(
         // A stamped twin at the selected endpoint wins (R39-7); claim the
         // stored original so the pair collapses to the twin. Attributable
         // entries claim via migratedLegacyModelIds; a floating original can
-        // only be claimed through the dedicated adoption channel (R45-2).
-        if (attributable) migratedLegacyModelIds.push(model.id);
-        else adoptedFloatingModelIds.push(model.id);
+        // only be claimed through the dedicated adoption channel (R45-2) —
+        // and ONLY when an explicit selection requested its id: an implicit
+        // (defaults-only) reconnect must not adopt a floating entry, id
+        // collision alone is not intent, and the entry must survive every
+        // connect like any key that names no endpoint (R39-3). On an
+        // implicit reconnect the entry is left unclaimed — the pair state
+        // predates this connect and is left as-is.
+        if (attributable) {
+          migratedLegacyModelIds.push(model.id);
+        } else if (hasExplicitModelIds && requestedModelIdSet.has(model.id)) {
+          adoptedFloatingModelIds.push(model.id);
+        }
         return [];
       }
       const shouldPreserve =
@@ -2067,7 +2159,10 @@ function readProviderSetupInputs(
         else adoptedFloatingModelIds.push(model.id);
         return [preserved];
       }
-      if (attributable) {
+      if (
+        attributable &&
+        (defaultModelIdSet.has(model.id) || roundTrippedSet.has(model.id))
+      ) {
         // An attributable entry that leaves the plan at its OWN endpoint —
         // explicitly deselected, or superseded by a generated default — must
         // still be claimed by id so buildInstallPlan removes the stored
@@ -2076,7 +2171,12 @@ function readProviderSetupInputs(
         // no existingConfig), this route seeds attributable baseUrl-less ids
         // into existingConfig (readExistingProviderConfig), so an explicit
         // selection omitting one carries the same informed-deselection
-        // meaning as omitting a stamped custom (R42-1).
+        // meaning as omitting a stamped custom (R42-1) — but ONLY for ids
+        // the seed actually exposed (roundTrippedSet) or ids this run
+        // supersedes with a generated default (serve's shape): a claim on
+        // pure absence deleted entries no seeding surface ever exposed
+        // (attributable to a non-restored endpoint), which the client was
+        // never shown.
         migratedLegacyModelIds.push(model.id);
       }
       return [];
@@ -2097,6 +2197,11 @@ function readProviderSetupInputs(
     ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
     ...(migratedLegacyModelIds.length > 0 ? { migratedLegacyModelIds } : {}),
     ...(adoptedFloatingModelIds.length > 0 ? { adoptedFloatingModelIds } : {}),
+    // Scope buildInstallPlan's free-form env-key ownership clause to the ids
+    // the list-time seed exposed (plus any id the plan writes): an omission
+    // of an entry the client was never shown is never deselection intent on
+    // this route either.
+    roundTrippedLegacyModelIds: [...(roundTrippedLegacyModelIds ?? [])],
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }
@@ -8158,6 +8263,12 @@ class QwenAgent implements Agent {
           (this.settings.merged as Record<string, unknown>)[
             'modelProviders'
           ] as Record<string, unknown> | undefined,
+          // The ids the list-time seed exposed to the client: scoping
+          // absence-claims to them keeps a reconnect from deleting entries
+          // the client was never shown (see collectSeededModelIds).
+          collectSeededModelIds(
+            readExistingProviderConfig(providerConfig, this.settings),
+          ),
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);

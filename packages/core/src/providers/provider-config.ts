@@ -539,6 +539,26 @@ export function buildInstallPlan(
           // guard below (R44-1).
           ((model.baseUrl !== undefined &&
             normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint) ||
+            // Stale-stamped entries: stamped at a URL that matches NO preset
+            // option (hand-edited settings, an earlier iteration's endpoint
+            // URL). The endpoint-match clause can never own such an entry,
+            // and its URL is not a sibling endpoint either — no install can
+            // legitimately target it. Without this clause a surface that
+            // prefills the entry's id and re-stamps it at a real option
+            // (the CLI dialog) persisted a permanent duplicate: the stamped
+            // copy at the option beside the unclaimed stale original. Claim
+            // it only when this run actually migrated it — same R40-2
+            // discipline as the baseUrl-less clause below; callers push an
+            // id here only when they re-stamp or deliberately deselect the
+            // entry in this very run.
+            (model.baseUrl !== undefined &&
+              Array.isArray(config.baseUrl) &&
+              migratedLegacyModelIds.has(model.id) &&
+              !config.baseUrl.some(
+                (option) =>
+                  normalizeBaseUrlForMatching(option.url) ===
+                  normalizeBaseUrlForMatching(model.baseUrl),
+              )) ||
             (model.baseUrl === undefined &&
               !namesSiblingEndpoint(model) &&
               // The id-collision clause claims only entries this run actually

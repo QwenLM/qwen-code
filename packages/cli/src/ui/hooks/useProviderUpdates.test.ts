@@ -398,6 +398,91 @@ describe('useProviderUpdates', () => {
     delete process.env[deepseekEnvKey];
   });
 
+  it('replaces stale-URL built-in stamps instead of duplicating them on update', async () => {
+    // deepseek is a non-merge, single-endpoint (string baseUrl) provider —
+    // it has NO sibling endpoints. When a preset's endpoint URL changes
+    // between versions, the update prompt fires with the metadata's stale
+    // URL, and 'Update all' must replace built-ins stamped at the OLD URL
+    // with the template at the CURRENT URL — keeping them as "sibling"
+    // entries duplicated every built-in permanently (old URL + new URL).
+    const deepseekBaseUrl = 'https://api.deepseek.com';
+    const staleBaseUrl = 'https://old.deepseek.example/v1';
+    const deepseekEnvKey = 'DEEPSEEK_API_KEY';
+    const deepseekTemplate = buildProviderTemplate(
+      deepseekProvider,
+      deepseekBaseUrl,
+    );
+    const builtinIds = deepseekTemplate.map(
+      (model: { id: string }) => model.id,
+    );
+    expect(builtinIds.length).toBeGreaterThan(1);
+    // Every built-in stamped at the STALE URL, plus one custom model that
+    // must survive the update.
+    const staleStamps = builtinIds.map((id: string) => ({
+      id,
+      name: `[DeepSeek] ${id}`,
+      baseUrl: staleBaseUrl,
+      envKey: deepseekEnvKey,
+    }));
+    const customAtStale = {
+      id: 'my-custom-model',
+      name: '[DeepSeek] my-custom-model',
+      baseUrl: staleBaseUrl,
+      envKey: deepseekEnvKey,
+      generationConfig: { samplingParams: { temperature: 0.25 } },
+    };
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      'deepseek'
+    ] = {
+      baseUrl: staleBaseUrl,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: [...staleStamps, customAtStale],
+    };
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: deepseekBaseUrl,
+      apiKeyEnvKey: deepseekEnvKey,
+    });
+    mockConfig.getModel.mockReturnValue(builtinIds[0]);
+    mockConfig.refreshAuth.mockResolvedValue(undefined);
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    await waitFor(() => {
+      expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    });
+
+    const reloaded = mockConfig.reloadModelProvidersConfig.mock.calls[0][0];
+    // Every built-in appears exactly once — stamped at the CURRENT URL.
+    for (const id of builtinIds) {
+      const entries = reloaded[AuthType.USE_OPENAI].filter(
+        (model: { id: string }) => model.id === id,
+      );
+      expect(entries).toHaveLength(1);
+      expect(entries[0].baseUrl).toBe(deepseekBaseUrl);
+    }
+    // No stale-URL stamps survive — except the custom model (user data).
+    expect(
+      reloaded[AuthType.USE_OPENAI].filter(
+        (model: { baseUrl?: string }) => model.baseUrl === staleBaseUrl,
+      ),
+    ).toEqual([customAtStale]);
+    delete process.env[deepseekEnvKey];
+  });
+
   it('preserves owned custom models using a proxy URL during an update', async () => {
     const deepseekBaseUrl = 'https://api.deepseek.com';
     const deepseekEnvKey = 'DEEPSEEK_API_KEY';

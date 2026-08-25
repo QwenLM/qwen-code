@@ -187,6 +187,20 @@ function computePreservedModels(
   const restoredDefaults = new Set(
     getDefaultModelIds(providerConfig, restoredBaseUrl),
   );
+  // Ids that already have a stamped entry at the restored endpoint. A
+  // same-id baseUrl-less legacy entry must not be carried beside its twin:
+  // nothing downstream dedups preserved-against-preserved, so the pair would
+  // persist as two permanent duplicate (id, baseUrl) entries (R39-7 — the
+  // collapse the ACP/serve routes apply in their connect paths).
+  const stampedIdsAtRestoredEndpoint = new Set(
+    savedModels
+      .filter(
+        (model) =>
+          model.baseUrl !== undefined &&
+          normalizeBaseUrlForMatching(model.baseUrl) === restoredEndpoint,
+      )
+      .map((model) => model.id),
+  );
   const migratedLegacyModelIds: string[] = [];
   const preserveModels = savedModels.flatMap((model) => {
     if (model.baseUrl === undefined) {
@@ -203,6 +217,10 @@ function computePreservedModels(
       // A default id is regenerated stamped at the restored endpoint; the
       // claim above collapses the stored original into it.
       if (restoredDefaults.has(model.id)) return [];
+      // A stamped twin at the restored endpoint wins (R39-7); the claim
+      // above collapses the stored original into the twin, so the stamped
+      // copy must not be carried a second time.
+      if (stampedIdsAtRestoredEndpoint.has(model.id)) return [];
       return [
         {
           ...model,
@@ -242,9 +260,19 @@ export function getExistingProviderSetup(
   modelIdsByBaseUrl: ReadonlyMap<string, readonly string[]>;
   preserveModels?: ProviderModelConfig[];
   migratedLegacyModelIds?: string[];
+  floatingLegacyModels?: ProviderModelConfig[];
 } {
   const saved = findExistingProviderModels(providerConfig, modelProviders);
   const savedBaseUrl = saved?.models[0]?.baseUrl;
+  // Array-baseUrl providers pass the first saved model's baseUrl through
+  // UNRESOLVED: the restored seed and the per-endpoint maps must reflect the
+  // entry's actual (possibly stale/hand-edited) URL so custom models saved
+  // there are still surfaced and prefilled. The duplicate that a divergent
+  // submission endpoint would create is closed at submit time instead:
+  // useProviderSetupFlow.buildCurrentInputs re-stamps such entries at the
+  // submission endpoint and emits their ids in migratedLegacyModelIds, and
+  // buildInstallPlan claims the stale original through its stale-stamped
+  // clause (an entry stamped at a URL matching no preset option).
   const initialBaseUrl = saved
     ? typeof providerConfig.baseUrl === 'string' || savedBaseUrl === undefined
       ? resolveBaseUrl(providerConfig, savedBaseUrl)
@@ -264,14 +292,47 @@ export function getExistingProviderSetup(
     model.baseUrl !== undefined ||
     (restoredAttribution !== undefined &&
       restoredAttribution.namesSelectedEndpoint(model));
+  // FLOATING baseUrl-less legacy entries (env key names NO endpoint, so they
+  // fail attribution at every endpoint and never reach the seed or
+  // preserveModels). Threading them to the flow lets a submission that
+  // explicitly types one of their ids adopt it through
+  // adoptedFloatingModelIds — without the channel the stamped copy is
+  // written while the stored original can never be claimed, a permanent
+  // duplicate (twin of the ACP/serve/VS Code adoption channel).
+  const floatingLegacyModels =
+    saved?.models.filter(
+      (model) =>
+        model.baseUrl === undefined &&
+        restoredAttribution !== undefined &&
+        !restoredAttribution.namesSelectedEndpoint(model) &&
+        !restoredAttribution.namesSiblingEndpoint(model),
+    ) ?? [];
   const modelIdsByBaseUrl = new Map<string, string[]>();
   for (const model of saved?.models ?? []) {
     if (!restoredLegacyAttributed(model)) continue;
     const modelBaseUrl = model.baseUrl ?? initialBaseUrl;
     if (modelBaseUrl === undefined) continue;
-    const resolvedBaseUrl = normalizeBaseUrlForMatching(
-      resolveBaseUrl(providerConfig, modelBaseUrl),
-    );
+    // A stamped entry of an array-baseUrl provider that matches no preset
+    // option is stale (hand-edited settings, an earlier iteration's stamp):
+    // key it under its OWN URL instead of letting resolveBaseUrl snap it to
+    // the first option — re-keying it there polluted that option's id map
+    // (a protocol-switch stash would pre-fill the stale id under the real
+    // option). The stale URL is never a selectable endpoint, so the entry
+    // stays inert in the per-endpoint maps while its id is still prefilled
+    // through restoredModelIds.
+    const matchesAnOption =
+      !Array.isArray(providerConfig.baseUrl) ||
+      model.baseUrl === undefined ||
+      providerConfig.baseUrl.some(
+        (option) =>
+          normalizeBaseUrlForMatching(option.url) ===
+          normalizeBaseUrlForMatching(model.baseUrl),
+      );
+    const resolvedBaseUrl = matchesAnOption
+      ? normalizeBaseUrlForMatching(
+          resolveBaseUrl(providerConfig, modelBaseUrl),
+        )
+      : normalizeBaseUrlForMatching(modelBaseUrl);
     const modelIds = modelIdsByBaseUrl.get(resolvedBaseUrl) ?? [];
     if (!modelIds.includes(model.id)) modelIds.push(model.id);
     modelIdsByBaseUrl.set(resolvedBaseUrl, modelIds);
@@ -318,6 +379,7 @@ export function getExistingProviderSetup(
     modelIdsByBaseUrl,
     ...(preserveModels.length > 0 ? { preserveModels } : {}),
     ...(migratedLegacyModelIds.length > 0 ? { migratedLegacyModelIds } : {}),
+    ...(floatingLegacyModels.length > 0 ? { floatingLegacyModels } : {}),
   };
 }
 
@@ -344,6 +406,10 @@ export function getProtocolSetups(
   >;
   migratedLegacyModelIdsByProtocol: ReadonlyMap<AuthType, readonly string[]>;
   baseUrlByProtocol: ReadonlyMap<AuthType, string>;
+  floatingLegacyModelsByProtocol: ReadonlyMap<
+    AuthType,
+    readonly ProviderModelConfig[]
+  >;
 } {
   const supportedProtocols = providerConfig.protocolOptions?.length
     ? providerConfig.protocolOptions
@@ -355,6 +421,10 @@ export function getProtocolSetups(
   const preserveModelsByProtocol = new Map<AuthType, ProviderModelConfig[]>();
   const migratedLegacyModelIdsByProtocol = new Map<AuthType, string[]>();
   const baseUrlByProtocol = new Map<AuthType, string>();
+  const floatingLegacyModelsByProtocol = new Map<
+    AuthType,
+    ProviderModelConfig[]
+  >();
   for (const proto of supportedProtocols) {
     const savedForProto = findExistingProviderModels(
       providerConfig,
@@ -373,22 +443,51 @@ export function getProtocolSetups(
     }
     // Same attribution gate as getExistingProviderSetup (R43-3): this is
     // the view useProviderSetupFlow.start() prefers, so it must enforce the
-    // identical fail-closed seeding.
-    const protoAttribution = protoBaseUrl
-      ? legacyEnvKeyAttribution(providerConfig, proto, protoBaseUrl)
-      : undefined;
+    // identical fail-closed seeding. Computed UNCONDITIONALLY — protoBaseUrl
+    // is always a string, and a free-form bucket whose first saved model has
+    // no baseUrl resolves to '' here exactly like initialBaseUrl does in the
+    // flat view; gating on truthiness skipped the attribution and the
+    // preserve computation for that bucket, so a protocol switch-and-back
+    // emptied preserveModels while the flat view had computed it (the two
+    // views diverged on gate shape).
+    const protoAttribution = legacyEnvKeyAttribution(
+      providerConfig,
+      proto,
+      protoBaseUrl,
+    );
     const protoLegacyAttributed = (model: ProviderModelConfig): boolean =>
       model.baseUrl !== undefined ||
-      (protoAttribution !== undefined &&
-        protoAttribution.namesSelectedEndpoint(model));
+      protoAttribution.namesSelectedEndpoint(model);
+    const protoFloating = savedForProto.models.filter(
+      (model) =>
+        model.baseUrl === undefined &&
+        !protoAttribution.namesSelectedEndpoint(model) &&
+        !protoAttribution.namesSiblingEndpoint(model),
+    );
+    if (protoFloating.length > 0) {
+      floatingLegacyModelsByProtocol.set(proto, protoFloating);
+    }
     const protoModelIdsByBaseUrl = new Map<string, string[]>();
     for (const model of savedForProto.models) {
       if (!protoLegacyAttributed(model)) continue;
       const modelBaseUrl = model.baseUrl ?? protoBaseUrl;
       if (modelBaseUrl === undefined) continue;
-      const resolvedModelBaseUrl = normalizeBaseUrlForMatching(
-        resolveBaseUrl(providerConfig, modelBaseUrl),
-      );
+      // Stale-URL guard: see getExistingProviderSetup — an array-baseUrl
+      // entry matching no option is keyed under its own URL, never re-keyed
+      // under the first option.
+      const matchesAnOption =
+        !Array.isArray(providerConfig.baseUrl) ||
+        model.baseUrl === undefined ||
+        providerConfig.baseUrl.some(
+          (option) =>
+            normalizeBaseUrlForMatching(option.url) ===
+            normalizeBaseUrlForMatching(model.baseUrl),
+        );
+      const resolvedModelBaseUrl = matchesAnOption
+        ? normalizeBaseUrlForMatching(
+            resolveBaseUrl(providerConfig, modelBaseUrl),
+          )
+        : normalizeBaseUrlForMatching(modelBaseUrl);
       const ids = protoModelIdsByBaseUrl.get(resolvedModelBaseUrl) ?? [];
       if (!ids.includes(model.id)) ids.push(model.id);
       protoModelIdsByBaseUrl.set(resolvedModelBaseUrl, ids);
@@ -397,17 +496,12 @@ export function getProtocolSetups(
     const {
       preserveModels: protoPreserveModels,
       migratedLegacyModelIds: protoMigratedIds,
-    } = protoBaseUrl
-      ? computePreservedModels(
-          providerConfig,
-          proto,
-          protoBaseUrl,
-          savedForProto.models,
-        )
-      : {
-          preserveModels: [] as ProviderModelConfig[],
-          migratedLegacyModelIds: [] as string[],
-        };
+    } = computePreservedModels(
+      providerConfig,
+      proto,
+      protoBaseUrl,
+      savedForProto.models,
+    );
     if (protoPreserveModels.length > 0) {
       preserveModelsByProtocol.set(proto, protoPreserveModels);
     }
@@ -420,6 +514,7 @@ export function getProtocolSetups(
     preserveModelsByProtocol,
     migratedLegacyModelIdsByProtocol,
     baseUrlByProtocol,
+    floatingLegacyModelsByProtocol,
   };
 }
 
@@ -515,6 +610,8 @@ export function AuthDialog({
       protocolSetups.baseUrlByProtocol,
       existingSetup.migratedLegacyModelIds,
       protocolSetups.migratedLegacyModelIdsByProtocol,
+      existingSetup.floatingLegacyModels,
+      protocolSetups.floatingLegacyModelsByProtocol,
     );
     pushView('provider-setup');
   };
@@ -605,6 +702,8 @@ export function AuthDialog({
           customProtocolSetups.baseUrlByProtocol,
           existingSetup.migratedLegacyModelIds,
           customProtocolSetups.migratedLegacyModelIdsByProtocol,
+          existingSetup.floatingLegacyModels,
+          customProtocolSetups.floatingLegacyModelsByProtocol,
         );
         pushView('provider-setup');
         break;

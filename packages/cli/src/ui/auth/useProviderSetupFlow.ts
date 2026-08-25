@@ -148,6 +148,21 @@ export function useProviderSetupFlow(
   // stored originals and the pairs collapse instead of duplicating. Swapped
   // per protocol alongside preserveModelsRef.
   const migratedLegacyModelIdsRef = useRef<string[]>([]);
+  // FLOATING baseUrl-less legacy entries (env key names NO endpoint): never
+  // seeded and never stamped by the views, but when the user explicitly
+  // types one of their ids into the models field the submit adopts it —
+  // stamped into preserveModels and emitted via adoptedFloatingModelIds so
+  // buildInstallPlan claims the stored original (without the channel the
+  // stamped copy is written while the original can never be claimed, a
+  // permanent duplicate; twin of the ACP/serve/VS Code adoption channel).
+  const floatingModelsRef = useRef<ProviderModelConfig[]>([]);
+  // Per-protocol stash of the floating entries above, swapped in
+  // selectProtocol alongside preserveModels. A key's floating status is
+  // protocol-dependent for the custom provider (its env keys encode the
+  // protocol), so each bucket carries its own list.
+  const floatingModelsByProtocolRef = useRef(
+    new Map<AuthType, readonly ProviderModelConfig[]>(),
+  );
   const [modelIds, setModelIds] = useState('');
   const [modelIdsError, setModelIdsError] = useState<string | null>(null);
   const customModelIdsByBaseUrlRef = useRef(new Map<string, string[]>());
@@ -216,6 +231,11 @@ export function useProviderSetupFlow(
         AuthType,
         readonly string[]
       >,
+      floatingLegacyModels?: readonly ProviderModelConfig[],
+      floatingLegacyModelsByProtocol?: ReadonlyMap<
+        AuthType,
+        readonly ProviderModelConfig[]
+      >,
     ) => {
       apiKeyDraftsRef.current.clear();
       protocolDraftsRef.current.clear();
@@ -256,6 +276,14 @@ export function useProviderSetupFlow(
       migratedLegacyModelIdsRef.current = [
         ...(migratedLegacyModelIdsByProtocol?.get(proto) ??
           migratedLegacyModelIds ??
+          []),
+      ];
+      floatingModelsByProtocolRef.current = new Map(
+        floatingLegacyModelsByProtocol ?? [],
+      );
+      floatingModelsRef.current = [
+        ...(floatingLegacyModelsByProtocol?.get(proto) ??
+          floatingLegacyModels ??
           []),
       ];
 
@@ -351,6 +379,8 @@ export function useProviderSetupFlow(
     committedBaseUrlRef.current = '';
     preserveModelsRef.current = [];
     migratedLegacyModelIdsRef.current = [];
+    floatingModelsRef.current = [];
+    floatingModelsByProtocolRef.current.clear();
     customModelIdsByBaseUrlRef.current.clear();
     trimmedDefaultModelIdsRef.current.clear();
     endpointModelStateByProtocolRef.current.clear();
@@ -418,6 +448,9 @@ export function useProviderSetupFlow(
         migratedLegacyModelIdsRef.current = [
           ...(savedModelStateByProtocolRef.current.get(selectedProtocol)
             ?.migratedLegacyModelIds ?? []),
+        ];
+        floatingModelsRef.current = [
+          ...(floatingModelsByProtocolRef.current.get(selectedProtocol) ?? []),
         ];
         const draft = protocolDraftsRef.current.get(selectedProtocol);
         if (draft) {
@@ -651,8 +684,20 @@ export function useProviderSetupFlow(
       const defaultModelIdSet = new Set(
         provider ? getDefaultModelIds(provider, resolvedBaseUrl) : [],
       );
-      const preserveModels = preserveModelsRef.current.filter((model) => {
-        if (!provider) return true;
+      // Ids of STALE-STAMPED entries (baseUrl matches no preset option of an
+      // array-baseUrl provider) this submit migrates or deselects. Emitted in
+      // migratedLegacyModelIds so buildInstallPlan's stale-stamped clause
+      // claims the stored original: prefilled stale ids are re-stamped at
+      // the submission endpoint (folding into the regenerated copy), and an
+      // id the user removed from the field is an informed deselection —
+      // without the claim the stale original survived beside the copy, a
+      // permanent duplicate spanning two env keys.
+      const staleStampedMigratedIds: string[] = [];
+      const staleStampEnvKey = provider
+        ? providerEnvKey(provider, protocol, resolvedBaseUrl)
+        : undefined;
+      const preserveModels = preserveModelsRef.current.flatMap((model) => {
+        if (!provider) return [model];
         const belongsToAnotherEndpoint =
           model.baseUrl !== undefined &&
           normalizeBaseUrlForMatching(model.baseUrl) !== selectedEndpoint;
@@ -682,7 +727,7 @@ export function useProviderSetupFlow(
             liveCustomIds === undefined &&
             liveTrimmedDefaults === undefined
           ) {
-            return true;
+            return [model];
           }
           const trimmedSet = new Set(liveTrimmedDefaults ?? []);
           const liveSiblingIds = new Set([
@@ -691,7 +736,7 @@ export function useProviderSetupFlow(
               (id) => !trimmedSet.has(id),
             ),
           ]);
-          return liveSiblingIds.has(model.id);
+          return liveSiblingIds.has(model.id) ? [model] : [];
         }
         if (!provider.mergeModelsByIdentity && model.baseUrl === undefined) {
           // A baseUrl-less entry reaching preserveModels on a non-merge
@@ -701,26 +746,98 @@ export function useProviderSetupFlow(
           // endpoint owns it — and the plan's UNSCOPED ownsModel deletes
           // whatever does not reach it, so carry it regardless of field
           // membership: such an entry is never deletable from any surface.
-          return true;
+          return [model];
+        }
+        if (
+          provider.mergeModelsByIdentity &&
+          Array.isArray(provider.baseUrl) &&
+          belongsToAnotherEndpoint &&
+          !provider.baseUrl.some(
+            (option) =>
+              normalizeBaseUrlForMatching(option.url) ===
+              normalizeBaseUrlForMatching(model.baseUrl),
+          )
+        ) {
+          // A STALE-STAMPED entry: its URL matches no preset option (hand-
+          // edited settings, an earlier iteration's endpoint URL), so the
+          // plan's endpoint-match clause can never own the stored original.
+          // The dialog prefilled its id (the views key it like any saved
+          // custom model), so the submission either re-stamps it at the
+          // submission endpoint — carry it stamped there so it folds into
+          // the regenerated copy with its rich generationConfig — or the
+          // user removed the id: an informed deselection. Record the id in
+          // migratedLegacyModelIds either way so buildInstallPlan's stale-
+          // stamped clause claims the original; omitting it left the stale
+          // entry beside the copy forever (a permanent duplicate spanning
+          // two env keys).
+          staleStampedMigratedIds.push(model.id);
+          if (!selectedModelIdSet.has(model.id)) return [];
+          return [
+            {
+              ...model,
+              baseUrl: resolvedBaseUrl,
+              ...(staleStampEnvKey ? { envKey: staleStampEnvKey } : {}),
+            },
+          ];
         }
         const belongsToSelectedMergeEndpoint =
           !provider.mergeModelsByIdentity ||
           (model.baseUrl !== undefined && !belongsToAnotherEndpoint);
-        return (
-          belongsToSelectedMergeEndpoint &&
+        return belongsToSelectedMergeEndpoint &&
           !defaultModelIdSet.has(model.id) &&
           selectedModelIdSet.has(model.id)
-        );
+          ? [model]
+          : [];
       });
+      // Floating adoption: a floating baseUrl-less entry the user explicitly
+      // typed into the models field is stamped at the submitted endpoint and
+      // claimed through adoptedFloatingModelIds — mirroring acpAgent/serve
+      // and the VS Code surface. Without the channel the stamped copy is
+      // written while the stored original can never be claimed (a permanent
+      // duplicate), because the free-form ownsLegacyEnvKey clause rejects
+      // prefix-only floating keys.
+      const adoptedFloatingModels = provider
+        ? floatingModelsRef.current.filter(
+            (model) =>
+              selectedModelIdSet.has(model.id) &&
+              !defaultModelIdSet.has(model.id),
+          )
+        : [];
+      const adoptedEnvKey = provider
+        ? providerEnvKey(provider, protocol, resolvedBaseUrl)
+        : undefined;
+      const allPreservedModels = [
+        ...preserveModels,
+        ...adoptedFloatingModels.map((model) => ({
+          ...model,
+          baseUrl: resolvedBaseUrl,
+          // Adoption re-keys the entry to the submitted endpoint's key,
+          // matching the ACP/serve stamp semantics (R39-6).
+          ...(adoptedEnvKey ? { envKey: adoptedEnvKey } : {}),
+        })),
+      ];
       return {
         protocol: provider?.protocolOptions ? protocol : undefined,
         baseUrl: resolvedBaseUrl,
         apiKey: apiKey.trim(),
         modelIds: resolvedModelIds,
-        ...(preserveModels.length > 0 ? { preserveModels } : {}),
-        ...(migratedLegacyModelIdsRef.current.length > 0
+        ...(allPreservedModels.length > 0
+          ? { preserveModels: allPreservedModels }
+          : {}),
+        ...(adoptedFloatingModels.length > 0
           ? {
-              migratedLegacyModelIds: [...migratedLegacyModelIdsRef.current],
+              adoptedFloatingModelIds: adoptedFloatingModels.map(
+                (model) => model.id,
+              ),
+            }
+          : {}),
+        ...(migratedLegacyModelIdsRef.current.length > 0 ||
+        staleStampedMigratedIds.length > 0
+          ? {
+              migratedLegacyModelIds: [
+                ...migratedLegacyModelIdsRef.current,
+                ...staleStampedMigratedIds,
+              ],
             }
           : {}),
         // The dialog is a round-tripping caller, but only for the baseUrl-less

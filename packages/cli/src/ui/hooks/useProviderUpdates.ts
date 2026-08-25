@@ -480,19 +480,24 @@ export function useProviderUpdates(
           if (providerCfg.mergeModelsByIdentity) {
             return belongsToSelectedEndpoint && !builtInIds.has(model.id);
           }
-          // Non-merge providers replace every owned model in one patch. Keep
-          // exact sibling-endpoint entries (including built-ins) and only
-          // replace the selected endpoint's built-in template. A baseUrl-less
-          // legacy entry of a single-endpoint (string-baseUrl) provider
-          // belongs to that endpoint: count it as the selected endpoint's so
-          // the stamped template REPLACES it instead of being written beside
-          // it as a permanent duplicate. For sibling-endpoint (array-baseUrl)
-          // providers a baseUrl-less entry cannot be attributed to one
-          // endpoint, so it is preserved untouched (R45-6).
+          // Non-merge providers replace every owned model in one patch. A
+          // provider whose baseUrl is a single string has NO sibling
+          // endpoints, so every owned entry belongs to the updated endpoint
+          // no matter which URL it is stamped at: a preset whose endpoint
+          // URL changes between versions leaves its built-ins stamped at the
+          // OLD URL, and keeping those as "sibling" entries while the
+          // install plan appends the same built-ins stamped at the new URL
+          // duplicated every built-in permanently (old URL + new URL). Only
+          // custom (non-built-in) ids are preserved for such providers, so
+          // the stamped template REPLACES stale stamps — matching the
+          // pre-existing rebuild behavior. (baseUrl-less legacy entries of
+          // these providers belong to the endpoint for the same reason.)
+          // For array-baseUrl providers a sibling endpoint genuinely exists,
+          // so exact sibling-endpoint entries (including built-ins) are
+          // kept, and a baseUrl-less entry cannot be attributed to one
+          // endpoint — it is preserved untouched (R45-6).
           const belongsOrLegacySingleEndpoint =
-            belongsToSelectedEndpoint ||
-            (model.baseUrl === undefined &&
-              !Array.isArray(providerCfg.baseUrl));
+            belongsToSelectedEndpoint || !Array.isArray(providerCfg.baseUrl);
           return !belongsOrLegacySingleEndpoint || !builtInIds.has(model.id);
         });
         const installPlan = buildInstallPlan(providerCfg, {

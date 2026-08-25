@@ -1827,4 +1827,172 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.apiKey).toBe('stored-second');
     expect(result.current.state.modelIds).toBe('second-model, custom-model');
   });
+
+  it('migrates a stale-URL array-provider entry at submit instead of duplicating it', async () => {
+    // A kimi entry stamped at a URL that matches no preset option is
+    // restored raw (prefill contract), while the submission endpoint
+    // resolves to the first option. The submit must re-stamp the entry at
+    // the submission endpoint and emit its id in migratedLegacyModelIds so
+    // buildInstallPlan's stale-stamped clause claims the stored original —
+    // otherwise the stamped copy at the first option persisted beside the
+    // unclaimed stale original, a permanent duplicate spanning two env
+    // keys.
+    const staleUrl = 'https://stale.example/v1';
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const staleOriginal = {
+      id: 'kimi-k3',
+      name: '[Kimi API] kimi-k3',
+      baseUrl: staleUrl,
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const modelProvidersRecord = { [AuthType.USE_OPENAI]: [staleOriginal] };
+    const setup = getExistingProviderSetup(kimiProvider, modelProvidersRecord);
+    const protocolSetups = getProtocolSetups(
+      kimiProvider,
+      modelProvidersRecord,
+    );
+
+    let modelProviders: ModelProvidersConfig = {
+      [AuthType.USE_OPENAI]: [staleOriginal],
+    };
+    const onSubmit = vi.fn(async (_config, inputs) => {
+      const plan = buildInstallPlan(kimiProvider, inputs);
+      await applyProviderInstallPlan(plan, {
+        settings: {
+          getValue: vi.fn(),
+          setValue: vi.fn(),
+          getModelProviders: () => modelProviders,
+          persist: vi.fn(),
+        },
+        reloadModelProviders: (next) => {
+          modelProviders = next;
+        },
+        doRefreshAuth: false,
+      });
+    });
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        kimiProvider,
+        setup.initialProtocol,
+        { MOONSHOT_API_KEY: 'sk-moon' },
+        setup.customModelIds,
+        setup.initialBaseUrl,
+        setup.trimmedDefaultModelIds,
+        setup.modelIdsByBaseUrl,
+        setup.preserveModels,
+        protocolSetups.modelIdsByBaseUrlByProtocol,
+        protocolSetups.preserveModelsByProtocol,
+        protocolSetups.baseUrlByProtocol,
+        setup.migratedLegacyModelIds,
+        protocolSetups.migratedLegacyModelIdsByProtocol,
+      );
+    });
+
+    // The submission endpoint resolves to the first option (the stale URL
+    // is not selectable), while the models field carries the prefilled id.
+    expect(result.current.state.baseUrl).toBe(codingUrl);
+    expect(result.current.state.modelIds).toContain('kimi-k3');
+
+    await act(async () => {
+      result.current.submit();
+    });
+
+    const inputs = onSubmit.mock.calls[0][1];
+    expect(inputs.migratedLegacyModelIds).toContain('kimi-k3');
+    expect(inputs.preserveModels).toContainEqual(
+      expect.objectContaining({ id: 'kimi-k3', baseUrl: codingUrl }),
+    );
+
+    // The pair collapses: exactly one kimi-k3 entry remains, stamped at the
+    // submission endpoint — no stale-URL duplicate.
+    const k3Entries = modelProviders[AuthType.USE_OPENAI]?.filter(
+      (model: ProviderModelConfig) => model.id === 'kimi-k3',
+    );
+    expect(k3Entries).toHaveLength(1);
+    expect(k3Entries?.[0].baseUrl).toBe(codingUrl);
+    // The rich generationConfig survived the merge with the regenerated copy.
+    expect(k3Entries?.[0].generationConfig).toEqual({
+      contextWindowSize: 12345,
+    });
+  });
+
+  it('adopts an explicitly typed floating legacy entry through adoptedFloatingModelIds', async () => {
+    // A floating baseUrl-less entry (env key names NO endpoint) is never
+    // seeded, but when the user explicitly types its id into the models
+    // field the submit adopts it: stamped into preserveModels and emitted
+    // via adoptedFloatingModelIds so buildInstallPlan claims the stored
+    // original — without the channel the stamped copy is written while the
+    // original can never be claimed, a permanent duplicate with the rich
+    // generationConfig stranded (twin of the VS Code/ACP/serve channel).
+    const url = 'https://proxy.example/v1';
+    const floating = {
+      id: 'floaty',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI', // prefix-only: names no endpoint
+      generationConfig: { contextWindowSize: 777 },
+    };
+    const onSubmit = vi.fn(async () => undefined);
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        customProvider,
+        AuthType.USE_OPENAI,
+        {},
+        [],
+        url,
+        undefined,
+        new Map(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [floating],
+      );
+    });
+
+    // Not seeded: the field starts empty.
+    expect(result.current.state.modelIds).toBe('');
+
+    act(() => {
+      result.current.changeModelIds('floaty');
+    });
+    await act(async () => {
+      result.current.submit();
+    });
+
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      customProvider,
+      expect.objectContaining({
+        adoptedFloatingModelIds: ['floaty'],
+        preserveModels: [
+          expect.objectContaining({
+            id: 'floaty',
+            baseUrl: url,
+            envKey: generateCustomEnvKey(AuthType.USE_OPENAI, url),
+            generationConfig: { contextWindowSize: 777 },
+          }),
+        ],
+      }),
+    );
+
+    // Control: not typed -> not adopted.
+    vi.mocked(onSubmit).mockClear();
+    act(() => {
+      result.current.changeModelIds('some-other-model');
+    });
+    await act(async () => {
+      result.current.submit();
+    });
+    expect(onSubmit).toHaveBeenLastCalledWith(
+      customProvider,
+      expect.not.objectContaining({
+        adoptedFloatingModelIds: expect.anything(),
+      }),
+    );
+  });
 });

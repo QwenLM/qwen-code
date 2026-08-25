@@ -196,7 +196,9 @@ export interface ProviderSetupInputs {
    *
    * When OMITTED (undefined) the historical behavior applies — the env-key
    * clause owns every attributable entry — which keeps callers that fully
-   * round-trip (CLI wizard, ACP, VS Code) unchanged.
+   * round-trip (CLI wizard, VS Code) unchanged. The ACP route seeds
+   * existingConfig but not every entry is exposed on every seeding surface,
+   * so it passes the ids its list-time seed actually exposed.
    */
   roundTrippedLegacyModelIds?: readonly string[];
   /**
