@@ -210,6 +210,61 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     },
   );
 
+  it('refuses when the file identity changes between lstat and open (async)', async () => {
+    // Async counterpart of the sync identity-change test. The real opened
+    // FileHandle's stat() cannot be intercepted through fs mocks, so the
+    // pre-open lstat is doctored instead (same prototype trick, ino + 1)
+    // and the identity re-check on the opened handle then mismatches it.
+    // This pins the async try/assertSameIdentity/catch-and-close block in
+    // openNoFollow: the symlink refusal tests all reject at the earlier
+    // isSymbolicLink() check, so deleting that block keeps them green
+    // while silently leaking the rejection-path handle unclosed.
+    const dir = makeTempDir();
+    const filePath = join(dir, 'data.txt');
+    writeFileSync(filePath, 'payload');
+
+    let closeSpy: ReturnType<typeof vi.spyOn> | undefined;
+
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const modified = {
+        ...actual,
+        constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        promises: {
+          ...actual.promises,
+          lstat: (async (p: string) => {
+            const stats = await actual.promises.lstat(p);
+            return Object.assign(
+              Object.create(Object.getPrototypeOf(stats)),
+              stats,
+              { ino: stats.ino + 1 },
+            );
+          }) as typeof actual.promises.lstat,
+          open: (async (...args: Parameters<typeof actual.promises.open>) => {
+            const handle = await actual.promises.open(...args);
+            closeSpy = vi.spyOn(handle, 'close');
+            return handle;
+          }) as typeof actual.promises.open,
+        },
+      };
+      return { ...modified, default: modified };
+    });
+
+    try {
+      const { openNoFollow: openFallback } = await import(
+        './no-follow-open.js'
+      );
+      const error = await openFallback(filePath).catch((e) => e);
+      expect((error as NodeJS.ErrnoException).code).toBe('ELOOP');
+      expect(closeSpy).toBeDefined();
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
   it('refuses when the filesystem cannot prove identity (inode 0)', async () => {
     // FAT/exFAT/SMB volumes report ino 0 for every file; the comparison
     // would be vacuous there, so the helper fails closed (#8290 posture).
