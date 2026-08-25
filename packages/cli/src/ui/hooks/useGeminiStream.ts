@@ -673,6 +673,13 @@ export const useGeminiStream = (
   // for the Idle drain would hold teammate messages for the whole task.
   const teammateQueueRef = useRef<TeammateQueueEntry[]>([]);
   const [teammateTrigger, setTeammateTrigger] = useState(0);
+  // A TeamManager swap invalidates every teammate batch of the outgoing
+  // team — the queued ones AND the ones already drained but not yet
+  // settled (in flight inside a tool-round submission). The swap handler
+  // clears the queue; this generation counter covers the in-flight ones:
+  // every drain captures the generation, and both its restore and its
+  // settlement refuse to act on the queue/journal once it has moved.
+  const teammateQueueGenerationRef = useRef(0);
   // Shared drain protocol for both delivery paths (tool-round boundary
   // and Idle fallback): splice the pending batch, render one compact
   // `● …` notification line per report (the full envelope goes only to
@@ -685,7 +692,9 @@ export const useGeminiStream = (
   const drainTeammateQueue = useCallback((): {
     entries: TeammateQueueEntry[];
     restore: () => void;
+    generation: number;
   } => {
+    const generation = teammateQueueGenerationRef.current;
     const entries = teammateQueueRef.current.splice(0);
     for (const entry of entries) {
       if (!entry.displayed) {
@@ -700,11 +709,23 @@ export const useGeminiStream = (
     const restore = () => {
       if (settled || entries.length === 0) return;
       settled = true;
+      if (teammateQueueGenerationRef.current !== generation) {
+        debugLogger.debug(
+          `dropping ${entries.length} drained teammate message(s): team changed while in flight`,
+        );
+        return;
+      }
+      // A TeamManager swap moved the generation while this batch was in
+      // flight: the entries belong to a team that no longer exists, so
+      // requeueing them would submit them into the NEW team's session
+      // (the swap handler clears only the queue, not this closure).
+      // Drop them instead — the same fate as the queued entries the swap
+      // handler clears.
       teammateQueueRef.current.unshift(...entries);
       // Re-arm the Idle drain in case no further state change happens.
       setTeammateTrigger((n) => n + 1);
     };
-    return { entries, restore };
+    return { entries, restore, generation };
   }, [addItem]);
   const lastPromptRef = useRef<PartListUnion | null>(null);
   // Records the USER history item that THIS turn's prepareQueryForGemini
@@ -745,7 +766,13 @@ export const useGeminiStream = (
   // failed terminally BEFORE producing content: the Retry path pops that
   // orphan entry before re-pushing the stored payload, so a payload still
   // missing its envelopes would silently lose them while the delivery
-  // journal claims delivered. Evaluated and cleared on every retry.
+  // journal claims delivered. Consumption is gated on admission: the
+  // evaluation runs inside `retryLastPrompt` only after the admission
+  // gate is known to pass, and the consumed records transfer into a
+  // settlement carrier on the retry's own submission, which records debt
+  // for the retry's re-pushed entry when its push lands — so an envelope
+  // that survives one retry is still protected if a later, different
+  // payload's retry orphans it again.
   //
   // Each record also carries `pushedEntryParts` — the parts of the pushed
   // history entry as captured at accept time — as an identity fingerprint
@@ -4233,6 +4260,69 @@ export const useGeminiStream = (
   );
 
   /**
+   * Remove trailing parts from `lastPromptRef` whose texts match the given
+   * envelope texts in order. Shared by the boundary settlement and the
+   * Ctrl+Y retry carrier, which both need to un-bake reattached envelopes
+   * from the stored retry payload. No-op unless the stored payload is an
+   * array actually ending with those parts (a later submission may have
+   * overwritten it).
+   */
+  const stripTrailingTextsFromLastPrompt = useCallback((texts: string[]) => {
+    if (texts.length === 0) return;
+    const lastPrompt = lastPromptRef.current;
+    if (!Array.isArray(lastPrompt)) return;
+    const cut = lastPrompt.length - texts.length;
+    if (
+      cut >= 0 &&
+      texts.every((text, i) => {
+        const part = lastPrompt[cut + i];
+        return (
+          typeof part === 'object' &&
+          part !== null &&
+          'text' in part &&
+          part.text === text
+        );
+      })
+    ) {
+      lastPromptRef.current = cut > 0 ? lastPrompt.slice(0, cut) : null;
+    }
+  }, []);
+
+  /**
+   * Identity fingerprint for envelope retry debt: capture the pushed
+   * history entry carrying these envelope parts (accept fires after the
+   * push landed). The youngest entry containing every envelope text is the
+   * one just pushed — a concurrent push can only displace the scan when it
+   * carries byte-identical envelope texts, which the fingerprint's
+   * tool-response parts then still distinguish at retry time. History
+   * unreadable ⇒ fall back to the envelope parts alone (the
+   * pre-fingerprint containment match).
+   */
+  const capturePushedTeammateEntry = useCallback(
+    (envelopeParts: Part[]): Part[] => {
+      try {
+        const history = geminiClient?.getHistoryShallow?.() ?? [];
+        for (let i = history.length - 1; i >= 0; i--) {
+          const candidate = history[i]?.parts ?? [];
+          if (
+            envelopeParts.every((part) =>
+              candidate.some((p) => p.text === part.text),
+            )
+          ) {
+            return candidate;
+          }
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to capture pushed teammate entry for retry debt: ${error}`,
+        );
+      }
+      return envelopeParts;
+    },
+    [geminiClient],
+  );
+
+  /**
    * Re-attach accepted-boundary envelope parts to a Ctrl+Y retry payload
    * when the history entry carrying them is about to be popped by the
    * Retry path.
@@ -4266,13 +4356,30 @@ export const useGeminiStream = (
    * plain user prompts store strings in `lastPromptRef`), so debt is
    * evaluated for ANY payload shape; a string query is wrapped into its
    * single text part only when something is actually re-attached.
+   *
+   * Returns the (possibly extended) query plus the CONSUMED debt records —
+   * the ones whose pushed entry matched a trailing orphan and whose
+   * envelopes were re-attached. `retryLastPrompt` transfers those records
+   * into a settlement carrier on the retry's own submission so the
+   * protection follows the envelopes into the retry's re-pushed entry;
+   * the debt ref itself is cleared here, which is safe because the call
+   * site runs only after the submission admission gate is known to pass
+   * (a gate-rejected retry must not discard debt). Unmatched records are
+   * dropped: their pushed entry is no longer a trailing orphan, so the
+   * pop can never drop it and its protection expires. When the history
+   * scan fails the debt stays untouched so a later retry can still
+   * evaluate it.
    */
   const reattachOrphanedRetryEnvelopes = useCallback(
-    (query: PartListUnion): PartListUnion => {
+    (
+      query: PartListUnion,
+    ): {
+      query: PartListUnion;
+      consumed: Array<{ envelopeParts: Part[]; pushedEntryParts: Part[] }>;
+    } => {
       const debt = boundaryEnvelopeRetryDebtRef.current;
-      boundaryEnvelopeRetryDebtRef.current = [];
       if (debt.length === 0) {
-        return query;
+        return { query, consumed: [] };
       }
       const samePart = (a: Part, b: Part): boolean => {
         if (typeof a.text === 'string' || typeof b.text === 'string') {
@@ -4336,12 +4443,23 @@ export const useGeminiStream = (
         }
       } catch (error) {
         // History unavailable: keep the stripped payload rather than fail
-        // the retry.
+        // the retry, and leave the debt untouched so a later retry can
+        // still evaluate it.
         debugLogger.warn(
           `Failed to scan history for orphaned teammate envelopes: ${error}`,
         );
-        return query;
+        return { query, consumed: [] };
       }
+      // Consume the debt now: the caller has already verified that the
+      // submission admission gate will pass, so the only outcomes are a
+      // landing push (the consumed records transfer into the retry's
+      // settlement carrier) or a pre-push exit (the carrier restores the
+      // records). Either way no protection is dropped on the floor.
+      boundaryEnvelopeRetryDebtRef.current = [];
+      const consumed: Array<{
+        envelopeParts: Part[];
+        pushedEntryParts: Part[];
+      }> = [];
       const reattach: Part[] = [];
       for (const record of debt) {
         if (
@@ -4350,10 +4468,14 @@ export const useGeminiStream = (
           )
         ) {
           reattach.push(...record.envelopeParts);
+          consumed.push(record);
         }
+        // Unmatched records expire: their pushed entry is no longer a
+        // trailing orphan (model content landed after it, or it is gone),
+        // so the Retry path's pop can never drop it.
       }
       if (reattach.length === 0) {
-        return query;
+        return { query, consumed };
       }
       // `query` may be a string or contain string parts (Idle Teammate/
       // Notification drains and plain prompts); normalize to Part[] only
@@ -4361,7 +4483,7 @@ export const useGeminiStream = (
       const base: Part[] = (Array.isArray(query) ? query : [query]).map(
         (part) => (typeof part === 'string' ? { text: part } : part),
       );
-      return [...base, ...reattach];
+      return { query: [...base, ...reattach], consumed };
     },
     [geminiClient],
   );
@@ -4403,6 +4525,20 @@ export const useGeminiStream = (
       return;
     }
 
+    // Admission-gate pre-check. The debt evaluation below CONSUMES the
+    // retry-debt records, but `submitQuery` early-returns at its admission
+    // gate when a submission is already in flight — a Retry is never a
+    // turn continuation nor a concurrent /btw, so for this submit type the
+    // gate rejects exactly when `isSubmittingQueryRef` is set. Consuming
+    // the debt before that gate (as argument evaluation) would permanently
+    // discard it for a lease-rejected Ctrl+Y; bail first and keep the debt
+    // for the next attempt. The check is synchronous with the gate inside
+    // `submitQuery` (no await in between), so nothing can flip the lease
+    // in the window.
+    if (isSubmittingQueryRef.current) {
+      return;
+    }
+
     const lastPrompt = lastPromptRef.current;
     if (!lastPrompt || !lastPromptErroredRef.current) {
       addItem(
@@ -4417,9 +4553,54 @@ export const useGeminiStream = (
 
     clearRetryCountdown();
 
+    const { query: retryQuery, consumed } =
+      reattachOrphanedRetryEnvelopes(lastPrompt);
+    // The re-attached envelopes are baked into THIS retry's push. Without
+    // protecting the retry's own entry the same loss shape repeats one
+    // retry later: the retry can also fail terminally before content, and
+    // a later retry of a DIFFERENT payload then pops the retry's orphaned
+    // entry — dropping the envelopes while the journal claims delivered.
+    // The attached carrier is settled by GeminiClient right next to the
+    // push (the same protocol the boundary settlement uses): accept
+    // records debt for the retry's re-pushed entry; restore re-records
+    // the consumed records under their original fingerprints after
+    // stripping the envelopes back out of `lastPromptRef` (core re-adds
+    // popped orphan entries as-is when the push never landed, so the
+    // original fingerprints stay valid, while the stored retry payload
+    // must not carry the envelopes twice).
+    const retryEnvelopeSettlement: SteerInput | undefined =
+      consumed.length === 0
+        ? undefined
+        : {
+            parts: [],
+            accept: () => {
+              for (const record of consumed) {
+                boundaryEnvelopeRetryDebtRef.current.push({
+                  envelopeParts: record.envelopeParts,
+                  pushedEntryParts: capturePushedTeammateEntry(
+                    record.envelopeParts,
+                  ),
+                });
+              }
+            },
+            restore: () => {
+              stripTrailingTextsFromLastPrompt(
+                consumed.flatMap((record) =>
+                  record.envelopeParts.map((part) => part.text ?? ''),
+                ),
+              );
+              for (const record of consumed) {
+                boundaryEnvelopeRetryDebtRef.current.push(record);
+              }
+            },
+          };
     await submitQuery(
-      reattachOrphanedRetryEnvelopes(lastPrompt),
+      retryQuery,
       SendMessageType.Retry,
+      undefined,
+      retryEnvelopeSettlement
+        ? { steerInput: retryEnvelopeSettlement }
+        : undefined,
     );
   }, [
     streamingState,
@@ -4427,6 +4608,8 @@ export const useGeminiStream = (
     clearRetryCountdown,
     submitQuery,
     reattachOrphanedRetryEnvelopes,
+    capturePushedTeammateEntry,
+    stripTrailingTextsFromLastPrompt,
   ]);
 
   const preemptGoalTurn = useCallback((reason: string) => {
@@ -5458,8 +5641,15 @@ export const useGeminiStream = (
         if (!drainedTeammates || drainedTeammates.entries.length === 0) {
           return;
         }
-        const { entries, restore } = drainedTeammates;
+        const { entries, restore, generation } = drainedTeammates;
         drainedTeammates = undefined;
+        const envelopeTexts = entries.map((entry) => entry.modelText);
+        // A TeamManager swap moved the generation while this batch was in
+        // flight: it belongs to the outgoing team no matter how it now
+        // settles, and must not be journaled into, or recorded as retry
+        // debt against, the NEW team's session. (The restore side of this
+        // guard lives in `drainTeammateQueue`'s restore itself.)
+        const swapped = teammateQueueGenerationRef.current !== generation;
         // The envelopes are baked into the Ctrl+Y retry payload either way:
         // `submitQuery` stored `finalQueryToSend` (envelope parts included)
         // in `lastPromptRef` before the client call settled. Strip them on
@@ -5468,43 +5658,23 @@ export const useGeminiStream = (
         // history, so a retry that re-sends them would hand the leader the
         // identical report twice (accepted-then-failed-mid-stream retry,
         // or retry + Idle drain after a restore). The trailing-match guard
-        // keeps this a no-op when settlement fires before `submitQuery`
-        // stored the payload (cancel and preempt paths below) or after a
-        // later submission overwrote it. One exception to "already in the
-        // session history": an accepted round can still fail terminally
-        // BEFORE any content, leaving the pushed entry as a trailing orphan
-        // that the Retry path pops before re-pushing the payload. The
-        // accept branch records the stripped parts as retry debt
+        // inside the helper keeps this a no-op when settlement fires before
+        // `submitQuery` stored the payload (cancel and preempt paths below)
+        // or after a later submission overwrote it. One exception to
+        // "already in the session history": an accepted round can still
+        // fail terminally BEFORE any content, leaving the pushed entry as
+        // a trailing orphan that the Retry path pops before re-pushing the
+        // payload. The accept branch records retry debt
         // (`boundaryEnvelopeRetryDebtRef`) so `retryLastPrompt` re-attaches
-        // them exactly when that orphan pop would drop them.
-        //
-        // Returns true only when the trailing envelope parts were found
-        // and removed; false means `lastPromptRef` no longer holds this
-        // payload, so there is nothing to strip and no debt to record.
-        const stripEnvelopeFromLastPrompt = (): boolean => {
-          const lastPrompt = lastPromptRef.current;
-          if (!Array.isArray(lastPrompt)) {
-            return false;
-          }
-          const cut = lastPrompt.length - entries.length;
-          if (
-            cut >= 0 &&
-            entries.every((entry, i) => {
-              const part = lastPrompt[cut + i];
-              return (
-                typeof part === 'object' &&
-                part !== null &&
-                'text' in part &&
-                part.text === entry.modelText
-              );
-            })
-          ) {
-            lastPromptRef.current = cut > 0 ? lastPrompt.slice(0, cut) : null;
-            return true;
-          }
-          return false;
-        };
+        // the envelopes exactly when that orphan pop would drop them.
         if (accepted) {
+          stripTrailingTextsFromLastPrompt(envelopeTexts);
+          if (swapped) {
+            debugLogger.debug(
+              `dropping ${entries.length} accepted teammate message(s): team changed while in flight`,
+            );
+            return;
+          }
           // The envelopes are in the session history; requeueing them
           // would deliver them twice. Record the delivery instead, the
           // same `recordNotification` journaling the hook-exempt
@@ -5520,57 +5690,38 @@ export const useGeminiStream = (
             undefined,
             toolGoalBinding?.permit,
           );
-          const stripped = stripEnvelopeFromLastPrompt();
-          if (stripped) {
-            // See `boundaryEnvelopeRetryDebtRef`: if this accepted round
-            // still fails terminally before any content, the pushed entry
-            // becomes the trailing orphan the Retry path pops, and the
-            // stripped payload alone would lose these envelopes.
-            const envelopeParts = entries.map((entry) => ({
-              text: entry.modelText,
-            }));
-            // Identity for the retry-time match: capture the pushed entry
-            // itself (accept fires after the push landed). The youngest
-            // entry carrying every envelope text is the one this drain
-            // pushed — a concurrent push can only displace the scan when
-            // it carries byte-identical envelope texts, which the
-            // fingerprint's tool-response parts then still distinguish at
-            // retry time. History unreadable ⇒ fall back to the envelope
-            // parts alone (the pre-fingerprint containment match).
-            let pushedEntryParts: Part[] = envelopeParts;
-            try {
-              const history = geminiClient?.getHistoryShallow?.() ?? [];
-              for (let i = history.length - 1; i >= 0; i--) {
-                const candidate = history[i]?.parts ?? [];
-                if (
-                  entries.every((entry) =>
-                    candidate.some((part) => part.text === entry.modelText),
-                  )
-                ) {
-                  pushedEntryParts = candidate;
-                  break;
-                }
-              }
-            } catch (error) {
-              debugLogger.warn(
-                `Failed to capture pushed teammate entry for retry debt: ${error}`,
-              );
-            }
-            boundaryEnvelopeRetryDebtRef.current.push({
-              envelopeParts,
-              pushedEntryParts,
-            });
-          }
+          // See `boundaryEnvelopeRetryDebtRef`: if this accepted round
+          // still fails terminally before any content, the pushed entry
+          // becomes the trailing orphan the Retry path pops, and a payload
+          // without these envelopes would lose them. Record the debt
+          // UNCONDITIONALLY, not only when the strip above matched: a
+          // concurrent submission admitted during the time-to-first-token
+          // window can overwrite `lastPromptRef` before this settlement
+          // fires, and the orphan pop drops the pushed entry regardless
+          // of what `lastPromptRef` holds at retry time — gating the debt
+          // on the strip match would silently drop the envelopes in that
+          // case while the journal still claims delivered. The retry-time
+          // orphan check keeps double delivery impossible: envelopes are
+          // only re-attached when the pushed entry really is the trailing
+          // orphan the pop is about to drop.
+          const envelopeParts = entries.map((entry) => ({
+            text: entry.modelText,
+          }));
+          boundaryEnvelopeRetryDebtRef.current.push({
+            envelopeParts,
+            pushedEntryParts: capturePushedTeammateEntry(envelopeParts),
+          });
           return;
         }
         // The submission never reached the model (cancelled/preempted
         // before send, admission failure, hook block): hand the batch
-        // back to the queue for the Idle fallback.
+        // back to the queue for the Idle fallback — unless a swap
+        // invalidated it, see the restore-side guard.
         debugLogger.debug(
           `restoring ${entries.length} teammate message(s) after failed/cancelled submission`,
         );
         restore();
-        stripEnvelopeFromLastPrompt();
+        stripTrailingTextsFromLastPrompt(envelopeTexts);
       };
       const submissionSettlement: SteerInput | undefined =
         drainedSteer || drainedTeammates
@@ -5648,6 +5799,8 @@ export const useGeminiStream = (
       bindGoalTurn,
       failClosedGoalTurn,
       releaseGoalTurn,
+      stripTrailingTextsFromLastPrompt,
+      capturePushedTeammateEntry,
     ],
   );
 
@@ -6137,6 +6290,13 @@ export const useGeminiStream = (
         // remount re-binds the same manager (boundManager is null here)
         // and preserves the queue.
         teammateQueueRef.current.length = 0;
+        // The queue clear only covers entries still queued. A batch
+        // already drained into an in-flight tool-round submission lives
+        // in that submission's settlement closure; moving the generation
+        // makes its restore drop the batch and its settlement skip the
+        // journal/debt, so it cannot resurface in the new team's session
+        // either.
+        teammateQueueGenerationRef.current += 1;
       }
       boundManager = manager;
       if (manager) {
