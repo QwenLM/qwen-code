@@ -12,6 +12,7 @@ import {
   type ResumedSessionData,
   SessionStartSource,
   computeUniqueBranchTitle,
+  normalizeDerivedBranchTitle,
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
@@ -140,8 +141,13 @@ export function useBranchCommand(
         //    a stale `lastCompletedUuid` and the next user message attaches
         //    its parentUuid to a record that's no longer the JSONL tail.
         const outgoingRecording = config.getChatRecordingService();
+        const sourceCustomTitle = outgoingRecording?.getCurrentCustomTitle();
         outgoingRecording?.finalize();
         await outgoingRecording?.flush();
+        const sourceDisplayName =
+          name === undefined && sourceCustomTitle === undefined
+            ? await sessionService.getSessionDisplayName(oldSessionId)
+            : undefined;
 
         // 2. Snapshot the parent JSONL state for rollback. `/branch` is
         //    guarded on `isIdleRef`, so the file isn't being mutated
@@ -167,8 +173,17 @@ export function useBranchCommand(
         // 5. Persist the branch title before switching core or UI. A failed
         //    title write leaves the parent active and the catch path removes
         //    the incomplete fork.
+        // A base that is empty, whitespace-only, or exactly a legacy
+        // `(Branch)`/`(Branch N)` token falls back to the first prompt here,
+        // while the daemon route falls back to the session-id prefix; no
+        // picker name survives either way, so each client keeps its own
+        // degradation.
         const baseName =
-          name ?? deriveFirstPrompt(provisional.conversation.messages);
+          name ??
+          (sourceCustomTitle
+            ? normalizeDerivedBranchTitle(sourceCustomTitle)
+            : sourceDisplayName?.trim() || undefined) ??
+          deriveFirstPrompt(provisional.conversation.messages);
         const effectiveTitle = await computeUniqueBranchTitle(
           baseName,
           sessionService,
@@ -233,7 +248,7 @@ export function useBranchCommand(
 
         // 11. Announce. Two history items mirror Claude's success message
         //    (branched line + resume hint). The quoted name is the raw
-        //    user-provided `name`; no `(Branch)` suffix — that decoration
+        //    user-provided `name`; no generated numeric suffix — that decoration
         //    belongs in the picker/prompt bar, not in the user-facing
         //    announcement.
         const titleInfo = name ? ` "${name}"` : '';

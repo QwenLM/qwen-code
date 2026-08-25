@@ -20,6 +20,8 @@ describe('useBranchCommand', () => {
   let renameSession: ReturnType<typeof vi.fn>;
   let finalize: ReturnType<typeof vi.fn>;
   let flush: ReturnType<typeof vi.fn>;
+  let getCurrentCustomTitle: ReturnType<typeof vi.fn>;
+  let getSessionDisplayName: ReturnType<typeof vi.fn>;
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
   let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
@@ -94,6 +96,8 @@ describe('useBranchCommand', () => {
     });
     finalize = vi.fn();
     flush = vi.fn().mockResolvedValue(undefined);
+    getCurrentCustomTitle = vi.fn().mockReturnValue(undefined);
+    getSessionDisplayName = vi.fn().mockResolvedValue(undefined);
     findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
     startNewSessionConfig = vi.fn();
     getGoalRuntimeReady = vi.fn().mockResolvedValue({});
@@ -132,8 +136,13 @@ describe('useBranchCommand', () => {
         removeSession,
         renameSession,
         findSessionTitlesByPrefix,
+        getSessionDisplayName,
       }),
-      getChatRecordingService: () => ({ finalize, flush }),
+      getChatRecordingService: () => ({
+        finalize,
+        flush,
+        getCurrentCustomTitle,
+      }),
       getGeminiClient: () => ({ initialize: vi.fn() }),
       getBackgroundTaskRegistry: () => backgroundTaskRegistry,
       getMonitorRegistry: () => monitorRegistry,
@@ -309,24 +318,24 @@ describe('useBranchCommand', () => {
     );
   });
 
-  it('records the user-provided name with a (Branch) suffix', async () => {
+  it('records the user-provided name with a numeric suffix', async () => {
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('my-branch');
     });
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
-      'my-branch (Branch)',
+      'my-branch(1)',
       'manual',
     );
-    expect(setSessionName).toHaveBeenCalledWith('my-branch (Branch)');
+    expect(setSessionName).toHaveBeenCalledWith('my-branch(1)');
   });
 
-  it('bumps to (Branch N) when the default suffix is already taken', async () => {
+  it('increments the suffix when the default name is already taken', async () => {
     // `findSessionTitlesByPrefix` returns every existing title under the
-    // `${name} (Branch` prefix in one shot, so the bump logic picks the
+    // `${name}(` prefix in one shot, so the bump logic picks the
     // first free slot in memory — no per-candidate disk probe.
-    findSessionTitlesByPrefix.mockResolvedValue(['my-branch (Branch)']);
+    findSessionTitlesByPrefix.mockResolvedValue(['my-branch(1)']);
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -334,22 +343,22 @@ describe('useBranchCommand', () => {
     });
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
-      'my-branch (Branch 2)',
+      'my-branch(2)',
       'manual',
     );
-    expect(setSessionName).toHaveBeenCalledWith('my-branch (Branch 2)');
+    expect(setSessionName).toHaveBeenCalledWith('my-branch(2)');
   });
 
-  it('does ONE prefix scan even when many (Branch N) slots are taken', async () => {
+  it('does ONE prefix scan even when many numeric slots are taken', async () => {
     // Pin the perf invariant: regardless of collision density, the
     // collision lookup must be a single project-wide scan, not N probes.
     // Reviewer's concern was that 99 sequential probes can stall /branch
     // on dense title spaces.
     findSessionTitlesByPrefix.mockResolvedValue([
-      'my-branch (Branch)',
-      'my-branch (Branch 2)',
-      'my-branch (Branch 3)',
-      'my-branch (Branch 4)',
+      'my-branch(1)',
+      'my-branch(2)',
+      'my-branch(3)',
+      'my-branch(4)',
     ]);
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
@@ -358,10 +367,10 @@ describe('useBranchCommand', () => {
     });
 
     expect(findSessionTitlesByPrefix).toHaveBeenCalledTimes(1);
-    expect(findSessionTitlesByPrefix).toHaveBeenCalledWith('my-branch (Branch');
+    expect(findSessionTitlesByPrefix).toHaveBeenCalledWith('my-branch(');
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
-      'my-branch (Branch 5)',
+      'my-branch(5)',
       'manual',
     );
   });
@@ -372,15 +381,105 @@ describe('useBranchCommand', () => {
       await result.current.handleBranch();
     });
     // deriveFirstPrompt collapses whitespace and truncates to 100 chars;
-    // "help me fix the login bug" fits, then + " (Branch)"
+    // "help me fix the login bug" fits, then + "(1)"
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
-      'help me fix the login bug (Branch)',
+      'help me fix the login bug(1)',
       'auto',
     );
   });
 
-  it('falls back to "Branched conversation (Branch)" when the transcript has no user records', async () => {
+  it('prefers the source custom title when no name is given', async () => {
+    getCurrentCustomTitle.mockReturnValue('My Project');
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch();
+    });
+
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
+      'My Project(1)',
+      'auto',
+    );
+  });
+
+  it.each([
+    ['My Project(2)', 'My Project(1)'],
+    ['My Project (Branch)', 'My Project(1)'],
+    ['My Project (Branch 2)', 'My Project(1)'],
+    ['My Project (2)', 'My Project (2)(1)'],
+    ['(Branch)', 'help me fix the login bug(1)'],
+    ['(Branch 2)', 'help me fix the login bug(1)'],
+  ])(
+    'normalizes the derived source title %s',
+    async (sourceTitle, expectedTitle) => {
+      getCurrentCustomTitle.mockReturnValue(sourceTitle);
+
+      const { result } = renderHook(() => useBranchCommand(makeOptions()));
+      await act(async () => {
+        await result.current.handleBranch();
+      });
+
+      expect(renameSession).toHaveBeenCalledWith(
+        expect.any(String),
+        expectedTitle,
+        'auto',
+      );
+    },
+  );
+
+  it('uses the picker display name for an untitled source session', async () => {
+    const pickerDisplayName = `Error: first line\n${'x'.repeat(120)}`;
+    getSessionDisplayName.mockResolvedValue(pickerDisplayName);
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch();
+    });
+
+    expect(getSessionDisplayName).toHaveBeenCalledWith(
+      '12345678-aaaa-bbbb-cccc-dddddddddddd',
+    );
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
+      `${pickerDisplayName}(1)`,
+      'auto',
+    );
+  });
+
+  it.each(['', '   '])(
+    'falls back to the first prompt when the picker display name is blank (%j)',
+    async (blankDisplayName) => {
+      getSessionDisplayName.mockResolvedValue(blankDisplayName);
+
+      const { result } = renderHook(() => useBranchCommand(makeOptions()));
+      await act(async () => {
+        await result.current.handleBranch();
+      });
+
+      expect(renameSession).toHaveBeenCalledWith(
+        expect.any(String),
+        'help me fix the login bug(1)',
+        'auto',
+      );
+    },
+  );
+
+  it('preserves a numeric token in an explicit branch name', async () => {
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('Roadmap (2026)');
+    });
+
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
+      'Roadmap (2026)(1)',
+      'manual',
+    );
+  });
+
+  it('falls back to "Branched conversation(1)" when the transcript has no user records', async () => {
     loadSession.mockResolvedValue({
       conversation: { messages: [] },
       filePath: '/tmp/new.jsonl',
@@ -392,7 +491,7 @@ describe('useBranchCommand', () => {
     });
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
-      'Branched conversation (Branch)',
+      'Branched conversation(1)',
       'auto',
     );
   });
@@ -416,7 +515,7 @@ describe('useBranchCommand', () => {
     });
     expect(renameSession).toHaveBeenCalledWith(
       expect.any(String),
-      'what does this codebase do (Branch)',
+      'what does this codebase do(1)',
       'auto',
     );
   });
