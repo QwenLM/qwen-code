@@ -2718,6 +2718,10 @@ export class Session implements SessionContext {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
+        {
+          cancelMessage:
+            'Workflow approval was cancelled before it could be answered.',
+        },
       );
       await this.#finishWorkflowApprovalToolCall(
         approval,

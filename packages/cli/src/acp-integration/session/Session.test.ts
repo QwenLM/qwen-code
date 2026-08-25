@@ -2045,6 +2045,10 @@ describe('Session', () => {
       'wf_timeout',
       'wfap_timeout',
       core.ToolConfirmationOutcome.Cancel,
+      {
+        cancelMessage:
+          'Workflow approval was cancelled before it could be answered.',
+      },
     );
     expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
       sessionId: 'test-session-id',
@@ -2131,6 +2135,10 @@ describe('Session', () => {
       'wf_persistent',
       'wfap_persistent',
       core.ToolConfirmationOutcome.Cancel,
+      {
+        cancelMessage:
+          'Workflow approval was cancelled before it could be answered.',
+      },
     );
   });
 
@@ -2170,6 +2178,10 @@ describe('Session', () => {
       'wf_dispose',
       'wfap_dispose',
       core.ToolConfirmationOutcome.Cancel,
+      {
+        cancelMessage:
+          'Workflow approval was cancelled before it could be answered.',
+      },
     );
     expect(
       mockWorkflowRunRegistry.setApprovalRequestCallback,
@@ -2213,6 +2225,10 @@ describe('Session', () => {
       'wf_cleared',
       'wfap_cleared',
       core.ToolConfirmationOutcome.Cancel,
+      {
+        cancelMessage:
+          'Workflow approval was cancelled before it could be answered.',
+      },
     );
   });
 
