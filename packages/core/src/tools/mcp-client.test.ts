@@ -2138,6 +2138,52 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
     });
 
+    it('discoverAndReturn records the discovery failure cause in the status registry (issue #9944)', async () => {
+      // Same carrier as connect()'s catch: a server whose connect()
+      // succeeds but discovery fails (up-but-empty) reaches
+      // discoverAndReturn()'s catch, which the manager swallows for
+      // best-effort discovery. `qwen mcp reconnect` relies on
+      // `getMCPServerLastError` to print the cause — the status enum alone
+      // only says DISCONNECTED.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({ prompts: [] }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const client = new McpClient(
+        'discovery-cause-server',
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await expect(
+        client.discoverAndReturn(cfgWithResources()),
+      ).rejects.toThrow('No prompts, tools, or resources found on the server.');
+
+      expect(getMCPServerLastError('discovery-cause-server')).toBe(
+        'No prompts, tools, or resources found on the server.',
+      );
+
+      removeMCPServerStatus('discovery-cause-server');
+    });
+
     it('keeps a server with only app-visible tools connected', async () => {
       mockAppOnlyMcpServer();
       const client = new McpClient(
