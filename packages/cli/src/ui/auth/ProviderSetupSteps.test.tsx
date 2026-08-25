@@ -302,6 +302,7 @@ describe('ProviderSetupSteps', () => {
     const frame = lastFrame() ?? '';
     expect(frame).toContain('Enter model IDs directly');
     expect(frame).toContain('Recommended models');
+    expect(frame).not.toContain('Other models from the provider');
     expect(frame).toContain(
       'Checked recommended models are applied on submit but not copied into the input.',
     );
@@ -474,6 +475,16 @@ describe('ProviderSetupSteps', () => {
     expect(frame).toMatch(/◉\uFE0E\s+MiniMax-M3/);
     expect(frame).toMatch(/○\uFE0E\s+MiniMax-M4/);
     expect(frame).toMatch(/○\uFE0E\s+custom-model/);
+    const lines = frame.split('\n');
+    const otherHeadingLine = lines.findIndex((line) =>
+      line.includes('Other models from the provider'),
+    );
+    expect(otherHeadingLine).toBeGreaterThan(
+      lines.findIndex((line) => /◉\uFE0E\s+MiniMax-M3/.test(line)),
+    );
+    expect(otherHeadingLine).toBeLessThan(
+      lines.findIndex((line) => /○\uFE0E\s+MiniMax-M4/.test(line)),
+    );
     await act(async () => {
       pressLatestKey('x', 'x');
     });
@@ -482,6 +493,73 @@ describe('ProviderSetupSteps', () => {
     pressKey('return', '\r');
     expect(submitModelIds).toHaveBeenCalledWith({
       modelIds: ['xcustom-model', 'MiniMax-M2.7', 'MiniMax-M3'],
+    });
+    unmount();
+  });
+
+  it('lists provider-only models without the recommended endorsement', async () => {
+    discoverProviderModelsMock.mockResolvedValue([
+      { id: 'served-unknown-a' },
+      { id: 'served-unknown-b' },
+    ]);
+    const flow = createModelIdsFlow();
+    enableDiscovery(flow);
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+    await act(async () => {});
+
+    const frame = lastFrame() ?? '';
+    expect(frame).not.toContain('Recommended models · from the provider');
+    expect(frame).toContain('Other models from the provider');
+    expect(frame).toMatch(/○\uFE0E\s+served-unknown-a/);
+    expect(frame).toMatch(/○\uFE0E\s+served-unknown-b/);
+    unmount();
+  });
+
+  it('toggles and submits an unendorsed provider model like a recommended one', async () => {
+    let resolveDiscovery!: (models: ModelSpec[]) => void;
+    discoverProviderModelsMock.mockReturnValue(
+      new Promise<ModelSpec[]>((resolve) => {
+        resolveDiscovery = resolve;
+      }),
+    );
+    const submitModelIds = vi.fn();
+    const flow = createModelIdsFlow({
+      modelIds: 'custom-model, MiniMax-M3',
+      submitModelIds,
+    });
+    enableDiscovery(flow);
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    await act(async () => {
+      resolveDiscovery([
+        { id: 'MiniMax-M3', contextWindowSize: 1000000 },
+        { id: 'MiniMax-M4' },
+      ]);
+    });
+
+    await act(async () => {
+      pressLatestKey('down');
+    });
+    await act(async () => {
+      pressLatestKey('down');
+    });
+    await act(async () => {
+      pressLatestKey('down');
+    });
+    await act(async () => {
+      pressLatestKey('space', ' ');
+    });
+
+    expect(lastFrame()).toMatch(/◉\uFE0E\s+MiniMax-M4/);
+
+    pressKey('return', '\r');
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['custom-model', 'MiniMax-M3', 'MiniMax-M4'],
     });
     unmount();
   });
@@ -500,6 +578,7 @@ describe('ProviderSetupSteps', () => {
     expect(frame).toContain(
       'Recommended models · provider list unavailable, showing built-ins',
     );
+    expect(frame).not.toContain('Other models from the provider');
     expect(frame).toContain('MiniMax-M2.7');
     unmount();
   });

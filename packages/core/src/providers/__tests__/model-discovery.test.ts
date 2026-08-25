@@ -42,7 +42,7 @@ describe('discoverProviderModels', () => {
     fetchWithPolicyMock.mockReset();
   });
 
-  it('merges standard model ids with known specs in stable order', async () => {
+  it('returns every served id uncurated, merging known specs first in stable order', async () => {
     fetchWithPolicyMock.mockResolvedValue(
       response({
         data: [
@@ -50,11 +50,9 @@ describe('discoverProviderModels', () => {
           { id: 'new-model' },
           { id: 'known-a' },
           { id: 'new-model' },
-          { id: 'qwen-audio-3.0' },
-          { id: 'wan2.7-image' },
+          { id: 'qwen2-audio-instruct' },
+          { id: 'qwen-vl-ocr-latest' },
           { id: 'wan2.7-t2v-plus' },
-          { id: 'paraformer-v2' },
-          { id: 'stable-diffusion-xl' },
         ],
       }),
     );
@@ -63,6 +61,9 @@ describe('discoverProviderModels', () => {
       { id: 'known-a', contextWindowSize: 1000 },
       { id: 'known-b', enableThinking: true },
       { id: 'new-model' },
+      { id: 'qwen2-audio-instruct' },
+      { id: 'qwen-vl-ocr-latest' },
+      { id: 'wan2.7-t2v-plus' },
     ]);
     expect(fetchWithPolicyMock).toHaveBeenCalledWith(
       'https://example.com/v1/models',
@@ -90,27 +91,6 @@ describe('discoverProviderModels', () => {
     await expect(discoverProviderModels(options)).resolves.toBeNull();
   });
 
-  it('falls back when all returned ids are non-chat models', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'text-embedding-v3' },
-          { id: 'qwen-tts-1' },
-          { id: 'video-generation' },
-          { id: 'wanx-v1' },
-          { id: 'wanx2.1-t2i-turbo' },
-          { id: 'wanx2.1-t2v-turbo' },
-          { id: 'whisper-v3' },
-          { id: 'flux-schnell' },
-          { id: 'bge-m3' },
-          { id: 'sensevoice-v1' },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toBeNull();
-  });
-
   it('keeps valid ids and skips ones with structural or control bytes', async () => {
     fetchWithPolicyMock.mockResolvedValue(
       response({
@@ -124,6 +104,43 @@ describe('discoverProviderModels', () => {
     );
 
     await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'good-model' },
+    ]);
+  });
+
+  it('skips ids with invisible or formatting characters', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        data: [
+          { id: 'qwen3.7-plus' },
+          { id: 'qwen3.7\u200b-plus' },
+          { id: '\u200bqwen-lookalike' },
+          { id: 'qwen\u202e3.7' },
+          { id: 'soft\u00adhyphen' },
+          { id: 'a\ufeffb' },
+          { id: 'qwen\u20663' },
+        ],
+      }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'qwen3.7-plus' },
+    ]);
+  });
+
+  it('skips ids longer than a plausible model name', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        data: [
+          { id: 'a'.repeat(257) },
+          { id: 'b'.repeat(256) },
+          { id: 'good-model' },
+        ],
+      }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'b'.repeat(256) },
       { id: 'good-model' },
     ]);
   });

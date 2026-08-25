@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
@@ -314,6 +314,13 @@ function ModelIdsStep({
       modelOptionSearchText(item).includes(normalizedQuery),
     );
   }, [modelOptions, modelSearchQuery]);
+  // Only the built-in specs are endorsed as recommendations; other served ids
+  // are listed under a separate heading below.
+  const firstOtherModelIndex = useMemo(
+    () =>
+      filteredModelOptions.findIndex((item) => !builtInModelIds.has(item.key)),
+    [filteredModelOptions, builtInModelIds],
+  );
   const recommendedScrollOffset =
     focusedModelIndex < 0
       ? 0
@@ -454,14 +461,16 @@ function ModelIdsStep({
             )}
           </Text>
         </Box>
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>
-            {t('Recommended models')}
-            {recommendationSource === 'provider' && t(' · from the provider')}
-            {recommendationSource === 'fallback' &&
-              t(' · provider list unavailable, showing built-ins')}
-          </Text>
-        </Box>
+        {firstOtherModelIndex !== 0 && (
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('Recommended models')}
+              {recommendationSource === 'provider' && t(' · from the provider')}
+              {recommendationSource === 'fallback' &&
+                t(' · provider list unavailable, showing built-ins')}
+            </Text>
+          </Box>
+        )}
         <Box marginTop={0} flexDirection="column">
           <Text color={theme.text.secondary}>{t('Search')}</Text>
           <TextInput
@@ -495,17 +504,30 @@ function ModelIdsStep({
                 : isSelected
                   ? theme.text.accent
                   : theme.text.primary;
+              const showOtherModelsHeading =
+                firstOtherModelIndex !== -1 &&
+                modelIndex >= firstOtherModelIndex &&
+                (visibleIndex === 0 || modelIndex === firstOtherModelIndex);
               return (
-                <Box key={item.key} alignItems="flex-start">
-                  <Box minWidth={4} flexShrink={0}>
-                    <Text color={textColor}>
-                      {isSelected ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY}
-                    </Text>
+                <Fragment key={item.key}>
+                  {showOtherModelsHeading && (
+                    <Box marginTop={1}>
+                      <Text color={theme.text.secondary}>
+                        {t('Other models from the provider')}
+                      </Text>
+                    </Box>
+                  )}
+                  <Box alignItems="flex-start">
+                    <Box minWidth={4} flexShrink={0}>
+                      <Text color={textColor}>
+                        {isSelected ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY}
+                      </Text>
+                    </Box>
+                    <Box flexGrow={1}>
+                      <Text color={textColor}>{item.label}</Text>
+                    </Box>
                   </Box>
-                  <Box flexGrow={1}>
-                    <Text color={textColor}>{item.label}</Text>
-                  </Box>
-                </Box>
+                </Fragment>
               );
             })
           ) : (

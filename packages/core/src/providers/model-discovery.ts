@@ -9,15 +9,13 @@ import type { ModelSpec } from './types.js';
 
 const DISCOVERY_TIMEOUT_MS = 5000;
 const DISCOVERY_MAX_BYTES = 1024 * 1024;
-const NON_CHAT_MODEL_PART =
-  /(^|[-_.])(asr|audio|embed|embedding|image|moderation|rerank|speech|t2i|t2v|tts|video)([-_.]|$)/i;
-const NON_CHAT_MODEL_FAMILY =
-  /(cosyvoice|sambert|paraformer|sensevoice|whisper|stable-diffusion|(^|[-_.])(bge|flux)([-_.]|$))/i;
-const MEDIA_MODEL_PREFIX = /^wan(?:\d|x[-_.\d]|[-_.])/i;
+const MAX_MODEL_ID_LENGTH = 256;
 // The wizard joins ids with commas and renders them raw, so a served id with
-// a comma or control bytes would split into bogus models or poison the TUI.
-// eslint-disable-next-line no-control-regex -- control bytes are exactly what this rejects
-const UNSAFE_MODEL_ID_CHARS = /[,\u0000-\u001f\u007f]/;
+// a comma, control byte, or invisible format character would split into bogus
+// models or poison the TUI.
+const UNSAFE_MODEL_ID_CHARS =
+  // eslint-disable-next-line no-control-regex -- control bytes are exactly what this rejects
+  /[,\u0000-\u001f\u007f\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/;
 
 interface DiscoverProviderModelsOptions {
   baseUrl: string;
@@ -48,10 +46,8 @@ function readModelIds(value: unknown): string[] | null {
     const trimmedId = id.trim();
     if (
       trimmedId &&
+      trimmedId.length <= MAX_MODEL_ID_LENGTH &&
       !UNSAFE_MODEL_ID_CHARS.test(trimmedId) &&
-      !NON_CHAT_MODEL_PART.test(trimmedId) &&
-      !NON_CHAT_MODEL_FAMILY.test(trimmedId) &&
-      !MEDIA_MODEL_PREFIX.test(trimmedId) &&
       !seen.has(trimmedId)
     ) {
       seen.add(trimmedId);
