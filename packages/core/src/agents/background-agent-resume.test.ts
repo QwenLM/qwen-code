@@ -3809,6 +3809,16 @@ describe('BackgroundAgentResumeService', () => {
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
     const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
 
+    const stats = {
+      totalTokens: 42,
+      outputTokens: 17,
+      toolUses: 3,
+      durationMs: 1200,
+    };
+    const recentActivities = [
+      { name: 'Read', description: 'read src/index.ts', at: 1 },
+      { name: 'Bash', description: 'npm test', at: 2 },
+    ];
     writeAgentMeta(metaPath, {
       agentId,
       agentType: 'researcher',
@@ -3819,6 +3829,9 @@ describe('BackgroundAgentResumeService', () => {
       status: 'completed',
       subagentName: 'researcher',
       resolvedApprovalMode: 'default',
+      sessionWorkflow: true,
+      stats,
+      recentActivities,
     });
     fs.writeFileSync(
       outputFile,
@@ -3843,8 +3856,10 @@ describe('BackgroundAgentResumeService', () => {
       abortController: new AbortController(),
       outputFile,
       metaPath,
+      stats,
+      recentActivities,
     });
-    registry.complete(agentId, 'All done');
+    registry.complete(agentId, 'All done', stats);
     const original = registry.get(agentId);
     expect(original?.notified).toBe(true);
 
@@ -3883,6 +3898,8 @@ describe('BackgroundAgentResumeService', () => {
     const restoredMeta = readAgentMeta(metaPath);
     expect(restoredMeta?.lastError).toBeUndefined();
     expect(restoredMeta?.status).toBe('completed');
+    expect(restoredMeta?.stats).toEqual(stats);
+    expect(restoredMeta?.recentActivities).toEqual(recentActivities);
   });
 
   it('emits one start event and one terminal notification when a completed agent is revived', async () => {

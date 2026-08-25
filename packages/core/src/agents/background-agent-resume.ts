@@ -1614,6 +1614,7 @@ export class BackgroundAgentResumeService {
       patchAgentMeta(entry.metaPath, {
         lastError: undefined,
         status: 'completed',
+        ...getAgentMetaTerminalSummary(entry.stats, entry.recentActivities),
       });
     }
     return restored;
