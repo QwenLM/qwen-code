@@ -3,8 +3,20 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { join } from 'node:path';
+import { safeTarget } from '../../utils/paths.js';
+import { REVIEW_TMP_DIR } from './lib/paths.js';
 
 const mocks = vi.hoisted(() => ({
+  // The default script naming is the basename transform the pre-existing
+  // assertions name; the dotfile cleanup test swaps in the REAL digest
+  // derivation — the one `emit-workflow` writes under. Kept as its own
+  // member so beforeEach can restore it after that swap.
+  basenameScriptPath: (planPath: string): string =>
+    `/repo/.qwen/workflows/${planPath
+      .split('/')
+      .at(-1)!
+      .replace(/\.json$/u, '.js')}`,
+  reviewWorkflowScriptPath: vi.fn(),
   execFileSync: vi.fn(),
   existsSync: vi.fn((_path: string): boolean => false),
   // The parameter is declared so the path-dependent implementations the
@@ -132,6 +144,7 @@ vi.mock('./lib/platform/aone-client.js', () => ({
 
 vi.mock('./lib/paths.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/paths.js')>();
+  const { safeTarget } = await import('../../utils/paths.js');
   return {
     ...actual,
     worktreePath: (prNumber: string) => `/repo/.qwen/tmp/review-pr-${prNumber}`,
@@ -141,16 +154,16 @@ vi.mock('./lib/paths.js', async (importOriginal) => {
     reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
     LEASE_PREFIX: 'qwen-review-lease-',
     REVIEW_TMP_DIR: '/repo/.qwen/tmp',
+    // Faithful to the real helpers, which flatten the target through
+    // `safeTarget`: the earlier verbatim interpolation let every test pass
+    // while the CLI disagreed with `emit-workflow` over the script name of
+    // any target `safeTarget` rewrites — a dotfile review (#8943).
     tmpFile: (target: string, suffix: string) =>
-      `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
-    tmpPrefix: (target: string) => `qwen-review-${target}-`,
+      `/repo/.qwen/tmp/qwen-review-${safeTarget(target)}-${suffix}`,
+    tmpPrefix: (target: string) => `qwen-review-${safeTarget(target)}-`,
     REVIEW_WORKFLOWS_DIR: '/repo/.qwen/workflows',
     findSymlinkedReviewWorkflowPath: mocks.findSymlinkedReviewWorkflowPath,
-    reviewWorkflowScriptPath: (planPath: string) =>
-      `/repo/.qwen/workflows/${planPath
-        .split('/')
-        .at(-1)!
-        .replace(/\.json$/u, '.js')}`,
+    reviewWorkflowScriptPath: mocks.reviewWorkflowScriptPath,
   };
 });
 
@@ -199,6 +212,10 @@ describe('runCleanup', () => {
     // path-dependent implementations, and a later test reading the declared
     // `[]` default would otherwise inherit them.
     mocks.readdirSync.mockImplementation((_path: string): string[] => []);
+    // Same leak class for the script naming: the dotfile test swaps in the
+    // real digest derivation, and a later test asserting the basename names
+    // must not inherit it.
+    mocks.reviewWorkflowScriptPath.mockImplementation(mocks.basenameScriptPath);
     mocks.refExists.mockReturnValue(true);
     mocks.releaseWorktree.mockReturnValue({
       existed: false,
@@ -274,6 +291,50 @@ describe('runCleanup', () => {
       '/repo/.qwen/workflows/qwen-review-checklist.js',
       expect.anything(),
     );
+  });
+
+  it('removes both plan-path spellings of a target safeTarget rewrites', async () => {
+    // The bundled skill spells the plan path with the target VERBATIM
+    // (`qwen-review-.gitignore-plan.json`), while `tmpFile` flattens it
+    // through `safeTarget` — and `emit-workflow` digests whichever path it
+    // was handed (#8943). Hold the sweep to the REAL script-name derivation
+    // (not the basename default) so the names asserted are the exact ones
+    // `emit-workflow` writes.
+    const actualPaths =
+      await vi.importActual<typeof import('./lib/paths.js')>('./lib/paths.js');
+    mocks.reviewWorkflowScriptPath.mockImplementation(
+      actualPaths.reviewWorkflowScriptPath,
+    );
+    mocks.execFileSync.mockReturnValue(Buffer.from(''));
+    const rawScript = actualPaths.reviewWorkflowScriptPath(
+      join(REVIEW_TMP_DIR, 'qwen-review-.gitignore-plan.json'),
+    );
+    const safeScript = actualPaths.reviewWorkflowScriptPath(
+      join(REVIEW_TMP_DIR, `qwen-review-${safeTarget('.gitignore')}-plan.json`),
+    );
+    // The shape this test exists to cover: two spellings, two digests.
+    expect(rawScript).not.toBe(safeScript);
+    mocks.existsSync.mockImplementation(
+      ((p: string) => p === '/repo/.qwen/workflows') as never,
+    );
+    mocks.lstatSync.mockImplementation(((path: string) => {
+      if (
+        path === '/repo/.qwen/workflows' ||
+        path === rawScript ||
+        path === safeScript
+      ) {
+        return {
+          isSymbolicLink: () => false,
+          isDirectory: () => path === '/repo/.qwen/workflows',
+        };
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    }) as never);
+
+    runCleanup('.gitignore');
+
+    expect(mocks.rmSync).toHaveBeenCalledWith(rawScript, { force: true });
+    expect(mocks.rmSync).toHaveBeenCalledWith(safeScript, { force: true });
   });
 
   it('does not remove a workflow through a symlinked root', () => {

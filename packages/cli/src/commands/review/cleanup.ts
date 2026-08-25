@@ -1014,11 +1014,22 @@ export function runCleanup(target: string): void {
   // --- Generated fan-out script (under .qwen/workflows/) ----------------
   // The plan path is deterministic for every cleanup target, so it identifies
   // the one generated script this run owns, including after a killed run.
+  // Derive it in BOTH spellings the plan file can carry: the bundled skill
+  // names that file with the target VERBATIM
+  // (`qwen-review-.gitignore-plan.json`), while `tmpFile` flattens it through
+  // `safeTarget` — and `emit-workflow` digests whichever path it was handed.
+  // A target `safeTarget` rewrites keeps its script (and any killed-run
+  // `.tmp` beside it) forever unless both spellings are swept (#8943).
   const workflowPaths = [
-    reviewWorkflowScriptPath(tmpFile(target, 'plan.json')),
-    ...(/^pr-\d+$/u.test(target)
-      ? [reviewWorkflowScriptPath(tmpFile(target, 'fetch.json'))]
-      : []),
+    ...new Set([
+      reviewWorkflowScriptPath(tmpFile(target, 'plan.json')),
+      reviewWorkflowScriptPath(
+        join(REVIEW_TMP_DIR, `qwen-review-${target}-plan.json`),
+      ),
+      ...(/^pr-\d+$/u.test(target)
+        ? [reviewWorkflowScriptPath(tmpFile(target, 'fetch.json'))]
+        : []),
+    ]),
   ];
   let workflowRootSafe = false;
   try {
