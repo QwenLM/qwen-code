@@ -27,7 +27,10 @@ import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
-import { readStopSidecarFields } from './lib/stop-sidecar.js';
+import {
+  readStopSidecarFields,
+  STOP_SIDECAR_NAME,
+} from './lib/stop-sidecar.js';
 import {
   coverageFromTranscripts,
   verificationGaps,
@@ -1470,10 +1473,10 @@ function stopSidecarFence(env: NodeJS.ProcessEnv | undefined): {
   }
   let sawFamily = false;
   for (const name of names) {
-    // `stopNameFor`'s shape: `qwen-review-<target-stem>-stop.json`. The
-    // target class is not knowable here, so match the family and let the
-    // stamp decide.
-    if (!/^qwen-review-.*-stop\.json$/.test(name)) continue;
+    // The shared sidecar family (`stopSidecarNameFor`'s shape). The target
+    // class is not knowable here, so match the family and let the stamp
+    // decide.
+    if (!STOP_SIDECAR_NAME.test(name)) continue;
     sawFamily = true;
     if (!hasRunId) return { granted: true, refusal: null };
     const stop = readStopSidecarFields(join(REVIEW_TMP_DIR, name));

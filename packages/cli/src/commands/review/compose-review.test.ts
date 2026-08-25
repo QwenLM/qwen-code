@@ -2480,6 +2480,70 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ).toBe(true);
   });
 
+  it('passes stopReRule through the handler spread — the exemption survives the CLI glue', async () => {
+    // Every other test in this suite drives composeReview() directly, but
+    // the production compose path is THIS handler, and the field rides its
+    // `{...parsed}` spread. A plausible maintenance change — adding
+    // `delete parsed.stopReRule` next to the sibling env/prBodyFetcher/
+    // draftedComments deletes, exactly the idiom `submit` uses for the same
+    // field — leaves the whole suite green while the exemption dies
+    // end-to-end: every decided-stop re-rule with an open Critical re-runs
+    // the transcript floors (no agents ran, none can pass), softens to
+    // COMMENT, and `review run` exits 0 — the hole issue #9908 names, back.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-handler-stop-'));
+    const savedCwd = process.cwd();
+    const savedRunId = process.env['QWEN_REVIEW_RUN_ID'];
+    delete process.env['QWEN_REVIEW_RUN_ID'];
+    process.chdir(dir);
+    try {
+      // The fence grants on sidecar presence when no run id is published
+      // (the interactive shape this handler runs under).
+      mkdirSync(join('.qwen', 'tmp'), { recursive: true });
+      writeFileSync(
+        join('.qwen', 'tmp', 'qwen-review-local-stop.json'),
+        JSON.stringify({ reason: 'clean-tree' }),
+      );
+      const planPath = join(dir, 'plan.json');
+      writeFileSync(
+        planPath,
+        JSON.stringify({
+          chunks: [],
+          nothingToReview: { reason: 'clean-tree' },
+        }),
+      );
+      const inputPath = join(dir, 'compose.json');
+      writeFileSync(
+        inputPath,
+        JSON.stringify({
+          modelId: MODEL,
+          planPath,
+          stopReRule: true,
+          bodyCriticals: [
+            'R1-1 hardcoded credentials (app.js:1) — still stands',
+          ],
+        }),
+      );
+      const commentsPath = join(dir, 'comments.json');
+      writeFileSync(commentsPath, '[]');
+      const outPath = join(dir, 'composed.json');
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      expect(written.event).toBe('REQUEST_CHANGES');
+      expect(written.cappedBy).toEqual([]);
+    } finally {
+      process.chdir(savedCwd);
+      if (savedRunId === undefined) delete process.env['QWEN_REVIEW_RUN_ID'];
+      else process.env['QWEN_REVIEW_RUN_ID'] = savedRunId;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   /**
    * Drive the handler with a state floor, a recorded floor, and a plan
    * naming PR 8255 (the recovery is PR-bound), then return the ARCHIVED
@@ -13523,6 +13587,46 @@ describe('composeReview — the decided-stop re-rule (stopReRule, #9908)', () =>
       modelId: MODEL,
     });
     expect(r.event).toBe('APPROVE');
+    expect(r.cappedBy).toEqual([]);
+  });
+
+  it('a granted exemption ignores a findingsPath still carrying unverified tags', () => {
+    // The SKILL's stop branches say to write the state "exactly as Step 7's
+    // compose state", which at high effort carries `findingsPath` — the
+    // PREVIOUS round's cumulative reverse-audit file, whose surviving
+    // `— [unverified]` tags persist by design. Dropping `!stopReRule &&`
+    // from the findingsPath block turns this red while the rest of the
+    // suite stays green: the exemption the PR adds must cover this floor
+    // too, or the re-ruled REQUEST_CHANGES softens to COMMENT and
+    // `review run --fail-on request-changes` exits 0 over a still-standing
+    // Critical.
+    writeSidecar();
+    const findingsPath = join(dir, 'prev-round-findings.md');
+    writeFileSync(findingsPath, '- **Severity:** Critical — [unverified]\n');
+    const r = composeReview({
+      planPath: stopPlan('clean-tree'),
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      findingsPath,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toEqual([]);
+  });
+
+  it('a granted exemption ignores a findingsPath that no longer reads', () => {
+    // The other arm of the same floor: the previous round's file may since
+    // have been cleaned up — the check fails CLOSED on a full round, and
+    // must not touch a stop round.
+    writeSidecar();
+    const r = composeReview({
+      planPath: stopPlan('clean-tree'),
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      findingsPath: join(dir, 'since-cleaned-up.md'),
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.cappedBy).toEqual([]);
   });
 

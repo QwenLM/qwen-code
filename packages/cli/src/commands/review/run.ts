@@ -39,7 +39,11 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, REVIEWS_DIR, repoRelativeOf } from './lib/paths.js';
-import { readStopSidecarFields } from './lib/stop-sidecar.js';
+import {
+  isValidStopReason,
+  readStopSidecarFields,
+  stopSidecarNameFor,
+} from './lib/stop-sidecar.js';
 import { safeTarget } from '../../utils/paths.js';
 import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
@@ -85,12 +89,18 @@ export interface RunReviewResult {
   /**
    * The decided-stop reason the capture stamped this run (`clean-tree`,
    * `unchanged-since-last-round`, `scope-emptied`), or null when the round
-   * was not a decided stop. Carried so a caller can tell a decided stop from
-   * a verdict round: `completed: true, event: null` is byte-identical for a
-   * legitimate clean stop and for a stop whose ledger held open findings but
-   * whose re-rule verdict never composed — this field is the signal that
-   * separates them, so a gate can alert on "stop present + no composed
-   * artifact" rather than reading both as a silent pass.
+   * was not a decided stop. Its one true contract: it separates a DECIDED
+   * STOP (non-null + reason) from a VERDICT ROUND (null). It does NOT
+   * separate a legitimate clean stop from a stop whose ledger held open
+   * findings but whose re-rule verdict never composed — both of those are
+   * `stopReason` non-null with `composedPath` null, byte-identical in this
+   * payload, because the sidecar is what makes either a stop and it carries
+   * no ledger knowledge. Detecting that lost-re-rule shape requires reading
+   * the cache ledger for open findings, which this result deliberately does
+   * not carry; a gate that needs it must read the ledger itself. The field
+   * exists so a caller can at least tell a stop from a verdict round and
+   * reason about exit 0 accordingly, instead of reading every
+   * `event: null` the same way.
    */
   stopReason: string | null;
   /**
@@ -220,8 +230,10 @@ const escapeRe = (s: string): string =>
 function stopNameFor(cls: RunTargetClass): string {
   // The capture's sidecar, not the plan: `--out` is the orchestrator's to
   // choose, so the plan has no name the parent can predict. This one is
-  // derived from the same target the parent derives.
-  return `qwen-review-${planStemFor(cls)}-stop.json`;
+  // derived from the same target the parent derives — and spelled through
+  // the shared sidecar module, so the writer and both readers agree on the
+  // name.
+  return stopSidecarNameFor(planStemFor(cls));
 }
 
 /** The stop sidecar's verdict-bearing shape. */
@@ -242,7 +254,7 @@ function readStopSidecar(path: string, runId: string): StopVerdict | null {
   const stop = readStopSidecarFields(path);
   if (stop === null) return null;
   if (stop.runId !== runId) return null;
-  if (typeof stop.reason !== 'string' || stop.reason === '') return null;
+  if (!isValidStopReason(stop.reason)) return null;
   return { reason: stop.reason };
 }
 
