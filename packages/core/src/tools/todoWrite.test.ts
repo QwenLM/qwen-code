@@ -581,6 +581,66 @@ describe('TodoWriteTool', () => {
       ]);
     });
 
+    it('reverses a dependency chain instead of failing on a preserved cycle edge', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          todos: [
+            { id: 'a', content: 'Task A', status: 'pending' },
+            {
+              id: 'b',
+              content: 'Task B',
+              status: 'pending',
+              blockedBy: ['a'],
+            },
+            {
+              id: 'c',
+              content: 'Task C',
+              status: 'pending',
+              blockedBy: ['b'],
+            },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      // Reversing the chain omits blockedBy on the new root 'c'. Preservation
+      // re-injects the stale c->b edge because 'b' survives, which closes a
+      // cycle with the incoming b->c edge. The call must fall back to the
+      // edges the caller actually sent instead of rejecting the entire update
+      // with 'must not contain a cycle' mid-execute.
+      const result = await tool
+        .build({
+          todos: [
+            {
+              id: 'a',
+              content: 'Task A',
+              status: 'pending',
+              blockedBy: ['b'],
+            },
+            {
+              id: 'b',
+              content: 'Task B',
+              status: 'pending',
+              blockedBy: ['c'],
+            },
+            { id: 'c', content: 'Task C', status: 'pending' },
+          ],
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
+      );
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toEqual([
+        { id: 'a', content: 'Task A', status: 'pending', blockedBy: ['b'] },
+        { id: 'b', content: 'Task B', status: 'pending', blockedBy: ['c'] },
+        { id: 'c', content: 'Task C', status: 'pending' },
+      ]);
+    });
+
     it('marks structured output in Session Workflow context', async () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',

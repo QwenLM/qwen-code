@@ -152,6 +152,9 @@ async function writeTodosToFile(
   });
 }
 
+const TODO_DEPENDENCY_CYCLE_ERROR =
+  'Todo dependencies must not contain a cycle.';
+
 function validateTodos(value: unknown): string | null {
   if (!Array.isArray(value)) {
     return 'Parameter "todos" must be an array.';
@@ -237,7 +240,7 @@ function validateTodos(value: unknown): string | null {
     }
   }
   if (queue.length !== todos.length) {
-    return 'Todo dependencies must not contain a cycle.';
+    return TODO_DEPENDENCY_CYCLE_ERROR;
   }
 
   return null;
@@ -295,6 +298,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         const data = JSON.parse(modified_content) as Record<string, unknown>;
         candidateTodos = data['todos'];
       } else {
+        let preservedAnyBlockedBy = false;
         candidateTodos = todos.map((todo) => {
           // Preserved edges may only reference ids that survive this update:
           // dropping a dependency target is a valid plan-shrinking edit, and
@@ -309,8 +313,23 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
                     todos.some((incoming) => incoming.id === dependency),
                   )
               : undefined);
-          return blockedBy === undefined ? todo : { ...todo, blockedBy };
+          if (blockedBy === undefined) return todo;
+          if (todo.blockedBy === undefined) preservedAnyBlockedBy = true;
+          return { ...todo, blockedBy };
         });
+        if (preservedAnyBlockedBy) {
+          const preservedValidationError = validateTodos(candidateTodos);
+          if (preservedValidationError === TODO_DEPENDENCY_CYCLE_ERROR) {
+            // A preserved edge that survives the update can close a cycle
+            // with incoming explicit edges when the model reorders or
+            // reverses a dependency chain (flipping chain a<-b<-c re-injects
+            // c.blockedBy=['b'], producing b<->c). The incoming list itself
+            // passed validateToolParams before execute, so fall back to the
+            // edges the caller actually sent instead of failing the entire
+            // call mid-execute on an edge it never sent.
+            candidateTodos = todos;
+          }
+        }
       }
 
       const validationError = validateTodos(candidateTodos);
