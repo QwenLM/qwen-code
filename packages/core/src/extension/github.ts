@@ -32,6 +32,7 @@ import {
   getAgentPluginSchemaStatus,
 } from './agent-plugins-v1/manifest.js';
 import {
+  MAX_ARCHIVE_EXPANDED_BYTES,
   assertDirectorySymlinksAreSafe,
   assertTarArchiveLinksAreSafe,
   type TarArchiveSafetyOptions,
@@ -1015,7 +1016,13 @@ export async function extractArchiveFile(
   await flattenSingleExtensionDirectory(destination, archivePath);
   signal?.throwIfAborted();
   if (options.allowContainedSymlinks === true) {
-    await assertDirectorySymlinksAreSafe(destination, signal);
+    await assertDirectorySymlinksAreSafe(
+      destination,
+      signal,
+      options.enforceResourceLimits === true
+        ? MAX_ARCHIVE_EXPANDED_BYTES
+        : undefined,
+    );
   }
   signal?.throwIfAborted();
   assertExtractedArchiveContainsExtensionSource(destination);

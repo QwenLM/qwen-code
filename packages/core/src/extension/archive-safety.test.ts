@@ -439,23 +439,30 @@ describe('assertTarArchiveLinksAreSafe', () => {
       ).rejects.toBe(reason);
     });
 
-    it('counts materialized symlink targets toward the expanded-size limit', async () => {
-      const archive = path.join(root, 'materialized-size.tar');
-      const targetSize = Math.floor(MAX_ARCHIVE_EXPANDED_BYTES / 2) + 1;
-      await writeCraftedTar(archive, [
-        symlinkHeader('copy', 'target'),
-        createTarFileHeader('target', targetSize),
-      ]);
+    it.runIf(process.platform !== 'win32')(
+      'counts the actual target of a backslash-named symlink',
+      async () => {
+        const source = path.join(root, 'backslash-source');
+        await fs.mkdir(path.join(source, 'dir'), { recursive: true });
+        await fs.writeFile(path.join(source, 'target'), 'large');
+        await fs.writeFile(path.join(source, 'dir', 'target'), '');
+        await fs.symlink('target', path.join(source, 'dir\\copy'));
+        const archive = path.join(root, 'backslash-entry-size.tar');
+        await tar.c({ cwd: source, file: archive }, [
+          'target',
+          'dir',
+          'dir\\copy',
+        ]);
 
-      await expect(
-        assertTarArchiveLinksAreSafe(archive, undefined, {
-          ...resourceLimits,
-          ...allowLinks,
-        }),
-      ).rejects.toThrow(
-        `Tar archive expands beyond ${MAX_ARCHIVE_EXPANDED_BYTES} bytes.`,
-      );
-    });
+        await expect(
+          assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+        ).resolves.toBeUndefined();
+
+        await expect(
+          assertDirectorySymlinksAreSafe(source, undefined, 9),
+        ).rejects.toThrow('Tar archive expands beyond 9 bytes.');
+      },
+    );
 
     it('counts accepted symlinks toward the link-entry limit', async () => {
       const archive = path.join(root, 'accepted-link-limit.tar');

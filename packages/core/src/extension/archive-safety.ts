@@ -48,8 +48,13 @@ interface AcceptedSymlink {
 }
 
 interface ArchiveEntry {
-  size: number;
   type: string;
+}
+
+function normalizeArchiveEntryPath(entryPath: string): string {
+  return path.posix.normalize(
+    process.platform === 'win32' ? entryPath.replaceAll('\\', '/') : entryPath,
+  );
 }
 
 /**
@@ -63,10 +68,10 @@ function resolveContainedSymlinkTarget(
   linkPath: string | undefined,
 ): string | undefined {
   if (!linkPath) return undefined;
-  const normalizedEntryPath = entryPath.replaceAll('\\', '/');
+  const normalizedEntry = normalizeArchiveEntryPath(entryPath);
   const normalizedLinkPath = linkPath.replaceAll('\\', '/');
   if (
-    path.posix.isAbsolute(normalizedEntryPath) ||
+    path.posix.isAbsolute(normalizedEntry) ||
     WINDOWS_ABSOLUTE_PATH.test(entryPath) ||
     path.posix.isAbsolute(normalizedLinkPath) ||
     WINDOWS_ABSOLUTE_PATH.test(linkPath)
@@ -76,7 +81,6 @@ function resolveContainedSymlinkTarget(
   // Resolve the target against the directory holding the link, so that
   // `docs/link.md -> ../real.md` stays inside while a root-level
   // `link.md -> ../real.md` does not.
-  const normalizedEntry = path.posix.normalize(normalizedEntryPath);
   const containingDirectory = path.posix.dirname(normalizedEntry);
   const resolved = path.posix.normalize(
     path.posix.join(containingDirectory, normalizedLinkPath),
@@ -119,6 +123,7 @@ export async function assertTarArchiveLinksAreSafe(
   const unsupportedLinkPaths: string[] = [];
   const acceptedSymlinks: AcceptedSymlink[] = [];
   const archiveEntries = new Map<string, ArchiveEntry>();
+  const archiveEntryParents = new Set<string>();
   let unsupportedLinkCount = 0;
   let linkCount = 0;
   let entryCount = 0;
@@ -141,7 +146,7 @@ export async function assertTarArchiveLinksAreSafe(
   };
   const onReadEntry = (entry: tar.ReadEntry) => {
     if (validationError) return;
-    const entryPath = path.posix.normalize(entry.path.replaceAll('\\', '/'));
+    const entryPath = normalizeArchiveEntryPath(entry.path);
     if (allowContainedSymlinks) {
       if (archiveEntries.has(entryPath)) {
         failValidation(
@@ -151,7 +156,14 @@ export async function assertTarArchiveLinksAreSafe(
         );
         return;
       }
-      archiveEntries.set(entryPath, { size: entry.size, type: entry.type });
+      archiveEntries.set(entryPath, { type: entry.type });
+      for (
+        let parent = path.posix.dirname(entryPath);
+        parent !== '.' && parent !== '/';
+        parent = path.posix.dirname(parent)
+      ) {
+        archiveEntryParents.add(parent);
+      }
     }
     if (enforceResourceLimits) {
       entryCount += 1;
@@ -216,31 +228,15 @@ export async function assertTarArchiveLinksAreSafe(
   }
   signal?.throwIfAborted();
   if (validationError) throw validationError;
-  const hasArchiveDescendant = (entryPath: string) => {
-    for (const candidatePath of archiveEntries.keys()) {
-      if (candidatePath.startsWith(`${entryPath}/`)) return true;
-    }
-    return false;
-  };
   for (const link of acceptedSymlinks) {
+    signal?.throwIfAborted();
     const target = archiveEntries.get(link.targetPath);
     if (
-      hasArchiveDescendant(link.entryPath) ||
+      archiveEntryParents.has(link.entryPath) ||
       !target ||
       !REGULAR_FILE_TYPES.has(target.type)
     ) {
       recordUnsupportedLink(link.entryPath);
-      continue;
-    }
-    if (enforceResourceLimits) {
-      // copyExtension dereferences links later, so each accepted link can
-      // materialize another full copy of its target.
-      expandedBytes += target.size;
-      if (expandedBytes > MAX_ARCHIVE_EXPANDED_BYTES) {
-        throw new Error(
-          `Tar archive expands beyond ${MAX_ARCHIVE_EXPANDED_BYTES} bytes.`,
-        );
-      }
     }
   }
   if (unsupportedLinkCount > 0) {
@@ -257,10 +253,19 @@ export async function assertTarArchiveLinksAreSafe(
 export async function assertDirectorySymlinksAreSafe(
   root: string,
   signal?: AbortSignal,
+  maxExpandedBytes?: number,
 ): Promise<void> {
   signal?.throwIfAborted();
   const resolvedRoot = path.resolve(root);
   const realRoot = await fs.promises.realpath(root);
+  let expandedBytes = 0;
+  const accountForMaterializedFile = (size: number) => {
+    if (maxExpandedBytes === undefined) return;
+    expandedBytes += size;
+    if (expandedBytes > maxExpandedBytes) {
+      throw new Error(`Tar archive expands beyond ${maxExpandedBytes} bytes.`);
+    }
+  };
   const visit = async (directory: string): Promise<void> => {
     for (const entry of await fs.promises.readdir(directory, {
       withFileTypes: true,
@@ -271,27 +276,33 @@ export async function assertDirectorySymlinksAreSafe(
         await visit(entryPath);
         continue;
       }
+      if (entry.isFile()) {
+        accountForMaterializedFile((await fs.promises.lstat(entryPath)).size);
+        continue;
+      }
       if (!entry.isSymbolicLink()) continue;
       const targetPath = path.resolve(
         path.dirname(entryPath),
         await fs.promises.readlink(entryPath),
       );
-      let targetIsSafe = false;
+      let targetSize: number | undefined;
       try {
         if (isContainedPath(resolvedRoot, targetPath)) {
           const targetStat = await fs.promises.lstat(targetPath);
           const realTarget = await fs.promises.realpath(targetPath);
-          targetIsSafe =
-            targetStat.isFile() && isContainedPath(realRoot, realTarget);
+          if (targetStat.isFile() && isContainedPath(realRoot, realTarget)) {
+            targetSize = targetStat.size;
+          }
         }
       } catch {
-        targetIsSafe = false;
+        targetSize = undefined;
       }
-      if (!targetIsSafe) {
+      if (targetSize === undefined) {
         throw new Error(
           `Tar archive contains unsupported link entry: ${formatEntryPath(path.relative(resolvedRoot, entryPath))}`,
         );
       }
+      accountForMaterializedFile(targetSize);
     }
   };
   await visit(resolvedRoot);
