@@ -15,14 +15,6 @@ export default defineConfig({
     outputFile: {
       junit: '../junit.xml',
     },
-    // The worker->main `onTaskUpdate` RPC runs on a 60s budget; under the
-    // resource pressure of the Windows/macOS runners a stall longer than that
-    // surfaces as an unhandled error and exits an all-green run red (the same
-    // failure mode the cli/core/scripts suites already guard against). Test
-    // failures still fail the run; only unhandled errors stop being fatal,
-    // and only off Linux — the ubuntu lane and Linux local runs keep the
-    // unhandled-error signal.
-    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
     coverage: {
       provider: 'v8',
       reportsDirectory: '../coverage',
