@@ -252,6 +252,8 @@ const UNRECOGNIZED_PROGRAM_DENIAL =
   'Daemon shell guard denied a shell command that may run a relocated Git command through an unrecognized program.';
 const SHADOW_REMOVAL_DENIAL =
   'Daemon shell guard denied a shell command that removes a tracked shell definition in a way it cannot model.';
+const UNMODELABLE_ESCAPE_DENIAL =
+  'Daemon shell guard denied a shell command containing a shell escape (a backslash before a quote or a cmd.exe caret) that it could not model safely before execution.';
 const PROMPTLESS_PROVIDER_DENIAL =
   'Managed external tool guard cannot consult an external provider without an active prompt binding.';
 
@@ -404,6 +406,15 @@ interface TokenizedSegment {
   readonly endDepth: number;
 }
 
+// The tokenizer distinguishes a genuinely unparseable segment from one the
+// guard refuses because a shell escape (a backslash before a quote, a cmd.exe
+// caret) would make the parse diverge from what the executing shell sees.
+// The two carry different denial reasons so a caller can tell them apart.
+type TokenizeOutcome =
+  | { kind: 'ok'; segment: TokenizedSegment }
+  | { kind: 'unmaskable' }
+  | null;
+
 // On Windows the daemon normally runs shell commands through cmd.exe or
 // PowerShell, where a backslash is a literal path separator rather than a
 // POSIX escape. shell-quote models POSIX sh, so an unquoted `C:\Users\repo`
@@ -422,9 +433,63 @@ interface TokenizedSegment {
 // reading.
 const WIN32_BACKSLASH_PLACEHOLDER = '\u0001';
 
-function shouldMaskWindowsBackslashes(): boolean {
-  if (process.platform !== 'win32') return false;
-  return getShellConfiguration().shell !== 'bash';
+// How the command text is parsed at this nesting level. Backslash masking and
+// cmd.exe caret removal only apply on the native Windows parse lanes; a
+// payload that runs under a POSIX interpreter (`sh -c`, `bash -c`, `env -S`,
+// …) must NOT be masked, because there a backslash is an escape rather than a
+// path separator — masking it would make the guard re-read the payload with
+// the outer lane's rules and misjudge a `./\.\./\.\.` traversal that the raw
+// POSIX parse already resolves correctly.
+type ShellSemantics = 'posix' | 'cmd' | 'powershell';
+
+// The daemon's own shell lane, computed once at the top of an evaluation and
+// carried into nested payloads (not re-derived from the daemon shell on every
+// recursion, so a POSIX payload the daemon happened to reach through a
+// cmd.exe lane keeps its POSIX reading): a backslash is a POSIX escape on
+// Unix shells and Git Bash, a literal path separator on cmd.exe and
+// PowerShell.
+function detectShellSemantics(): ShellSemantics {
+  const config = getShellConfiguration();
+  if (config.shell === 'bash') return 'posix';
+  return config.shell === 'cmd' ? 'cmd' : 'powershell';
+}
+
+// On the cmd.exe lane `^` is the escape character: outside double quotes it
+// strips itself and leaves the next character literal; inside quotes it is an
+// ordinary character. A path such as `..^\..^\outside\repo` therefore reaches
+// git (and the daemon's containment check) as `..\..\...` once cmd.exe eats the
+// unquoted carets, but the POSIX model shell-quote applies treats the caret as
+// an ordinary character — the guard would validate a literal `..^` directory
+// that never exists and let a `..\..\` traversal be judged in-boundary.
+// Collapse the carets the way cmd.exe would, before the parse, so the guard
+// reads the path git will actually receive. A caret with no character after it
+// is a cmd.exe line continuation, and an unmatched quote is a form whose caret
+// handling the guard cannot model, so both fail closed rather than guess.
+function normalizeWin32CaretEscapes(segment: string): string | null {
+  let normalized = '';
+  let inQuotes = false;
+  let index = 0;
+  while (index < segment.length) {
+    const char = segment[index]!;
+    if (char === '"') {
+      inQuotes = !inQuotes;
+      normalized += char;
+      index++;
+      continue;
+    }
+    if (char === '^' && !inQuotes) {
+      if (index + 1 >= segment.length) return null;
+      // `^X` outside quotes collapses to a literal `X`; a `^` before another
+      // `^` (an escaped caret) is a literal `^`, which consuming the next
+      // caret as the escaped character reproduces.
+      normalized += segment[index + 1]!;
+      index += 2;
+      continue;
+    }
+    normalized += char;
+    index++;
+  }
+  return inQuotes ? null : normalized;
 }
 
 function restoreWindowsBackslashes(
@@ -452,7 +517,15 @@ function restoreWindowsBackslashes(
 // relocation after it. Either way the guard and the executing shell read the
 // command differently and a containment decision is unknowable — fail closed.
 function hasUnmaskableBackslash(segment: string): boolean {
-  return /\\"/.test(segment);
+  // Only a `\"` (backslash before a quote) makes masking change the parse,
+  // and only when the segment also carries a path separator elsewhere.
+  // A segment whose every backslash sits immediately before a quote (a
+  // `git commit -m "say \"hi\""` message) hides no relocation behind the
+  // mask — the raw POSIX parse already yields the executing shell's argv, so
+  // it may safely proceed unmasked. A backslash before any other character is
+  // a cmd.exe path separator, and masking one is precisely the divergence the
+  // guard cannot decide and must fail closed on.
+  return /\\"/.test(segment) && /\\[^"]/.test(segment);
 }
 
 // Masking is also unsafe when the masked parse changes the token structure
@@ -487,30 +560,37 @@ function structureDiffers(
 function tokenizeSegment(
   segment: string,
   startDepth: number,
-): TokenizedSegment | null {
-  const masking = shouldMaskWindowsBackslashes();
-  if (masking && segment.includes(WIN32_BACKSLASH_PLACEHOLDER)) {
+  shellSemantics: ShellSemantics,
+): TokenizeOutcome {
+  const masking = shellSemantics !== 'posix';
+  let workSegment = segment;
+  if (shellSemantics === 'cmd') {
+    const normalized = normalizeWin32CaretEscapes(segment);
+    if (normalized === null) return { kind: 'unmaskable' };
+    workSegment = normalized;
+  }
+  if (masking && workSegment.includes(WIN32_BACKSLASH_PLACEHOLDER)) {
     // A literal placeholder in the input cannot be masked without corrupting
     // the restore step, and parsing it raw reintroduces the escape-eating bug
     // in a form that can flip an outside relocation into an in-boundary one.
-    return null;
+    return { kind: 'unmaskable' };
   }
-  if (masking && hasUnmaskableBackslash(segment)) {
-    return null;
+  if (masking && hasUnmaskableBackslash(workSegment)) {
+    return { kind: 'unmaskable' };
   }
   const masked = masking
-    ? segment.replaceAll('\\', WIN32_BACKSLASH_PLACEHOLDER)
+    ? workSegment.replaceAll('\\', WIN32_BACKSLASH_PLACEHOLDER)
     : null;
   let parsed: ReturnType<typeof parse>;
   let raw: ReturnType<typeof parse> | null = null;
   try {
-    parsed = parse(masked ?? segment, (key) => `$${key}`);
+    parsed = parse(masked ?? workSegment, (key) => `$${key}`);
   } catch {
     return null;
   }
   if (masked !== null) {
     try {
-      raw = parse(segment, (key) => `$${key}`);
+      raw = parse(workSegment, (key) => `$${key}`);
     } catch {
       raw = null;
     }
@@ -608,7 +688,13 @@ function tokenizeSegment(
     }
     runs.push({ tokens: [], depth });
   }
-  return { runs: runs.filter((run) => run.tokens.length > 0), endDepth: depth };
+  return {
+    kind: 'ok',
+    segment: {
+      runs: runs.filter((run) => run.tokens.length > 0),
+      endDepth: depth,
+    },
+  };
 }
 
 /**
@@ -1030,6 +1116,10 @@ type RunAnalysis =
       payload: string;
       state: PrefixState;
       propagatesCwd: boolean;
+      // True when the payload is interpreted by a POSIX shell (`sh -c`,
+      // `bash -c`, `env -S`), so its text must not be Windows-backslash
+      // masked; `eval` runs in this shell and leaves it false.
+      posixPayload: boolean;
       // Only bash imports functions marked with `export -f`; dash/sh/zsh/ksh
       // resolve the external program instead.
       importsExportedFunctions?: boolean;
@@ -1277,6 +1367,9 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
           payload: scan.payload,
           state,
           propagatesCwd: false,
+          // `env -S` splits its string and execs it under POSIX quoting, so
+          // its text is read with POSIX escapes, not Windows masking.
+          posixPayload: true,
         };
       }
       index = scan.next;
@@ -1306,6 +1399,9 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         // `eval` runs in the current shell, so a `cd` inside the payload
         // relocates subsequent commands in this run's scope.
         propagatesCwd: true,
+        // `eval` re-parses in this very shell, so it keeps this level's
+        // semantics rather than forcing a POSIX reading.
+        posixPayload: false,
       };
     }
     if (SHELL_WRAPPER_PROGRAMS.has(program)) {
@@ -1319,6 +1415,9 @@ function analyzeRun(run: GuardToken[]): RunAnalysis {
         payload: scan.payload,
         state,
         propagatesCwd: false,
+        // The `-c` payload is interpreted by the POSIX shell named above, so
+        // it must not be read with the daemon's Windows masking.
+        posixPayload: true,
         // Only bash imports `export -f` functions, and only when it inherits
         // the environment carrying them — `env -i bash -c` wipes them first.
         importsExportedFunctions:
@@ -1954,6 +2053,11 @@ interface RelinkState {
 
 interface EvaluationScope {
   readonly relink: RelinkState;
+  // The parse semantics this level is read under: 'posix' for a payload that
+  // runs under a POSIX interpreter, otherwise the daemon's own lane. Carried
+  // so a nested payload does not recompute it from the daemon shell and
+  // wrongly re-apply Windows backslash masking.
+  readonly shellSemantics?: ShellSemantics;
   // Shell variables the nested command can see: `eval` and subshells inherit
   // them, a `sh -c` subprocess does not.
   readonly locals?: Map<string, GuardToken>;
@@ -2102,6 +2206,9 @@ async function evaluateCommandWithCwd(
   scope: EvaluationScope = { relink: { targets: [], gitDir: false } },
 ): Promise<CommandEvaluation> {
   let trackedCwd = startCwd;
+  // Computed once at this level and carried into nested payloads so a POSIX
+  // interpreter (sh/bash/env -S) does not re-derive the daemon's own lane.
+  const shellSemantics = scope.shellSemantics ?? detectShellSemantics();
   // Assignments this command exported into the environment of everything that
   // runs after them, and whether `set -a` made plain assignments exported.
   const exported: PrefixState = { relocations: [], unresolved: false };
@@ -2217,6 +2324,7 @@ async function evaluateCommandWithCwd(
       depth + 1,
       {
         relink: scope.relink,
+        shellSemantics,
         locals: shellLocals,
         exportedNames,
         allExport,
@@ -2279,14 +2387,22 @@ async function evaluateCommandWithCwd(
     const allExportBefore = allExport;
     const substitutions = extractCommandSubstitutions(segment);
     const tokenized =
-      substitutions === null ? null : tokenizeSegment(segment, subshellDepth);
-    const runs = tokenized?.runs ?? null;
-    if (runs === null) {
+      substitutions === null
+        ? null
+        : tokenizeSegment(segment, subshellDepth, shellSemantics);
+    if (tokenized === null) {
       return {
         denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
         cwdAfter: trackedCwd,
       };
     }
+    if (tokenized.kind === 'unmaskable') {
+      return {
+        denial: { allowed: false, reason: UNMODELABLE_ESCAPE_DENIAL },
+        cwdAfter: trackedCwd,
+      };
+    }
+    const runs = tokenized.segment.runs;
     // `name() { … }` — shell-quote reports the parentheses as operators, so
     // the header is recognised on the raw segment. The body runs wherever the
     // name is later used, which is what the recorded shape stands in for.
@@ -2335,6 +2451,7 @@ async function evaluateCommandWithCwd(
         // so it gets copies and nothing is merged back.
         {
           relink: scope.relink,
+          shellSemantics,
           locals: new Map(shellLocals),
           exportedNames: new Set(exportedNames),
           allExport,
@@ -2537,6 +2654,11 @@ async function evaluateCommandWithCwd(
             depth + 1,
             {
               relink: scope.relink,
+              // A `sh -c`/`env -S` payload runs under a POSIX interpreter, so
+              // its text must not be read with the daemon's Windows masking;
+              // `eval` inherits this shell's semantics. Carried, not
+              // re-derived, so the lane survives the recursion.
+              shellSemantics: analysis.posixPayload ? 'posix' : shellSemantics,
               // `eval` runs in this very shell, so it sees these variables
               // and the export attributes; a `sh -c` subprocess inherits only
               // exported ones.
@@ -2877,11 +2999,11 @@ async function evaluateCommandWithCwd(
     // The tokenizer's closing depth is authoritative for what this segment
     // did with parentheses: `(cd <outside>)` opens and closes within it, so
     // the subshell's cwd must not survive into the next segment.
-    while (tokenized!.endDepth < subshellDepth) {
+    while (tokenized.segment.endDepth < subshellDepth) {
       restoreShellState(subshellCwds.pop());
       subshellDepth--;
     }
-    while (tokenized!.endDepth > subshellDepth) {
+    while (tokenized.segment.endDepth > subshellDepth) {
       subshellCwds.push(snapshotShellState());
       subshellDepth++;
     }
