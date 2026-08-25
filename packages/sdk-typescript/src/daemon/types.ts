@@ -13,6 +13,11 @@
  * signals breaking wire changes (per the design doc).
  */
 
+import {
+  PERMISSION_MODES,
+  type PermissionMode,
+} from '../types/permission-mode.js';
+
 export type DaemonMode = 'http-bridge' | 'native';
 
 /** Goal v2 wire types, duplicated here to keep the SDK independent of Core. */
@@ -1450,6 +1455,7 @@ export interface DaemonWorkspaceSessionInfo {
 export interface DaemonArchiveSessionsResult {
   archived: string[];
   alreadyArchived: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }
@@ -1457,6 +1463,7 @@ export interface DaemonArchiveSessionsResult {
 export interface DaemonUnarchiveSessionsResult {
   unarchived: string[];
   alreadyActive: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }
@@ -1914,6 +1921,7 @@ export interface DaemonWorkspaceProviderModel {
   envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
+  configOptions?: unknown[];
 }
 
 export interface DaemonWorkspaceProviderStatus extends DaemonStatusCell {
@@ -2781,14 +2789,8 @@ export interface SetSessionLanguageResult {
  * Order matters for diagnostic UIs that render the modes in the
  * advertised sequence.
  */
-export const DAEMON_APPROVAL_MODES = [
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-] as const;
-export type DaemonApprovalMode = (typeof DAEMON_APPROVAL_MODES)[number];
+export const DAEMON_APPROVAL_MODES = PERMISSION_MODES;
+export type DaemonApprovalMode = PermissionMode;
 
 /**
  * Result body of `POST /session/:id/approval-mode`. `previous` and
@@ -3753,6 +3755,7 @@ export interface MCPServerConfigShape {
   readonly tcp?: string;
   readonly timeout?: number;
   readonly discoveryTimeoutMs?: number;
+  readonly versionNegotiation?: 'auto' | 'legacy';
   readonly trust?: boolean;
   readonly description?: string;
   readonly oauth?: Record<string, unknown>;

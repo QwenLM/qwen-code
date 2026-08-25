@@ -1699,6 +1699,7 @@ mod tests {
             help: None,
             actions: actions.iter().map(|value| (*value).to_owned()).collect(),
             element_ptr: 7,
+            identity: None,
             depth: 0,
             parent_element_index: None,
             frame: None,
@@ -1721,8 +1722,10 @@ mod tests {
 
     fn tree(nodes: Vec<AXNode>) -> TreeWalkResult {
         TreeWalkResult {
+            incomplete_notes: Vec::new(),
             tree_markdown: String::new(),
             nodes,
+            complete: true,
             truncated: false,
             window_scope: Some(crate::ax::WindowScope::Matched),
         }
@@ -1849,8 +1852,10 @@ mod tests {
     #[test]
     fn pixel_fallback_requires_committed_navigation_and_complete_ax_proof() {
         let truncated = TreeWalkResult {
+            incomplete_notes: Vec::new(),
             tree_markdown: String::new(),
             nodes: Vec::new(),
+            complete: false,
             truncated: true,
             window_scope: Some(crate::ax::WindowScope::Matched),
         };

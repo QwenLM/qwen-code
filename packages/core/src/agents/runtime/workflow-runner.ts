@@ -31,6 +31,10 @@ import { WorkflowBudgetImpl } from './workflow-budget.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import { WorkflowJournal, type JournalReplay } from './workflow-journal.js';
 import { resolveSavedWorkflowScript } from './workflow-saved.js';
+import {
+  compileWorkflowScript,
+  describeWorkflowCompileError,
+} from './workflow-sandbox.js';
 
 export interface WorkflowRunnerOptions {
   config: Config;
@@ -76,6 +80,27 @@ export class WorkflowRunHandle {
   }
 }
 
+/**
+ * The script never compiled, so no run was created.
+ *
+ * Distinct from `WorkflowExecutionError` on purpose: that one describes a run
+ * that existed and failed, and callers report it as such. This one means there
+ * is nothing to report on — no runId, no journal, no registry entry, no
+ * snapshot — and the caller should say the workflow was not launched rather
+ * than that it failed.
+ */
+export class WorkflowScriptNotLaunchedError extends Error {
+  constructor(readonly detail: string) {
+    super(
+      `Workflow script is invalid and was not launched:\n${detail}\n\n` +
+        `Workflow scripts must be plain JavaScript — the usual causes are ` +
+        `TypeScript syntax (type annotations, interfaces, generics) and ` +
+        `broken string quoting or escaping. Metadata must use literal values.`,
+    );
+    this.name = 'WorkflowScriptNotLaunchedError';
+  }
+}
+
 export class WorkflowRunner {
   static async start(
     options: WorkflowRunnerOptions,
@@ -92,6 +117,25 @@ export class WorkflowRunner {
         : undefined;
     const script = loaded?.script ?? options.script ?? '';
     const scriptPath = loaded?.scriptPath ?? options.scriptPath;
+
+    // Refuse a script that cannot compile before anything exists to clean up.
+    // Everything below this line has a cost that outlives a failure: a runId is
+    // minted, a journal file is opened, the run is registered and shows up in
+    // `/workflows`, and the failure path writes a snapshot and a log entry. A
+    // single TypeScript annotation used to produce all of that — a phantom
+    // failed run for a workflow that never started. Compiling first turns it
+    // into a plain refusal with nothing to explain afterwards.
+    try {
+      compileWorkflowScript(script);
+    } catch (error) {
+      throw new WorkflowScriptNotLaunchedError(
+        describeWorkflowCompileError(
+          error,
+          script.split(/\r\n|[\n\r\u2028\u2029]/).length,
+        ),
+      );
+    }
+
     const runId =
       options.resumeFromRunId ?? `wf_${randomBytes(8).toString('hex')}`;
     const storage = config.storage;

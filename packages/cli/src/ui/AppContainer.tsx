@@ -78,6 +78,7 @@ import {
   buildResumedHistoryItems,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
+import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
@@ -119,6 +120,7 @@ const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
 import { useWakeRepaint } from './hooks/use-wake-repaint.js';
+import type { MicrophonePermission } from './hooks/use-voice-input.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -179,7 +181,7 @@ import {
   detectWorkflowKeyword,
   buildWorkflowSteeringNotice,
 } from './utils/workflow-keyword.js';
-import { parseSlashCommand } from '../utils/commands.js';
+import { parseSlashCommand } from './commands/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { ExtensionRefreshState } from '../config/extension-refresh-state.js';
@@ -199,7 +201,7 @@ import { useCommandMigration } from './hooks/useCommandMigration.js';
 import { migrateTomlCommands } from '../services/command-migration-tool.js';
 import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
-import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
+import { setUpdateHandler } from './handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import {
   useMessageQueue,
@@ -231,8 +233,8 @@ import {
 } from './contexts/BackgroundTaskViewContext.js';
 import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
-import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../utils/chat-recording-failure.js';
-import { buildPermissionSuggestions } from '../utils/permission-suggestions.js';
+import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../nonInteractive/chat-recording-failure.js';
+import { buildPermissionSuggestions } from '../nonInteractive/permission-suggestions.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
@@ -900,6 +902,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
+  // Dedup for the voice mic-permission notice. Held here rather than in
+  // Composer because dialogs (tool approvals, auth, settings) swap Composer
+  // out of the layout; a ref held there would reset on each swap and the
+  // notice would repeat on the next recording.
+  const voiceMicWarnedStatusRef = useRef<MicrophonePermission | null>(null);
   const lastTitleRef = useRef<string | null>(null);
   const [startupWarnings, setStartupWarnings] = useState(
     () => props.startupWarnings || [],
@@ -3760,8 +3767,10 @@ export const AppContainer = (props: AppContainerProps) => {
 
           // Strip suppressOnRestore flags and filter out collapse-summary items
           // so rewound items remain visible without stale summary text
-          const truncatedUi = expandCollapsedHistory(
-            originalHistory.filter((h) => h.id < userItem.id),
+          const truncatedUi = recoalesceFindingsHistoryItems(
+            expandCollapsedHistory(
+              originalHistory.filter((h) => h.id < userItem.id),
+            ),
           );
           clearPendingStateRef.current();
           loadHistoryWithLatchReconciliation(truncatedUi);
@@ -4559,6 +4568,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalWidth,
       terminalHeight,
       mainControlsRef,
+      voiceMicWarnedStatusRef,
       currentIDE,
       startupIdeConnectionStatus,
       updateInfo,
@@ -4703,6 +4713,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalWidth,
       terminalHeight,
       mainControlsRef,
+      voiceMicWarnedStatusRef,
       currentIDE,
       startupIdeConnectionStatus,
       updateInfo,
