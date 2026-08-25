@@ -54,11 +54,15 @@
   text-transform: uppercase;
 }
 
+/* preflight.css resets headings to `font: inherit`, so size and weight both
+   have to be restated or the session title renders at body text. The row's
+   `min-width: 0` already caps the width; a fixed max-width only stranded space
+   on wide viewports. */
 .identity h1 {
-  max-width: 680px;
   margin: 4px 0 3px;
   overflow: hidden;
   font-size: clamp(20px, 2.2vw, 28px);
+  font-weight: 600;
   letter-spacing: -0.03em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -66,8 +70,8 @@
 
 .identity small {
   color: var(--muted-foreground);
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
 }
 
 .backButton {
@@ -114,28 +118,29 @@
 }
 
 .headerStatus > span[data-status='running'] {
-  color: var(--agent-blue-500);
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
 }
 
 .headerStatus > span[data-status='attention'] {
-  color: var(--warning-color);
-  background: var(--warning-bg);
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
 }
 
 .headerStatus > span[data-status='completed'] {
-  color: var(--success-color);
-  background: var(--success-bg);
+  color: var(--status-done-fg);
+  background: var(--status-done-bg);
 }
 
-.headerStatus i {
+.connectionDot {
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--warning-color);
+  background: var(--status-attention-fg);
 }
 
-.headerStatus span[data-connected='true'] i {
-  background: var(--success-color);
+[data-connected='true'] > .connectionDot {
+  background: var(--status-done-fg);
 }
 
 .canvas {
@@ -165,6 +170,13 @@
   margin: 0;
 }
 
+/* Without an explicit size and weight the reset leaves this at body text, so
+   the empty state opens with no title. */
+.emptyCockpit h1 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
 .emptyCockpit p {
   max-width: 520px;
   color: var(--muted-foreground);
@@ -183,7 +195,11 @@
   font-weight: 700;
 }
 
-@media (max-width: 760px) {
+.emptyCockpit button:hover {
+  background: color-mix(in srgb, var(--primary) 88%, var(--background));
+}
+
+@media (max-width: 900px) {
   .header {
     align-items: stretch;
     flex-direction: column;

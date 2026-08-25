@@ -104,7 +104,7 @@ export function SessionWorkflowCockpit({
             {t(projection.taskStatusI18nKey)}
           </span>
           <span data-connected={connected || undefined}>
-            <i />
+            <span className={styles.connectionDot} />
             {t(
               connected
                 ? 'workflow.connection.connected'

@@ -32,7 +32,7 @@
   top: 0;
   z-index: 2;
   padding: 15px;
-  box-shadow: 0 6px 20px color-mix(in srgb, var(--background) 86%, transparent);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
 }
 
 .summaryHeading,
@@ -62,37 +62,43 @@
   font-size: 16px;
 }
 
-.summaryHeading b {
+.summaryCount {
   padding: 5px 8px;
   border-radius: 999px;
-  color: var(--agent-blue-500);
-  background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
   font-size: 12px;
 }
 
-.summaryHeading b[data-status='attention'] {
-  color: var(--warning-color);
-  background: var(--warning-bg);
+.summaryCount[data-status='attention'] {
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
 }
 
-.summaryHeading b[data-status='completed'] {
-  color: var(--success-color);
-  background: var(--success-bg);
+.summaryCount[data-status='completed'] {
+  color: var(--status-done-fg);
+  background: var(--status-done-bg);
 }
 
 .progress {
-  height: 6px;
+  height: 5px;
   margin-top: 12px;
   overflow: hidden;
   border-radius: 999px;
-  background: var(--muted);
+  background: var(--secondary);
 }
 
 .progress span {
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--agent-blue-500);
+  background: var(--status-done-fg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .progress span {
+    transition: width 160ms ease;
+  }
 }
 
 .summaryMeta {
@@ -143,10 +149,13 @@
   margin-bottom: 9px;
 }
 
+/* preflight.css resets headings to `font: inherit`, so weight has to be
+   restated or every section title renders at body weight. */
 .compactHeading h2,
 .sectionHeading h2 {
   margin: 0;
   font-size: 13px;
+  font-weight: 600;
 }
 
 .compactHeading span {
@@ -155,8 +164,8 @@
   height: 20px;
   place-items: center;
   border-radius: 999px;
-  color: var(--muted-foreground);
-  background: var(--muted);
+  color: var(--status-idle-fg);
+  background: var(--status-idle-bg);
   font-size: 11px;
 }
 
@@ -182,25 +191,32 @@
   cursor: pointer;
 }
 
-.attention > button:hover,
-.attention > button[aria-pressed='true'] {
-  background: var(--warning-bg);
+.attention > button:hover {
+  background: var(--status-attention-bg);
 }
 
-.attention i {
+/* Hover and selection used to paint the same background, so moving the mouse
+   across the list erased any sign of which row was actually selected. The rail
+   is what marks selection; the tint is only feedback. */
+.attention > button[aria-pressed='true'] {
+  background: var(--status-attention-bg);
+  box-shadow: inset 2px 0 0 var(--status-attention-fg);
+}
+
+.attentionGlyph {
   display: grid;
   width: 20px;
   height: 20px;
   place-items: center;
   border-radius: 999px;
-  color: var(--warning-color);
-  background: var(--warning-bg);
-  font-style: normal;
-  font-weight: 800;
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+  font-weight: 700;
 }
 
 .attention svg {
   width: 14px;
+  height: 14px;
 }
 
 .sectionHeading h2 {
@@ -212,28 +228,34 @@
   flex: none;
   padding: 4px 7px;
   border-radius: 999px;
-  color: var(--muted-foreground);
-  background: var(--muted);
-  font-size: 10px;
+  color: var(--status-idle-fg);
+  background: var(--status-idle-bg);
+  font-size: 11px;
   font-weight: 700;
 }
 
 .status[data-status='running'],
 .status[data-status='in_progress'] {
-  color: var(--agent-blue-500);
-  background: color-mix(in srgb, var(--agent-blue-500) 9%, transparent);
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
 }
 
 .status[data-status='completed'] {
-  color: var(--success-color);
-  background: var(--success-bg);
+  color: var(--status-done-fg);
+  background: var(--status-done-bg);
+}
+
+.status[data-status='paused'] {
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
 }
 
 .stepId {
   display: inline-block;
   margin-top: 8px;
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
 }
 
 .dependencies {
@@ -244,7 +266,7 @@
 
 .dependencies div {
   display: grid;
-  grid-template-columns: 78px minmax(0, 1fr);
+  grid-template-columns: minmax(78px, auto) minmax(0, 1fr);
   gap: 8px;
 }
 
@@ -270,7 +292,8 @@
 
 .linkedAgents h3 {
   margin: 0 0 7px;
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .linkedAgents button,
@@ -285,11 +308,14 @@
   cursor: pointer;
 }
 
-.linkedAgents button > span {
+.itemText {
   display: grid;
   min-width: 0;
-  flex: 1;
   gap: 2px;
+}
+
+.linkedAgents .itemText {
+  flex: 1;
 }
 
 .linkedAgents button strong,
@@ -300,19 +326,22 @@
 }
 
 .linkedAgents button strong {
+  font-size: 12px;
+}
+
+.linkedAgents button small {
+  color: var(--muted-foreground);
   font-size: 11px;
 }
 
-.linkedAgents button small,
-.linkedAgents button em {
-  color: var(--muted-foreground);
-  font-size: 9px;
-  font-style: normal;
+.linkedAgents button:hover,
+.deliverables button:not(:disabled):hover {
+  background: var(--accent);
 }
 
-.linkedAgents button:hover,
-.deliverables button:hover {
-  background: var(--accent);
+.deliverables button:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .linkedAgents svg,
@@ -346,12 +375,16 @@
   cursor: pointer;
 }
 
-.stepList > button:hover,
-.stepList > button[aria-pressed='true'] {
+.stepList > button:hover {
   background: var(--accent);
 }
 
-.stepList i {
+.stepList > button[aria-pressed='true'] {
+  background: var(--accent);
+  box-shadow: inset 2px 0 0 var(--agent-blue-500);
+}
+
+.stepIndex {
   display: grid;
   width: 24px;
   height: 24px;
@@ -359,22 +392,27 @@
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--muted-foreground);
-  font-size: 10px;
-  font-style: normal;
+  font-size: 11px;
 }
 
-.stepList i[data-status='completed'] {
-  color: var(--success-color);
-  border-color: color-mix(in srgb, var(--success-color) 45%, var(--border));
+.stepIndex[data-status='completed'] {
+  color: var(--status-done-fg);
+  border-color: color-mix(in srgb, var(--status-done-fg) 45%, var(--border));
 }
 
-.stepList > button > span,
-.deliverables button > span,
-.activityList > button > span,
-.activityList > div > span {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
+.stepIndex[data-status='running'],
+.stepIndex[data-status='in_progress'] {
+  color: var(--status-running-fg);
+  border-color: color-mix(in srgb, var(--status-running-fg) 45%, var(--border));
+}
+
+.stepIndex[data-status='paused'] {
+  color: var(--status-attention-fg);
+  border-color: color-mix(
+    in srgb,
+    var(--status-attention-fg) 45%,
+    var(--border)
+  );
 }
 
 .stepList strong,
@@ -391,21 +429,19 @@
 .stepList strong,
 .deliverables strong,
 .activityList strong {
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .stepList small,
 .deliverables small,
 .activityList small {
   color: var(--muted-foreground);
-  font-size: 10px;
+  font-size: 11px;
 }
 
-.stepList em,
-.activityList em {
+.stateLabel {
   color: var(--muted-foreground);
-  font-size: 9px;
-  font-style: normal;
+  font-size: 11px;
 }
 
 .collapsible {
@@ -441,7 +477,7 @@
 .activityList > button,
 .activityList > div {
   display: grid;
-  grid-template-columns: 38px 26px minmax(0, 1fr) auto;
+  grid-template-columns: 52px 26px minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
   padding: 7px 4px;
@@ -459,21 +495,20 @@
 
 .activityList time {
   color: var(--muted-foreground);
-  font-size: 9px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 
-.activityList > button > i,
-.activityList > div > i {
+.activityAvatar {
   display: grid;
   width: 24px;
   height: 24px;
   place-items: center;
-  border-radius: 7px;
-  color: var(--agent-blue-500);
-  background: color-mix(in srgb, var(--agent-blue-500) 9%, transparent);
-  font-size: 8px;
-  font-style: normal;
-  font-weight: 800;
+  border-radius: var(--radius-md);
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .canvasHint {
@@ -489,6 +524,7 @@
 
 .canvasHint svg {
   width: 14px;
+  height: 14px;
 }
 
 .empty {

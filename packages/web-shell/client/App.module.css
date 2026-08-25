@@ -15,6 +15,25 @@
   --accent-orange: #ff8a2a;
   --accent-yellow: #f6c431;
   --accent-green: #69c987;
+  /* Execution-status palette — one mapping shared by the plan graph, the
+     workflow inspector, and the cockpit header so a status reads the same
+     colour wherever it appears. Derived from the per-theme tokens above, so a
+     single declaration here covers both themes. Green means "done" and never
+     "in flight"; idle deliberately sits on --secondary rather than --muted,
+     which is the same value as --card in the dark theme and so disappears on
+     a card. */
+  --status-running-fg: var(--agent-blue-500);
+  --status-running-bg: color-mix(
+    in srgb,
+    var(--agent-blue-500) 12%,
+    transparent
+  );
+  --status-done-fg: var(--success-color);
+  --status-done-bg: var(--success-bg);
+  --status-attention-fg: var(--warning-color);
+  --status-attention-bg: var(--warning-bg);
+  --status-idle-fg: var(--secondary-foreground);
+  --status-idle-bg: var(--secondary);
   position: relative;
   display: flex;
   flex-direction: column;

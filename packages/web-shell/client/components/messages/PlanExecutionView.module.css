@@ -43,7 +43,7 @@
   display: grid;
   grid-template-columns: minmax(220px, 2fr) repeat(3, minmax(110px, 1fr));
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--background);
 }
 
@@ -85,7 +85,7 @@
   display: block;
   height: 100%;
   border-radius: inherit;
-  background: var(--success-color);
+  background: var(--status-done-fg);
 }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -107,7 +107,7 @@
 }
 
 .overviewStat[data-attention='true'] strong {
-  color: var(--warning-color);
+  color: var(--status-attention-fg);
 }
 
 .count,
@@ -194,12 +194,6 @@
   margin-bottom: -4px;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .dagEdge {
-    transition: none;
-  }
-}
-
 .flatList,
 .flatCanvas,
 .layer {
@@ -250,12 +244,6 @@
     box-shadow 160ms ease;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .node {
-    transition: none;
-  }
-}
-
 .dagCanvas .node::before,
 .dagCanvas .node::after {
   display: none;
@@ -286,19 +274,27 @@
    real plan, so it stays neutral; painting it amber made a perfectly healthy
    graph read as a wall of warnings. */
 .node[data-status='completed'] {
-  --node-accent: color-mix(in srgb, var(--success-color) 55%, var(--border));
-  --node-ring: var(--success-color);
+  --node-accent: color-mix(in srgb, var(--status-done-fg) 55%, var(--border));
+  --node-ring: var(--status-done-fg);
 }
 
 .node[data-status='running'],
 .node[data-status='in_progress'] {
-  --node-accent: color-mix(in srgb, var(--agent-blue-500) 55%, var(--border));
-  --node-ring: var(--agent-blue-500);
+  --node-accent: color-mix(
+    in srgb,
+    var(--status-running-fg) 55%,
+    var(--border)
+  );
+  --node-ring: var(--status-running-fg);
 }
 
 .node[data-status='paused'] {
-  --node-accent: color-mix(in srgb, var(--warning-color) 55%, var(--border));
-  --node-ring: var(--warning-color);
+  --node-accent: color-mix(
+    in srgb,
+    var(--status-attention-fg) 55%,
+    var(--border)
+  );
+  --node-ring: var(--status-attention-fg);
 }
 
 .node[data-status='blocked'],
@@ -358,18 +354,18 @@
 }
 
 .completed {
-  color: var(--success-color);
+  color: var(--status-done-fg);
 }
 
 .running,
 .in_progress {
-  color: var(--agent-blue-500);
+  color: var(--status-running-fg);
 }
 
 .paused,
 .blocked,
 .attention {
-  color: var(--warning-color);
+  color: var(--status-attention-fg);
 }
 
 .ready {
@@ -605,12 +601,6 @@ button.nestedExecution:not(:disabled):focus-visible {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .node[data-status='running'] .nodeGlyph {
-    animation: none;
-  }
-}
-
 .edgeNotice {
   margin: 0;
   padding: 6px 10px;
@@ -619,4 +609,17 @@ button.nestedExecution:not(:disabled):focus-visible {
   color: var(--muted-foreground);
   background: var(--muted);
   font-size: 11px;
+}
+
+/* Every motion opt-out in this view, kept in one place so a new animation has
+   an obvious home. */
+@media (prefers-reduced-motion: reduce) {
+  .dagEdge,
+  .node {
+    transition: none;
+  }
+
+  .node[data-status='running'] .nodeGlyph {
+    animation: none;
+  }
 }

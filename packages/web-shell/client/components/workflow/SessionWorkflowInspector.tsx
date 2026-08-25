@@ -141,7 +141,7 @@ export function SessionWorkflowInspector({
                 onClick={() => onOpenSubagent(tool)}
                 type="button"
               >
-                <span>
+                <span className={styles.itemText}>
                   <strong>
                     {tool.title || String(tool.args?.description ?? 'Agent')}
                   </strong>
@@ -154,9 +154,9 @@ export function SessionWorkflowInspector({
                   {metrics.length > 0 && <small>{metrics.join(' · ')}</small>}
                 </span>
                 {task && (
-                  <em data-status={task.status}>
+                  <span className={styles.stateLabel} data-status={task.status}>
                     {t(workflowTaskStatusKey(task.status))}
-                  </em>
+                  </span>
                 )}
                 <ArrowUpRightIcon aria-hidden="true" />
               </button>
@@ -189,9 +189,12 @@ export function SessionWorkflowInspector({
             <span>{t('workflow.inspector.summary')}</span>
             <strong>{t(projection.taskStatusI18nKey)}</strong>
           </div>
-          <b data-status={projection.taskStatusTone}>
+          <span
+            className={styles.summaryCount}
+            data-status={projection.taskStatusTone}
+          >
             {projection.completedCount}/{todos.length}
-          </b>
+          </span>
         </div>
         <div
           className={styles.progress}
@@ -239,7 +242,9 @@ export function SessionWorkflowInspector({
               onClick={() => onSelectedTodoIdChange(todo.id)}
               type="button"
             >
-              <i aria-hidden="true">!</i>
+              <span aria-hidden="true" className={styles.attentionGlyph}>
+                !
+              </span>
               <span>{todo.content}</span>
               <ChevronRightIcon aria-hidden="true" />
             </button>
@@ -262,15 +267,20 @@ export function SessionWorkflowInspector({
                 onClick={() => onSelectedTodoIdChange(todo.id)}
                 type="button"
               >
-                <i data-status={state?.status}>{index + 1}</i>
-                <span>
+                <span className={styles.stepIndex} data-status={state?.status}>
+                  {index + 1}
+                </span>
+                <span className={styles.itemText}>
                   <strong>{todo.content}</strong>
                   <small>{todo.id}</small>
                 </span>
                 {state && (
-                  <em data-status={state.status}>
+                  <span
+                    className={styles.stateLabel}
+                    data-status={state.status}
+                  >
                     {t(`planExecution.status.${state.status}`)}
-                  </em>
+                  </span>
                 )}
               </button>
             );
@@ -293,17 +303,19 @@ export function SessionWorkflowInspector({
             const content = (
               <>
                 <time>{workflowClock(task.endTime ?? task.startTime)}</time>
-                <i>{workflowInitials(task.subagentType || task.label)}</i>
-                <span>
+                <span className={styles.activityAvatar}>
+                  {workflowInitials(task.subagentType || task.label)}
+                </span>
+                <span className={styles.itemText}>
                   <strong>{task.label}</strong>
                   <small>
                     {task.recentActivities?.at(-1)?.description ||
                       task.description}
                   </small>
                 </span>
-                <em data-status={task.status}>
+                <span className={styles.stateLabel} data-status={task.status}>
                   {t(workflowTaskStatusKey(task.status))}
-                </em>
+                </span>
               </>
             );
             return tool ? (
@@ -337,7 +349,7 @@ export function SessionWorkflowInspector({
               onClick={() => onOpenArtifact?.(artifact.id)}
               type="button"
             >
-              <span>
+              <span className={styles.itemText}>
                 <strong>{artifact.title}</strong>
                 <small>
                   {artifact.kind} · {artifact.status}
