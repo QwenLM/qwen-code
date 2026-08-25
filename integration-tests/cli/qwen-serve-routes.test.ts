@@ -414,6 +414,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_live_state',
       'workspace_session_metadata',
       'voice_transcribe',
+      'web_terminal',
     ]);
   });
 });
