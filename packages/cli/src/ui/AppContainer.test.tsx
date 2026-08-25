@@ -461,6 +461,7 @@ describe('AppContainer State Management', () => {
     const mockSubagentManager: Partial<SubagentManager> = {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
+      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
       loadSubagent: vi.fn(),
       createSubagent: vi.fn(),
     };
@@ -6249,6 +6250,11 @@ describe('AppContainer State Management', () => {
     });
 
     it('surfaces unexpected outer errors through history', async () => {
+      // Scoped stub: the throwing getGeminiClient spy below would otherwise
+      // also be hit by the mount init effect's un-awaited initialize() IIFE
+      // (AgentTool.refreshSubagents calls getGeminiClient in its finally),
+      // surfacing as an unhandled rejection.
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       const harness = renderRewindHarness();
       vi.spyOn(mockConfig, 'getGeminiClient').mockImplementation(() => {
         throw new Error('client exploded');
