@@ -3763,22 +3763,29 @@ describe('qwen-triage verify hardening round 2', () => {
       spawnSync('bash', ['-c', cmd], { encoding: 'utf8', ...opts });
     try {
       // The uploader stub preserves the object layout while avoiding network
-      // access. The gh stub captures the rendered report body.
+      // access, and enforces the real uploader's flag contract: the workflow
+      // must pass --bucket, --config and --prefix with values, or the
+      // harness fails exactly where production would silently degrade every
+      // report to text-only. The gh stub captures the rendered report body.
       writeFileSync(
         join(dir, 'upload-assets'),
         [
           '#!/usr/bin/env bash',
           'set -euo pipefail',
           'if [ "${OSS_STUB_FAIL:-}" = 1 ]; then exit 1; fi',
-          'bucket=""; prefix=""',
+          'bucket=""; config=""; prefix=""',
           'while [ "$#" -gt 0 ]; do',
           '  case "$1" in',
           '    --bucket) bucket="$2"; shift 2 ;;',
-          '    --config) shift 2 ;;',
+          '    --config) config="$2"; shift 2 ;;',
           '    --prefix) prefix="$2"; shift 2 ;;',
           '    *) break ;;',
           '  esac',
           'done',
+          'if [ -z "$bucket" ] || [ -z "$config" ] || [ -z "$prefix" ]; then',
+          '  echo "upload-assets stub: --bucket, --config and --prefix are all required" >&2',
+          '  exit 1',
+          'fi',
           'target="$OSS_STUB_ROOT/$bucket/$prefix"',
           'mkdir -p "$target"',
           'for file in "$@"; do cp "$file" "$target/$(basename "$file")"; done',
@@ -3940,6 +3947,24 @@ describe('qwen-triage verify hardening round 2', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // The behavioural runs above set VERIFY_ASSETS_UPLOADER, so the
+  // production `node "$uploader"` arm never executes there. Pin its full
+  // invocation shape instead: node must resolve under the inherited PATH
+  // (never $RUNNER_TEMP — PATH hijack) and all three ossutil flags must be
+  // present — the real uploader exits 1 on a valueless --config, which in
+  // production silently degrades every /verify report to text-only.
+  it('pins the production uploader invocation and its ossutil flags', () => {
+    const script =
+      stepIn('publish-verify', 'Post verification report comment').match(
+        /run: \|-\n([\s\S]*)$/,
+      )?.[1] ?? '';
+    expect(script).toContain('node_bin="$(command -v node || true)"');
+    expect(script).toContain('upload_cmd=("$node_bin" "$uploader")');
+    expect(script).toContain('--bucket "$ALIYUN_OSS_BUCKET"');
+    expect(script).toContain('--config "${RUNNER_TEMP:-/tmp}/.ossutilconfig"');
+    expect(script).toContain('--prefix "$prefix"');
   });
 
   // Every publish fixture returned [] for the comments listing, so the
