@@ -2460,7 +2460,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         args: undefined,
       });
       // 50 thunks >> window, so the window fully fills: peak === cap.
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
   });
@@ -2533,7 +2533,7 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
         );`,
         args: undefined,
       });
-      const cap = Math.max(1, Math.min(16, os.cpus().length - 2));
+      const cap = Math.max(2, Math.min(16, os.availableParallelism() - 2));
       expect(peak).toBe(cap);
     });
 
@@ -2828,16 +2828,31 @@ describe('WorkflowOrchestrator P2 — parallel() / pipeline() / caps', () => {
       }
     });
 
-    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [1,16]', () => {
+    it('resolveConcurrencyLimit honors a valid override and clamps the cpu default to [2,16]', () => {
       expect(
         resolveConcurrencyLimit({ QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '4' }),
       ).toBe(4);
-      // invalid → cpu-derived default, always within [1, 16]
+      // invalid → cpu-derived default, always within [2, 16]
       const fallback = resolveConcurrencyLimit({
         QWEN_CODE_MAX_WORKFLOW_CONCURRENCY: '-1',
       });
-      expect(fallback).toBeGreaterThanOrEqual(1);
+      expect(fallback).toBeGreaterThanOrEqual(2);
       expect(fallback).toBeLessThanOrEqual(16);
+    });
+
+    // The default reads `availableParallelism()`, which honours the CPU
+    // affinity mask and container limits, where `os.cpus()` reports the
+    // host and can return an empty array. The floor is 2, not 1: a window
+    // of 1 turns every `parallel()` into a sequence on a small machine.
+    it('resolveConcurrencyLimit derives the default from availableParallelism, floored at 2', () => {
+      const at = (parallelism: number) =>
+        resolveConcurrencyLimit({}, () => parallelism);
+      expect(at(0)).toBe(2);
+      expect(at(1)).toBe(2);
+      expect(at(3)).toBe(2);
+      expect(at(6)).toBe(4);
+      expect(at(18)).toBe(16);
+      expect(at(64)).toBe(16);
     });
 
     // PR #4947 R1 T4 (wenshao): an env override above the hard ceiling must
@@ -4258,6 +4273,48 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
       /git binary missing/,
     );
+  });
+
+  // A fan-out of N isolated agents used to issue N concurrent `git worktree
+  // add` calls, which contend on `.git/worktrees` and the index lock; the
+  // losers fail and surface as `null` slots indistinguishable from an agent
+  // that returned nothing. Provisioning is serialised behind one mutex.
+  it("isolation:'worktree' provisions one worktree at a time across a fan-out", async () => {
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    let inFlight = 0;
+    let peak = 0;
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          createUserWorktree: vi.fn(async (slug: string) => {
+            inFlight += 1;
+            peak = Math.max(peak, inFlight);
+            await new Promise((resolve) => setTimeout(resolve, 15));
+            inFlight -= 1;
+            return {
+              success: true,
+              worktree: {
+                path: `/fake/repo/.qwen/worktrees/${slug}`,
+                branch: `worktree-${slug}`,
+              },
+            };
+          }),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    const dispatch = createProductionDispatch(config);
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () =>
+        dispatch('hi', { isolation: 'worktree' }),
+      ),
+    );
+    expect(results).toHaveLength(6);
+    expect(peak).toBe(1);
   });
 
   it("isolation:'worktree' refuses when cwd is not a git repository", async () => {

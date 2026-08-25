@@ -7,6 +7,7 @@
 import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
+import { Mutex } from 'async-mutex';
 import type { Config } from '../../config/config.js';
 import {
   createWorkflowSandbox,
@@ -130,6 +131,7 @@ export const HARD_MAX_CONCURRENCY_CEILING = 64;
  */
 export function resolveConcurrencyLimit(
   env: Record<string, string | undefined> = process.env,
+  availableParallelism: () => number = os.availableParallelism,
 ): number {
   const raw = env[MAX_WORKFLOW_CONCURRENCY_ENV];
   if (raw !== undefined && raw.trim() !== '') {
@@ -151,7 +153,12 @@ export function resolveConcurrencyLimit(
         `using cpu-derived default`,
     );
   }
-  return Math.max(1, Math.min(16, os.cpus().length - 2));
+  // `availableParallelism()` honours the process's CPU affinity mask and
+  // container CPU limits; `os.cpus()` reports the host and can return an
+  // empty array in some sandboxes, which used to make every run serial.
+  // Floor of 2: a window of 1 turns `parallel()` into a sequence and
+  // silently defeats the point of a fan-out on a small machine.
+  return Math.max(2, Math.min(16, availableParallelism() - 2));
 }
 
 /**
@@ -1264,7 +1271,26 @@ interface WorkflowWorktreeIsolation {
  * UX so model authors can rely on consistent behavior across both call
  * sites.
  */
-async function provisionWorkflowWorktree(
+/**
+ * Serialises worktree provisioning across a run's dispatch window. Sixteen
+ * concurrent `git worktree add` calls contend on `.git/worktrees` and the
+ * index lock; the losers fail and become `null` slots in the fan-out, which
+ * reads as "agent returned nothing" rather than "git lost a race". Creating
+ * a worktree takes well under a second, so queueing them costs far less than
+ * the retries it prevents. Module-level on purpose: the contention is on the
+ * repository, not on any one run.
+ */
+const worktreeProvisionLock = new Mutex();
+
+function provisionWorkflowWorktree(
+  config: Config,
+): Promise<WorkflowWorktreeIsolation> {
+  return worktreeProvisionLock.runExclusive(() =>
+    provisionWorkflowWorktreeExclusively(config),
+  );
+}
+
+async function provisionWorkflowWorktreeExclusively(
   config: Config,
 ): Promise<WorkflowWorktreeIsolation> {
   const cwd = config.getTargetDir();
