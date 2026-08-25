@@ -3586,6 +3586,127 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('lets a matching deny rule win over the allowlist-miss attribution (#9827)', async () => {
+    // The deny-rule arm comes FIRST in the message branch, and it must:
+    // a tool rejected by a deny rule is by definition not covered by any
+    // allow/ask rule, so under an active allowlist BOTH the deny arm and
+    // the allowlist-miss arm could fire. The denial is real here —
+    // something was declined — so the message must cite the matching deny
+    // rule, not the "not covered by permissions.allow" attribution (whose
+    // remediation would be wrong: an allow rule cannot override a deny
+    // rule, the only fix is removing the deny rule itself).
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(ToolNames.SEND_MESSAGE),
+      // Arm the allowlist-miss branch too so this test pins the
+      // if/else-if ORDERING, not just the deny arm in isolation.
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'deny-rule-beats-allowlist',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-deny-rule-beats-allowlist',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toBe(
+        `Qwen Code requires permission to use "${ToolNames.SEND_MESSAGE}", but that permission was declined. Matching deny rule: "${ToolNames.SEND_MESSAGE}".`,
+      );
+      expect(message).not.toContain('permissions.allow');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('lets a matching deny rule win over the generic declined fallback without an active allowlist (#9827)', async () => {
+    // Without an active allowlist only the deny arm and the generic
+    // fallback arm can fire; the matching rule must still surface so the
+    // user sees WHICH configured rule declined the call instead of the
+    // bare "permission was declined" message.
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.SEND_MESSAGE,
+        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
+      ],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(ToolNames.SEND_MESSAGE),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(false),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'deny-rule-beats-fallback',
+          name: ToolNames.SEND_MESSAGE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-deny-rule-beats-fallback',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toBe(
+        `Qwen Code requires permission to use "${ToolNames.SEND_MESSAGE}", but that permission was declined. Matching deny rule: "${ToolNames.SEND_MESSAGE}".`,
+      );
+      expect(message).toContain('Matching deny rule');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('keeps the legacy declined message when a covered tool is rejected by another gate under an active allowlist (#9827)', async () => {
     // While the allowlist is active, a COVERED tool can still fail
     // isToolEnabled through a different gate — the witness is the legacy
