@@ -3,7 +3,7 @@
 ## Problem
 
 The `/review` cross-round ledger tracks finding ids, carries, and
-supersession, but nothing reads the *lineage*: when the fix for round N's
+supersession, but nothing reads the _lineage_: when the fix for round N's
 Critical produces round N+1's Critical on the same subsystem, every round
 looks locally normal while the subsystem is diverging. On #9659 the
 stop-round blocker-dating chain produced three generations of successor
@@ -14,7 +14,7 @@ count collapsed.
 
 The convergence module's recurrence cluster already says "the file sees
 findings again" — it cannot say "the fix closed one and the mechanism grew
-another", because no round records the *closures*.
+another", because no round records the _closures_.
 
 ## Design
 
@@ -44,9 +44,16 @@ marker's "footnote, never a payload" contract:
   advisory data never costs a re-review or a ruling. Shedding them never
   sets `dropped`: closures certify no range.
 
-Minting is suppressed when the recovered work list is incomplete
-(`dropped`/rejected entries): a missing id may be truncation, not a
-ruling. Thin history stays silent rather than guesses.
+Minting is suppressed wherever absence from the posting set does not
+mean "ruled fixed" — the same honesty legs the `openCriticals` gate
+applies to the identical inference: an incomplete recovered work list
+(`dropped`/rejected entries — a missing id may be truncation, not a
+ruling), a diff-only round that could not rule, a round that publicly
+answered "cannot tell" on a Critical, and a pure-foreign previous list
+whose entries are a stranger's. Minting also closes on CLAIM identity,
+not id identity: a claim the round re-posts under a re-minted id (a
+regenerated gate Critical, a relocated entry) still stands. Thin
+history stays silent rather than guesses.
 
 `parseLedger` validates closures through `isLedgerClosure` (caps and the
 round bound, mirrored from the serializer); `prevLedgerFacts` carries them

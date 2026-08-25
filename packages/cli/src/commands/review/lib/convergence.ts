@@ -280,9 +280,10 @@ export type CriticalFloorKind =
  *   spend the code set's only real property — that a code means a fact was
  *   observed — on a constant.
  *
- * That is the whole menu: eleven codes in the design, five emitted here
- * (`successor-chain` joined the four below with #9905 — its measurement is
- * the closure lineage the marker now records), seven named above.
+ * That is the whole menu: twelve codes in the design, five emitted here
+ * (`successor-chain` joined the four existing codes with #9905 — its
+ * measurement is the closure lineage the marker now records), seven named
+ * above.
  */
 export const RECOMMENDATION_CODES = [
   'root-cause-triage',
@@ -727,16 +728,6 @@ export function diagnoseConvergence(input: {
 }
 
 /**
- * The handling recommendations this diagnosis matches — measurement to
- * advice, with zero constants and zero decisions.
- *
- * DERIVED from the diagnosis rather than stored on it. Carried as a field,
- * the same round would have two representations of one thing, and a caller
- * (or a test) could hold a diagnosis whose codes and whose facts describe
- * different rounds. Derived, the paragraph a human reads and the codes a
- * caller wires cannot disagree, because there is only one of them.
- */
-/**
  * The per-generation id bound for a rendered chain, so a round that closed
  * a whole family on the file cannot grow the paragraph unboundedly.
  */
@@ -758,6 +749,16 @@ export function renderSuccessorChain(c: SuccessorChain): string {
   return [...c.generations, c.newIds].map(renderGeneration).join(' → ');
 }
 
+/**
+ * The handling recommendations this diagnosis matches — measurement to
+ * advice, with zero constants and zero decisions.
+ *
+ * DERIVED from the diagnosis rather than stored on it. Carried as a field,
+ * the same round would have two representations of one thing, and a caller
+ * (or a test) could hold a diagnosis whose codes and whose facts describe
+ * different rounds. Derived, the paragraph a human reads and the codes a
+ * caller wires cannot disagree, because there is only one of them.
+ */
 export function recommendationsFor(d: ConvergenceDiagnosis): Recommendation[] {
   const out: Recommendation[] = [];
   if (d.clusters.length > 0) {

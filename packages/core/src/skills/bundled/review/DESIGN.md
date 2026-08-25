@@ -546,7 +546,7 @@ So the marker now carries one bounded `closed` list: composing round N diffs the
 
 - **One generation, no carry-forward.** The check reads closures at N (minted while composing) and N-1 (read back off the previous marker), so the marker carries only its own round's mint — older entries are dead bytes.
 - **Advisory, never a cap, never the anchor.** A divergence is a property of the code under review, not of what this round read. It sheds ABOVE the anchor pair in the byte-budget cascade — a full-diff re-review costs more than a lost lineage hint — and shedding it never sets `dropped`, because closures certify no range.
-- **Thin history stays silent.** A previous list with `dropped` set mints nothing that round (a missing id may be the budget, not a ruling), and every marker written before the field existed simply has none.
+- **Thin history stays silent.** Minting closes on claim identity, not id identity (a claim re-posted under a re-minted id still stands), and stays silent wherever absence from the posting set is not a ruling: a previous list with `dropped` set (a missing id may be the budget, not a ruling), a diff-only round, a round that answered "cannot tell" on a Critical, and a pure-foreign previous list. Every marker written before the field existed simply has none.
 - **Only Criticals, only real files.** Suggestion churn is not the patch-and-regress signal, and the `(body)`/`(unknown)` stand-ins name no subsystem — the check applies the cluster join's own `k`-flag rule, so a real file spelled like a stand-in still clusters.
 
 ## Why `--resume` continues a run from the harness's records, not a checkpoint file

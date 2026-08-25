@@ -996,7 +996,11 @@ export function recoverLedger(
   if (!best) return { recovered: null, sawOwnReview };
   // The anchor never crosses accounts. Dropped here, at the recovery seam, so
   // no consumer downstream has to remember the rule. The churn state is the
-  // same class of claim and crosses with it — see `stripChurnState`.
+  // same class of claim and crosses with it — see `stripChurnState` — and so
+  // are the closures: a closure records what LEFT a work list the account
+  // that minted it certified, so a stranger's `closed` is their ruling-shaped
+  // history, not this loop's — adopted, it feeds the divergence sentinel a
+  // lineage this loop never produced. See `withoutClosures`.
   // The anchor is stripped whenever the winner is foreign, INCLUDING the
   // anonymous case: without a `me` every marker walks as foreign, and a
   // drive-by anchor must not decide which lines this pipeline stops looking
@@ -1006,7 +1010,12 @@ export function recoverLedger(
   // `gh api user` break this account's own trend chain for two rounds — and
   // record its own marker as a stranger's.
   let ledger = best.foreign
-    ? stripChurnState(stripAnchor(best.ledger))
+    ? (withoutClosures(
+        stripChurnState(stripAnchor(best.ledger)) as unknown as Record<
+          string,
+          unknown
+        >,
+      ) as unknown as Ledger)
     : best.ledger;
   if (me && best.foreign) ledger = stripForeignVolume(ledger);
   // A FOREIGN winner never DISPLACES this account's own findings — it is
@@ -1061,7 +1070,20 @@ export function recoverLedger(
       ...ledger,
       ...pickChurnState(bestOwn.ledger),
       ...(bestOwn.ledger.round === ledger.round
-        ? pickVolume(bestOwn.ledger as unknown as Record<string, unknown>)
+        ? {
+            ...pickVolume(bestOwn.ledger as unknown as Record<string, unknown>),
+            // The closures come back under the SAME gate as the volume, for
+            // the same reason: each entry is stamped `r` = the round that
+            // minted it, and the compose this recovery feeds reads exactly
+            // `r === winner's round` off it — own closures from the winner's
+            // own round are the generation the sentinel needs, own closures
+            // from any OTHER round are dead bytes, and the foreign winner's
+            // were stripped above, so nothing foreign enters through the
+            // restore. A round gap reads as "not recorded", like volume.
+            ...(bestOwn.ledger.closed === undefined
+              ? {}
+              : { closed: bestOwn.ledger.closed }),
+          }
         : {}),
     };
   }
@@ -1304,11 +1326,12 @@ export function persistRecoveredLedger(
           commitId: _droppedCommitId,
           ...rest
         } = existing;
-        // Both groups through their shared projections, not a second
+        // All three groups through their shared projections, not a second
         // hand-kept list: the volume group grew twice and this branch was
         // updated neither time, and the churn group carries a streak that
-        // DECIDES a blocker.
-        const kept = withoutChurn(withoutVolume(rest));
+        // DECIDES a blocker. The closures go with them: each is a fact
+        // about the round this advance leaves behind, exactly like volume.
+        const kept = withoutClosures(withoutChurn(withoutVolume(rest)));
         mkdirSync(dirname(sideFilePath), { recursive: true });
         writeAtomic(
           JSON.stringify(
@@ -1423,20 +1446,24 @@ export function persistRecoveredLedger(
                 : {}),
             }
           : {};
-      // The anonymous whole-write sheds BOTH groups. The volume can genuinely
-      // arrive here — recovery keeps it on an anonymous walk on purpose, since
-      // "foreign" then means only "this run could not ask who" — and the churn
-      // cannot, because recovery strips it from every marker when there is no
-      // `me`. Shedding it anyway costs nothing and makes the seam defend
-      // itself instead of depending on that upstream invariant holding
-      // forever: this is the one path where a whole foreign ledger is written
-      // to the file, so a loosened strip would land a stranger's streak here
-      // intact and arm the blocker off someone else's count.
+      // The anonymous whole-write sheds ALL THREE groups. The volume can
+      // genuinely arrive here — recovery keeps it on an anonymous walk on
+      // purpose, since "foreign" then means only "this run could not ask
+      // who" — and the churn and the closures cannot, because recovery
+      // strips them from every marker when there is no `me`. Shedding them
+      // anyway costs nothing and makes the seam defend itself instead of
+      // depending on that upstream invariant holding forever: this is the
+      // one path where a whole foreign ledger is written to the file, so a
+      // loosened strip would land a stranger's streak here intact and arm
+      // the blocker off someone else's count — and a stranger's closure
+      // lineage here intact, stamped `foreign: false`.
       const recoveredOut = identityKnown
         ? recovered.ledger
-        : (withoutChurn(
-            withoutVolume(
-              recovered.ledger as unknown as Record<string, unknown>,
+        : (withoutClosures(
+            withoutChurn(
+              withoutVolume(
+                recovered.ledger as unknown as Record<string, unknown>,
+              ),
             ),
           ) as unknown as Ledger);
       writeAtomic(
@@ -1697,6 +1724,30 @@ function stripForeignVolume(ledger: Ledger): Ledger {
   return withoutVolume(
     ledger as unknown as Record<string, unknown>,
   ) as unknown as Ledger;
+}
+
+/**
+ * The same record with its closure list removed — ONE statement of the
+ * scoping decision three seams make for `closed`, on the same discipline the
+ * churn and volume groups get from `CHURN_FIELDS`/`VOLUME_FIELDS`.
+ *
+ * A closure is a ruling-shaped fact about the account whose round minted it:
+ * what LEFT a work list that account certified, when. Recovery crosses
+ * accounts, and the field crosses with it — left scoped, a foreign winner's
+ * closures ride into the side file as this loop's own history, feed the
+ * divergence sentinel a lineage this loop never produced, and the anonymous
+ * whole-write stamps them `foreign: false`, laundering the provenance past
+ * every guard that could still see it. The union restores this account's OWN
+ * closures beside the volume (same-round gate, same reason), and the two
+ * anonymous writes in `persistRecoveredLedger` shed the field beside the
+ * volume and the churn — each entry is a fact about a round those writes no
+ * longer describe. Absence degrades to silence: the sentinel reads no
+ * closures exactly as a pre-field marker does.
+ */
+function withoutClosures<T extends Record<string, unknown>>(record: T): T {
+  const out = { ...record };
+  delete out['closed'];
+  return out;
 }
 
 /**

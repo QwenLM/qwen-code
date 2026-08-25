@@ -727,27 +727,39 @@ export function isLedgerFinding(
 
 /**
  * Is this a closure entry this pipeline would admit, against the round the
- * marker claims? The same two rules as the findings, minus the fields a
- * closure does not carry: the caps bind on read as on write, and a closure
- * claiming a round past the marker's own is a squat — the marker's round IS
- * the newest state it can describe.
+ * marker claims? The same rules as the findings, minus the fields a closure
+ * does not carry: the caps bind on read as on write, a closure claiming a
+ * round past the marker's own is a squat — the marker's round IS the newest
+ * state it can describe — and the id obeys the SAME grammar and id-round
+ * bounds `isLedgerFinding` applies in this file. Skipping them here let a
+ * hand-edited or forged marker plant arbitrary ≤24-char tokens — an empty
+ * string, `R9999-1` spelling a round nobody ran, a live link or mention —
+ * into the posted advisory and the machine-readable `basis`, through the
+ * route whose comment names the planted-marker threat.
  */
 export function isLedgerClosure(
   c: unknown,
   markerRound: number,
 ): c is LedgerClosure {
   const e = c as LedgerClosure | null | undefined;
-  return (
-    !!e &&
-    typeof e === 'object' &&
-    Number.isInteger(e.r) &&
-    e.r >= 1 &&
-    e.r <= markerRound &&
-    typeof e.id === 'string' &&
-    e.id.length <= LEDGER_MAX_ID &&
-    typeof e.f === 'string' &&
-    e.f.length <= LEDGER_MAX_FILE
-  );
+  if (
+    !e ||
+    typeof e !== 'object' ||
+    !Number.isInteger(e.r) ||
+    e.r < 1 ||
+    e.r > markerRound ||
+    typeof e.id !== 'string' ||
+    e.id.length > LEDGER_MAX_ID ||
+    !LEDGER_ID_SHAPE.test(e.id) ||
+    typeof e.f !== 'string' ||
+    e.f === '' ||
+    e.f.length > LEDGER_MAX_FILE
+  ) {
+    return false;
+  }
+  const idRound = Number(e.id.slice(1).split('-')[0]);
+  if (!Number.isSafeInteger(idRound)) return false;
+  return idRound >= 1 && idRound <= Math.min(markerRound, LEDGER_MAX_ROUND);
 }
 
 /**

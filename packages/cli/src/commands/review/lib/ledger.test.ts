@@ -761,6 +761,30 @@ describe('ledger marker — the closure list (#9905)', () => {
     expect(back.closed![0]!.id).toBe('R1-10');
   });
 
+  it('refuses closure ids the finding grammar refuses — squats, links, empty', () => {
+    // The admission test applies the SAME grammar and id-round bounds
+    // `isLedgerFinding` does in this file: a hand-edited or forged marker
+    // must not plant arbitrary ≤24-char tokens into the posted advisory and
+    // the machine-readable `basis` — an empty id renders a blank generation
+    // (` → `), `R9999-1` spells a round nobody ran, a link or mention rides
+    // the route whose own comment names the planted-marker threat — while
+    // the ledger's admission test refuses every one of them as a finding.
+    // The one honest entry survives.
+    const back = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":2,"findings":[],' +
+        '"closed":[' +
+        '{"r":2,"id":"R9999-1","f":"a.ts"},' +
+        '{"r":2,"id":"","f":"a.ts"},' +
+        '{"r":2,"id":"not-an-id","f":"a.ts"},' +
+        '{"r":2,"id":"[x](http://evil.example)","f":"a.ts"},' +
+        '{"r":2,"id":"@mention ping","f":"a.ts"},' +
+        '{"r":2,"id":"R1-1","f":""},' +
+        '{"r":2,"id":"R1-2","f":"a.ts"}' +
+        ']} -->',
+    )!;
+    expect(back.closed).toEqual([{ r: 2, id: 'R1-2', f: 'a.ts' }]);
+  });
+
   it('sheds closures BEFORE the anchor pair, and never sets `dropped` for them', () => {
     // The cascade order is the priority order: advisory history goes before
     // the anchor (a full re-review) and the work list (a ruling owed). A

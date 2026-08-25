@@ -235,6 +235,191 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
+  it('a FOREIGN winner carries no planted closures into the side file', () => {
+    // The closure seam's strip half, end to end: any account that can submit
+    // a review can post a marker carrying `closed`, and recovery adopts the
+    // highest round inside the headroom. If the foreign winner's PLANTED
+    // closures rode the identity-known write into the side file, the next
+    // compose would feed them to the divergence sentinel as THIS loop's own
+    // lineage — and the anonymous write would stamp them `foreign: false`,
+    // laundering the provenance past every downstream guard. The planted
+    // list must not survive. The own list from the round-GAP own marker is
+    // not restored either: its entries stamp `r` = 3, and the compose this
+    // recovery feeds reads exactly `r` = 4 off it — dead bytes, like volume.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      const ownMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":3,' +
+        '"findings":[{"id":"R3-1","sev":"S","file":"a.ts","title":"own"}],' +
+        '"closed":[{"r":3,"id":"R2-1","f":"a.ts"}]} -->';
+      const plantedMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":4,' +
+        '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"theirs"}],' +
+        '"closed":[{"r":4,"id":"R3-9","f":"a.ts"}]} -->';
+      const { recovered } = recoverLedger(
+        [
+          {
+            id: 1,
+            user: { login: 'bot' },
+            submitted_at: '2026-01-01T00:00:00Z',
+            body: ownMarker,
+          },
+          {
+            id: 2,
+            user: { login: 'stranger' },
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: plantedMarker,
+          },
+        ],
+        'bot',
+      );
+      expect(recovered?.foreign).toBe(true);
+      persistRecoveredLedger(side, recovered, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(4);
+      expect(written.closed).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a SAME-round union restores this account's own closures to disk", () => {
+    // The restore half: the own marker describes the SAME round the foreign
+    // winner claims (the winner's own closures were stripped at the seam).
+    // The union exists so a foreign marker cannot erase own data — the own
+    // mint is exactly the generation the next compose reads `r === round`
+    // off — so it comes back beside the same-round volume, and the restore
+    // only means anything if it survives the identity-known write. Left
+    // unrestored, one interleaved same-round foreign marker silently
+    // disarms the divergence sentinel for this account's next round.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      const ownMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":4,' +
+        '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"own"}],' +
+        '"closed":[{"r":4,"id":"R3-1","f":"a.ts"}]} -->';
+      const foreignMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":4,' +
+        '"findings":[{"id":"R4-9","sev":"S","file":"b.ts","title":"theirs"}],' +
+        '"closed":[{"r":4,"id":"R3-9","f":"b.ts"}]} -->';
+      const { recovered } = recoverLedger(
+        [
+          {
+            id: 1,
+            user: { login: 'bot' },
+            submitted_at: '2026-01-01T00:00:00Z',
+            body: ownMarker,
+          },
+          {
+            id: 2,
+            user: { login: 'stranger' },
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: foreignMarker,
+          },
+        ],
+        'bot',
+      );
+      expect(recovered?.foreign).toBe(true);
+      expect(recovered?.merged).toBe(true);
+      persistRecoveredLedger(side, recovered, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(4);
+      // The OWN mint, not the stranger's planted list.
+      expect(written.closed).toEqual([{ r: 4, id: 'R3-1', f: 'a.ts' }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ANONYMOUS whole-write sheds the closures it cannot vouch', () => {
+    // Without a `me` every marker walks as foreign, so the recovery strip
+    // already fires upstream — but this seam defends ITSELF rather than
+    // depending on that invariant holding forever: it is the one path where
+    // a whole foreign ledger is written to the file, and kept closures
+    // would be stamped `foreign: false` here, laundering a stranger's
+    // lineage past every provenance guard downstream. Fed DIRECTLY, with a
+    // closure-carrying ledger the upstream strip never saw, the shed must
+    // hold on its own — exactly as the churn shed beside it is pinned.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 4,
+            findings: [{ id: 'R4-1', sev: 'S', file: 'a.ts', title: 't' }],
+            closed: [{ r: 4, id: 'R3-1', f: 'a.ts' }],
+          },
+          commitId: 'c'.repeat(40),
+          reviewId: 44,
+          foreign: true,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(4);
+      expect(written.closed).toBeUndefined();
+      expect(written.foreign).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an ANONYMOUS higher-round advance sheds the closures with the volume', () => {
+    // The counter-advance branch keeps the file's OWN findings but sheds
+    // every fact ABOUT the round it leaves behind — anchor, volume, streak.
+    // Each closure is the same class: stamped with the round that minted
+    // it, which this advance passes. Kept, it rides a rebuilt file whose
+    // round no longer describes it.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({
+          ...ledger,
+          round: 7,
+          reviewId: 100,
+          posted: 4,
+          closed: [{ r: 7, id: 'R6-1', f: 'a.ts' }],
+        }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 8,
+            findings: [{ id: 'R8-1', sev: 'S', file: 'x.ts', title: 'theirs' }],
+          },
+          commitId: 'c'.repeat(40),
+          reviewId: 200,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(8);
+      expect(written.findings).toEqual(ledger.findings);
+      expect(written.closed).toBeUndefined();
+      expect(written.posted).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('records that the winning marker came from another account', () => {
     // The convergence diagnosis CITES the round numbers carried in this work
     // list, in a body this account posts. Recovery adopts the highest-round

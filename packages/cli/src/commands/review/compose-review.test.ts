@@ -29,6 +29,7 @@ import {
 import { getGhHost, setGhHost } from './lib/gh.js';
 import { BRIEFS } from './lib/agent-briefs.js';
 import {
+  LEDGER_MAX_CLOSED,
   LEDGER_MAX_FILE,
   LEDGER_MAX_ID,
   LEDGER_MAX_ROUND,
@@ -13130,6 +13131,220 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body).not.toContain('⚠️ Divergence:');
     expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('mints no closures on a cannot-tell round — absence is a DECLINED ruling', () => {
+    // The mint's honesty legs, leg one: a round that publicly answered
+    // "cannot tell" on a Critical declined to rule on it — the id is absent
+    // from the posting set by construction, but absence there is not
+    // "ruled fixed". The sibling `openCriticals` gate withholds the same
+    // inference under the same state.
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+      cannotTellCriticals: [
+        'R10-2 — the claim could not be verified either way',
+      ],
+    });
+    expect(r.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('mints no closures on a context-unavailable round — nothing was re-read', () => {
+    // Leg two: a diff-only round could not re-read the context the previous
+    // work list was ruled under, so a vanished id is not a ruling there
+    // either — the same state the sibling gate cites `cannot-tell` beside.
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      contextUnavailable: true,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.cappedBy).toContain('context-unavailable');
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('mints no closures over a PURE-FOREIGN previous list', () => {
+    // Leg three (#9526): a list recovered from another account's marker,
+    // NOT merged over this account's own, is a stranger's — its unreposted
+    // Criticals are not rulings this account made, and minting closures
+    // over them seeds the sentinel with a lineage this loop never produced.
+    sideFile({
+      round: 10,
+      foreign: true,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('still mints closures over a MERGED foreign list — the union keeps own entries', () => {
+    // The leg's other edge: a MERGED list protects this account's own
+    // certified entries under their own ids — the round re-rules them entry
+    // by entry, so a vanished one WAS ruled. Over-tightening the leg to
+    // `foreign !== true` would disarm the mint on exactly the merged rounds
+    // the union exists to protect.
+    sideFile({
+      round: 10,
+      foreign: true,
+      merged: true,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it('mints no closure for a standing gate blocker re-minted under a fresh id', () => {
+    // Claim identity, not id identity. The gate's Critical renders
+    // path-first with no carried id, so `buildLedger` mints it a FRESH id
+    // every round while the claim stands: round 1 posted it as R1-1, round
+    // 2 re-derives it as R2-1, and R1-1 is absent from the posting set —
+    // read by id alone, the blocker mints a closure every round of its
+    // life, in the very body that re-posts it open (#9526's renumbering
+    // walk). The mint joins on the locator projection instead, sees the
+    // claim still standing in the SAME build, and stays silent.
+    const diffPath = join(dir, 'the.diff');
+    writeFileSync(
+      diffPath,
+      'diff --git a/deploy.sh b/deploy.sh\n@@ -0,0 +1 @@\n+x\n',
+      'utf8',
+    );
+    const diffHash = createHash('sha256')
+      .update(readFileSync(diffPath))
+      .digest('hex');
+    const gatePlan = join(dir, 'plan-gate.json');
+    writeFileSync(
+      gatePlan,
+      JSON.stringify({
+        prNumber: 8255,
+        worktreePath: '.qwen/tmp/review-pr-8255',
+        diffPathAbsolute: diffPath,
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-script-lint.json'),
+      JSON.stringify({
+        checked: [
+          {
+            path: 'deploy.sh',
+            tool: 'shellcheck',
+            findings: [
+              {
+                line: 1,
+                code: 'SC2086',
+                level: 'info',
+                message: 'quote the variable',
+                inDiff: true,
+              },
+            ],
+          },
+        ],
+        skipped: [],
+        errored: [],
+        deferred: [],
+        ok: false,
+        note: '',
+        diffHash,
+      }),
+      'utf8',
+    );
+    const gateLine = scriptLintGate(gatePlan).criticals[0]!;
+    sideFile({
+      round: 1,
+      findings: [{ id: 'R1-1', sev: 'C', file: '(body)', title: gateLine }],
+    });
+    const r = composeReview({
+      planPath: gatePlan,
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [],
+    });
+    // The blocker IS on the work list again — under this round's fresh id.
+    const marker = parseLedger(r.body)!;
+    expect(
+      marker.findings.some((f) => f.file === '(body)' && f.title === gateLine),
+    ).toBe(true);
+    // ...so it is NOT closed.
+    expect(marker.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('caps a planted side-file closure list, keeping the NEWEST entries', () => {
+    // The side file is the same untrusted shape arriving by another route —
+    // and the route a planted `qwen-review-pr-<n>-prev-ledger.json` takes,
+    // bypassing the serializer's write-side cap. The read applies the count
+    // cap like its two siblings, or an unbounded valid `closed` array flows
+    // into the chain join and builds unbounded id arrays in the diagnosis.
+    // Sixty planted entries, cap fifty: the chain's first generation shows
+    // six ids and names the forty-four the cap shed — not the uncapped
+    // fifty-four.
+    const closed = Array.from({ length: LEDGER_MAX_CLOSED + 10 }, (_, i) => ({
+      r: 10,
+      id: `R9-${i}`,
+      f: 'src/a.ts',
+    }));
+    sideFile({
+      round: 10,
+      findings: [{ id: 'R10-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
+      closed,
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 9, body: '**[Critical]** again' },
+      ],
+    });
+    expect(r.body).toContain('⚠️ Divergence:');
+    expect(r.body).toContain('… (+44)');
+    expect(r.body).not.toContain('… (+54)');
   });
 });
 

@@ -73,6 +73,7 @@ import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
   LEDGER_ID_READBACK,
+  LEDGER_MAX_CLOSED,
   LEDGER_MAX_ID,
   isLedgerClosure,
   isLedgerFinding,
@@ -1681,15 +1682,44 @@ export function composeReview(
   );
   // The closures this round mints (#9905): the previous work list's
   // Criticals this round does not re-post — `fixed` and `superseded` both
-  // read as closure, and a positional diff needs no more. Minted ONLY over
-  // a complete previous list: a vanished id in a truncated one may be the
-  // byte budget, not a ruling, so a partial list mints nothing — the same
-  // honesty rule the anchor applies, one consumer down.
+  // read as closure, and a positional diff needs no more. Minted ONLY where
+  // absence from the posting set MEANS "ruled fixed" — the same honesty
+  // rule the anchor applies, one consumer down, with the SAME legs the
+  // sibling `openCriticals` gate applies to the identical inference: a
+  // PARTIAL previous list (a vanished id may be the byte budget, not a
+  // ruling), a diff-only round that could not rule, a round that publicly
+  // answered "cannot tell" on a Critical it declined to rule, and a
+  // PURE-FOREIGN list whose entries are a stranger's, not a shortened
+  // version of this account's (#9526). In all of them the mint stays
+  // silent rather than guesses — thin history stays silent.
   const postedIds = new Set(postedLedger?.findings.map((f) => f.id) ?? []);
+  // Claim identity, not id identity: a claim this round RE-POSTS without a
+  // carried id — a gate Critical regenerated from the report, a relocated
+  // deferral entry, a model re-post the readback lost — gets a FRESH id in
+  // the build, so the original is absent from `postedIds` while the claim
+  // still stands. Read absent-by-id alone, a still-standing blocker mints a
+  // closure every round of its life, in the very body that re-posts it
+  // open. So the join also runs on the locator projection the gate-repost
+  // dedup uses — over the SAME build the marker stamps, so the record and
+  // the mint cannot disagree about what closed.
+  const standingClaims = new Set(
+    (postedLedger?.findings ?? [])
+      .map((g) => claimLocator(g.title))
+      .filter((k) => k !== ''),
+  );
   const closuresThisRound: LedgerClosure[] =
-    carriedWorkList.complete && postedLedger !== null
+    carriedWorkList.complete &&
+    postedLedger !== null &&
+    input.contextUnavailable !== true &&
+    (input.cannotTellCriticals?.length ?? 0) === 0 &&
+    !(prevFacts.foreign === true && prevFacts.merged !== true)
       ? prevFacts.findings
-          .filter((f) => f.sev === 'C' && !postedIds.has(f.id))
+          .filter(
+            (f) =>
+              f.sev === 'C' &&
+              !postedIds.has(f.id) &&
+              !standingClaims.has(claimLocator(f.title)),
+          )
           .map((f) => ({ r: postedLedger.round, id: f.id, f: f.file }))
       : [];
   // Is the loop settling? Measured from facts this round already holds — the
@@ -1762,7 +1792,6 @@ export function composeReview(
     result.dimensionGapsAreDepthOnly ?? false,
     attribution,
     runtimeModelId,
-    prevRound,
     prevFacts.src0,
     postedInline,
     result.postedFresh,
@@ -2107,15 +2136,19 @@ function prevLedgerFacts(planPath: string | undefined): {
     // admission test on the same route as the findings — the side file is
     // the same untrusted shape arriving by another route, and a closure
     // claiming a round past the file's own is a squat the parser refuses.
+    // The count cap binds here as on the two sibling routes (`parseLedger`
+    // and the serializer): the caps exist for the hand-edited or planted
+    // file, which is bound by no mint, and this route is the one a planted
+    // `qwen-review-pr-<n>-prev-ledger.json` arrives by.
     // Travels with the round like the work list does: a file with no
     // usable round is one this read cannot place, and its closures would
     // seed the successor-chain check for a round this read calls 0.
     const closed =
       round === 0 || !Array.isArray(prev.closed)
         ? []
-        : prev.closed.filter((c): c is LedgerClosure =>
-            isLedgerClosure(c, round),
-          );
+        : prev.closed
+            .filter((c): c is LedgerClosure => isLedgerClosure(c, round))
+            .slice(-LEDGER_MAX_CLOSED);
 
     return {
       round,
@@ -2274,7 +2307,6 @@ function ledgerMarkerFor(
   dimensionGapsAreDepthOnly: boolean,
   attribution: boolean,
   runtimeModelId: string | undefined,
-  prevRound: number,
   prevSrc0: number,
   postedInline: number,
   freshInline: number,
@@ -5519,18 +5551,26 @@ export function withoutGateReposts(
   ownBodyCriticals: readonly string[],
   gateCriticals: readonly string[],
 ): string[] {
-  const locator = (entry: string): string => {
-    const claim = entry.trim().replace(LEDGER_ID_READBACK, '').trim();
-    const dash = claim.indexOf(' — ');
-    // Backticks stripped: the gate renders the path through `mdField`, and a
-    // re-post that types the locator plainly names the same finding.
-    return (dash === -1 ? claim : claim.slice(0, dash))
-      .replace(/`/g, '')
-      .trim();
-  };
-  const regenerated = new Set(gateCriticals.map(locator).filter((k) => k));
+  const regenerated = new Set(gateCriticals.map(claimLocator).filter((k) => k));
   if (regenerated.size === 0) return [...ownBodyCriticals];
-  return ownBodyCriticals.filter((c) => !regenerated.has(locator(c)));
+  return ownBodyCriticals.filter((c) => !regenerated.has(claimLocator(c)));
+}
+
+/**
+ * The claim LOCATOR of a work-list entry or a built finding's title: the
+ * carried id stripped through the ledger's OWN readback, the part before
+ * the first ' — ' kept, backticks gone. Stated once because two consumers
+ * join claims by it — the gate-repost dedup above and the closure mint
+ * (#9905), which must not call a claim closed while the SAME build
+ * re-posts it under a fresh id — and a second spelling is the drift class
+ * `lib/ledger.ts`'s header exists to prevent.
+ */
+function claimLocator(entry: string): string {
+  const claim = entry.trim().replace(LEDGER_ID_READBACK, '').trim();
+  const dash = claim.indexOf(' — ');
+  // Backticks stripped: the gate renders the path through `mdField`, and a
+  // re-post that types the locator plainly names the same finding.
+  return (dash === -1 ? claim : claim.slice(0, dash)).replace(/`/g, '').trim();
 }
 
 export function scriptLintGate(planPath: string): {
