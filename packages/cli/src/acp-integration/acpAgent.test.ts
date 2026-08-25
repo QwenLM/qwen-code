@@ -1036,6 +1036,8 @@ import {
   ACTIVE_WORK_HOLD_CATEGORIES,
   ACTIVE_WORK_LEGACY_HOLD_CATEGORIES,
   ACTIVE_WORK_NOTIFICATION_METHOD,
+  CHANNEL_LIVENESS_META_KEY,
+  CHANNEL_LIVENESS_VERSION,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   PROMPT_CANCEL_METHOD,
@@ -2840,6 +2842,69 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       ],
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('negotiates and answers channel liveness without a Session', async () => {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const response = (await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
+      },
+    })) as { _meta?: Record<string, unknown> };
+
+    expect(response._meta).toMatchObject({
+      [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
+    });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.channelPing, {
+        v: CHANNEL_LIVENESS_VERSION,
+        nonce: 42,
+      }),
+    ).resolves.toEqual({ v: CHANNEL_LIVENESS_VERSION, nonce: 42 });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.channelPing, {
+        v: CHANNEL_LIVENESS_VERSION,
+        nonce: -1,
+      }),
+    ).rejects.toThrow('Invalid channel liveness ping');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not acknowledge an unrequested channel liveness capability', async () => {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const response = (await agent.initialize({
+      clientCapabilities: {},
+    })) as { _meta?: Record<string, unknown> };
+
+    expect(response._meta?.[CHANNEL_LIVENESS_META_KEY]).toBeUndefined();
 
     mockConnectionState.resolve();
     await agentPromise;
