@@ -62,8 +62,10 @@ import { dirname, join, resolve } from 'node:path';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
 import {
   LOG_MAX_BYTES,
+  MAX_READ_BYTES,
   POLL_MS,
   SERVER_NAME_RE,
+  installSignalTeardown,
   logBytes,
   sentinelExitCode,
   shellQuote,
@@ -302,7 +304,19 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
   // B'S sentinel — forging the other tree's outcome, exit code and
   // `observed: true`. A phase's directory does not exist until the moment
   // that phase starts, so there is nothing for earlier code to aim at.
-  const runDir = mkdtempSync(join(tmpdir(), 'qwen-review-ab-drive-'));
+  let runDir: string;
+  try {
+    runDir = mkdtempSync(join(tmpdir(), 'qwen-review-ab-drive-'));
+  } catch (e) {
+    // An unusable TMPDIR (full, unwritable, gone) is an environment gap like a
+    // failed keeper session — it must return a JSON fail report, not escape to
+    // the handler catch where a non-TypeError throw maps to exit 1, the
+    // refusal/coupling-fact class a calling verifier records against the diff.
+    return fail(
+      `could not create the run directory under ${tmpdir()}: ${(e as Error).message} — an environment gap (a full or unwritable TMPDIR), not a finding`,
+      { killedStale },
+    );
+  }
 
   // A tmux server exits with its LAST session — and this command, unlike
   // `drive`, starts sessions sequentially, so a phase whose script exits
@@ -479,6 +493,14 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     shared !== null && tmux('has-session', '-t', shared.name).status === 0;
   let note = '';
 
+  // Each arm's poll loop can block for the whole --timeout; a SIGTERM/SIGINT/
+  // SIGHUP there would skip the finally and leak the keeper (unreachable by a
+  // group kill — it setsids away) with every running arm's untrusted script
+  // still executing. Best-effort the same kill-server on the way out; the
+  // finally uninstalls it.
+  const uninstallSignalTeardown = installSignalTeardown(() => {
+    tmux('kill-server');
+  });
   try {
     const runArm = (arm: 'a' | 'b'): AbArmReport | 'stop' => {
       const root = resolve(arm === 'a' ? args.armA : args.armB);
@@ -629,6 +651,19 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       let exitCode: number | null = null;
       let output = '';
       for (;;) {
+        // Hard ceiling BEFORE the read. `readIfThere` allocates the whole
+        // file, so an arm writing faster than one poll interval can grow its
+        // log past V8's ~512 MiB string limit between polls; the read then
+        // throws, `readIfThere` swallows it to '', and a COMPLETED arm would
+        // report an empty capture — two provably different arms comparing
+        // equal. Stat first and classify a log past MAX_READ_BYTES as
+        // overflowed WITHOUT reading (never completed), so that empty-capture
+        // verdict can never form. The soft LOG_MAX_BYTES check below still runs
+        // after the read for an ordinary overflow.
+        if (logBytes(a.logPath) > MAX_READ_BYTES) {
+          outcome = 'overflowed';
+          break;
+        }
         output = readIfThere(a.logPath);
         const rcText = readIfThere(a.rcPath);
         exitCode = rcText === '' ? null : sentinelExitCode(rcText);
@@ -656,10 +691,19 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
           // near-cap logs). Here the stake is doubled: one arm hitting the
           // race and the other not turns two identical runs into
           // `identicalOutput: false` — a harness-fabricated difference.
+          // Re-check the hard ceiling first: a final burst between the stat at
+          // the top of this iteration and the sentinel could still have pushed
+          // the log past MAX_READ_BYTES, and the re-read would then throw to ''.
+          if (logBytes(a.logPath) > MAX_READ_BYTES) {
+            outcome = 'overflowed';
+            break;
+          }
           output = readIfThere(a.logPath);
           outcome = 'completed';
           break;
         }
+        // Soft cap, after the read: an ordinary overflow keeps its trimmed tail
+        // (unlike the unread hard-ceiling break above).
         if (logBytes(a.logPath) > LOG_MAX_BYTES) {
           outcome = 'overflowed';
           break;
@@ -709,6 +753,7 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     const b = runArm('b');
     if (b !== 'stop') armReports.b = b;
   } finally {
+    uninstallSignalTeardown();
     // Neither teardown may throw out of the finally and discard the report:
     // an untrusted arm can leave runDir un-removable (a chmod, a mount), and
     // tmux can fail transiently — best-effort both, a leak is not worth a

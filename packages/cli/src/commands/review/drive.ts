@@ -394,6 +394,18 @@ export function extractCaptures(
  * it gets its own outcome and no exit code at all.
  */
 export const LOG_MAX_BYTES = 8 * 1024 * 1024;
+/**
+ * A hard ceiling on how large a log file may be before the poll loop reads it
+ * at all. `LOG_MAX_BYTES` is the SOFT cap: a log over it is classified
+ * `overflowed`, but only AFTER the read, so the trimmed tail is still reported.
+ * A log can grow past V8's ~512 MiB string limit between polls, though, and
+ * then the read throws `ERR_STRING_TOO_LONG` — swallowed to '' by the ab-drive
+ * capture (a completed arm reporting an empty capture, two different arms
+ * comparing equal) or thrown out of the loop in drive. Set well under that
+ * limit, this bounds the allocation: past it the log is unreadable evidence
+ * anyway, so the loop classifies `overflowed` WITHOUT reading.
+ */
+export const MAX_READ_BYTES = 256 * 1024 * 1024;
 /** How often readiness is polled. Fast enough to measure, slow enough to be cheap. */
 export const POLL_MS = 250;
 
@@ -423,6 +435,46 @@ export function logBytes(p: string): number {
 
 export function waitMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** 128 + the signal number, the shell's convention for "died on this signal". */
+const SIGNAL_EXIT_CODES: Partial<Record<NodeJS.Signals, number>> = {
+  SIGHUP: 129,
+  SIGINT: 130,
+  SIGTERM: 143,
+};
+export const TEARDOWN_SIGNALS = Object.keys(
+  SIGNAL_EXIT_CODES,
+) as NodeJS.Signals[];
+
+/**
+ * Install best-effort teardown on the signals whose default action skips a
+ * `finally`. Node terminates on SIGTERM/SIGINT/SIGHUP without unwinding, so a
+ * cancelled CI job or a Ctrl+C would leave the tmux keeper — which setsids out
+ * of the caller's process group and so is unreachable by any group kill — and
+ * every running arm alive, the untrusted driven script executing past its
+ * `--timeout`. `onSignal` (a best-effort `kill-server`) runs, then the process
+ * exits 128+signal. Returns an uninstaller for the caller's `finally`, so the
+ * handlers live only for the drive's own duration and never accumulate across
+ * the many in-process test calls.
+ */
+export function installSignalTeardown(onSignal: () => void): () => void {
+  const installed = new Map<NodeJS.Signals, () => void>();
+  for (const signal of TEARDOWN_SIGNALS) {
+    const handler = (): void => {
+      try {
+        onSignal();
+      } catch {
+        /* best effort — a lost verdict is not worth a crash in the handler */
+      }
+      process.exit(SIGNAL_EXIT_CODES[signal] ?? 1);
+    };
+    installed.set(signal, handler);
+    process.on(signal, handler);
+  }
+  return () => {
+    for (const [signal, handler] of installed) process.off(signal, handler);
+  };
 }
 
 /**
@@ -610,6 +662,13 @@ export function runDrive(args: DriveArgs): DriveReport {
   let output = '';
   let exitCode: number | null = null;
   let outcome: DriveOutcome = 'timed-out';
+  // The poll loop below can block for the whole --timeout; a SIGTERM/SIGINT/
+  // SIGHUP there would skip the finally and leak the keeper (which setsids out
+  // of reach of a group kill) with the untrusted script still running. Best-
+  // effort the same kill-server on the way out; the finally uninstalls it.
+  const uninstallSignalTeardown = installSignalTeardown(() => {
+    tmux('kill-server');
+  });
   try {
     // The SCRIPT writes the log, not the pane. `pipe-pane` attaches after
     // `new-session` has already started the script, so a fast drive finishes —
@@ -641,6 +700,15 @@ export function runDrive(args: DriveArgs): DriveReport {
     }
     const deadline = droveFrom + args.timeout * 1000;
     for (;;) {
+      // Hard ceiling BEFORE the read: readFileSync allocates the whole file, so
+      // a log that grows past V8's ~512 MiB string limit between polls throws
+      // ERR_STRING_TOO_LONG out of the loop. Stat first and stop unread past
+      // MAX_READ_BYTES; the soft LOG_MAX_BYTES overflow check below still runs
+      // after the read, so an ordinary overflow keeps its trimmed tail.
+      if (logBytes(logPath) > MAX_READ_BYTES) {
+        outcome = 'overflowed';
+        break;
+      }
       output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
       exitCode = existsSync(sentinelPath)
         ? sentinelExitCode(readFileSync(sentinelPath, 'utf8'))
@@ -659,10 +727,20 @@ export function runDrive(args: DriveArgs): DriveReport {
         // sentinel write, so a read taken after it is complete. Kept to this
         // branch: the other exits stopped the run rather than observing it
         // finish, and have no such guarantee to lean on.
+        // Re-check the hard ceiling first: a final burst between the stat at
+        // the top of this iteration and the sentinel could have pushed the log
+        // past MAX_READ_BYTES, and the re-read would then throw
+        // ERR_STRING_TOO_LONG.
+        if (logBytes(logPath) > MAX_READ_BYTES) {
+          outcome = 'overflowed';
+          break;
+        }
         output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
         outcome = 'completed';
         break;
       }
+      // Soft cap, after the read: an ordinary overflow keeps its trimmed tail
+      // (unlike the unread hard-ceiling break at the top of the loop).
       if (logBytes(logPath) > LOG_MAX_BYTES) {
         outcome = 'overflowed';
         break;
@@ -671,6 +749,7 @@ export function runDrive(args: DriveArgs): DriveReport {
       waitMs(POLL_MS);
     }
   } finally {
+    uninstallSignalTeardown();
     // Unconditional. The 87% that clean up by hand are the 87% that remembered;
     // a leaked server is the next run's wrong observation.
     tmux('kill-server');

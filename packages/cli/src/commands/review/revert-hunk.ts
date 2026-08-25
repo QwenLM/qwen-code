@@ -101,6 +101,50 @@ export interface RevertHunkReport {
 }
 
 /**
+ * The 1-based line of a hunk's LAST body line, bounded by the `@@ -a,b +c,d @@`
+ * header's declared old/new line counts rather than by `parseDiff`'s range.
+ *
+ * parseDiff leaves the final hunk's range open to EOF, so for a single-commit
+ * `git format-patch -1 --stdout` capture (in scope for arbitrary `--diff`) the
+ * mbox signature trailer (`-- \n<version>\n`) falls inside `[diffStart,
+ * diffEnd]`. Its `-- ` line's first byte is `-`, so a raw scan counts it as a
+ * removed line (fabricating `removedLines`) and a raw slice appends the trailer
+ * bytes to the extracted patch. Consuming exactly the header's declared counts
+ * stops at the last real body line instead. Falls back to `diffEnd` when the
+ * header is unparseable, so a malformed header never regresses behaviour.
+ */
+function hunkBodyEnd(
+  lines: string[],
+  hunk: { diffStart: number; diffEnd: number },
+): number {
+  const header = lines[hunk.diffStart - 1] ?? '';
+  const m = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(header);
+  if (!m) return hunk.diffEnd;
+  let oldRem = m[1] === undefined ? 1 : Number(m[1]);
+  let newRem = m[2] === undefined ? 1 : Number(m[2]);
+  let ln = hunk.diffStart; // the `@@` line; the body begins at +1
+  while ((oldRem > 0 || newRem > 0) && ln < hunk.diffEnd) {
+    ln++;
+    const c = lines[ln - 1]?.[0];
+    if (c === ' ') {
+      oldRem--;
+      newRem--;
+    } else if (c === '-') oldRem--;
+    else if (c === '+') newRem--;
+    else if (c === '\\') {
+      // `\ No newline at end of file` — a marker on the previous line, consumes
+      // neither side.
+    } else break; // a trailer or anything else is past the hunk body.
+  }
+  // A `\ No newline at end of file` marker for the LAST counted line trails it,
+  // after both counts have reached zero; absorb any such marker line so it
+  // stays with the hunk (the format-patch trailer starts with `-`, not `\`, so
+  // it is never re-absorbed here).
+  while (ln < hunk.diffEnd && lines[ln]?.[0] === '\\') ln++;
+  return ln;
+}
+
+/**
  * Enumerate the diff's hunks. Binary and mode-only sections carry none and
  * are simply absent — there is nothing of theirs to revert.
  */
@@ -112,10 +156,11 @@ export function listHunks(diffText: string): HunkEntry[] {
     f.hunks.forEach((h, i) => {
       let added = 0;
       let removed = 0;
-      // Body starts after the `@@` line. `+++`/`---` cannot open a body line
-      // that is not itself an add/remove (metadata only exists before the
-      // first hunk), so the first byte is the authority.
-      for (let ln = h.diffStart + 1; ln <= h.diffEnd; ln++) {
+      // Body starts after the `@@` line, bounded by the header's declared
+      // counts (see `hunkBodyEnd`) so a format-patch signature trailer inside
+      // the final hunk's open range is not miscounted as a removed line.
+      const end = hunkBodyEnd(lines, h);
+      for (let ln = h.diffStart + 1; ln <= end; ln++) {
         const c = lines[ln - 1]?.[0];
         if (c === '+') added++;
         else if (c === '-') removed++;
@@ -202,7 +247,10 @@ export function extractHunkPatch(
       return l;
     });
   }
-  const body = lines.slice(hunk.diffStart - 1, hunk.diffEnd);
+  // Bound by the header's declared counts, not parseDiff's open range, so a
+  // format-patch mbox trailer inside the final hunk is never appended to the
+  // patch git applies (see `hunkBodyEnd`).
+  const body = lines.slice(hunk.diffStart - 1, hunkBodyEnd(lines, hunk));
   return `${[...header, ...body].join('\n')}\n`;
 }
 
@@ -314,6 +362,27 @@ function gitApply(cwd: string, args: string[]): GitApplyResult {
   };
 }
 
+/**
+ * Whether `tree` is inside a git work tree. `git apply` itself needs NO
+ * repository, so the status-128 guard on the apply cannot catch a --tree that
+ * is a plain directory: a content mismatch there records a fabricated coupling
+ * fact, and a content MATCH silently reverse-applies into the wrong directory
+ * while the report claims the scratch tree was reverted. Distinguishes the
+ * three states so a genuinely non-repo directory refuses up front (exit 2)
+ * while a non-existent tree or a missing git binary still falls through to the
+ * apply path's spawn-error classification (`could not run git`).
+ */
+function gitTreeState(tree: string): 'repo' | 'not-repo' | 'unrunnable' {
+  const r = spawnSync('git', ['rev-parse', '--git-dir'], {
+    cwd: tree,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+    timeout: 60_000,
+  });
+  if (r.error) return 'unrunnable';
+  return r.status === 0 ? 'repo' : 'not-repo';
+}
+
 export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   // 'latin1', not 'utf8', end to end: the pipeline's diff files are byte
   // streams (fetch-diff writes latin1 so "a Latin-1/Shift-JIS diff survives
@@ -323,6 +392,23 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   // fabricated witness pair). latin1 is a 1:1 byte<->char map and all diff
   // syntax is ASCII, so parsing is unaffected.
   const diffText = readFileSync(resolve(args.diff), 'latin1');
+  // A --diff whose line endings were normalized to CRLF (a text-mode copy, a
+  // Windows paste of the capture) carries a trailing \r on the `@@` header
+  // itself. git's own diffs are LF; extractHunkPatch would then write a \r\n
+  // patch git apply -R refuses, landing a damaged capture in the exit-1
+  // coupling-fact class instead of the repairable exit-2 class. Refuse it as a
+  // harness fact, before parsing. A \r inside CONTENT lines is legitimate (a
+  // CRLF file's own bytes), so the structural `@@` header — never a content
+  // line, which always carries a leading ' '/'+'/'-' — is the signal.
+  if (
+    diffText.split('\n').some((l) => /^@@ .*@@/.test(l) && l.endsWith('\r'))
+  ) {
+    return {
+      applied: false,
+      harnessFailure: true,
+      note: `--diff ${JSON.stringify(args.diff)} has CRLF line endings on its hunk headers — the capture was normalized through a text-mode channel, not written as bytes, so git apply -R would refuse the \\r\\n patch and the refusal would read as a coupling fact. Recapture or transfer the diff as bytes (no CRLF conversion); nothing was changed.`,
+    };
+  }
   const sel = parseHunkId(args.hunk);
   if (!sel) {
     return {
@@ -389,6 +475,20 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   const patch = extractHunkPatch(diffText, file, sel.n);
 
   const tree = resolve(args.tree);
+  // git apply needs no repository, so a --tree that is a plain (non-repo)
+  // directory would either fabricate a coupling fact on a content mismatch or
+  // silently mutate the wrong directory on a match. Refuse it up front as a
+  // harness fact. A non-existent tree or a missing git binary is left to the
+  // apply path's spawn-error classification below, so this changes only the
+  // exists-but-not-a-repo case.
+  if (gitTreeState(tree) === 'not-repo') {
+    return {
+      applied: false,
+      hunk: entry,
+      harnessFailure: true,
+      note: `--tree ${JSON.stringify(args.tree)} is not inside a git repository (git rev-parse --git-dir failed there) — git apply would otherwise reverse-apply into a non-repo directory silently. Point --tree at the scratch worktree (a real git tree); nothing was changed.`,
+    };
+  }
   // mkdtemp, not a pid-keyed name: a predictable path in the shared temp dir
   // can be pre-planted as a symlink by a local peer, and `mkdirSync`
   // (recursive) follows it silently. mkdtemp creates a fresh 0700 directory

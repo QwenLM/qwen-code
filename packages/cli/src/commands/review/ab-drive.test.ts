@@ -262,6 +262,30 @@ describe('runAbDrive, harnessed', () => {
     expect(r.note).toContain('tmux is not available');
   });
 
+  it('returns a fail report, not exit 1, when the run directory cannot be created', () => {
+    // An unusable TMPDIR (full, unwritable, gone) is an environment gap like a
+    // failed keeper session: it must return a JSON fail report, not escape
+    // runAbDrive into the handler catch where a non-TypeError throw maps to
+    // exit 1 — the coupling-fact class a verifier records against the diff.
+    const args = baseArgs({}); // arm dirs are created under the REAL TMPDIR
+    const h = harness({ server: args.server });
+    const saved = process.env['TMPDIR'];
+    // A path whose parent exists but whose leaf does not: mkdtemp there throws
+    // ENOENT, and only the run-dir mkdtemp (not the earlier arm validation)
+    // sees the changed TMPDIR.
+    process.env['TMPDIR'] = join(tempDir('ab-gone-'), 'vanished');
+    try {
+      const r = runAbDrive({ ...args, exec: h.exec });
+      expect(r.observed).toBe(false);
+      expect(r.a).toBeNull();
+      expect(r.b).toBeNull();
+      expect(r.note).toContain('run directory');
+    } finally {
+      if (saved === undefined) delete process.env['TMPDIR'];
+      else process.env['TMPDIR'] = saved;
+    }
+  });
+
   it('names the missing arm instead of driving what does not exist', () => {
     const h = harness({ server: 't' });
     const r = runAbDrive(

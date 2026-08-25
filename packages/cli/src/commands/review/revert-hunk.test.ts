@@ -851,6 +851,90 @@ describe('runRevertHunk', () => {
     expect(r.note).toContain('gitlink/submodule');
   });
 
+  it('does not count a format-patch signature trailer as a removed line', () => {
+    // `git format-patch -1 --stdout` appends an mbox trailer (`-- \n<version>`)
+    // after the last hunk; parseDiff leaves that hunk's range open to EOF, so a
+    // raw scan reads the `-- ` line's leading `-` as a removed line. The count
+    // must be bounded by the hunk header's declared line counts instead.
+    const dir = tempDir('rh-fp-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    writeFileSync(join(dir, 'f.txt'), 'one\ntwo\nthree\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'f.txt'), 'one\nTWO\nthree\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'pr');
+    const patchPath = join(dir, 'fp.patch');
+    writeFileSync(patchPath, git(dir, 'format-patch', '-1', '--stdout'));
+    const raw = readFileSync(patchPath, 'utf8');
+    // Sanity: the capture really carries the mbox signature trailer.
+    expect(raw).toContain('\n-- \n');
+
+    const hunks = listHunks(raw);
+    const h = hunks.find((x) => x.id === 'f.txt:1')!;
+    expect(h.removedLines).toBe(1); // the real edit, not 1 + the `-- ` trailer
+    expect(h.addedLines).toBe(1);
+    // And the revert still applies cleanly — the trailer is not in the patch.
+    const r = runRevertHunk({ diff: patchPath, tree: dir, hunk: 'f.txt:1' });
+    expect(r.applied).toBe(true);
+    expect(readFileSync(join(dir, 'f.txt'), 'utf8')).toBe('one\ntwo\nthree\n');
+  });
+
+  it('refuses a CRLF-normalized diff as a harness fact, not a coupling refusal', () => {
+    // A capture whose line endings were normalized to CRLF carries a trailing
+    // \r on the `@@` header; git apply would refuse the \r\n patch and the
+    // refusal would read as a coupling fact (exit 1) instead of the repairable
+    // exit-2 class every other damaged capture gets.
+    const { dir, diffPath } = twoHunkFixture();
+    const crlf = readFileSync(diffPath, 'utf8').replace(/\n/g, '\r\n');
+    const crlfPath = join(dir, 'crlf.diff');
+    writeFileSync(crlfPath, crlf);
+    const r = runRevertHunk({ diff: crlfPath, tree: dir, hunk: 'f.txt:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.conflict).toBeUndefined();
+    expect(r.note).toContain('CRLF');
+  });
+
+  it('does not fire the CRLF guard on a diff whose CONTENT lines carry \\r', () => {
+    // A CRLF file's own bytes appear as `+content\r` lines; only a normalized
+    // capture puts \r on the structural `@@` header. The guard must key on the
+    // header, or it refuses legitimate diffs of CRLF-terminated files.
+    const dir = tempDir('rh-crcontent-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    writeFileSync(join(dir, 'crlf.txt'), 'alpha\r\nbeta\r\ngamma\r\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'crlf.txt'), 'alpha\r\nBETA\r\ngamma\r\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'pr');
+    const diffPath = join(dir, 'content.diff');
+    writeFileSync(diffPath, git(dir, 'diff', 'HEAD~1', 'HEAD'));
+    // The diff bytes contain \r\n on content lines but not on the `@@` header.
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'crlf.txt:1' });
+    expect(r.note ?? '').not.toContain('CRLF');
+    expect(r.applied).toBe(true);
+  });
+
+  it('refuses a plain (non-repo) --tree instead of mutating the wrong directory', () => {
+    // git apply needs no repository; a --tree pointing at a plain directory
+    // whose contents happen to match would silently reverse-apply into the
+    // wrong place with applied:true. Require a real work tree up front.
+    const { diffPath } = twoHunkFixture();
+    const plain = tempDir('rh-nonrepo-'); // exists, but no git init
+    const r = runRevertHunk({ diff: diffPath, tree: plain, hunk: 'f.txt:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.conflict).toBeUndefined();
+    expect(r.note).toContain('not inside a git repository');
+  });
+
   it('reverts under apply.whitespace=fix without silently rewriting the restored base', () => {
     // A repo whose config sets apply.whitespace=fix would have git strip the
     // trailing space off the base line as it is re-added under -R, so the

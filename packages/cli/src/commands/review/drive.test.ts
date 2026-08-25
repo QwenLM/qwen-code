@@ -17,6 +17,7 @@ import {
   readFileSync,
   readdirSync,
   writeFileSync,
+  truncateSync,
   existsSync,
   rmSync,
 } from 'node:fs';
@@ -32,6 +33,8 @@ import {
   DRIVE_SENTINEL,
   parseCaptureSpecs,
   extractCaptures,
+  installSignalTeardown,
+  TEARDOWN_SIGNALS,
   type ExecResult,
 } from './drive.js';
 import { BRIEFS } from './lib/agent-briefs.js';
@@ -571,6 +574,73 @@ describe('the log cap', () => {
     expect(r.observed).toBe(false);
     expect(r.note).toContain('was stopped');
     expect(poll).toBeLessThan(20); // stopped early, did not sit out the timeout
+  });
+
+  it('classifies a log past the hard read ceiling as overflowed WITHOUT reading it', () => {
+    // A log can grow past V8's ~512 MiB string limit between polls; reading it
+    // then throws ERR_STRING_TOO_LONG out of the loop. The poll loop must stat
+    // first and stop unread past MAX_READ_BYTES. A sparse file gives the
+    // apparent size (300 MiB > the 256 MiB ceiling) without the bytes; the
+    // proof it was never read is that `output` is empty rather than the
+    // trimmed tail a read would have produced.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-huge-'));
+    const log = join(dir, 'drive.log');
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      if (cmd === 'tmux' && args[0] === '-V') return ok();
+      if (cmd === 'tmux' && args[2] === 'new-session') {
+        writeFileSync(log, '');
+        truncateSync(log, 300 * 1024 * 1024); // sparse: apparent size only
+        return ok();
+      }
+      return ok();
+    };
+    const r = runDrive({
+      script: 'noisy',
+      cwd: dir,
+      readyTimeout: 1,
+      timeout: 30,
+      server: 'huge',
+      exec,
+      logPath: log,
+    });
+    rmSync(dir, { recursive: true, force: true });
+    expect(r.outcome).toBe('overflowed');
+    expect(r.output).toBe(''); // never read — not the 300 MiB (trimmed) tail
+  });
+});
+
+describe('signal teardown', () => {
+  it('installs handlers on the kill signals and removes them again', () => {
+    const before = TEARDOWN_SIGNALS.map((s) => process.listenerCount(s));
+    const uninstall = installSignalTeardown(() => {});
+    TEARDOWN_SIGNALS.forEach((s, i) =>
+      expect(process.listenerCount(s)).toBe(before[i] + 1),
+    );
+    uninstall();
+    TEARDOWN_SIGNALS.forEach((s, i) =>
+      expect(process.listenerCount(s)).toBe(before[i]),
+    );
+  });
+
+  it('runs the teardown and exits 128+signal when a kill signal fires', () => {
+    // Node's default action for these signals terminates without unwinding, so
+    // the drive's finally never runs and the tmux keeper leaks with the
+    // untrusted script still executing. The handler must kill-server first.
+    const exitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as never);
+    let torndown = 0;
+    const uninstall = installSignalTeardown(() => {
+      torndown++;
+    });
+    // Invoke the just-installed SIGTERM handler directly rather than
+    // process.emit('SIGTERM'), which would also trip vitest's own listeners.
+    const handler = process.listeners('SIGTERM').at(-1) as () => void;
+    handler();
+    expect(torndown).toBe(1);
+    expect(exitSpy).toHaveBeenCalledWith(143); // 128 + SIGTERM(15)
+    uninstall();
+    exitSpy.mockRestore();
   });
 });
 
