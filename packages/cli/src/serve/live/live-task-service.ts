@@ -41,7 +41,11 @@ import {
   isCompatibleLiveSessionSource,
   readLoadableLiveConversationMetadata,
 } from '../../runtime/live-session-source.js';
-import { conversationRuntimeUnavailableError } from '../conversations/conversation-runtime-errors.js';
+import {
+  ConversationRuntimeOwnershipError,
+  conversationRuntimeUnavailableError,
+} from '../conversations/conversation-runtime-errors.js';
+import { DaemonDrainingError } from '../server/session-archive.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import {
   StandaloneSessionServiceError,
@@ -1270,7 +1274,16 @@ export class LiveTaskService {
                     error instanceof SessionNotFoundError ||
                     (error instanceof StandaloneSessionServiceError &&
                       (error.code === 'standalone_session_not_found' ||
-                        error.code === 'invalid_request'))
+                        error.code === 'invalid_request')) ||
+                    // A quarantined, draining, or otherwise unavailable
+                    // Conversations runtime cannot serve this thread — treat
+                    // it as absent so the scan still reaches healthy runtimes
+                    // instead of rejecting the whole Promise.all.
+                    error instanceof ConversationRuntimeOwnershipError ||
+                    error instanceof DaemonDrainingError ||
+                    (error instanceof Error &&
+                      error.message ===
+                        'Live conversation runtime is unavailable.')
                   ) {
                     return false;
                   }

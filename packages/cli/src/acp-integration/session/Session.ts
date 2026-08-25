@@ -276,6 +276,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
+import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
@@ -704,12 +705,6 @@ function managedConversationBindingError(): RequestError {
     'The standalone working directory is missing.',
     { errorKind: 'working_directory_missing' },
   );
-}
-
-function sameManagedConversationPath(left: string, right: string): boolean {
-  return process.platform === 'win32'
-    ? left.toLowerCase() === right.toLowerCase()
-    : left === right;
 }
 
 function createDaemonToolLoopState(
@@ -3416,7 +3411,7 @@ export class Session implements SessionContext {
     }
     if (binding.state === 'committed' || binding.state === 'released') return;
     if (
-      !sameManagedConversationPath(
+      !isSameConversationPath(
         this.config.getTargetDir(),
         binding.expectation.child.canonicalPath,
       )
@@ -3443,7 +3438,7 @@ export class Session implements SessionContext {
     }
     if (binding.state === 'released') return;
     if (
-      !sameManagedConversationPath(
+      !isSameConversationPath(
         this.config.getTargetDir(),
         binding.expectation.child.canonicalPath,
       )
@@ -3475,7 +3470,7 @@ export class Session implements SessionContext {
     const binding = this.managedConversationBinding;
     if (
       binding?.state !== 'released' ||
-      !sameManagedConversationPath(
+      !isSameConversationPath(
         this.config.getTargetDir(),
         binding.expectation.child.canonicalPath,
       )

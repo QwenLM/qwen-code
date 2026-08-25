@@ -2569,7 +2569,17 @@ export class BridgeClient implements Client {
       );
       return;
     }
-    await entry.prepareArtifactWorkspace?.();
+    try {
+      await entry.prepareArtifactWorkspace?.();
+    } catch {
+      // A failing prepare rejects the whole update and would silently drop the
+      // batch; park it in the deferred queue so a later drain retries it.
+      this.deferArtifactBatch(entry, artifacts, options, turn);
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=deferred reason=workspace_prepare_failed`,
+      );
+      return;
+    }
     await this.upsertAndPublishArtifactsReady(entry, artifacts, options, turn);
   }
 
