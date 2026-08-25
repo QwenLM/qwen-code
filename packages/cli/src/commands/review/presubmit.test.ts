@@ -1143,6 +1143,25 @@ describe('presubmitCommand', () => {
       expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
     });
 
+    it('extracts the carried id past a MULTI-line leading comment on the attribution-off shape', async () => {
+      // An attribution-off post of a draft whose residue sat between the
+      // marker and the id leads with that residue; the marker-less
+      // readback strips it BEFORE the line split, so a multi-line
+      // comment cannot cut the id off the first line (#9940 review).
+      const result = await presubmitWithComments(
+        [
+          {
+            ...CARRIED_COMMENT,
+            body: '<!--\nrender-note\n-->R3-2: eq-form rescue asymmetry\n\n<!-- qwen-review critical -->',
+          },
+        ],
+        [{ path: 'src/parse-args.ts', line: 44, id: 'R3-2' }],
+      );
+      expect(result.existingComments.byBucket.overlap).toBe(1);
+      expect(result.existingComments.byBucket.repost).toBe(1);
+      expect(result.existingComments.repost[0].matchedIds).toEqual(['R3-2']);
+    });
+
     it('keeps a marker-carrying id-less comment out of the repost bucket when the location is ambiguous', async () => {
       // The attribution-off shape without a carried id: the id-less
       // fallback stays off while two ids share the location, so the

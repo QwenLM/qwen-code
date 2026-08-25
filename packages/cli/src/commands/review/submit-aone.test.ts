@@ -391,6 +391,41 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderr).toContain('1 fixed ruling(s)');
   });
 
+  it('an Aone submit never stamps ledger ids into the posted bodies', () => {
+    // The stamp exists for the GitHub review-thread graph; the Aone
+    // write path has none, so the `!aoneWrite` half of the stamp guard
+    // must hold even when compose minted ids (#9940 review).
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [],
+      draftedIds: ['R1-1'],
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    // The marker and claim stay adjacent — a stamp would splice its id
+    // between them — and no id prefix rides the body anywhere.
+    expect(req.comments).toEqual([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: expect.stringContaining(
+          '**[Critical]** Off-by-one in the loop bound.',
+        ),
+      },
+    ]);
+    expect((req.comments as Array<{ body: string }>)[0].body).not.toMatch(
+      /R\d+-\d+:/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
   it('the contextUnavailable claim crosses the Aone seam unchanged, in BOTH directions', () => {
     // true stays true — a run that never read the MR keeps its cap.
     expect(() =>

@@ -3830,6 +3830,14 @@ describe('the thread lifecycle', () => {
     expect(resolveCalls()).toHaveLength(1);
     expect(String(resolveCalls()[0]![5])).toBe('threadId=T9');
     expect(stdoutJson()).toMatchObject({ posted: true, threadsResolved: 1 });
+    // The pre-stamp population gap is disclosed on the resolve branch: a
+    // ruling that resolved id-bearing re-post threads can leave the
+    // id-less round-1 original open, and nothing else names it (#9940).
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('opened before id-stamping shipped'),
+      ),
+    ).toBe(true);
   });
 
   it('a fixed ruling resolves EVERY live own thread under the id — the multiplied-lineage cleanup', () => {
@@ -4075,6 +4083,28 @@ describe('the thread lifecycle', () => {
           source: 'review',
           severity: 'Critical',
           title: 'R1-2 the guard still drops a valid case',
+        },
+      ],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-Critical deferral entry re-voicing an id it also rules fixed', () => {
+    // A deferred Suggestion's title renders VERBATIM into the posted
+    // body's deferral list — an id-carrying channel the scan must cover
+    // like the others, whatever its severity (#9940 review).
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      deferredSuggestions: [
+        {
+          file: 'src/foo.ts',
+          line: 12,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'R1-2 loose review-config pins',
         },
       ],
     });

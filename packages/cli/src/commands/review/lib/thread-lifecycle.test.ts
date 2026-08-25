@@ -26,6 +26,7 @@ import {
   stampCarriedId,
   type ReviewThread,
 } from './thread-lifecycle.js';
+import { stripSeverityPrefix } from './inline-counts.js';
 
 function thread(over: Partial<ReviewThread>): ReviewThread {
   return {
@@ -84,6 +85,16 @@ describe('carriedFindingOf — the id a comment body leads with', () => {
     expect(
       carriedFindingOf('<!-- context --> R1-2: the claim\n\nrest of body'),
     ).toEqual({ id: 'R1-2', fixInduced: false });
+  });
+
+  it('reads the id past a MULTI-line leading comment — strip before split', () => {
+    // The bare leg mirrors the ledger builder's body-Criticals leg, which
+    // strips leading residue BEFORE the line split: a multi-line comment
+    // leading the posted body must not cut the id off the first line, or
+    // the thread goes unreachable next round (#9940 review).
+    expect(
+      carriedFindingOf('<!--\nrender-note\n-->R1-5: the claim\n\nrest'),
+    ).toEqual({ id: 'R1-5', fixInduced: false });
   });
 });
 
@@ -364,6 +375,53 @@ describe('stampCarriedId — the write side of the readback', () => {
     expect(stamped).toBe('**[Critical]** R1-1: <!-- x --> the claim');
     expect(carriedFindingOf(stamped)).toEqual({
       id: 'R1-1',
+      fixInduced: false,
+    });
+  });
+
+  it('normalizes separator variants — the stamped id reads back', () => {
+    // A colon or nothing right after the marker are admitted draft
+    // shapes; stamped between the marker and such a separator the id
+    // ends in `::` or `:x`, which LEDGER_ID_READBACK refuses — the write
+    // side producing text the read side cannot read (#9940 review).
+    for (const draft of [
+      '**[Critical]**: the claim',
+      '**[Critical]**\uff1a the claim',
+      '**[Critical]**the claim',
+    ]) {
+      const stamped = stampCarriedId(draft, 'R1-5');
+      expect(stamped).toBe('**[Critical]** R1-5: the claim');
+      expect(carriedFindingOf(stamped)).toEqual({
+        id: 'R1-5',
+        fixInduced: false,
+      });
+    }
+  });
+
+  it('stamps past a stacked-marker run — no stray marker survives the strip', () => {
+    // stripSeverityPrefix iterates a contiguous marker run; an id
+    // inserted BETWEEN the two markers breaks the run and the
+    // attribution-off strip posts the second marker VISIBLE, naming the
+    // wrong severity (#9940 review).
+    const stamped = stampCarriedId(
+      '**[Critical]** **[Suggestion]** the claim',
+      'R2-3',
+    );
+    expect(stamped).toBe('**[Critical]** R2-3: the claim');
+    expect(carriedFindingOf(stamped)).toEqual({
+      id: 'R2-3',
+      fixInduced: false,
+    });
+    expect(stripSeverityPrefix(stamped)).toBe('R2-3: the claim');
+  });
+
+  it('stamps a glued multi-line comment — the id still reads back', () => {
+    const stamped = stampCarriedId(
+      '**[Critical]**<!--\nrender-note\n-->the claim',
+      'R2-1',
+    );
+    expect(carriedFindingOf(stamped)).toEqual({
+      id: 'R2-1',
       fixInduced: false,
     });
   });

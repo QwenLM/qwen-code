@@ -100,8 +100,8 @@ function extractCarriedIds(body: string): string[] {
     // the surviving id token bars the id-less fallback.
     line = body
       .trimStart()
-      .split(/\r\n?|\n/)[0]
       .replace(LEADING_INVISIBLE_RE, '')
+      .split(/\r\n?|\n/)[0]
       .trim();
   }
   const carried = LEDGER_ID_READBACK.exec(line ?? '');

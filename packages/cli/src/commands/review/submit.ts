@@ -651,8 +651,9 @@ function inconsistencies(
    * re-voices its id from the body's deferral list — the body Criticals,
    * the cannot-tell Criticals (they cap the verdict by id exactly like
    * the body ones), the duplicate-drop account (its entries lead with the
-   * confirmed finding's id), and the Critical deferral entries compose
-   * relocates into the body Criticals (#9940 review).
+   * confirmed finding's id), and the deferral entries — a deferred
+   * entry's title renders verbatim into the body's deferral list at any
+   * severity (#9940 review).
    */
   fixedFindings: FixedFinding[] = [],
   preRerouteComments?: ReviewComment[],
@@ -714,11 +715,7 @@ function inconsistencies(
         ) {
           return;
         }
-        const { severity, title } = entry as {
-          severity?: unknown;
-          title?: unknown;
-        };
-        if (severity !== 'Critical') return;
+        const { title } = entry as { title?: unknown };
         const carried =
           typeof title === 'string' ? carriedFindingOf(title) : null;
         if (carried !== null && fixedIds.has(carried.id)) {
@@ -1572,7 +1569,10 @@ function submit(
         }));
         writeStderrLine(
           `Thread lifecycle: ${plan.resolves.length} thread(s) resolved ` +
-            `for ${fixedFindings.length} fixed ruling(s).`,
+            `for ${fixedFindings.length} fixed ruling(s). Threads this ` +
+            `account opened before id-stamping shipped carry no ledger ` +
+            `id and cannot be matched — if such an original is still ` +
+            `open, resolve it by hand.`,
         );
       }
       for (const id of plan.unmatchedFixed) {

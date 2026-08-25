@@ -56,6 +56,7 @@ import {
   SUGGESTION_PREFIX,
   carriedClaimLine,
   severityOf,
+  stripSeverityPrefix,
 } from './inline-counts.js';
 import type { FixedFinding } from '../compose-review.js';
 
@@ -205,8 +206,8 @@ export function carriedFindingOf(body: unknown): {
     marked ??
     body
       .trimStart()
-      .split(/\r\n?|\n/)[0]
       .replace(LEADING_INVISIBLE_RE, '')
+      .split(/\r\n?|\n/)[0]
   ).trim();
   if (!LEDGER_ID_READBACK.test(line)) return null;
   const { id, fixInduced } = readClaim(line);
@@ -221,8 +222,15 @@ export function carriedFindingOf(body: unknown): {
  * the stamp a fresh finding's root is id-less, and no later carry or
  * `fixed` ruling can ever reach the thread (#9940 review).
  *
- * The stamp is an INSERTION right after the severity marker; it rewrites
- * nothing else. A body that already leads with a carried id keeps it —
+ * The post-marker region is NORMALIZED before the insertion — the whole
+ * marker run, residue and separators collapse through the same
+ * `stripSeverityPrefix` the attribution-off post applies — so the stamp
+ * lands in the canonical `MARKER id: claim` shape whatever admitted draft
+ * shape arrived: an id spliced between stacked markers breaks the
+ * contiguous run the strip iterates, and one spliced before a glued
+ * separator or comment lands in `id::` / `id:x` that the readback grammar
+ * refuses (#9940 review). A body that already leads with a carried id
+ * keeps it —
  * the model's carry stays verbatim, and a re-minted stray id keeps
  * whatever claim line it arrived with (the ledger records the re-mint;
  * the root and the marker disagree exactly as they did before stamps).
@@ -237,7 +245,7 @@ export function stampCarriedId(body: string, id: string): string {
   const lead = LEADING_INVISIBLE_RE.exec(body)?.[0] ?? '';
   const visible = body.slice(lead.length);
   if (!visible.startsWith(marker)) return body;
-  return `${lead}${marker} ${id}:${visible.slice(marker.length)}`;
+  return `${lead}${marker} ${id}: ${stripSeverityPrefix(visible)}`;
 }
 
 export interface ThreadActionPlan {
