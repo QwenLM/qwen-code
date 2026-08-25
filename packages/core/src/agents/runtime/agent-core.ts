@@ -246,7 +246,8 @@ export function extractParentToolNames(
     new Set(
       (
         generationConfig?.tools as
-          Array<{ functionDeclarations?: FunctionDeclaration[] }> | undefined
+          | Array<{ functionDeclarations?: FunctionDeclaration[] }>
+          | undefined
       )
         ?.flatMap((tool) => tool.functionDeclarations ?? [])
         .map((declaration) => declaration.name)
@@ -1614,7 +1615,8 @@ export class AgentCore {
     const registeredTool = this.runtimeContext
       .getToolRegistry()
       .getTool(toolName) as
-      { serverName?: unknown; serverToolName?: unknown } | undefined;
+      | { serverName?: unknown; serverToolName?: unknown }
+      | undefined;
     if (
       typeof registeredTool?.serverName !== 'string' ||
       typeof registeredTool.serverToolName !== 'string'
