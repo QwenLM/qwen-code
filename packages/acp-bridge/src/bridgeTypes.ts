@@ -1952,7 +1952,10 @@ export interface AcpSessionBridge {
   ): Promise<boolean>;
 
   /** Delete all persisted attachments after the session itself is deleted. */
-  deleteSessionAttachments(sessionId: string): Promise<void>;
+  deleteSessionAttachments(
+    sessionId: string,
+    options?: { assertCanCommit?: () => void },
+  ): Promise<void>;
 
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(

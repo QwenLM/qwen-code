@@ -64,6 +64,7 @@ import {
 } from './externalToolGuard.js';
 import type { ChannelFactory } from './channel.js';
 import type {
+  BridgeOptions,
   BridgeFreshSessionAdmissionContext,
   BridgeTelemetry,
 } from './bridgeOptions.js';
@@ -113,6 +114,7 @@ import {
 } from './internal/testUtils.js';
 import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
 import { SessionAttachmentStore } from './sessionAttachments.js';
+import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -18706,7 +18708,7 @@ describe('createAcpSessionBridge', () => {
     /** Spin up a bridge with a hand-driven channel; returns the bridge,
      *  session, and a function the test uses to call `requestPermission`
      *  from the agent side. */
-    async function setupForPermission() {
+    async function setupForPermission(opts: Partial<BridgeOptions> = {}) {
       let capturedConn: AgentSideConnection | undefined;
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {
@@ -18736,10 +18738,102 @@ describe('createAcpSessionBridge', () => {
           },
         };
       };
-      const bridge = makeBridge({ channelFactory: factory });
+      const bridge = makeBridge({ ...opts, channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       return { bridge, session, conn: capturedConn!, handles };
     }
+
+    it('disables the permission timer by default and honors an explicit timeout', async () => {
+      const requestPermission = (
+        conn: AgentSideConnection,
+        sessionId: string,
+        toolCall: Record<string, unknown>,
+      ) =>
+        (
+          conn as unknown as {
+            requestPermission(p: unknown): Promise<unknown>;
+          }
+        ).requestPermission({
+          sessionId,
+          toolCall,
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        });
+      const resolvePending = (
+        bridge: ReturnType<typeof makeBridge>,
+        sessionId: string,
+      ) => {
+        const requestId =
+          bridge.getSessionSummary(sessionId)?.pendingInteractions?.[0]
+            ?.requestId;
+        expect(requestId).toBeDefined();
+        bridge.respondToPermission(requestId!, {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        });
+      };
+      const exerciseBothInteractionKinds = async (
+        bridge: ReturnType<typeof makeBridge>,
+        sessionId: string,
+        conn: AgentSideConnection,
+        expectedTimeoutMs: number,
+      ) => {
+        const toolCalls = [
+          { toolCallId: 'ordinary', title: 'Need permission' },
+          {
+            toolCallId: 'question',
+            title: 'Need an answer',
+            _meta: { qwenInteractionKind: 'user_question' },
+          },
+        ];
+        for (const toolCall of toolCalls) {
+          const firstRelevantCall = mediatorRequest.mock.calls.length;
+          const response = requestPermission(conn, sessionId, toolCall);
+          await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+          expect(mediatorRequest.mock.calls).toHaveLength(
+            firstRelevantCall + 1,
+          );
+          expect(mediatorRequest.mock.calls[firstRelevantCall]?.[1]).toBe(
+            expectedTimeoutMs,
+          );
+          resolvePending(bridge, sessionId);
+          await response;
+        }
+      };
+      const mediatorRequest = vi.spyOn(
+        MultiClientPermissionMediator.prototype,
+        'request',
+      );
+      try {
+        const { bridge, session, conn } = await setupForPermission();
+        try {
+          await exerciseBothInteractionKinds(
+            bridge,
+            session.sessionId,
+            conn,
+            0,
+          );
+        } finally {
+          await bridge.cancelSession(session.sessionId);
+          await bridge.shutdown();
+        }
+
+        const configured = await setupForPermission({
+          permissionResponseTimeoutMs: 45_000,
+        });
+        try {
+          await exerciseBothInteractionKinds(
+            configured.bridge,
+            configured.session.sessionId,
+            configured.conn,
+            45_000,
+          );
+        } finally {
+          await configured.bridge.cancelSession(configured.session.sessionId);
+          await configured.bridge.shutdown();
+        }
+      } finally {
+        mediatorRequest.mockRestore();
+      }
+    });
 
     it('publishes a permission_request event with a generated requestId and awaits a vote', async () => {
       const { bridge, session, conn } = await setupForPermission();

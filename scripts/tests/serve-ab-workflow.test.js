@@ -7,17 +7,19 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -25,19 +27,33 @@ const workflow = readFileSync('.github/workflows/serve-ab.yml', 'utf8');
 
 const job = parse(workflow).jobs['ab'];
 const steps = job.steps;
-const WIPE = 'Wipe stale workspace before checkout';
+const WIPE = 'Wipe stale workspace except the shared .git before checkout';
 const wipe = steps.find((s) => s.name === WIPE);
 
 // Runs the real wipe script under the runner's shell flags: this job sets
 // `defaults.run.shell: bash`, which GitHub Actions executes with
 // `-eo pipefail`, so the exec tests must reproduce that instead of hiding
 // it behind bare `bash -c`.
-const runWipe = (env, options = {}) =>
-  execFileSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+const runWipe = (env, options = {}) => {
+  // GitHub Actions starts the step with its CWD in GITHUB_WORKSPACE, so
+  // the harness does too — a symlinked root then opens the link's target
+  // as the CWD, exactly the shape the kept-.git tail must contain. The
+  // heal fixtures hand over a workspace that is a file or a dangling
+  // symlink — no cwd to stand in — so pin the parent instead: a mkdtemp
+  // dir, never a repo.
+  let cwd = env.GITHUB_WORKSPACE;
+  try {
+    if (!statSync(cwd).isDirectory()) cwd = dirname(cwd);
+  } catch {
+    cwd = dirname(cwd);
+  }
+  return execFileSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
     encoding: 'utf8',
+    cwd,
     env: { ...process.env, ...env },
     ...options,
   });
+};
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
 // extension. Probe the host before asserting GNU-specific path behavior.
@@ -91,11 +107,19 @@ describe('serve-ab pre-checkout workspace wipe', () => {
       "refusing runner workspace path containing '..'",
     );
     expect(wipe.run).toContain('runner workspace resolved to /');
-    // Exit contract: the wipe stays bare on purpose — under the job's
-    // `-eo pipefail` a wipe that cannot clear the workspace fails the job
-    // here instead of building both checkouts on top of the leftovers.
-    // `|| true` would silently void that.
-    expect(wipe.run).not.toContain('|| true');
+    // Exit contract: the guard and the destructive lines stay bare on
+    // purpose — under the job's `-eo pipefail` a wipe that cannot clear the
+    // workspace fails the job here instead of building both checkouts on
+    // top of the leftovers. `|| true` may appear only on the kept-.git
+    // defang scrub — the config.worktree defang pair and the allowlist
+    // sweep — mirroring qwen-triage.yml's config-sanitize.
+    const loosened = wipe.run
+      .split('\n')
+      .filter((line) => line.includes('|| true'));
+    expect(loosened).toHaveLength(3);
+    expect(loosened[0]).toContain('--git-path config.worktree');
+    expect(loosened[1]).toContain('--unset-all extensions.worktreeConfig');
+    expect(loosened[2]).toContain('config --local --name-only --list');
   });
 
   it('carries the symlink heal, ordered and bounded (#9480)', () => {
@@ -135,7 +159,7 @@ describe('serve-ab pre-checkout workspace wipe', () => {
   });
 
   it.skipIf(!hasGnuRealpath)(
-    'wipes a legitimate workspace inside the runner workspace',
+    'wipes a legitimate workspace but keeps and defangs the shared .git',
     () => {
       const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-ok-'));
       const ws = join(parent, 'repo');
@@ -145,13 +169,148 @@ describe('serve-ab pre-checkout workspace wipe', () => {
       mkdirSync(join(ws, 'base'), { recursive: true });
       writeFileSync(join(ws, 'head', 'package.json'), '{}');
       writeFileSync(join(ws, 'bundle.tgz'), 'x');
+      // A shared root .git shaped like the real one: objects are the reason
+      // it is kept; hooks, info/attributes, and non-allowlisted local
+      // config are the exec vectors that must not survive into the next
+      // job's checkout.
+      execFileSync('git', ['init', '--quiet', ws]);
+      mkdirSync(join(ws, '.git', 'objects', 'pack'), { recursive: true });
+      writeFileSync(join(ws, '.git', 'objects', 'pack', 'sentinel'), 'x');
+      writeFileSync(
+        join(ws, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\necho pwned\n',
+      );
+      writeFileSync(join(ws, '.git', 'info', 'attributes'), '* filter=x\n');
+      execFileSync('git', ['config', '--local', 'alias.pwned', '!echo pwned'], {
+        cwd: ws,
+      });
+      execFileSync('git', ['config', '--local', 'safe.directory', ws], {
+        cwd: ws,
+      });
       try {
         runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
-        expect(readdirSync(ws)).toEqual([]);
+        expect(readdirSync(ws)).toEqual(['.git']);
+        expect(
+          readFileSync(join(ws, '.git', 'objects', 'pack', 'sentinel'), 'utf8'),
+        ).toBe('x');
+        expect(existsSync(join(ws, '.git', 'hooks'))).toBe(false);
+        expect(existsSync(join(ws, '.git', 'info', 'attributes'))).toBe(false);
+        expect(() =>
+          execFileSync('git', ['config', '--local', 'alias.pwned'], {
+            cwd: ws,
+            stdio: 'pipe',
+          }),
+        ).toThrow();
+        expect(
+          execFileSync('git', ['config', '--local', 'safe.directory'], {
+            cwd: ws,
+            encoding: 'utf8',
+          }).trim(),
+        ).toBe(ws);
         // The directory itself survives: the checkouts clone into it next.
         expect(wipe.run).toContain('-mindepth 1 -maxdepth 1');
       } finally {
         rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'defangs the worktreeConfig split-config bypass',
+    () => {
+      // extensions.worktreeConfig activates .git/config.worktree, a second
+      // local file that `git config --local` neither lists nor unsets — a
+      // planted exec vector there survives the allowlist sweep and fires on
+      // the next job's checkout. The defang deletes the file and drops the
+      // extension, mirroring qwen-triage.yml's hardened config-sanitize.
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-wtcfg-'));
+      const ws = join(parent, 'repo');
+      execFileSync('git', ['init', '--quiet', ws]);
+      execFileSync(
+        'git',
+        ['config', '--local', 'extensions.worktreeConfig', 'true'],
+        { cwd: ws },
+      );
+      execFileSync(
+        'git',
+        ['config', '--worktree', 'core.hooksPath', join(parent, 'evil-hooks')],
+        { cwd: ws },
+      );
+      try {
+        runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
+        expect(existsSync(join(ws, '.git', 'config.worktree'))).toBe(false);
+        expect(() =>
+          execFileSync(
+            'git',
+            ['config', '--local', 'extensions.worktreeConfig'],
+            { cwd: ws, stdio: 'pipe' },
+          ),
+        ).toThrow();
+        // Full-scope resolution: the planted exec vector no longer resolves.
+        expect(
+          spawnSync('git', ['-C', ws, 'config', '--get', 'core.hooksPath'], {
+            encoding: 'utf8',
+          }).status,
+        ).not.toBe(0);
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!hasGnuRealpath)(
+    'never scrubs a repo outside a healed workspace',
+    () => {
+      // The heal unlinks the workspace symlink and recreates it as an empty
+      // real dir, but the step's CWD was opened through the link and still
+      // IS the target repo. The kept-.git tail must stay anchored to
+      // $WS/.git: discovering the repo from the CWD here unsets the
+      // target's local config and deletes its config.worktree — writes
+      // outside the workspace. The target carries the full split-config
+      // shape so every anchored line has its own witness.
+      const parent = mkdtempSync(join(tmpdir(), 'serve-ab-heal-scrub-'));
+      const target = mkdtempSync(join(tmpdir(), 'serve-ab-heal-target-'));
+      execFileSync('git', ['init', '--quiet', target]);
+      execFileSync(
+        'git',
+        ['config', '--local', 'extensions.worktreeConfig', 'true'],
+        { cwd: target },
+      );
+      execFileSync(
+        'git',
+        ['config', '--worktree', 'core.hooksPath', join(target, 'evil')],
+        { cwd: target },
+      );
+      execFileSync('git', ['config', '--local', 'alias.pwned', '!echo pwned'], {
+        cwd: target,
+      });
+      const ws = join(parent, 'repo');
+      symlinkSync(target, ws);
+      try {
+        runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
+        // The workspace heals to an empty real dir...
+        expect(lstatSync(ws).isSymbolicLink()).toBe(false);
+        expect(lstatSync(ws).isDirectory()).toBe(true);
+        expect(readdirSync(ws)).toEqual([]);
+        // ...and the link target's repo is untouched: the split file, the
+        // extension, and the hostile local key all survive.
+        expect(existsSync(join(target, '.git', 'config.worktree'))).toBe(true);
+        expect(
+          execFileSync(
+            'git',
+            ['config', '--local', 'extensions.worktreeConfig'],
+            { cwd: target, encoding: 'utf8' },
+          ).trim(),
+        ).toBe('true');
+        expect(
+          execFileSync('git', ['config', '--local', 'alias.pwned'], {
+            cwd: target,
+            encoding: 'utf8',
+          }).trim(),
+        ).toBe('!echo pwned');
+      } finally {
+        rmSync(parent, { recursive: true, force: true });
+        rmSync(target, { recursive: true, force: true });
       }
     },
   );
