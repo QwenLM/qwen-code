@@ -78,17 +78,15 @@ Lift history (#4175 Mode B daemon roadmap):
   `PermissionMediator`, session-update fan-out into `EventBus`,
   child-side `extNotification` routing, early-event buffer + tombstone
   bookkeeping, inline fs proxy for `writeTextFile` / `readTextFile`.
-  Exports the supporting
-  `PendingPermission` / `PermissionResolutionRecord` /
-  `BridgeClientSessionEntry` types + `MAX_RESOLVED_PERMISSION_RECORDS`
-  cap that the factory's bookkeeping maps consume.
+  Exports the supporting `BridgeClientSessionEntry` type consumed by
+  the factory's `resolveEntry` callback.
 - `bridge` (F1) — `createHttpAcpBridge` factory closure (~3000 LOC)
   - `ChannelInfo` / `SessionEntry` interfaces + factory-only
     helpers (`withTimeout`, `canonicalizeExistingAncestor`,
     `verifyParentWithinWorkspace`, debug log helpers,
-    `hasControlCharacter`) + factory constants. Builds the
-    bookkeeping closures (`resolveEntry`, `registerPending`, etc.)
-    and wires them into `BridgeClient`.
+    `hasControlCharacter`) + factory constants. Owns session
+    bookkeeping, constructs the `PermissionMediator`, and wires an
+    inline `resolveEntry` callback into `BridgeClient`.
 - `bridgeFileSystem` (F1) — `BridgeFileSystem` interface for the
   ACP fs proxy. When wired through `BridgeOptions.fileSystem`,
   `BridgeClient.readTextFile` / `BridgeClient.writeTextFile`

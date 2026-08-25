@@ -18,8 +18,9 @@
  *   default; preserves the live-collaboration UX.
  * - `designated` — only the `originatorClientId` that started the
  *   prompt may answer; other clients see `permission_forbidden`.
- *   Use case: per-tenant SaaS where a UI surface must own its own
- *   approvals.
+ *   If the request has no originator, resolution falls back to
+ *   first-responder. Use case: per-tenant SaaS where a UI surface
+ *   must own its own approvals.
  * - `consensus` — N-of-M quorum across the session client IDs
  *   captured when the permission request is issued; intermediate
  *   `permission_partial_vote` events let UIs render progress. Use case:
@@ -38,10 +39,7 @@ export type PermissionPolicy =
   | 'local-only';
 
 /**
- * One pending permission tracked by a `PermissionMediator`. The
- * shape mirrors the current `PendingPermission` record in
- * `@qwen-code/acp-bridge/bridgeClient`
- * so the mediation implementation's lift is a structural rename rather than a redesign.
+ * One pending permission tracked by a `PermissionMediator`.
  */
 export interface PermissionRequestRecord {
   /** ACP `RequestPermission` request id, unique per session. */
