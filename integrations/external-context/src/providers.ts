@@ -192,14 +192,18 @@ export class Mem0OssAdapter
     limit: number;
     signal: AbortSignal;
   }): Promise<readonly ExternalContextItem[]> {
-    const filters: Record<string, string> = { user_id: this.config.userId };
-    if (this.config.appId !== undefined) {
-      filters['app_id'] = this.config.appId;
+    const body: Record<string, unknown> = {
+      query: input.query,
+      limit: input.limit,
+      filters: { user_id: this.config.userId },
+    };
+    if (this.config.agentId !== undefined) {
+      body['agent_id'] = this.config.agentId;
     }
     const response = await postJson({
       url: new URL('/v2/memories/search', this.baseUrl),
       authorization: `Token ${this.config.apiKey}`,
-      body: { query: input.query, limit: input.limit, filters },
+      body,
       signal: input.signal,
     });
     return parseMem0Items(response);
@@ -214,8 +218,8 @@ export class Mem0OssAdapter
       user_id: this.config.userId,
       infer: false,
     };
-    if (this.config.appId !== undefined) {
-      body['app_id'] = this.config.appId;
+    if (this.config.agentId !== undefined) {
+      body['agent_id'] = this.config.agentId;
     }
     let response: unknown;
     try {

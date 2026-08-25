@@ -77,7 +77,7 @@ export interface Mem0OssProviderConfig {
   apiKeyEnv: string;
   apiKey: string;
   userId: string;
-  appId?: string;
+  agentId?: string;
   allowInsecureHttp?: boolean;
 }
 

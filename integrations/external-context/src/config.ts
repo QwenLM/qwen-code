@@ -31,7 +31,7 @@ const providerSchema = z.discriminatedUnion('type', [
       baseUrl: z.string().url(),
       apiKeyEnv: z.string().regex(ENV_NAME),
       userId: z.string().trim().min(1).max(256),
-      appId: z.string().trim().min(1).max(256).optional(),
+      agentId: z.string().trim().min(1).max(256).optional(),
       allowInsecureHttp: z.boolean().optional(),
     })
     .strict(),

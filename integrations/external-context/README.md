@@ -383,8 +383,9 @@ Provider audit or access logs may still be retained. See
 
 The `mem0` provider type targets services that expose the open-source Mem0
 REST API, such as a self-hosted mem0 server or Aliyun PolarDB Mem0. Search
-calls `POST {baseUrl}/v2/memories/search` with the configured `user_id` (and
-optional `app_id`) under `filters`; writes call `POST {baseUrl}/v1/memories`
+calls `POST {baseUrl}/v2/memories/search` with the configured `user_id` under
+`filters` and the optional `agent_id` as a top-level field; writes call `POST
+{baseUrl}/v1/memories`
 with one exact user message and `infer: false`. Both paths are fixed by the
 open-source Mem0 protocol; the `baseUrl` (scheme, host, and port only) is the
 operator's switch for choosing the vendor — moving from one managed mem0

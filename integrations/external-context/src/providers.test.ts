@@ -633,7 +633,7 @@ describe('Mem0OssAdapter', () => {
     ).toThrow('Provider URL must not contain credentials');
   });
 
-  it('binds user_id and app_id into the fixed OSS search request', async () => {
+  it('binds user_id and agent_id into the fixed OSS search request', async () => {
     let requestBody: unknown;
     let requestPath: string | undefined;
     let authorization: string | undefined;
@@ -658,14 +658,15 @@ describe('Mem0OssAdapter', () => {
     expect(requestBody).toEqual({
       query: 'deployment',
       limit: 3,
-      filters: { user_id: 'fixed-user', app_id: 'fixed-repository' },
+      agent_id: 'fixed-repository',
+      filters: { user_id: 'fixed-user' },
     });
     expect(items).toEqual([
       { id: 'memory-1', content: 'repository policy', score: 0.9 },
     ]);
   });
 
-  it('omits app_id from search filters when not configured', async () => {
+  it('omits agent_id from the search request when not configured', async () => {
     let requestBody: unknown;
     const baseUrl = await startServer(async (request, response) => {
       requestBody = JSON.parse(await readBody(request));
@@ -711,7 +712,7 @@ describe('Mem0OssAdapter', () => {
     expect(requestBody).toEqual({
       messages: [{ role: 'user', content }],
       user_id: 'fixed-user',
-      app_id: 'fixed-repository',
+      agent_id: 'fixed-repository',
       infer: false,
     });
   });
@@ -798,14 +799,14 @@ describe('Mem0OssAdapter', () => {
   });
 });
 
-function ossAdapter(baseUrl: string, appId?: string) {
+function ossAdapter(baseUrl: string, agentId?: string) {
   return new Mem0OssAdapter({
     type: 'mem0',
     baseUrl,
     apiKeyEnv: 'MEM0_API_KEY',
     apiKey: 'project-key',
     userId: 'fixed-user',
-    ...(appId === undefined ? {} : { appId }),
+    ...(agentId === undefined ? {} : { agentId }),
   });
 }
 

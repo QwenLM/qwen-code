@@ -248,7 +248,7 @@ describe('extension manifest', () => {
         baseUrl: 'https://<your-mem0-endpoint>',
         apiKeyEnv: 'MEM0_API_KEY',
         userId: '<your-user-id>',
-        appId: 'qwen-code',
+        agentId: 'qwen-code',
       },
     });
 
@@ -271,7 +271,7 @@ describe('extension manifest', () => {
       expect(loaded.provider).toMatchObject({
         type: 'mem0',
         userId: 'example-user',
-        appId: 'qwen-code',
+        agentId: 'qwen-code',
       });
       expect(() => createProvider(loaded.provider)).not.toThrow();
     } finally {
