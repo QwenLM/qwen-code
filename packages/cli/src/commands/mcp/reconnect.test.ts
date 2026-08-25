@@ -67,6 +67,7 @@ describe('mcp reconnect command', () => {
     getToolRegistry: vi.Mock;
     shutdown: vi.Mock;
     initialize: vi.Mock;
+    getMcpServerUnavailableReason: vi.Mock;
     isMcpServerDisabled: vi.Mock;
     isMcpServerPendingApproval: vi.Mock;
     isTrustedFolder: vi.Mock;
@@ -94,6 +95,7 @@ describe('mcp reconnect command', () => {
       initialize: vi.fn().mockResolvedValue(undefined),
       // Default: nothing is skipped, so verification failures report the
       // generic connection message.
+      getMcpServerUnavailableReason: vi.fn().mockReturnValue(undefined),
       isMcpServerDisabled: vi.fn().mockReturnValue(false),
       isMcpServerPendingApproval: vi.fn().mockReturnValue(false),
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -709,6 +711,122 @@ describe('mcp reconnect command', () => {
         'Failed to reconnect 1 of 2 configured server(s).',
       );
       expect(mockProcessExit).toHaveBeenCalledWith(1);
+    });
+
+    it('reports an excluded server with the mcp.excluded reason, not the disabled flag', async () => {
+      // A real Config answers `isMcpServerDisabled` = true for an
+      // `mcp.excluded` server, so pre-fix the skip was misattributed to a
+      // per-server disabled flag that does not exist. The admission
+      // classifier (`getMcpServerUnavailableReason`) must win.
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockReturnValue('disconnected');
+      mockConfig.getMcpServerUnavailableReason.mockReturnValue('excluded');
+      mockConfig.isMcpServerDisabled.mockReturnValue(true);
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Failed to reconnect to server "test-server": no connection attempt was made: server is excluded in settings (mcp.excluded)',
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
+    });
+
+    it('reports an allow-list-blocked server as skipped instead of a failed connection', async () => {
+      // A server the `mcp.allowed` list keeps out is a deliberate skip;
+      // pre-fix it fell through every classifier branch and was reported
+      // as a failed connection attempt (status: disconnected).
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockReturnValue('disconnected');
+      mockConfig.getMcpServerUnavailableReason.mockReturnValue('not_allowed');
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Failed to reconnect to server "test-server": no connection attempt was made: server is not in the mcp.allowed list',
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
+    });
+
+    it('--all reports an allow-list-blocked server as skipped without counting it as a failure', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'server-one': { command: '/path/to/server1' },
+            'server-two': { command: '/path/to/server2' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockImplementation((name: string) =>
+        name === 'server-one' ? 'connected' : 'disconnected',
+      );
+      mockConfig.getMcpServerUnavailableReason.mockImplementation(
+        (name: string) => (name === 'server-two' ? 'not_allowed' : undefined),
+      );
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': undefined, all: true });
+
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '✓ server-one: Reconnected successfully',
+      );
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '- server-two: Skipped - server is not in the mcp.allowed list',
+      );
+      // An intentional skip must not count toward the failure total —
+      // otherwise one allow-list-blocked server forces exit 1 forever.
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
+      expect(mockProcessExit).not.toHaveBeenCalled();
+    });
+
+    it('--all reports an excluded server as skipped without counting it as a failure', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'server-one': { command: '/path/to/server1' },
+            'server-two': { command: '/path/to/server2' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockImplementation((name: string) =>
+        name === 'server-one' ? 'connected' : 'disconnected',
+      );
+      mockConfig.getMcpServerUnavailableReason.mockImplementation(
+        (name: string) => (name === 'server-two' ? 'excluded' : undefined),
+      );
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': undefined, all: true });
+
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '✓ server-one: Reconnected successfully',
+      );
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '- server-two: Skipped - server is excluded in settings (mcp.excluded)',
+      );
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
+      expect(mockProcessExit).not.toHaveBeenCalled();
     });
   });
 

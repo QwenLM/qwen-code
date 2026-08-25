@@ -157,18 +157,31 @@ function createReconnectError(
 
 /**
  * Discovery skips some servers deliberately BEFORE any connection attempt —
+ * servers off the `mcp.allowed` allow-list, servers in `mcp.excluded`,
  * disabled servers, `.mcp.json` servers pending approval, untrusted
  * workspaces — and `getMCPServerStatus` defaults never-seen servers to
  * DISCONNECTED. Without this check every skip would be reported as a failed
  * connection attempt, sending whoever is debugging to chase networking for a
  * server the client never tried to contact. The skip reasons are cheap and
- * knowable, so report them instead. (Budget-refused slots are decided inside
- * the client manager and stay on the generic failure message.)
+ * knowable, so report them instead. The allow/exclude gates reuse the same
+ * classifier as the tool-not-found path (`getMcpServerUnavailableReason`):
+ * an allow-list-blocked server otherwise falls through every branch below
+ * and is misreported as a failed connection on every run, and an
+ * `mcp.excluded` server is misattributed to the per-server disabled flag
+ * (issue #9944). (Budget-refused slots are decided inside the client
+ * manager and stay on the generic failure message.)
  */
 function describeSkippedConnectionReason(
   config: Config,
   serverName: string,
 ): string | undefined {
+  const unavailableReason = config.getMcpServerUnavailableReason(serverName);
+  if (unavailableReason === 'excluded') {
+    return 'server is excluded in settings (mcp.excluded)';
+  }
+  if (unavailableReason === 'not_allowed') {
+    return 'server is not in the mcp.allowed list';
+  }
   if (config.isMcpServerDisabled(serverName)) {
     return 'server is disabled in settings';
   }
