@@ -12646,6 +12646,93 @@ describe('Session', () => {
         });
       });
 
+      it('returns cancelled when a cancel lands in the override route-key resolution window (#9529)', async () => {
+        // First override send records an over-limit count under the
+        // override route; on the second same-override send the route-key
+        // resolution outlives a cancel. The abort re-check after the
+        // resolution must win over the session-token-limit gate (101 > 100
+        // cached), which would otherwise mislabel the cancel as
+        // 'max_tokens' and drop the user turn from history.
+        setupVisionRouteOverrideMocks(mockConfig);
+
+        const visionPrompt: PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            { type: 'image', mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          ],
+        };
+
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = createOverLimitUsageSendStream();
+
+        await expect(session.prompt(visionPrompt)).resolves.toEqual({
+          stopReason: 'end_turn',
+        });
+
+        // Second same-override send: compression fails so the gate falls
+        // back to the cached over-limit count, and the route-key
+        // resolution hangs until released — the cancel lands inside that
+        // window and the resolver settles only afterwards.
+        mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+        let releaseRouteResolution!: () => void;
+        const resolveForModel = vi.fn().mockImplementation(
+          () =>
+            new Promise<{
+              contentGenerator: Record<string, never>;
+              contentGeneratorConfig: { model: string };
+              model: string;
+            }>((resolve) => {
+              releaseRouteResolution = () =>
+                resolve({
+                  contentGenerator: {},
+                  contentGeneratorConfig: { model: 'vision-agent' },
+                  model: 'vision-agent',
+                });
+            }),
+        );
+        mockConfig.getBaseLlmClient = vi
+          .fn()
+          .mockReturnValue({ resolveForModel });
+
+        const promptPromise = session.prompt(visionPrompt);
+        await vi.waitFor(() => {
+          expect(resolveForModel).toHaveBeenCalled();
+        });
+
+        await session.cancelPendingPrompt();
+        releaseRouteResolution();
+
+        await expect(promptPromise).resolves.toEqual({
+          stopReason: 'cancelled',
+        });
+        // The send never went out; the cancelled user turn was restored to
+        // history and no token-limit diagnostic was emitted.
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.any(Array),
+        });
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'Session token limit exceeded: 101 tokens > 100 limit. ' +
+                'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+            },
+          },
+        });
+      });
+
       it('surfaces an automatic compression AbortError without an aborted signal', async () => {
         const error = new Error('compression transport aborted unexpectedly');
         error.name = 'AbortError';

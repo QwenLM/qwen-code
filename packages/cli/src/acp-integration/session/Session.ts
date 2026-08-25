@@ -6832,6 +6832,12 @@ export class Session implements SessionContext {
       options.modelOverride ??
       this.config.getModel();
     const requestRouteKey = await this.#requestRouteKeyForModel(model);
+    if (abortSignal.aborted) {
+      debugLogger.debug(
+        `Send aborted after request route key resolution for prompt ${promptId}`,
+      );
+      return { responseStream: null, stopReason: 'cancelled' };
+    }
     // Recorded with the resolved request route key: a COMPRESSED result
     // must invalidate every retained route count, not just the active
     // route's (see #invalidateRouteTokenCountsForCompression).
