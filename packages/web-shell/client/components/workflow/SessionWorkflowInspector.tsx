@@ -4,6 +4,7 @@ import type {
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import {
+  AlertCircleIcon,
   ArrowUpRightIcon,
   ChevronRightIcon,
   GitBranchIcon,
@@ -242,9 +243,10 @@ export function SessionWorkflowInspector({
               onClick={() => onSelectedTodoIdChange(todo.id)}
               type="button"
             >
-              <span aria-hidden="true" className={styles.attentionGlyph}>
-                !
-              </span>
+              <AlertCircleIcon
+                aria-hidden="true"
+                className={styles.attentionGlyph}
+              />
               <span>{todo.content}</span>
               <ChevronRightIcon aria-hidden="true" />
             </button>
@@ -300,9 +302,12 @@ export function SessionWorkflowInspector({
             const tool = task.toolUseId
               ? projection.toolsByCallId.get(task.toolUseId)
               : undefined;
+            const at = task.endTime ?? task.startTime;
             const content = (
               <>
-                <time>{workflowClock(task.endTime ?? task.startTime)}</time>
+                <time dateTime={at ? new Date(at).toISOString() : undefined}>
+                  {workflowClock(at)}
+                </time>
                 <span className={styles.activityAvatar}>
                   {workflowInitials(task.subagentType || task.label)}
                 </span>

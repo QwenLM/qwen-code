@@ -203,20 +203,17 @@
   box-shadow: inset 2px 0 0 var(--status-attention-fg);
 }
 
-.attentionGlyph {
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  border-radius: 999px;
-  color: var(--status-attention-fg);
-  background: var(--status-attention-bg);
-  font-weight: 700;
-}
-
 .attention svg {
   width: 14px;
   height: 14px;
+}
+
+/* Two-class selector so this wins over the row's generic icon size above. */
+.attention .attentionGlyph {
+  width: 18px;
+  height: 18px;
+  justify-self: center;
+  color: var(--status-attention-fg);
 }
 
 .sectionHeading h2 {
