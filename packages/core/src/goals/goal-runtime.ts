@@ -16,12 +16,15 @@ import {
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
 import {
+  isGoalCheckpointStalled,
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerifier,
 } from './goal-checkpoint.js';
 import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
 import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  GOAL_CHECKPOINT_STALL_LIMIT,
+  GOAL_CHECKPOINT_STALLED_REASON,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
   isRepeatedBlockerProposal,
@@ -274,6 +277,14 @@ export function createGoalRuntime(
    * Goal accounting is bookkeeping: a ledger that is absent or that throws
    * costs the Goal its spend figure for this turn, never the turn itself.
    */
+  const withCheckpointStalls = (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    checkpointStalls: number,
+  ): NonNullable<GoalSnapshotV2['goal']> => {
+    const { checkpointStalls: _previous, ...rest } = goal;
+    return checkpointStalls > 0 ? { ...rest, checkpointStalls } : rest;
+  };
+
   const takeTurnTokens = (turnId: string): number => {
     if (!options.tokenLedger) return 0;
     try {
@@ -757,10 +768,12 @@ export function createGoalRuntime(
       const persistedCause =
         nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
       const now = Date.now();
+      // The window had room, so compaction is keeping up: a stall streak
+      // ends here even though no checkpoint was written.
       const checkedSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...snapshot.goal,
+          ...withCheckpointStalls(snapshot.goal, 0),
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
         },
@@ -785,6 +798,41 @@ export function createGoalRuntime(
     });
   };
 
+  /** The `usage_limited` settle for a checkpoint attempt; runs on the queue. */
+  const settleCheckpointFailure = async (
+    attempt: CheckpointAttempt,
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    reason: string,
+    limitKind?: GoalLimitKind,
+  ): Promise<void> => {
+    const now = Date.now();
+    const limitedSnapshot: GoalSnapshotV2 = {
+      v: GOAL_STATE_VERSION,
+      goal: {
+        ...goal,
+        status: 'usage_limited',
+        activeTimeMs: elapsedActiveTime(goal, now),
+        updatedAt: now,
+        lastReason: reason,
+        ...(limitKind === undefined ? {} : { limitKind }),
+      },
+      activity: 'idle',
+    };
+    await options.journal.recordGoalState(randomUUID(), {
+      v: GOAL_STATE_VERSION,
+      cause: 'usage_limited',
+      snapshot: limitedSnapshot,
+    });
+    if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+    checkpointAttempt = undefined;
+    continuationQueued = false;
+    // Keep nextVerifierFeedback: a rejection committed before this
+    // checkpoint failure must still reach the resumed continuation.
+    currentTurnFeedback = undefined;
+    snapshot = structuredClone(limitedSnapshot);
+    broadcast('usage_limited');
+  };
+
   const recordCheckpointFailure = async (
     attempt: CheckpointAttempt,
     reason: string,
@@ -792,49 +840,40 @@ export function createGoalRuntime(
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      const now = Date.now();
-      const limitedSnapshot: GoalSnapshotV2 = {
-        v: GOAL_STATE_VERSION,
-        goal: {
-          ...snapshot.goal,
-          status: 'usage_limited',
-          activeTimeMs: elapsedActiveTime(snapshot.goal, now),
-          updatedAt: now,
-          lastReason: reason,
-          ...(limitKind === undefined ? {} : { limitKind }),
-        },
-        activity: 'idle',
-      };
-      await options.journal.recordGoalState(randomUUID(), {
-        v: GOAL_STATE_VERSION,
-        cause: 'usage_limited',
-        snapshot: limitedSnapshot,
-      });
-      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      checkpointAttempt = undefined;
-      continuationQueued = false;
-      // Keep nextVerifierFeedback: a rejection committed before this
-      // checkpoint failure must still reach the resumed continuation.
-      currentTurnFeedback = undefined;
-      snapshot = structuredClone(limitedSnapshot);
-      broadcast('usage_limited');
+      await settleCheckpointFailure(attempt, snapshot.goal, reason, limitKind);
     });
   };
 
   const recordCheckpoint = async (
     attempt: CheckpointAttempt,
     checkpoint: NonNullable<GoalSnapshotV2['goal']>['evidenceCheckpoint'],
+    stalled: boolean,
   ): Promise<void> => {
     if (!checkpoint) return;
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      const checkpointStalls = stalled
+        ? (snapshot.goal.checkpointStalls ?? 0) + 1
+        : 0;
+      if (checkpointStalls >= GOAL_CHECKPOINT_STALL_LIMIT) {
+        // Persist the streak with the stop so the record explains itself;
+        // the checkpoint that would have been written is discarded, since a
+        // resumed window restarts from a fresh cursor anyway.
+        await settleCheckpointFailure(
+          attempt,
+          withCheckpointStalls(snapshot.goal, checkpointStalls),
+          GOAL_CHECKPOINT_STALLED_REASON,
+          'evidence_catalog',
+        );
+        return;
+      }
       const now = Date.now();
       const persistedCause =
         nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
       const checkpointSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...snapshot.goal,
+          ...withCheckpointStalls(snapshot.goal, checkpointStalls),
           evidenceCursor: { recordId: attempt.recordUuid },
           evidenceCheckpoint: checkpoint,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
@@ -942,7 +981,11 @@ export function createGoalRuntime(
         await finishCheckpointCheck(attempt);
         return;
       }
-      await recordCheckpoint(attempt, checkpoint);
+      await recordCheckpoint(
+        attempt,
+        checkpoint,
+        isGoalCheckpointStalled(window, checkpoint),
+      );
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
       if (

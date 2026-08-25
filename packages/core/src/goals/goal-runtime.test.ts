@@ -8,7 +8,10 @@ import { describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
+  GOAL_CHECKPOINT_CLAIM_LIMIT,
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  GOAL_CHECKPOINT_STALL_LIMIT,
+  GOAL_CHECKPOINT_STALLED_REASON,
   GOAL_PROPOSAL_REASON_MAX_BYTES,
   type GoalSnapshotV2,
   type GoalStateCause,
@@ -1362,6 +1365,212 @@ describe('goal runtime', () => {
       'checkpoint',
     ]);
     expect(host.started).toHaveLength(3);
+  });
+
+  // Drives one Goal turn through the checkpoint check. `count` records after
+  // the previous checkpoint: 101 overflows the raw-entry budget (truncated),
+  // 60 lands between the compaction threshold and the budget (an effective
+  // checkpoint once 32 claims sit in front of it), 10 stays below threshold
+  // (no checkpoint at all). `claims` is what the verifier answers with.
+  async function runCheckpointTurn(
+    runtime: ReturnType<typeof createGoalRuntime>,
+    host: ReturnType<typeof fakeGoalTurnHost>,
+    setRecords: (records: readonly RuntimeRecord[]) => void,
+    previous: readonly RuntimeRecord[],
+    count: number,
+    prefix: string,
+  ): Promise<RuntimeRecord[]> {
+    const permit = host.started.at(-1)!;
+    const goal = runtime.getSnapshot().goal!;
+    const checkpoint = goal.evidenceCheckpoint;
+    const records: RuntimeRecord[] = checkpoint
+      ? [
+          ...previous,
+          {
+            uuid: checkpoint.checkpointId,
+            parentUuid: previous.at(-1)!.uuid,
+            sessionId: 's-1',
+            timestamp: new Date(2).toISOString(),
+            type: 'system',
+            subtype: 'goal_state',
+            provenance: 'goal_control',
+            cwd: '/tmp',
+            version: 'test',
+          },
+          ...verifierEvidenceWindow(
+            permit,
+            checkpoint.checkpointId,
+            count,
+            prefix,
+          ).slice(1),
+        ]
+      : verifierEvidenceWindow(
+          permit,
+          goal.evidenceCursor.recordId!,
+          count,
+          prefix,
+        );
+    setRecords(records);
+    await runtime.finishTurn(permit);
+    return records;
+  }
+
+  const fullClaims = (input: GoalCheckpointVerifierInput) => ({
+    claims: Array.from({ length: GOAL_CHECKPOINT_CLAIM_LIMIT }, (_, index) => ({
+      proofKind: 'delivered_output' as const,
+      claim: `Claim ${index}`,
+      sourceRefs: [input.evidence[index % input.evidence.length]!.uuid],
+    })),
+  });
+
+  function stallHarness() {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const checkpointVerifier = vi.fn(
+      async (input: GoalCheckpointVerifierInput) => fullClaims(input),
+    );
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({
+      journal,
+      evidenceSource,
+      verifier: vi.fn(),
+      checkpointVerifier,
+    });
+    runtime.bindHost(host);
+    return {
+      journal,
+      host,
+      runtime,
+      checkpointVerifier,
+      setRecords: (next: readonly RuntimeRecord[]) => {
+        records = next;
+      },
+    };
+  }
+
+  it('stops a Goal after three consecutive stalled checkpoints', async () => {
+    const { journal, host, runtime, checkpointVerifier, setRecords } =
+      stallHarness();
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    for (let stall = 1; stall < GOAL_CHECKPOINT_STALL_LIMIT; stall++) {
+      records = await runCheckpointTurn(
+        runtime,
+        host,
+        setRecords,
+        records,
+        101,
+        `window-${stall}`,
+      );
+      // Each stalled checkpoint is still written -- the streak is counted on
+      // the record, not held back in memory.
+      expect(runtime.getSnapshot().goal).toMatchObject({
+        status: 'active',
+        checkpointStalls: stall,
+      });
+    }
+    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+
+    await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'window-final',
+    );
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(
+      GOAL_CHECKPOINT_STALL_LIMIT,
+    );
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+      },
+    });
+    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
+    // No continuation was minted for the stopped Goal.
+    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+  });
+
+  it('resets the stall streak when a checkpoint finds room to absorb', async () => {
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'a',
+    );
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'b',
+    );
+    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
+
+    // A window that compacts without overflowing: the claims are still full,
+    // but nothing was left behind, so compaction is keeping up again.
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      60,
+      'c',
+    );
+    expect(checkpointVerifier).toHaveBeenCalledTimes(3);
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+
+    // The streak restarts from zero rather than continuing from two.
+    await runCheckpointTurn(runtime, host, setRecords, records, 101, 'd');
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'active',
+      checkpointStalls: 1,
+    });
+  });
+
+  it('resets the stall streak when a check needs no checkpoint at all', async () => {
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'a',
+    );
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'b',
+    );
+    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
+
+    await runCheckpointTurn(runtime, host, setRecords, records, 10, 'quiet');
+    expect(checkpointVerifier).toHaveBeenCalledTimes(2);
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
   });
 
   it('promotes queued user input before an automatic post-checkpoint turn', async () => {

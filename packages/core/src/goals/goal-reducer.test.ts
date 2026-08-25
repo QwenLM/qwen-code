@@ -582,6 +582,35 @@ describe('goal reducer', () => {
     });
   });
 
+  it('restores a persisted checkpoint stall streak and spells zero as no field', () => {
+    const stalled = snapshot(goalRecord({ checkpointStalls: 2 }));
+    expect(parseGoalSnapshotV2(stalled)).toEqual(stalled);
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ checkpointStalls: 0 })))?.goal,
+    ).not.toHaveProperty('checkpointStalls');
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ checkpointStalls: -1 }))),
+    ).toBeUndefined();
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ checkpointStalls: 1.5 }))),
+    ).toBeUndefined();
+  });
+
+  it('resets the checkpoint stall streak on edit', () => {
+    const edited = reduceGoalControl(goalRecord({ checkpointStalls: 2 }), {
+      request: {
+        action: 'edit',
+        objective: 'deliver the rest',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      },
+      now: 200,
+      nextGoalId: 'g-next',
+      cursor: { recordId: 'r-200' },
+    });
+    expect(edited?.checkpointStalls).toBeUndefined();
+  });
+
   it('rejects a snapshot carrying negative spend', () => {
     expect(
       parseGoalSnapshotV2(snapshot(goalRecord({ tokensUsed: -1 }))),

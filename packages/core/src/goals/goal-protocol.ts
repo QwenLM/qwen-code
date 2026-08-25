@@ -15,6 +15,14 @@ export const GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON =
   'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
 export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
   'The current Goal revision exceeded the checkpoint verifier request limit. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
+/**
+ * How many consecutive stalled checkpoints a Goal may run before it stops.
+ * Three matches the thrash bounds elsewhere in this family of runtimes: one
+ * stalled checkpoint is a busy turn, two is a pattern, three is the loop.
+ */
+export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
+export const GOAL_CHECKPOINT_STALLED_REASON =
+  'The current Goal revision compacted its evidence three times in a row without relief: each checkpoint already held the maximum number of claims while the evidence window still overflowed, so every turn was paying a checkpoint call and losing uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
 
 /**
  * Which bound a `usage_limited` Goal ran into.
@@ -115,6 +123,14 @@ export interface GoalRecord {
   createdAt: number;
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;
+  /**
+   * Consecutive checkpoints that ran at the compaction ceiling without
+   * relieving the evidence window (see `isGoalCheckpointStalled`). Persisted
+   * on the record rather than held in memory so a daemon restart or session
+   * resume cannot launder the count; absent means zero. Reset by any
+   * checkpoint check that finds room, and by edit or replace.
+   */
+  checkpointStalls?: number;
   lastReason?: string;
   /**
    * Set alongside `lastReason` whenever the runtime stops a Goal at one of the
