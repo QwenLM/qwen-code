@@ -28,10 +28,10 @@ import {
 
 const observeAcpProjectionMock = vi.hoisted(() => vi.fn());
 vi.mock(
-  '../../utils/tool-result-boundary-diagnostics.js',
+  '../../nonInteractive/tool-result-boundary-diagnostics.js',
   async (original) => ({
     ...(await original<
-      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../../nonInteractive/tool-result-boundary-diagnostics.js')
     >()),
     observeAcpToolResultProjection: observeAcpProjectionMock,
   }),
@@ -50,6 +50,7 @@ const GOAL_STATE: GoalSnapshotV2 = {
     evidenceCursor: { recordId: 'goal-state' },
     turnCount: 2,
     activeTimeMs: 1000,
+    tokensUsed: 0,
     createdAt: 1,
     updatedAt: 2,
   },
@@ -275,6 +276,38 @@ describe('history replay page', () => {
       config,
       records: [userRecord(), auqRecord],
       cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.replayError).toBeUndefined();
+    expect(
+      result.updates.some(
+        (update) => update.sessionUpdate === 'tool_call_update',
+      ),
+    ).toBe(false);
+  });
+
+  it('finalizes a dangling tool call as failed by default', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [userRecord(), toolCallRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.replayError).toBeUndefined();
+    expect(result.updates).toContainEqual(
+      expect.objectContaining({
+        sessionUpdate: 'tool_call_update',
+        status: 'failed',
+      }),
+    );
+  });
+
+  it('keeps a dangling tool call in flight when finalizeDangling is false', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [userRecord(), toolCallRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      finalizeDangling: false,
     });
 
     expect(result.replayError).toBeUndefined();
@@ -730,6 +763,7 @@ describe('history replay page', () => {
         evidenceCursor: { recordId: 'goal-state' },
         turnCount: 3,
         activeTimeMs: 1234,
+        tokensUsed: 0,
         createdAt: 10,
         updatedAt: 20,
       },

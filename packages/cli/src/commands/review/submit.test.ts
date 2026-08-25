@@ -123,6 +123,7 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
 const { runSubmit, submitCommand } = await import('./submit.js');
 
 let dir: string;
+let savedCwd: string;
 let savedSessionId: string | undefined;
 let savedGhHost: string | undefined;
 
@@ -140,6 +141,35 @@ const REVIEW = {
   comments: [] as unknown[],
   state: { suggestionsDiscarded: 1, modelId: 'qwen3.7-max' },
 };
+
+/**
+ * The Aone anchor gate refuses an Aone post whose captured diff is absent
+ * (the platform validates nothing, so the write path must hold the diff —
+ * docs/design/2026-08-21-review-aone-removed-line-anchoring.md). Routing
+ * tests below post through the gate, so each supplies the convention file
+ * for its target number. The content is minimal — these payloads carry no
+ * comments — but real, so the gate parses it.
+ */
+const CAPTURED_DIFF_FIXTURE = [
+  'diff --git a/src/route.ts b/src/route.ts',
+  'index 1111111..2222222 100644',
+  '--- a/src/route.ts',
+  '+++ b/src/route.ts',
+  '@@ -1,3 +1,3 @@',
+  ' a',
+  '-b',
+  '+c',
+  ' d',
+  '',
+].join('\n');
+
+function writeCapturedDiff(pr: number): string {
+  const dirPath = join('.qwen', 'tmp');
+  mkdirSync(dirPath, { recursive: true });
+  const p = join(dirPath, `qwen-review-pr-${pr}-diff.txt`);
+  writeFileSync(p, CAPTURED_DIFF_FIXTURE, 'utf8');
+  return p;
+}
 
 /** Write a file under the fixture dir and return its path. */
 function file(name: string, content: unknown): string {
@@ -176,6 +206,12 @@ function args(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'review-submit-'));
+  // Run from the per-test fixture dir: the anchor gate's captured diff
+  // and the slow-path recordings are seeded at cwd-relative convention
+  // paths, and seeding them in the REAL vitest cwd would overwrite (and
+  // cleanup-delete) a same-numbered live capture sitting there.
+  savedCwd = process.cwd();
+  process.chdir(dir);
   ghMock.mockClear();
   ghViewMock.mockClear();
   aoneSubmitMock.mockClear();
@@ -205,6 +241,7 @@ beforeEach(() => {
   delete process.env['GH_HOST'];
 });
 afterEach(() => {
+  process.chdir(savedCwd);
   rmSync(dir, { recursive: true, force: true });
   process.exitCode = undefined;
   if (savedSessionId === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
@@ -547,10 +584,12 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(bySetting.why).not.toContain(
       '`--comment` was not in the review arguments',
     );
+    expect(bySetting.cls).toBe('unbound');
 
     const byFlag = authFor('src/foo.ts --comment');
     expect(byFlag.ok).toBe(false);
     expect(byFlag.why).toContain('do not name a');
+    expect(byFlag.cls).toBe('unbound');
 
     // Neither source requested it: the original wording stands.
     const neither = authFor('src/foo.ts');
@@ -558,6 +597,92 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(neither.why).toContain(
       '`--comment` was not in the review arguments',
     );
+    expect(neither.cls).toBe('comment-not-requested');
+  });
+
+  it('a minimal-topology record names the topology, not a missing PR', () => {
+    // `--topology minimal` is a third cause of `comment.effective === false`
+    // beside the two the refusal wording knew about. The record names its PR
+    // perfectly, so the target-shape message is factually wrong and sends the
+    // operator to fix a target problem that does not exist — re-running with
+    // identical arguments refuses again for the unnamed reason. The topology
+    // is the REAL blocker; name it.
+    const byFlag = authFor('123 --topology minimal --comment');
+    expect(byFlag.ok).toBe(false);
+    expect(byFlag.why).toContain('`--topology minimal`');
+    expect(byFlag.why).not.toContain('do not name a');
+    expect(byFlag.cls).toBe('topology');
+
+    const bySetting = authFor('123 --topology minimal', {
+      defaultComment: true,
+    });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.why).toContain('`--topology minimal`');
+    expect(bySetting.why).not.toContain('do not name a');
+    expect(bySetting.cls).toBe('topology');
+
+    // No comment source at all: the topology is STILL the blocker to name —
+    // even a typed --comment would not lift the refusal, so the missing-flag
+    // wording would bury the fact that the topology bars every post.
+    const neither = authFor('123 --topology minimal');
+    expect(neither.ok).toBe(false);
+    expect(neither.why).toContain('`--topology minimal`');
+    expect(neither.cls).toBe('topology');
+  });
+
+  it('a minimal record names the topology only when it is the sole blocker', () => {
+    // The topology refusal's remedy is "re-run the review without it" — a
+    // remedy that cannot lift the refusal while the record ALSO fails to
+    // bind this write. Lead with the binding refusal there: a non-PR record
+    // falls through to the target-shape wording, and a PR record naming
+    // another number, repo, or host leads with the binding mismatch — the
+    // topology refusal still fires, correctly, once the binding stops
+    // being a blocker.
+    const fileTarget = authFor('src/foo.ts --topology minimal --comment');
+    expect(fileTarget.ok).toBe(false);
+    expect(fileTarget.why).toContain('do not name a');
+    expect(fileTarget.why).not.toContain('`--topology minimal`');
+    expect(fileTarget.cls).toBe('unbound');
+
+    const wrongPr = authFor('456 --topology minimal --comment');
+    expect(wrongPr.ok).toBe(false);
+    expect(wrongPr.why).toContain('authorise pull request #456');
+    expect(wrongPr.why).toContain('targets #123');
+    expect(wrongPr.why).not.toContain('`--topology minimal`');
+    expect(wrongPr.cls).toBe('unbound');
+
+    const wrongHost = authFor(
+      'https://ghe.corp.example/o/r/pull/123 --topology minimal --comment',
+    );
+    expect(wrongHost.ok).toBe(false);
+    expect(wrongHost.why).toContain('authorise ghe.corp.example');
+    expect(wrongHost.why).toContain('targets github.com');
+    expect(wrongHost.why).not.toContain('`--topology minimal`');
+    expect(wrongHost.cls).toBe('unbound');
+
+    const wrongRepo = authFor(
+      'https://github.com/x/y/pull/123 --topology minimal --comment',
+    );
+    expect(wrongRepo.ok).toBe(false);
+    expect(wrongRepo.why).toContain('authorise x/y');
+    expect(wrongRepo.why).toContain('targets o/r');
+    expect(wrongRepo.why).not.toContain('`--topology minimal`');
+    expect(wrongRepo.cls).toBe('unbound');
+  });
+
+  it('the fast path honours the user ask even under minimal (documented layering)', () => {
+    // posting.md documents the slow/fast contrast this PR's topology refusal
+    // makes observable on the identical record: the slow path refuses
+    // ("…ran with `--topology minimal`…"), while the `--user-authorized`
+    // fast path never consults the topology — the skill's Step 7 rule, not
+    // the gate, is the layer that catches a minimal run whose decline was
+    // missed. Pin the fast side here (the slow side is pinned above), so a
+    // drift in either direction reddens instead of silently rewriting the
+    // documented layering.
+    const auth = authFor('123 --topology minimal --comment', {
+      userAuthorized: true,
+    });
+    expect(auth.ok).toBe(true);
   });
 
   it('a missing args file names the missing invocation, not a missing flag, when the setting authorises', () => {
@@ -582,10 +707,12 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       'no recorded invocation names a pull request',
     );
     expect(bySetting.why).not.toContain('`--comment`');
+    expect(bySetting.cls).toBe('unbound');
 
     const byFlag = reviewWriteAuthorization(base);
     expect(byFlag.ok).toBe(false);
     expect(byFlag.why).toContain('cannot show that `--comment` was requested');
+    expect(byFlag.cls).toBe('comment-not-requested');
 
     // Both production callers pass a strict boolean (destructured default /
     // the resolved setting), so pin the flag branch with the explicit false
@@ -599,6 +726,7 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(byFlagExplicit.why).toContain(
       'cannot show that `--comment` was requested',
     );
+    expect(byFlagExplicit.cls).toBe('comment-not-requested');
   });
 
   it('surfaces the recorded host on the --user-authorized fast path too', () => {
@@ -680,13 +808,16 @@ describe('the user-authorized fast path binds a recorded Aone target (round-6 wi
   // at the a1 seam — the wrong-host leak class is unchanged, only the
   // platform the correct post lands on moved.
   let savedGhHost: string | undefined;
+  let capturedDiff: string | undefined;
   beforeEach(() => {
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    capturedDiff = writeCapturedDiff(123);
   });
   afterEach(() => {
     if (savedGhHost === undefined) delete process.env['GH_HOST'];
     else process.env['GH_HOST'] = savedGhHost;
+    if (capturedDiff) rmSync(capturedDiff, { force: true });
   });
 
   it('posts a recorded Aone target through a1, never gh', () => {
@@ -720,6 +851,7 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
   // exit 0, COMMENT review filed at repos/maxcompute/odps_src/pulls/42).
   const siblingDir = join('.qwen', 'tmp', 's-r11-cross-session');
   const siblingFile = join(siblingDir, 'qwen-skill-args-review.txt');
+  let capturedDiff: string | undefined;
   let savedCwd: string;
   beforeEach(() => {
     // Isolate the recording store: it is cwd-relative, and the scan
@@ -739,9 +871,13 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
       'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/42 --comment\n',
       'utf8',
     );
+    capturedDiff = writeCapturedDiff(42);
   });
   afterEach(() => {
     rmSync(siblingDir, { recursive: true, force: true });
+    // The captured-diff path is cwd-relative — remove it before restoring
+    // the cwd.
+    if (capturedDiff) rmSync(capturedDiff, { force: true });
     process.chdir(savedCwd);
   });
 
@@ -1059,6 +1195,8 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     const newFile = join(newDir, 'qwen-skill-args-review.txt');
     mkdirSync(oldDir, { recursive: true });
     mkdirSync(newDir, { recursive: true });
+    // The reversed arm posts this target through the anchor gate.
+    const capturedDiff = writeCapturedDiff(7);
     try {
       const now = Math.floor(Date.now() / 1000);
       // OLDER session carried a host; NEWER session recorded a bare number.
@@ -1105,6 +1243,7 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     } finally {
       rmSync(oldDir, { recursive: true, force: true });
       rmSync(newDir, { recursive: true, force: true });
+      rmSync(capturedDiff, { force: true });
     }
   });
 
@@ -1484,6 +1623,26 @@ describe('the posting gate', () => {
     expect(advice()).toContain('invoked naming it');
     writeStderrSpy.mockClear();
 
+    // A minimal-topology run: the record bound this target on every axis,
+    // so the binding arm's "Nothing recorded" preamble is false for it and
+    // its remedies misdirect — "a review invoked naming it" re-refuses
+    // while the topology stands, and `--user-authorized` mechanically
+    // posts what the topology bars. The advice restates the refusal's own
+    // remedy and nothing else.
+    runSubmit(
+      args({
+        skillArgs: file(
+          'advice-minimal.txt',
+          '6771 --topology minimal --comment',
+        ),
+      }),
+    );
+    expect(advice()).toContain('posts nothing at any effort');
+    expect(advice()).toContain('without `--topology minimal`');
+    expect(advice()).not.toContain('Nothing recorded authorises binding');
+    expect(advice()).not.toContain('--user-authorized');
+    writeStderrSpy.mockClear();
+
     // Nothing recorded at all, with the setting authorising: the refusal
     // names the missing invocation, and the advice preamble must not
     // contradict it by presupposing recorded arguments exist.
@@ -1493,6 +1652,63 @@ describe('the posting gate', () => {
     expect(advice()).toContain('no recorded invocation names a pull request');
     expect(advice()).toContain('Nothing recorded authorises binding');
     expect(advice()).not.toContain('The recorded arguments');
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('classifies the advice on the refusal class, never on quoted operator text', () => {
+    // The gate's `why` embeds the operator's verbatim recorded arguments via
+    // JSON.stringify, and writeSkillArgs records the invocation byte-for-byte
+    // while tokenizeArgs strips only single/double quotes — so a
+    // markdown-backticked mention of the topology phrase never parses as the
+    // flag yet still reaches `why`. Substring-matching it steered this
+    // missing-`--comment` refusal into the topology arm: claiming the run
+    // "ran under `--topology minimal`" when it did not, and prescribing a
+    // re-run without a flag that was never in effect while the real blocker
+    // stayed unnamed (probe: exit 3, `gh` never called — the write stays
+    // fail-closed, only the advice class was wrong). The advice keys on the
+    // gate's structural refusal class instead.
+    const advice = () =>
+      (writeStderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+
+    runSubmit(
+      args({
+        skillArgs: file('advice-backtick.txt', '6771 `--topology minimal`'),
+      }),
+    );
+    expect(advice()).toContain('`--comment` was not in the review arguments');
+    expect(advice()).toContain('Re-run with `--comment`');
+    expect(advice()).not.toContain('posts nothing at any effort');
+    expect(advice()).not.toContain('Nothing recorded authorises binding');
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('a minimal refusal names the remedies that actually authorise posting', () => {
+    // The canonical minimal invocation records NO comment source, and the
+    // refusal's own remedy — "re-run the review without it" — makes no
+    // sufficiency promise. Advice promising posting on the bare re-run alone
+    // would send the operator straight into the missing-`--comment` refusal:
+    // the futile retry loop the gate's wording exists to prevent. The arm
+    // must name what actually authorises the post — `--comment` or the
+    // `review.comment` setting — whatever comment shape the record carried.
+    const advice = () =>
+      (writeStderrSpy.mock.calls.map((c) => c[0]) as string[]).join(' ');
+
+    runSubmit(
+      args({
+        skillArgs: file(
+          'advice-minimal-nocomment.txt',
+          '6771 --topology minimal',
+        ),
+      }),
+    );
+    expect(advice()).toContain('posts nothing at any effort');
+    expect(advice()).toContain('without `--topology minimal`');
+    expect(advice()).toContain('`--comment`');
+    expect(advice()).toContain('`review.comment`');
+    expect(advice()).not.toContain('Nothing recorded authorises binding');
+    expect(advice()).not.toContain('--user-authorized');
     expect(ghMock).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(3);
   });

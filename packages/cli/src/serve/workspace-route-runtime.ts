@@ -176,6 +176,22 @@ export function resolveWorkspaceRuntimeFromParam(
   return runtime;
 }
 
+export function resolveTrustedRuntime(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceRuntime | null {
+  const runtime = resolveWorkspaceRuntimeFromParam(
+    registry,
+    req,
+    res,
+    paramName,
+  );
+  if (!runtime) return null;
+  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
+}
+
 export function resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
   registry: WorkspaceRegistry,
   req: Request,
