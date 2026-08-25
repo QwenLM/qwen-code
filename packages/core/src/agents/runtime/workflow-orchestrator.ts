@@ -1299,6 +1299,9 @@ let worktreeProvisionLock: MutexInterface = withTimeout(
   WORKTREE_PROVISION_LOCK_TIMEOUT_MS,
 );
 
+/** Dispatches currently parked on the lock's acquire wait (test seam). */
+let worktreeProvisionLockWaiters = 0;
+
 /**
  * Test seam: rebuild the provisioning lock so a holder wedged by one test
  * cannot queue the next test's dispatches, optionally shortening the acquire
@@ -1313,10 +1316,64 @@ export function resetWorktreeProvisionLockForTesting(timeoutMs?: number): void {
   );
 }
 
+const ABORTED_WHILE_WAITING_MESSAGE =
+  `agent({isolation:'worktree'}): run aborted while waiting to ` +
+  `provision the worktree.`;
+
+/**
+ * Test seam: how many dispatches are currently parked on the provisioning
+ * lock's acquire wait. Lets a test reach the exact parked state the abort
+ * race exists for, without wall-clock pauses.
+ */
+export function worktreeProvisionLockWaiterCountForTesting(): number {
+  return worktreeProvisionLockWaiters;
+}
+
+/**
+ * Acquires the provisioning lock, racing the wait against the dispatch's
+ * signal: an abort while parked rejects at once instead of draining the
+ * acquire deadline and misreporting the cancellation as a provisioning
+ * stall. If the acquire only resolves after the race rejected, the lock is
+ * released immediately so the abandoned wait cannot wedge it.
+ */
+async function acquireProvisionLockOrAbort(
+  signal?: AbortSignal,
+): Promise<() => void> {
+  worktreeProvisionLockWaiters += 1;
+  try {
+    if (!signal) {
+      return await worktreeProvisionLock.acquire();
+    }
+    return await new Promise<() => void>((resolve, reject) => {
+      const onAbort = () => reject(new Error(ABORTED_WHILE_WAITING_MESSAGE));
+      signal.addEventListener('abort', onAbort, { once: true });
+      worktreeProvisionLock.acquire().then(
+        (release) => {
+          signal.removeEventListener('abort', onAbort);
+          if (signal.aborted) {
+            // The race already rejected; drop the lock no one will use.
+            release();
+            return;
+          }
+          resolve(release);
+        },
+        (error) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        },
+      );
+    });
+  } finally {
+    worktreeProvisionLockWaiters -= 1;
+  }
+}
+
 /**
  * Serialised, abort-aware provisioning entry point: waits on the lock
- * (bounded by the acquire deadline), bails out when the dispatch's signal is
- * aborted, and delegates to the exclusive provision.
+ * (bounded by the acquire deadline), racing the wait against the dispatch's
+ * signal so an abort while parked rejects at once instead of draining the
+ * deadline and misreporting the cancellation as a stall. Delegates to the
+ * exclusive provision once the lock is held.
  */
 async function provisionWorkflowWorktree(
   config: Config,
@@ -1328,21 +1385,16 @@ async function provisionWorkflowWorktree(
         `could be provisioned.`,
     );
   }
+  let release: () => void;
   try {
-    return await worktreeProvisionLock.runExclusive(async () => {
-      // Re-check after the wait on the lock: a run cancelled while this
-      // dispatch queued must not provision — then tear down — a worktree it
-      // will never use.
-      if (signal?.aborted) {
-        throw new Error(
-          `agent({isolation:'worktree'}): run aborted while waiting to ` +
-            `provision the worktree.`,
-        );
-      }
-      return await provisionWorkflowWorktreeExclusively(config);
-    });
+    release = await acquireProvisionLockOrAbort(signal);
   } catch (err) {
     if (err === E_TIMEOUT) {
+      // An abort that races the deadline still reads as a cancellation,
+      // not a stall.
+      if (signal?.aborted) {
+        throw new Error(ABORTED_WHILE_WAITING_MESSAGE);
+      }
       throw new Error(
         `agent({isolation:'worktree'}): worktree provisioning is ` +
           `serialised and this dispatch did not acquire the provisioning ` +
@@ -1352,6 +1404,17 @@ async function provisionWorkflowWorktree(
       );
     }
     throw err;
+  }
+  try {
+    // Re-check once the lock is held: a run cancelled while this dispatch
+    // queued must not provision — then tear down — a worktree it will
+    // never use.
+    if (signal?.aborted) {
+      throw new Error(ABORTED_WHILE_WAITING_MESSAGE);
+    }
+    return await provisionWorkflowWorktreeExclusively(config);
+  } finally {
+    release();
   }
 }
 
@@ -1391,6 +1454,12 @@ async function provisionWorkflowWorktreeExclusively(
   const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
   const wtService =
     projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+
+  // Repair the auto-generated `.qwen/.gitignore` BEFORE the dirty gate:
+  // an untracked pre-fix body is exactly what makes the gate report dirty,
+  // and `createUserWorktree`'s internal repair sits behind the very gate
+  // it exists to clear.
+  await wtService.ensureWorktreesGitignored();
 
   let parentDirty = false;
   try {

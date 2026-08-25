@@ -1670,8 +1670,8 @@ export class GitWorktreeService {
 
       // Keep the worktrees directory and its contents out of the parent
       // repo's `git status` and any subsequent glob/grep that walks from
-      // the parent root. Only writes when the file is missing — never
-      // touches an existing user-managed `.qwen/.gitignore`.
+      // the parent root. An existing file is only rewritten when it is
+      // byte-identical to this method's pre-fix body.
       await this.ensureWorktreesGitignored();
 
       const base = baseBranch || (await this.getCurrentBranch());
@@ -2134,9 +2134,17 @@ export class GitWorktreeService {
 
   /**
    * Ensures `<projectRoot>/.qwen/.gitignore` ignores the worktrees
-   * directory. Idempotent: writes only when the file is missing. If the
-   * file exists (user may have curated it), this method is a no-op so
-   * we never disturb intentional configuration.
+   * directory. Idempotent: writes when the file is missing; an existing
+   * file is rewritten only when it is byte-identical to the pre-fix body
+   * this method used to write (see `upgradeLegacyWorktreesGitignore`) —
+   * anything a user touched differs and is left exactly as it is.
+   *
+   * Callers that fail-closed on a dirty parent run this BEFORE their dirty
+   * check: an untracked pre-fix body is exactly what makes that check
+   * report dirty, so the repair cannot queue behind the gate it exists to
+   * clear. Neither outcome dirties the parent — the new-file body ignores
+   * itself, and the upgrade replaces a dirtying legacy body with one that
+   * ignores itself.
    *
    * The generated file ignores itself. Without that line, writing it is what
    * makes the parent working tree dirty: the entry covers `worktrees/` but not
@@ -2148,7 +2156,7 @@ export class GitWorktreeService {
    * not a `.gitignore` the user puts under `.qwen/agents/`, and genuine
    * user-created content under `.qwen/` still reports as a change.
    */
-  private async ensureWorktreesGitignored(): Promise<void> {
+  async ensureWorktreesGitignored(): Promise<void> {
     try {
       const qwenDir = path.join(this.sourceRepoPath, '.qwen');
       await fs.mkdir(qwenDir, { recursive: true });
@@ -2187,8 +2195,25 @@ export class GitWorktreeService {
     gitignorePath: string,
   ): Promise<void> {
     try {
+      // `lstat` so a symlinked `.qwen/.gitignore` (git stores symlinks, so
+      // a checked-out branch can plant one) or FIFO is skipped instead of
+      // followed — the rewrite would otherwise land on the link's target
+      // outside `.qwen/`.
+      const st = await fs.lstat(gitignorePath);
+      if (!st.isFile()) return;
       const existing = await fs.readFile(gitignorePath, 'utf8');
       if (existing !== LEGACY_WORKTREES_GITIGNORE_BODY) return;
+      // A tracked legacy file cannot dirty the parent (tracked + unmodified
+      // = clean), and ignore rules never apply to tracked files — rewriting
+      // it would modify a user-owned file and surface as
+      // ` M .qwen/.gitignore`, failing every later dirty-parent gate.
+      const tracked = await (await this.getGit())
+        .raw(['ls-files', '--error-unmatch', '--', '.qwen/.gitignore'])
+        .then(
+          () => true,
+          () => false,
+        );
+      if (tracked) return;
       await fs.writeFile(gitignorePath, WORKTREES_GITIGNORE_BODY, {
         encoding: 'utf8',
       });

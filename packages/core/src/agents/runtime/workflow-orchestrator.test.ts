@@ -15,6 +15,7 @@ import {
   WorkflowExecutionError,
   createProductionDispatch,
   resetWorktreeProvisionLockForTesting,
+  worktreeProvisionLockWaiterCountForTesting,
   DEFAULT_MAX_AGENTS_PER_RUN,
   resolveMaxAgentsPerRun,
   resolveConcurrencyLimit,
@@ -95,6 +96,7 @@ const worktreeStubs = vi.hoisted(() => {
     isGitRepository: vi.fn(async () => true),
     getRepoTopLevel: vi.fn(async () => '/fake/repo'),
     getCurrentBranch: vi.fn(async () => 'main'),
+    ensureWorktreesGitignored: vi.fn(async () => {}),
     hasWorktreeChanges: vi.fn(async () => false),
     hasUnmergedWorktreeCommits: vi.fn(async () => false),
     createUserWorktree: vi.fn(
@@ -4367,6 +4369,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(provisions).toBe(1);
     releaseStalled?.();
     await wedged;
+    // Recovery half: once the stall clears, the lock is usable again — a
+    // timed-out waiter must not leave it poisoned for later dispatches.
+    const recovered = dispatch('hi', { isolation: 'worktree' });
+    await expect(recovered).resolves.toBeTruthy();
+    expect(provisions).toBe(2);
   });
 
   // A cancelled fan-out must not keep provisioning (then tearing down) a
@@ -4427,6 +4434,64 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(provisions).toBe(1);
   });
 
+  // An abort that lands while a dispatch is parked on the lock must reject
+  // as a cancellation at once — not drain the acquire deadline and surface
+  // the stall error ("Retry the dispatch.") for a run that was cancelled.
+  // The waiter seam pins the parked state instead of a wall-clock pause,
+  // and the strict matcher pins the abort path: the stall path produces a
+  // different message.
+  it("isolation:'worktree' rejects a parked dispatch at once when the run aborts", async () => {
+    resetWorktreeProvisionLockForTesting(2000);
+    const { GitWorktreeService } = await import(
+      '../../services/gitWorktreeService.js'
+    );
+    let releaseWedge: (() => void) | undefined;
+    const wedge = new Promise<void>((resolve) => {
+      releaseWedge = resolve;
+    });
+    let provisions = 0;
+    vi.mocked(GitWorktreeService).mockImplementation(
+      () =>
+        ({
+          ...worktreeStubs.makeStub(),
+          createUserWorktree: vi.fn(async (slug: string) => {
+            provisions += 1;
+            // Hold the lock well past the 2000ms acquire deadline.
+            await wedge;
+            return {
+              success: true,
+              worktree: {
+                path: `/fake/repo/.qwen/worktrees/${slug}`,
+                branch: `worktree-${slug}`,
+              },
+            };
+          }),
+        }) as unknown as InstanceType<typeof GitWorktreeService>,
+    );
+    const { config } = fakeConfigWithMgr({
+      onCreate: async () => ({ finalText: 'ok', terminateMode: 'GOAL' }),
+    });
+    const controller = new AbortController();
+    const dispatch = createProductionDispatch(config, controller.signal);
+    const holder = dispatch('hi', { isolation: 'worktree' });
+    await vi.waitFor(() => expect(provisions).toBe(1), { timeout: 5000 });
+    const parked = dispatch('hi', { isolation: 'worktree' });
+    await vi.waitFor(
+      () => expect(worktreeProvisionLockWaiterCountForTesting()).toBe(1),
+      { timeout: 5000 },
+    );
+    const t0 = Date.now();
+    controller.abort();
+    await expect(parked).rejects.toThrow(
+      /run aborted while waiting to provision the worktree/,
+    );
+    // The race rejects at once; without it the wait drains the full 2000ms
+    // acquire deadline before the E_TIMEOUT catch can report the abort.
+    expect(Date.now() - t0).toBeLessThan(1000);
+    releaseWedge?.();
+    await expect(holder).resolves.toBeTruthy();
+  });
+
   it("isolation:'worktree' refuses when cwd is not a git repository", async () => {
     const { GitWorktreeService } = await import(
       '../../services/gitWorktreeService.js'
@@ -4451,11 +4516,14 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const { GitWorktreeService } = await import(
       '../../services/gitWorktreeService.js'
     );
+    const repair = vi.fn(async () => {});
+    const gate = vi.fn(async () => true);
     vi.mocked(GitWorktreeService).mockImplementation(
       () =>
         ({
           ...worktreeStubs.makeStub(),
-          hasWorktreeChanges: vi.fn(async () => true),
+          ensureWorktreesGitignored: repair,
+          hasWorktreeChanges: gate,
         }) as unknown as InstanceType<typeof GitWorktreeService>,
     );
     const { config } = fakeConfigWithMgr({
@@ -4464,6 +4532,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     await expect(dispatch('hi', { isolation: 'worktree' })).rejects.toThrow(
       /uncommitted changes/,
+    );
+    // The pre-gate repair must run BEFORE the dirty check: an untracked
+    // legacy `.qwen/.gitignore` is what makes the gate report dirty, so a
+    // repair queued behind the gate would never run.
+    expect(repair).toHaveBeenCalledTimes(1);
+    expect(repair.mock.invocationCallOrder[0]).toBeLessThan(
+      gate.mock.invocationCallOrder[0],
     );
   });
 

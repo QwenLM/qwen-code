@@ -148,4 +148,77 @@ describe('GitWorktreeService.createUserWorktree() — hooksPath setup', () => {
     );
     expect(await fs.readFile(gitignorePath, 'utf8')).toBe(curated);
   });
+
+  // A committed legacy body must never be rewritten: ignore rules do not
+  // apply to tracked files, so rewriting one would surface as
+  // ` M .qwen/.gitignore` and fail every later dirty-parent gate — blaming
+  // the user for a one-line change the tool itself made.
+  it('never rewrites a tracked legacy gitignore', async () => {
+    const qwenDir = path.join(repoRoot, '.qwen');
+    await fs.mkdir(qwenDir, { recursive: true });
+    const gitignorePath = path.join(qwenDir, '.gitignore');
+    await fs.writeFile(gitignorePath, LEGACY_WORKTREES_GITIGNORE_BODY);
+    execFileSync('git', ['add', '.qwen/.gitignore'], { cwd: repoRoot });
+    execFileSync('git', ['commit', '-q', '-m', 'gitignore', '--no-verify'], {
+      cwd: repoRoot,
+    });
+
+    const svc = new GitWorktreeService(repoRoot);
+    expect((await svc.createUserWorktree('tracked-first')).success).toBe(true);
+    expect(await fs.readFile(gitignorePath, 'utf8')).toBe(
+      LEGACY_WORKTREES_GITIGNORE_BODY,
+    );
+    expect(await svc.hasWorktreeChanges(repoRoot)).toBe(false);
+    expect((await svc.createUserWorktree('tracked-second')).success).toBe(true);
+  });
+
+  // Git stores symlinks, so a checked-out branch can plant a symlinked
+  // `.qwen/.gitignore`. The upgrade must skip it — following the link would
+  // rewrite a file outside `.qwen/`.
+  it('does not follow a symlinked legacy gitignore', async () => {
+    const qwenDir = path.join(repoRoot, '.qwen');
+    await fs.mkdir(qwenDir, { recursive: true });
+    const targetPath = path.join(repoRoot, 'target.txt');
+    await fs.writeFile(targetPath, LEGACY_WORKTREES_GITIGNORE_BODY);
+    await fs.symlink(targetPath, path.join(qwenDir, '.gitignore'));
+
+    const svc = new GitWorktreeService(repoRoot);
+    expect((await svc.createUserWorktree('symlink-safe')).success).toBe(true);
+    expect(await fs.readFile(targetPath, 'utf8')).toBe(
+      LEGACY_WORKTREES_GITIGNORE_BODY,
+    );
+  });
+
+  // The gated provision paths run the repair BEFORE the dirty check: an
+  // untracked pre-fix body is exactly what makes the gate report dirty, so
+  // a repair queued behind the gate would never run. Witness the exact
+  // service-level sequence the gates rely on.
+  it('repair before the dirty gate clears an untracked legacy gitignore', async () => {
+    const qwenDir = path.join(repoRoot, '.qwen');
+    await fs.mkdir(qwenDir, { recursive: true });
+    const gitignorePath = path.join(qwenDir, '.gitignore');
+    await fs.writeFile(gitignorePath, LEGACY_WORKTREES_GITIGNORE_BODY);
+
+    const svc = new GitWorktreeService(repoRoot);
+    // The gate alone refuses: the legacy body does not ignore itself.
+    expect(await svc.hasWorktreeChanges(repoRoot)).toBe(true);
+    // The pre-gate repair the gated paths now run.
+    await svc.ensureWorktreesGitignored();
+    expect(await fs.readFile(gitignorePath, 'utf8')).toBe(
+      WORKTREES_GITIGNORE_BODY,
+    );
+    expect(await svc.hasWorktreeChanges(repoRoot)).toBe(false);
+    expect((await svc.createUserWorktree('gate-repaired')).success).toBe(true);
+  });
+
+  // Converse of the self-ignore: the anchored `/.gitignore` hides only that
+  // file. Genuine user-created content under `.qwen/` must still report as
+  // a change, or the fail-closed dirty-parent gate would provision over
+  // uncommitted user content.
+  it('still reports genuine user content under `.qwen/` as a change', async () => {
+    const svc = new GitWorktreeService(repoRoot);
+    expect((await svc.createUserWorktree('user-content')).success).toBe(true);
+    await fs.writeFile(path.join(repoRoot, '.qwen', 'notes.md'), 'mine\n');
+    expect(await svc.hasWorktreeChanges(repoRoot)).toBe(true);
+  });
 });
