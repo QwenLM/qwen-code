@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -15,6 +15,10 @@ const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 30_000;
 const MAX_RECENT_BRANCHES = 20;
 const MAX_REFLOG_ENTRIES = 200;
+
+// The unique SHA of the empty tree: the merge base for a pull into an
+// unborn HEAD, where every incoming path is new.
+const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 export interface GitBranchInfo {
   name: string;
@@ -584,6 +588,21 @@ async function currentStashSha(
   ).trim();
 }
 
+// The pull lock serializes daemon pulls only, not the user's terminal:
+// a stash pushed by another actor between the auto-stash and the restore
+// becomes stash@{0}, so the restore checks the recorded identity instead
+// of popping blindly. Probe failures read as "not ours" — the entry is
+// kept either way.
+async function stashTopIs(
+  cwd: string,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  recorded: string,
+): Promise<boolean> {
+  if (recorded === '') return false;
+  const top = await currentStashSha(cwd, env).catch(() => '');
+  return top === recorded;
+}
+
 async function hasMergeHead(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -604,7 +623,15 @@ async function inProgressRebaseDir(
     ).trim();
     if (!rel) continue;
     const abs = path.resolve(cwd, rel);
-    if (fs.existsSync(abs)) return abs;
+    if (!fs.existsSync(abs)) continue;
+    // `git am` parks its state in the same rebase-apply directory, but
+    // never writes `onto` — a stopped am is not a rebase, and none of
+    // the pull's recovery steps (stash, reset, clean, aborting state
+    // matched to the fetched tip) disturb it.
+    if (stateDir === 'rebase-apply' && !fs.existsSync(path.join(abs, 'onto'))) {
+      continue;
+    }
+    return abs;
   }
   return '';
 }
@@ -679,23 +706,33 @@ function splitBuffer(buf: Buffer, byte: number): Buffer[] {
 // neither the auto-stash (--include-untracked skips ignored files) nor
 // the force reset/clean (clean -fd keeps ignored entries) protects them.
 //
-// Both sides are enumerated structurally and compared as raw bytes. The
-// incoming additions come from `diff --no-renames --diff-filter=A -z`
-// starting at the merge base (so unpushed local deletions are not
-// counted as incoming additions; rename destinations count as
-// additions). The local side enumerates the ignored files present in
-// the worktree with `ls-files --others --ignored --exclude-standard -z`,
-// so no pathspec parsing and no filesystem walk is involved: names
-// holding glob characters, `:(` pathspec magic, invalid UTF-8, or
-// symlinks compare literally, and a symlinked prefix cannot poison the
-// probe. A collision is an exact match or a segment-boundary prefix in
-// either direction: an ignored file `docs` blocks an incoming
-// `docs/guide.md`, and an incoming file `dist` replaces an ignored
-// `dist/` with everything inside it. A rebase replays the local commits
-// on top of the fetched tip, so the additions they introduce join the
-// incoming set — including paths a later local commit untracked again,
-// which the net range diff no longer shows but the replay still checks
-// out over the worktree.
+// Both sides are enumerated structurally. The incoming side comes from
+// `diff --no-renames --diff-filter=d -z` starting at the merge base:
+// every path the update writes — additions AND modifications, since the
+// modify/delete conflict on a locally untracked path still checks the
+// incoming content out over the ignored file — excluding deletions,
+// which write nothing (so unpushed local deletions are not counted;
+// rename destinations count as additions). On an unborn HEAD the merge
+// base is the empty tree, since HEAD does not resolve yet and every
+// incoming path is new to the branch. The local side enumerates the
+// ignored files present in the worktree with `ls-files --others
+// --ignored --exclude-standard -z`, so no pathspec parsing and no
+// filesystem walk is involved: names holding glob characters, `:(`
+// pathspec magic, invalid UTF-8, or symlinks compare literally, and a
+// symlinked prefix cannot poison the probe. The listing is streamed
+// entry-by-entry: a worktree whose ignored listing exceeds
+// runGitBuffer's cap must still be pullable. Keys compare as raw bytes,
+// folded case-wise when the repository says the filesystem folds
+// (core.ignorecase): a case-variant incoming path is the same file
+// there, and git's own ignore matching folds too, so nothing else
+// catches the overwrite. A collision is an exact match or a
+// segment-boundary prefix in either direction: an ignored file `docs`
+// blocks an incoming `docs/guide.md`, and an incoming file `dist`
+// replaces an ignored `dist/` with everything inside it. A rebase
+// replays the local commits on top of the fetched tip, so the paths
+// their commits write join the incoming set — including paths a later
+// local commit untracked again, which the net range diff no longer
+// shows but the replay still checks out over the worktree.
 async function incomingIgnoredPaths(
   cwd: string,
   fetchedTip: string,
@@ -710,16 +747,20 @@ async function incomingIgnoredPaths(
   const toplevel = (
     await runGit(cwd, ['rev-parse', '--show-toplevel'], env)
   ).trim();
-  const base = (
-    await runGit(toplevel, ['merge-base', 'HEAD', fetchedTip], env)
-  ).trim();
+  // rev-parse -q --verify exits 1 on an unborn HEAD (a zero-commit
+  // branch with a configured upstream); merge-base would fatal there.
+  const headExists = await hasForeignHead(toplevel, 'HEAD', env);
+  const base = headExists
+    ? (await runGit(toplevel, ['merge-base', 'HEAD', fetchedTip], env)).trim()
+    : EMPTY_TREE_SHA;
+  const foldCase = await repoFoldsCase(toplevel, env);
   const additions = splitBuffer(
     await runGitBuffer(
       toplevel,
       [
         'diff',
         '--no-renames',
-        '--diff-filter=A',
+        '--diff-filter=d',
         '--name-only',
         '-z',
         base,
@@ -729,7 +770,8 @@ async function incomingIgnoredPaths(
     ),
     0,
   );
-  if (includeReplayedAdditions) {
+  // An unborn branch has no local commits to replay.
+  if (includeReplayedAdditions && headExists) {
     additions.push(
       ...splitBuffer(
         await runGitBuffer(
@@ -737,7 +779,7 @@ async function incomingIgnoredPaths(
           [
             'log',
             '--no-renames',
-            '--diff-filter=A',
+            '--diff-filter=d',
             '--name-only',
             '--format=',
             '-z',
@@ -750,27 +792,13 @@ async function incomingIgnoredPaths(
     );
   }
   if (additions.length === 0) return [];
-  const ignoredRaw = await runGitBuffer(
-    toplevel,
-    ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
-    env,
-  );
-  return findIgnoredCollisions(additions, ignoredRaw);
-}
-
-// The local side of the collision probe, keyed by raw bytes ('binary'
-// maps bytes 1:1 onto code units, unlike UTF-8 which corrupts invalid
-// sequences to U+FFFD). Collapsed directory entries (a nested repository
-// under an ignored path) carry a trailing slash; it is stripped so the
-// entry compares like its path.
-function findIgnoredCollisions(
-  additions: Buffer[],
-  ignoredRaw: Buffer,
-): Buffer[] {
   const ignoredFiles = new Set<string>();
   const ignoredDirs = new Set<string>();
-  for (const entry of splitBuffer(ignoredRaw, 0)) {
-    let key = entry.toString('binary');
+  await streamIgnoredListing(toplevel, env, (entry) => {
+    // Collapsed directory entries (a nested repository under an ignored
+    // path) carry a trailing slash; strip it so the entry compares like
+    // its path.
+    let key = collisionKey(entry, foldCase);
     if (key.endsWith('/')) key = key.slice(0, -1);
     ignoredFiles.add(key);
     for (
@@ -780,9 +808,26 @@ function findIgnoredCollisions(
     ) {
       ignoredDirs.add(key.slice(0, slash));
     }
-  }
+  });
+  return findIgnoredCollisions(additions, ignoredFiles, ignoredDirs, foldCase);
+}
+
+// 'binary' maps bytes 1:1 onto code units, unlike UTF-8 which corrupts
+// invalid sequences to U+FFFD. Folding applies only when the repository
+// says the filesystem folds case.
+function collisionKey(raw: Buffer, foldCase: boolean): string {
+  const key = raw.toString('binary');
+  return foldCase ? key.toLowerCase() : key;
+}
+
+function findIgnoredCollisions(
+  additions: Buffer[],
+  ignoredFiles: ReadonlySet<string>,
+  ignoredDirs: ReadonlySet<string>,
+  foldCase: boolean,
+): Buffer[] {
   return additions.filter((addition) => {
-    const key = addition.toString('binary');
+    const key = collisionKey(addition, foldCase);
     // Exact match, or the incoming file sits where an ignored directory's
     // contents live.
     if (ignoredFiles.has(key) || ignoredDirs.has(key)) return true;
@@ -795,6 +840,74 @@ function findIgnoredCollisions(
       if (ignoredFiles.has(key.slice(0, slash))) return true;
     }
     return false;
+  });
+}
+
+// Fail closed: an unreadable ignorecase setting assumes a folding
+// filesystem, which only widens the refusal set.
+async function repoFoldsCase(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  const value = (
+    await runGit(
+      cwd,
+      ['config', '--default=false', 'core.ignorecase'],
+      env,
+    ).catch(() => 'true')
+  ).trim();
+  return value === 'true';
+}
+
+// Streams the ignored listing entry-by-entry instead of buffering it:
+// workspaces whose listing exceeds runGitBuffer's fixed maxBuffer must
+// not die in the probe. Non-zero exits and timeouts reject, refusing the
+// pull like any other probe failure.
+function streamIgnoredListing(
+  cwd: string,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  onEntry: (entry: Buffer) => void,
+): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      'git',
+      ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+      { cwd, env: gitEnv(env) },
+    );
+    let rest: Buffer | undefined;
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`git ls-files timed out after ${GIT_TIMEOUT_MS}ms`));
+    }, GIT_TIMEOUT_MS);
+    child.stdout?.on('data', (chunk: Buffer) => {
+      const buf = rest === undefined ? chunk : Buffer.concat([rest, chunk]);
+      let start = 0;
+      for (let nul = buf.indexOf(0); nul !== -1; nul = buf.indexOf(0, start)) {
+        if (nul > start) onEntry(buf.subarray(start, nul));
+        start = nul + 1;
+      }
+      rest = start < buf.length ? buf.subarray(start) : undefined;
+    });
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(
+          new Error(stderr.trim() || `git ls-files exited with code ${code}`),
+        );
+        return;
+      }
+      if (rest !== undefined && rest.length > 0) onEntry(rest);
+      resolve();
+    });
   });
 }
 
@@ -1029,22 +1142,26 @@ async function gitPullInner(
     // Without a catch: a missing upstream must surface here, before
     // anything is discarded. A diverged branch is refused because the
     // post-discard merge would have to merge the local commits and could
-    // wedge the repository mid-merge.
-    const countsRaw = (
-      await runGit(
-        cwd,
-        ['rev-list', '--left-right', '--count', `HEAD...${fetchedTip}`],
-        env,
-      )
-    ).trim();
-    const [ahead, behind] = countsRaw
-      .split(/\s+/)
-      .map((n) => parseInt(n, 10) || 0);
-    if ((ahead ?? 0) > 0 && (behind ?? 0) > 0) {
-      throw new GitPullFailure(
-        'diverged',
-        'cannot discard changes and update: the branch has diverged from its upstream, so the update would still need to merge your local commits; merge or rebase them manually first',
-      );
+    // wedge the repository mid-merge. An unborn HEAD has no local
+    // commits, so ahead is 0 by definition and the divergence refusal
+    // cannot apply — rev-list would only fatal on the missing ref.
+    if (await hasForeignHead(cwd, 'HEAD', env)) {
+      const countsRaw = (
+        await runGit(
+          cwd,
+          ['rev-list', '--left-right', '--count', `HEAD...${fetchedTip}`],
+          env,
+        )
+      ).trim();
+      const [ahead, behind] = countsRaw
+        .split(/\s+/)
+        .map((n) => parseInt(n, 10) || 0);
+      if ((ahead ?? 0) > 0 && (behind ?? 0) > 0) {
+        throw new GitPullFailure(
+          'diverged',
+          'cannot discard changes and update: the branch has diverged from its upstream, so the update would still need to merge your local commits; merge or rebase them manually first',
+        );
+      }
     }
   }
   // Every pull shape refuses an incoming collision with local ignored
@@ -1067,52 +1184,77 @@ async function gitPullInner(
     throw refusedIgnoredCollision(ignored);
   }
   let stashed = false;
+  let stashedSha = '';
   if (opts?.force) {
     await refuseForeignMergeOrRebase(cwd, env);
     await runGit(cwd, ['reset', '--hard'], env);
     await runGit(cwd, ['clean', '-fd'], env);
   } else if (opts?.stash) {
     await refuseForeignMergeOrRebase(cwd, env);
-    // Compare refs/stash before/after instead of parsing the push output,
-    // which differs between git versions and locales.
-    const before = await currentStashSha(cwd, env);
-    try {
-      await runGit(
-        cwd,
-        [
-          'stash',
-          'push',
-          '--include-untracked',
-          '-m',
-          'qwen-code: auto-stash before pull',
-        ],
-        env,
-      );
-    } catch (err) {
-      // Git creates the stash commit, updates refs/stash, and only then
-      // resets the worktree, so a failed push can leave the entry behind
-      // with the changes gone from the worktree. Pop it back before
-      // refusing; classify from repository state, since the push's own
-      // error text (e.g. "needs merge") is version- and locale-dependent.
-      const afterPush = await currentStashSha(cwd, env);
-      let popBackFailed = false;
-      if (afterPush !== '' && afterPush !== before) {
-        await runGit(cwd, ['stash', 'pop'], env).catch((popErr) => {
-          popBackFailed = true;
-          // eslint-disable-next-line no-console
-          console.error(
-            'git pull: failed to pop back a partially created auto-stash:',
-            popErr,
-          );
+    // An unborn HEAD cannot be stashed (no initial commit yet) and
+    // has no tracked changes to protect: the merge refuses to
+    // overwrite an untracked file on its own, so pull through
+    // without a stash.
+    if (await hasForeignHead(cwd, 'HEAD', env)) {
+      // Compare refs/stash before/after instead of parsing the push output,
+      // which differs between git versions and locales.
+      const before = await currentStashSha(cwd, env);
+      try {
+        await runGit(
+          cwd,
+          [
+            'stash',
+            'push',
+            '--include-untracked',
+            '-m',
+            'qwen-code: auto-stash before pull',
+          ],
+          env,
+        );
+      } catch (err) {
+        // Git creates the stash commit, updates refs/stash, and only then
+        // resets the worktree, so a failed push can leave the entry behind
+        // with the changes gone from the worktree. Pop it back before
+        // refusing; classify from repository state, since the push's own
+        // error text (e.g. "needs merge") is version- and locale-dependent.
+        let stashStateUnknown = false;
+        const afterPush = await currentStashSha(cwd, env).catch(() => {
+          // The push failed mid-way: whether it managed to create an entry
+          // is now unknown, and a created one may hold the user's changes.
+          // Flag the restore like a failed pop-back instead of leaking a
+          // bare probe error with no pointer.
+          stashStateUnknown = true;
+          return '';
         });
+        let popBackFailed = false;
+        if (afterPush !== '' && afterPush !== before) {
+          await runGit(cwd, ['stash', 'pop'], env).catch((popErr) => {
+            popBackFailed = true;
+            // eslint-disable-next-line no-console
+            console.error(
+              'git pull: failed to pop back a partially created auto-stash:',
+              popErr,
+            );
+          });
+        }
+        const failure = await classifyPullFailure(cwd, env, err, true);
+        // A failed pop-back leaves the changes in the kept entry; name it,
+        // like every sibling restore-failure path. An unreadable stash
+        // state after a failed push may hold them too.
+        throw popBackFailed || stashStateUnknown
+          ? withStashRestoreNote(failure)
+          : failure;
       }
-      const failure = await classifyPullFailure(cwd, env, err, true);
-      // A failed pop-back leaves the changes in the kept entry; name it,
-      // like every sibling restore-failure path.
-      throw popBackFailed ? withStashRestoreNote(failure) : failure;
+      const after = await currentStashSha(cwd, env).catch((probeErr) => {
+        // The push succeeded, so an entry exists but its identity is
+        // unreadable: the restore below could not tell it apart from a
+        // concurrent actor's. Refuse with the stash pointer instead of
+        // leaking a bare probe error while the edits sit in refs/stash.
+        throw withStashRestoreNote(probeErr);
+      });
+      stashed = after !== '' && after !== before;
+      stashedSha = stashed ? after : '';
     }
-    const after = await currentStashSha(cwd, env);
-    stashed = after !== '' && after !== before;
   }
   // Merge or rebase exactly the probed tip. --no-autostash neutralizes
   // ambient merge.autostash/rebase.autostash config: an auto-stash inside
@@ -1195,10 +1337,17 @@ async function gitPullInner(
       }
       if (stashed) {
         // Bring the stashed changes back. A failed restore leaves the
-        // stash entry in place, so nothing is lost either way.
-        await runGit(cwd, ['stash', 'pop'], env).catch(() => {
+        // stash entry in place, so nothing is lost either way. Pop only
+        // the entry this pull created: the lock does not cover the user's
+        // terminal, so a concurrent `git stash` in the merge window
+        // would otherwise be applied and dropped in its place.
+        if (await stashTopIs(cwd, env, stashedSha)) {
+          await runGit(cwd, ['stash', 'pop'], env).catch(() => {
+            restoreFailed = true;
+          });
+        } else {
           restoreFailed = true;
-        });
+        }
       }
     }
     const failure = await classifyPullFailure(
@@ -1211,16 +1360,23 @@ async function gitPullInner(
   }
   if (stashed) {
     let stashRestoreConflict = false;
-    const popOutput = await runGit(cwd, ['stash', 'pop'], env).catch(
-      (popErr) => {
+    let popOutput: string;
+    // Pop only the entry this pull created (see the failure-recovery
+    // pop): on a mismatch the edits stay in the kept entry and the note
+    // names them, instead of a foreign stash being applied and dropped.
+    if (await stashTopIs(cwd, env, stashedSha)) {
+      popOutput = await runGit(cwd, ['stash', 'pop'], env).catch((popErr) => {
         // A failed pop always keeps the stash entry and leaves the changes
         // unrestored — conflict markers, or an untracked-file collision — so
         // flag it instead of failing an otherwise successful pull.
         stashRestoreConflict = true;
         const e = popErr as { stdout?: string; stderr?: string };
         return `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
-      },
-    );
+      });
+    } else {
+      stashRestoreConflict = true;
+      popOutput = STASH_RESTORE_NOTE;
+    }
     return {
       success: true,
       output: `${output.trim()}\n${popOutput.trim()}`.trim(),
