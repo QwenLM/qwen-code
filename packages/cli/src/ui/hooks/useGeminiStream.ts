@@ -227,6 +227,13 @@ interface ResolvedSteerMessages {
    * send options were frozen.
    */
   routeSelector?: string;
+  /**
+   * True when a fail-closed capability probe CLEARED the active override
+   * during this drain. Surfaced so core falls back to the session model
+   * instead of resurrecting the stale pre-drain `options.modelOverride` as the
+   * steer route (the exact selector the drain just cleared, R48-4).
+   */
+  overrideCleared?: boolean;
   accept: () => void;
   restoreMessages: string[];
 }
@@ -1424,18 +1431,15 @@ export const useGeminiStream = (
         return { parts, shouldProceed: true };
       }
       if (!shouldRunVisionBridge(config)) {
-        if (
-          inlineModelOverrideActiveRef.current ||
-          (modelOverrideRef.current !== undefined &&
-            mediaRoutedOverrideRef.current === modelOverrideRef.current)
-        ) {
-          // Reaching this gate with an active inline override means the
-          // capability probe rejected the images (unsupported or unresolvable
-          // target); a media-routed override reaches it the same way (the
-          // probe rejects the image modality of the route that owns the
-          // turn's already-routed media). With no vision bridge to describe
-          // them, fail closed visibly instead of exact-routing raw images
-          // that the route's slimming would silently placeholder-substitute.
+        if (modelOverrideRef.current !== undefined) {
+          // Reaching this gate with an active override means the capability
+          // probe rejected the images (unsupported or unresolvable target).
+          // The probe polices ANY active override now — inline (`/model`),
+          // media-routed, and unstamped skill-tool overrides alike (R48-1) —
+          // so every override left standing here failed the image capability
+          // check. With no vision bridge to describe the images, fail closed
+          // visibly instead of exact-routing raw images that the route's
+          // slimming would silently placeholder-substitute.
           addItem(
             {
               type: MessageType.ERROR,
@@ -1555,15 +1559,29 @@ export const useGeminiStream = (
       timestamp: number,
       signal: AbortSignal,
       allowFullTurnModel = true,
+      inheritedResolutionFailed = false,
     ): Promise<{
       parts: PartListUnion | null;
       shouldProceed: boolean;
       modelOverrideResolutionFailed: boolean;
       preOverrideParts?: PartListUnion;
       mediaRouted?: boolean;
+      overrideCleared?: boolean;
     }> => {
       let nextParts = parts;
-      let modelOverrideResolutionFailed = false;
+      // R48-3: a drain segment that follows one whose capability probe
+      // fail-closed (and cleared the override) must inherit the accumulated
+      // resolution failure. The session-model clamp / visible fail-closed
+      // protections below key off this flag, and re-entering each segment
+      // with a fresh per-invocation `false` would drop both protections for
+      // every segment after the first failure. The drain loop threads the
+      // accumulated value through both passes.
+      let modelOverrideResolutionFailed = inheritedResolutionFailed;
+      // R48-4: set wherever a fail-closed probe cleared an active override so
+      // resolveSteeredMessages can surface "the drain cleared the route" and
+      // core falls back to the session model instead of resurrecting the stale
+      // pre-drain options.modelOverride.
+      let overrideCleared = false;
       let targetSupportsImage = false;
       let preOverrideParts: PartListUnion | undefined;
       let mediaRouted = false;
@@ -1602,6 +1620,7 @@ export const useGeminiStream = (
                 mediaRoutedOverrideRef,
                 mediaRoutedPromptIdRef,
               );
+              overrideCleared = true;
             }
             if (failClosed) {
               const reason = modelOverrideResolutionFailed
@@ -1665,6 +1684,7 @@ export const useGeminiStream = (
               parts: null,
               shouldProceed: false,
               modelOverrideResolutionFailed,
+              overrideCleared,
             };
           }
           if (result.status === 'failed' && preOverrideParts === undefined) {
@@ -1683,20 +1703,21 @@ export const useGeminiStream = (
       // probe the audio branch runs: raw images exact-routed to a target that
       // cannot see them are placeholder-substituted by the route's slimming —
       // the model would answer about an image it never received. This covers
-      // BOTH inline (`/model`) overrides and media-routed overrides installed
-      // non-inline (skill tools / a prior drain's audio route): the send-time
-      // stamp exact-routes any media-carrying payload to the routed override,
-      // so a top-level image must be validated against that route exactly like
-      // the inline branch validates it — otherwise it passes raw into the
-      // exact route and is silently placeholder-substituted. The audio probe
-      // above already resolved the route when audio was present
-      // (targetSupportsImage / modelOverrideResolutionFailed set).
+      // ANY active override, not only inline (`/model`) or already-stamped
+      // media-routed ones: a skill-tool override installs UNSTAMPED (~6084
+      // applies the skill's modelOverride without touching
+      // mediaRoutedOverrideRef), and the send-time stamp exact-routes any
+      // media-carrying payload to the active override, so a top-level image
+      // must be validated against that route regardless of how the override
+      // was installed (R48-1; mirrors the headless twin, which polices ANY
+      // persisted selector). Otherwise it passes raw into the exact route and
+      // is silently placeholder-substituted. The audio probe above already
+      // resolved the route when audio was present (targetSupportsImage /
+      // modelOverrideResolutionFailed set).
       if (
         nextParts !== null &&
         hasImageParts(nextParts) &&
         modelOverrideRef.current !== undefined &&
-        (inlineModelOverrideActiveRef.current ||
-          mediaRoutedOverrideRef.current === modelOverrideRef.current) &&
         !targetSupportsImage &&
         !modelOverrideResolutionFailed
       ) {
@@ -1730,6 +1751,7 @@ export const useGeminiStream = (
               mediaRoutedOverrideRef,
               mediaRoutedPromptIdRef,
             );
+            overrideCleared = true;
           }
           debugLogger.warn(
             `image route capability check failed for '${routeSelector}': ${
@@ -1760,6 +1782,7 @@ export const useGeminiStream = (
           modelOverrideResolutionFailed,
           preOverrideParts,
           mediaRouted,
+          overrideCleared,
         };
       }
       // A resolution failure with the override STILL active (a media-routed
@@ -1870,6 +1893,7 @@ export const useGeminiStream = (
         // installed full-turn selector; merge its mediaRouted so the route is
         // recorded for the owning prompt / drained steer.
         mediaRouted: mediaRouted || visionResult.mediaRouted === true,
+        overrideCleared,
       };
     },
     [addItem, applyVisionBridgeIfNeeded, config, settings],
@@ -3698,6 +3722,11 @@ export const useGeminiStream = (
       // may reinstall a full-turn selector from that same batch.
       let modelOverrideResolutionFailed = false;
       let drainMediaRouted = false;
+      // R48-4: a fail-closed probe can CLEAR the active override mid-drain.
+      // The drain's output contract must express that so core falls back to
+      // the session model instead of resurrecting the stale pre-drain
+      // options.modelOverride as the steer route.
+      let overrideClearedDuringDrain = false;
 
       for (let index = 0; index < messages.length; index += 1) {
         if (signal.aborted) {
@@ -3796,10 +3825,16 @@ export const useGeminiStream = (
           timestamp + index,
           signal,
           !modelOverrideResolutionFailed,
+          // R48-3: thread the accumulated resolution failure so this segment's
+          // clamp / visible fail-closed protections see a failure an earlier
+          // segment's probe already recorded (the per-invocation local flag
+          // would otherwise reset to false and drop both protections).
+          modelOverrideResolutionFailed,
         );
         modelOverrideResolutionFailed ||=
           bridgeResult.modelOverrideResolutionFailed;
         drainMediaRouted ||= bridgeResult.mediaRouted === true;
+        overrideClearedDuringDrain ||= bridgeResult.overrideCleared === true;
         if (!bridgeResult.shouldProceed) {
           if (signal.aborted) {
             restoreMessages.push(...messages.slice(index + 1));
@@ -3852,6 +3887,10 @@ export const useGeminiStream = (
           timestamp,
           signal,
           false,
+          // R48-3: the recheck pass must inherit the accumulated resolution
+          // failure too (it previously passed literal `false`, dropping the
+          // clamp / visible fail-closed protections for rechecked media).
+          modelOverrideResolutionFailed,
         );
         if (!rechecked.shouldProceed) {
           resolvedSegments.splice(index, 1);
@@ -3861,11 +3900,21 @@ export const useGeminiStream = (
           continue;
         }
         drainMediaRouted ||= rechecked.mediaRouted === true;
+        overrideClearedDuringDrain ||= rechecked.overrideCleared === true;
         const recheckedParts = normalizePartList(rechecked.parts ?? segment);
         resolvedSegments[index] = recheckedParts;
-        // A recheck that failed the bridge captured the still-pristine media;
-        // it replaces any earlier variant for this segment.
-        if (rechecked.preOverrideParts !== undefined) {
+        // A recheck that fails the bridge captures the segment as RECEIVED —
+        // already marker-substituted when the first pass degraded it. Filling
+        // it unconditionally would clobber the first-pass FULL-pristine
+        // capture (real audio + images) with the degraded one, and retryParts
+        // (built from pristineSegments) would resend the literal marker
+        // forever (R48-2). Only fill an absent capture: first-pass captures
+        // are taken before any substitution and are always at least as
+        // pristine.
+        if (
+          rechecked.preOverrideParts !== undefined &&
+          pristineSegments[index] === undefined
+        ) {
           pristineSegments[index] = normalizePartList(
             rechecked.preOverrideParts,
           );
@@ -3912,6 +3961,9 @@ export const useGeminiStream = (
         // installed (or cleared) the override after the caller's send options
         // were frozen, so those can no longer be trusted to name the route.
         routeSelector: drainRouteSelector,
+        // R48-4: surface "the drain cleared the route" so core falls back to
+        // the session model instead of the stale pre-drain options.modelOverride.
+        overrideCleared: overrideClearedDuringDrain,
         restoreMessages,
         accept: () => {
           for (const { message, parts, sideEffects } of resolvedForRecording) {
@@ -3965,6 +4017,7 @@ export const useGeminiStream = (
           retryParts: resolved.retryParts,
           mediaRouted: resolved.mediaRouted,
           routeSelector: resolved.routeSelector,
+          overrideCleared: resolved.overrideCleared,
           accept: () => {
             if (settled) return;
             settled = true;

@@ -7088,6 +7088,52 @@ hello
       expect(mockTurnRunFn.mock.calls[1]?.[0]).toBe('skill-model');
     });
 
+    it('degrades a steer to the session model when the drain cleared the override', async () => {
+      // R48-4: a fail-closed probe cleared the active override mid-drain, so
+      // the drain reports overrideCleared with routeSelector: undefined and
+      // mediaRouted: false. The steerRouteOverride `?? override` fallback must
+      // NOT resurrect the stale pre-drain selector (the exact route the drain
+      // just cleared) — it must degrade the steer send to the session model.
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+      const steerInput: SteerInput = {
+        parts: [{ text: 'steer whose route was cleared' }],
+        mediaRouted: false,
+        routeSelector: undefined,
+        overrideCleared: true,
+        accept: vi.fn(),
+        restore: vi.fn(),
+      };
+      const getSteerInput = vi
+        .fn<() => Promise<SteerInput | undefined>>()
+        .mockResolvedValueOnce(steerInput)
+        .mockResolvedValue(undefined);
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'initial prompt' }],
+          new AbortController().signal,
+          'prompt-steer-cleared-route',
+          {
+            type: SendMessageType.UserQuery,
+            getSteerInput,
+            // The pre-drain frozen selector names the route the drain cleared.
+            modelOverride: 'stale-inline-model',
+          },
+        ),
+      );
+
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+      // The original turn keeps the frozen selector…
+      expect(mockTurnRunFn.mock.calls[0]?.[0]).toBe('stale-inline-model');
+      // …but the steer send degrades to the session model ('test-model')
+      // instead of resurrecting the cleared 'stale-inline-model'.
+      expect(mockTurnRunFn.mock.calls[1]?.[0]).toBe('test-model');
+    });
+
     it('marks a JSON Schema invocation as failed when no structured output is produced', async () => {
       vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
         type: 'object',

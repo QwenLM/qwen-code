@@ -253,6 +253,16 @@ export interface SteerInput {
    */
   routeSelector?: string;
   /**
+   * True when a fail-closed capability probe CLEARED the active override
+   * during this drain. The drain's `routeSelector` is then undefined and
+   * `mediaRouted` false — indistinguishable, without this flag, from a drain
+   * that never touched the override. When set, the steer send must fall back
+   * to the session model (undefined) instead of the stale pre-drain
+   * `options.modelOverride`, which names the exact selector the drain just
+   * cleared (R48-4).
+   */
+  overrideCleared?: boolean;
+  /**
    * Invoked when `restore` settles this input (the message goes back to the
    * queue, so the re-drain — not a stored retry payload — owns recovery).
    * The CLI uses this to strip the steer segment from the stored Ctrl+Y
@@ -3208,6 +3218,15 @@ export class GeminiClient {
         override: string | undefined,
         steerInput: SteerInput | undefined,
       ): string | undefined => {
+        // R48-4: a drain that fail-closed-resolved and CLEARED the active
+        // override returns routeSelector: undefined, mediaRouted: false —
+        // which the `?? override` fallback below would paper over by
+        // resurrecting the stale pre-drain selector (the exact route the drain
+        // just cleared). Honor the third state and degrade to the session
+        // model instead.
+        if (steerInput?.overrideCleared === true) {
+          return undefined;
+        }
         const base = steerInput?.routeSelector ?? override;
         return steerInput?.mediaRouted === true &&
           base !== undefined &&
