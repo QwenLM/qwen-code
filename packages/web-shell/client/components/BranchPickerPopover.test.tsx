@@ -502,6 +502,92 @@ describe('BranchPickerPopover actions', () => {
     );
   });
 
+  it('surfaces the daemon message alongside the terminal guidance', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    // The 409 body's message is the sole carrier of the unrestored-stash
+    // pointer; the fixed guidance string alone would hide it.
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'diverged',
+          message:
+            'Auto-merging a.txt The auto-stashed changes were not restored; they are kept in the stash entry (git stash list).',
+        },
+        'POST /workspaces/:workspace/git/pull: diverged',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+    clickButton('Update Project');
+    await flush();
+
+    expect(document.body.textContent).toContain('diverged from its upstream');
+    expect(document.body.textContent).toContain(
+      'The auto-stashed changes were not restored',
+    );
+  });
+
+  it('surfaces the daemon message in the dirty-tree panel', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    // A failure-recovery restore failure on a dirty tree rides the panel
+    // path, whose status line is hidden behind the panel — the pointer
+    // must render in the panel message itself.
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        {
+          error: 'dirty_working_tree',
+          unmerged: true,
+          message:
+            'CONFLICT (content) The auto-stashed changes were not restored; they are kept in the stash entry (git stash list).',
+        },
+        'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+    clickButton('Update Project');
+    await flush();
+
+    expect(document.body.textContent).toContain(
+      'Update blocked by unresolved merge conflicts',
+    );
+    expect(document.body.textContent).toContain(
+      'The auto-stashed changes were not restored',
+    );
+  });
+
   it('resets the resolution panel when the popover is reopened', async () => {
     workspaceGitBranches.mockResolvedValue({
       v: 1,

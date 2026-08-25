@@ -23,12 +23,18 @@ sending both is a 400):
 
 - `stash`: stash local changes (`git stash push --include-untracked`, so
   untracked files that could block the merge are covered), run the pull,
-  then `git stash pop`. If the pull fails, any partial merge/rebase is
-  aborted and the stash is popped back, restoring the pre-pull state. If
-  the restore fails after a successful pull — a conflict, or an
-  untracked-file collision — the response is still a success with
-  `stashRestoreConflict: true` and its `output` carries git's failure
-  notice; git keeps the stash entry, so nothing is lost.
+  then restore by `git stash apply` + identity re-check + `git stash
+drop` — never a single `git stash pop`, because `refs/stash` is
+  shared with the user's terminal and no check-then-act on it is atomic:
+  the apply leaves every entry in place, so a racing push or pop is
+  reported as a restore conflict with the entries kept instead of
+  consuming a foreign entry behind a success. If the pull fails, any
+  partial merge/rebase is aborted and the stash is popped back,
+  restoring the pre-pull state. If the restore fails after a successful
+  pull — a conflict, an untracked-file collision, or a racing actor —
+  the response is still a success with `stashRestoreConflict: true` and
+  its `output` carries git's failure notice; git keeps the stash entry,
+  so nothing is lost.
 - `force`: discard all local changes first (`git reset --hard` +
   `git clean -fd`; ignored files are kept), then pull. Destructive.
   `git reset --hard` acts on the whole repository regardless of the cwd,
@@ -43,7 +49,12 @@ sending both is a 400):
   partial merge/rebase.
 
 Stash detection compares `refs/stash` before/after the push instead of
-parsing git output, which varies by version and locale. The update runs
+parsing git output, which varies by version and locale, and the restore
+attributes the entry by identity — the recorded SHA plus the reflog
+marker the auto-stash pushes with — rather than by stack movement, which
+a concurrent actor's push also changes: when the top of the stack is not
+attributable as the pull's own entry, the restore fails closed with the
+stash pointer instead of applying and dropping a foreign entry. The update runs
 as an explicit fetch followed by a merge (or rebase) of exactly the
 fetched upstream tip, never as a bare `git pull`: re-fetching between
 the probe and the merge would let a commit pushed into that window
@@ -64,25 +75,40 @@ instead. Pulls are serialized per workspace cwd so
 overlapping pulls cannot cross-apply each other's auto-stashes (one
 shared `refs/stash`) or abort each other's in-progress merge.
 
-Pulls are refused while a merge or rebase is already in progress
-(`MERGE_HEAD` or the rebase state directories): the failure recovery
-aborts merge/rebase state indiscriminately, so it must only ever abort
-state the pull itself started. Every pull shape — plain, stash, and
+Pulls are refused while a merge, rebase, cherry-pick, revert, or am
+session is already in progress (`MERGE_HEAD`, `CHERRY_PICK_HEAD`,
+`REVERT_HEAD`, the rebase state directories, or a stopped `git am`,
+which parks in `rebase-apply` without the `onto` file a rebase
+writes): the failure recovery aborts merge/rebase state
+indiscriminately, so it must only ever abort state the pull itself
+started, and the stash/discard steps would abandon the staged
+resolution a cherry-pick, revert, or am carries (unrecoverable by
+reflog). Every pull shape — plain, stash, and
 force — is also refused when the incoming commits add paths that exist
 locally as ignored files: git would silently check the incoming file
 out over the ignored one (ignored paths never appear in `git status`,
 so even a plain pull reads clean), and neither the auto-stash
 (`--include-untracked` skips ignored files) nor the force reset/clean
-protects it. The incoming-addition set is computed relative to the
-merge base from the repository toplevel with `--no-renames -z` (rename
-destinations count as additions, non-ASCII names are not C-quoted, and
-unpushed local deletions are not counted as incoming additions); for a
-rebase, the additions the replayed local commits introduce join the set
-(the replay checks them out over the worktree the same way). The set is
+protects it. The incoming-addition set is computed relative to every merge base
+(`merge-base --all`, unioned: a criss-cross history's real merge
+computes from the virtual merge of its best common ancestors, so
+diffing a single base can hide a path) from the repository toplevel
+with `--no-renames -z` (rename destinations count as additions,
+non-ASCII names are not C-quoted, and unpushed local deletions are not
+counted as incoming additions); for a rebase, the additions the replayed
+local commits introduce join the set (the replay checks them out over
+the worktree the same way). The probe runs just-in-time — after the
+stash/discard, next to the guard re-run — because neither step touches
+ignored files and one a concurrent actor creates while they run must
+still refuse the update; the force shape also probes before the discard
+so the refusal precedes the destructive step when visible. The set is
 compared byte-for-byte against the ignored files present in the
 worktree (`ls-files --others --ignored --exclude-standard -z`), with no
 pathspec parsing and no filesystem walk: a collision is an exact match
-or a segment-boundary prefix in either direction.
+or a segment-boundary prefix in either direction, folded case-wise when
+the repository says the filesystem folds case (`core.ignorecase`) — on
+both the byte-mapped form and the decoded-UTF-8 form, since the
+byte-mapped fold covers ASCII only.
 
 Failures are classified from repository state (`MERGE_HEAD`, rebase
 state, unmerged index entries, ahead/behind counts, dirtiness) into
@@ -116,7 +142,9 @@ a diverged branch whose update conflicts with the local commits, or
 incoming changes colliding with local ignored files — return their own
 409 codes (`merge_in_progress`, `rebase_in_progress`, `diverged`,
 `ignored_collision`) and render terminal guidance instead of the
-stash/discard buttons.
+stash/discard buttons, surfacing the daemon's 409 message alongside the
+fixed guidance text — it is the sole carrier of the unrestored-stash
+pointer. The dirty-tree panel does the same in its message line.
 
 ## Ownership
 

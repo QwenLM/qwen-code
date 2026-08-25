@@ -1388,11 +1388,15 @@ describe('gitPull state guards', () => {
     expect(git(dir, 'stash', 'list').trim()).toBe('');
   });
 
-  it('pulls every shape through a stopped git am session, keeping it', async () => {
+  it('refuses every pull shape while a git am session is stopped, keeping it', async () => {
     const dir = makeRepo();
     // A patch that conflicts with the local history: `git am` stops and
     // leaves .git/rebase-apply — the same directory a rebase uses, but
-    // without the `onto` file a rebase writes.
+    // without the `onto` file a rebase writes. A stopped am carries no
+    // MERGE_HEAD/CHERRY_PICK_HEAD/REVERT_HEAD either, yet the staged
+    // resolution work the user prepares for `am --continue` is just as
+    // unrecoverable-by-reflog as a cherry-pick's — so the guard covers
+    // it instead of letting the stash/discard steps destroy it.
     fs.writeFileSync(path.join(dir, 'a.txt'), 'patched line\n');
     git(dir, 'commit', '-q', '-am', 'patch source');
     const patch = git(dir, 'format-patch', '-1', '--stdout');
@@ -1416,20 +1420,63 @@ describe('gitPull state guards', () => {
     git(clone, 'push', '-q', 'origin', 'HEAD');
 
     for (const opts of [{}, { stash: true }, { force: true }] as const) {
-      const result = await gitPull(dir, opts);
-      expect(result.success).toBe(true);
-      // The am session survives every pull shape: none of the recovery
-      // steps (stash, reset, clean, tip-matched aborts) touch it.
+      await expect(gitPull(dir, opts)).rejects.toMatchObject({
+        code: 'rebase_in_progress',
+      });
+      // The am session survives every refusal: the guard precedes any
+      // stash/discard action.
       expect(
         fs.existsSync(path.join(dir, '.git', 'rebase-apply', 'applying')),
       ).toBe(true);
     }
-    expect(fs.readFileSync(path.join(dir, 'remote-only.txt'), 'utf8')).toBe(
-      'remote\n',
-    );
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(false);
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
     // The state is still abortable as am, not rebase.
     git(dir, 'am', '--abort');
     expect(fs.existsSync(path.join(dir, '.git', 'rebase-apply'))).toBe(false);
+  });
+
+  it('refuses a force pull while a stopped am holds a staged resolution', async () => {
+    const dir = makeRepo();
+    // A stopped am WITH unmerged entries: the user resolved the patch
+    // conflict and staged the resolution for `am --continue`. That
+    // staged blob is unrecoverable by reflog — the exact loss the
+    // cherry-pick/revert arm of the guard exists to prevent, and the
+    // discard's `reset --hard` destroys it.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'patched line\n');
+    git(dir, 'commit', '-q', '-am', 'patch source');
+    const patch = git(dir, 'format-patch', '-1', '--stdout');
+    fs.writeFileSync(path.join(dir, '.git', 'conflict.patch'), patch);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local line\n');
+    git(dir, 'commit', '-q', '-am', 'local change');
+    expect(() =>
+      git(dir, 'am', '--3way', path.join(dir, '.git', 'conflict.patch')),
+    ).toThrow();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'resolved line\n');
+    git(dir, 'add', 'a.txt');
+
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // An unmerged tree leaves the panel Discard as the only recovery; it
+    // must refuse instead of resetting the staged resolution away.
+    await expect(gitPull(dir, { force: true })).rejects.toMatchObject({
+      code: 'rebase_in_progress',
+    });
+
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'resolved line\n',
+    );
+    expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
+    expect(
+      fs.existsSync(path.join(dir, '.git', 'rebase-apply', 'applying')),
+    ).toBe(true);
   });
 
   it('refuses a stash pull while a cherry-pick is conflicted', async () => {
@@ -2687,10 +2734,10 @@ describe('gitPull incoming-tip guards', () => {
   );
 
   // The POSIX shim below stands in for a concurrent actor pushing into
-  // the restore's identity-check->pop window; it has no Windows
+  // the restore's identity-check->apply window; it has no Windows
   // equivalent in this suite.
   it.runIf(process.platform !== 'win32')(
-    'flags the restore when a foreign stash lands between the identity check and the pop',
+    'flags the restore when a foreign stash lands between the identity check and the apply',
     async () => {
       const dir = makeRepo();
       const remote = makeBareRemote();
@@ -2711,11 +2758,12 @@ describe('gitPull incoming-tip guards', () => {
       const marker = path.join(dir, '.git', 'racer-marker');
       const target = path.join(dir, 'remote-only.txt');
       // The user's terminal stashes its own edit inside the window between
-      // the restore's identity check and the pop: the pop must not consume
-      // and drop the foreign entry while the pull's own stays behind.
+      // the restore's identity check and the apply: the restore must not
+      // consume and drop the foreign entry while the pull's own stays
+      // behind.
       const shimDir = installGitShim(
         `#!/bin/sh\n` +
-          `if [ "$1" = "stash" ] && [ "$2" = "pop" ] && [ ! -e "${marker}" ]; then\n` +
+          `if [ "$1" = "stash" ] && [ "$2" = "apply" ] && [ ! -e "${marker}" ]; then\n` +
           `  : > "${marker}"\n` +
           `  printf 'concurrent edit\\n' >> "${target}"\n` +
           `  "${realGit}" -C "${dir}" stash push -q -m 'concurrent actor'\n` +
@@ -2730,13 +2778,15 @@ describe('gitPull incoming-tip guards', () => {
       expect(result.success).toBe(true);
       // The restore is reported as failed — the pull's own entry was never
       // applied — instead of a silent success behind the consumed foreign
-      // entry.
+      // entry. The apply leaves entries in place, so the foreign entry
+      // survives as a duplicate (its diff applied, entry kept) instead of
+      // being applied AND dropped by a single pop.
       expect(result.stashRestoreConflict).toBe(true);
       const list = git(dir, 'stash', 'list');
       expect(list).toContain('qwen-code: auto-stash before pull');
-      expect(list).not.toContain('concurrent actor');
+      expect(list).toContain('concurrent actor');
       // The local edit waits in the kept entry; the concurrent edit landed
-      // in the worktree with its stash entry dropped.
+      // in the worktree through the apply.
       expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('one\n');
       expect(fs.readFileSync(path.join(dir, 'remote-only.txt'), 'utf8')).toBe(
         'remote\nconcurrent edit\n',
@@ -2966,9 +3016,10 @@ describe('gitPull incoming-tip guards', () => {
       const realGit = execFileSync('which', ['git'], {
         encoding: 'utf8',
       }).trim();
+      // The restore now applies and drops separately; fail the apply.
       const shimDir = installGitShim(
         `#!/bin/sh\n` +
-          `if [ "$1" = "stash" ] && [ "$2" = "pop" ]; then\n` +
+          `if [ "$1" = "stash" ] && [ "$2" = "apply" ]; then\n` +
           `  exit 1\n` +
           `fi\n` +
           `exec "${realGit}" "$@"\n`,
@@ -3264,7 +3315,7 @@ describe('gitPull incoming-tip guards', () => {
           `  "${realGit}" "$@"\n` +
           `  exit 1\n` +
           `fi\n` +
-          `if [ "$1" = "stash" ] && [ "$2" = "pop" ]; then\n` +
+          `if [ "$1" = "stash" ] && [ "$2" = "apply" ]; then\n` +
           `  exit 1\n` +
           `fi\n` +
           `exec "${realGit}" "$@"\n`,
@@ -3732,4 +3783,501 @@ describe('gitPull incoming-tip guards', () => {
       expect(git(dir, 'stash', 'list').trim()).toBe('');
     },
   );
+
+  // The POSIX shim below stands in for a concurrent actor pushing into
+  // the push->attribution window; it has no Windows equivalent in this
+  // suite.
+  it.runIf(process.platform !== 'win32')(
+    'keeps both entries when a terminal stash lands between the push and the identity probe',
+    async () => {
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, 't2.txt'), 'committed\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'add t2');
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'terminal-stash-once');
+      const t2 = path.join(dir, 't2.txt');
+      // The user's terminal stashes its own edit right after the pull's
+      // auto-stash pushed: the restore must not attribute the displaced
+      // foreign entry as its own and apply-and-drop it in ours's place.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "stash" ] && [ "$2" = "push" ] && [ ! -e "${marker}" ]; then\n` +
+          `  "${realGit}" "$@"\n` +
+          `  status=$?\n` +
+          `  : > "${marker}"\n` +
+          `  printf 'terminal edit\\n' > "${t2}"\n` +
+          `  "${realGit}" -C "${dir}" stash push -q -m 'terminal actor'\n` +
+          `  exit $status\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      const result = await withPathPrefix(shimDir, () =>
+        gitPull(dir, { stash: true }),
+      );
+
+      // The pull converges but the restore fails closed: with no
+      // attributable identity the edits wait in the kept entry and the
+      // pointer is shown, instead of the foreign entry being consumed.
+      expect(result.success).toBe(true);
+      expect(result.stashRestoreConflict).toBe(true);
+      expect(result.output).toContain(STASH_RESTORE_NOTE);
+      const list = git(dir, 'stash', 'list', '--oneline');
+      expect(list).toContain('auto-stash before pull');
+      expect(list).toContain('terminal actor');
+      // Neither entry was applied or dropped.
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('one\n');
+      expect(fs.readFileSync(path.join(dir, 't2.txt'), 'utf8')).toBe(
+        'committed\n',
+      );
+      expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    },
+  );
+
+  // The POSIX shim below stands in for a concurrent actor pushing into
+  // the failed-push pop-back window; it has no Windows equivalent in
+  // this suite.
+  it.runIf(process.platform !== 'win32')(
+    'keeps a displaced entry when the failed-push pop-back cannot attribute it',
+    async () => {
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, 't2.txt'), 'committed\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'add t2');
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'failed-push-once');
+      const t2 = path.join(dir, 't2.txt');
+      // The push runs for real (creating the entry and moving the edits
+      // out of the worktree), a terminal actor pushes its own entry on
+      // top, and only then the push reports failure: the pop-back must
+      // not apply and drop the actor's entry in ours's place.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "stash" ] && [ "$2" = "push" ] && [ ! -e "${marker}" ]; then\n` +
+          `  "${realGit}" "$@"\n` +
+          `  : > "${marker}"\n` +
+          `  printf 'terminal edit\\n' > "${t2}"\n` +
+          `  "${realGit}" -C "${dir}" stash push -q -m 'terminal actor'\n` +
+          `  exit 1\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      let thrown: unknown;
+      await withPathPrefix(shimDir, () => gitPull(dir, { stash: true })).catch(
+        (err) => {
+          thrown = err;
+        },
+      );
+
+      expect(thrown).toBeTruthy();
+      expect((thrown as Error).message).toContain(STASH_RESTORE_NOTE);
+      const list = git(dir, 'stash', 'list', '--oneline');
+      expect(list).toContain('auto-stash before pull');
+      expect(list).toContain('terminal actor');
+      // The pop-back never ran on the displaced entry.
+      expect(fs.readFileSync(path.join(dir, 't2.txt'), 'utf8')).toBe(
+        'committed\n',
+      );
+    },
+  );
+
+  // The POSIX shim below stands in for a concurrent actor popping the
+  // pull's own entry inside the restore window; it has no Windows
+  // equivalent in this suite.
+  it.runIf(process.platform !== 'win32')(
+    'keeps a foreign entry the terminal pops out of the restore window',
+    async () => {
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, 'z.txt'), 'z one\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'add z');
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      // The user's own older entry sits below the pull's auto-stash.
+      fs.writeFileSync(path.join(dir, 'z.txt'), 'z user edit\n');
+      git(dir, 'stash', 'push', '-q', '-m', 'user older');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'terminal-pop-once');
+      // The terminal pops the pull's own entry inside the window between
+      // the restore's identity check and its apply; the daemon must then
+      // not apply and drop the exposed older entry behind a success.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "stash" ] && [ "$2" = "apply" ] && [ ! -e "${marker}" ]; then\n` +
+          `  : > "${marker}"\n` +
+          `  "${realGit}" -C "${dir}" stash pop -q\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      const result = await withPathPrefix(shimDir, () =>
+        gitPull(dir, { stash: true }),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.stashRestoreConflict).toBe(true);
+      // The user's pop already restored the pull's own edits; the daemon
+      // applied the exposed older entry but kept it instead of dropping
+      // it behind a verified-success report.
+      const list = git(dir, 'stash', 'list', '--oneline');
+      expect(list).toContain('user older');
+      expect(list).not.toContain('auto-stash before pull');
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(fs.readFileSync(path.join(dir, 'z.txt'), 'utf8')).toBe(
+        'z user edit\n',
+      );
+      expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    },
+  );
+
+  // The POSIX shim below makes the restore's post-apply identity probe
+  // unreadable; it has no Windows equivalent in this suite.
+  it.runIf(process.platform !== 'win32')(
+    'flags the restore when the post-apply identity probe fails',
+    async () => {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'post-apply-probe-once');
+      // An unreadable refs/stash right after the apply (refs/stash lock
+      // contention is likeliest in exactly this concurrent-actor window)
+      // must report the restore as failed, matching the pre-check's
+      // fail-closed polarity — not read as a verified successful restore.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "stash" ] && [ "$2" = "apply" ]; then\n` +
+          `  : > "${marker}"\n` +
+          `fi\n` +
+          `if [ "$1" = "rev-parse" ] && [ -e "${marker}" ]; then\n` +
+          `  for a in "$@"; do\n` +
+          `    [ "$a" = "refs/stash" ] && exit 128\n` +
+          `  done\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      const result = await withPathPrefix(shimDir, () =>
+        gitPull(dir, { stash: true }),
+      );
+
+      // The apply ran, so the edits are in the worktree AND still in the
+      // kept entry; the unreadable re-check reports the conflict instead
+      // of a lying success.
+      expect(result.success).toBe(true);
+      expect(result.stashRestoreConflict).toBe(true);
+      expect(git(dir, 'stash', 'list', '--oneline')).toContain(
+        'auto-stash before pull',
+      );
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+    },
+  );
+
+  // The POSIX shim below fails the collision probe on demand; it has no
+  // Windows equivalent in this suite.
+  it.runIf(process.platform !== 'win32')(
+    'keeps a probe failure on a diverged dirty tree panel-recoverable',
+    async () => {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      // Diverge the branch and dirty the tree.
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'a.txt'), 'remote version\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local version\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'local commit');
+      fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "ls-files" ]; then\n` +
+          `  exit 128\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      // A probe failure is not an update failure: the update was never
+      // attempted, so the stash pull must not launder it into the
+      // terminal-only diverged code — the stash option can still succeed
+      // on a retry that passes the probe.
+      await withPathPrefix(shimDir, () =>
+        expect(gitPull(dir, { stash: true })).rejects.toMatchObject({
+          code: 'dirty_working_tree',
+        }),
+      );
+      await withPathPrefix(shimDir, () =>
+        expect(gitPull(dir)).rejects.toMatchObject({
+          code: 'dirty_working_tree',
+        }),
+      );
+
+      // The stash pull's probe failure popped the auto-stash back.
+      expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+        'dirty edit\n',
+      );
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local version\n',
+      );
+      expect(git(dir, 'stash', 'list').trim()).toBe('');
+    },
+  );
+
+  // The POSIX shim below stands in for a watcher creating an ignored file
+  // while the auto-stash runs; it has no Windows equivalent in this suite.
+  it.runIf(process.platform !== 'win32')(
+    'refuses the merge when an ignored file appears while the stash runs',
+    async () => {
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, '.gitignore'), 'config.json\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'ignore config.json');
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'config.json'), 'incoming\n');
+      git(clone, 'add', '-f', 'config.json');
+      git(clone, 'commit', '-q', '-m', 'add config.json');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'watcher-once');
+      const target = path.join(dir, 'config.json');
+      // A dev server or build watcher writes an ignored artifact at the
+      // incoming path during the multi-second stash phase; the probe must
+      // snapshot the ignored set AFTER the stash, not before it, or the
+      // merge silently checks the incoming file out over it.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "stash" ] && [ "$2" = "push" ] && [ ! -e "${marker}" ]; then\n` +
+          `  "${realGit}" "$@"\n` +
+          `  status=$?\n` +
+          `  : > "${marker}"\n` +
+          `  printf 'watcher secret\\n' > "${target}"\n` +
+          `  exit $status\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      await withPathPrefix(shimDir, () =>
+        expect(gitPull(dir, { stash: true })).rejects.toMatchObject({
+          code: 'ignored_collision',
+        }),
+      );
+
+      // The refusal restores the dirty edit and keeps the watcher's file.
+      expect(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).toBe(
+        'watcher secret\n',
+      );
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(git(dir, 'stash', 'list').trim()).toBe('');
+
+      // The force shape has the same window: `clean -fd` keeps ignored
+      // files, so a watcher file created during the discard must still
+      // refuse the merge via the just-in-time re-probe. Remove the file
+      // first so the pre-discard probe sees a clean snapshot and only
+      // the just-in-time one can catch the racing write.
+      fs.rmSync(path.join(dir, 'config.json'));
+      const cleanMarker = path.join(dir, '.git', 'watcher-clean-once');
+      const cleanShimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "clean" ] && [ ! -e "${cleanMarker}" ]; then\n` +
+          `  "${realGit}" "$@"\n` +
+          `  status=$?\n` +
+          `  : > "${cleanMarker}"\n` +
+          `  printf 'watcher secret\\n' > "${target}"\n` +
+          `  exit $status\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+      await withPathPrefix(cleanShimDir, () =>
+        expect(gitPull(dir, { force: true })).rejects.toMatchObject({
+          code: 'ignored_collision',
+        }),
+      );
+      expect(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).toBe(
+        'watcher secret\n',
+      );
+    },
+  );
+
+  it('refuses a merge pull whose criss-cross bases hide the collision in one base', async () => {
+    // A criss-cross history has several best common ancestors; the real
+    // merge computes from their virtual merge, so diffing a single base
+    // under-approximates the incoming set. The dates pin `merge-base`
+    // (single) to the base that HIDES the path (git reports the newer of
+    // two tied best ancestors), so only the union over every base sees
+    // the collision.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranches-'));
+    tmpRoots.push(dir);
+    const dated = (date: string, ...args: string[]): string =>
+      execFileSync('git', args, {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { ...process.env, GIT_COMMITTER_DATE: date },
+      });
+    git(dir, 'init', '-q', '-b', 'master');
+    git(dir, 'config', 'user.email', 'test@example.com');
+    git(dir, 'config', 'user.name', 'Test');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(dir, 'F.txt'), 'base\n');
+    git(dir, 'add', '.');
+    dated('2020-01-01T00:00:00', 'commit', '-q', '-m', 'O');
+    git(dir, 'checkout', '-q', '-b', 'lineA');
+    fs.writeFileSync(path.join(dir, 'F.txt'), 'x\n');
+    dated('2022-01-01T00:00:00', 'commit', '-q', '-am', 'X');
+    git(dir, 'checkout', '-q', 'master');
+    git(dir, 'checkout', '-q', '-b', 'lineB');
+    fs.writeFileSync(path.join(dir, 'F.txt'), 'y\n');
+    dated('2021-01-01T00:00:00', 'commit', '-q', '-am', 'Y');
+    // Each line merges the other's pre-merge tip with `-s ours`: both
+    // merges record the same two ancestors, making X and Y merge bases.
+    git(dir, 'checkout', '-q', 'lineA');
+    git(dir, 'merge', '-q', '-s', 'ours', '--no-edit', 'lineB');
+    git(dir, 'checkout', '-q', 'lineB');
+    git(dir, 'merge', '-q', '-s', 'ours', '--no-edit', 'lineA~1');
+    // The tip changes F to match X's content: diff(X, tip) hides F while
+    // diff(Y, tip) shows it.
+    fs.writeFileSync(path.join(dir, 'F.txt'), 'x\n');
+    git(dir, 'commit', '-q', '-am', 'Z');
+
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'lineB');
+    git(dir, 'checkout', '-q', 'lineA');
+    git(dir, 'branch', '--set-upstream-to', 'origin/lineB', 'lineA');
+
+    // Locally delete F and keep user content at the path, ignored.
+    git(dir, 'rm', '-q', 'F.txt');
+    git(dir, 'commit', '-q', '-m', 'delete F');
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'F.txt\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'ignore F');
+    fs.writeFileSync(path.join(dir, 'F.txt'), 'user content\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    // Fixture sanity: a criss-cross carries two best common ancestors.
+    expect(
+      git(dir, 'merge-base', '--all', 'HEAD', '@{u}').trim().split('\n'),
+    ).toHaveLength(2);
+
+    let thrown: unknown;
+    await gitPull(dir).catch((err) => {
+      thrown = err;
+    });
+    expect(thrown).toMatchObject({ code: 'ignored_collision' });
+    expect((thrown as Error).message).toContain('F.txt');
+
+    expect(fs.readFileSync(path.join(dir, 'F.txt'), 'utf8')).toBe(
+      'user content\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('refuses a non-ASCII case-variant collision when the repository folds case', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'caf\u00e9-notes.md\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'ignore the non-ascii notes');
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'caf\u00c9-notes.md'), 'incoming\n');
+    git(clone, 'add', '-f', 'caf\u00c9-notes.md');
+    git(clone, 'commit', '-q', '-m', 'add the uppercase-variant notes');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // core.ignorecase=true is the default on the case-folding
+    // filesystems (APFS/NTFS). The byte-mapped fold covers ASCII only,
+    // so the probe must also fold decoded UTF-8 to catch non-ASCII
+    // case-variant collisions.
+    git(dir, 'config', 'core.ignorecase', 'true');
+    fs.writeFileSync(path.join(dir, 'caf\u00e9-notes.md'), 'local secret\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    await expect(gitPull(dir, { stash: true })).rejects.toMatchObject({
+      code: 'ignored_collision',
+    });
+
+    expect(fs.readFileSync(path.join(dir, 'caf\u00e9-notes.md'), 'utf8')).toBe(
+      'local secret\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
 });

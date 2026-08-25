@@ -47,6 +47,16 @@ function isDirtyWorkingTreeError(err: unknown): boolean {
   return pullErrorBody(err)?.['error'] === 'dirty_working_tree';
 }
 
+// The 409 body's message is the sole carrier of details the fixed UI
+// strings do not cover — notably the unrestored-stash pointer appended
+// by the daemon. Surface it alongside the guidance/panel text.
+function pullDaemonMessage(err: unknown): string | undefined {
+  const message = pullErrorBody(err)?.['message'];
+  return typeof message === 'string' && message.trim() !== ''
+    ? message
+    : undefined;
+}
+
 // A dirty-tree 409 whose index carries unmerged entries: stash cannot
 // recover it (git refuses to stash unmerged entries), only discard. The
 // route sets the structured flag from its repository-state probe.
@@ -117,6 +127,9 @@ export function BranchPickerPopover({
   const [pullBlocked, setPullBlocked] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [pullBlockedUnmerged, setPullBlockedUnmerged] = useState(false);
+  const [pullBlockedDetail, setPullBlockedDetail] = useState<string | null>(
+    null,
+  );
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     recent: false,
     local: false,
@@ -157,6 +170,7 @@ export function BranchPickerPopover({
       setPullBlocked(false);
       setConfirmDiscard(false);
       setPullBlockedUnmerged(false);
+      setPullBlockedDetail(null);
       setTimeout(() => searchRef.current?.focus(), 50);
     }
   }, [open, fetchBranches]);
@@ -173,6 +187,7 @@ export function BranchPickerPopover({
     setPullBlocked(false);
     setConfirmDiscard(false);
     setPullBlockedUnmerged(false);
+    setPullBlockedDetail(null);
     // The panel's status line is hidden while it is up; drop it too so a
     // competing action does not run with the stale blocked message showing.
     setStatusMsg(null);
@@ -303,13 +318,18 @@ export function BranchPickerPopover({
         onBranchChanged?.();
       } catch (err) {
         const guidanceKey = terminalPullGuidanceKey(err);
+        const detail = pullDaemonMessage(err);
         if (guidanceKey) {
           clearPullPanel();
-          showStatus(t(guidanceKey), 'error');
+          showStatus(
+            detail ? `${t(guidanceKey)} — ${detail}` : t(guidanceKey),
+            'error',
+          );
         } else if (isDirtyWorkingTreeError(err)) {
           setPullBlocked(true);
           setConfirmDiscard(false);
           setPullBlockedUnmerged(isUnmergedStateError(err));
+          setPullBlockedDetail(detail ?? null);
           showStatus(t('branchPicker.pullBlocked'), 'error');
         } else {
           clearPullPanel();
@@ -690,9 +710,10 @@ export function BranchPickerPopover({
         {pullBlocked ? (
           <div className={styles.pullBlocked}>
             <div className={styles.pullBlockedMessage}>
-              {pullBlockedUnmerged
+              {(pullBlockedUnmerged
                 ? t('branchPicker.pullUnmerged')
-                : t('branchPicker.pullBlocked')}
+                : t('branchPicker.pullBlocked')) +
+                (pullBlockedDetail ? ` — ${pullBlockedDetail}` : '')}
             </div>
             {confirmDiscard ? (
               <>

@@ -549,6 +549,11 @@ export type GitPullFailureCode =
 export const STASH_RESTORE_NOTE =
   'The auto-stashed changes were not restored; they are kept in the stash entry (git stash list).';
 
+// The reflog marker the auto-stash entry is pushed with; the restore
+// attributes the entry by this marker plus the recorded SHA instead of
+// by stack movement, which a concurrent actor's push also changes.
+const AUTO_STASH_MESSAGE = 'qwen-code: auto-stash before pull';
+
 /**
  * A pull refusal or failure classified from repository state instead of
  * git's rendered diagnostics, which vary by version and locale and embed
@@ -604,13 +609,39 @@ async function stashTopIs(
   return top === recorded;
 }
 
+// The reflog message of the topmost stash entry: `git stash push -m`
+// writes "On <branch>: <message>", so the marker rides the suffix. An
+// unreadable message reads as "not ours" — the entry is kept either way.
+async function stashTopMessage(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  return (
+    await runGit(
+      cwd,
+      ['log', '-g', '-1', '--format=%gs', 'refs/stash'],
+      env,
+    ).catch(() => '')
+  ).trim();
+}
+
 // refs/stash is shared with actors the pull lock does not serialize
-// (the user's terminal), and no check-then-pop on it is atomic. Bracket
-// the pop with identity checks on both sides: the pre-check refuses a
-// foreign entry that replaced ours before the pop, and the post-check
-// catches one pushed inside the check-then-pop window that the pop then
-// consumes in ours's place. Either failure reports the restore as
-// failed; our entry is kept either way.
+// (the user's terminal), and no check-then-act on it is atomic. Restore
+// with apply-then-drop bracketed by identity checks instead of a single
+// `git stash pop`, which atomically applies AND drops whatever sits on
+// top: the pre-check refuses a foreign entry that replaced ours first,
+// and the apply leaves every entry in place, so the re-check can then
+// report the restore as failed when the top no longer matches the
+// recorded identity — an entry the actor pushed OR popped inside the
+// window — with the foreign entry surviving as a duplicate instead of
+// being consumed and dropped behind a success report. The re-check is
+// fail-closed on probe errors like the pre-check: an unreadable
+// refs/stash reports the restore as failed instead of reading as "the
+// recorded entry left the top, so ours was consumed". Either failure
+// reports the restore as failed; our entry is kept either way. A
+// residual window remains between the re-check and the drop — no
+// refs/stash sequence can rule out a concurrent push displacing ours
+// inside it — and is accepted, not implied closed.
 async function popRecordedStash(
   cwd: string,
   env: Readonly<Record<string, string | undefined>> | undefined,
@@ -620,11 +651,11 @@ async function popRecordedStash(
     return { popped: false, output: '' };
   }
   try {
-    const output = await runGit(cwd, ['stash', 'pop'], env);
-    if (await stashTopIs(cwd, env, recorded)) {
-      // Ours is still on top: the pop consumed the foreign entry.
+    const output = await runGit(cwd, ['stash', 'apply'], env);
+    if (!(await stashTopIs(cwd, env, recorded))) {
       return { popped: false, output: '' };
     }
+    await runGit(cwd, ['stash', 'drop'], env);
     return { popped: true, output };
   } catch (err) {
     const e = err as { stdout?: string; stderr?: string };
@@ -656,10 +687,10 @@ async function inProgressRebaseDir(
     if (!rel) continue;
     const abs = path.resolve(cwd, rel);
     if (!fs.existsSync(abs)) continue;
-    // `git am` parks its state in the same rebase-apply directory, but
-    // never writes `onto` — a stopped am is not a rebase, and none of
-    // the pull's recovery steps (stash, reset, clean, aborting state
-    // matched to the fetched tip) disturb it.
+    // `git am` parks its state in the same rebase-apply directory but
+    // never writes `onto`. A stopped am is not a rebase this pull's
+    // recovery may abort, so the tip-matched abort logic never sees it;
+    // the guard covers it separately (see stoppedAmDir).
     if (stateDir === 'rebase-apply' && !fs.existsSync(path.join(abs, 'onto'))) {
       continue;
     }
@@ -668,12 +699,34 @@ async function inProgressRebaseDir(
   return '';
 }
 
+// A stopped `git am` parks in rebase-apply WITHOUT the `onto` file a
+// rebase writes and without MERGE_HEAD/CHERRY_PICK_HEAD/REVERT_HEAD. It
+// is still foreign state the pull must refuse: the discard's
+// `reset --hard` destroys the staged patch-conflict resolution the
+// user prepared for `am --continue`, and that blob is unrecoverable by
+// reflog.
+async function stoppedAmDir(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  const rel = (
+    await runGit(cwd, ['rev-parse', '--git-path', 'rebase-apply'], env)
+  ).trim();
+  if (!rel) return '';
+  const abs = path.resolve(cwd, rel);
+  if (!fs.existsSync(abs)) return '';
+  return fs.existsSync(path.join(abs, 'onto')) ? '' : abs;
+}
+
 async function hasInProgressRebase(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<boolean> {
   try {
-    return (await inProgressRebaseDir(cwd, env)) !== '';
+    return (
+      (await inProgressRebaseDir(cwd, env)) !== '' ||
+      (await stoppedAmDir(cwd, env)) !== ''
+    );
   } catch {
     return false;
   }
@@ -739,12 +792,13 @@ function splitBuffer(buf: Buffer, byte: number): Buffer[] {
 // the force reset/clean (clean -fd keeps ignored entries) protects them.
 //
 // Both sides are enumerated structurally. For a merge the incoming side
-// comes from `diff --no-renames --diff-filter=d -z` starting at the merge
-// base: every path the update writes — additions AND modifications, since
-// the modify/delete conflict on a locally untracked path still checks the
-// incoming content out over the ignored file — excluding deletions, which
-// write nothing (so unpushed local deletions are not counted; rename
-// destinations count as additions). A rebase's initial detach-checkout
+// comes from `diff --no-renames --diff-filter=d -z` starting at EVERY
+// merge base (`merge-base --all`, unioned): every path the update writes
+// — additions AND modifications, since the modify/delete conflict on a
+// locally untracked path still checks the incoming content out over the
+// ignored file — excluding deletions, which write nothing (so unpushed
+// local deletions are not counted; rename destinations count as
+// additions). A rebase's initial detach-checkout
 // writes the ENTIRE fetched tip's tree before the replay starts, so the
 // rebase shape enumerates that tree instead — paths unchanged upstream
 // but deleted locally are written by it too. On an unborn HEAD the merge
@@ -758,9 +812,10 @@ function splitBuffer(buf: Buffer, byte: number): Buffer[] {
 // entry-by-entry: a worktree whose ignored listing exceeds
 // runGitBuffer's cap must still be pullable. Keys compare as raw bytes,
 // folded case-wise when the repository says the filesystem folds
-// (core.ignorecase): a case-variant incoming path is the same file
-// there, and git's own ignore matching folds too, so nothing else
-// catches the overwrite. A collision is an exact match or a
+// (core.ignorecase) — on both the byte-mapped form and the decoded-UTF-8
+// form, since the byte-mapped fold covers ASCII only: a case-variant
+// incoming path is the same file there, and git's own ignore matching
+// folds too, so nothing else catches the overwrite. A collision is an exact match or a
 // segment-boundary prefix in either direction: an ignored file `docs`
 // blocks an incoming `docs/guide.md`, and an incoming file `dist`
 // replaces an ignored `dist/` with everything inside it. A rebase
@@ -785,51 +840,73 @@ async function incomingIgnoredPaths(
   // rev-parse -q --verify exits 1 on an unborn HEAD (a zero-commit
   // branch with a configured upstream); merge-base would fatal there.
   const headExists = await hasForeignHead(toplevel, 'HEAD', env);
-  const base = headExists
-    ? (await runGit(toplevel, ['merge-base', 'HEAD', fetchedTip], env)).trim()
-    : EMPTY_TREE_SHA;
-  const foldCase = await repoFoldsCase(toplevel, env);
-  const additions =
-    includeReplayedAdditions && headExists
-      ? splitBuffer(
-          await runGitBuffer(
-            toplevel,
-            ['ls-tree', '-r', '--name-only', '-z', fetchedTip],
-            env,
-          ),
-          0,
-        )
-      : splitBuffer(
-          await runGitBuffer(
-            toplevel,
-            [
-              'diff',
-              '--no-renames',
-              '--diff-filter=d',
-              '--name-only',
-              '-z',
-              base,
-              fetchedTip,
-            ],
-            env,
-          ),
-          0,
-        );
-  // An unborn branch has no local commits to replay.
-  if (includeReplayedAdditions && headExists) {
-    additions.push(
-      ...splitBuffer(
+  // `merge-base --all`: criss-cross histories have several best common
+  // ancestors, and the real merge computes from their virtual merge —
+  // diffing a single one of them under-approximates the incoming set (a
+  // base whose content equals the tip hides the path), so union the
+  // range diffs of EVERY base. The union is a sound over-approximation
+  // whose only extra refusals are the probe's declared fail-closed
+  // direction.
+  const bases = headExists
+    ? splitBuffer(
         await runGitBuffer(
           toplevel,
-          [
-            'log',
-            '--no-renames',
-            '--diff-filter=d',
-            '--name-only',
-            '--format=',
-            '-z',
-            `${base}..HEAD`,
-          ],
+          ['merge-base', '--all', 'HEAD', fetchedTip],
+          env,
+        ),
+        10,
+      )
+        .map((line) => line.toString('utf8').trim())
+        .filter((line) => line !== '')
+    : [EMPTY_TREE_SHA];
+  const foldCase = await repoFoldsCase(toplevel, env);
+  const additions: Buffer[] = [];
+  const seenAdditions = new Set<string>();
+  const collect = (entries: Buffer[]): void => {
+    for (const entry of entries) {
+      const key = entry.toString('binary');
+      if (seenAdditions.has(key)) continue;
+      seenAdditions.add(key);
+      additions.push(entry);
+    }
+  };
+  if (includeReplayedAdditions && headExists) {
+    collect(
+      splitBuffer(
+        await runGitBuffer(
+          toplevel,
+          ['ls-tree', '-r', '--name-only', '-z', fetchedTip],
+          env,
+        ),
+        0,
+      ),
+    );
+  }
+  for (const base of bases) {
+    // An unborn branch has no local commits to replay.
+    collect(
+      splitBuffer(
+        await runGitBuffer(
+          toplevel,
+          includeReplayedAdditions && headExists
+            ? [
+                'log',
+                '--no-renames',
+                '--diff-filter=d',
+                '--name-only',
+                '--format=',
+                '-z',
+                `${base}..HEAD`,
+              ]
+            : [
+                'diff',
+                '--no-renames',
+                '--diff-filter=d',
+                '--name-only',
+                '-z',
+                base,
+                fetchedTip,
+              ],
           env,
         ),
         0,
@@ -840,18 +917,19 @@ async function incomingIgnoredPaths(
   const ignoredFiles = new Set<string>();
   const ignoredDirs = new Set<string>();
   await streamIgnoredListing(toplevel, env, (entry) => {
-    // Collapsed directory entries (a nested repository under an ignored
-    // path) carry a trailing slash; strip it so the entry compares like
-    // its path.
-    let key = collisionKey(entry, foldCase);
-    if (key.endsWith('/')) key = key.slice(0, -1);
-    ignoredFiles.add(key);
-    for (
-      let slash = key.indexOf('/');
-      slash !== -1;
-      slash = key.indexOf('/', slash + 1)
-    ) {
-      ignoredDirs.add(key.slice(0, slash));
+    for (let key of collisionKeys(entry, foldCase)) {
+      // Collapsed directory entries (a nested repository under an ignored
+      // path) carry a trailing slash; strip it so the entry compares like
+      // its path.
+      if (key.endsWith('/')) key = key.slice(0, -1);
+      ignoredFiles.add(key);
+      for (
+        let slash = key.indexOf('/');
+        slash !== -1;
+        slash = key.indexOf('/', slash + 1)
+      ) {
+        ignoredDirs.add(key.slice(0, slash));
+      }
     }
   });
   return findIgnoredCollisions(additions, ignoredFiles, ignoredDirs, foldCase);
@@ -859,10 +937,23 @@ async function incomingIgnoredPaths(
 
 // 'binary' maps bytes 1:1 onto code units, unlike UTF-8 which corrupts
 // invalid sequences to U+FFFD. Folding applies only when the repository
-// says the filesystem folds case.
-function collisionKey(raw: Buffer, foldCase: boolean): string {
-  const key = raw.toString('binary');
-  return foldCase ? key.toLowerCase() : key;
+// says the filesystem folds case — and there the probe compares a
+// decoded-UTF-8 key in addition to the byte-mapped one: JS toLowerCase
+// on the byte-mapped string folds only ASCII, and multi-byte sequences
+// corrupt into DIFFERENT keys under it, which would miss every
+// non-ASCII case-variant collision. The UTF-8 key is computed only for
+// valid UTF-8; invalid sequences keep their 1:1 binary comparison
+// instead of collapsing unrelated names onto U+FFFD.
+function collisionKeys(raw: Buffer, foldCase: boolean): string[] {
+  const byteKey = raw.toString('binary');
+  const keys = [foldCase ? byteKey.toLowerCase() : byteKey];
+  if (foldCase) {
+    const text = raw.toString('utf8');
+    if (Buffer.byteLength(text, 'utf8') === raw.length) {
+      keys.push(text.normalize('NFC').toLowerCase());
+    }
+  }
+  return keys;
 }
 
 function findIgnoredCollisions(
@@ -871,21 +962,22 @@ function findIgnoredCollisions(
   ignoredDirs: ReadonlySet<string>,
   foldCase: boolean,
 ): Buffer[] {
-  return additions.filter((addition) => {
-    const key = collisionKey(addition, foldCase);
-    // Exact match, or the incoming file sits where an ignored directory's
-    // contents live.
-    if (ignoredFiles.has(key) || ignoredDirs.has(key)) return true;
-    // An ignored file sits at a directory prefix of the incoming path.
-    for (
-      let slash = key.indexOf('/');
-      slash !== -1;
-      slash = key.indexOf('/', slash + 1)
-    ) {
-      if (ignoredFiles.has(key.slice(0, slash))) return true;
-    }
-    return false;
-  });
+  return additions.filter((addition) =>
+    collisionKeys(addition, foldCase).some((key) => {
+      // Exact match, or the incoming file sits where an ignored
+      // directory's contents live.
+      if (ignoredFiles.has(key) || ignoredDirs.has(key)) return true;
+      // An ignored file sits at a directory prefix of the incoming path.
+      for (
+        let slash = key.indexOf('/');
+        slash !== -1;
+        slash = key.indexOf('/', slash + 1)
+      ) {
+        if (ignoredFiles.has(key.slice(0, slash))) return true;
+      }
+      return false;
+    }),
+  );
 }
 
 // Fail closed: an unreadable ignorecase setting assumes a folding
@@ -1043,6 +1135,10 @@ async function classifyPullFailure(
   err: unknown,
   wasStashPull: boolean,
 ): Promise<unknown> {
+  // Typed failures already carry their repository-state classification;
+  // re-deriving it from the live tree would launder a guard's refusal
+  // into whatever state the probes happen to find now.
+  if (err instanceof GitPullFailure) return err;
   const detail = gitFailureDetail(err);
   if (await hasMergeHead(cwd, env)) {
     return new GitPullFailure('merge_in_progress', detail);
@@ -1097,11 +1193,13 @@ async function hasForeignHead(
   }
 }
 
-// Throws when a merge, rebase, cherry-pick, or revert this pull did not
-// start is in progress. A conflict-resolved-and-staged cherry-pick or
-// revert carries no MERGE_HEAD or rebase state dir, yet `stash push` and
-// `reset --hard` both abandon it and the staged resolution blob is
-// unrecoverable by reflog, so the guard covers those heads too.
+// Throws when a merge, rebase, cherry-pick, revert, or am session this
+// pull did not start is in progress. A conflict-resolved-and-staged
+// cherry-pick or revert carries no MERGE_HEAD or rebase state dir, yet
+// `stash push` and `reset --hard` both abandon it and the staged
+// resolution blob is unrecoverable by reflog, so the guard covers those
+// heads — and a stopped am, which carries the same unrecoverable staged
+// resolution — too.
 async function refuseForeignMergeOrRebase(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -1125,6 +1223,12 @@ async function refuseForeignMergeOrRebase(
     throw new GitPullFailure(
       'rebase_in_progress',
       'cannot pull: a rebase is already in progress — finish or abort it before updating',
+    );
+  }
+  if ((await stoppedAmDir(cwd, env)) !== '') {
+    throw new GitPullFailure(
+      'rebase_in_progress',
+      'cannot pull: an am session is in progress — finish, skip, or abort it before updating',
     );
   }
 }
@@ -1220,31 +1324,31 @@ async function gitPullInner(
       }
     }
   }
-  // Every pull shape refuses an incoming collision with local ignored
-  // files: ignored paths never appear in `git status`, so the plain path
-  // reads clean and would silently check the incoming file out over the
-  // local one. Probe failures must refuse the pull, not read as "no
-  // collision" (see incomingIgnoredPaths).
-  //
   // An unborn HEAD has no local commits to replay, so the rebase shape
   // degenerates to the merge one: `git rebase` fatals on the missing HEAD
   // ("Could not resolve HEAD to a commit") — on the force path only after
   // the discard already ran.
   const headExists = await hasForeignHead(cwd, 'HEAD', env);
   const useRebase = opts?.rebase === true && headExists;
-  let ignored: Buffer[];
-  try {
-    ignored = await incomingIgnoredPaths(cwd, fetchedTip, useRebase, env);
-  } catch (err) {
-    throw await classifyPullFailure(cwd, env, err, opts?.stash === true);
-  }
-  if (ignored.length > 0) {
-    throw refusedIgnoredCollision(ignored);
-  }
   let stashed = false;
   let stashedSha = '';
   if (opts?.force) {
     await refuseForeignMergeOrRebase(cwd, env);
+    // Probe before the discard too: the destructive step must not run
+    // when the pre-discard snapshot already sees the collision. The
+    // just-in-time re-probe below still guards the merge against ignored
+    // files created while the discard runs (`clean -fd` keeps them).
+    const preDiscardIgnored = await incomingIgnoredPaths(
+      cwd,
+      fetchedTip,
+      useRebase,
+      env,
+    ).catch(async (err) => {
+      throw await classifyPullFailure(cwd, env, err, false);
+    });
+    if (preDiscardIgnored.length > 0) {
+      throw refusedIgnoredCollision(preDiscardIgnored);
+    }
     await runGit(cwd, ['reset', '--hard'], env);
     await runGit(cwd, ['clean', '-fd'], env);
   } else if (opts?.stash) {
@@ -1260,13 +1364,7 @@ async function gitPullInner(
       try {
         await runGit(
           cwd,
-          [
-            'stash',
-            'push',
-            '--include-untracked',
-            '-m',
-            'qwen-code: auto-stash before pull',
-          ],
+          ['stash', 'push', '--include-untracked', '-m', AUTO_STASH_MESSAGE],
           env,
         );
       } catch (err) {
@@ -1274,7 +1372,9 @@ async function gitPullInner(
         // resets the worktree, so a failed push can leave the entry behind
         // with the changes gone from the worktree. Pop it back before
         // refusing; classify from repository state, since the push's own
-        // error text (e.g. "needs merge") is version- and locale-dependent.
+        // error text (e.g. "needs merge") is version- and locale-dependent
+        // — and with wasStashPull=false, since the update was never
+        // attempted and a retry can still succeed.
         let stashStateUnknown = false;
         const afterPush = await currentStashSha(cwd, env).catch(() => {
           // The push failed mid-way: whether it managed to create an entry
@@ -1286,10 +1386,22 @@ async function gitPullInner(
         });
         let popBackFailed = false;
         if (afterPush !== '' && afterPush !== before) {
-          const { popped } = await popRecordedStash(cwd, env, afterPush);
-          popBackFailed = !popped;
+          // Pop the stranded entry back only when it is attributable as
+          // ours: a concurrent actor's push between the failed push and
+          // this probe displaces ours, and popping the displaced entry
+          // would apply and drop the actor's changes.
+          if (
+            (await stashTopMessage(cwd, env)).endsWith(
+              `: ${AUTO_STASH_MESSAGE}`,
+            )
+          ) {
+            const { popped } = await popRecordedStash(cwd, env, afterPush);
+            popBackFailed = !popped;
+          } else {
+            stashStateUnknown = true;
+          }
         }
-        const failure = await classifyPullFailure(cwd, env, err, true);
+        const failure = await classifyPullFailure(cwd, env, err, false);
         // A failed pop-back leaves the changes in the kept entry; name it,
         // like every sibling restore-failure path. An unreadable stash
         // state after a failed push may hold them too.
@@ -1305,7 +1417,19 @@ async function gitPullInner(
         throw withStashRestoreNote(probeErr);
       });
       stashed = after !== '' && after !== before;
-      stashedSha = stashed ? after : '';
+      // Attribute by identity, not stack movement: a concurrent actor's
+      // push between ours and this probe displaces ours from the top, and
+      // recording the displaced entry would make the restore apply and
+      // drop the actor's changes in ours's place. The entry this push
+      // created carries the marker in its reflog message; when the top is
+      // not ours, keep the stash flag (the edits are somewhere in the
+      // stack) but record no identity, so the restore fails closed with
+      // the stash pointer instead of consuming a foreign entry.
+      stashedSha =
+        stashed &&
+        (await stashTopMessage(cwd, env)).endsWith(`: ${AUTO_STASH_MESSAGE}`)
+          ? after
+          : '';
     }
   }
   // Merge or rebase exactly the probed tip. --no-autostash neutralizes
@@ -1322,6 +1446,35 @@ async function gitPullInner(
     // only safe for state this pull started — so refuse here (restoring
     // the auto-stash) instead of merging into the foreign state.
     await refuseForeignMergeOrRebase(cwd, env);
+    // Every pull shape refuses an incoming collision with local ignored
+    // files: ignored paths never appear in `git status`, so the plain
+    // path reads clean and would silently check the incoming file out
+    // over the local one. The probe runs here — after the stash/discard,
+    // next to the guard re-run — because neither of those steps touches
+    // ignored files, and an ignored file a concurrent actor (a dev
+    // server, a build watcher) creates while they run must still refuse
+    // the update instead of being overwritten by it.
+    let ignored: Buffer[];
+    try {
+      ignored = await incomingIgnoredPaths(cwd, fetchedTip, useRebase, env);
+    } catch (err) {
+      // Probe failures refuse the pull instead of reading as "no
+      // collision" (see incomingIgnoredPaths). The update was never
+      // attempted, so undo the pull's mutation so far — pop the
+      // auto-stash back — and classify like a plain pull: a diverged
+      // tree stays panel-recoverable (a retry can pass the probe)
+      // instead of reading as the stash pull's diverged dead end.
+      if (stashed) {
+        const { popped } = await popRecordedStash(cwd, env, stashedSha);
+        restoreFailed = !popped;
+        stashed = false;
+      }
+      const failure = await classifyPullFailure(cwd, env, err, false);
+      throw restoreFailed ? withStashRestoreNote(failure) : failure;
+    }
+    if (ignored.length > 0) {
+      throw refusedIgnoredCollision(ignored);
+    }
     output = await runGit(
       cwd,
       useRebase
