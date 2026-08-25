@@ -17,7 +17,7 @@ import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   resolveContainedCwdOrFail,
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
@@ -85,7 +85,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
   app.get('/workspaces/:workspace/github/prs', async (req, res) => {
     const route = 'GET /workspaces/:workspace/github/prs';
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedRuntime(
       deps.workspaceRegistry,
       req,
       res,
@@ -152,7 +152,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
     deps.mutate({ strict: true }),
     async (req, res) => {
       const route = 'POST /workspaces/:workspace/github/prs/create';
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
@@ -239,7 +239,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
   app.get('/workspaces/:workspace/github/default-branch', async (req, res) => {
     const route = 'GET /workspaces/:workspace/github/default-branch';
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedRuntime(
       deps.workspaceRegistry,
       req,
       res,

@@ -15,7 +15,7 @@ import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   resolveContainedCwd,
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
@@ -204,11 +204,7 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/git/diff', (req, res) => {
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-      deps.workspaceRegistry,
-      req,
-      res,
-    );
+    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     void handleDiffList(
       res,
@@ -219,11 +215,7 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
     );
   });
   app.get('/workspaces/:workspace/git/diff/file', (req, res) => {
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-      deps.workspaceRegistry,
-      req,
-      res,
-    );
+    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     void handleDiffFile(
       req,

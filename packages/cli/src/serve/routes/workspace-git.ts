@@ -12,7 +12,7 @@ import type { WorkspaceGitState } from '../workspace-git-state.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   resolveContainedCwd,
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 
@@ -65,11 +65,7 @@ export function registerWorkspaceQualifiedGitRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/git', async (req, res) => {
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-      deps.workspaceRegistry,
-      req,
-      res,
-    );
+    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     const route = 'GET /workspaces/:workspace/git';
     try {

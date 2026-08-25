@@ -26,7 +26,7 @@ import {
 } from './workspace-file-read.js';
 import {
   getWorkspaceRouteContext,
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   setWorkspaceRouteContext,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -333,7 +333,7 @@ export function registerWorkspaceQualifiedFileWriteRoutes(
   deps: RegisterDeps & { workspaceRegistry: WorkspaceRegistry },
 ): void {
   const resolve = (req: Request, res: Response): boolean => {
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedRuntime(
       deps.workspaceRegistry,
       req,
       res,
@@ -563,7 +563,7 @@ function fileUploadAdmission(
           if (!registry) {
             throw new Error('workspace registry is not configured');
           }
-          const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+          const runtime = resolveTrustedRuntime(
             registry,
             req,
             res,

@@ -17,7 +17,8 @@ import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
 // Config
-import { ApprovalMode, type Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';

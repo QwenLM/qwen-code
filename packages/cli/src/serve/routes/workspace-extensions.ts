@@ -37,7 +37,7 @@ import type { SendBridgeError } from '../server/error-response.js';
 import type { safeBody as safeBodyType } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
@@ -2306,7 +2306,7 @@ export function registerWorkspaceExtensionRoutes(
       '/workspaces/:workspace/extensions/:extensionId/activation',
       mutate({ strict: true }),
       (req, res) => {
-        const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+        const runtime = resolveTrustedRuntime(
           registry,
           req,
           res,
@@ -2358,7 +2358,7 @@ export function registerWorkspaceExtensionRoutes(
       '/workspaces/:workspace/extensions/:extensionId/activation',
       mutate({ strict: true }),
       (req, res) => {
-        const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+        const runtime = resolveTrustedRuntime(
           registry,
           req,
           res,
@@ -2410,7 +2410,7 @@ export function registerWorkspaceExtensionRoutes(
       '/workspaces/:workspace/extensions/refresh',
       mutate({ strict: true }),
       (req, res) => {
-        const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+        const runtime = resolveTrustedRuntime(
           registry,
           req,
           res,

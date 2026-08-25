@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import { promises as fs, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -555,9 +556,11 @@ export class SessionAttachmentStore {
     await fs.rm(directory, { recursive: true, force: true });
   }
 
-  async delete(): Promise<void> {
+  async delete(options: { assertCanCommit?: () => void } = {}): Promise<void> {
+    options.assertCanCommit?.();
     this.closing = true;
     await this.waitForCopy();
+    options.assertCanCommit?.();
     if (!this.closed) {
       this.closed = true;
       this.pendingItems = 0;
@@ -567,7 +570,20 @@ export class SessionAttachmentStore {
     const directory =
       this.persistentDirectory ??
       (await this.directoryPromise?.catch(() => undefined));
-    if (directory) await fs.rm(directory, { recursive: true, force: true });
+    if (directory) {
+      options.assertCanCommit?.();
+      const tombstone = path.join(
+        path.dirname(directory),
+        `.${path.basename(directory)}.deleting-${randomUUID()}`,
+      );
+      try {
+        await fs.rename(directory, tombstone);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+        throw error;
+      }
+      await fs.rm(tombstone, { recursive: true, force: true });
+    }
   }
 
   private assertStored(reference: SessionAttachmentReference): void {

@@ -78,6 +78,7 @@ import {
   buildResumedHistoryItems,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
+import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
@@ -3766,8 +3767,10 @@ export const AppContainer = (props: AppContainerProps) => {
 
           // Strip suppressOnRestore flags and filter out collapse-summary items
           // so rewound items remain visible without stale summary text
-          const truncatedUi = expandCollapsedHistory(
-            originalHistory.filter((h) => h.id < userItem.id),
+          const truncatedUi = recoalesceFindingsHistoryItems(
+            expandCollapsedHistory(
+              originalHistory.filter((h) => h.id < userItem.id),
+            ),
           );
           clearPendingStateRef.current();
           loadHistoryWithLatchReconciliation(truncatedUi);

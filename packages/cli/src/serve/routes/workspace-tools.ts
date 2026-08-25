@@ -13,7 +13,7 @@ import {
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -132,7 +132,7 @@ export function registerWorkspaceQualifiedToolsRoutes(
     '/workspaces/:workspace/tools/:name/enable',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,

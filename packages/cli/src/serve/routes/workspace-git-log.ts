@@ -17,7 +17,7 @@ import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   resolveContainedCwd,
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
 
@@ -183,11 +183,7 @@ export function registerWorkspaceQualifiedGitLogRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/git/log', (req, res) => {
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-      deps.workspaceRegistry,
-      req,
-      res,
-    );
+    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     void handleLogList(
       req,
@@ -198,11 +194,7 @@ export function registerWorkspaceQualifiedGitLogRoutes(
     );
   });
   app.get('/workspaces/:workspace/git/log/commit', (req, res) => {
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-      deps.workspaceRegistry,
-      req,
-      res,
-    );
+    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     void handleCommitDetail(
       req,

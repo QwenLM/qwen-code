@@ -1630,8 +1630,6 @@ const EN: Messages = {
   'skilldesc.e2eTesting': 'Run end-to-end tests of the Qwen Code CLI',
   'skilldesc.featDev': 'End-to-end workflow for a non-trivial feature',
   'skilldesc.memoryLeakDebug': 'Diagnose CLI memory leaks via heap snapshots',
-  'skilldesc.openworkDesktopSync':
-    'Sync packages/desktop with openwork commit-by-commit',
   'skilldesc.preparePr': 'Prepare a GitHub PR title and body from the branch',
   'skilldesc.qwenCodeClaw': 'Use Qwen Code as a code-understanding agent',
   'skilldesc.structuredDebugging':
@@ -3212,6 +3210,7 @@ const ZH: Messages = {
   'toolName.read_mcp_resource': '读取 MCP 资源',
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
+  'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
   'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
@@ -4610,7 +4609,6 @@ const ZH: Messages = {
   'skilldesc.e2eTesting': '运行 Qwen Code CLI 的端到端测试',
   'skilldesc.featDev': '实现非平凡功能的端到端工作流',
   'skilldesc.memoryLeakDebug': '用堆快照诊断 CLI 内存泄漏',
-  'skilldesc.openworkDesktopSync': '将 packages/desktop 与 openwork 逐提交同步',
   'skilldesc.preparePr': '从当前分支准备 GitHub PR 标题和正文',
   'skilldesc.qwenCodeClaw': '将 Qwen Code 用作代码理解智能体',
   'skilldesc.structuredDebugging': '假设驱动的疑难 bug 调试方法',
@@ -5988,9 +5986,6 @@ const ZH: Messages = {
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
     '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
-  'settings.label.tools.computerUse.enabled': '启用 Computer Use',
-  'settings.description.tools.computerUse.enabled':
-    '启用后（默认），会注册 9 个 computer_use__* 延迟内置工具。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',

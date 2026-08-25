@@ -22,7 +22,7 @@ import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   resolveContainedCwd,
   resolveContainedCwdOrFail,
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -444,11 +444,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/git/branches', (req, res) => {
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-      deps.workspaceRegistry,
-      req,
-      res,
-    );
+    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     void handleBranches(
       res,
@@ -463,11 +459,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
     '/workspaces/:workspace/git/checkout',
     deps.mutate({ strict: true }),
     (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-        deps.workspaceRegistry,
-        req,
-        res,
-      );
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();
@@ -500,11 +492,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
     '/workspaces/:workspace/git/branch',
     deps.mutate({ strict: true }),
     (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-        deps.workspaceRegistry,
-        req,
-        res,
-      );
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();
@@ -537,11 +525,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
     '/workspaces/:workspace/git/push',
     deps.mutate({ strict: true }),
     (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-        deps.workspaceRegistry,
-        req,
-        res,
-      );
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();
@@ -574,11 +558,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
     '/workspaces/:workspace/git/pull',
     deps.mutate({ strict: true }),
     (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-        deps.workspaceRegistry,
-        req,
-        res,
-      );
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();
@@ -611,11 +591,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
     '/workspaces/:workspace/git/commit',
     deps.mutate({ strict: true }),
     (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
-        deps.workspaceRegistry,
-        req,
-        res,
-      );
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
       if (!runtime) return;
       try {
         runtime.generationGuard?.assertOpen();

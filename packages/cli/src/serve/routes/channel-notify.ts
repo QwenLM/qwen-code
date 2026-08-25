@@ -19,7 +19,7 @@ import {
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
 } from '../workspace-route-runtime.js';
 
 interface RegisterChannelNotifyRoutesDeps {
@@ -110,7 +110,7 @@ export function registerChannelNotifyRoutes(
     '/workspaces/:workspace/notify',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,

@@ -20,7 +20,7 @@ import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { WorkspacePermissionRulesSessionRequiredError } from '../workspace-service/types.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
-  resolveTrustedWorkspaceRuntimeFromParam,
+  resolveTrustedRuntime,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -196,7 +196,7 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/permissions', (req, res) => {
-    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedRuntime(
       deps.workspaceRegistry,
       req,
       res,
@@ -227,7 +227,7 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
     '/workspaces/:workspace/permissions',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedRuntime(
         deps.workspaceRegistry,
         req,
         res,
