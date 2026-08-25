@@ -13316,10 +13316,12 @@ exit 1
       const launchIdx = argStart;
       expect(execIdx).toBeGreaterThan(launchIdx);
     }
-    // Four clean children: the two deferred-findings upserts plus the two
+    // Five clean children: the two deferred-findings upserts, the two
     // verification-gate launches (the gate runs after the agent step's
-    // branch code, so its bash must inherit nothing at all).
-    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(4);
+    // branch code, so its bash must inherit nothing at all), and the
+    // finalize step's PAT-touching body (R9-1: BASH_FUNC imports close
+    // only inside an env -i child).
+    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(5);
     // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
     // child — tie their shared security scaffold together so drift in one is
     // caught. Compare the allow-list + prelude (everything up to where the
@@ -15779,7 +15781,7 @@ exit 1
     // additionally prove publication through the push step's output, since
     // an env plant can no-op that step with exit 0 (R3-1).
     expect(finalizeStatusCommentStep).toContain(
-      '[[ "${PUBLISHED}" == \'true\' && ( "${OUTCOME:-}" == \'fixed\' || "${OUTCOME:-}" == \'noop\' || "${OUTCOME:-}" == \'handoff\' || "${OUTCOME:-}" == \'dirty_handoff\' || "${OUTCOME:-}" == \'committed_handoff\' ) ]]',
+      '[[ "${PUBLISHED}" == "true" && ( "${OUTCOME:-}" == "fixed" || "${OUTCOME:-}" == "noop" || "${OUTCOME:-}" == "handoff" || "${OUTCOME:-}" == "dirty_handoff" || "${OUTCOME:-}" == "committed_handoff" ) ]]',
     );
     // R3-1 downstream half: an env plant can kill 'Push and report's shell
     // at execve (silent exit 0, gate body never ran) — the in-step sentinel
@@ -15792,7 +15794,7 @@ exit 1
     );
     expect(finalizeStatusCommentStep).toContain('PUBLISHED=true');
     expect(finalizeStatusCommentStep).toMatch(
-      /if \[\[ "\$\{OUTCOME:-\}" == 'fixed' \|\| "\$\{OUTCOME:-\}" == 'noop' \]\] && \[\[ "\$\{PUSH_REPORTED:-\}" != 'true' \]\]; then\n\s*PUBLISHED=false/,
+      /if \[\[ "\$\{OUTCOME:-\}" == "fixed" \|\| "\$\{OUTCOME:-\}" == "noop" \]\] && \[\[ "\$\{PUSH_REPORTED:-\}" != "true" \]\]; then\n\s*PUBLISHED=false/,
     );
     expect(finalizeStatusCommentStep).toContain(
       'ended without publishing a report',
@@ -16230,8 +16232,7 @@ exit 1
     // startup-channel pins at step level — BASH_ENV is sourced at process
     // STARTUP before line 1 of the body (an in-body unset is one hop
     // late), SHELLOPTS is the sibling option-import channel, and the LD_*
-    // family is mapped by ld.so at startup the same way — plus the PATH
-    // pin before its bare terminal gh call (af-148, R8-3).
+    // family is mapped by ld.so at startup the same way (af-148, R8-3).
     expect(finalizeStatusCommentStep).toContain("BASH_ENV: ''");
     expect(finalizeStatusCommentStep).toContain("SHELLOPTS: ''");
     expect(finalizeStatusCommentStep).toContain("LD_PRELOAD: ''");
@@ -16240,12 +16241,173 @@ exit 1
     expect(finalizeStatusCommentStep).toContain(
       "TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'",
     );
+    // HOME re-enters the clean child below: a $GITHUB_ENV-planted HOME
+    // repoints gh's config search at an attacker-writable dir (the
+    // af-112 http_unix_socket exfil), so it rides the stage-time capture
+    // like the gate children's (R8-3).
     expect(finalizeStatusCommentStep).toContain(
-      'export PATH="${TRUSTED_PATH}"',
+      "HOME: '${{ steps.stage.outputs.trusted_home }}'",
     );
+    // R9-1: those step-level pins close the NAMED startup channels of
+    // the parent shell, but bash also imports BASH_FUNC_<name>%% env
+    // entries as functions at startup even under --norc, ahead of
+    // builtins and PATH, under attacker-chosen names no env: block can
+    // enumerate — probe-verified on this host for every command word
+    // the step's former inline body resolved (set, export, builtin, the
+    // bare gh; a planted gh received the token even with PATH re-pinned
+    // in the body). The step therefore runs its whole PAT-touching body
+    // through the gate's env -i clean-child form (R6-4), and the launch
+    // is pinned STRUCTURALLY — one verbatim adjacency chain, every
+    // allowlist entry in order — because token-level pins alone let a
+    // demoted or reordered launch through (R2-1).
+    const finalizeLaunchTokens = [
+      'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH=',
+      '/usr/bin/env -i',
+      'PATH="${TRUSTED_PATH}"',
+      'HOME="${HOME}"',
+      'GITHUB_TOKEN="${GITHUB_TOKEN}"',
+      'WORKDIR="${WORKDIR}"',
+      'HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"',
+      'STATUS_ID="${STATUS_ID}"',
+      'PUSH_REPORTED="${PUSH_REPORTED}"',
+      'OUTCOME="${OUTCOME}"',
+      'EFFECTIVE_ROUND="${EFFECTIVE_ROUND}"',
+      'ROUND="${ROUND}"',
+      'RUN_URL="${RUN_URL}"',
+      'REPO="${REPO}"',
+      'PR="${PR}"',
+      "bash --norc -c '",
+    ];
+    const finalizeLaunchPin = new RegExp(
+      finalizeLaunchTokens
+        .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join(' \\\\\n[ \\t]*'),
+    );
+    expect(finalizeStatusCommentStep).toMatch(finalizeLaunchPin);
+    // The parent body is ONLY the launch: a statement before the LD_*
+    // prefix, or anything after the child's closing quote, would run in
+    // the PAT-bearing parent shell the clean child exists to avoid —
+    // pin both ends. PATH reaches the child through the allowlist,
+    // ahead of the bare gh inside (no in-shell export pin of its own).
+    const finalizeStatements = finalizeStatusCommentStep
+      .slice(finalizeStatusCommentStep.indexOf('run: |-') + 'run: |-'.length)
+      .split('\n')
+      .map((line) => line.replace(/^[ \t]+|[ \t]+$/g, ''))
+      .filter((line) => line !== '' && !line.startsWith('#'));
+    expect(finalizeStatements[0]).toBe(
+      'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\',
+    );
+    expect(finalizeStatements[2]).toBe('PATH="${TRUSTED_PATH}" \\');
+    expect(finalizeStatements[finalizeStatements.length - 1]).toBe("'");
     expect(
-      finalizeStatusCommentStep.indexOf('export PATH="${TRUSTED_PATH}"'),
+      finalizeStatusCommentStep.indexOf('PATH="${TRUSTED_PATH}"'),
     ).toBeLessThan(finalizeStatusCommentStep.indexOf('--method PATCH'));
+    // Exactly one child launch: a second, unpinned `bash --norc` (the
+    // pinned block demoted into a never-run arm) must fail here (R2-1).
+    expect((finalizeStatusCommentStep.match(/bash --norc/g) ?? []).length).toBe(
+      1,
+    );
+    // Behavioral witness (both arms flip): render the run body with the
+    // one expression resolved, then execute it in a step-like env. The
+    // poisoned arm plants BASH_FUNC imports named for every command word
+    // the pre-R9 inline body resolved — none may run: env -i drops the
+    // whole class, so reverting the body back into the parent shell runs
+    // the plants and fails here. BASH_ENV/SHELLOPTS/LD_* plants stay out
+    // of the probe env on purpose: those are closed by the step-level
+    // pins above, which a spawn cannot model.
+    const finalizeRunBody = finalizeStatusCommentStep
+      .slice(finalizeStatusCommentStep.indexOf('run: |-') + 'run: |-'.length)
+      .replaceAll('${{ steps.post_status.outputs.heartbeat_pid }}', '');
+    const finalizeProbeDir = mkdtempSync(
+      join(tmpdir(), 'autofix-finalize-r91-'),
+    );
+    const finalizeProbeOut = join(finalizeProbeDir, 'probe-out');
+    const finalizeProbeBin = join(finalizeProbeDir, 'bin');
+    mkdirSync(finalizeProbeBin);
+    writeFileSync(
+      join(finalizeProbeBin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        `printf 'STUB_GH_RAN token=%s args=%s\\n' "\${GITHUB_TOKEN:-none}" "$*" >> "${finalizeProbeOut}"`,
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const finalizeProbeEnv = {
+      TRUSTED_PATH: `${finalizeProbeBin}:/usr/bin:/bin`,
+      HOME: finalizeProbeDir,
+      GITHUB_TOKEN: 'SECRET_PAT',
+      WORKDIR: finalizeProbeDir,
+      STATUS_ID: '12345',
+      PUSH_REPORTED: 'true',
+      OUTCOME: 'fixed',
+      EFFECTIVE_ROUND: '3',
+      ROUND: '3',
+      RUN_URL: 'https://example.invalid/runs/1',
+      REPO: 'octo/repo',
+      PR: '77',
+    };
+    try {
+      // Clean arm: the child PATCHes through the stub gh with the
+      // step-level token and the finished-text body, and the stop
+      // marker lands in WORKDIR.
+      const clean = spawnSync(
+        'bash',
+        ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+        { encoding: 'utf8', env: finalizeProbeEnv },
+      );
+      expect(clean.status).toBe(0);
+      expect(clean.stdout).not.toContain('PLANTED');
+      const cleanOut = readFileSync(finalizeProbeOut, 'utf8');
+      expect(cleanOut).toContain('STUB_GH_RAN token=SECRET_PAT');
+      expect(cleanOut).toContain(
+        'api --method PATCH repos/octo/repo/issues/comments/12345',
+      );
+      expect(cleanOut).toContain('AutoFix round 4 finished');
+      expect(existsSync(join(finalizeProbeDir, 'heartbeat-stop'))).toBe(true);
+      // Poisoned arm: none of the planted functions may run, and the
+      // clean-child behavior must be unchanged.
+      rmSync(finalizeProbeOut, { force: true });
+      const poisoned = spawnSync(
+        'bash',
+        ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+        {
+          encoding: 'utf8',
+          env: {
+            ...finalizeProbeEnv,
+            'BASH_FUNC_set%%': '() { echo PLANTED_SET_RAN; }',
+            'BASH_FUNC_export%%': '() { echo PLANTED_EXPORT_RAN; }',
+            'BASH_FUNC_builtin%%': '() { echo PLANTED_BUILTIN_RAN; }',
+            'BASH_FUNC_touch%%': '() { echo PLANTED_TOUCH_RAN; }',
+            'BASH_FUNC_kill%%': '() { echo PLANTED_KILL_RAN; }',
+            'BASH_FUNC_gh%%': '() { echo PLANTED_GH_RAN; }',
+            'BASH_FUNC_true%%': '() { echo PLANTED_TRUE_RAN; }',
+          },
+        },
+      );
+      expect(poisoned.status).toBe(0);
+      expect(poisoned.stdout).not.toContain('PLANTED');
+      expect(poisoned.stderr).not.toContain('PLANTED');
+      expect(readFileSync(finalizeProbeOut, 'utf8')).toContain(
+        'STUB_GH_RAN token=SECRET_PAT',
+      );
+      // PATCH-only doctrine: an empty STATUS_ID exits before any gh
+      // call, poisoned arm or not.
+      rmSync(finalizeProbeOut, { force: true });
+      const noStatus = spawnSync(
+        'bash',
+        ['-e', '-o', 'pipefail', '-c', finalizeRunBody],
+        {
+          encoding: 'utf8',
+          env: { ...finalizeProbeEnv, STATUS_ID: '' },
+        },
+      );
+      expect(noStatus.status).toBe(0);
+      expect(noStatus.stdout).toContain('nothing to finalize');
+      expect(existsSync(finalizeProbeOut)).toBe(false);
+    } finally {
+      rmSync(finalizeProbeDir, { recursive: true, force: true });
+    }
     const cleanupStep =
       reviewAddressJob.match(
         /- name: 'Clean up autofix workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,

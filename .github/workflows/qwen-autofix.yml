@@ -6144,14 +6144,17 @@ jobs:
           ${{ always() && steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
         env:
           # Startup-channel pins, the gate steps' doctrine: BASH_ENV is
-          # sourced by bash at process STARTUP, before line 1 of the body
-          # below, and SHELLOPTS is the sibling option-import channel — a
+          # sourced by bash at process STARTUP, before the launch below,
+          # and SHELLOPTS is the sibling option-import channel — a
           # body-side unset is one hop late, so both are pinned empty at
           # step level, which outranks any $GITHUB_ENV plant. The LD_*
-          # family is mapped by ld.so at startup the same way (an in-body
-          # unset cannot unload a library already mapped into THIS step's
-          # bash; ld.so ignores empty values). This step holds the PAT, so
-          # a plant sourced at startup runs with it.
+          # family is mapped by ld.so at startup the same way. These pins
+          # protect the parent shell that executes the launch; the
+          # BASH_FUNC_<name>%% channel no env: block can enumerate — the
+          # attacker chooses the name, and bash imports the entries as
+          # functions at startup even under --norc, ahead of builtins and
+          # PATH — is closed by the env -i clean child below (R9-1), the
+          # gate's R6-4 pattern.
           # Full rationale → qwen-autofix.md#af-148
           BASH_ENV: ''
           SHELLOPTS: ''
@@ -6159,6 +6162,11 @@ jobs:
           LD_AUDIT: ''
           LD_LIBRARY_PATH: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
+          # HOME re-enters the clean child below: a $GITHUB_ENV-planted
+          # HOME repoints gh's config search at an attacker-writable dir
+          # (af-112's http_unix_socket exfil). Pin it from the stage-time
+          # capture, the TRUSTED_PATH doctrine above (R8-3).
+          HOME: '${{ steps.stage.outputs.trusted_home }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
@@ -6175,71 +6183,99 @@ jobs:
           # must not assert a report that never posted.
           PUSH_REPORTED: '${{ steps.push_report.outputs.round_reported }}'
         run: |-
-          set -uo pipefail
-          # This step holds the PAT: pin PATH from the stage-time capture
-          # BEFORE the bare gh below resolves (the R6-3 doctrine the
-          # sibling PAT steps apply). Full rationale → qwen-autofix.md#af-148
-          export PATH="${TRUSTED_PATH}"
-          # Stop the round heartbeat BEFORE flipping this comment to its
-          # terminal text: a tick landing after the finalize would
-          # overwrite it with a live-looking "working" line. The gate
-          # already killed the loop before the host-side branch code; this
-          # is the belt to its braces (a missed kill there must not outlive
-          # the round). Kill target comes from expression context — a pid
-          # read from a WORKDIR file would be an untrusted kill target
-          # (WORKDIR is sandbox-writable). The session kill covers a kill
-          # landing mid-tick (the tick's timeout/gh subtree sits in its own
-          # process group under the loop's session). The stop marker ends
-          # the loop on its next self-check even if the kills miss, and the
-          # sleep lets an already-dispatched tick PATCH land before the
-          # terminal text goes up. Full rationale → qwen-autofix.md#af-148
-          # Command words take the gate kill block's absolute-path/builtin
-          # form: this step holds the PAT, and bare names are PATH-resolved
-          # (kill additionally shadowable by a $GITHUB_ENV BASH_FUNC plant).
-          /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
-          HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
-          if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
-            builtin kill -- -"${HB_PID}" 2>/dev/null || true
-            builtin kill "${HB_PID}" 2>/dev/null || true
-            /usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true
-            /usr/bin/sleep 2
-          fi
-          MARKER='<!-- autofix-status -->'
-          if [[ -z "${STATUS_ID}" ]]; then
-            echo "This round posted no status comment on PR #${PR}; nothing to finalize."
-            exit 0
-          fi
-          ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
-          # ROUND counts rounds already DONE; every other message numbers the
-          # round being performed (the report posts ROUND + 1). Match it, or
-          # the same round carries two different numbers in one thread.
-          if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
-            ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
-          fi
-          # 'fixed'/'noop'/'handoff'/'dirty_handoff'/'committed_handoff' are
-          # the outcomes that published a round report — handoff and the two
-          # brake-violation rejections post their note + eval marker from the
-          # report step; anything else means the round stopped before
-          # publishing one. fixed/noop additionally condition on the push
-          # step's own success output: an env plant can kill that step's
-          # shell at execve (silent exit 0, gate body never ran), and the
-          # success text would otherwise assert a report that never posted.
-          PUBLISHED=true
-          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' ]] && [[ "${PUSH_REPORTED:-}" != 'true' ]]; then
-            PUBLISHED=false
-          fi
-          if [[ "${PUBLISHED}" == 'true' && ( "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' || "${OUTCOME:-}" == 'dirty_handoff' || "${OUTCOME:-}" == 'committed_handoff' ) ]]; then
-            EN="$(printf '✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below.' "${ROUND_DISPLAY}" "${RUN_URL}")"
-            ZH="$(printf '✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。' "${ROUND_DISPLAY}" "${RUN_URL}")"
-          else
-            EN="$(printf '⚠️ **AutoFix round %s ended without publishing a report** — [view run](%s).' "${ROUND_DISPLAY}" "${RUN_URL}")"
-            ZH="$(printf '⚠️ **AutoFix 第 %s 轮结束但未发布报告** —— [查看运行](%s)。' "${ROUND_DISPLAY}" "${RUN_URL}")"
-          fi
-          BODY="$(printf '%s\n\n%s\n\n<details>\n<summary>中文说明</summary>\n\n%s\n\n</details>' \
-            "${MARKER}" "${EN}" "${ZH}")"
-          gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
-            -f body="${BODY}" > /dev/null ||
-            echo "::warning::Failed to finalize the autofix status comment on PR #${PR}; continuing."
+          # This step holds the PAT, and its shell inherits every
+          # $GITHUB_ENV plant earlier steps left — including
+          # BASH_FUNC_<name>%% imports, which bash loads as functions at
+          # STARTUP even under --norc, ahead of builtins and PATH, under
+          # attacker-chosen names no step-level pin can enumerate
+          # (probe-verified: plants shadowing set/export/builtin/gh each
+          # hijacked this step's former inline body). Close the class,
+          # not the enumeration: the whole PAT-touching body runs in the
+          # gate's env -i clean-child form, re-declaring only what it
+          # needs from the step-level pins above and expression context.
+          # PATH reaches the child through the allowlist, so the body
+          # carries no in-shell pin of its own; inside the clean child
+          # no import survives, so bare and builtin words resolve
+          # soundly again. The kill target travels through expression
+          # context — a pid read from a WORKDIR file would be an
+          # untrusted kill target (WORKDIR is sandbox-writable).
+          # Full rationale → qwen-autofix.md#af-148
+          LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+            /usr/bin/env -i \
+            PATH="${TRUSTED_PATH}" \
+            HOME="${HOME}" \
+            GITHUB_TOKEN="${GITHUB_TOKEN}" \
+            WORKDIR="${WORKDIR}" \
+            HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}" \
+            STATUS_ID="${STATUS_ID}" \
+            PUSH_REPORTED="${PUSH_REPORTED}" \
+            OUTCOME="${OUTCOME}" \
+            EFFECTIVE_ROUND="${EFFECTIVE_ROUND}" \
+            ROUND="${ROUND}" \
+            RUN_URL="${RUN_URL}" \
+            REPO="${REPO}" \
+            PR="${PR}" \
+            bash --norc -c '
+              set -uo pipefail
+              # Stop the round heartbeat BEFORE flipping this comment to
+              # its terminal text: a tick landing after the finalize would
+              # overwrite it with a live-looking "working" line. The gate
+              # already killed the loop before the host-side branch code;
+              # this is the belt to its braces (a missed kill there must
+              # not outlive the round). The session kill covers a kill
+              # landing mid-tick (the timeout/gh subtree of a tick sits
+              # in its own process group under the session of the loop).
+              # The stop marker ends the loop on its next self-check even
+              # if the kills miss, and the sleep lets an already-
+              # dispatched tick PATCH land before the terminal text goes
+              # up. Full rationale → qwen-autofix.md#af-148
+              /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
+              if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
+                builtin kill -- -"${HB_PID}" 2>/dev/null || true
+                builtin kill "${HB_PID}" 2>/dev/null || true
+                /usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true
+                /usr/bin/sleep 2
+              fi
+              MARKER="<!-- autofix-status -->"
+              if [[ -z "${STATUS_ID}" ]]; then
+                echo "This round posted no status comment on PR #${PR}; nothing to finalize."
+                exit 0
+              fi
+              ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
+              # ROUND counts rounds already DONE; every other message
+              # numbers the round being performed (the report posts
+              # ROUND + 1). Match it, or the same round carries two
+              # different numbers in one thread.
+              if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
+                ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
+              fi
+              # "fixed"/"noop"/"handoff"/"dirty_handoff"/
+              # "committed_handoff" are the outcomes that published a
+              # round report — handoff and the two brake-violation
+              # rejections post their note + eval marker from the report
+              # step; anything else means the round stopped before
+              # publishing one. fixed/noop additionally condition on the
+              # success output of the push step: an env plant can kill
+              # that shell at execve (silent exit 0, gate body never
+              # ran), and the success text would otherwise assert a
+              # report that never posted.
+              PUBLISHED=true
+              if [[ "${OUTCOME:-}" == "fixed" || "${OUTCOME:-}" == "noop" ]] && [[ "${PUSH_REPORTED:-}" != "true" ]]; then
+                PUBLISHED=false
+              fi
+              if [[ "${PUBLISHED}" == "true" && ( "${OUTCOME:-}" == "fixed" || "${OUTCOME:-}" == "noop" || "${OUTCOME:-}" == "handoff" || "${OUTCOME:-}" == "dirty_handoff" || "${OUTCOME:-}" == "committed_handoff" ) ]]; then
+                EN="$(printf "✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below." "${ROUND_DISPLAY}" "${RUN_URL}")"
+                ZH="$(printf "✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。" "${ROUND_DISPLAY}" "${RUN_URL}")"
+              else
+                EN="$(printf "⚠️ **AutoFix round %s ended without publishing a report** — [view run](%s)." "${ROUND_DISPLAY}" "${RUN_URL}")"
+                ZH="$(printf "⚠️ **AutoFix 第 %s 轮结束但未发布报告** —— [查看运行](%s)。" "${ROUND_DISPLAY}" "${RUN_URL}")"
+              fi
+              BODY="$(printf "%s\n\n%s\n\n<details>\n<summary>中文说明</summary>\n\n%s\n\n</details>" \
+                "${MARKER}" "${EN}" "${ZH}")"
+              gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
+                -f body="${BODY}" > /dev/null ||
+                echo "::warning::Failed to finalize the autofix status comment on PR #${PR}; continuing."
+            '
 
       # Nothing else removes the per-target WORKDIR; PR numbers only
       # increase, so on the persistent pool every addressed PR would leave
