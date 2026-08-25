@@ -2056,7 +2056,7 @@ describe('runBuildTest', () => {
   });
 
   it('discloses a diff inside a negated member — softly, never as an incomplete scope', () => {
-    // packages/desktop is a separate toolchain (its own lockfile); a diff
+    // packages/desktop-shell is a separate toolchain (its own lockfile); a diff
     // inside it cannot fail any npm workspace's suite, so "nothing to run"
     // stays the answer — disclosed softly (its own suite did not run), never
     // as an incomplete scope.
@@ -2064,7 +2064,7 @@ describe('runBuildTest', () => {
       join(root, 'package.json'),
       JSON.stringify({
         name: 'r',
-        workspaces: ['packages/*', '!packages/desktop'],
+        workspaces: ['packages/*', '!packages/desktop-shell'],
         scripts: { test: 'exit 0' },
       }),
     );
@@ -2072,11 +2072,11 @@ describe('runBuildTest', () => {
       name: '@x/core',
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    pkg('packages/desktop', {
+    pkg('packages/desktop-shell', {
       name: '@x/desktop',
       scripts: { build: 'exit 0', test: 'exit 0' },
     });
-    writePlan(['packages/desktop/src/main.rs']);
+    writePlan(['packages/desktop-shell/src/main.rs']);
 
     const rep = runBuildTest({
       plan: planPath,
@@ -2088,7 +2088,9 @@ describe('runBuildTest', () => {
     expect(rep.build).toEqual([]);
     expect(rep.test).toEqual([]);
     expect(rep.testScope?.workspaces).toEqual([]);
-    expect(rep.testScope?.caveat).toContain('packages/desktop/src/main.rs');
+    expect(rep.testScope?.caveat).toContain(
+      'packages/desktop-shell/src/main.rs',
+    );
     expect(rep.testScope?.caveat).toContain('were not run');
     expect(rep.note).toContain('were not run');
   });
@@ -2332,7 +2334,7 @@ describe('runBuildTest', () => {
 
   it('excludes a negated workspace from the build set (integration)', () => {
     // `!packages/excluded` must keep that package out — building it could fail on a
-    // repo where it is a separate toolchain (e.g. packages/desktop, its own lockfile).
+    // repo where it is a separate toolchain (e.g. packages/desktop-shell, its own lockfile).
     writeFileSync(
       join(root, 'package.json'),
       JSON.stringify({

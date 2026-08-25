@@ -112,6 +112,47 @@ describe('MessageRewriteMiddleware', () => {
       },
     );
 
+    it('does not rewrite vision bridge notices or carry their metadata', async () => {
+      const { middleware, mockSendUpdate } = createMiddleware('message');
+      const notice = {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Vision bridge cancelled.' },
+        _meta: {
+          source: 'vision_bridge_notice',
+          qwenDiscreteMessage: true,
+          visionBridgeNotice: { status: 'skipped' },
+        },
+      } as unknown as SessionUpdate;
+
+      await middleware.interceptUpdate(notice);
+      await middleware.interceptUpdate({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Normal model response.' },
+      } as unknown as SessionUpdate);
+      await middleware.flushTurn();
+      await middleware.waitForPendingRewrites();
+
+      expect(mockSendUpdate).toHaveBeenNthCalledWith(1, notice);
+      expect(mockSendUpdate).toHaveBeenNthCalledWith(3, {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'rewritten text' },
+        _meta: { rewritten: true, turnIndex: 1 },
+      });
+
+      const { LlmRewriter } = await import('./LlmRewriter.js');
+      const rewriter = vi.mocked(LlmRewriter).mock.results[0]?.value as {
+        rewrite: ReturnType<typeof vi.fn>;
+      };
+      expect(rewriter.rewrite).toHaveBeenCalledWith(
+        {
+          thoughts: [],
+          messages: ['Normal model response.'],
+          hasToolCalls: false,
+        },
+        expect.any(AbortSignal),
+      );
+    });
+
     it('should accumulate messages when target is "message"', async () => {
       const { middleware, mockSendUpdate } = createMiddleware('message');
 
