@@ -777,14 +777,13 @@ export function createGoalRuntime(
           : outcome === 'stalled'
             ? (snapshot.goal.checkpointStalls ?? 0) + 1
             : (snapshot.goal.checkpointStalls ?? 0);
-      if (checkpointStalls >= GOAL_CHECKPOINT_STALL_LIMIT) {
-        // Persist the streak with the stop so the record explains itself.
-        await settleCheckpointFailure(
+      if (
+        await settleIfCheckpointStalled(
           attempt,
-          withCheckpointStalls(snapshot.goal, checkpointStalls),
-          GOAL_CHECKPOINT_STALLED_REASON,
-          'evidence_catalog',
-        );
+          snapshot.goal,
+          checkpointStalls,
+        )
+      ) {
         return;
       }
       const persistedCause =
@@ -853,6 +852,26 @@ export function createGoalRuntime(
     broadcast('usage_limited');
   };
 
+  /**
+   * Stops the Goal once its stall streak reaches the limit, persisting the
+   * streak with the stop so the record explains itself. Returns whether the
+   * attempt was settled.
+   */
+  const settleIfCheckpointStalled = async (
+    attempt: CheckpointAttempt,
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    checkpointStalls: number,
+  ): Promise<boolean> => {
+    if (checkpointStalls < GOAL_CHECKPOINT_STALL_LIMIT) return false;
+    await settleCheckpointFailure(
+      attempt,
+      withCheckpointStalls(goal, checkpointStalls),
+      GOAL_CHECKPOINT_STALLED_REASON,
+      'evidence_catalog',
+    );
+    return true;
+  };
+
   const recordCheckpointFailure = async (
     attempt: CheckpointAttempt,
     reason: string,
@@ -875,16 +894,15 @@ export function createGoalRuntime(
       const checkpointStalls = stalled
         ? (snapshot.goal.checkpointStalls ?? 0) + 1
         : 0;
-      if (checkpointStalls >= GOAL_CHECKPOINT_STALL_LIMIT) {
-        // Persist the streak with the stop so the record explains itself;
-        // the checkpoint that would have been written is discarded, since a
-        // resumed window restarts from a fresh cursor anyway.
-        await settleCheckpointFailure(
+      // A stopped Goal discards the checkpoint it would have written: a
+      // resumed window restarts from a fresh cursor anyway.
+      if (
+        await settleIfCheckpointStalled(
           attempt,
-          withCheckpointStalls(snapshot.goal, checkpointStalls),
-          GOAL_CHECKPOINT_STALLED_REASON,
-          'evidence_catalog',
-        );
+          snapshot.goal,
+          checkpointStalls,
+        )
+      ) {
         return;
       }
       const now = Date.now();
