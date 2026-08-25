@@ -2665,18 +2665,28 @@ describe('subagent.ts', () => {
 
         await scope.execute(new ContextState());
 
-        // The replay never executes, and the suppression unwinds its
-        // streamed-in request count (keeping the exoneration gate
-        // `resultsObserved >= count - 1` reachable for changing boards and
-        // matching the daemon twin, which never counts suppressed calls),
-        // so the consecutive streak counts the four executable requests:
-        // the halt lands on the fifth countable identical request
-        // (poll_5's stream) after poll_4 executes as the fourth frozen
-        // board, corroborated by the four unchanged results. Pre-fix the
-        // fabricated replay error counted as a changed result, the streak
-        // restarted, and the run sailed to GOAL.
-        expect(taskListInvocation.execute).toHaveBeenCalledTimes(4);
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(6);
+        // The replay never executes, but its suppression KEEPS the
+        // streamed-in repetition increment (the keep-suppressed-counts fix
+        // for #9450: unwinding it let a pure stream of identical
+        // suppressed calls oscillate the count forever and escape the
+        // threshold) and counts the replay into the streak's
+        // suppressedRequests instead, which the exoneration gate
+        // subtracts from the expected results so changing boards stay
+        // exonerable. The streak therefore counts FIVE identical requests
+        // by poll_4's stream — poll_1..poll_3, the replay, poll_4 — and
+        // the halt lands there, one round earlier than under the old
+        // suppression unwind the previous pin tracked: expectedResults is
+        // 5 - 1 in flight (poll_4) - 1 suppressed (the replay) = 3,
+        // exactly the three unchanged frozen-board results recorded for
+        // poll_1..poll_3 (unchangedStreak 2 >= expectedResults - 1), so
+        // the halt is corroborated by the executed evidence after three
+        // executions — under the unwind the replay's count was erased,
+        // the fifth countable request was poll_5, and the pin tracked
+        // four executions. Pre-fix the fabricated replay error counted
+        // as a changed result, the streak restarted, and the run sailed
+        // to GOAL.
+        expect(taskListInvocation.execute).toHaveBeenCalledTimes(3);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(5);
         expect(scope.getTerminateMode()).toBe(AgentTerminateMode.LOOP_DETECTED);
         expect(finishEvents).toHaveLength(1);
         expect(finishEvents[0].loopType).toBe(
