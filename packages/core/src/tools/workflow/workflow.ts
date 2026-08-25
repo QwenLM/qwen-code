@@ -72,11 +72,12 @@ export interface WorkflowParams {
    */
   script?: string;
   /**
-   * P7b: absolute path to a saved workflow `.js` file to load and run
-   * instead of inline `script`. Set by the `/<name>` saved-workflow slash
-   * command (`SavedWorkflowLoader`). Read at execution time so edits to the
-   * saved file take effect on the next run; the resolved path is recorded on
-   * the registry entry as run provenance.
+   * P7b: absolute path to a workflow `.js` file to load and run instead of
+   * inline `script` — a saved workflow, set by the `/<name>` slash command
+   * (`SavedWorkflowLoader`), or a one-run script a tool generated under the
+   * generated-scripts root. Read at execution time so edits to the file take
+   * effect on the next run; the resolved path is recorded on the registry
+   * entry as run provenance.
    */
   scriptPath?: string;
   /** Optional structured value bound to the `args` global inside the script. */
@@ -257,7 +258,13 @@ class WorkflowToolInvocation extends BaseToolInvocation<
       return `Run workflow: ${sanitizeLine(meta.name)}`;
     }
     if (this.params.scriptPath && this.params.script === undefined) {
-      return `Run saved workflow (${path.basename(this.params.scriptPath)})`;
+      const kind = isGeneratedWorkflowScriptPath(
+        this.config,
+        this.params.scriptPath,
+      )
+        ? 'generated workflow script'
+        : 'saved workflow';
+      return `Run ${kind} (${path.basename(this.params.scriptPath)})`;
     }
     return `Run a workflow script (${this.params.script?.length ?? 0} chars)`;
   }
@@ -297,7 +304,7 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const meta = this.resolveMeta();
-    const body = buildConfirmationPrompt(this.params, meta);
+    const body = buildConfirmationPrompt(this.params, meta, this.config);
 
     // The cost warning belongs before the spend, not after it. The registry
     // latch flips on read, so surfacing it here means the post-hoc copy on
@@ -637,15 +644,31 @@ function readMetaForConfirmation(script: string): WorkflowMeta | null {
 }
 
 /**
+ * True when a `scriptPath` points inside the generated-scripts root. Such a
+ * script is a throwaway artifact a tool emitted for this run, not a workflow
+ * the user saved — the approval surface labels it accordingly so a grant is
+ * given under the right identity. Lexical match on purpose: this only picks
+ * a label; the security check is the realpath boundary in the loader.
+ */
+function isGeneratedWorkflowScriptPath(
+  config: Config,
+  scriptPath: string,
+): boolean {
+  const root = config.storage.getGeneratedWorkflowsDir();
+  return scriptPath === root || scriptPath.startsWith(root + path.sep);
+}
+
+/**
  * The body of the approval dialog: what this workflow says it will do.
  *
- * Everything here comes from `meta` and the call's own parameters — never from
- * executing the script. When `meta` is absent or unreadable the dialog still
- * renders, just with less to say.
+ * Everything here comes from `meta`, the call's own parameters, and the
+ * configured script roots — never from executing the script. When `meta` is
+ * absent or unreadable the dialog still renders, just with less to say.
  */
 function buildConfirmationPrompt(
   params: WorkflowParams,
   meta: WorkflowMeta | null,
+  config: Config,
 ): string {
   const lines: string[] = [];
 
@@ -653,7 +676,10 @@ function buildConfirmationPrompt(
     lines.push(`Workflow: ${sanitizeLine(meta.name)}`);
     lines.push(sanitizeLine(meta.description));
   } else if (params.scriptPath) {
-    lines.push(`Saved workflow: ${sanitizeLine(params.scriptPath)}`);
+    const label = isGeneratedWorkflowScriptPath(config, params.scriptPath)
+      ? 'Generated workflow script'
+      : 'Saved workflow';
+    lines.push(`${label}: ${sanitizeLine(params.scriptPath)}`);
   } else {
     lines.push('Workflow: (the script declares no meta block)');
   }
@@ -904,9 +930,9 @@ export class WorkflowTool extends BaseDeclarativeTool<
     const hasPath =
       typeof params.scriptPath === 'string' && params.scriptPath.length > 0;
     // XOR: inline `script` (LLM authoring) or `scriptPath` (a saved-workflow
-    // slash command), never both, never neither.
+    // slash command or a generated script), never both, never neither.
     if (!hasScript && !hasPath) {
-      return 'WorkflowTool: provide `script` (inline source) or `scriptPath` (a saved workflow file).';
+      return 'WorkflowTool: provide `script` (inline source) or `scriptPath` (a workflow script file).';
     }
     if (hasScript && hasPath) {
       return 'WorkflowTool: provide exactly one of `script` or `scriptPath`, not both.';

@@ -275,12 +275,18 @@ describe('workflow-saved', () => {
         );
         await fs.mkdir(path.dirname(generatedDir), { recursive: true });
         await fs.symlink(external, generatedDir, 'dir');
-        await expect(
-          resolveSavedWorkflowScript(
-            { scriptPath: path.join(generatedDir, 'leak.js') },
-            fakeConfig(projectDir),
-          ),
-        ).rejects.toThrow(/outside the workflow script roots/);
+        const attempt = resolveSavedWorkflowScript(
+          { scriptPath: path.join(generatedDir, 'leak.js') },
+          fakeConfig(projectDir),
+        );
+        await expect(attempt).rejects.toThrow(
+          /outside the workflow script roots/,
+        );
+        // The refused root stays visible in the message: a checked-list it
+        // is silently absent from reads as if the loader never considered it.
+        await expect(attempt).rejects.toThrow(
+          `(checked: ${new Storage(projectDir).getProjectWorkflowsDir()}, ${Storage.getUserWorkflowsDir()}; refused symlinked root: ${generatedDir})`,
+        );
       } finally {
         await fs.rm(external, { recursive: true, force: true });
       }
@@ -514,9 +520,16 @@ describe('workflow-saved', () => {
 
     it('{scriptPath} into a symlinked root is refused', async () => {
       const p = path.join(projectWorkflowsDir, 'leak.js');
-      await expect(
-        resolveSavedWorkflowScript({ scriptPath: p }, fakeConfig(projectDir)),
-      ).rejects.toThrow(/outside the workflow script roots/);
+      const attempt = resolveSavedWorkflowScript(
+        { scriptPath: p },
+        fakeConfig(projectDir),
+      );
+      await expect(attempt).rejects.toThrow(
+        /outside the workflow script roots/,
+      );
+      await expect(attempt).rejects.toThrow(
+        `refused symlinked root: ${projectWorkflowsDir}`,
+      );
     });
 
     it('save into a symlinked root is refused (no write-through)', async () => {

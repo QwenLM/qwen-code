@@ -169,25 +169,31 @@ async function readWorkflowFileSecurely(
   config: Config,
 ): Promise<string> {
   const real = await fs.realpath(filePath); // throws ENOENT if absent
-  const dirs = (
-    await Promise.all(
-      getWorkflowScriptRoots(config).map(async (dir) => {
-        // Exclude a symlinked root: realpath(dir) would launder a
-        // `.qwen/workflows -> /outside` link into the allowed boundary, so a
-        // file resolving under the link's target would pass the check below.
-        if (await isSymlinkedRoot(dir)) return null;
-        try {
-          return await fs.realpath(dir);
-        } catch {
-          return path.resolve(dir);
-        }
-      }),
-    )
-  ).filter((d): d is string => d !== null);
+  const roots = await Promise.all(
+    getWorkflowScriptRoots(config).map(async (dir) => {
+      // Exclude a symlinked root: realpath(dir) would launder a
+      // `.qwen/workflows -> /outside` link into the allowed boundary, so a
+      // file resolving under the link's target would pass the check below.
+      if (await isSymlinkedRoot(dir)) return { dir, real: null };
+      try {
+        return { dir, real: await fs.realpath(dir) };
+      } catch {
+        return { dir, real: path.resolve(dir) };
+      }
+    }),
+  );
+  const dirs = roots.flatMap((r) => (r.real === null ? [] : [r.real]));
   const inside = dirs.some((d) => real === d || real.startsWith(d + path.sep));
   if (!inside) {
+    // Keep refused-but-considered roots visible: dropping a symlinked root
+    // from the list reads as if the loader never considered it at all.
+    const refused = roots.flatMap((r) => (r.real === null ? [r.dir] : []));
+    const refusedNote =
+      refused.length > 0
+        ? `; refused symlinked ${refused.length === 1 ? 'root' : 'roots'}: ${refused.join(', ')}`
+        : '';
     throw new Error(
-      `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}): '${filePath}'.`,
+      `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}${refusedNote}): '${filePath}'.`,
     );
   }
   return fs.readFile(real, 'utf8');

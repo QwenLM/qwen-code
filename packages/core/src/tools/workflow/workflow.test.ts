@@ -48,6 +48,16 @@ function configWithRegistry(): {
   return { config, registry };
 }
 
+/**
+ * The scriptPath approval/description surface classifies the path against
+ * the generated-scripts root, so it needs a config with a real `storage`.
+ */
+function configWithStorage(): Config {
+  return {
+    storage: new Storage(path.join(os.tmpdir(), 'workflow-label-test')),
+  } as unknown as Config;
+}
+
 describe('WorkflowTool', () => {
   it('has the registered name and display name', () => {
     const tool = new WorkflowTool(fakeConfig());
@@ -314,9 +324,10 @@ await agent('scan package.json')
     });
 
     it('scopes a saved-workflow grant to the path that was approved', async () => {
-      const details = (await detailsFor({
-        scriptPath: '/home/u/.qwen/workflows/audit.js',
-      })) as { hideAlwaysAllow?: boolean; permissionRules?: string[] };
+      const details = (await detailsFor(
+        { scriptPath: '/home/u/.qwen/workflows/audit.js' },
+        configWithStorage(),
+      )) as { hideAlwaysAllow?: boolean; permissionRules?: string[] };
       expect(details.hideAlwaysAllow).toBeFalsy();
       expect(details.permissionRules).toHaveLength(1);
 
@@ -343,6 +354,50 @@ await agent('scan package.json')
         wouldAllow({ scriptPath: '/home/u/.qwen/workflows/other.js' }),
       ).toBe(false);
       expect(wouldAllow({ script: 'await agent("x")' })).toBe(false);
+    });
+
+    // A generated-root script is a throwaway artifact a tool emitted for this
+    // run. Labeling it as a saved workflow would have the user approve — and
+    // maybe pre-approve the path rule — under a wrong identity.
+    it('labels a generated-root scriptPath as a generated script, not a saved workflow', async () => {
+      const storage = new Storage(
+        path.join(os.tmpdir(), 'workflow-label-test'),
+      );
+      const config = { storage } as unknown as Config;
+      const scriptPath = path.join(
+        storage.getGeneratedWorkflowsDir(),
+        'fanout-1a2b3c.js',
+      );
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run generated workflow script (fanout-1a2b3c.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(
+        `Generated workflow script: ${scriptPath}`,
+      );
+      expect(details.prompt).not.toContain('Saved workflow');
+    });
+
+    it('keeps the saved-workflow label for a saved-root scriptPath', async () => {
+      const storage = new Storage(
+        path.join(os.tmpdir(), 'workflow-label-test'),
+      );
+      const config = { storage } as unknown as Config;
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        'deep-research.js',
+      );
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run saved workflow (deep-research.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
     });
 
     // The cost warning used to arrive only after a successful run — i.e.
@@ -452,7 +507,7 @@ await agent('scan package.json')
   });
 
   it('build() accepts a scriptPath without inline script', () => {
-    const tool = new WorkflowTool(fakeConfig());
+    const tool = new WorkflowTool(configWithStorage());
     const invocation = tool.build({
       scriptPath: '/abs/deep-research.js',
     });
