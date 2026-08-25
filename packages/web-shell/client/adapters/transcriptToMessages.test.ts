@@ -356,6 +356,61 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('keeps vision bridge notices separate from assistant output', () => {
+    const notice = {
+      status: 'skipped',
+      convertedCount: 0,
+      omittedCount: 0,
+      modelName: 'qwen3.6-plus',
+      modelEndpoint: 'idealab.alibaba-inc.com',
+      egressOccurred: true,
+    };
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('assistant-0', 'assistant', 'Earlier reply', 0),
+      textBlock(
+        'vision-notice',
+        'assistant',
+        'Vision bridge cancelled.',
+        1,
+        false,
+        {
+          meta: {
+            source: 'vision_bridge_notice',
+            qwenDiscreteMessage: true,
+            visionBridgeNotice: notice,
+          },
+        },
+      ),
+      textBlock('assistant-1', 'assistant', 'Normal reply', 2),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'assistant-0',
+        role: 'assistant',
+        content: 'Earlier reply',
+        isStreaming: false,
+        timestamp: 0,
+      },
+      {
+        id: 'vision-notice',
+        role: 'system',
+        content: 'Vision bridge cancelled.',
+        variant: 'info',
+        source: 'vision_bridge_notice',
+        data: notice,
+        timestamp: 1,
+      },
+      {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'Normal reply',
+        isStreaming: false,
+        timestamp: 2,
+      },
+    ]);
+  });
+
   it.each([
     ['completed', 'completed'],
     ['failed', 'failed'],
