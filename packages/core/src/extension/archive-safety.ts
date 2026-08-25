@@ -72,6 +72,9 @@ function resolveContainedSymlinkTarget(
   if (!linkPath || linkPath.includes('\\')) return undefined;
   const normalizedEntry = normalizeArchiveEntryPath(entryPath);
   if (
+    normalizedEntry === '.' ||
+    normalizedEntry === '..' ||
+    normalizedEntry.startsWith('../') ||
     path.posix.isAbsolute(normalizedEntry) ||
     WINDOWS_ABSOLUTE_PATH.test(entryPath) ||
     path.posix.isAbsolute(linkPath) ||

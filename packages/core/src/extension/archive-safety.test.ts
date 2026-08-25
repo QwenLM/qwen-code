@@ -422,6 +422,18 @@ describe('assertTarArchiveLinksAreSafe', () => {
       ).rejects.toThrow('unsupported link entry');
     });
 
+    it('rejects a symlink whose entry path normalizes to the archive root', async () => {
+      const archive = path.join(root, 'root-entry.tar');
+      await writeCraftedTar(archive, [
+        symlinkHeader('nested/..', 'target'),
+        createTarFileHeader('target', 0),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
+
     it('rejects a symlink resolving to its own directory', async () => {
       const archive = path.join(root, 'self-cycle.tar');
       await writeCraftedTar(archive, [symlinkHeader('self', '.')]);
