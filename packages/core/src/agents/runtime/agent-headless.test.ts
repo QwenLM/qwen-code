@@ -30,12 +30,13 @@ import {
   AuthType,
 } from '../../core/contentGenerator.js';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { GeminiEventType } from '../../core/turn.js';
 import {
   getToolCallFingerprint,
   normalizeModelToolCallIds,
 } from '../../core/toolCallIdUtils.js';
 import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
-import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import { getInitialChatHistory } from '../../core/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
 import {
@@ -61,6 +62,7 @@ import { AgentTerminateMode } from './agent-types.js';
 import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -72,9 +74,7 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     createContentGenerator: vi.fn().mockResolvedValue({
       generateContent: vi.fn(),
       generateContentStream: vi.fn(),
-      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
       embedContent: vi.fn(),
-      useSummarizedThinking: vi.fn().mockReturnValue(false),
     }),
     createContentGeneratorConfig: vi.fn().mockReturnValue({
       model: DEFAULT_QWEN_MODEL,
@@ -90,7 +90,7 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     }),
   };
 });
-vi.mock('../../utils/environmentContext.js', () => ({
+vi.mock('../../core/environmentContext.js', () => ({
   SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
@@ -3435,6 +3435,62 @@ describe('subagent.ts', () => {
           'rejected to prevent writing truncated content',
         );
       });
+
+      it.each([
+        { retry: { type: 'retry' as const, isContinuation: true } },
+        { retry: { type: 'retry' as const } },
+      ])(
+        'forwards retry events to subagent loop detection',
+        async ({ retry }) => {
+          const loopSpy = vi
+            .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+            .mockReturnValue(false);
+
+          const { config } = await createMockConfig();
+          mockSendMessageStream.mockResolvedValue(
+            (async function* () {
+              yield {
+                ...retry,
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      finishReason: 'STOP',
+                      content: { parts: [{ text: 'done' }] },
+                    },
+                  ],
+                },
+              };
+            })(),
+          );
+
+          const scope = await AgentHeadless.create(
+            'test-agent',
+            config,
+            promptConfig,
+            defaultModelConfig,
+            defaultRunConfig,
+            { tools: [] },
+            new AgentEventEmitter(),
+          );
+
+          await scope.execute(new ContextState());
+
+          const retryArg = loopSpy.mock.calls.find(
+            ([event]) => event.type === GeminiEventType.Retry,
+          )?.[0] as { type: GeminiEventType; isContinuation?: boolean };
+          expect(retryArg).toEqual(
+            expect.objectContaining({ type: GeminiEventType.Retry }),
+          );
+          if ('isContinuation' in retry) {
+            expect(retryArg.isContinuation).toBe(true);
+          } else {
+            expect(retryArg).not.toHaveProperty('isContinuation');
+          }
+        },
+      );
 
       it('keeps automatic max token escalation warm for the next agent round', async () => {
         const writeFileToolDef: FunctionDeclaration = {

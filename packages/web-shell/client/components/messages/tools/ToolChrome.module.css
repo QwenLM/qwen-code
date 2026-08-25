@@ -19,6 +19,10 @@
   gap: 2px;
 }
 
+.chatSummaryParallelAgents {
+  padding: 2px 0;
+}
+
 /* Completed thinking folded into the merged tool summary: a clickable line
    like a tool row, expanding to the thought content on click. */
 .chatSummaryThought {
@@ -29,7 +33,6 @@
 .chatSummaryThoughtHeader {
   display: flex;
   align-items: center;
-  gap: 7px;
   margin: 0;
   padding: 0;
   border: none;
@@ -42,11 +45,28 @@
 }
 
 .chatSummaryThoughtHeader:hover,
-.chatSummaryThoughtHeader:focus-visible {
+.chatSummaryThoughtSummary:focus-visible {
   color: var(--primary);
 }
 
-.chatSummaryThoughtHeader:focus-visible {
+.chatSummaryThoughtSummary {
+  flex: 0 1 auto;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.chatSummaryThoughtSummary:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
   outline-offset: 2px;
   border-radius: 4px;
@@ -80,8 +100,8 @@
 
 .chatSummaryThoughtHeader:hover .chatSummaryThoughtChevronRight,
 .chatSummaryThoughtHeader:hover .chatSummaryThoughtChevronDown,
-.chatSummaryThoughtHeader:focus-within .chatSummaryThoughtChevronRight,
-.chatSummaryThoughtHeader:focus-within .chatSummaryThoughtChevronDown {
+.chatSummaryThoughtSummary:focus-visible ~ .chatSummaryThoughtChevronRight,
+.chatSummaryThoughtSummary:focus-visible ~ .chatSummaryThoughtChevronDown {
   opacity: 1;
 }
 
@@ -378,11 +398,6 @@
   grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
-  transition: grid-template-rows 180ms ease;
-}
-
-.chatSummaryContentCollapsed {
-  grid-template-rows: 0fr;
 }
 
 .chatSummaryContentInner {

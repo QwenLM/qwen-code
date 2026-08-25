@@ -122,9 +122,10 @@ export async function readSessionPrs(
 export async function writeSessionPrs(
   filePath: string,
   prs: SessionPr[],
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await atomicWriteJSON(filePath, { prs } satisfies SessionPrList);
+  await atomicWriteJSON(filePath, { prs } satisfies SessionPrList, options);
 }
 
 // `gh pr create` must START a command segment: a search like
