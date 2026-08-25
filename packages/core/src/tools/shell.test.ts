@@ -124,6 +124,7 @@ describe('ShellTool', () => {
       getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getPlanModeReadOnlyRoots: vi.fn().mockReturnValue(new Set<string>()),
       getSessionId: vi.fn().mockReturnValue('test-session'),
       getWorkspaceContext: vi
         .fn()
@@ -7233,6 +7234,37 @@ describe('ShellTool', () => {
       expect(permission).toBe('allow');
     });
 
+    it('should allow a user-vouched read-only root (issue #9694)', async () => {
+      const build = () =>
+        shellTool.build({ command: 'ib domain list', is_background: false });
+
+      expect(await build().getDefaultPermission()).toBe('ask');
+
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['ib']));
+
+      expect(await build().getDefaultPermission()).toBe('allow');
+    });
+
+    it('should still ask when a vouched root redirects or substitutes', async () => {
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['ib']));
+
+      const redirect = shellTool.build({
+        command: 'ib domain list > out.txt',
+        is_background: false,
+      });
+      expect(await redirect.getDefaultPermission()).toBe('ask');
+
+      const substitution = shellTool.build({
+        command: 'ib domain list $(whoami)',
+        is_background: false,
+      });
+      expect(await substitution.getDefaultPermission()).toBe('ask');
+    });
+
     // Regression coverage for PR #4386 round 6 (cid 3298521039): the
     // env-prefix wrapper substitution bypass. `getDefaultPermission`
     // calls `stripShellWrapper(this.params.command)` BEFORE the AST
@@ -7279,6 +7311,41 @@ describe('ShellTool', () => {
       expect(details.type).toBe('exec');
     });
 
+    it('should exclude a vouched sub-command from confirmation details (issue #9694)', async () => {
+      const params = {
+        command: 'ib domain list && curl example.com',
+        is_background: false,
+      };
+
+      const unvouched = (await shellTool
+        .build(params)
+        .getConfirmationDetails(new AbortController().signal)) as {
+        rootCommand: string;
+        permissionRules: string[];
+      };
+      expect(unvouched.rootCommand).toContain('ib');
+
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['ib']));
+
+      const details = (await shellTool
+        .build(params)
+        .getConfirmationDetails(new AbortController().signal)) as {
+        rootCommand: string;
+        permissionRules: string[];
+      };
+
+      expect(details.rootCommand).not.toContain('ib');
+      expect(details.rootCommand).toContain('curl');
+      expect(details.permissionRules).not.toContainEqual(
+        expect.stringContaining('ib'),
+      );
+      expect(details.permissionRules).toContainEqual(
+        expect.stringContaining('curl'),
+      );
+    });
+
     it('keeps a directory-changing sub-command in the confirmation scope', async () => {
       // `cd` classifies read-only on its own, and used to be dropped for it.
       // But it is the segment that makes `npm run build` mean something other
@@ -7305,6 +7372,8 @@ describe('ShellTool', () => {
     });
 
     it('still drops a read-only sub-command that plants nothing', async () => {
+      // The drop itself is intact for segments that mean the same thing alone
+      // as they do in sequence.
       const invocation = shellTool.build({
         command: 'ls -la && npm run build',
         is_background: false,

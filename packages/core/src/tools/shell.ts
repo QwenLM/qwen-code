@@ -2052,6 +2052,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
         command,
         this.params.directory || this.config.getTargetDir(),
+        { extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots() },
       );
       if (isReadOnly) {
         return 'allow';
@@ -2123,11 +2124,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Split compound command and filter out already-allowed (read-only) sub-commands
     const subCommands = splitCommands(command);
     const confirmableSubCommands: string[] = [];
-    // A read-only classification is only meaningful for the directory and
-    // environment the sub-command actually runs in. Once an earlier one has
-    // planted state, classifying a later one alone measures the wrong world,
-    // so it stays in the scope the user approves. Mirrors
-    // `PermissionManager.evaluateCompoundCommand`.
+    // Once a sub-command has planted state, the ones after it cannot be
+    // classified alone — they are probed against a directory or environment
+    // the sequence has already changed — so they stay in the scope the user
+    // approves. Mirrors `PermissionManager.evaluateCompoundCommand`.
     let statePlanted = false;
     for (const sub of subCommands) {
       // Decided before the drop below, and never dropped itself: a planter
@@ -2140,7 +2140,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         isReadOnly =
           !statePlanted &&
           !plants &&
-          (await isShellCommandReadOnlyASTInDirectory(sub, cwd));
+          (await isShellCommandReadOnlyASTInDirectory(sub, cwd, {
+            extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots(),
+          }));
       } catch {
         // conservative: treat unknown commands as requiring confirmation
       }

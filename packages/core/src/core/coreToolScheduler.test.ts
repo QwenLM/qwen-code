@@ -10536,6 +10536,7 @@ describe('CoreToolScheduler Plan shell routing', () => {
       getDebugMode: () => false,
       getApprovalMode: options.mode ?? (() => ApprovalMode.PLAN),
       getApprovalModeRevision: options.revision ?? (() => 0),
+      getPlanModeReadOnlyRoots: () => new Set<string>(),
       getSdkMode: () => false,
       getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({

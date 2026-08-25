@@ -3869,6 +3869,39 @@ describe('loadCliConfig safe mode', () => {
     expect(config.getAutoModeSettings()).toEqual({});
   });
 
+  it.each([['--safe-mode'], ['--bare']])(
+    'should strip settings-sourced planMode read-only roots with %s',
+    async (flag) => {
+      // The guard is load-bearing: argv.approvalMode is resolved before it, so
+      // `--safe-mode --approval-mode plan` really does reach PLAN mode, where
+      // a surviving vouch would auto-approve shell commands safe mode exists
+      // to prompt for.
+      process.argv = ['node', 'script.js', flag, '--approval-mode', 'plan'];
+      const argv = await parseArguments();
+      const settings: Settings = {
+        permissions: { planMode: { extraReadOnlyCommands: ['ib'] } },
+      };
+      const config = await loadCliConfig(settings, argv, undefined, []);
+
+      expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.PLAN);
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(new Set());
+
+      config.setApprovalMode(ServerConfig.ApprovalMode.PLAN);
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(new Set());
+    },
+  );
+
+  it('should keep settings-sourced planMode read-only roots without those flags', async () => {
+    process.argv = ['node', 'script.js', '--approval-mode', 'plan'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      permissions: { planMode: { extraReadOnlyCommands: ['ib'] } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getPlanModeReadOnlyRoots()).toEqual(new Set(['ib']));
+  });
+
   it('should ignore settings-sourced coreTools in safe mode', async () => {
     process.argv = ['node', 'script.js', '--safe-mode'];
     const argv = await parseArguments();

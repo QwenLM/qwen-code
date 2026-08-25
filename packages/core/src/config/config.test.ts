@@ -19,6 +19,7 @@ import {
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
+  normalizePlanModeReadOnlyRoots,
 } from './config.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
@@ -9893,6 +9894,118 @@ describe('setApprovalMode with folder trust', () => {
         },
         environment: ['Open-source monorepo'],
       });
+    });
+  });
+
+  describe('normalizePlanModeReadOnlyRoots', () => {
+    it('returns an empty set for undefined or empty input', () => {
+      expect(normalizePlanModeReadOnlyRoots(undefined)).toEqual(new Set());
+      expect(normalizePlanModeReadOnlyRoots([])).toEqual(new Set());
+    });
+
+    it('trims and lowercases entries', () => {
+      expect(normalizePlanModeReadOnlyRoots(['  IB  ', 'MyCli'])).toEqual(
+        new Set(['ib', 'mycli']),
+      );
+    });
+
+    it('drops entries that are not bare command names', () => {
+      expect(
+        normalizePlanModeReadOnlyRoots([
+          '',
+          '   ',
+          'ib list',
+          '/usr/local/bin/ib',
+          'C:\\tools\\ib.exe',
+          'ib;rm',
+          'ib*',
+          '$ib',
+          '-ib',
+        ]),
+      ).toEqual(new Set());
+    });
+
+    it('keeps launcher names but they are inert — the classifier refuses them', () => {
+      // Normalization deliberately does not filter these; the shell classifier
+      // rejects them so no caller-supplied set can vouch them back in. Their
+      // per-name behaviour is pinned in shellAstParser.test.ts.
+      expect(normalizePlanModeReadOnlyRoots(['bash', 'ib'])).toEqual(
+        new Set(['bash', 'ib']),
+      );
+    });
+
+    it('drops a non-array value whole instead of iterating it', () => {
+      // Settings are merged per key with no type validation, so a hand-written
+      // string would otherwise be walked one character at a time and a number
+      // or object would throw out of the Config constructor during startup.
+      for (const malformed of [
+        'mycli',
+        42,
+        true,
+        { ib: true },
+        null,
+      ] as unknown as Array<readonly string[] | undefined>) {
+        expect(normalizePlanModeReadOnlyRoots(malformed)).toEqual(new Set());
+      }
+    });
+
+    it('drops non-string elements of an otherwise valid array', () => {
+      // Same threat model as above, one level down: a hand-written mixed array
+      // must not reach entry.trim() and throw during startup.
+      expect(
+        normalizePlanModeReadOnlyRoots([
+          'ib',
+          42,
+          null,
+          { ib: true },
+        ] as unknown as string[]),
+      ).toEqual(new Set(['ib']));
+    });
+  });
+
+  describe('getPlanModeReadOnlyRoots', () => {
+    const params: ConfigParameters = {
+      ...baseParams,
+      permissions: { planMode: { extraReadOnlyCommands: ['ib', 'mycli'] } },
+    };
+
+    it('returns the configured roots in PLAN mode', () => {
+      const config = new Config({ ...params, approvalMode: ApprovalMode.PLAN });
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(
+        new Set(['ib', 'mycli']),
+      );
+    });
+
+    it('returns an empty set outside PLAN mode', () => {
+      for (const mode of [
+        ApprovalMode.DEFAULT,
+        ApprovalMode.AUTO,
+        ApprovalMode.AUTO_EDIT,
+        ApprovalMode.YOLO,
+      ]) {
+        const config = new Config({ ...params, approvalMode: mode });
+        expect(config.getPlanModeReadOnlyRoots()).toEqual(new Set());
+      }
+    });
+
+    it('follows a runtime approval-mode switch', () => {
+      const config = new Config({
+        ...params,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(new Set());
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(
+        new Set(['ib', 'mycli']),
+      );
+    });
+
+    it('returns an empty set when nothing is configured', () => {
+      const config = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(new Set());
     });
   });
 

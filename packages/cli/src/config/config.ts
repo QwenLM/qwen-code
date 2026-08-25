@@ -2210,6 +2210,8 @@ export async function loadCliConfig(
             : undefined,
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
+      planMode:
+        bareMode || safeMode ? undefined : settings.permissions?.planMode,
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).

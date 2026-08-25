@@ -20,6 +20,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getLocalGitConfigRisk } from './git-config-safety.js';
+import type { LocalGitConfigRisk } from './git-config-safety.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   classifyAwkCommandSafety,
@@ -29,6 +30,29 @@ import {
 
 export type ShellCommandSafety = 'read-only' | 'write' | 'unknown';
 type Safety = ShellCommandSafety;
+
+/** Caller-supplied extensions to the classifier's built-in knowledge. */
+export interface ShellSafetyOptions {
+  /**
+   * Extra root command names the user vouched for as read-only.
+   *
+   * Consulted in exactly two places, both of which must stay:
+   *
+   * 1. the terminal fallback branch of `evaluateCommandSafety`, so roots the
+   *    classifier already understands (`rm`, `git`, `tee`, …) keep their
+   *    built-in classification and cannot be vouched away; and
+   * 2. `localGitConfigMakesCommandUnsafe`, where the entire planted-config
+   *    gate for vouched wrappers hangs off it. Dropping that arm silently
+   *    removes planted-config protection for every vouched git frontend.
+   */
+  extraReadOnlyRoots?: ReadonlySet<string>;
+}
+
+const NO_EXTRA_ROOTS: ReadonlySet<string> = new Set();
+
+function extraRoots(options?: ShellSafetyOptions): ReadonlySet<string> {
+  return options?.extraReadOnlyRoots ?? NO_EXTRA_ROOTS;
+}
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -117,7 +141,424 @@ const READ_ONLY_ROOT_COMMANDS = new Set([
 ]);
 
 const WRITE_ROOT_COMMAND =
-  /^(chgrp|chmod|chown|cp|install|ln|mkdir|mkfifo|mknod|mv|rename|rm|rmdir|shred|touch|truncate|unlink)$/;
+  /^(chattr|chgrp|chmod|chown|cp|csplit|fallocate|install|ln|mkdir|mkfifo|mknod|mktemp|mv|patch|rename|rm|rmdir|shred|split|touch|truncate|unlink)$/;
+
+/**
+ * Roots that never classify read-only, whatever a caller vouches for.
+ *
+ * Two families, both of which make the analysis below meaningless rather than
+ * merely uncertain:
+ *
+ * - Launchers — shell and language interpreters, multi-call binaries, and
+ *   wrappers whose whole job is to execute a command taken from their
+ *   arguments. Trusting one is not a statement about that binary, it is a
+ *   statement about whatever it is handed (`time rm -rf build`).
+ * - State planters — builtins that rebind how a *later* command resolves.
+ *   The classifier evaluates statements independently, so it cannot see that
+ *   `hash -p ./evil/git git && git status` turns a trusted root into an
+ *   attacker-chosen binary.
+ *
+ * Neither list closes its family on its own. A launcher can always be named
+ * something this file has never heard of, and an interpreter takes its payload
+ * as a code string or a script path rather than as a command name, so nothing
+ * in the argument text identifies it. What bounds the exposure is
+ * `vouchedRootIsSafe` below: it accepts a vouch only for an invocation whose
+ * shape the classifier can actually read. These lists are the floor under
+ * that rule, not a substitute for it.
+ */
+export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
+  // Shell interpreters and multi-call binaries.
+  'ash',
+  'bash',
+  'busybox',
+  'cmd',
+  'cmd.exe',
+  'csh',
+  'dash',
+  'fish',
+  'ksh',
+  'mksh',
+  'osh',
+  'posh',
+  'powershell',
+  'pwsh',
+  'sh',
+  'tcsh',
+  'toybox',
+  'yash',
+  'zsh',
+  // Language interpreters. The payload is a code string or a script path, so
+  // no argument inspection can tell a read from a write.
+  'bun',
+  'bunx',
+  'clojure',
+  'crystal',
+  'dart',
+  'deno',
+  'dmd',
+  'elixir',
+  'escript',
+  'expect',
+  'ghc',
+  'groovy',
+  'lua',
+  'luajit',
+  'java',
+  'jshell',
+  'julia',
+  'kotlin',
+  'nim',
+  'node',
+  'nodejs',
+  'ocaml',
+  'osascript',
+  'perl',
+  'pnpx',
+  'php',
+  'python',
+  'python3',
+  'racket',
+  'rscript',
+  'ruby',
+  'runghc',
+  'scala',
+  'swift',
+  'tclsh',
+  'ts-node',
+  'tsx',
+  'wish',
+  'zig',
+  // Build and package tools. The payload is a Makefile recipe, a package
+  // script, or a downloaded package — never argv — so no argument inspection
+  // can see it either.
+  'ant',
+  'bazel',
+  'buck',
+  'buck2',
+  'bundle',
+  'bundler',
+  'cargo',
+  'cc',
+  'c++',
+  'clang',
+  'guile',
+  'tcc',
+  'clang++',
+  'cmake',
+  'conda',
+  'go',
+  'g++',
+  'gcc',
+  'composer',
+  'dotnet',
+  'gem',
+  'gradle',
+  'grunt',
+  'gulp',
+  'hatch',
+  'javac',
+  'just',
+  'lein',
+  'make',
+  'meson',
+  'mvn',
+  'ninja',
+  'nix',
+  'nix-build',
+  'nix-shell',
+  'nox',
+  'nx',
+  'pants',
+  'pdm',
+  'pip',
+  'pip3',
+  'pipenv',
+  'pipx',
+  'poetry',
+  'rake',
+  'rustc',
+  'rye',
+  'sbt',
+  'scons',
+  'task',
+  'tox',
+  'turbo',
+  'uv',
+  'uvx',
+  // Container runtimes: the payload can live entirely inside the image.
+  'docker',
+  'podman',
+  'npm',
+  'npx',
+  'pnpm',
+  'yarn',
+  // Privilege, namespace, scheduling, and process launchers.
+  'at',
+  'batch',
+  'bwrap',
+  'crontab',
+  'caffeinate',
+  'chroot',
+  'doas',
+  'env',
+  'fakeroot',
+  'flock',
+  'ionice',
+  'linux32',
+  'linux64',
+  'newgrp',
+  'nice',
+  'nohup',
+  'nsenter',
+  'parallel',
+  'pkexec',
+  'run0',
+  'runuser',
+  'setarch',
+  'script',
+  'rsh',
+  'setsid',
+  'sg',
+  'ssh',
+  'stdbuf',
+  'su',
+  'sudo',
+  'sudoedit',
+  'systemd-nspawn',
+  'systemd-run',
+  'time',
+  'timeout',
+  'unshare',
+  'watch',
+  'wine',
+  'wsl',
+  'wsl.exe',
+  'xargs',
+  // Launchers whose payload is a path argument, added alongside the families
+  // above: `run-parts <dir>` executes every script in the directory,
+  // `setpriv --reset-env <prog>`, `schroot -- <prog>` and `proot <prog>` each
+  // exec an argument the analysis reads as an ordinary literal.
+  'proot',
+  'run-parts',
+  'schroot',
+  'setpriv',
+  // Siblings of the interpreter, shell and tracer families above, added
+  // after review found each one vouchable while its family member was not.
+  'bpython',
+  'ccl',
+  'clisp',
+  'ecl',
+  'elvish',
+  'erl',
+  'es',
+  'gdb',
+  'ipython',
+  'jruby',
+  'jython',
+  'ksh88',
+  'ksh93',
+  'lldb',
+  'ltrace',
+  'micropython',
+  'mruby',
+  'nu',
+  'oil',
+  'py',
+  'pypy',
+  'pypy3',
+  'pythonw',
+  'raku',
+  'rakudo',
+  'rbash',
+  'rc',
+  'rksh',
+  'rzsh',
+  'sbcl',
+  'strace',
+  'truffleruby',
+  'valgrind',
+  'xonsh',
+  // Builtins that execute or re-resolve another command.
+  'alias',
+  'bind',
+  'builtin',
+  'command',
+  'compgen',
+  'complete',
+  'coproc',
+  'enable',
+  'eval',
+  'exec',
+  'fc',
+  'hash',
+  'history',
+  'getopts',
+  'let',
+  'mapfile',
+  'read',
+  'readarray',
+  'set',
+  'shopt',
+  'source',
+  // `.` is the POSIX spelling of `source`; tree-sitter parses `. ./evil.sh`
+  // as an ordinary command node.
+  '.',
+  'trap',
+  'unalias',
+]);
+
+/**
+ * Whether a root is a versioned spelling of a name on the refusal floor —
+ * `python3.12`, `lua5.4`, the free-threaded `python3.13t`, Debian's hyphenated
+ * `gcc-13` and `clang-15`, the historical ABI suffix `python3.7m`, upstream
+ * tarball spellings such as `luajit-2.1.0-beta3`, and distro spellings such as
+ * `guile-3.0`, `ghc-9.6.6`, `lldb-18`, `ksh93`.
+ *
+ * Derived from `NEVER_READ_ONLY_ROOT_COMMANDS` rather than restating its
+ * families in a second alternation. The second list had drifted from the first
+ * within one round of adding to it: review swept every floor name with a
+ * `<name>-9.9` shape and found 183 of them vouchable, because the alternation
+ * named only the families someone had thought to copy across. Deriving the
+ * answer means a name added to the floor is versioned-refused the same day,
+ * with nothing to keep in sync.
+ *
+ * Listing every release of every interpreter is not a finite job, so
+ * everything from the first digit of the suffix onward is accepted as a
+ * version.
+ */
+function namesAVersionedRefusedRoot(root: string): boolean {
+  // Every split point is tried rather than stripping greedily from the first
+  // digit, because a floor name may end in a digit that is part of its
+  // identity: greedy stripping turns `linux32-9.9` into `linux`, which is not
+  // on the floor, and `run09` into `run`.
+  for (let i = root.length - 1; i > 0; i--) {
+    const suffix = root.slice(i);
+    if (!/^-?[0-9][0-9a-z.-]*$/.test(suffix)) continue;
+    if (NEVER_READ_ONLY_ROOT_COMMANDS.has(root.slice(0, i))) return true;
+  }
+  return false;
+}
+
+/**
+ * Node types inside a redirect that carry no statement of their own: the
+ * heredoc's own delimiters and body, and the words and expansions naming a
+ * redirect's destination, which `evaluateRedirectionSafety` already owns.
+ *
+ * Deliberately a skip-list rather than an allow-list. tree-sitter-bash nests
+ * whatever follows `&&`, `||` or `;` on the opener line *inside* the redirect
+ * node, and that is an open set — `pipeline`, `negated_command`,
+ * `if_statement`, `for_statement`, `c_style_for_statement`,
+ * `select_statement`, `declaration_command` and more all appear there.
+ * Enumerating them has been wrong twice. Anything not listed here is handed to
+ * `evaluateStatementSafety`, whose default arm floors an unrecognised type at
+ * `unknown`, so a shape nobody anticipated prompts instead of vanishing.
+ */
+const INERT_REDIRECT_CHILD: ReadonlySet<string> = new Set([
+  'command_substitution',
+  'concatenation',
+  'expansion',
+  'file_descriptor',
+  'heredoc_body',
+  'heredoc_end',
+  'heredoc_start',
+  'number',
+  'process_substitution',
+  'raw_string',
+  'simple_expansion',
+  'string',
+  'word',
+]);
+
+/** Roots with a dedicated evaluator in `evaluateCommandSafety`. */
+const SPECIAL_ROOT_COMMAND = /^(dd|kill|killall|pkill|tee)$/;
+
+/**
+ * Whether a word names a command this file decides the safety of. Each
+ * `=`-separated part contributes its basename, with and without a trailing
+ * `.exe`, so `/bin/rm`, `rm.exe` and `--exec=/bin/rm` all name `rm` while an
+ * ordinary path argument does not — `./report.json` names `report.json`, not
+ * the `.` that is the POSIX spelling of `source`.
+ *
+ * `.` and `..` contribute nothing: as a whole word they are the directory a
+ * read-only CLI is routinely pointed at (`ib list .`), and they can never
+ * name an executable in argument position. The POSIX `source` spelling is
+ * refused as a *root* by the dispatch chain, which reaches
+ * `NEVER_READ_ONLY_ROOT_COMMANDS` before any vouch is consulted.
+ */
+function namesAKnownCommand(word: string): boolean {
+  return word
+    .toLowerCase()
+    .split('=')
+    .flatMap((part) => {
+      if (part === '.' || part === '..') return [];
+      const basename = part.split(/[\\/]/).pop() ?? '';
+      return [basename, basename.replace(/\.exe$/, '')];
+    })
+    .some(
+      (name) =>
+        READ_ONLY_ROOT_COMMANDS.has(name) ||
+        NEVER_READ_ONLY_ROOT_COMMANDS.has(name) ||
+        namesAVersionedRefusedRoot(name) ||
+        WRITE_ROOT_COMMAND.test(name) ||
+        SPECIAL_ROOT_COMMAND.test(name),
+    );
+}
+
+/**
+ * Characters an argument may contain and still mean, at run time, exactly what
+ * it says here. Deliberately a whitelist: quoting, escaping, expansion and
+ * globbing are each an open-ended way to spell a word the shell rewrites
+ * before the binary sees it (`r\m`, `r'm'`, `$cmd`, `*` all reach argv as
+ * `rm`), and matching those forms one at a time never terminates.
+ *
+ * Letters, digits and marks are matched by Unicode property, not by `\w`:
+ * every shell metacharacter is ASCII, so a bare non-ASCII word is literal by
+ * construction and refusing it would only cost a prompt on ordinary paths.
+ */
+const LITERAL_ARGUMENT = /^[\p{L}\p{N}\p{M}_@%+=:,./-]+$/u;
+
+/**
+ * Whether a caller-vouched root may classify read-only for this invocation.
+ *
+ * A vouch says "this binary only reads"; it can never say "and so does
+ * whatever I pass it". The classifier cannot recognise every launcher by name
+ * — an unknown binary may be one, and an interpreter's payload is a code
+ * string, not a command name — so the vouch is honoured only for invocations
+ * it can actually read:
+ *
+ * - every argument is a plain literal word, so its text is what the binary
+ *   receives, and
+ * - no argument names a command this file knows, so a launcher we have never
+ *   heard of cannot use the vouch to smuggle one past the analysis, and
+ * - the root itself is not a known command under another spelling
+ *   (`git.exe`), which would otherwise skip the dispatch chain above, and
+ * - no argument is one of git's redirecting global options or an option that
+ *   makes a git read verb run a helper program. A vouched wrapper is treated
+ *   as a possible git frontend elsewhere in this file; these options change
+ *   which repository, which config, or which executables git uses, so a
+ *   wrapper carrying one escapes that treatment entirely — `gitw -c
+ *   core.fsmonitor=./evil.sh status` needs no hostile checkout at all.
+ *
+ * The cost of the last rule is a prompt for a vouched CLI that spells its own
+ * config flag `-c` or `-C`. Refusing costs a confirmation prompt; accepting
+ * wrongly costs the write.
+ */
+function vouchedRootIsSafe(root: string, argNodes: SyntaxNode[]): boolean {
+  if (namesAKnownCommand(root)) return false;
+  const argTexts = argNodes.map((node) => stripOuterQuotes(node.text));
+  const shapeIsLiteral = argNodes.every((node, index) => {
+    const arg = argTexts[index]!;
+    return (
+      LITERAL_ARGUMENT.test(node.text) &&
+      !hasShellExpansion(node) &&
+      !namesAKnownCommand(node.text) &&
+      !GIT_REDIRECTING_GLOBAL_OPTION.test(arg) &&
+      !ATTACHED_CONFIG_OR_PATH_OPTION.test(arg) &&
+      !GIT_EXTERNAL_HELPER_OPTION.test(arg)
+    );
+  });
+  return shapeIsLiteral && vouchedGitShapeIsSafe(argTexts);
+}
 /** Git sub-commands considered read-only. */
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'blame',
@@ -148,6 +589,311 @@ const WRITE_GIT_BRANCH_FLAG =
 const GIT_BRANCH_LIST_FLAG =
   /^(?:-[alr]|--(?:all|list|remotes|show-current|contains|no-contains|merged|no-merged|points-at))(?:=|$)/;
 
+/**
+ * git's global options that redirect which repository it reads, which config
+ * it applies, or where it resolves its sub-command executables.
+ *
+ * `evaluateGitSafety` screens literal git by refusing any leading-dash first
+ * argument. A vouched wrapper cannot be screened that broadly — most CLIs take
+ * flags, and refusing all of them would retract the feature — so the specific
+ * redirecting options are named instead. Unlike the open set of binaries that
+ * `NEVER_READ_ONLY_ROOT_COMMANDS` chases, this one is finite and
+ * authoritative: it is git's own documented global option list.
+ */
+const GIT_REDIRECTING_GLOBAL_OPTION =
+  /^(?:-[Cc]|--(?:git-dir|work-tree|namespace|config-env|exec-path|bare))(?:=|$)/;
+
+/**
+ * A single-dash argument that could carry git's `-C <path>` or
+ * `-c <key>=<value>` payload attached to the option letter instead of spaced.
+ *
+ * Real git refuses the attached form — `handle_options` in `git.c` compares
+ * with `!strcmp(cmd, "-c")` / `"-C"`, so `git -C. status` and
+ * `git -ccore.fsmonitor=./evil.sh status` both exit 129 with `unknown option`
+ * (verified against git 2.50.1; pinned in the test suite). A vouched wrapper
+ * is not git, though, and one that normalises its own argv before forwarding
+ * hands git back the spaced form that plants the config. Screened for every
+ * vouched invocation, not only git-shaped ones, because planting an alias
+ * through the option makes the first word a non-git verb
+ * (`gitw -calias.z=config z core.fsmonitor ./evil.sh`) and a wrapper invoked
+ * with flags alone has no verb to shape-match at all.
+ *
+ * Deliberately narrower than "any attached `-c`/`-C`": config injection needs
+ * a `key=value`, and `-C` needs a path. That keeps `-cp` and `-classpath`
+ * working; it costs a prompt for `-Cdir` and for a single-dash `-flag=value`
+ * spelling such as `-count=5`, which is the spelling git's own `-c` uses.
+ */
+const ATTACHED_CONFIG_OR_PATH_OPTION = /^-(?!-)(?:C.+|[^-]*=)/;
+
+/**
+ * A single-dash cluster carrying a `c`/`C` somewhere other than the front —
+ * `-pcCORE.fsmonitor=x`, `-pC/hostile`. Real git accepts no clustered global
+ * options at all, so refusing these costs a genuine frontend nothing. Applied
+ * only where the invocation is git-shaped (or carries no verb to shape-match),
+ * so an unrelated CLI's `-cp`/`-classpath` is untouched. All-digit arguments
+ * are exempt: `-10` is git's own `git log -<n>` shortcut.
+ */
+const CLUSTERED_GIT_REDIRECTING_OPTION = /^-(?!-)(?!\d+$)[^-]*[Cc]/;
+
+/**
+ * git's complete command vocabulary, as reported by
+ * `git --list-cmds=builtins,main,others` (git 2.50.1).
+ *
+ * `vouchedGitShapeIsSafe` used to recognise a git invocation from the read-verb
+ * list plus two write-verb regexes, which meant every verb outside those three
+ * sets — `config`, `bisect`, `submodule`, `difftool`, `prune`, `update-index`,
+ * `notes`, `maintenance`, `hook`, `repack` — was not recognised as git-shaped
+ * at all and sailed past unscreened, giving a vouched wrapper *less* scrutiny
+ * than literal git for exactly the verbs that run programs. Git's vocabulary
+ * is finite and authoritative, so the recognition is done against all of it and
+ * every real verb is handed to `evaluateGitSafety`, whose floor is `unknown`.
+ *
+ * `--list-cmds` is structurally blind to git's exec-fallback porcelains — the
+ * dashed scripts git finds on PATH as `git-<verb>` — so `svn`, `cvsserver`,
+ * `citool`, `gui` and `instaweb` are appended by hand below. That is also why
+ * the list is a snapshot rather than a complete enumeration: a verb added by a
+ * future git, or a third-party `git-<verb>` on PATH, is simply unrecognised,
+ * which is the pre-existing behaviour, and the floor still refuses it for
+ * literal git.
+ */
+const GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  // Exec-fallback porcelains: `git <verb>` runs `git-<verb>` from PATH, so
+  // these never appear under any `--list-cmds` category even where installed.
+  'citool',
+  'cvsserver',
+  'gui',
+  'instaweb',
+  'svn',
+  'add',
+  'am',
+  'annotate',
+  'apply',
+  'archive',
+  'backfill',
+  'bisect',
+  'blame',
+  'branch',
+  'bugreport',
+  'bundle',
+  'cat-file',
+  'check-attr',
+  'check-ignore',
+  'check-mailmap',
+  'check-ref-format',
+  'checkout',
+  'checkout--worker',
+  'checkout-index',
+  'cherry',
+  'cherry-pick',
+  'clean',
+  'clone',
+  'column',
+  'commit',
+  'commit-graph',
+  'commit-tree',
+  'config',
+  'count-objects',
+  'credential',
+  'credential-cache',
+  'credential-cache--daemon',
+  'credential-osxkeychain',
+  'credential-store',
+  'daemon',
+  'describe',
+  'diagnose',
+  'diff',
+  'diff-files',
+  'diff-index',
+  'diff-pairs',
+  'diff-tree',
+  'difftool',
+  'difftool--helper',
+  'fast-export',
+  'fast-import',
+  'fetch',
+  'fetch-pack',
+  'filter-branch',
+  'fmt-merge-msg',
+  'for-each-ref',
+  'for-each-repo',
+  'format-patch',
+  'fsck',
+  'fsck-objects',
+  'fsmonitor--daemon',
+  'gc',
+  'get-tar-commit-id',
+  'grep',
+  'gui--askpass',
+  'hash-object',
+  'help',
+  'hook',
+  'http-backend',
+  'http-fetch',
+  'http-push',
+  'imap-send',
+  'index-pack',
+  'init',
+  'init-db',
+  'interpret-trailers',
+  'log',
+  'ls-files',
+  'ls-remote',
+  'ls-tree',
+  'mailinfo',
+  'mailsplit',
+  'maintenance',
+  'merge',
+  'merge-base',
+  'merge-file',
+  'merge-index',
+  'merge-octopus',
+  'merge-one-file',
+  'merge-ours',
+  'merge-recursive',
+  'merge-recursive-ours',
+  'merge-recursive-theirs',
+  'merge-resolve',
+  'merge-subtree',
+  'merge-tree',
+  'mergetool',
+  'mktag',
+  'mktree',
+  'multi-pack-index',
+  'mv',
+  'name-rev',
+  'notes',
+  'p4',
+  'pack-objects',
+  'pack-redundant',
+  'pack-refs',
+  'patch-id',
+  'pickaxe',
+  'prune',
+  'prune-packed',
+  'pull',
+  'push',
+  'quiltimport',
+  'range-diff',
+  'read-tree',
+  'rebase',
+  'receive-pack',
+  'reflog',
+  'refs',
+  'remote',
+  'remote-ext',
+  'remote-fd',
+  'remote-ftp',
+  'remote-ftps',
+  'remote-http',
+  'remote-https',
+  'repack',
+  'replace',
+  'replay',
+  'request-pull',
+  'rerere',
+  'reset',
+  'restore',
+  'rev-list',
+  'rev-parse',
+  'revert',
+  'rm',
+  'send-email',
+  'send-pack',
+  'sh-i18n--envsubst',
+  'shell',
+  'shortlog',
+  'show',
+  'show-branch',
+  'show-index',
+  'show-ref',
+  'sparse-checkout',
+  'stage',
+  'stash',
+  'status',
+  'stripspace',
+  'submodule',
+  'submodule--helper',
+  'subtree',
+  'switch',
+  'symbolic-ref',
+  'tag',
+  'unpack-file',
+  'unpack-objects',
+  'update-index',
+  'update-ref',
+  'update-server-info',
+  'upload-archive',
+  'upload-archive--writer',
+  'upload-pack',
+  'var',
+  'verify-commit',
+  'verify-pack',
+  'verify-tag',
+  'version',
+  'web--browse',
+  'whatchanged',
+  'worktree',
+  'write-tree',
+]);
+
+/**
+ * Whether a vouched-root set covers the root as spelled.
+ *
+ * `.exe` is stripped only on Windows, where PATHEXT makes `mytool` and
+ * `mytool.exe` the same file. On POSIX they are two different files, and the
+ * one nobody legitimately ships is the one an attacker can create in any
+ * writable PATH directory without winning a shadowing race — so extending a
+ * vouch for `mytool` to `mytool.exe` there would hand a planted binary the
+ * vouch. The *refusal* side still strips `.exe` everywhere: recognising
+ * `git.exe` as git is fail-closed, and the asymmetry is deliberate.
+ */
+function vouchCovers(extra: ReadonlySet<string>, root: string): boolean {
+  if (extra.has(root)) return true;
+  if (process.platform !== 'win32') return false;
+  // Both directions there, since the two spellings are one file: an entry
+  // written `mytool.exe` — the natural spelling on Windows, and one
+  // `BARE_COMMAND_NAME` accepts — otherwise fails to cover `mytool` and the
+  // user is prompted for exactly the command they vouched.
+  return extra.has(root.replace(/\.exe$/, '')) || extra.has(`${root}.exe`);
+}
+
+/**
+ * Whether an invocation of a vouched root looks like a git invocation, and if
+ * so whether git's own evaluator calls it read-only.
+ *
+ * A vouch cannot say which binary it names — this file already treats one as a
+ * possible git frontend for the planted-config gate, and the e2e plan's own
+ * example wrapper is `exec git "$@"`. Screening every vouched root through
+ * `evaluateGitSafety` would refuse every CLI whose verbs are not git's, so the
+ * screen is applied only when the first non-flag argument is a git command.
+ * Then the wrapper gets exactly what literal git gets: the write-verb list, the
+ * `branch -D` flag arm, `--output`, and the `%G` gpg-helper arm.
+ *
+ * The cost is a prompt for a vouched CLI whose own verb collides with one of
+ * git's 170 — `ib add`, `ib tag`, `ib config`, `ib init`. Read verbs collide
+ * harmlessly (`ib status`, `ib log` stay read-only); the rest cost a keystroke.
+ */
+function vouchedGitShapeIsSafe(argTexts: string[]): boolean {
+  // Everything after `--` is a pathspec, not an option or a verb.
+  const terminator = argTexts.indexOf('--');
+  const scanned = terminator < 0 ? argTexts : argTexts.slice(0, terminator);
+  // Screened before the verb lookup and independently of it: an option can sit
+  // on either side of the verb, and an invocation of flags alone has no verb.
+  const clustered = scanned.some((arg) =>
+    CLUSTERED_GIT_REDIRECTING_OPTION.test(arg),
+  );
+  const verbIndex = scanned.findIndex((arg) => !arg.startsWith('-'));
+  if (verbIndex < 0) return !clustered;
+  if (!GIT_SUBCOMMANDS.has(scanned[verbIndex]!.toLowerCase())) return true;
+  if (clustered) return false;
+  // Sliced at the verb, but out of the *untruncated* list: the `--` cut above
+  // exists to find the verb and screen the options, and everything after `--`
+  // is still a positional git reads. Passing the truncated tail hid them from
+  // the write arms — `gitw branch -- newbranch` reached `evaluateGitSafety` as
+  // a bare `['branch']`, which is a read. The evaluator handles `--` itself.
+  return evaluateGitSafety(argTexts.slice(verbIndex)) === 'read-only';
+}
+
 const BLOCKED_FIND_PREFIXES = ['-fls', '-fprint', '-fprintf'];
 const FIND_VALUE_PREDICATE =
   /^-(?:[ac]?newer|newer[a-z]{2}|[acm](?:min|time)|context|fstype|gid|group|i?(?:lname|name|path|regex)|inum|links|maxdepth|mindepth|path|perm|printf|regextype|samefile|size|type|uid|used|user|wholename|xtype)$/;
@@ -160,6 +906,34 @@ const UNIQ_VALUE_OPTIONS = new Set(
  * Input-only redirections (`<`, `<<`, `<<<`) are safe.
  */
 const WRITE_REDIRECT_OPERATORS = new Set(['>', '>>', '&>', '&>>', '>|']);
+
+/**
+ * The subset that runs inside a heredoc body, where expansion follows
+ * double-quote rules. `<(…)` is not expanded there, so including it would only
+ * refuse a body that quotes the text.
+ */
+const HEREDOC_SUBSTITUTION = /\$\(|`/;
+
+/**
+ * `${v@P}` prompt expansion, which runs any `$(…)` held in the variable's
+ * value. In a pattern word it is a leaf, so the `@`/`P` child-adjacency check
+ * never sees it.
+ *
+ * Deliberately not anchored to a brace-free span: `${a[${b}]@P}` nests a brace
+ * inside the expansion, and a `[^{}]*` bridge stops at it — so the computed
+ * subscript form escaped while bash still ran the expansion. This is a leaf
+ * fallback for sites the node walk cannot reach, so treating any `@P` that
+ * co-occurs with a `${` as unsafe costs at most a prompt.
+ */
+const PROMPT_EXPANSION = /\$\{[\s\S]*@P/;
+
+/**
+ * A command or process substitution that survived the substitution-node walk.
+ * Both openers count: bash runs `<(…)` and `>(…)` wherever it runs `$(…)` —
+ * in a pattern word, that is. See `HEREDOC_SUBSTITUTION` for the one place it
+ * does not.
+ */
+const HIDDEN_SUBSTITUTION = /\$\(|`|<\(|>\(/;
 
 /**
  * Map of root command → known sub-command sets.
@@ -633,36 +1407,6 @@ export async function initParser(): Promise<void> {
 }
 
 /**
- * Node types inside a redirect that carry no statement of their own: the
- * heredoc's own delimiters and body, and the words and expansions naming a
- * redirect's destination, which `evaluateRedirectionSafety` already owns.
- *
- * Deliberately a skip-list rather than an allow-list. tree-sitter-bash nests
- * whatever follows `&&`, `||` or `;` on the opener line *inside* the redirect
- * node, and that is an open set — `pipeline`, `negated_command`,
- * `if_statement`, `for_statement`, `c_style_for_statement`,
- * `select_statement`, `declaration_command` and more all appear there.
- * Enumerating them has been wrong twice. Anything not listed here is handed to
- * `evaluateStatementSafety`, whose default arm floors an unrecognised type at
- * `unknown`, so a shape nobody anticipated prompts instead of vanishing.
- */
-const INERT_REDIRECT_CHILD: ReadonlySet<string> = new Set([
-  'command_substitution',
-  'concatenation',
-  'expansion',
-  'file_descriptor',
-  'heredoc_body',
-  'heredoc_end',
-  'heredoc_start',
-  'number',
-  'process_substitution',
-  'raw_string',
-  'simple_expansion',
-  'string',
-  'word',
-]);
-
-/**
  * Parse a shell command string into a tree-sitter Tree.
  * Initialises the parser lazily if needed.
  */
@@ -989,35 +1733,10 @@ function processSafety(root: string, args: string[]): Safety {
   return 'write';
 }
 
-/**
- * The subset that runs inside a heredoc body, where expansion follows
- * double-quote rules. `<(…)` is not expanded there, so including it would only
- * refuse a body that quotes the text.
- */
-const HEREDOC_SUBSTITUTION = /\$\(|`/;
-
-/**
- * `${v@P}` prompt expansion, which runs any `$(…)` held in the variable's
- * value. In a pattern word it is a leaf, so the `@`/`P` child-adjacency check
- * never sees it.
- *
- * Deliberately not anchored to a brace-free span: `${a[${b}]@P}` nests a brace
- * inside the expansion, and a `[^{}]*` bridge stops at it — so the computed
- * subscript form escaped while bash still ran the expansion. This is a leaf
- * fallback for sites the node walk cannot reach, so treating any `@P` that
- * co-occurs with a `${` as unsafe costs at most a prompt.
- */
-const PROMPT_EXPANSION = /\$\{[\s\S]*@P/;
-
-/**
- * A command or process substitution that survived the substitution-node walk.
- * Both openers count: bash runs `<(…)` and `>(…)` wherever it runs `$(…)` —
- * in a pattern word, that is. See `HEREDOC_SUBSTITUTION` for the one place it
- * does not.
- */
-const HIDDEN_SUBSTITUTION = /\$\(|`|<\(|>\(/;
-
-function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
+function evaluateSubstitutions(
+  node: SyntaxNode,
+  extra: ReadonlySet<string>,
+): ShellCommandSafety {
   const substitutions = collectDescendants(
     node,
     new Set(['command_substitution', 'process_substitution']),
@@ -1070,11 +1789,14 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
     'unknown',
     ...substitutions
       .flatMap((substitution) => substitution.namedChildren)
-      .map(evaluateStatementSafety),
+      .map((child) => evaluateStatementSafety(child, extra)),
   );
 }
 
-function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
+function evaluateCommandSafety(
+  commandNode: SyntaxNode,
+  extra: ReadonlySet<string>,
+): ShellCommandSafety {
   const rawRoot = commandNode.childForFieldName('name')?.text;
   const root = getCommandName(commandNode);
   const argNodes = getArgumentNodes(commandNode);
@@ -1121,8 +1843,22 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
       ))
   ) {
     result = 'unknown';
+  } else if (
+    NEVER_READ_ONLY_ROOT_COMMANDS.has(root) ||
+    namesAVersionedRefusedRoot(root)
+  ) {
+    // Decided here rather than by filtering the caller's set, so no caller can
+    // vouch a launcher or a state planter back in.
+    result = 'unknown';
+  } else if (READ_ONLY_ROOT_COMMANDS.has(root)) {
+    result = 'read-only';
+  } else if (vouchCovers(extra, root)) {
+    // Terminal fallback: every root the classifier understands specially is
+    // handled above, so a caller-supplied root can only ever add to the
+    // built-in read-only set — never override a write classification.
+    result = vouchedRootIsSafe(root, argNodes) ? 'read-only' : 'unknown';
   } else {
-    result = READ_ONLY_ROOT_COMMANDS.has(root) ? 'read-only' : 'unknown';
+    result = 'unknown';
   }
   if (
     result === 'read-only' &&
@@ -1144,18 +1880,21 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
   if (root && hasEnvironment) result = mergeSafety(result, 'unknown');
   return mergeSafety(
     result,
-    evaluateRedirectionSafety(commandNode),
+    evaluateRedirectionSafety(commandNode, extra),
     ...commandNode.namedChildren
       .filter((child) => !child.type.endsWith('_redirect'))
-      .map(evaluateSubstitutions),
+      .map((child) => evaluateSubstitutions(child, extra)),
   );
 }
 
-function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
+function evaluateRedirectionSafety(
+  node: SyntaxNode,
+  extra: ReadonlySet<string>,
+): ShellCommandSafety {
   let result: ShellCommandSafety = 'read-only';
   for (const redirect of node.namedChildren) {
     if (!redirect.type.endsWith('_redirect')) continue;
-    result = mergeSafety(result, evaluateSubstitutions(redirect));
+    result = mergeSafety(result, evaluateSubstitutions(redirect, extra));
     if (redirect.type !== 'file_redirect') continue;
     const operator = redirect.children.find(
       (child) => child.type !== 'file_descriptor',
@@ -1176,56 +1915,88 @@ function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
   return result;
 }
 
-function childrenSafety(node: SyntaxNode, floor: Safety = 'read-only'): Safety {
-  return mergeSafety(floor, ...node.namedChildren.map(evaluateStatementSafety));
+function childrenSafety(
+  node: SyntaxNode,
+  extra: ReadonlySet<string>,
+  floor: Safety = 'read-only',
+): Safety {
+  return mergeSafety(
+    floor,
+    ...node.namedChildren.map((child) => evaluateStatementSafety(child, extra)),
+  );
 }
 
-function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
-  if (node.type === 'command') return evaluateCommandSafety(node);
-  if (CHILD_STATEMENT.test(node.type)) return childrenSafety(node);
+function evaluateStatementSafety(
+  node: SyntaxNode,
+  extra: ReadonlySet<string>,
+): ShellCommandSafety {
+  if (node.type === 'command') return evaluateCommandSafety(node, extra);
+  if (CHILD_STATEMENT.test(node.type)) return childrenSafety(node, extra);
   if (node.type === 'redirected_statement')
     return mergeSafety(
       ...node.namedChildren
         .filter((child) => !child.type.endsWith('_redirect'))
-        .map((child) => evaluateStatementSafety(child)),
+        .map((child) => evaluateStatementSafety(child, extra)),
       // Whatever follows the heredoc opener on the same line is parsed
-      // *inside* the redirect node — `cat <<EOF && rm -rf build` puts the
-      // `rm` beside the heredoc body, and `cat <<EOF >out.txt` puts the
-      // write redirect there — so filtering the redirect out above dropped
-      // both from the analysis entirely.
+      // *inside* the redirect node — `vtool <<EOF && rm -rf build` puts the
+      // `rm` beside the heredoc body, and `cat <<EOF >out.txt` puts the write
+      // redirect there — so filtering the redirect out above dropped both
+      // from the analysis entirely.
       ...node.namedChildren
         .filter((child) => child.type.endsWith('_redirect'))
         .flatMap((redirect) => [
           // A redirect nested in a redirect is a redirect, not a statement:
           // it belongs to the redirection axis, which never reached inside
           // the heredoc node because it only walks direct children.
-          evaluateRedirectionSafety(redirect),
+          evaluateRedirectionSafety(redirect, extra),
           ...redirect.namedChildren
             .filter(
               (child) =>
                 !INERT_REDIRECT_CHILD.has(child.type) &&
                 !child.type.endsWith('_redirect'),
             )
-            .map((child) => evaluateStatementSafety(child)),
+            .map((child) => evaluateStatementSafety(child, extra)),
         ]),
-      evaluateRedirectionSafety(node),
+      evaluateRedirectionSafety(node, extra),
     );
   if (/^variable_assignments?$/.test(node.type))
     return mergeSafety(
       node.parent?.namedChildCount === 1 ? 'read-only' : 'unknown',
-      evaluateSubstitutions(node),
+      evaluateSubstitutions(node, extra),
     );
   if (node.type === 'function_definition') return 'unknown';
-  return childrenSafety(node, 'unknown');
+  return childrenSafety(node, extra, 'unknown');
 }
 
+/**
+ * Whether a repository's own `.git/config` turns this command into a write.
+ *
+ * A hostile checkout can set `diff.external` or `core.fsmonitor` to a script
+ * of its choosing, so `git diff` and `git status` run attacker code without
+ * either word appearing in the command.
+ *
+ * A caller-vouched root gets the same treatment as literal `git`, and without
+ * the sub-command filter: the vouch exists for wrapper CLIs, a wrapper is
+ * free to spell its verb anywhere in argv (the reporting issue's own CLI puts
+ * it in the *second* argument), and this file cannot know which of a private
+ * binary's verbs reach git. Repositories that plant nothing are unaffected —
+ * `getLocalGitConfigRisk` reports no risk and the command stays read-only.
+ */
 function localGitConfigMakesCommandUnsafe(
   root: SyntaxNode,
   cwd: string,
+  extra: ReadonlySet<string>,
 ): boolean {
   let changedDirectory = false;
   let usesDiff = false;
   let usesStatus = false;
+  // Probed at most once per classification. The probe is a synchronous
+  // `spawnSync` with a 1s timeout; running it inside the loop cost one
+  // blocking git launch per vouched-wrapper command node — N+1 per
+  // classification of a compound — on the event loop, for a value that cannot
+  // change between nodes.
+  let cachedRisk: LocalGitConfigRisk | undefined;
+  const risk = () => (cachedRisk ??= getLocalGitConfigRisk(cwd));
 
   for (const command of collectDescendants(root, new Set(['command']))) {
     const name = getCommandName(command);
@@ -1233,7 +2004,23 @@ function localGitConfigMakesCommandUnsafe(
       changedDirectory = true;
       continue;
     }
-    if (name !== 'git') continue;
+    if (name === null) continue;
+    if (name !== 'git') {
+      if (!vouchCovers(extra, name)) continue;
+      // A wrapper has no sub-command filter, so a repository-local key that
+      // makes *any* read verb run a program reaches it — a planted textconv
+      // driver through `.gitattributes`, a clean/smudge filter, the gpg
+      // program behind a signature display, or a `!` shell alias, which git
+      // runs for a verb it does not recognise. Literal `git` is screened from
+      // these by `evaluateGitSafety`'s read-only verb list; the wrapper is not.
+      // Ordered so the free check runs first: a `cd` already decides the
+      // answer and makes the probe pointless.
+      if (changedDirectory) return true;
+      if (risk().helperProgram) return true;
+      usesDiff = true;
+      usesStatus = true;
+      continue;
+    }
     const subcommand = stripOuterQuotes(
       getArgumentNodes(command)[0]?.text ?? '',
     ).toLowerCase();
@@ -1244,8 +2031,8 @@ function localGitConfigMakesCommandUnsafe(
   }
 
   if (!usesDiff && !usesStatus) return false;
-  const risk = getLocalGitConfigRisk(cwd);
-  return (usesDiff && risk.diffExternal) || (usesStatus && risk.fsmonitor);
+  const { diffExternal, fsmonitor } = risk();
+  return (usesDiff && diffExternal) || (usesStatus && fsmonitor);
 }
 
 function fallbackGitConfigMakesCommandUnsafe(
@@ -1260,6 +2047,7 @@ function fallbackGitConfigMakesCommandUnsafe(
 
 async function classifyInternal(
   command: string,
+  extra: ReadonlySet<string>,
   cwd?: string,
 ): Promise<Safety> {
   const tree = await parseShellCommand(command);
@@ -1267,17 +2055,20 @@ async function classifyInternal(
     const root = tree.rootNode;
     if (root.namedChildCount === 0 || root.hasError) return 'unknown';
     const safety = mergeSafety(
-      ...root.namedChildren.map(evaluateStatementSafety),
+      ...root.namedChildren.map((child) =>
+        evaluateStatementSafety(child, extra),
+      ),
     );
     if (safety === 'read-only' && command.includes('\\\n')) {
       const normalizedSafety = await classifyInternal(
         command.replaceAll('\\\n', ''),
+        extra,
         cwd,
       );
       if (normalizedSafety !== 'read-only') return 'unknown';
     }
     if (safety !== 'read-only' || !cwd) return safety;
-    return localGitConfigMakesCommandUnsafe(root, cwd)
+    return localGitConfigMakesCommandUnsafe(root, cwd, extra)
       ? 'unknown'
       : 'read-only';
   } finally {
@@ -1400,10 +2191,10 @@ function statementPlantsState(node: SyntaxNode): boolean {
 
 /** Whether a redirect node runs something while its target is expanded. */
 function redirectPlantsState(node: SyntaxNode): boolean {
-  // The safety axis evaluates a substitution separately, on its own nodes, so
-  // it can treat one inside a redirect as inert. The plant axis has no such
-  // second pass: `echo x < $(./evil.sh)` runs the script before anything
-  // after it is classified.
+  // `INERT_REDIRECT_CHILD` treats substitutions as inert because the safety
+  // axis evaluates them separately. The plant axis has no such second pass:
+  // `echo x < $(./evil.sh)` runs the script before anything after it is
+  // classified.
   return collectDescendants(node, REDIRECT_TARGET_SUBSTITUTION).length > 0;
 }
 
@@ -1453,17 +2244,21 @@ export async function plantsStateForLaterCommands(
 
 export async function classifyShellCommandSafety(
   command: string,
+  options?: ShellSafetyOptions,
 ): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  return classifyInternal(command).catch(() => 'unknown');
+  return classifyInternal(command, extraRoots(options)).catch(() => 'unknown');
 }
 
 export async function classifyShellCommandSafetyInDirectory(
   command: string,
   cwd: string,
+  options?: ShellSafetyOptions,
 ): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  return classifyInternal(command, cwd).catch(() => 'unknown');
+  return classifyInternal(command, extraRoots(options), cwd).catch(
+    () => 'unknown',
+  );
 }
 
 /**
@@ -1481,19 +2276,22 @@ export async function classifyShellCommandSafetyInDirectory(
  */
 export async function isShellCommandReadOnlyAST(
   command: string,
+  options?: ShellSafetyOptions,
 ): Promise<boolean> {
-  return isShellCommandReadOnlyInternal(command);
+  return isShellCommandReadOnlyInternal(command, extraRoots(options));
 }
 
 export async function isShellCommandReadOnlyASTInDirectory(
   command: string,
   cwd: string,
+  options?: ShellSafetyOptions,
 ): Promise<boolean> {
-  return isShellCommandReadOnlyInternal(command, cwd);
+  return isShellCommandReadOnlyInternal(command, extraRoots(options), cwd);
 }
 
 async function isShellCommandReadOnlyInternal(
   command: string,
+  extra: ReadonlySet<string>,
   cwd?: string,
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
@@ -1509,7 +2307,7 @@ async function isShellCommandReadOnlyInternal(
   }
 
   try {
-    return (await classifyInternal(command, cwd)) === 'read-only';
+    return (await classifyInternal(command, extra, cwd)) === 'read-only';
   } catch {
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.

@@ -2535,6 +2535,46 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      planMode: {
+        type: 'object',
+        label: 'Plan Mode',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Settings consumed by the PLAN approval mode shell policy.',
+        showInDialog: false,
+        properties: {
+          extraReadOnlyCommands: {
+            type: 'array',
+            label: 'Plan Mode Extra Read-Only Commands',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as string[] | undefined,
+            description:
+              'Root command names Plan Mode treats as read-only in addition ' +
+              'to its built-in set, so a custom read-only CLI stops ' +
+              'prompting on every invocation. An entry vouches for the ' +
+              'entire binary, including any mutating sub-commands. Every ' +
+              'other Plan Mode rule still applies: redirections, command ' +
+              'substitution, environment-assignment prefixes and pipes into ' +
+              'unknown commands are unaffected, commands the classifier ' +
+              'already understands (git, rm, sed, …) keep their built-in ' +
+              'classification. Launchers that run a command taken from ' +
+              'their arguments (bash, busybox, env, sudo, xargs, watch, ' +
+              'time, …) and builtins that rebind name resolution (hash, ' +
+              'alias, …) are refused, as is a vouched root whose arguments ' +
+              'are not plain literal words or name a command the classifier ' +
+              'knows. Only honored from User, System, and SystemDefaults ' +
+              'settings scopes; values set in Workspace settings are ignored ' +
+              'so a cloned repository cannot vouch for a command on your ' +
+              'behalf. Applies only in Plan Mode; use permissions.allow for ' +
+              'other modes.',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.UNION,
+          },
+        },
+      },
     },
   },
 
