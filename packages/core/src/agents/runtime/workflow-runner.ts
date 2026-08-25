@@ -339,8 +339,7 @@ export class WorkflowRunner {
           }
           if (
             callerWasAbortedBeforeStart ||
-            (!runInBackground && options.signal.aborted) ||
-            entry?.status === 'cancelled'
+            (!runInBackground && options.signal.aborted)
           ) {
             registry?.cancel(runId, Date.now());
           } else {

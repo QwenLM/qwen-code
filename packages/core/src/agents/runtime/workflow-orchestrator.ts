@@ -7,7 +7,12 @@
 import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
-import { Mutex } from 'async-mutex';
+import {
+  E_TIMEOUT,
+  Mutex,
+  withTimeout,
+  type MutexInterface,
+} from 'async-mutex';
 import type { Config } from '../../config/config.js';
 import {
   createWorkflowSandbox,
@@ -122,12 +127,13 @@ export const HARD_MAX_CONCURRENCY_CEILING = 64;
 
 /**
  * Maximum agents in flight at once within a single run, shared across all
- * `parallel()` / `pipeline()` calls. `min(16, cpus-2)` mirrors upstream;
- * `max(1, …)` guards 1–2 core machines where `cpus-2 <= 0` would otherwise
- * produce a deadlocking limit. `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY` overrides
- * the computed value with an explicit integer in `[1, HARD_MAX_CONCURRENCY_CEILING]`;
- * an invalid override falls back to the cpu-derived default with a debug
- * warning, and an over-ceiling override is clamped.
+ * `parallel()` / `pipeline()` calls. `min(16, availableParallelism()-2)`
+ * mirrors upstream; `max(2, …)` floors small machines at 2 — a window of 1
+ * would serialize every `parallel()` and silently defeat the point of a
+ * fan-out. `QWEN_CODE_MAX_WORKFLOW_CONCURRENCY` overrides the computed value
+ * with an explicit integer in `[1, HARD_MAX_CONCURRENCY_CEILING]`; an invalid
+ * override falls back to the cpu-derived default with a debug warning, and an
+ * over-ceiling override is clamped.
  */
 export function resolveConcurrencyLimit(
   env: Record<string, string | undefined> = process.env,
@@ -957,7 +963,7 @@ async function runOverridePath(
     );
   }
   if (opts.isolation === 'worktree') {
-    worktreeIsolation = await provisionWorkflowWorktree(config);
+    worktreeIsolation = await provisionWorkflowWorktree(config, signal);
     effectiveContext = createDirScopedConfigOverride(
       config,
       worktreeIsolation.path,
@@ -1262,15 +1268,23 @@ interface WorkflowWorktreeIsolation {
 }
 
 /**
- * Provision an isolation worktree for one `agent({isolation:'worktree'})`
- * call. Mirrors the AgentTool provision path (agent.ts:1849-1963) with
- * the same fail-closed dirty-parent refuse: if the parent working tree
- * has uncommitted changes, `git worktree add` would silently check out
- * the parent's HEAD without those edits and the subagent would see a
- * stale tree. Forcing the user to commit / stash matches AgentTool's
- * UX so model authors can rely on consistent behavior across both call
- * sites.
+ * Per-acquire deadline for the provisioning lock below. A wedged
+ * `git worktree add` inside the critical section (an unresponsive network
+ * filesystem, a blocking post-checkout hook — the same hazard
+ * GitWorktreeService's fetch-PR timeout names) would otherwise hold this
+ * process-global lock forever: every subsequent worktree dispatch in the
+ * process queues behind it with no way out, each burning its run's wall-clock
+ * budget and dying with a misleading "exceeded N ms of active time" error.
+ * With the deadline a waiter instead fails fast with an error that names
+ * serialized provisioning. Sized well clear of a legitimate full window's
+ * serialised provisioning (each provision runs well under a second) yet far
+ * below the run's wall-clock cap, so a wedged holder reads as a provisioning
+ * stall, not a wall-clock timeout.
  */
+const WORKTREE_PROVISION_LOCK_TIMEOUT_MS = 120_000;
+
+let worktreeProvisionLockTimeoutMs = WORKTREE_PROVISION_LOCK_TIMEOUT_MS;
+
 /**
  * Serialises worktree provisioning across a run's dispatch window. Sixteen
  * concurrent `git worktree add` calls contend on `.git/worktrees` and the
@@ -1280,16 +1294,77 @@ interface WorkflowWorktreeIsolation {
  * the retries it prevents. Module-level on purpose: the contention is on the
  * repository, not on any one run.
  */
-const worktreeProvisionLock = new Mutex();
+let worktreeProvisionLock: MutexInterface = withTimeout(
+  new Mutex(),
+  WORKTREE_PROVISION_LOCK_TIMEOUT_MS,
+);
 
-function provisionWorkflowWorktree(
-  config: Config,
-): Promise<WorkflowWorktreeIsolation> {
-  return worktreeProvisionLock.runExclusive(() =>
-    provisionWorkflowWorktreeExclusively(config),
+/**
+ * Test seam: rebuild the provisioning lock so a holder wedged by one test
+ * cannot queue the next test's dispatches, optionally shortening the acquire
+ * deadline so a wait timeout is observable without a production-length wait.
+ */
+export function resetWorktreeProvisionLockForTesting(timeoutMs?: number): void {
+  worktreeProvisionLockTimeoutMs =
+    timeoutMs ?? WORKTREE_PROVISION_LOCK_TIMEOUT_MS;
+  worktreeProvisionLock = withTimeout(
+    new Mutex(),
+    worktreeProvisionLockTimeoutMs,
   );
 }
 
+/**
+ * Serialised, abort-aware provisioning entry point: waits on the lock
+ * (bounded by the acquire deadline), bails out when the dispatch's signal is
+ * aborted, and delegates to the exclusive provision.
+ */
+async function provisionWorkflowWorktree(
+  config: Config,
+  signal?: AbortSignal,
+): Promise<WorkflowWorktreeIsolation> {
+  if (signal?.aborted) {
+    throw new Error(
+      `agent({isolation:'worktree'}): run aborted before the worktree ` +
+        `could be provisioned.`,
+    );
+  }
+  try {
+    return await worktreeProvisionLock.runExclusive(async () => {
+      // Re-check after the wait on the lock: a run cancelled while this
+      // dispatch queued must not provision — then tear down — a worktree it
+      // will never use.
+      if (signal?.aborted) {
+        throw new Error(
+          `agent({isolation:'worktree'}): run aborted while waiting to ` +
+            `provision the worktree.`,
+        );
+      }
+      return await provisionWorkflowWorktreeExclusively(config);
+    });
+  } catch (err) {
+    if (err === E_TIMEOUT) {
+      throw new Error(
+        `agent({isolation:'worktree'}): worktree provisioning is ` +
+          `serialised and this dispatch did not acquire the provisioning ` +
+          `lock within ${worktreeProvisionLockTimeoutMs}ms — another ` +
+          `provision is likely stalled (a hung git process or a blocked ` +
+          `filesystem). Retry the dispatch.`,
+      );
+    }
+    throw err;
+  }
+}
+
+/**
+ * Provision an isolation worktree for one `agent({isolation:'worktree'})`
+ * call. Mirrors the AgentTool provision path (agent.ts:1849-1963) with
+ * the same fail-closed dirty-parent refuse: if the parent working tree
+ * has uncommitted changes, `git worktree add` would silently check out
+ * the parent's HEAD without those edits and the subagent would see a
+ * stale tree. Forcing the user to commit / stash matches AgentTool's
+ * UX so model authors can rely on consistent behavior across both call
+ * sites.
+ */
 async function provisionWorkflowWorktreeExclusively(
   config: Config,
 ): Promise<WorkflowWorktreeIsolation> {
