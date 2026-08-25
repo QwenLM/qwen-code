@@ -4154,6 +4154,23 @@ export class Session implements SessionContext {
     }
 
     const checkpoint = this.rewindCheckpoint;
+    // Identified restores are the undo half of a rewind: they are only
+    // admissible while the daemon still holds the rollback context the
+    // rewind captured. The checkpoint is in-memory and consumed by the
+    // first successful restore below (and dropped by /clear and by process
+    // restarts), so an identified restore arriving without one is a stale
+    // or foreign pair. Both staleness guards that follow are gated on the
+    // checkpoint, so without this gate the client's blob would apply
+    // wholesale over a session that moved on — resurrecting cleared or
+    // rewound-away turns while transcript, snapshots and files keep their
+    // state. Fail closed; the promptIds-less cold-restore/fork arm below
+    // stays open.
+    if (promptIds !== undefined && !checkpoint) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot restore identified history without a live rewind checkpoint',
+      );
+    }
     if (checkpoint) {
       // Staleness fingerprint: the pair the client still holds matches the
       // checkpoint's pre-rewind capture even after the session advances, so
