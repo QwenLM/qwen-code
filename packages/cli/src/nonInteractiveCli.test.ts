@@ -2053,7 +2053,14 @@ describe('runNonInteractive', () => {
     });
     expect(runVisionBridgeSpy).not.toHaveBeenCalled();
     const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
-    expect(sentParts).toEqual([{ text: 'inspect this image' }]);
+    // The model-facing marker accompanies the surviving text so the turn is
+    // never silent about the withheld image (R47-6).
+    expect(sentParts).toEqual([
+      { text: 'inspect this image' },
+      {
+        text: '[Image was not sent: the active model override does not support images, and no vision bridge is available to describe it.]',
+      },
+    ]);
     expect(JSON.stringify(sentParts)).not.toContain('inlineData');
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining('Image was not sent'),
@@ -2061,6 +2068,72 @@ describe('runNonInteractive', () => {
     expect(
       mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
     ).toBe('text-model');
+  });
+
+  it('keeps an image-only turn non-empty when no vision bridge can describe it', async () => {
+    // R47-6 negative control: an image-only payload through the no-vision-
+    // bridge branch used to reduce to an EMPTY parts list, which headless
+    // then sent as the user turn (the run dies in provider-side validation
+    // instead of the intended visible fail-closed completion). The marker
+    // part keeps the turn non-empty and tells the model the image was
+    // withheld — removing it reproduces the empty send.
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    const mockCommand = {
+      name: 'text-model',
+      description: 'submit an image to a text-only model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [imagePart],
+        modelOverride: 'text-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'text-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: {} },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(undefined),
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/text-model',
+      'prompt-image-only-no-bridge',
+    );
+
+    const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
+    // Never an empty user turn: the marker part is the whole turn.
+    expect(Array.isArray(sentParts)).toBe(true);
+    expect((sentParts as unknown[]).length).toBeGreaterThan(0);
+    expect(sentParts).toEqual([
+      {
+        text: '[Image was not sent: the active model override does not support images, and no vision bridge is available to describe it.]',
+      },
+    ]);
+    expect(JSON.stringify(sentParts)).not.toContain('inlineData');
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Image was not sent'),
+    );
   });
 
   it('vision-bridges images when a slash prompt routes them to a text-only model', async () => {

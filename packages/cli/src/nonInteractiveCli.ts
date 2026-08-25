@@ -1374,7 +1374,19 @@ export async function runNonInteractive(
         if (!shouldRunVisionBridge(config)) {
           const reason = 'the active model override does not support images';
           emitBridgeNotice('vision_bridge', `Image was not sent: ${reason}.`);
-          return splitImageParts(parts).nonImageParts;
+          // Append a model-facing marker (not just the operator notice): an
+          // image-only payload would otherwise reduce to an EMPTY parts list
+          // that headless sends as the user turn (the run dies in provider
+          // validation instead of fail-closed completion), and a text+image
+          // turn would never tell the model an image was withheld. Mirrors
+          // headless Block D below and the TUI twin (applyVisionBridgeIfNeeded
+          // appends it 'so an image-only steered message is not lost', R47-6).
+          return [
+            ...splitImageParts(parts).nonImageParts,
+            {
+              text: `[Image was not sent: ${reason}, and no vision bridge is available to describe it.]`,
+            },
+          ];
         }
         try {
           const bridgeResult = await runVisionBridge({

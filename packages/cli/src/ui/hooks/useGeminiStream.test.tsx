@@ -6867,14 +6867,15 @@ describe('useGeminiStream', () => {
 
     mockSendMessageStream
       .mockReturnValueOnce(
+        // eslint-disable-next-line require-yield
         (async function* () {
-          yield {
-            type: ServerGeminiEventType.Content,
-            value: 'partial response',
-          };
-          // Emulate core settle for a push that LANDED: accept() settles the
-          // steer input before the stream failure reaches the CLI's failure
-          // handler, so the restore() that handler triggers must be a no-op.
+          // Emulate core settle for a push that LANDED with NO model content:
+          // accept() settles the steer input before the stream failure
+          // reaches the CLI's failure handler, so the restore() that handler
+          // triggers must be a no-op. (No Content event first — the steer
+          // never reached the model, so the undo below must re-arm the
+          // composite; with content landed the steer would be consumed and
+          // the store would keep only the dedup-safe tool responses.)
           (
             mockSendMessageStream.mock.calls[0]?.[3] as {
               steerInput?: SteerInput;
@@ -7103,6 +7104,182 @@ describe('useGeminiStream', () => {
     expect(retrySent).not.toContain('UklGRg==');
   });
 
+  it('strips a consumed steer from the retry store in goal-first sessions', async () => {
+    // R47-4 negative control: goal-first sessions have nothing to hand back —
+    // `/goal` is intercepted by the message queue and Goal submits skip the
+    // lastPromptRef store, so `previousPayload` is still null when the first
+    // goal tool continuation drains a steer. The old code installed no
+    // onAccept at all for null previousPayload, so the composite (tool
+    // responses + steer) stayed in the store after the model CONSUMED the
+    // steer, and a later retryable failure let Ctrl+Y re-inject the
+    // already-consumed steer segment (double delivery — the orphan strip
+    // keeps the consumed steer push because the model answered it). With
+    // nothing to hand back, accept must strip the steer segment instead:
+    // only the dedup-safe tool responses stay retryable.
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const resolvedAudioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const markerPart: Part = {
+      text: '[Audio bridge could not transcribe attached audio: no voice model is configured.]',
+    };
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'failed',
+      parts: [resolvedTextPart, markerPart],
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 0,
+      error: 'no voice model is configured',
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [resolvedTextPart, resolvedAudioPart],
+      shouldProceed: true,
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    const makeCompletedToolCall = (
+      callId: string,
+      promptId: string,
+    ): TrackedToolCall[] => [
+      {
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: promptId,
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const queue: string[] = [queuedPrompt];
+    const midTurnDrainRef = {
+      current: vi.fn(() => queue.splice(0, queue.length)),
+    };
+    const restoreSteer = vi.fn((messages: string[]) => {
+      queue.unshift(...messages);
+    });
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    const finished = () =>
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Finished,
+          value: { reason: 'STOP', usageMetadata: undefined },
+        };
+      })();
+
+    mockSendMessageStream
+      // Send 1: the GOAL tool continuation draining the steer. Goal submits
+      // skip the lastPromptRef store, so previousPayload is null when this
+      // send stores its composite — no outer prompt precedes it. The model
+      // CONSUMES the steer (content lands), settle accepts, then a later
+      // retryable failure of the same request surfaces.
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'answer that consumed the steer',
+          };
+          (
+            mockSendMessageStream.mock.calls[0]?.[3] as {
+              steerInput?: SteerInput;
+            }
+          ).steerInput?.accept();
+          throw new Error('later continuation failed');
+        })(),
+      )
+      // Send 2: the Ctrl+Y retry.
+      .mockReturnValueOnce(finished());
+
+    // No preceding submitQuery: goal-first session, lastPromptRef is null.
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(
+          makeCompletedToolCall('call1', 'prompt-id-goal-first-steer'),
+        );
+      }
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    // Accepted-settle, no re-queue.
+    expect(restoreSteer).not.toHaveBeenCalled();
+    expect(recordMidTurnUserMessage).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    // The consumed steer segment left the store at accept time: the retry
+    // re-sends only the dedup-safe tool responses — never the steer audio,
+    // its text, or its marker (re-injecting any of them would deliver the
+    // consumed steer content to the model a second time).
+    const retrySent = JSON.stringify(mockSendMessageStream.mock.calls[1][0]);
+    expect(retrySent).toContain('testTool');
+    expect(retrySent).not.toContain('UklGRg==');
+    expect(retrySent).not.toContain('listen @/tmp/recording.wav');
+    expect(retrySent).not.toContain('could not transcribe');
+  });
+
   it('recovers the steer composite when an accepted continuation fails before any model content', async () => {
     // R46-1: settle accepts as soon as the steer's push lands — BEFORE the
     // model produces anything. When the continuation send then errors with
@@ -7312,6 +7489,13 @@ describe('useGeminiStream', () => {
     // surfaces the resolved drain via onSteerResolved so the hook can store
     // the pristine retry payload (retryParts) exactly like the hook path's
     // metadata.preOverrideParts. A failed Steer send then stays retryable.
+    //
+    // Faithful to core's ordering (R47-5): the turn streams content BEFORE
+    // the boundary drain resolves (every takeSteerInput site is post-turn),
+    // the drain resolves (onSteerResolved), settle ACCEPTS once the push
+    // lands, and only then does the enclosing failure surface. The old shape
+    // of this test never invoked settle (bare vi.fn() accept/restore) and
+    // blessed the stranding regression.
     mockRunAudioBridge.mockResolvedValue({
       status: 'ok',
       parts: [{ text: 'recovered client transcript' }],
@@ -7320,13 +7504,41 @@ describe('useGeminiStream', () => {
       egressCount: 1,
       modelId: 'qwen3-asr-flash',
     });
+    const markerPart: Part = {
+      text: '[Audio bridge could not transcribe attached audio: no voice model is configured.]',
+    };
+    const pristineAudio: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const restoreSteer = vi.fn();
     mockSendMessageStream
       .mockReturnValueOnce(
         (async function* () {
+          // Production ordering: the turn streams content before the
+          // boundary drain resolves.
           yield {
             type: ServerGeminiEventType.Content,
             value: 'partial response',
           };
+          const opts = mockSendMessageStream.mock.calls[0]?.[3] as {
+            onSteerResolved?: (steerInput: SteerInput) => void;
+          };
+          const input: SteerInput = {
+            parts: [{ text: 'start the analysis' }, markerPart],
+            retryParts: [{ text: 'start the analysis' }, pristineAudio],
+            accept: vi.fn(),
+            restore: vi.fn(),
+          };
+          // Mirror the production accept closure: settling fires onAccept.
+          input.accept = vi.fn(() => input.onAccept?.());
+          input.restore = vi.fn(() => {
+            input.onRestore?.();
+            restoreSteer();
+          });
+          opts.onSteerResolved?.(input);
+          // The Steer push lands (settle accepts) before the enclosing
+          // failure surfaces — core always settles in a finally first.
+          input.accept();
           throw new Error('steer send failed');
         })(),
       )
@@ -7364,7 +7576,7 @@ describe('useGeminiStream', () => {
         undefined,
         undefined,
         undefined,
-        { current: vi.fn() },
+        { current: restoreSteer },
       ),
     );
 
@@ -7376,25 +7588,8 @@ describe('useGeminiStream', () => {
       );
     });
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
-      onSteerResolved?: (steerInput: SteerInput) => void;
-    };
-    expect(sendOptions.onSteerResolved).toEqual(expect.any(Function));
-
-    const markerPart: Part = {
-      text: '[Audio bridge could not transcribe attached audio: no voice model is configured.]',
-    };
-    const pristineAudio: Part = {
-      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
-    };
-    await act(async () => {
-      sendOptions.onSteerResolved!({
-        parts: [{ text: 'start the analysis' }, markerPart],
-        retryParts: [{ text: 'start the analysis' }, pristineAudio],
-        accept: vi.fn(),
-        restore: vi.fn(),
-      });
-    });
+    // Accepted-settle, no re-queue: the retry store is the single channel.
+    expect(restoreSteer).not.toHaveBeenCalled();
 
     await act(async () => {
       await result.current.retryLastPrompt();
@@ -7402,6 +7597,10 @@ describe('useGeminiStream', () => {
     await waitFor(() => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
     });
+    // No model content landed SINCE the drain (the enclosing turn's earlier
+    // content does not count — the steer was not in it), so the accepted
+    // steer never reached the model: Ctrl+Y re-delivers the stored pristine
+    // payload (re-bridged), not the handed-back outer prompt.
     const retrySent = JSON.stringify(mockSendMessageStream.mock.calls[1][0]);
     expect(retrySent).toContain('recovered client transcript');
     expect(retrySent).not.toContain('could not transcribe');
@@ -7415,12 +7614,41 @@ describe('useGeminiStream', () => {
     // it superseded — the nested failure surfaces in the outer turn with the
     // Ctrl+Y hint, and nulling the store would answer "No failed request to
     // retry." while the hint promises a retry.
+    //
+    // R47-1 negative control: settle restores BEFORE the enclosing failure
+    // surfaces (core settles in a finally), and no model content lands after
+    // the drain — the exact shape where an undo keyed only on lastPromptRef
+    // identity would re-arm the stored payload alongside the re-queue and
+    // deliver the steer twice. The retry must stay the outer payload.
+    const restoreSteer = vi.fn();
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
+        // Production ordering: content streams before the boundary drain.
         yield {
           type: ServerGeminiEventType.Content,
           value: 'partial response',
         };
+        const opts = mockSendMessageStream.mock.calls[0]?.[3] as {
+          onSteerResolved?: (steerInput: SteerInput) => void;
+        };
+        const input: SteerInput = {
+          parts: [{ text: 'start the analysis' }],
+          retryParts: [
+            { text: 'start the analysis' },
+            { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+          ],
+          accept: vi.fn(),
+          restore: vi.fn(),
+        };
+        // Mirror the production restore closure: settling fires onRestore.
+        input.restore = vi.fn(() => {
+          input.onRestore?.();
+          restoreSteer();
+        });
+        opts.onSteerResolved?.(input);
+        // The Steer push never lands: settle restores before the enclosing
+        // failure surfaces.
+        input.restore();
         throw new Error('steer send failed');
       })(),
     );
@@ -7450,7 +7678,7 @@ describe('useGeminiStream', () => {
         undefined,
         undefined,
         undefined,
-        { current: vi.fn() },
+        { current: restoreSteer },
       ),
     );
 
@@ -7462,27 +7690,8 @@ describe('useGeminiStream', () => {
       );
     });
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
-      onSteerResolved?: (steerInput: SteerInput) => void;
-    };
-
-    const steerInput: SteerInput = {
-      parts: [{ text: 'start the analysis' }],
-      retryParts: [
-        { text: 'start the analysis' },
-        { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
-      ],
-      accept: vi.fn(),
-      restore: vi.fn(),
-    };
-    // Mirror the production restore closure: settling fires onRestore.
-    steerInput.restore = vi.fn(() => steerInput.onRestore?.());
-    await act(async () => {
-      sendOptions.onSteerResolved!(steerInput);
-    });
-    await act(async () => {
-      steerInput.restore();
-    });
+    // The re-queue channel fired (restore settled the drain).
+    expect(restoreSteer).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       await result.current.retryLastPrompt();
@@ -7498,17 +7707,36 @@ describe('useGeminiStream', () => {
   });
 
   it('hands the retry store back to the outer payload once the steer is accepted', async () => {
-    // Once the steer's push has landed (settle fires accept), the steer
-    // content is owned by the history — so the retry store must hand back
-    // the outer payload the drain superseded. Leaving the steer payload in
-    // the store would let Ctrl+Y re-deliver the already-accepted steer when
-    // a later core-driven continuation of the same request fails (the exact
+    // Once the steer's push has landed (settle fires accept) AND the model
+    // answered it (content lands after the drain), the steer content is
+    // owned by the history — so the retry store must hand back the outer
+    // payload the drain superseded. Leaving the steer payload in the store
+    // would let Ctrl+Y re-deliver the already-accepted steer when a later
+    // core-driven continuation of the same request fails (the exact
     // twice-delivery the restore channel prevents for the re-queue).
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
+        const opts = mockSendMessageStream.mock.calls[0]?.[3] as {
+          onSteerResolved?: (steerInput: SteerInput) => void;
+        };
+        const input: SteerInput = {
+          parts: [{ text: 'steered question' }],
+          retryParts: [
+            { text: 'steered question' },
+            { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+          ],
+          accept: vi.fn(),
+          restore: vi.fn(),
+        };
+        // Mirror the production accept closure: settling fires onAccept.
+        input.accept = vi.fn(() => input.onAccept?.());
+        opts.onSteerResolved?.(input);
+        // The Steer push lands (settle accepts) and the model answers the
+        // steer: content lands AFTER the drain, proving delivery.
+        input.accept();
         yield {
           type: ServerGeminiEventType.Content,
-          value: 'partial response',
+          value: 'answer to the steer',
         };
         throw new Error('outer turn failed');
       })(),
@@ -7551,28 +7779,6 @@ describe('useGeminiStream', () => {
       );
     });
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
-    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
-      onSteerResolved?: (steerInput: SteerInput) => void;
-    };
-    expect(sendOptions.onSteerResolved).toEqual(expect.any(Function));
-
-    const steerInput: SteerInput = {
-      parts: [{ text: 'steered question' }],
-      retryParts: [
-        { text: 'steered question' },
-        { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
-      ],
-      accept: vi.fn(),
-      restore: vi.fn(),
-    };
-    // Mirror the production accept closure: settling fires onAccept.
-    steerInput.accept = vi.fn(() => steerInput.onAccept?.());
-    await act(async () => {
-      sendOptions.onSteerResolved!(steerInput);
-    });
-    await act(async () => {
-      steerInput.accept();
-    });
 
     await act(async () => {
       await result.current.retryLastPrompt();
@@ -7588,11 +7794,17 @@ describe('useGeminiStream', () => {
 
   it('keeps a client-steer payload retryable when the enclosing send fails before any model content', async () => {
     // R46-1 core-driven twin: the boundary drain's Steer push lands (settle
-    // accepts) but the send errors BEFORE any model content. The accept
+    // accepts) but no model content lands SINCE the drain. The accept
     // hand-back would then strand the steer — Ctrl+Y re-sends the outer
     // payload and the orphan strip pops the landed steer push, so nothing
-    // re-delivers it. The enclosing send's no-content failure must undo the
-    // hand-back and keep the steer payload in the retry store.
+    // re-delivers it. The enclosing send's failure must undo the hand-back
+    // and keep the steer payload in the retry store.
+    //
+    // Production-faithful ordering (R47-3): core only resolves client-driven
+    // drains at turn boundaries, AFTER the turn streamed content — so a
+    // Content event lands before onSteerResolved. The enclosing send's
+    // tracker is already true by then; the undo must key on the per-drain
+    // tracker, not the send's.
     mockRunAudioBridge.mockResolvedValue({
       status: 'ok',
       // Faithful re-bridge of the steer payload: the steer text is preserved,
@@ -7607,12 +7819,17 @@ describe('useGeminiStream', () => {
       modelId: 'qwen3-asr-flash',
     });
     mockSendMessageStream.mockReturnValueOnce(
-      // eslint-disable-next-line require-yield
       (async function* () {
-        // Emulate the production ordering: core resolves the drain
-        // (onSteerResolved stores the pristine payload), the Steer push
-        // lands (settle fires accept via onAccept), then the send errors
-        // with no model content.
+        // The turn streams content before the boundary drain resolves
+        // (every takeSteerInput site is post-turn) — the enclosing tracker
+        // is already true by drain-resolution time.
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'outer turn content',
+        };
+        // Core resolves the drain (onSteerResolved stores the pristine
+        // payload), the Steer push lands (settle fires accept via onAccept),
+        // then the send errors with no content landed since the drain.
         const opts = mockSendMessageStream.mock.calls[0]?.[3] as {
           onSteerResolved?: (steerInput: SteerInput) => void;
         };
@@ -7629,7 +7846,7 @@ describe('useGeminiStream', () => {
         input.accept = vi.fn(() => input.onAccept?.());
         opts.onSteerResolved?.(input);
         input.accept();
-        throw new Error('steer send failed before any content');
+        throw new Error('steer send failed before its own content');
       })(),
     );
 
@@ -7683,6 +7900,102 @@ describe('useGeminiStream', () => {
     expect(retrySent).toContain('steered question');
     expect(retrySent).toContain('recovered client transcript');
     expect(retrySent).not.toContain('start the analysis');
+    expect(mockSendMessageStream.mock.calls[1]?.[0]).not.toBe(
+      'start the analysis',
+    );
+  });
+
+  it('keeps a retryParts-less client steer retryable when the enclosing send fails', async () => {
+    // R47-2 negative control: the COMMON drain shape has no retryParts —
+    // every text steer and every cleanly-transcribed media steer. The old
+    // handleResolvedSteer early-returned for them (no store swap, no
+    // onAccept/onRestore, no undo record), so an accepted steer whose
+    // enclosing send errored was stranded: Ctrl+Y retried the outer prompt
+    // while the orphan strip popped the landed steer push. The bookkeeping
+    // must not gate on retryParts — the drain's own parts are the payload.
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          // Production ordering: the turn streams content before the boundary
+          // drain resolves.
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'outer turn content',
+          };
+          const opts = mockSendMessageStream.mock.calls[0]?.[3] as {
+            onSteerResolved?: (steerInput: SteerInput) => void;
+          };
+          const input: SteerInput = {
+            // No retryParts: every bridge succeeded, `parts` IS the payload.
+            parts: [{ text: 'steered question' }],
+            accept: vi.fn(),
+            restore: vi.fn(),
+          };
+          // Mirror the production accept closure: settling fires onAccept.
+          input.accept = vi.fn(() => input.onAccept?.());
+          opts.onSteerResolved?.(input);
+          input.accept();
+          throw new Error('steer send failed before its own content');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: vi.fn(() => []) },
+        undefined,
+        undefined,
+        undefined,
+        { current: vi.fn() },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-client-steer-no-retryparts',
+      );
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    // The accepted steer never reached the model (no content landed since
+    // the drain): Ctrl+Y re-delivers the drain's parts, not the outer prompt.
+    expect(JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0])).toContain(
+      'steered question',
+    );
     expect(mockSendMessageStream.mock.calls[1]?.[0]).not.toBe(
       'start the analysis',
     );
@@ -8736,15 +9049,16 @@ describe('useGeminiStream', () => {
 
     mockSendMessageStream
       .mockReturnValueOnce(
+        // eslint-disable-next-line require-yield
         (async function* () {
-          yield {
-            type: ServerGeminiEventType.Content,
-            value: 'partial response',
-          };
-          // Emulate core settle for a push that LANDED: accept() settles the
-          // steer input before the stream failure reaches the CLI's failure
-          // handler, so the restore() that handler triggers is a no-op and
-          // the stored payload keeps its steer segment for the comparison.
+          // Emulate core settle for a push that LANDED with NO model content:
+          // accept() settles the steer input before the stream failure
+          // reaches the CLI's failure handler, so the restore() that handler
+          // triggers is a no-op and the undo re-arms the stored composite —
+          // keeping its steer segment for the capture-precedence comparison.
+          // (No Content event first: content landed since the push would
+          // mean the model consumed the steer, and the store would keep only
+          // the tool responses.)
           (
             mockSendMessageStream.mock.calls[0]?.[3] as {
               steerInput?: SteerInput;
@@ -15084,14 +15398,14 @@ describe('useGeminiStream', () => {
 
           mockSendMessageStream
             .mockReturnValueOnce(
+              // eslint-disable-next-line require-yield
               (async function* () {
-                yield {
-                  type: ServerGeminiEventType.Content,
-                  value: 'partial response',
-                };
-                // Settle the drained steer as push-landed before the failure:
-                // restore() must be a no-op so the retry store keeps the
-                // routed audio for Ctrl+Y (the delivered-but-failed shape).
+                // Settle the drained steer as push-landed with NO model
+                // content before the failure surfaces: restore() must be a
+                // no-op and the undo re-arms the composite so the retry store
+                // keeps the routed audio for Ctrl+Y. (No Content event first:
+                // content landed since the push would mean the model consumed
+                // the steer and the store would keep only the tool responses.)
                 (
                   mockSendMessageStream.mock.calls[0]?.[3] as {
                     steerInput?: SteerInput;

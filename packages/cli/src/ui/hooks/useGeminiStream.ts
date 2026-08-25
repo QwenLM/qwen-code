@@ -238,7 +238,11 @@ interface ResolvedSteerMessages {
  * the model produces anything — so a send can fail "accepted-settled" with
  * the model never having seen the steer. A drain snapshots the tracker of
  * its enclosing send; a retryable failure with no observed content undoes
- * the accept hand-back so the steer stays Ctrl+Y-retryable.
+ * the accept hand-back so the steer stays Ctrl+Y-retryable. Client-driven
+ * drains mint their own tracker at resolution time: they resolve at turn
+ * boundaries, after the enclosing send already streamed content, so only
+ * content landed SINCE the drain proves the steer reached the model
+ * (R47-3).
  */
 interface StreamContentTracker {
   sawModelContent: boolean;
@@ -732,9 +736,20 @@ export const useGeminiStream = (
   const turnSawContentEventRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
   const goalTerminalErrorRef = useRef(false);
-  // The most recent client-driven drain's retry-store bookkeeping. When the
-  // enclosing send fails retryably before any model content landed, the
-  // accepted-settle hand-back is undone from here (see
+  // The most recent client-driven drain's retry-store bookkeeping. Keyed to
+  // the drain's settle OUTCOME and its own content window, not to
+  // lastPromptRef identity or the enclosing send's tracker:
+  //  - `settledVia` records which settle channel fired. Only an ACCEPTED
+  //    drain may be re-armed for Ctrl+Y: a RESTORED drain is owned by the
+  //    re-queue (midTurnRestoreRef), and re-arming the stored payload
+  //    alongside it would deliver the steer twice (R47-1).
+  //  - `drainTracker` tracks model content landed SINCE the drain resolved.
+  //    Core resolves client-driven drains at turn boundaries, after the
+  //    enclosing send already streamed content, so the enclosing tracker is
+  //    already true by then; the steer reaches the model only if content
+  //    lands after the drain (R47-3).
+  // When the enclosing send fails retryably with no post-drain content and
+  // the drain settled accepted, the hand-back is undone from here (see
   // undoAcceptedSteerHandBackIfNeeded in submitQuery): the steer's push
   // landed but the model never saw it, so the retry store must keep the
   // steer payload for Ctrl+Y's strip-then-push to re-deliver it exactly
@@ -743,7 +758,9 @@ export const useGeminiStream = (
   const lastClientSteerUndoRef = useRef<{
     stored: PartListUnion;
     previous: PartListUnion | null;
-    tracker: StreamContentTracker;
+    ownerTracker: StreamContentTracker;
+    drainTracker: StreamContentTracker;
+    settledVia?: 'accept' | 'restore';
   } | null>(null);
 
   // Wrapper around addItem that attaches timestamp to gemini items for display.
@@ -3997,10 +4014,31 @@ export const useGeminiStream = (
   // `parts`. Surface the drain's pristine retry payload back to the retry
   // store so a failed Steer send stays Ctrl+Y-retryable exactly like the hook
   // path (which stores it via metadata.preOverrideParts).
+  //
+  // `drainTracker` tracks content landed SINCE this drain resolved and
+  // `ownerTracker` identifies the enclosing send the drain resolved inside
+  // (concurrent sends can interleave); `settledVia` records which settle
+  // channel fired so the undo below can tell an accepted drain (retry store
+  // owns recovery) from a restored one (the re-queue owns it) — both settle
+  // channels leave lastPromptRef equal to `previous`, so identity alone
+  // cannot distinguish them (R47-1).
   const handleResolvedSteer = useCallback(
-    (steerInput: SteerInput, tracker?: StreamContentTracker) => {
-      if (!steerInput.retryParts || steerInput.retryParts.length === 0) return;
-      const stored = normalizePartList(steerInput.retryParts);
+    (
+      steerInput: SteerInput,
+      drainTracker?: StreamContentTracker,
+      ownerTracker?: StreamContentTracker,
+    ) => {
+      // Bookkeeping is unconditional: the COMMON drain shape (every text
+      // steer, every cleanly-transcribed media steer) has no retryParts, and
+      // gating the store on them stranded accepted steers whose enclosing
+      // send errored (R47-2). Without retryParts the drain's own parts are
+      // the retry payload — mirroring the hook path, whose store is
+      // unconditional and whose suffix falls back to steerInput.parts.length.
+      const stored = normalizePartList(
+        steerInput.retryParts && steerInput.retryParts.length > 0
+          ? steerInput.retryParts
+          : steerInput.parts,
+      );
       // The store holds the outer turn's payload until the drain supersedes it;
       // if the Steer send fails before its history push lands, settle restores
       // the drain and this store must hand the outer payload back — nulling it
@@ -4008,6 +4046,16 @@ export const useGeminiStream = (
       // retry store ("No failed request to retry.").
       const previous = lastPromptRef.current;
       lastPromptRef.current = stored;
+      const undoEntry =
+        drainTracker && ownerTracker
+          ? {
+              stored,
+              previous,
+              ownerTracker,
+              drainTracker,
+              settledVia: undefined as 'accept' | 'restore' | undefined,
+            }
+          : null;
       // Settle fires `onAccept` once the steer's push has landed. From that
       // point the steer content is owned by the history (a later Ctrl+Y Retry
       // strips/replaces it via the orphan strip), so the retry store must hand
@@ -4017,9 +4065,11 @@ export const useGeminiStream = (
       // exact twice-delivery the sibling `onRestore` hook prevents for the
       // re-queue channel: the content cannot reach the model twice). The
       // enclosing send undoes this hand-back when it fails retryably BEFORE
-      // any model content landed (the accepted push never reached the model —
-      // see lastClientSteerUndoRef), so the steer is not stranded.
+      // any model content landed since the drain (the accepted push never
+      // reached the model — see lastClientSteerUndoRef), so the steer is not
+      // stranded.
       steerInput.onAccept = () => {
+        if (undoEntry) undoEntry.settledVia = 'accept';
         if (lastPromptRef.current === stored) {
           lastPromptRef.current = previous;
         }
@@ -4029,12 +4079,21 @@ export const useGeminiStream = (
         // steer's payload so Ctrl+Y neither re-delivers the steer alongside the
         // re-drain nor duplicates the already-delivered original turn, and
         // reinstate whatever the store held before the drain superseded it.
+        // Invalidate the undo record too (R47-1): a no-content failure of the
+        // enclosing send must NOT re-arm the stored payload once the re-queue
+        // channel is armed — both channels armed would deliver the steer twice.
+        if (undoEntry) {
+          undoEntry.settledVia = 'restore';
+          if (lastClientSteerUndoRef.current === undoEntry) {
+            lastClientSteerUndoRef.current = null;
+          }
+        }
         if (lastPromptRef.current === stored) {
           lastPromptRef.current = previous;
         }
       };
-      if (tracker) {
-        lastClientSteerUndoRef.current = { stored, previous, tracker };
+      if (undoEntry) {
+        lastClientSteerUndoRef.current = undoEntry;
       }
     },
     [],
@@ -4559,8 +4618,20 @@ export const useGeminiStream = (
         const sendContentTracker: StreamContentTracker = {
           sawModelContent: false,
         };
+        // The content tracker of the most recent client-driven drain resolved
+        // during this send. A client drain resolves at a turn boundary, AFTER
+        // this send has already streamed content — so the steer it carries
+        // reaches the model only if content lands AFTER the drain. Minted per
+        // drain by the onSteerResolved wrapper; the stream wrapper below marks
+        // it alongside sendContentTracker (R47-3). A `.current` holder is used
+        // (not a bare captured `let`) because TypeScript narrows a captured
+        // mutable local to its initializer inside closures, which would type
+        // the read below as `never`.
+        const activeDrainTrackerRef: {
+          current: StreamContentTracker | null;
+        } = { current: null };
         let steerHandedBack = false;
-        let steerUndoPrevious: PartListUnion | null = null;
+        let steerUndoAcceptedPayload: PartListUnion | null = null;
         let steerUndoStored: PartListUnion | undefined;
         if (submitType !== SendMessageType.Goal) {
           // Retry drops the one-shot inline override, so remember the parts as
@@ -4597,12 +4668,18 @@ export const useGeminiStream = (
             // stored retry payload so Ctrl+Y re-sends only the tool responses
             // and the content cannot reach the model twice.
             const storedPayload = lastPromptRef.current;
-            steerUndoPrevious = previousPayload;
             steerUndoStored = storedPayload;
             const suffixLength =
               metadata?.preOverrideParts !== undefined && steerInput.retryParts
                 ? steerInput.retryParts.length
                 : steerInput.parts.length;
+            const storedParts = normalizePartList(storedPayload);
+            const trimmedStored = storedParts.slice(
+              0,
+              Math.max(0, storedParts.length - suffixLength),
+            );
+            const trimmedPayload =
+              trimmedStored.length > 0 ? trimmedStored : null;
             // Settle fires `onAccept` once the steer's push has landed. From
             // that point the composite (tool responses + pristine steer) is
             // owned by the history, so the retry store must hand back the
@@ -4610,36 +4687,40 @@ export const useGeminiStream = (
             // the store would let Ctrl+Y re-inject the already-accepted steer
             // when a LATER core-internal continuation of the same request
             // (stop-hook / next-speaker recursion) fails. This mirrors the
-            // core-driven path's `handleResolvedSteer.onAccept`. The guard is
-            // load-bearing: a tool continuation is always preceded by the outer
-            // turn's prompt in production (so `previousPayload` is the payload
-            // to hand back), but when there is nothing to hand back the
-            // composite must stay the recovery channel instead of being nulled.
-            // (The already-landed tool responses themselves cannot duplicate on
-            // a Ctrl+Y re-send — core's `repairOrphanedToolUseTurns` drops
-            // duplicate `functionResponse` copies for the same callId — but the
-            // steer segment has no such dedup, which is what this prevents.)
+            // core-driven path's `handleResolvedSteer.onAccept`.
+            //
+            // When there IS an outer payload, hand it back. When there is
+            // NOTHING to hand back (`previousPayload` null — goal-first
+            // sessions: `/goal` is intercepted by the message queue and Goal
+            // submits skip the lastPromptRef store, so a goal tool
+            // continuation can drain a steer while the store is still empty),
+            // strip the steer segment from the composite instead (R47-4):
+            // the consumed steer must leave the store or a later retryable
+            // failure of the same request would let Ctrl+Y re-inject it
+            // (double delivery — the orphan strip keeps the consumed steer
+            // push because the model answered it). The tool responses left
+            // behind cannot duplicate on a Ctrl+Y re-send — core's
+            // `repairOrphanedToolUseTurns` drops duplicate `functionResponse`
+            // copies for the same callId — but the steer segment has no such
+            // dedup, which is what this prevents.
+            //
             // When THIS send fails retryably before any model content landed,
             // the hand-back is undone below (undoAcceptedSteerHandBackIfNeeded):
             // settle accepts on the push alone, so an accepted steer whose send
             // errored before any model output never reached the model — and the
             // orphan strip would pop the landed composite on the retry, leaving
             // nothing to re-deliver it (R46-1).
-            if (previousPayload !== null) {
-              steerInput.onAccept = () => {
-                if (lastPromptRef.current !== storedPayload) return;
-                lastPromptRef.current = previousPayload;
-                steerHandedBack = true;
-              };
-            }
+            const acceptPayload =
+              previousPayload !== null ? previousPayload : trimmedPayload;
+            steerUndoAcceptedPayload = acceptPayload;
+            steerInput.onAccept = () => {
+              if (lastPromptRef.current !== storedPayload) return;
+              lastPromptRef.current = acceptPayload;
+              steerHandedBack = true;
+            };
             steerInput.onRestore = () => {
               if (lastPromptRef.current !== storedPayload) return;
-              const stored = normalizePartList(storedPayload);
-              const trimmed = stored.slice(
-                0,
-                Math.max(0, stored.length - suffixLength),
-              );
-              lastPromptRef.current = trimmed.length > 0 ? trimmed : null;
+              lastPromptRef.current = trimmedPayload;
             };
           }
         }
@@ -4657,18 +4738,32 @@ export const useGeminiStream = (
         // landed push first). Applies to both the hook-path steer attached to
         // this send and a client-driven drain resolved during it.
         const undoAcceptedSteerHandBackIfNeeded = () => {
-          if (sendContentTracker.sawModelContent) return;
+          // Hook-path steer: attached to THIS send from its start, so the
+          // send's own tracker proves whether the model saw it. Only a
+          // no-content failure may undo the hand-back.
           if (
+            !sendContentTracker.sawModelContent &&
             steerHandedBack &&
             steerUndoStored !== undefined &&
-            lastPromptRef.current === steerUndoPrevious
+            lastPromptRef.current === steerUndoAcceptedPayload
           ) {
             lastPromptRef.current = steerUndoStored;
           }
           const clientSteerUndo = lastClientSteerUndoRef.current;
+          // Client-driven drain: it resolves at a turn boundary, when the
+          // enclosing send's tracker is ALREADY true — so it must NOT share
+          // the hook path's sendContentTracker guard (that made this branch
+          // dead code in production, R47-3). Its delivery window is the
+          // per-drain tracker instead. Restore settles the drain into the
+          // re-queue channel, which owns recovery — re-arming the stored
+          // payload here would arm BOTH channels and deliver the steer twice
+          // (R47-1). Only an accepted drain whose own content window is still
+          // empty may be re-armed.
           if (
             clientSteerUndo &&
-            clientSteerUndo.tracker === sendContentTracker &&
+            clientSteerUndo.ownerTracker === sendContentTracker &&
+            clientSteerUndo.settledVia === 'accept' &&
+            !clientSteerUndo.drainTracker.sawModelContent &&
             lastPromptRef.current === clientSteerUndo.previous
           ) {
             lastPromptRef.current = clientSteerUndo.stored;
@@ -4788,8 +4883,21 @@ export const useGeminiStream = (
             midTurnDrainRef
               ? {
                   getSteerInput: drainSteerAtBoundary,
-                  onSteerResolved: (steerInput: SteerInput) =>
-                    handleResolvedSteer(steerInput, sendContentTracker),
+                  onSteerResolved: (steerInput: SteerInput) => {
+                    // Mint a fresh per-drain content tracker: the enclosing
+                    // send's tracker is already true by boundary-drain time,
+                    // so it can never prove the steer did NOT reach the model.
+                    // The steer's delivery window starts at resolution (R47-3).
+                    const drainTracker: StreamContentTracker = {
+                      sawModelContent: false,
+                    };
+                    activeDrainTrackerRef.current = drainTracker;
+                    handleResolvedSteer(
+                      steerInput,
+                      drainTracker,
+                      sendContentTracker,
+                    );
+                  },
                 }
               : {}),
           };
@@ -4831,6 +4939,9 @@ export const useGeminiStream = (
                 event.type === ServerGeminiEventType.ToolCallRequest
               ) {
                 sendContentTracker.sawModelContent = true;
+                if (activeDrainTrackerRef.current) {
+                  activeDrainTrackerRef.current.sawModelContent = true;
+                }
               }
               yield event;
             }
