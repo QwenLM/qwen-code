@@ -199,7 +199,6 @@ const SKILL_DESCRIPTION_KEYS: Record<string, string> = {
   'e2e-testing': 'skilldesc.e2eTesting',
   'feat-dev': 'skilldesc.featDev',
   'memory-leak-debug': 'skilldesc.memoryLeakDebug',
-  'openwork-desktop-sync': 'skilldesc.openworkDesktopSync',
   'prepare-pr': 'skilldesc.preparePr',
   'qwen-code-claw': 'skilldesc.qwenCodeClaw',
   'structured-debugging': 'skilldesc.structuredDebugging',

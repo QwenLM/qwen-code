@@ -37,6 +37,8 @@ export interface AgentViewLastError {
   at: string;
 }
 
+export type AgentViewInputKind = 'blocking' | 'soft';
+
 export interface AgentViewWorktreeState {
   mode: 'none' | 'worktree' | 'shared-unisolated';
   path?: string;
@@ -66,6 +68,13 @@ export interface AgentViewLaunchFile {
   [key: string]: unknown;
   schemaVersion: 1;
   sessionId: string;
+  /**
+   * The spelling-preserving id passed to --resume. The store canonicalizes
+   * sessionIds for directory naming, but the native session store keeps the
+   * original spelling; resuming with a rewritten id fails on
+   * case-sensitive filesystems.
+   */
+  resumeSessionId?: string;
   argv: string[];
   env: Record<string, string>;
   entrypoint: string;
@@ -77,6 +86,7 @@ export interface AgentViewLaunchFile {
   settingsDigest?: string;
   mcpDigest?: string;
   includeDirectories: string[];
+  initialPrompt?: string;
   terminal: {
     columns: number;
     rows: number;
@@ -88,7 +98,14 @@ export interface AgentViewActivityFile {
   schemaVersion: 1;
   summary?: string;
   waitingFor?: string;
+  inputKind?: AgentViewInputKind;
   lastResult?: string;
+  queuedPromptCount?: number;
+  queuedPromptPreview?: string;
+  queuedPromptId?: string;
+  queuedPromptText?: string;
+  queuedPromptDeliveredAt?: string;
+  lastQueuedPromptAt?: string;
   lastActivityAt: string;
   capabilities: string[];
 }
@@ -101,6 +118,7 @@ export interface AgentViewWorkerFile {
   endpoint?: string;
   hostEndpoint?: string;
   hostAuthToken?: string;
+  hostId?: string;
   tokenDigest?: string;
   lastHeartbeatAt?: string;
   protocolVersion: number;
@@ -140,6 +158,7 @@ export interface AgentViewSupervisorFile {
 export interface AgentViewSessionSnapshot {
   sessionId: string;
   state: AgentViewSessionStateFile;
+  launch?: AgentViewLaunchFile;
   activity?: AgentViewActivityFile;
   worker?: AgentViewWorkerFile;
   rosterEntry?: AgentViewRosterEntry;
@@ -171,7 +190,9 @@ export type AgentViewWorkerEvent =
       cwd?: string;
       summary?: string;
       waitingFor?: string;
+      inputKind?: AgentViewInputKind;
       lastResult?: string;
+      promptId?: string;
       at?: string;
     };
 
@@ -184,6 +205,7 @@ export type AgentViewWorkerControlEvent =
   | {
       type: 'prompt';
       sequence: number;
+      promptId: string;
       text: string;
       at: string;
     }
@@ -195,6 +217,11 @@ export type AgentViewWorkerControlEvent =
       callId?: string;
       outcome?: AgentViewWorkerAnswerOutcome;
       payload?: Record<string, unknown>;
+    }
+  | {
+      type: 'stop';
+      sequence: number;
+      at: string;
     };
 
 export type AgentViewWorkerAnswerOutcome =
