@@ -4574,6 +4574,18 @@ export const useGeminiStream = (
         : {
             parts: [],
             accept: () => {
+              // Mirror the boundary settlement and this carrier's own
+              // restore: the re-attached envelopes landed in the session
+              // history with the retry's push, so un-bake them from the
+              // stored payload before re-recording debt. Without the
+              // strip, each accept→fail-before-content→Ctrl+Y cycle
+              // re-attaches the envelopes onto a base that still carries
+              // them, appending one duplicate copy per cycle.
+              stripTrailingTextsFromLastPrompt(
+                consumed.flatMap((record) =>
+                  record.envelopeParts.map((part) => part.text ?? ''),
+                ),
+              );
               for (const record of consumed) {
                 boundaryEnvelopeRetryDebtRef.current.push({
                   envelopeParts: record.envelopeParts,

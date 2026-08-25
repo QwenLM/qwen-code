@@ -3198,6 +3198,118 @@ describe('useGeminiStream', () => {
       expect(recordNotification).toHaveBeenCalledTimes(1);
     });
 
+    it('does not accumulate duplicate envelopes when an accepted retry fails terminally before content and is retried again (Ctrl+Y x2)', async () => {
+      // Regression pin: the retry carrier's accept re-recorded debt but
+      // never stripped the re-attached envelopes back out of
+      // `lastPromptRef`, so every accept→fail-before-content→Ctrl+Y cycle
+      // re-attached the envelopes onto a base that still carried them —
+      // the submitted payload grew one duplicate copy per cycle
+      // ([toolResponses, envelope, envelope, ...]).
+      const recordNotification = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordNotification,
+      });
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+        client,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // Every submission fails terminally before content — the
+      // persistent-outage shape the retry carrier exists for.
+      const terminalErrorStream = () =>
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'model overloaded' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      mockSendMessageStream.mockImplementation(terminalErrorStream);
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      const retryEntryParts = [
+        ...completed.response.responseParts,
+        { text: teammateModelText },
+      ];
+      // History scans, in call order: (1) Ctrl+Y #1's orphan scan sees the
+      // accepted entry as the trailing orphan; (2) the retry carrier's
+      // accept captures the retry's own pushed entry (same parts — a
+      // retry re-pushes the identical payload); (3) Ctrl+Y #2's orphan
+      // scan sees the retry's entry as the trailing orphan (and the
+      // second carrier's accept capture reads the same shape).
+      client.getHistoryShallow = vi
+        .fn()
+        .mockReturnValueOnce([
+          { role: 'model', parts: [{ text: 'earlier' }] },
+          { role: 'user', parts: retryEntryParts },
+        ])
+        .mockReturnValueOnce([
+          { role: 'model', parts: [{ text: 'earlier' }] },
+          { role: 'user', parts: retryEntryParts },
+        ])
+        .mockReturnValue([
+          { role: 'model', parts: [{ text: 'earlier' }] },
+          { role: 'user', parts: retryEntryParts },
+        ]);
+
+      // Ctrl+Y #1: the envelope is re-attached and the retry's push
+      // lands; the carrier accepts and must strip the envelope back out
+      // of the stored payload.
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual(retryEntryParts);
+
+      // The retry ALSO failed terminally before content. Ctrl+Y #2
+      // retries the SAME payload: the retry's entry is the trailing
+      // orphan, so the transferred debt re-attaches the envelope — onto
+      // the base the accept above already stripped, i.e. exactly ONE
+      // envelope copy. Without that strip the stored payload still
+      // carried the envelope and the re-attach appended a second copy.
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendMessageStream.mock.calls[2][0]).toEqual(retryEntryParts);
+      expect(mockSendMessageStream.mock.calls[2][3]).toEqual(
+        expect.objectContaining({ type: SendMessageType.Retry }),
+      );
+      // Only the boundary delivery journals a notification; the retry
+      // settlements record debt, not deliveries.
+      expect(recordNotification).toHaveBeenCalledTimes(1);
+    });
+
     it('does not discard retry debt when Ctrl+Y is pressed while the submission lease is held', async () => {
       // Regression pin: retryLastPrompt used to evaluate (and clear) the
       // debt as a call argument BEFORE submitQuery's admission gate ran,
