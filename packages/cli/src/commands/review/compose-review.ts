@@ -143,6 +143,23 @@ export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
 export const LOW_SIGNAL_SRC_DIFF_LINES = 100;
 
 /**
+ * How much a source diff must have grown since the review first measured it
+ * before the approach signal fires. A module constant rather than a setting,
+ * matching `LOW_SIGNAL_SRC_DIFF_LINES` beside it: the round threshold is the
+ * knob an operator would reach for, and a second one buys nothing but a second
+ * thing to get wrong. 3x is below the 4x the measured incident reached and
+ * well above the drift a normal review round produces.
+ */
+export const APPROACH_GROWTH_FACTOR = 3;
+
+/**
+ * Rounds before the approach signal can fire, when no operator setting
+ * overrides it. Five is the repo's own number for "this has gone on long
+ * enough" — AGENTS.md uses it for the review round budget.
+ */
+export const APPROACH_ROUNDS_DEFAULT = 5;
+
+/**
  * GitHub's hard limit on a review body. A POST over it is rejected whole —
  * the review's blockers included — which is the worst failure this module
  * has: a run that found the bug and could not say it.
@@ -1004,6 +1021,32 @@ export interface ComposeReviewResult {
    * the orchestrator's prose ever reports it.
    */
   dimensionGapsAreDepthOnly?: boolean;
+  /**
+   * Set when a PR has taken enough rounds AND grown enough since the review
+   * first measured it that the shape of the change, not the current patch, is
+   * the open question. Disclosure only — the event never moves on it, exactly
+   * as `lowSignal` above.
+   *
+   * It exists because every finding this review emits is anchored to a
+   * `file:line` inside the current diff, so the review can say where an
+   * approach leaks but never that a different approach would retire all of the
+   * leaks at once. Measured: one change took three attempts across two PRs and
+   * 74 individually-correct findings, growing 4x, before the mechanism itself
+   * was replaced and every finding went away with it.
+   *
+   * Never fires on APPROVE: an approve IS convergence, and telling a
+   * converging PR to reconsider itself is the loudest possible false positive.
+   * `nonConverged` reports only THIS round's reverse-audit round-cap stop, as
+   * corroborating text — there is no cross-round tally of it, and the sentence
+   * does not claim one.
+   */
+  approachSignal: {
+    round: number;
+    src0: number;
+    srcDiffLines: number;
+    growth: number;
+    nonConverged: boolean;
+  } | null;
 }
 
 /**
@@ -1440,9 +1483,9 @@ export function composeReview(
   // One read, one round: the deferred-suggestions clause and the ledger
   // marker both name this round, and each reading the side file for itself
   // would let a mid-compose update publish two different round numbers in
-  // one review. The previous volume rides out of the same read for the
-  // same reason — a marker pairing one round's number with another's count
-  // is a trend nobody can read back.
+  // one review. The approach baseline and the previous volume ride out of
+  // the same read for the same reason — a marker pairing one round's number
+  // with another's baseline or count is a record nobody can read back.
   const prevFacts = prevLedgerFacts(input.planPath);
   const prevRound = prevFacts.round;
   // The convergence verdict, decided HERE — beside the one side-file read
@@ -1592,6 +1635,7 @@ export function composeReview(
     cliVersion,
     attribution,
     prevRound,
+    prevFacts.src0,
     reroute,
     {
       prev: {
@@ -1646,6 +1690,7 @@ export function composeReview(
     attribution,
     runtimeModelId,
     prevRound,
+    prevFacts.src0,
     postedInline,
     result.postedFresh,
     prevFacts.posted,
@@ -1819,6 +1864,7 @@ function ordinalSuffix(n: number): string {
  */
 const EMPTY_PREV_FACTS = {
   round: 0,
+  src0: 0,
   churnRounds: 0,
   findings: [] as LedgerFinding[],
   truncated: false,
@@ -1828,25 +1874,33 @@ const EMPTY_PREV_FACTS = {
 };
 
 /**
- * The previous posted round's number AND its posting volume, recovered from
- * the side file `pr-context` wrote — never from the model.
+ * The previous posted round's number, its approach baseline AND its posting
+ * volume, recovered from the side file `pr-context` wrote — never from the
+ * model.
  *
  * The round is 0 when the plan names no PR or no previous round was
  * recovered: this is round 1. It is shared by the marker (which stamps
- * `Math.min(prevRound + 1, LEDGER_MAX_ROUND)`) and the deferred-suggestions
+ * `Math.min(prevRound + 1, LEDGER_MAX_ROUND)`), the deferred-suggestions
  * clause (which names the round the posture engaged on, clamped
- * identically), so the two cannot disagree about which round this is — at
- * the cap included, where an unclamped `prevRound + 1` on either side would
- * name round 10001 beside a round-10000 marker.
+ * identically), and the approach signal, so none of the three can disagree
+ * about which round this is — at the cap included, where an unclamped
+ * `prevRound + 1` on either side would name round 10001 beside a
+ * round-10000 marker.
  *
- * Two facts, one read, on purpose: reading the file twice would let a
- * mid-compose rewrite pair round N's number with round N+1's volume in a
- * single marker. They degrade independently — the side file is a
- * best-effort recovery, and a round with no volume recorded (every round
+ * Three facts, one read, on purpose: reading the file twice would let a
+ * mid-compose rewrite pair round N's number with round N+1's baseline or
+ * volume in a single marker. They degrade independently — the side file is
+ * a best-effort recovery, and a round with no volume recorded (every round
  * before the field shipped) is not a round that posted nothing.
+ *
+ * `src0` is 0 on every failure path — see `Ledger.src0`. A force-push or an
+ * account switch that loses the side file therefore reads as round 1 and
+ * disarms the approach signal rather than misreporting it. That direction is
+ * deliberate: the signal is advisory, so its failure mode should be silence.
  */
 function prevLedgerFacts(planPath: string | undefined): {
   round: number;
+  src0: number;
   posted?: number;
   /**
    * The previous round's work list, for the recurrence join. Empty when
@@ -1891,6 +1945,10 @@ function prevLedgerFacts(planPath: string | undefined): {
     ) as Ledger & { foreign?: unknown; merged?: unknown };
     const round =
       Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0;
+    const src0 =
+      Number.isInteger(prev.src0) && (prev.src0 as number) > 0
+        ? (prev.src0 as number)
+        : 0;
     // Read through the ledger's own volume reader rather than a local
     // restatement: the side file is a JSON `pr-context` wrote, not a marker
     // `parseLedger` already normalised, and a boundary that checked the
@@ -1940,6 +1998,7 @@ function prevLedgerFacts(planPath: string | undefined): {
 
     return {
       round,
+      src0,
       churnRounds,
       ...(posted === undefined || round === 0 ? {} : { posted }),
       // Gated on the round for the same reason the volume is: a work list
@@ -2026,6 +2085,7 @@ function ledgerMarkerFor(
   attribution: boolean,
   runtimeModelId: string | undefined,
   prevRound: number,
+  prevSrc0: number,
   postedInline: number,
   freshInline: number,
   prevPostedInline: number | undefined,
@@ -2038,6 +2098,9 @@ function ledgerMarkerFor(
     if (!planNamesPr(input.planPath)) return null;
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       fetchedSha?: unknown;
+      srcDiffLines?: unknown;
+      fullSrcDiffLines?: unknown;
+      incremental?: { effective?: unknown };
       reviewModelId?: unknown;
     };
     // The anchor rides only when this round's SCOPE was clean. An anchor
@@ -2078,6 +2141,16 @@ function ledgerMarkerFor(
       !failClosed && typeof plan.fetchedSha === 'string'
         ? plan.fetchedSha
         : undefined;
+    const measured = Number(
+      plan.fullSrcDiffLines ??
+        (plan.incremental?.effective === true ? 0 : (plan.srcDiffLines ?? 0)),
+    );
+    const src0 =
+      prevSrc0 > 0
+        ? prevSrc0
+        : Number.isFinite(measured) && measured > 0
+          ? Math.round(measured)
+          : 0;
     // The anchor's same-model qualifier: "clean up to `sha`" is THIS model's
     // verdict, and Step 1's recovered-anchor gate refuses to scope another
     // model's round to it. The identity is the one the RUNTIME published —
@@ -2182,6 +2255,11 @@ function ledgerMarkerFor(
       // round as a pre-field marker rather than as "nobody certified this".
       ...(shaCandidate && !identityDrifted ? { sha: shaCandidate } : {}),
       ...(model ? { model } : {}),
+      // Carry the baseline forward unchanged once one exists; only measure a
+      // full-range diff when there is none. Re-measuring every round would let
+      // a diff that shrinks rewrite its own baseline and erase the growth it
+      // already accumulated.
+      ...(src0 > 0 ? { src0 } : {}),
       // Volume telemetry: unconditional, unlike everything above it. The
       // anchor pair is withheld whenever the round could not certify its
       // scope, but "how many comments did this round post" stays true on a
@@ -2336,6 +2414,7 @@ function composeReviewBody(
   cliVersion: string,
   attribution: boolean,
   prevRound: number,
+  prevSrc0: number,
   reroute: { indices: number[]; entries: DeferredEntry[] } = {
     indices: [],
     entries: [],
@@ -2553,6 +2632,7 @@ function composeReviewBody(
    *  nothing. */
   let canonicalStopEntries: Set<string> | null = null;
   let budgetEntry: (typeof coverageEntries)[number] | undefined;
+  let roundCapStopped = false;
   if (input.planPath) {
     const stop = readBudgetStop(input.planPath);
     if (stop !== null) {
@@ -2579,6 +2659,11 @@ function composeReviewBody(
       // entries exists; an absent cause is a time stop, for markers written
       // before the cause field existed.
       const isRoundCap = stop.cause === 'round-cap';
+      // Corroborating text for the approach signal below. Read-only: the
+      // entry keeps its existing coverage cap untouched, and this flag is
+      // never a trigger on its own — only a clause appended when the signal
+      // has already fired on rounds and growth.
+      roundCapStopped = isRoundCap;
       // Spliced on the FULL canonical entry text (both languages: the
       // exemption admits the Chinese pair as a compliant relay, so the
       // splice must retire it too, or the same gap renders twice beside the
@@ -3540,6 +3625,63 @@ function composeReviewBody(
       const src = Number(plan.srcDiffLines ?? 0);
       if (src > LOW_SIGNAL_SRC_DIFF_LINES) {
         lowSignal = { agents: requiredAgents(plan).length, srcDiffLines: src };
+      }
+    }
+  }
+
+  // Every finding this review emits is anchored to a `file:line` inside the
+  // current diff, so it can report where an approach leaks but never that a
+  // different approach would retire all of the leaks at once. When a change
+  // has taken many rounds AND grown several times over while doing so, that
+  // limit is worth stating out loud to the human deciding what happens next —
+  // otherwise the only reading available is "keep patching".
+  //
+  // Advisory by construction: it is not a finding (findings are what the
+  // autofix loop consumes, which is the pattern this exists to interrupt), it
+  // adds no cap, and it never moves the event.
+  let approachSignal: ComposeReviewResult['approachSignal'] = null;
+  // An APPROVE is convergence. Telling a converging PR to reconsider itself is
+  // the loudest false positive available, and it would contradict the posture
+  // that composes a deferrals-only late Approve on purpose.
+  if (baseEvent !== 'APPROVE' && prevSrc0 > 0 && input.planPath) {
+    // Same clamp as the ledger marker stamp and the deferred-suggestions
+    // clause: a side file at the cap is representable and carries forward, so
+    // an unclamped +1 would print a round the marker in the same body denies.
+    const round = Math.min(prevRound + 1, LEDGER_MAX_ROUND);
+    const rounds =
+      operatorReviewSettings().approachRounds ?? APPROACH_ROUNDS_DEFAULT;
+    if (round >= rounds) {
+      let src = 0;
+      try {
+        const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
+          srcDiffLines?: unknown;
+          fullSrcDiffLines?: unknown;
+          incremental?: { effective?: unknown };
+        };
+        src = Number(
+          plan.fullSrcDiffLines ??
+            (plan.incremental?.effective === true
+              ? 0
+              : (plan.srcDiffLines ?? 0)),
+        );
+      } catch {
+        // Unreadable plan, no disclosure — same posture as `lowSignal`.
+      }
+      const growth = src / prevSrc0;
+      // The absolute floor reuses the module's existing "non-trivial diff"
+      // threshold: tripling a 12-line diff is not the shape this describes.
+      if (
+        Number.isFinite(src) &&
+        src > LOW_SIGNAL_SRC_DIFF_LINES &&
+        growth >= APPROACH_GROWTH_FACTOR
+      ) {
+        approachSignal = {
+          round,
+          src0: prevSrc0,
+          srcDiffLines: src,
+          growth,
+          nonConverged: roundCapStopped,
+        };
       }
     }
   }
@@ -4546,6 +4688,39 @@ function composeReviewBody(
       ]
     : [];
 
+  // Addressed to the human deciding what happens next, not to the model that
+  // will fix the findings — which is why it is a body paragraph and not a
+  // finding. Built from `approachSignal` rather than re-evaluating the
+  // predicate, so the paragraph and the verdict-line clause cannot disagree.
+  const approachBlock: Bi[] = approachSignal
+    ? [
+        {
+          en:
+            `⚠️ Round ${approachSignal.round}, and the diff has grown ` +
+            `${approachSignal.growth.toFixed(1)}x since this review first measured it ` +
+            `(${approachSignal.src0} → ${approachSignal.srcDiffLines} source diff lines)` +
+            (approachSignal.nonConverged
+              ? '; the reverse audit also stopped at its round cap without converging'
+              : '') +
+            `. The findings below are anchored to the current patch, so they can only say ` +
+            `where this approach leaks — never that a different approach would retire all ` +
+            `of them at once. Before fixing them, a human should decide whether the shape ` +
+            `of the change is still right. Advisory only: this does not affect the verdict, ` +
+            `and nothing here is a blocker.`,
+          zh:
+            `⚠️ 第 ${approachSignal.round} 轮，且自本审查首次测量以来 diff 已增长 ` +
+            `${approachSignal.growth.toFixed(1)} 倍（源码 diff 行数 ` +
+            `${approachSignal.src0} → ${approachSignal.srcDiffLines}）` +
+            (approachSignal.nonConverged
+              ? '；反向审计也在轮数上限处停止且未收敛'
+              : '') +
+            `。下方的发现都锚定在当前这版补丁上，因此它们只能指出这个方案在哪里漏了，` +
+            `而无法说明换一个方案就能一次性消除全部问题。在动手修复之前，应由人来判断这次` +
+            `改动的整体形态是否仍然正确。仅供参考：本段不影响判定结论，其中也没有任何阻断项。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -4554,6 +4729,7 @@ function composeReviewBody(
     const parts = [
       ...(coverageOpener ? [coverageOpener] : []),
       ...(contextUnavailable ? [contextUnavailableClause] : []),
+      ...approachBlock,
       ...duplicatesBlock,
       ...cannotTellBlock,
       ...notReviewedForBody,
@@ -4595,6 +4771,7 @@ function composeReviewBody(
       lowSignal,
       scopeUnproven,
       dimensionGapsAreDepthOnly,
+      approachSignal,
       ...(residualRisk ? { residualRisk } : {}),
     };
   }
@@ -4683,6 +4860,7 @@ function composeReviewBody(
       lowSignal,
       scopeUnproven,
       dimensionGapsAreDepthOnly,
+      approachSignal,
       ...(residualRisk ? { residualRisk } : {}),
     };
   }
@@ -4817,6 +4995,12 @@ function composeReviewBody(
   // single unreadable wall.
   const openerCount = clauses.length;
 
+  // 4-. Approach signal — pushed FIRST after the opener count so it becomes a
+  //     standalone paragraph rather than being swallowed into the opener's
+  //     space-joined run. It is the one clause addressed to a human rather
+  //     than to the next round's work list, so it reads before the findings.
+  clauses.push(...approachBlock);
+
   // 4a. Duplicate-dropped Suggestions — built above with the other body
   //     blocks; it renders on every event, RC included.
   clauses.push(...duplicatesBlock);
@@ -4926,6 +5110,7 @@ function composeReviewBody(
     lowSignal,
     scopeUnproven,
     dimensionGapsAreDepthOnly,
+    approachSignal,
     ...(residualRisk ? { residualRisk } : {}),
   };
 }
@@ -6143,6 +6328,16 @@ export function verdictLine(r: ComposeReviewResult): string {
     // enforcement also fires under `auto` from round 6, where no literal
     // critical floor exists in the invocation — the round resolved to one.
     line += ` — ${r.floorEnforced.length} of those moved by CLI floor enforcement (drafted inline past the resolved critical floor)`;
+  }
+  // Last, and phrased so the terminal line alone carries the ask: this is the
+  // line the orchestrator prints verbatim, and on a CI-triggered review it may
+  // be all a human reads before opening the PR.
+  if (r.approachSignal) {
+    line +=
+      ` — round ${r.approachSignal.round}, diff grown ` +
+      `${r.approachSignal.growth.toFixed(1)}x since first measured ` +
+      `(${r.approachSignal.src0} → ${r.approachSignal.srcDiffLines} source diff lines); ` +
+      `reconsider the approach, not only the findings`;
   }
   return line;
 }

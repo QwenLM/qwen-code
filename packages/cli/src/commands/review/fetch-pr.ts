@@ -42,7 +42,7 @@ import { sanitizedGitEnv } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
-import type { ReviewEffort } from './parse-args.js';
+import { EFFORT_OPTION, type ReviewEffort } from './parse-args.js';
 import {
   git,
   gitOpt,
@@ -224,6 +224,8 @@ type FetchPrResult = PlanReport & {
    * local review's plan has no such field: nothing is posted there.
    */
   prDescriptionHasHan: boolean;
+  /** Source diff lines in the full merge-base range, including on an incremental round. */
+  fullSrcDiffLines?: number;
   /**
    * The model this ROUND started under — the runtime identity at capture
    * time, stamped here because nothing else in the flow remembers it.
@@ -1499,6 +1501,22 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
 
+    let fullSrcDiffLines: number | undefined;
+    if (fullText !== null) {
+      if (!scopedDelta) {
+        fullSrcDiffLines = plan.srcDiffLines;
+      } else {
+        try {
+          fullSrcDiffLines = buildDiffPlan(
+            fullText,
+            args.maxChunkLines,
+          ).srcDiffLines;
+        } catch {
+          // Advisory measurement only; compose-review stays silent without it.
+        }
+      }
+    }
+
     // Aone does not advertise diff stats — fill them from the captured diff
     // so the report's diffStat and the stderr summary carry real numbers.
     // Runs AFTER the plan/rescue above, where `diffText` is FINAL: the
@@ -1664,6 +1682,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       diffPathAbsolute,
       diffSha256,
       prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+      ...(fullSrcDiffLines === undefined ? {} : { fullSrcDiffLines }),
       ...(roundModelId ? { reviewModelId: roundModelId } : {}),
       ...(anchor ? { incremental: anchor.incremental } : {}),
       ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path), {
@@ -1886,15 +1905,7 @@ export const fetchPrCommand: CommandModule = {
         describe:
           'Continue an interrupted run of this PR when its on-disk state still matches (worktree at the fetched SHA, diff bytes unchanged, PR head unmoved): keep the worktree, leave the plan untouched, and print {"resumed":true}. Falls through to a normal fresh fetch — printing {"resumed":false,"resumeRefused":"<reason>"} — whenever the state does not match.',
       })
-      .option('effort', {
-        type: 'string',
-        choices: ['low', 'medium', 'high'],
-        describe:
-          'The review effort. `medium` (balanced) drops the adversarial ' +
-          'personas from the required roster; recorded in the plan so ' +
-          'check-coverage, agent-prompt --roster and compose-review all read ' +
-          'one value. Omit for the full (high) roster.',
-      })
+      .option('effort', EFFORT_OPTION)
       .option('since', {
         type: 'string',
         describe:

@@ -45,6 +45,13 @@ const TARGETS = {
     cls: { kind: 'file', base: 'src_foo.ts' } as const,
     token: 'src_foo.ts',
   },
+  // A markdown target: the pin deliberately does NOT double the `.md`, and
+  // the Step 8 template carries the matching no-doubling rule — the shape
+  // where every file review of a `.md` path used to lose its `Report:` line.
+  fileMd: {
+    cls: { kind: 'file', base: 'docs_guide.md' } as const,
+    token: 'docs_guide.md',
+  },
   local: { cls: { kind: 'local' } as const, token: 'local' },
 };
 
@@ -125,6 +132,17 @@ describe('run pins match the bundled skill templates', () => {
     for (const { cls, token } of [TARGETS.file, TARGETS.fileNested]) {
       expect(reportPatternFor(cls).test(render('<target>', token))).toBe(true);
     }
+    // A token that already ends in `.md`: the template ends the name at the
+    // token — the prose rule beside it, pinned here so a template edit that
+    // drops the rule fails next to the pin it must agree with.
+    expect(step8Corpus as string).toContain('do not double the extension');
+    const mdName = `2026-08-13-101010-${TARGETS.fileMd.token}`;
+    expect(reportPatternFor(TARGETS.fileMd.cls).test(mdName)).toBe(true);
+    // …and the DOUBLED rendering — what a template without the rule writes —
+    // must not match, or the run's `Report:` line is silently lost again.
+    expect(reportPatternFor(TARGETS.fileMd.cls).test(`${mdName}.md`)).toBe(
+      false,
+    );
     expect(reportPatternFor(TARGETS.local.cls).test(render('local', ''))).toBe(
       true,
     );

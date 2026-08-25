@@ -1280,3 +1280,233 @@ describe('capture-local — round-12 stop shapes', () => {
     expect(err).toContain('this is NOT a clean tree');
   });
 });
+
+describe('capture-local — round-13 findings: visibility bits and empty anchors', () => {
+  it('a FILE review with no diff still anchors its subject (R13-2)', () => {
+    // The no-diff shape promoted an EMPTY files map, and an
+    // `--assume-unchanged` edit on the subject then hid from `git diff
+    // HEAD`: `changedSince` over the empty maps certified the
+    // "unchanged-since-last-round" stop over bytes no round ever read.
+    // `hash-object` reads through the bit, so the subject enters the anchor
+    // even without a diff section.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/foo.ts', 'export const v = 0;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+
+    const first = capture({ file: 'src/foo.ts', model: 'model-a' });
+    const candidate = JSON.parse(
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    ) as { files: Record<string, string> };
+    expect(Object.keys(candidate.files)).toEqual(['src/foo.ts']);
+
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    writeFileSync(
+      first['cachePath'] as string,
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    );
+
+    git('update-index', '--assume-unchanged', 'src/foo.ts');
+    write('src/foo.ts', 'export const v = 999; // hidden edit\n');
+
+    stderrLines.length = 0;
+    const second = capture({
+      file: 'src/foo.ts',
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    // The hidden edit moved the subject's identity: re-reviewed, never
+    // stopped over.
+    expect(second['nothingToReview']).toBeUndefined();
+    expect(second.incremental).toBeDefined();
+    expect(second.incremental!.scope!.deltaFiles).toContain('src/foo.ts');
+    expect(stderrLines.join('\n')).not.toContain('nothing to re-review');
+  });
+
+  it('a cache with an empty files map refuses the anchor (R13-2)', () => {
+    // A no-diff whole-tree round promotes an empty files map, and
+    // `changedSince` over two empty maps answers "unchanged" under ANY tree
+    // state the capture cannot see — an anchor with no identities certifies
+    // nothing, so the gate refuses it out loud.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+    const first = capture({ model: 'model-a' });
+    expect(first['nothingToReview']).toEqual({ reason: 'clean-tree' });
+    const candidate = JSON.parse(
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    ) as { files: Record<string, string> };
+    expect(Object.keys(candidate.files)).toEqual([]);
+    const cachePath = promoteCandidate(first, 'model-a');
+
+    git('update-index', '--assume-unchanged', BYSTANDER);
+    write(BYSTANDER, 'export const b = 999; // hidden edit\n');
+
+    stderrLines.length = 0;
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second.incremental).toBeUndefined();
+    expect(second['nothingToReview']).toBeUndefined();
+    const err = stderrLines.join('\n');
+    expect(err).toContain('recorded no file identities');
+    // The visibility guard withholds the clean-tree stop on the fallback
+    // capture too, and names the bit.
+    expect(err).toContain('this is NOT a clean tree');
+    expect(err).not.toContain('the working tree is clean');
+  });
+
+  it('a hidden edit OUTSIDE the cached paths suppresses the unchanged stop (R13-6)', () => {
+    // The defence iterated `cache.files` keys only, so a hidden edit on a
+    // path the cached round did NOT review (clean at cache time) was
+    // enumerated by no gate: every comparison stood still and the round
+    // stopped decided over bytes no round ever read.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/a.ts', 'export const a = 1;\n');
+    write('src/b.ts', 'export const b = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    write('src/a.ts', 'export const a = 2;\n');
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+
+    // The anchored file stands still (still dirty, byte-identical); b.ts
+    // gets edited behind the bit.
+    git('update-index', '--assume-unchanged', 'src/b.ts');
+    write('src/b.ts', 'export const b = 999; // hidden edit\n');
+
+    stderrLines.length = 0;
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second['nothingToReview']).toBeUndefined();
+    expect(
+      existsSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json')),
+    ).toBe(false);
+    const err = stderrLines.join('\n');
+    expect(err).toContain('carry an --assume-unchanged or');
+    expect(err).not.toContain('nothing to re-review');
+
+    // Control: with the bit cleared (and the edit discarded) the stop fires.
+    git('update-index', '--no-assume-unchanged', 'src/b.ts');
+    git('checkout', '--', 'src/b.ts');
+    const third = capture({ cache: cachePath, model: 'model-a' });
+    expect(third['nothingToReview']).toEqual({
+      reason: 'unchanged-since-last-round',
+    });
+  });
+
+  it('a hidden edit suppresses the CLEAN-TREE stop — no cache involved (R13-6)', () => {
+    // The clean-tree claim needs no cache, so neither did this entrance:
+    // "nothing staged, nothing unstaged, nothing untracked" proves nothing
+    // while a marked path may carry an edit `git diff` cannot see.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/a.ts', 'export const a = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    git('update-index', '--assume-unchanged', 'src/a.ts');
+    write('src/a.ts', 'export const a = 999; // hidden edit\n');
+
+    stderrLines.length = 0;
+    const plan = capture();
+    expect(plan['nothingToReview']).toBeUndefined();
+    expect(
+      existsSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json')),
+    ).toBe(false);
+    const err = stderrLines.join('\n');
+    expect(err).not.toContain('the working tree is clean');
+    expect(err).toContain('this is NOT a clean tree');
+    expect(err).toContain('--assume-unchanged/--skip-worktree');
+
+    // Control: the genuinely clean tree still stops.
+    git('update-index', '--no-assume-unchanged', 'src/a.ts');
+    git('checkout', '--', 'src/a.ts');
+    const clean = capture();
+    expect(clean['nothingToReview']).toEqual({ reason: 'clean-tree' });
+  });
+
+  it('a hidden edit suppresses the scope-emptied stop (R13-6)', () => {
+    // The designed all-discarded shape, plus one path the cached round never
+    // reviewed hiding an edit: the empty slice proves only what `git diff`
+    // can see, so the stop is withheld and the refusal is said out loud.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/a.ts', 'export const a = 1;\n');
+    write('src/extra.ts', 'export const e = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    write('src/a.ts', 'export const a = 2;\n');
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+
+    git('checkout', '--', 'src/a.ts');
+    git('update-index', '--assume-unchanged', 'src/extra.ts');
+    write('src/extra.ts', 'export const e = 999; // hidden edit\n');
+
+    stderrLines.length = 0;
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second['nothingToReview']).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('carry an --assume-unchanged or');
+
+    // Control: without the bit the all-discarded shape still stops.
+    git('update-index', '--no-assume-unchanged', 'src/extra.ts');
+    git('checkout', '--', 'src/extra.ts');
+    const third = capture({ cache: cachePath, model: 'model-a' });
+    expect(third['nothingToReview']).toEqual({ reason: 'scope-emptied' });
+  });
+});
+
+describe('capture-local — round-15 findings: the candidate under visibility bits', () => {
+  it('a visibility bit withholds the cache candidate (R14-1)', () => {
+    // The three decided stops are conditioned on the visibility bits, but
+    // the candidate write was not: `hash-object` reads the worktree bytes
+    // THROUGH a set bit while `git diff` cannot see them, so the candidate
+    // recorded the identity of bytes the round's diff never showed.
+    // Promoted, they became anchor state — and when the bit was cleared
+    // between rounds keeping the bytes, every comparison found no change,
+    // every visibility gate read clean, and the unchanged-since stop
+    // certified them: the loop decided "nothing to re-review" over bytes no
+    // round ever read. The same uncertainty that withholds a stop withholds
+    // the candidate.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/foo.ts', 'export const v = 0;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    // A staged edit — visible to `git diff HEAD`.
+    write('src/foo.ts', 'export const v = 1;\n');
+    git('add', 'src/foo.ts');
+    const plain = capture({ model: 'model-a' });
+    expect(existsSync(plain.cacheCandidatePath)).toBe(true);
+
+    // A further edit hidden behind the bit on the SAME file: the diff still
+    // shows the staged hunk alone, while the candidate hashes read through.
+    git('update-index', '--assume-unchanged', 'src/foo.ts');
+    write('src/foo.ts', 'export const v = 999; // hidden edit\n');
+    stderrLines.length = 0;
+    const hidden = capture({ model: 'model-a' });
+    // Withheld — including the unlink of the earlier round's candidate,
+    // whose name this plan publishes and Step 8 would otherwise promote.
+    expect(existsSync(hidden.cacheCandidatePath)).toBe(false);
+    const err = stderrLines.join('\n');
+    expect(err).toContain('carry an --assume-unchanged or');
+    expect(err).toContain('the cache candidate is withheld');
+    // The round itself still proceeds on the first capture — only the
+    // anchor is withheld.
+    expect(hidden.chunks.length).toBeGreaterThan(0);
+
+    // The hole the withholding closes, end to end: nothing was promoted, so
+    // clearing the bit between rounds keeping the bytes cannot produce an
+    // "unchanged since last round" stop over the hidden bytes — the next
+    // round captures full and the now-visible edit is in scope.
+    git('update-index', '--no-assume-unchanged', 'src/foo.ts');
+    stderrLines.length = 0;
+    const next = capture({
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    expect(next['nothingToReview']).toBeUndefined();
+    expect(next.incremental).toBeUndefined();
+    expect(readFileSync(join(repo, next.diffPath), 'utf8')).toContain(
+      'hidden edit',
+    );
+  });
+});

@@ -366,6 +366,7 @@ export type WorkflowApprovalRequestCallback = (
 interface WorkflowApprovalRuntime {
   respond: AgentApprovalRequestEvent['respond'];
   requestController?: AbortController;
+  releaseSource: () => void;
 }
 
 export class WorkflowRunRegistry {
@@ -617,13 +618,22 @@ export class WorkflowRunRegistry {
         if (dispatch) dispatch.subagentId = event.subagentId;
       }
       const sourceKey = JSON.stringify([event.subagentId, event.callId]);
-      // Re-emission of an already-settled call: respond is idempotent via
-      // the runtime's responded set, so silently dropping it is safe.
-      if (seenSources.has(sourceKey)) return;
+      if (seenSources.has(sourceKey)) {
+        debugLogger.warn(
+          `Workflow approval re-emission dropped (source still latched): ${runId}/${sourceKey}`,
+        );
+        return;
+      }
       seenSources.add(sourceKey);
-      const parked = this.parkPendingApproval(runId, event, dispatchId);
-      if (parked === 'duplicate') return;
+      const parked = this.parkPendingApproval(runId, event, dispatchId, () =>
+        seenSources.delete(sourceKey),
+      );
+      if (parked === 'duplicate') {
+        seenSources.delete(sourceKey);
+        return;
+      }
       if (parked === 'rejected') {
+        seenSources.delete(sourceKey);
         this.rejectResponder(event.respond);
         return;
       }
@@ -662,13 +672,11 @@ export class WorkflowRunRegistry {
       (candidate) => candidate.approvalId === approvalId,
     );
     if (!approval) return false;
-    const runtime = this.approvalRuntimes.get(approvalId);
     this.appendApprovalEvent(entry, approval, 'approval-settled', Date.now());
     entry.pendingApprovals = entry.pendingApprovals.filter(
       (candidate) => candidate !== approval,
     );
-    this.approvalRuntimes.delete(approvalId);
-    runtime?.requestController?.abort();
+    const runtime = this.releaseApprovalRuntime(approvalId);
     this.emitApprovalChange(entry);
     if (!runtime) return false;
     const normalized = normalizeWorkflowApprovalOutcome(outcome);
@@ -716,9 +724,7 @@ export class WorkflowRunRegistry {
     entry.pendingApprovals = entry.pendingApprovals.filter(
       (candidate) => candidate !== approval,
     );
-    const runtime = this.approvalRuntimes.get(approval.approvalId);
-    this.approvalRuntimes.delete(approval.approvalId);
-    runtime?.requestController?.abort();
+    this.releaseApprovalRuntime(approval.approvalId);
     this.emitApprovalChange(entry);
     return true;
   }
@@ -726,7 +732,8 @@ export class WorkflowRunRegistry {
   private parkPendingApproval(
     runId: string,
     event: AgentApprovalRequestEvent,
-    dispatchId?: string,
+    dispatchId: string | undefined,
+    releaseSource: () => void,
   ): string | 'duplicate' | 'rejected' {
     const entry = this.entries.get(runId);
     if (
@@ -786,6 +793,7 @@ export class WorkflowRunRegistry {
     this.approvalRuntimes.set(approvalId, {
       respond: event.respond,
       requestController,
+      releaseSource,
     });
     entry.pendingApprovals = [...entry.pendingApprovals, approval];
     this.appendEvent(entry, {
@@ -826,8 +834,7 @@ export class WorkflowRunRegistry {
         entry.pendingApprovals = entry.pendingApprovals.filter(
           (candidate) => candidate.approvalId !== approvalId,
         );
-        this.approvalRuntimes.delete(approvalId);
-        requestController.abort();
+        this.releaseApprovalRuntime(approvalId);
         this.emitApprovalChange(entry);
         return 'rejected';
       }
@@ -1229,11 +1236,10 @@ export class WorkflowRunRegistry {
     for (const entry of this.entries.values()) {
       this.rejectPendingApprovals(entry.runId);
     }
-    for (const runtime of this.approvalRuntimes.values()) {
-      runtime.requestController?.abort();
-      this.rejectResponder(runtime.respond);
+    for (const approvalId of Array.from(this.approvalRuntimes.keys())) {
+      const runtime = this.releaseApprovalRuntime(approvalId);
+      if (runtime) this.rejectResponder(runtime.respond);
     }
-    this.approvalRuntimes.clear();
     this.entries.clear();
     this.handles.clear();
     if (sample) this.emitStatusChange(sample);
@@ -1381,14 +1387,23 @@ export class WorkflowRunRegistry {
     );
     const runtimes: WorkflowApprovalRuntime[] = [];
     for (const approvalId of rejectedIds) {
-      const runtime = this.approvalRuntimes.get(approvalId);
-      this.approvalRuntimes.delete(approvalId);
+      const runtime = this.releaseApprovalRuntime(approvalId);
       if (!runtime) continue;
-      runtime.requestController?.abort();
       runtimes.push(runtime);
     }
     this.emitApprovalChange(entry);
     for (const runtime of runtimes) this.rejectResponder(runtime.respond);
+  }
+
+  private releaseApprovalRuntime(
+    approvalId: string,
+  ): WorkflowApprovalRuntime | undefined {
+    const runtime = this.approvalRuntimes.get(approvalId);
+    if (!runtime) return undefined;
+    this.approvalRuntimes.delete(approvalId);
+    runtime.releaseSource();
+    runtime.requestController?.abort();
+    return runtime;
   }
 
   private rejectResponder(respond: AgentApprovalRequestEvent['respond']): void {
