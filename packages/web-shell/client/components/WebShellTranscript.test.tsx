@@ -27,9 +27,17 @@ vi.mock('../WebShellContexts', () => {
     CompactModeContext: createContext(false),
     TodoDetailContext,
     TodoTimelineContext,
-    TodoContextsProvider: ({ children }: { children?: ReactNode }) => (
-      <TodoTimelineContext.Provider value={new Map()}>
-        <TodoDetailContext.Provider value={new Map()}>
+    TodoContextsProvider: ({
+      timeline,
+      details,
+      children,
+    }: {
+      timeline?: Map<string, unknown>;
+      details?: Map<string, unknown>;
+      children?: ReactNode;
+    }) => (
+      <TodoTimelineContext.Provider value={timeline ?? new Map()}>
+        <TodoDetailContext.Provider value={details ?? new Map()}>
           {children}
         </TodoDetailContext.Provider>
       </TodoTimelineContext.Provider>
