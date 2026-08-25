@@ -119,11 +119,14 @@ export {
 } from '@qwen-code/acp-bridge/bridge';
 export { defaultSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
 // The bridge error classes external embeds most commonly need to recognize
-// live on this public barrel; the full set `sendBridgeError`
-// (server/error-response.ts) matches via `instanceof` is on
-// `@qwen-code/acp-bridge/bridgeErrors`. In-repo callers import these classes
-// from `@qwen-code/acp-bridge/bridgeErrors` directly, so this block looks
-// unused from inside the repo but is load-bearing public surface.
+// live on this public barrel. They are a subset of the classes
+// `sendBridgeError` (server/error-response.ts) matches via `instanceof`;
+// the rest of that match set lives across other modules —
+// `@qwen-code/acp-bridge/status`, `@qwen-code/acp-bridge/sessionArtifacts`,
+// `@qwen-code/qwen-code-core`, and `server/session-archive.ts` — so no
+// single module carries the complete set. In-repo callers import these
+// classes from `@qwen-code/acp-bridge/bridgeErrors` directly, so this block
+// looks unused from inside the repo but is load-bearing public surface.
 export {
   McpServerNotFoundError,
   McpServerRestartFailedError,

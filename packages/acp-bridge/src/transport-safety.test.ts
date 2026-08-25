@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Client } from '@agentclientprotocol/sdk';
 import {
+  createBoundedAcpTransportSafety,
   createLogSafeAcpClient,
   estimateTransportValueBytes,
   type AcpChannelTransportGuard,
@@ -248,10 +249,20 @@ describe('inbound handler admission', () => {
   });
 
   it('releases the admission budget after a handler completes', async () => {
-    // 3000 bytes fits exactly one small frame (2048-byte envelope + params);
-    // a second sequential call is admitted only if the first call's budget
-    // was released by the `finally` decrements in the admission run.
-    const guard = { ...createFakeGuard(), maxActiveHandlerBytes: 3000 };
+    // 3000 bytes fits exactly one small frame (2048-byte envelope + params),
+    // and `maxActiveHandlers: 1` fits exactly one in-flight handler; a
+    // second sequential call is admitted only if the first call's budget
+    // was released by BOTH `finally` decrements in the admission run — the
+    // byte decrement (`activeBytes -= requiredBytes`) and the paired count
+    // decrement (`activeHandlers--`). Capping only bytes would let a leaked
+    // handler count survive until the channel's lifetime request count
+    // reaches maxActiveHandlers, after which every inbound call fails
+    // admission and guard.fail retires the transport mid-session.
+    const guard = {
+      ...createFakeGuard(),
+      maxActiveHandlers: 1,
+      maxActiveHandlerBytes: 3000,
+    };
     const { client, sessionUpdate } = createFakeClient();
     const wrapped = createLogSafeAcpClient(client, guard);
     const params = {
@@ -322,6 +333,73 @@ describe('inbound handler admission', () => {
     // responses queue uncharged.
     expect(reservePreparedResponse).toHaveBeenCalledTimes(1);
     expect(reservePreparedResponse).toHaveBeenCalledWith(result);
+  });
+
+  it('reserves under null when a request handler resolves undefined', async () => {
+    // The ACP SDK sends `{ result: result ?? null }` on the wire, so
+    // runRequest must reserve under the same normalized value: a handler
+    // resolving `undefined` that reserved under `undefined` would charge
+    // under a key the release path never sees — releaseMessage looks the
+    // sent frame's `result: null` up, misses, and the charge leaks until
+    // the queue limit retires the transport.
+    const reservePreparedResponse = vi.fn();
+    const guard = { ...createFakeGuard(), reservePreparedResponse };
+    const extMethod = vi.fn(
+      async (): Promise<Record<string, unknown>> => undefined as never,
+    );
+    const client = {
+      requestPermission: vi.fn(async () => ({})),
+      sessionUpdate: vi.fn(async () => {}),
+      extMethod,
+    } as unknown as Client;
+    const wrapped = createLogSafeAcpClient(client, guard);
+
+    await wrapped.extMethod!('x/status', { sessionId: 's' });
+
+    expect(extMethod).toHaveBeenCalledTimes(1);
+    expect(reservePreparedResponse).toHaveBeenCalledTimes(1);
+    expect(reservePreparedResponse).toHaveBeenCalledWith(null);
+  });
+
+  it('releases the undefined-resolving charge through the null wire frame', async () => {
+    // Drive an undefined-resolving handler through a real reserve→release
+    // pairing: each call reserves under the normalized `null` result, and
+    // the observed `result: null` wire frame must release that same
+    // charge. With the `?? null` normalization dropped from runRequest,
+    // the release lookup misses and the third reservation trips the
+    // two-message queue limit (NdJsonQueueLimitError → guard.fail).
+    const failures: unknown[] = [];
+    const safety = createBoundedAcpTransportSafety(
+      {
+        maxFrameBytes: 64 * 1024,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 64 * 1024,
+      },
+      (error) => {
+        failures.push(error);
+      },
+    );
+    const extMethod = vi.fn(
+      async (): Promise<Record<string, unknown>> => undefined as never,
+    );
+    const client = {
+      requestPermission: vi.fn(async () => ({})),
+      sessionUpdate: vi.fn(async () => {}),
+      extMethod,
+    } as unknown as Client;
+    const wrapped = createLogSafeAcpClient(client, safety.guard);
+
+    for (let id = 1; id <= 5; id++) {
+      await wrapped.extMethod!('x/status', { sessionId: 's' });
+      safety.observeMessage({
+        direction: 'sent',
+        bytes: 32,
+        message: { jsonrpc: '2.0', id, result: null },
+      });
+    }
+
+    expect(extMethod).toHaveBeenCalledTimes(5);
+    expect(failures).toEqual([]);
   });
 
   it('fails request admission closed when params exceed the handler budget', async () => {

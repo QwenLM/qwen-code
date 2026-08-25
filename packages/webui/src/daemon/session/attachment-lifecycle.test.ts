@@ -54,6 +54,45 @@ describe('SessionAttachmentLifecycle', () => {
     await expect(second).resolves.toBeUndefined();
   });
 
+  it('advances the load generation on every startPendingLoad', async () => {
+    // branchSession's stale-switch guard samples `generation` before its
+    // await and compares it afterwards (actions.ts): the guard can only
+    // notice an in-flight reload if every startPendingLoad actually
+    // advances the counter. Two supersedes must therefore produce three
+    // distinct, increasing generations.
+    const lifecycle = new SessionAttachmentLifecycle();
+    expect(lifecycle.generation).toBe(0);
+
+    const first = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    expect(lifecycle.generation).toBe(1);
+    expect(lifecycle.pendingLoad?.id).toBe(1);
+
+    const second = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    expect(lifecycle.generation).toBe(2);
+    expect(lifecycle.pendingLoad?.id).toBe(2);
+
+    const third = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    expect(lifecycle.generation).toBe(3);
+    expect(lifecycle.pendingLoad?.id).toBe(3);
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    await expect(second).rejects.toMatchObject({ name: 'AbortError' });
+    lifecycle.resolvePendingLoad(lifecycle.pendingLoad!);
+    await expect(third).resolves.toBeUndefined();
+  });
+
   it('releases the current load before running its timeout callback', async () => {
     vi.useFakeTimers();
     const lifecycle = new SessionAttachmentLifecycle();
@@ -209,5 +248,41 @@ describe('SessionAttachmentLifecycle', () => {
 
     lifecycle.resolvePendingLoad(lifecycle.pendingLoad!);
     await expect(successor).resolves.toBeUndefined();
+  });
+
+  it("releases a superseded load's exemption while keeping the successor's", async () => {
+    const lifecycle = new SessionAttachmentLifecycle();
+    const supersededSession = {
+      sessionId: 'session-a',
+    } as DaemonSessionClient;
+    const successorSession = {
+      sessionId: 'session-b',
+    } as DaemonSessionClient;
+
+    const first = lifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    lifecycle.preserveCleanupDetach(supersededSession);
+    expect(lifecycle.isCleanupDetachPreserved(supersededSession)).toBe(true);
+
+    const second = lifecycle.startPendingLoad({
+      sessionId: 'session-b',
+      mode: 'load',
+      onTimeout: () => new Error('timed out'),
+    });
+    // The supersede runs cancelPendingLoad → rejectPendingLoad →
+    // releaseCleanupDetachExemptionForSession('session-a') synchronously
+    // inside startPendingLoad, so the superseded load's exemption must
+    // already be gone by the time the successor re-preserves its own.
+    lifecycle.preserveCleanupDetach(successorSession);
+
+    await expect(first).rejects.toMatchObject({ name: 'AbortError' });
+    expect(lifecycle.isCleanupDetachPreserved(supersededSession)).toBe(false);
+    expect(lifecycle.isCleanupDetachPreserved(successorSession)).toBe(true);
+
+    lifecycle.resolvePendingLoad(lifecycle.pendingLoad!);
+    await expect(second).resolves.toBeUndefined();
   });
 });
