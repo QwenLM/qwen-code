@@ -91,6 +91,12 @@ interface UseVoiceInputArgs {
   onSubmit?: (text: string) => void;
   /** Pre-load the recorder backend when voice turns on (avoids cold-start race). */
   warmup?: () => void | Promise<void>;
+  /**
+   * Probe the OS microphone permission and surface a notice when it is not
+   * granted. Called when a recording actually starts, so users who never
+   * dictate are not told about microphone access on every startup.
+   */
+  checkMicrophonePermission?: () => void;
   /** Enable live streaming transcription (requires openStream + a drain-capable recorder). */
   streaming?: boolean;
   /** Open a streaming session; the hook pumps drained PCM into it while recording. */
@@ -165,6 +171,7 @@ export function useVoiceInput({
   refine,
   onSubmit,
   warmup,
+  checkMicrophonePermission,
   streaming,
   openStream,
 }: UseVoiceInputArgs): UseVoiceInputReturn {
@@ -287,6 +294,10 @@ export function useVoiceInput({
 
   const startRecording = useCallback(
     (silenceDetection: boolean) => {
+      // Permission is probed here rather than during warmup: on macOS an
+      // undetermined TCC status is only worth reporting to someone who is
+      // actually trying to record.
+      checkMicrophonePermission?.();
       const recorder = createRecorder();
       const sessionId = ++sessionIdRef.current;
       recorderRef.current = recorder;
@@ -401,6 +412,7 @@ export function useVoiceInput({
       });
     },
     [
+      checkMicrophonePermission,
       clearPump,
       clearReleaseTimer,
       createRecorder,

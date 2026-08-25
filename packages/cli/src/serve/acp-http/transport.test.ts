@@ -3691,6 +3691,27 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.error.message).toContain('sessionIds');
   });
 
+  it('_qwen/sessions/archive rejects a non-boolean conflict repair option', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 141,
+      method: '_qwen/sessions/archive',
+      params: { sessionIds: ['session-1'], resolveConflicts: 'yes' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.id).toBe(141);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('resolveConflicts');
+  });
+
   it('_qwen/sessions/unarchive returns per-id result buckets', async () => {
     const sessionId = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
     const connId = await initialize();
@@ -3709,6 +3730,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       result: {
         unarchived: string[];
         alreadyActive: string[];
+        resolvedConflicts: string[];
         notFound: string[];
         errors: unknown[];
       };
@@ -3717,8 +3739,52 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.result).toEqual({
       unarchived: [],
       alreadyActive: [],
+      resolvedConflicts: [],
       notFound: [sessionId],
       errors: [],
+    });
+  });
+
+  it('_qwen/sessions archive and unarchive repair conflicts only when requested', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440142';
+      await writeStoredSession(sessionId, 'active');
+      await writeStoredSession(sessionId, 'archived');
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const reader = frameReader(connStream);
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 142,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId], resolveConflicts: true },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 142,
+        result: {
+          archived: [sessionId],
+          resolvedConflicts: [sessionId],
+          errors: [],
+        },
+      });
+
+      await writeStoredSession(sessionId, 'active');
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 143,
+        method: '_qwen/sessions/unarchive',
+        params: { sessionIds: [sessionId], resolveConflicts: true },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 143,
+        result: {
+          unarchived: [sessionId],
+          resolvedConflicts: [sessionId],
+          errors: [],
+        },
+      });
+      reader.close();
     });
   });
 
@@ -4662,39 +4728,38 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it('session/load rejects active/archive conflicts', async () => {
-    await withRuntimeDir(async () => {
-      const sessionId = '550e8400-e29b-41d4-a716-446655440321';
-      await writeStoredSession(sessionId);
-      await writeStoredSession(sessionId, 'archived');
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s restores an active/archive conflicted session from its active copy',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440321';
+        await writeStoredSession(sessionId);
+        await writeStoredSession(sessionId, 'archived');
 
-      const connId = await initialize();
-      const connStream = await openStream(connId);
-      const got = takeFrames(connStream, 1);
-      await new Promise((r) => setTimeout(r, 50));
-      await post(connId, {
-        jsonrpc: '2.0',
-        id: 212,
-        method: 'session/load',
-        params: { sessionId },
+        const connId = await initialize();
+        const connStream = await openStream(connId);
+        const got = takeFrames(connStream, 1);
+        await new Promise((r) => setTimeout(r, 50));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 212,
+          method,
+          params: { sessionId },
+        });
+
+        const [frame] = (await got) as Array<{
+          id: number;
+          result?: unknown;
+          error?: { code: number; message: string };
+        }>;
+        // Loads read the active copy (CLI resume parity): a session left in
+        // both states by a crashed archive stays loadable over ACP.
+        expect(frame.id).toBe(212);
+        expect(frame.error).toBeUndefined();
+        expect(frame.result).toEqual(expect.any(Object));
       });
-
-      const [frame] = (await got) as Array<{
-        id: number;
-        error: {
-          code: number;
-          message: string;
-          data?: { errorKind?: string };
-        };
-      }>;
-      expect(frame.id).toBe(212);
-      expect(frame.error.code).toBe(-32603);
-      expect(frame.error.message).toContain(
-        'Delete the session with POST /sessions/delete',
-      );
-      expect(frame.error.data?.errorKind).toBe('session_conflict');
-    });
-  });
+    },
+  );
 
   it('session/load preserves sanitized session writer RPC errors', async () => {
     await withRuntimeDir(async () => {
@@ -5078,6 +5143,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           SessionArchiveCoordinator.prototype,
           'runSharedMany',
         );
+        const findSessionId = vi.spyOn(
+          SessionService.prototype,
+          'findSessionIdIgnoringCase',
+        );
 
         try {
           const connId = await initialize();
@@ -5103,7 +5172,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             [sessionId],
             expect.any(Function),
           );
+          expect(findSessionId).toHaveBeenCalledTimes(1);
         } finally {
+          findSessionId.mockRestore();
           runSharedMany.mockRestore();
         }
       });
@@ -5111,7 +5182,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s converts a pre-guard both-states conflict to actionable session conflict',
+    '%s keeps a differently spelled both-states conflict strict',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId =
@@ -5134,9 +5205,6 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(await reader.next()).toMatchObject({
           id: 231,
           error: {
-            message: expect.stringContaining(
-              'Delete the session with POST /sessions/delete',
-            ),
             data: expect.objectContaining({ errorKind: 'session_conflict' }),
           },
         });
@@ -5146,7 +5214,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s converts an in-guard both-states conflict to actionable session conflict',
+    '%s preserves a known case conflict without secondary classification',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId =
@@ -5160,12 +5228,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         );
         const findSessionId = vi
           .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-          .mockResolvedValueOnce(storageSessionId)
           .mockRejectedValue(conflict);
         const getSessionLocation = vi
           .spyOn(SessionService.prototype, 'getSessionLocation')
-          .mockImplementation(async (candidateId) =>
-            candidateId === storageSessionId ? 'conflict' : undefined,
+          .mockRejectedValue(
+            Object.assign(new Error('catalog failed'), { code: 'EIO' }),
           );
 
         try {
@@ -5188,9 +5255,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             },
           });
           reader.close();
-          // The conversion must re-check the resolver's candidate spelling:
-          // the request-case id finds nothing on a case-sensitive filesystem.
-          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          expect(getSessionLocation).not.toHaveBeenCalled();
         } finally {
           getSessionLocation.mockRestore();
           findSessionId.mockRestore();
@@ -5351,8 +5416,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect.objectContaining({
           id: 219,
           error: expect.objectContaining({
-            message: expect.stringContaining('by case'),
-            data: expect.objectContaining({ errorKind: 'session_conflict' }),
+            data: expect.objectContaining({
+              errorKind: 'session_conflict',
+              sessionId,
+            }),
           }),
         }),
       );
@@ -6839,7 +6906,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     release(); // spawn resolves AFTER destroy
     await vi.waitFor(() => {
       expect(bridge.killed).toContain(sessionId);
-      expect(removeSession).toHaveBeenCalledWith(sessionId);
+      expect(removeSession).toHaveBeenCalledWith(
+        sessionId,
+        expect.objectContaining({
+          assertStorageUnchanged: expect.any(Function),
+        }),
+      );
     });
     removeSession.mockRestore();
   });
@@ -8826,6 +8898,60 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
 
     it.each([
+      '_qwen/sessions/delete',
+      '_qwen/sessions/archive',
+      '_qwen/sessions/unarchive',
+    ])('gates lifecycle method %s by trust and generation', async (method) => {
+      await restartServer({ primaryTrusted: false });
+      const untrustedConnId = await initialize();
+      const untrustedStream = await openStream(untrustedConnId);
+      const untrustedFrames = takeFrames(untrustedStream, 1);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await post(untrustedConnId, {
+        jsonrpc: '2.0',
+        id: 594,
+        method,
+        params: { sessionIds: ['session-1'] },
+      });
+      await expect(untrustedFrames).resolves.toEqual([
+        expect.objectContaining({
+          id: 594,
+          error: expect.objectContaining({
+            data: expect.objectContaining({
+              errorKind: 'untrusted_workspace',
+              httpStatus: 403,
+            }),
+          }),
+        }),
+      ]);
+
+      const generationGuard = createWorkspaceGenerationGuard();
+      await restartServer({ generationGuard });
+      const closedConnId = await initialize();
+      const closedStream = await openStream(closedConnId);
+      const closedFrames = takeFrames(closedStream, 1);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      generationGuard.close();
+      await post(closedConnId, {
+        jsonrpc: '2.0',
+        id: 595,
+        method,
+        params: { sessionIds: ['session-1'] },
+      });
+      await expect(closedFrames).resolves.toEqual([
+        expect.objectContaining({
+          id: 595,
+          error: expect.objectContaining({
+            data: expect.objectContaining({
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+            }),
+          }),
+        }),
+      ]);
+    });
+
+    it.each([
       [
         '_qwen/workspace/session_groups/create',
         { workspaceCwd: TEST_WORKSPACE, name: 'Blocked', color: 'blue' },
@@ -9674,7 +9800,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
               errors: [{ sessionId, error: removeError }],
             },
           });
-          expect(removeSessionSpy).toHaveBeenCalledWith(sessionId);
+          expect(removeSessionSpy).toHaveBeenCalledWith(
+            sessionId,
+            expect.objectContaining({
+              assertStorageUnchanged: expect.any(Function),
+            }),
+          );
 
           const deleteLog = stdioMocks.writeStderrLine.mock.calls
             .map(([line]) => line)

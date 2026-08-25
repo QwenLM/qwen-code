@@ -14,6 +14,8 @@ import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { applyOutputStyle } from './output-styles.js';
+import type { OutputStyleDefinition } from './output-styles.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
 
@@ -88,8 +90,17 @@ function getInteractiveInteractionModePrompt(): {
  * Factored out so `QWEN_SYSTEM_IDENTITY_MD` can replace this single unit
  * without fragile splicing of the large base-prompt template.
  */
-function getDefaultCoreIdentitySentence(role: string): string {
-  return `You are Qwen Code, ${role} developed by Alibaba Group, specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.`;
+function getDefaultCoreIdentitySentence(
+  role: string,
+  hasOutputStyle = false,
+): string {
+  // With a style active the identity points at it, mirroring what the style
+  // section further down actually governs. Without one the wording is
+  // unchanged, so the default prompt stays byte-identical.
+  const focus = hasOutputStyle
+    ? 'responding according to your "Output Style" below, which describes how you should respond to user queries'
+    : 'specializing in software engineering tasks';
+  return `You are Qwen Code, ${role} developed by Alibaba Group, ${focus}. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.`;
 }
 
 /**
@@ -237,64 +248,53 @@ export function getCustomSystemPrompt(
 }
 
 /**
- * Builds the stable base system prompt (identity, mandates, tool guidance).
+ * The workflow guidance for performing software-engineering work.
  *
- * @param userMemory - Back-compat convenience slot for context files.
- *   @deprecated Prefer composing layers explicitly via `assembleSystemPrompt`
- *   (e.g. `assembleSystemPrompt({ base: getCoreSystemPrompt(undefined, model), contextFiles })`)
- *   so a single site owns the layer order. Passing memory here *and* wrapping
- *   the result in `assembleSystemPrompt({ contextFiles })` double-includes it.
- * @param model - Model id, used to select model-specific prompt variants.
- * @param appendInstruction - Back-compat convenience slot for the append prompt.
- *   @deprecated Prefer the `appendPrompt` slot of `assembleSystemPrompt`.
- * @param interactionMode - Interactive vs. headless prompt variant.
+ * Split out so an output style with `keepCodingInstructions: false` can drop
+ * exactly this section and nothing else — mandates, safety rules, tool
+ * guidance and tone stay in force under every style.
  */
-export function getCoreSystemPrompt(
-  userMemory?: string,
-  model?: string,
-  appendInstruction?: string,
-  interactionMode: SystemPromptInteractionMode = 'interactive',
+function getSoftwareEngineeringTasksSection(): string {
+  return `## Software Engineering Tasks
+When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this iterative approach:
+- **Plan:** Use '${ToolNames.TODO_WRITE}' for complex, ambiguous, or multi-step work when visible progress tracking adds value. Keep the plan short and outcome-oriented; skip it for simple tasks unless the user explicitly requests a plan.
+- **Implement:** Begin implementing while gathering context as needed. Use available search and editing tools strategically, adhering to project conventions (see 'Core Mandates'). Do not add features, refactor code, or make "improvements" beyond what was asked. Don't add error handling, fallbacks, or validation for scenarios that can't happen—only validate at system boundaries (user input, external APIs). Don't create helpers, utilities, or abstractions for one-time operations. Three similar lines of code is better than a premature abstraction. Prefer editing existing files over creating new ones.
+- **Adapt:** Refine your approach as you discover new information or encounter obstacles. If a todo list exists, keep it current as the scope or approach changes. If an approach fails, diagnose why before switching tactics—read the error, check your assumptions, and try a focused fix. Don't retry blindly, but don't abandon a viable approach after a single failure.
+- **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures. Identify the correct test commands and frameworks by examining 'README' files, build/package configuration (e.g., 'package.json'), or existing test execution patterns. NEVER assume standard test commands. Before reporting a task complete, verify it actually works. If you can't verify (no test exists, can't run the code), say so explicitly rather than claiming success.
+- **Verify (Standards):** When your task involves a code or system change, execute the project-specific build, linting and type-checking commands (e.g., 'tsc', 'npm run lint', 'ruff check .') that you have identified for this project (or obtained from the user). This ensures code quality and adherence to standards. Read-only or explanatory turns do not require verification.
+- **Report outcomes faithfully:** If tests fail, say so with the relevant output. If you did not run a verification step, say that rather than implying it succeeded. Never claim "all tests pass" when output shows failures, never suppress failing checks to manufacture a green result, and never characterize incomplete or broken work as done.
+
+**Key Principle:** Start with a reasonable approach based on available information, then adapt as you learn. Users prefer seeing progress quickly rather than waiting for perfect understanding.
+
+`;
+}
+
+/**
+ * Builds the default (non-override) base system prompt.
+ *
+ * Extracted so the same text can be produced with and without an output
+ * style: the QWEN_WRITE_SYSTEM_MD dump always wants the unstyled form.
+ */
+function buildDefaultBasePrompt(
+  interaction: { role: string; questions: string },
+  model: string | undefined,
+  outputStyle?: OutputStyleDefinition | null,
 ): string {
-  // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
-  // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
-  let systemMdEnabled = false;
-  let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
-  // Resolve the environment variable to get either a path or a switch value.
-  const systemMdResolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+  // A style with `keepCodingInstructions: false` drops exactly the
+  // software-engineering workflow section; every other section, including the
+  // safety rules in `getActionsSection`, is unaffected.
+  const softwareEngineeringTasks =
+    outputStyle?.keepCodingInstructions === false
+      ? ''
+      : getSoftwareEngineeringTasksSection();
 
-  // Proceed only if the environment variable is set and is not disabled.
-  if (systemMdResolution.value && !systemMdResolution.isDisabled) {
-    systemMdEnabled = true;
-
-    // We update systemMdPath to this new custom path.
-    if (!systemMdResolution.isSwitch) {
-      systemMdPath = systemMdResolution.value;
-    }
-
-    // require file to exist when override is enabled
-    if (!fs.existsSync(systemMdPath)) {
-      throw new Error(`missing system prompt file '${systemMdPath}'`);
-    }
-  }
-
-  const interaction = getInteractionModePrompt(interactionMode);
-  // A QWEN_SYSTEM_MD override replaces the base prompt verbatim and is
-  // intentionally not augmented with interaction-mode guidance: the override is
-  // a full, user-owned prompt, so injecting our mode wording would defeat the
-  // purpose of the override. Custom prompts are responsible for their own mode
-  // awareness (e.g. not instructing the model to ask questions in headless
-  // runs). `appendInstruction` below still applies in both branches.
-  //
-  // `QWEN_SYSTEM_IDENTITY_MD` only applies on the default-prompt branch and is
-  // ignored whenever `QWEN_SYSTEM_MD` is in effect (including empty-file clear).
-  let basePrompt: string;
-  if (systemMdEnabled) {
-    basePrompt = fs.readFileSync(systemMdPath, 'utf8');
-  } else {
-    const coreIdentity =
-      resolveCoreIdentityOverride() ??
-      getDefaultCoreIdentitySentence(interaction.role);
-    basePrompt = `
+  // A QWEN_SYSTEM_IDENTITY_MD override is inserted verbatim, so the styled
+  // variant applies only to the default identity sentence — the override is
+  // distributor-owned wording we must not rewrite.
+  const coreIdentity =
+    resolveCoreIdentityOverride() ??
+    getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
+  return `
 ${coreIdentity}
 
 # Core Mandates
@@ -324,18 +324,7 @@ When you create a todo list:
 
 # Primary Workflows
 
-## Software Engineering Tasks
-When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this iterative approach:
-- **Plan:** Use '${ToolNames.TODO_WRITE}' for complex, ambiguous, or multi-step work when visible progress tracking adds value. Keep the plan short and outcome-oriented; skip it for simple tasks unless the user explicitly requests a plan.
-- **Implement:** Begin implementing while gathering context as needed. Use available search and editing tools strategically, adhering to project conventions (see 'Core Mandates'). Do not add features, refactor code, or make "improvements" beyond what was asked. Don't add error handling, fallbacks, or validation for scenarios that can't happen—only validate at system boundaries (user input, external APIs). Don't create helpers, utilities, or abstractions for one-time operations. Three similar lines of code is better than a premature abstraction. Prefer editing existing files over creating new ones.
-- **Adapt:** Refine your approach as you discover new information or encounter obstacles. If a todo list exists, keep it current as the scope or approach changes. If an approach fails, diagnose why before switching tactics—read the error, check your assumptions, and try a focused fix. Don't retry blindly, but don't abandon a viable approach after a single failure.
-- **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures. Identify the correct test commands and frameworks by examining 'README' files, build/package configuration (e.g., 'package.json'), or existing test execution patterns. NEVER assume standard test commands. Before reporting a task complete, verify it actually works. If you can't verify (no test exists, can't run the code), say so explicitly rather than claiming success.
-- **Verify (Standards):** When your task involves a code or system change, execute the project-specific build, linting and type-checking commands (e.g., 'tsc', 'npm run lint', 'ruff check .') that you have identified for this project (or obtained from the user). This ensures code quality and adherence to standards. Read-only or explanatory turns do not require verification.
-- **Report outcomes faithfully:** If tests fail, say so with the relevant output. If you did not run a verification step, say that rather than implying it succeeded. Never claim "all tests pass" when output shows failures, never suppress failing checks to manufacture a green result, and never characterize incomplete or broken work as done.
-
-**Key Principle:** Start with a reasonable approach based on available information, then adapt as you learn. Users prefer seeing progress quickly rather than waiting for perfect understanding.
-
-- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.
+${softwareEngineeringTasks}- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.
 - When you see a <persisted-output> tag in a tool result, the full output was saved to disk because it was too large. Use the read_file tool to access the complete content if the preview is insufficient.
 
 ## New Applications
@@ -446,7 +435,71 @@ Your core function is efficient and safe assistance. Balance conciseness with th
 
 Interaction mode reminder: ${interaction.questions}
 `.trim();
+}
+
+/**
+ * Builds the stable base system prompt (identity, mandates, tool guidance).
+ *
+ * @param userMemory - Back-compat convenience slot for context files.
+ *   @deprecated Prefer composing layers explicitly via `assembleSystemPrompt`
+ *   (e.g. `assembleSystemPrompt({ base: getCoreSystemPrompt(undefined, model), contextFiles })`)
+ *   so a single site owns the layer order. Passing memory here *and* wrapping
+ *   the result in `assembleSystemPrompt({ contextFiles })` double-includes it.
+ * @param model - Model id, used to select model-specific prompt variants.
+ * @param appendInstruction - Back-compat convenience slot for the append prompt.
+ *   @deprecated Prefer the `appendPrompt` slot of `assembleSystemPrompt`.
+ * @param interactionMode - Interactive vs. headless prompt variant.
+ * @param outputStyle - Active output style, layered onto the base prompt.
+ *   Ignored when `QWEN_SYSTEM_MD` replaces the base prompt (see below).
+ */
+export function getCoreSystemPrompt(
+  userMemory?: string,
+  model?: string,
+  appendInstruction?: string,
+  interactionMode: SystemPromptInteractionMode = 'interactive',
+  outputStyle?: OutputStyleDefinition | null,
+): string {
+  // Learning requires a reply to its handoff, which a headless run cannot receive.
+  const effectiveOutputStyle =
+    interactionMode === 'headless' && outputStyle?.name === 'Learning'
+      ? undefined
+      : outputStyle;
+  // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
+  // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
+  let systemMdEnabled = false;
+  let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
+  // Resolve the environment variable to get either a path or a switch value.
+  const systemMdResolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+
+  // Proceed only if the environment variable is set and is not disabled.
+  if (systemMdResolution.value && !systemMdResolution.isDisabled) {
+    systemMdEnabled = true;
+
+    // We update systemMdPath to this new custom path.
+    if (!systemMdResolution.isSwitch) {
+      systemMdPath = systemMdResolution.value;
+    }
+
+    // require file to exist when override is enabled
+    if (!fs.existsSync(systemMdPath)) {
+      throw new Error(`missing system prompt file '${systemMdPath}'`);
+    }
   }
+
+  const interaction = getInteractionModePrompt(interactionMode);
+  // A QWEN_SYSTEM_MD override replaces the base prompt verbatim and is
+  // intentionally not augmented with interaction-mode guidance: the override is
+  // a full, user-owned prompt, so injecting our mode wording would defeat the
+  // purpose of the override. Custom prompts are responsible for their own mode
+  // awareness (e.g. not instructing the model to ask questions in headless
+  // runs). `appendInstruction` below still applies in both branches.
+  //
+  // `QWEN_SYSTEM_IDENTITY_MD` and the active output style only apply on the
+  // default-prompt branch and are ignored whenever `QWEN_SYSTEM_MD` is in
+  // effect (including empty-file clear).
+  const basePrompt = systemMdEnabled
+    ? fs.readFileSync(systemMdPath, 'utf8')
+    : buildDefaultBasePrompt(interaction, model, effectiveOutputStyle);
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
   const writeSystemMdResolution = resolvePathFromEnv(
@@ -461,11 +514,21 @@ Interaction mode reminder: ${interaction.questions}
       : writeSystemMdResolution.value;
 
     fs.mkdirSync(path.dirname(writePath), { recursive: true });
-    fs.writeFileSync(writePath, basePrompt);
+    // Dump the unstyled base. That file is meant to be reusable as a
+    // QWEN_SYSTEM_MD base, and a style is layered on top of a base — writing
+    // the styled form would apply the style twice once the dump is fed back.
+    fs.writeFileSync(
+      writePath,
+      systemMdEnabled
+        ? basePrompt
+        : buildDefaultBasePrompt(interaction, model, undefined),
+    );
   }
 
   return assembleSystemPrompt({
-    base: basePrompt,
+    base: systemMdEnabled
+      ? basePrompt
+      : applyOutputStyle(basePrompt, effectiveOutputStyle),
     contextFiles: userMemory,
     appendPrompt: appendInstruction,
   });
