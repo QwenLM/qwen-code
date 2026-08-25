@@ -2479,6 +2479,55 @@ describe('Session', () => {
     expect(mockChat.addHistory).not.toHaveBeenCalled();
   });
 
+  it('restores the adopted orphan when a hook blocks the retry resend before the send loop', async () => {
+    // R10-8: the push-count-gated catch sits INSIDE the send-loop try, but
+    // a UserPromptSubmit block returns BEFORE that try — an adopted retry
+    // whose resent prompt is blocked would leak the stripped orphan
+    // permanently (its record stays, its live entry is gone). The pre-send
+    // wrapper must re-add it on the way out.
+    const orphan: Content = {
+      role: 'user',
+      parts: [{ text: 'failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphan, 'original-prompt');
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphan]);
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        success: true,
+        output: { decision: 'block', reason: 'Blocked by hook' },
+      }),
+    };
+    mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+    mockChat.sendMessageStream = vi.fn();
+
+    const result = await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'failed prompt' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    // The stripped orphan came back despite never reaching the send loop.
+    expect(mockChat.addHistory).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: 'user',
+        parts: expect.arrayContaining([
+          expect.objectContaining({ text: 'failed prompt' }),
+        ]),
+      }),
+    );
+    const restored = vi
+      .mocked(mockChat.addHistory)
+      .mock.calls.map((call) => call[0])
+      .find((entry) => core.getApiHistoryPromptId(entry) === 'original-prompt');
+    expect(restored).toBeDefined();
+  });
+
   it('re-adds every stripped entry a no-adoption retry does not re-push', async () => {
     // Two stacked failed attempts leave two marked orphans; the retry
     // strips BOTH and fails closed on adoption (length !== 1). The resend

@@ -5247,7 +5247,8 @@ export class Session implements SessionContext {
                   retriedPromptText.length > 0 &&
                   (lastStrippedEntry.parts ?? []).some(
                     (part) =>
-                      'text' in part && part.text.trim() === retriedPromptText,
+                      typeof part.text === 'string' &&
+                      part.text.trim() === retriedPromptText,
                   );
                 if (lastStrippedIsRetriedPrompt) {
                   for (const entry of strippedRetryEntries.slice(0, -1)) {
@@ -5373,209 +5374,246 @@ export class Session implements SessionContext {
               return true;
             };
 
-            if (isRestoreAskUserQuestion) {
-              parts = [];
-            } else if (isContinue) {
-              // Non-null here: the `none` case returned early above, and both
-              // interruption branches assign a concrete part list.
-              parts = continuationParts!;
-            } else if (isSlashInput) {
-              // Handle slash command in ACP mode using capability-based filtering
-              const slashCommandResult = await handleSlashCommand(
-                inputText,
-                pendingSend,
-                this.config,
-                this.settings,
-                {
-                  // `/clear` swaps in a new Goal runtime under this
-                  // long-lived Session; without this the goal-state
-                  // subscription stays on the disposed instance.
-                  startNewSession: () => this.rebindGoalRuntimeForNewSession(),
-                },
-              );
+            // Declared outside the pre-send orphan-restore wrapper below:
+            // the Stop-hook handling after the send loop reads them too.
+            const hooksEnabled = !this.config.getDisableAllHooks?.();
+            const messageBus = this.config.getMessageBus?.();
 
-              if (
-                slashCommandName === 'advisor' &&
-                pendingSend.signal.aborted &&
-                slashCommandResult.type === 'message'
-              ) {
-                this.todoStopGuard.suspend();
-                logConversationFinishedEvent(
+            // R10-8: a retry/continuation strip above removed the user's
+            // entry from history, and the ONLY restore sites are the
+            // push-count-gated catch INSIDE the send loop below (throws)
+            // and the null-stream preserve (graceful returns). Several
+            // pre-send exits sit between the strip and that try — a
+            // UserPromptSubmit block or throw, #resolvePrompt throwing, a
+            // locally-handled slash return, an advisor cancel — and each
+            // would leak the stripped orphan permanently (its transcript
+            // record stays while the live entry is gone). Wrap the whole
+            // pre-send region so any such exit restores the orphan before
+            // leaving; `reachedSendLoop` distinguishes the normal
+            // fall-through into the send loop, where the catch/preserve
+            // sites take over.
+            let reachedSendLoop = false;
+            try {
+              if (isRestoreAskUserQuestion) {
+                parts = [];
+              } else if (isContinue) {
+                // Non-null here: the `none` case returned early above, and both
+                // interruption branches assign a concrete part list.
+                parts = continuationParts!;
+              } else if (isSlashInput) {
+                // Handle slash command in ACP mode using capability-based filtering
+                const slashCommandResult = await handleSlashCommand(
+                  inputText,
+                  pendingSend,
                   this.config,
-                  new ConversationFinishedEvent(
-                    this.config.getApprovalMode(),
-                    0,
-                  ),
+                  this.settings,
+                  {
+                    // `/clear` swaps in a new Goal runtime under this
+                    // long-lived Session; without this the goal-state
+                    // subscription stays on the disposed instance.
+                    startNewSession: () =>
+                      this.rebindGoalRuntimeForNewSession(),
+                  },
                 );
-                return { stopReason: 'cancelled' };
+
+                if (
+                  slashCommandName === 'advisor' &&
+                  pendingSend.signal.aborted &&
+                  slashCommandResult.type === 'message'
+                ) {
+                  this.todoStopGuard.suspend();
+                  logConversationFinishedEvent(
+                    this.config,
+                    new ConversationFinishedEvent(
+                      this.config.getApprovalMode(),
+                      0,
+                    ),
+                  );
+                  return { stopReason: 'cancelled' };
+                }
+
+                // Classify by the RESOLVED command, not the raw token: a
+                // custom command named `advisor` shadows the built-in and
+                // must keep its transcript records (R18-6). Only `/advisor`
+                // defers its user-message record to here — every other slash
+                // command was already recorded above, before its action ran.
+                // Retries included: the retry fresh-record branch skips
+                // advisor-named input, so this is the shadow's only record
+                // site when the strip yielded no adoptable identity. A retry
+                // that ADOPTED an identity re-pushes under the original
+                // attempt's record, and that attempt already recorded here
+                // (its push landed after this site) — recording again would
+                // land a second boundary for one positional turn.
+                const resolvedCommandInfo = slashCommandResult.resolvedCommand;
+                const shouldRecordSlashCommand = !(
+                  resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
+                  resolvedCommandInfo.name === 'advisor'
+                );
+                if (
+                  slashCommandName === 'advisor' &&
+                  shouldRecordSlashCommand &&
+                  goalTurn?.origin !== 'runtime' &&
+                  !(isRetry && resubmittedPromptIdentity !== undefined)
+                ) {
+                  const recorder = this.config.getChatRecordingService();
+                  if (promptDisplayText !== undefined) {
+                    recorder?.recordUserMessage(
+                      promptText,
+                      goalTurn?.permit,
+                      {
+                        displayText: promptDisplayText,
+                        hookContext: '',
+                      },
+                      promptId,
+                    );
+                  } else if (goalTurn) {
+                    recorder?.recordUserMessage(
+                      promptText,
+                      goalTurn.permit,
+                      undefined,
+                      promptId,
+                    );
+                  } else {
+                    recorder?.recordUserMessage(
+                      promptText,
+                      undefined,
+                      undefined,
+                      promptId,
+                    );
+                  }
+                }
+
+                try {
+                  parts = await this.#processSlashCommandResult(
+                    slashCommandResult,
+                    modelPromptBlocks,
+                    pendingSend.signal,
+                    onFullTurnModel,
+                    shouldRecordSlashCommand,
+                  );
+                } catch (error) {
+                  logConversationFinishedEvent(
+                    this.config,
+                    new ConversationFinishedEvent(
+                      this.config.getApprovalMode(),
+                      0,
+                    ),
+                  );
+                  throw error;
+                }
+
+                // If parts is null, the command was fully handled (e.g., /summary completed)
+                // Return early without sending to the model
+                if (parts === null) {
+                  logConversationFinishedEvent(
+                    this.config,
+                    new ConversationFinishedEvent(
+                      this.config.getApprovalMode(),
+                      0,
+                    ),
+                  );
+                  return { stopReason: 'end_turn' };
+                }
+              } else {
+                // Normal processing for non-slash commands. promptLast keeps the
+                // user's instruction the final, prominent part when referenced
+                // file/editor content is appended (issue: ACP + local qwen).
+                parts = await this.#resolvePrompt(
+                  modelPromptBlocks,
+                  pendingSend.signal,
+                  { promptLast: true, onFullTurnModel },
+                );
               }
 
-              // Classify by the RESOLVED command, not the raw token: a
-              // custom command named `advisor` shadows the built-in and
-              // must keep its transcript records (R18-6). Only `/advisor`
-              // defers its user-message record to here — every other slash
-              // command was already recorded above, before its action ran.
-              // Retries included: the retry fresh-record branch skips
-              // advisor-named input, so this is the shadow's only record
-              // site when the strip yielded no adoptable identity. A retry
-              // that ADOPTED an identity re-pushes under the original
-              // attempt's record, and that attempt already recorded here
-              // (its push landed after this site) — recording again would
-              // land a second boundary for one positional turn.
-              const resolvedCommandInfo = slashCommandResult.resolvedCommand;
-              const shouldRecordSlashCommand = !(
-                resolvedCommandInfo?.kind === CommandKind.BUILT_IN &&
-                resolvedCommandInfo.name === 'advisor'
-              );
+              // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
+              // A runtime continuation is machine-generated, not a user
+              // submission — the same reason `isContinue` is exempt. Firing
+              // the hook on one is also unrecoverable: a block returns before
+              // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
+              // branch, which re-queues the identical continuation. Nothing in
+              // that cycle can change the goal state, so it spins — no model
+              // call, one persisted transcript record per lap — until someone
+              // pauses or clears the goal.
+              const isRuntimeContinuation = goalTurn?.origin === 'runtime';
               if (
-                slashCommandName === 'advisor' &&
-                shouldRecordSlashCommand &&
-                goalTurn?.origin !== 'runtime' &&
-                !(isRetry && resubmittedPromptIdentity !== undefined)
+                !isContinue &&
+                !isRestoreAskUserQuestion &&
+                !isRuntimeContinuation &&
+                hooksEnabled &&
+                messageBus &&
+                this.config.hasHooksForEvent?.('UserPromptSubmit')
               ) {
-                const recorder = this.config.getChatRecordingService();
-                if (promptDisplayText !== undefined) {
-                  recorder?.recordUserMessage(
-                    promptText,
-                    goalTurn?.permit,
-                    {
-                      displayText: promptDisplayText,
-                      hookContext: '',
+                const response = await messageBus.request<
+                  HookExecutionRequest,
+                  HookExecutionResponse
+                >(
+                  {
+                    type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                    eventName: 'UserPromptSubmit',
+                    input: {
+                      prompt: promptText,
                     },
-                    promptId,
+                    signal: pendingSend.signal,
+                  },
+                  MessageBusType.HOOK_EXECUTION_RESPONSE,
+                );
+                const hookOutput = response.output
+                  ? createHookOutput('UserPromptSubmit', response.output)
+                  : undefined;
+
+                if (
+                  hookOutput?.isBlockingDecision() ||
+                  hookOutput?.shouldStopExecution()
+                ) {
+                  // Hook blocked the prompt - send notification to UI and return
+                  const blockReason =
+                    hookOutput?.getEffectiveReason() || 'No reason provided';
+                  await this.messageEmitter.emitAgentMessage(
+                    `✗ **UserPromptSubmit blocked**: ${blockReason}`,
                   );
-                } else if (goalTurn) {
-                  recorder?.recordUserMessage(
-                    promptText,
-                    goalTurn.permit,
-                    undefined,
-                    promptId,
-                  );
-                } else {
-                  recorder?.recordUserMessage(
-                    promptText,
-                    undefined,
-                    undefined,
-                    promptId,
-                  );
+                  return { stopReason: 'end_turn' };
+                }
+
+                // Add additional context from hooks to the request, wrapped in
+                // the reserved tag so it stays distinguishable from
+                // user-authored text (same shape as the interactive path).
+                const additionalContext = hookOutput?.getAdditionalContext();
+                if (additionalContext) {
+                  parts = [
+                    ...parts,
+                    { text: wrapUserPromptSubmitContext(additionalContext) },
+                  ];
                 }
               }
 
-              try {
-                parts = await this.#processSlashCommandResult(
-                  slashCommandResult,
-                  modelPromptBlocks,
-                  pendingSend.signal,
-                  onFullTurnModel,
-                  shouldRecordSlashCommand,
-                );
-              } catch (error) {
-                logConversationFinishedEvent(
-                  this.config,
-                  new ConversationFinishedEvent(
-                    this.config.getApprovalMode(),
-                    0,
-                  ),
-                );
-                throw error;
+              if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
+                this.#resetTodoStopGuardBackgroundLineage();
               }
-
-              // If parts is null, the command was fully handled (e.g., /summary completed)
-              // Return early without sending to the model
-              if (parts === null) {
-                logConversationFinishedEvent(
-                  this.config,
-                  new ConversationFinishedEvent(
-                    this.config.getApprovalMode(),
-                    0,
-                  ),
-                );
-                return { stopReason: 'end_turn' };
-              }
-            } else {
-              // Normal processing for non-slash commands. promptLast keeps the
-              // user's instruction the final, prominent part when referenced
-              // file/editor content is appended (issue: ACP + local qwen).
-              parts = await this.#resolvePrompt(
-                modelPromptBlocks,
-                pendingSend.signal,
-                { promptLast: true, onFullTurnModel },
+              this.config.startActiveTodoWorkChain(
+                promptId,
+                continuesCurrentWorkChain
+                  ? this.activeTodoWorkChainPromptId
+                  : undefined,
               );
-            }
-
-            // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
-            const hooksEnabled = !this.config.getDisableAllHooks?.();
-            const messageBus = this.config.getMessageBus?.();
-            // A runtime continuation is machine-generated, not a user
-            // submission — the same reason `isContinue` is exempt. Firing
-            // the hook on one is also unrecoverable: a block returns before
-            // `modelStarted`, so `#settleGoalTurn` takes the `releaseTurn`
-            // branch, which re-queues the identical continuation. Nothing in
-            // that cycle can change the goal state, so it spins — no model
-            // call, one persisted transcript record per lap — until someone
-            // pauses or clears the goal.
-            const isRuntimeContinuation = goalTurn?.origin === 'runtime';
-            if (
-              !isContinue &&
-              !isRestoreAskUserQuestion &&
-              !isRuntimeContinuation &&
-              hooksEnabled &&
-              messageBus &&
-              this.config.hasHooksForEvent?.('UserPromptSubmit')
-            ) {
-              const response = await messageBus.request<
-                HookExecutionRequest,
-                HookExecutionResponse
-              >(
-                {
-                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
-                  eventName: 'UserPromptSubmit',
-                  input: {
-                    prompt: promptText,
-                  },
-                  signal: pendingSend.signal,
-                },
-                MessageBusType.HOOK_EXECUTION_RESPONSE,
-              );
-              const hookOutput = response.output
-                ? createHookOutput('UserPromptSubmit', response.output)
-                : undefined;
-
-              if (
-                hookOutput?.isBlockingDecision() ||
-                hookOutput?.shouldStopExecution()
-              ) {
-                // Hook blocked the prompt - send notification to UI and return
-                const blockReason =
-                  hookOutput?.getEffectiveReason() || 'No reason provided';
-                await this.messageEmitter.emitAgentMessage(
-                  `✗ **UserPromptSubmit blocked**: ${blockReason}`,
-                );
-                return { stopReason: 'end_turn' };
-              }
-
-              // Add additional context from hooks to the request, wrapped in
-              // the reserved tag so it stays distinguishable from
-              // user-authored text (same shape as the interactive path).
-              const additionalContext = hookOutput?.getAdditionalContext();
-              if (additionalContext) {
-                parts = [
-                  ...parts,
-                  { text: wrapUserPromptSubmitContext(additionalContext) },
-                ];
+              this.activeTodoWorkChainPromptId = promptId;
+              reachedSendLoop = true;
+            } finally {
+              if (!reachedSendLoop && strippedOrphanEntries) {
+                // Nothing between the strip and here pushes user content
+                // (pushes happen only inside the send loop), so the gate
+                // always passes on these exits — it is kept verbatim with
+                // the catch's for symmetry and defense.
+                if (
+                  (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) <=
+                  orphanPushCountSnapshot
+                ) {
+                  for (const entry of strippedOrphanEntries) {
+                    this.#getCurrentChat().addHistory(entry);
+                  }
+                  strippedOrphanEntries = null;
+                }
               }
             }
-
-            if (!continuesCurrentWorkChain && !this.todoStopGuard.enabled) {
-              this.#resetTodoStopGuardBackgroundLineage();
-            }
-            this.config.startActiveTodoWorkChain(
-              promptId,
-              continuesCurrentWorkChain
-                ? this.activeTodoWorkChainPromptId
-                : undefined,
-            );
-            this.activeTodoWorkChainPromptId = promptId;
 
             // Snapshot file state before this turn. Placed after
             // slash-command and hook early-returns so locally handled commands
