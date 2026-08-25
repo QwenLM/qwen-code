@@ -1158,45 +1158,50 @@ describe('CoreToolScheduler', () => {
     ).toBe(0);
   });
 
-  it('does not leak the path-unescape rewrite into the caller-owned request args', async () => {
-    const readExecute = vi.fn().mockResolvedValue({
-      llmContent: 'read',
-      returnDisplay: 'read',
-    });
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName: new Map([
-          [
-            ToolNames.READ_FILE,
-            new MockTool({ name: ToolNames.READ_FILE, execute: readExecute }),
-          ],
-        ]),
+  // `unescapePath` is an intentional no-op on win32 (backslashes are path
+  // separators there), so the rewrite this test pins never fires.
+  it.skipIf(process.platform === 'win32')(
+    'does not leak the path-unescape rewrite into the caller-owned request args',
+    async () => {
+      const readExecute = vi.fn().mockResolvedValue({
+        llmContent: 'read',
+        returnDisplay: 'read',
       });
-    // Callers pass args that may alias the model-emitted functionCall part
-    // stored in chat history; the scheduler's in-place PATH_ARG_KEYS
-    // unescape must land on its own cloned copy, or the rewrite leaks into
-    // history and skews the duplicate-replay fingerprints derived from it.
-    const callerArgs = { file_path: '/tmp/my\\ docs/a.txt' };
-    const callerRequest = {
-      callId: 'escaped-path-call',
-      name: ToolNames.READ_FILE,
-      args: callerArgs,
-      isClientInitiated: false,
-      prompt_id: 'prompt-escaped-path',
-    };
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: new Map([
+            [
+              ToolNames.READ_FILE,
+              new MockTool({ name: ToolNames.READ_FILE, execute: readExecute }),
+            ],
+          ]),
+        });
+      // Callers pass args that may alias the model-emitted functionCall part
+      // stored in chat history; the scheduler's in-place PATH_ARG_KEYS
+      // unescape must land on its own cloned copy, or the rewrite leaks into
+      // history and skews the duplicate-replay fingerprints derived from it.
+      const callerArgs = { file_path: '/tmp/my\\ docs/a.txt' };
+      const callerRequest = {
+        callId: 'escaped-path-call',
+        name: ToolNames.READ_FILE,
+        args: callerArgs,
+        isClientInitiated: false,
+        prompt_id: 'prompt-escaped-path',
+      };
 
-    await scheduler.schedule([callerRequest], new AbortController().signal);
-    await vi.waitFor(() => {
-      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
-    });
+      await scheduler.schedule([callerRequest], new AbortController().signal);
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+      });
 
-    const completedCalls = onAllToolCallsComplete.mock
-      .calls[0][0] as CompletedToolCall[];
-    expect(completedCalls[0].request.args['file_path']).toBe(
-      '/tmp/my docs/a.txt',
-    );
-    expect(callerArgs.file_path).toBe('/tmp/my\\ docs/a.txt');
-  });
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as CompletedToolCall[];
+      expect(completedCalls[0].request.args['file_path']).toBe(
+        '/tmp/my docs/a.txt',
+      );
+      expect(callerArgs.file_path).toBe('/tmp/my\\ docs/a.txt');
+    },
+  );
 
   it('clears the display list before awaiting the completion callback (#9420)', async () => {
     // Regression: since v0.21.13 (#9121) the TUI's completion callback awaits

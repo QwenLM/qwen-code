@@ -6143,7 +6143,7 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async () => {
+  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async (ctx) => {
     const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     const tempDir = await mkdtemp(path.join(os.tmpdir(), 'auto-memory-cache-'));
     const projectRoot = path.join(tempDir, 'project');
@@ -6160,6 +6160,32 @@ describe('Server Config (config.ts)', () => {
     await mkdir(path.dirname(userIndexPath), { recursive: true });
     await writeFile(managedIndexPath, '# managed memory\n', 'utf-8');
     await writeFile(userIndexPath, '# user memory\n', 'utf-8');
+
+    // FileReadCache keys entries by dev:ino. On volumes where distinct
+    // files report the same inode, the two index records collide under one
+    // key and the second record overwrites the first's fingerprint, so the
+    // managed index would be checked against the user index's stats. The
+    // seeding this test pins only makes sense where inode identity is real;
+    // skip where the volume cannot provide it.
+    const [managedStats, userStats] = await Promise.all([
+      stat(managedIndexPath),
+      stat(userIndexPath),
+    ]);
+    if (
+      Number(managedStats.ino) === 0 ||
+      Number(userStats.ino) === 0 ||
+      (managedStats.dev === userStats.dev && managedStats.ino === userStats.ino)
+    ) {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+      ctx.skip();
+      return;
+    }
 
     try {
       const config = new Config({

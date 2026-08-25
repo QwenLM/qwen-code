@@ -47,7 +47,11 @@ describe('extension Git credential storage', () => {
     const selectorContent = await fs.readFile(selectorPath, 'utf8');
     expect(selectorContent).not.toContain('user');
     expect(selectorContent).not.toContain('fine-grained-token');
-    expect((await fs.stat(selectorPath)).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX permission bits; the credential read side does
+    // not rely on the file mode.
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(selectorPath)).mode & 0o777).toBe(0o600);
+    }
     await expect(resolveStoredGitCredential(extensionDir)).resolves.toEqual({
       credential: { username: 'user', password: 'fine-grained-token' },
       selector: prepared.selector,
