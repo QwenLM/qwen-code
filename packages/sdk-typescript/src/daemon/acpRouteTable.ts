@@ -12,9 +12,11 @@
 // prevents route inconsistencies between the two transport variants.
 // ---------------------------------------------------------------------------
 
-import { isRecord } from './acpTransportUtils.js';
-
 const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 export interface RouteMapping {
   method: string;
