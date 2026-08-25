@@ -135,12 +135,13 @@ describe('discoverProviderModels', () => {
     ]);
   });
 
-  it('skips ids with unassigned or private-use code points', async () => {
+  it('skips ids with unassigned, private-use, or surrogate code points', async () => {
     fetchWithPolicyMock.mockResolvedValue(
       response({
         data: [
           { id: 'unassigned\u2065point' },
           { id: 'private\ue000use' },
+          { id: 'surrogate\ud800point' },
           { id: 'good-model' },
         ],
       }),
