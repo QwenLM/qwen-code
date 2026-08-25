@@ -265,6 +265,18 @@ function lookupRecordedHost(
 }
 
 /**
+ * The structural class of a write refusal. The advice at the submit call
+ * site branches on THIS, never on the refusal text: `why` embeds the
+ * operator's verbatim recorded arguments (JSON.stringify of the raw
+ * record), and any marker string can itself appear inside that quoted
+ * record — text that embeds operator input cannot classify itself.
+ */
+export type ReviewWriteRefusalClass =
+  | 'topology'
+  | 'comment-not-requested'
+  | 'unbound';
+
+/**
  * Exactly three things authorise a public write, and all are facts rather than
  * impressions: `--comment` in the arguments the user typed (re-parsed from the
  * CLI's verbatim record), the standing `review.comment` setting, or
@@ -275,6 +287,12 @@ function lookupRecordedHost(
 export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   ok: boolean;
   why: string;
+  /**
+   * The refusal class — present on every refusal, absent on success. See
+   * `ReviewWriteRefusalClass` for why the caller branches on this instead
+   * of matching `why`.
+   */
+  cls?: ReviewWriteRefusalClass;
   /**
    * The host the recorded target names, when it names one: a pr-url target
    * carries it; a bare pr-number supplies a recorded `--host` flag or none.
@@ -343,6 +361,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     // a plain re-run of the review fixes that — typing `--comment` does not.
     return {
       ok: false,
+      cls: req.defaultComment === true ? 'unbound' : 'comment-not-requested',
       why:
         req.defaultComment === true
           ? `no review arguments were recorded at ${path}, so no recorded ` +
@@ -364,6 +383,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
       verdict.comment.requested || req.defaultComment === true;
     return {
       ok: false,
+      cls: commentRequested ? 'unbound' : 'comment-not-requested',
       why: commentRequested
         ? `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
           'pull request, so they cannot authorise posting to one'
@@ -384,6 +404,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   if (authorisedPr === undefined) {
     return {
       ok: false,
+      cls: 'unbound',
       why:
         `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
         'pull request, so they cannot authorise posting to one',
@@ -392,6 +413,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   if (authorisedPr !== req.pr) {
     return {
       ok: false,
+      cls: 'unbound',
       why:
         `the review arguments authorise pull request #${authorisedPr}, but ` +
         `this submission targets #${req.pr}`,
@@ -403,6 +425,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
       if (authorisedRepo.toLowerCase() !== req.repo.toLowerCase()) {
         return {
           ok: false,
+          cls: 'unbound',
           why:
             `the review arguments authorise ${authorisedRepo}, but this ` +
             `submission targets ${req.repo}`,
@@ -429,6 +452,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     if (!hostUnasserted && !hostsEquivalent(t.host.toLowerCase(), writeHost)) {
       return {
         ok: false,
+        cls: 'unbound',
         why:
           `the review arguments authorise ${t.host}, but this submission ` +
           `targets ${req.host ?? 'github.com'}`,
@@ -444,6 +468,7 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     // --comment would not lift the refusal while minimal stands.
     return {
       ok: false,
+      cls: 'topology',
       why:
         `the review arguments (${JSON.stringify(raw.trim())}) ran with ` +
         '`--topology minimal`, which is terminal-only and cannot authorise ' +
