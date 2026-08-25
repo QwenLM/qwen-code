@@ -13,10 +13,15 @@ import { vi } from 'vitest';
  * hook tests so the contract has exactly one home — when it evolves,
  * updating this file updates both suites at once (#9844 review).
  *
- * `abortTelemetrySwap` models the real boolean return: true when the abort
- * settled an open transaction (an undo applied), false when nothing was
- * open. Modeling it makes "abort ran but restored nothing" observable —
- * the no-op case a stateless fake cannot distinguish from a restore.
+ * `abortTelemetrySwap` models HALF of the real boolean return: true when a
+ * transaction was open, false when nothing was open. The real client
+ * additionally returns false when the open transaction never armed an undo
+ * ("abort with an open but unarmed transaction is a no-op" in
+ * client.telemetrySwap.test.ts) — the fake cannot observe initialize()'s
+ * replay decision, so it over-approximates. Tests must therefore not
+ * assert the true return for shapes where the forward initialize() never
+ * ran; assert the call counts and the commit-vs-abort choice instead
+ * (#9844 review).
  */
 export function makeSwapSlotClient() {
   let open = false;

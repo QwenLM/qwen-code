@@ -693,8 +693,8 @@ export class GeminiClient {
    * The swap failed and core rolled back: restore the usage aggregate (and
    * the two affected session buckets) to the state captured before this
    * swap's replay. Overwrites rather than subtracts, so it stays correct
-   * when the rollback's own re-`initialize()` (the `/branch` path) has
-   * already replayed something else on top.
+   * when the rollback's own re-`initialize()` (the `/branch` and `/resume`
+   * paths) has already replayed something else on top.
    *
    * Also forgets `initializedSessionId` when it still names the abandoned
    * INCOMING session: undoing the replay without forgetting it would make a

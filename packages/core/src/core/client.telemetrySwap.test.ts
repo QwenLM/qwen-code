@@ -99,14 +99,14 @@ function makeEnv() {
     seedResumeTokenCounts: vi.fn(),
     setLastPromptTokenCount: vi.fn(),
   } as unknown as GeminiChat;
-  vi.spyOn(client, 'startChat').mockImplementation(async function (
-    this: GeminiClient,
-  ) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (this as any).chat = fakeChat;
-    return fakeChat;
-  });
-  return { config, client };
+  const startChat = vi
+    .spyOn(client, 'startChat')
+    .mockImplementation(async function (this: GeminiClient) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this as any).chat = fakeChat;
+      return fakeChat;
+    });
+  return { config, client, startChat };
 }
 
 describe('GeminiClient telemetry swap transaction (#9833)', () => {
@@ -222,6 +222,22 @@ describe('GeminiClient telemetry swap transaction (#9833)', () => {
     const bucketA = uiTelemetryService.getMetricsForSession(SESSION_A);
     expect(bucketA.models['test-model']?.api.totalRequests).toBe(2);
     expect(bucketA.skills?.totalCalls).toBe(1);
+
+    // The kept initializedSessionId is the load-bearing part of the fix:
+    // a follow-up same-session initialize — the /resume rollback shape
+    // (#9844 review), or /resume of the session the user is already on —
+    // early-returns instead of re-replaying A's stored telemetry on top of
+    // the live aggregate (a double count) and wiping A's never-persisted
+    // state via resetSession.
+    await client.initialize();
+    expect(totalRequests()).toBe(2);
+    expect(
+      uiTelemetryService.getMetricsForSession(SESSION_A).models['test-model']
+        ?.api.totalRequests,
+    ).toBe(2);
+    expect(
+      uiTelemetryService.getMetricsForSession(SESSION_A).skills?.totalCalls,
+    ).toBe(1);
   });
 
   it('same-session initialize early-returns and arms nothing', async () => {
@@ -342,7 +358,7 @@ describe('GeminiClient telemetry swap transaction (#9833)', () => {
     // would skip the early return and re-replay its stored telemetry on
     // top of the live aggregate — a permanent double count, plus the loss
     // of the bucket's never-persisted state (#9844 review).
-    const { config, client } = makeEnv();
+    const { config, client, startChat } = makeEnv();
 
     config.swap(SESSION_A, { conversation: conversationWith(100) });
     await client.initialize();
@@ -350,16 +366,22 @@ describe('GeminiClient telemetry swap transaction (#9833)', () => {
     uiTelemetryService.recordSkillInvocation('test-skill', true, SESSION_A);
     expect(totalRequests()).toBe(2);
 
-    // Step 1: /resume B fails AFTER its forward replay. The /resume
-    // rollback puts core back WITHOUT re-initializing; abort restores and
-    // clears initializedSessionId (it still names the abandoned B) —
-    // leaving the client initialized-but-unaware, the precondition for the
-    // trap below.
+    // Step 1: /resume B fails AFTER its forward replay, and the rollback's
+    // own re-initialize of A fails too (startChat rejects), so
+    // initializedSessionId still names the abandoned B; abort restores and
+    // clears it — leaving the client initialized-but-unaware, the
+    // precondition for the trap below. (A rollback re-initialize that
+    // SUCCEEDS sets initializedSessionId back to A, which abort then keeps
+    // — see 'the rollback re-initialize does not re-arm'.)
     expect(client.beginTelemetrySwap()).toBe(true);
     config.swap(SESSION_B, { conversation: conversationWith(100, SESSION_B) });
     await client.initialize();
     expect(totalRequests()).toBe(3);
-    config.swap(SESSION_A); // hook rollback: startNewSession(old), no initialize
+    config.swap(SESSION_A, { conversation: conversationWith(100) });
+    startChat.mockRejectedValueOnce(new Error('rollback re-init failed'));
+    await expect(client.initialize()).rejects.toThrow(
+      'rollback re-init failed',
+    );
     expect(client.abortTelemetrySwap()).toBe(true);
     expect(totalRequests()).toBe(2);
 

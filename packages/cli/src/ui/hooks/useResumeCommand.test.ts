@@ -867,6 +867,7 @@ describe('useResumeCommand', () => {
   });
 
   it('rolls core back when persisted Goal state is malformed', async () => {
+    resumeMocks.reset();
     const startNewSession = vi.fn();
     const geminiClient = makeSwapSlotClient();
     const goalFailure = new Error('unsupported Goal lifecycle record');
@@ -923,7 +924,8 @@ describe('useResumeCommand', () => {
       await result.current.handleResume('new-session-id');
     });
 
-    // Core was swapped to the new session, then rolled back to the old one.
+    // Core was swapped to the new session, then rolled back to the old one
+    // with its persisted state reloaded for the rollback re-initialize.
     expect(config.startNewSession).toHaveBeenNthCalledWith(
       1,
       'new-session-id',
@@ -932,7 +934,7 @@ describe('useResumeCommand', () => {
     expect(config.startNewSession).toHaveBeenNthCalledWith(
       2,
       'old-session-id',
-      undefined,
+      expect.objectContaining({ conversation: expect.anything() }),
     );
     expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
       'old-session-id',
@@ -951,14 +953,118 @@ describe('useResumeCommand', () => {
       }),
       expect.any(Number),
     );
-    expect(geminiClient.initialize).not.toHaveBeenCalled();
-    // The rollback aborted the transaction this attempt opened. The fake
-    // models the real boolean return, so "abort ran and restored" (true) is
-    // observable here — and "abort ran but restored nothing" (false) would
-    // be caught if the settle ever degraded to a no-op (#9844 review).
+    // The forward initialize never ran (the Goal runtime rejected before
+    // it); the single call is the rollback's re-initialize of the old
+    // session, which re-hydrates the client against the restored session
+    // the same way /branch's rollback does (#9844 review).
+    expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
+    // The rollback aborted the transaction this attempt opened. The return
+    // value is deliberately NOT asserted: the failure landed before the
+    // forward initialize(), so the real client armed nothing and returns
+    // false here ("abort with an open but unarmed transaction is a no-op"
+    // in client.telemetrySwap.test.ts) — the slot fake over-approximates
+    // that case (see mock-swap-slot-client.ts). The load-bearing hook
+    // invariants: abort ran exactly once and commit never did.
+    expect(geminiClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(geminiClient.commitTelemetrySwap).not.toHaveBeenCalled();
+  });
+
+  it('re-initializes the outgoing session when resume fails after initialize', async () => {
+    // The swap fails AFTER the forward initialize() replayed the incoming
+    // session (here: background-agent recovery rejects). Rolling core back
+    // must re-initialize the client against the outgoing session — the same
+    // shape as /branch's rollback. Without it the client's chat stays on
+    // the abandoned session's replayed history and the abort clears
+    // initializedSessionId, so a follow-up same-session /resume of the
+    // outgoing session skips initialize()'s early return: its replay wipes
+    // the outgoing session's live bucket (skill invocations are never
+    // persisted) and re-adds its stored telemetry on top of the aggregate
+    // that already contains it — the #9833 double-count reintroduced
+    // (#9844 review).
+    resumeMocks.reset();
+
+    const geminiClient = makeSwapSlotClient();
+    const resumeFailure = new Error('background agent recovery failed');
+    const config = {
+      ...makeSwapSlotConfig(geminiClient),
+      loadPausedBackgroundAgents: vi
+        .fn()
+        .mockRejectedValueOnce(resumeFailure)
+        .mockResolvedValue([]),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: mockSettings,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('new-session-id');
+    });
+
+    // The failure surfaced...
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(
+          /Failed to resume session.*background agent recovery failed/,
+        ),
+      }),
+      expect.any(Number),
+    );
+    // Core was swapped to the new session, then rolled back to the old one
+    // with its persisted state reloaded for the re-initialize.
+    expect(config.startNewSession).toHaveBeenNthCalledWith(
+      1,
+      'new-session-id',
+      expect.any(Object),
+    );
+    expect(config.startNewSession).toHaveBeenNthCalledWith(
+      2,
+      'old-session-id',
+      expect.objectContaining({ conversation: expect.anything() }),
+    );
+    // The forward initialize ran, and the rollback re-initialized the
+    // outgoing session (a reverted fix leaves the call count at 1).
+    expect(geminiClient.initialize).toHaveBeenCalledTimes(2);
+    // The outgoing session's paused agents were reloaded after rollback.
+    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+      'old-session-id',
+    );
+    // UI never swapped.
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.clearItems).not.toHaveBeenCalled();
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+    // The rollback aborted the armed transaction and never committed it.
+    // The true return is safe to assert here: the forward initialize ran,
+    // so the real client armed its undo and also returns true.
     expect(geminiClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
     expect(geminiClient.abortTelemetrySwap).toHaveReturnedWith(true);
     expect(geminiClient.commitTelemetrySwap).not.toHaveBeenCalled();
+
+    // The released slot admits the follow-up same-session resume of the
+    // outgoing session (the double-count trigger): it is NOT rejected with
+    // "already in progress" and settles cleanly.
+    await act(async () => {
+      await result.current.handleResume('old-session-id');
+    });
+    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(historyManager.addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
   });
 
   it('settles the swap slot when resume fails before the core swap', async () => {

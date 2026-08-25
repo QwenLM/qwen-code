@@ -9,6 +9,7 @@ import {
   SessionService,
   buildSessionRecoveryPlan,
   type Config,
+  type ResumedSessionData,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -261,7 +262,34 @@ export function useResumeCommand(
           // orphaned session JSONL while UI still shows the old session.
           try {
             resetBackgroundStateForSessionSwitch(config);
-            config.startNewSession(oldSessionId, undefined);
+            // Best-effort snapshot of the old session's persisted state so
+            // the re-initialize below re-hydrates the chat history from its
+            // replay branch. undefined still rolls back sessionId +
+            // recorder (the load-bearing invariant); the re-initialize then
+            // starts an empty chat on the old session — still safer than
+            // leaving the client on the abandoned session's replayed
+            // history.
+            let prevSessionData: ResumedSessionData | undefined;
+            try {
+              prevSessionData = await new SessionService(
+                config.getTargetDir(),
+              ).loadSession(oldSessionId);
+            } catch {
+              // Best-effort — see above.
+            }
+            config.startNewSession(oldSessionId, prevSessionData);
+            // Re-hydrate the client against the restored session, mirroring
+            // /branch's rollback: without it the client's chat stays on the
+            // abandoned session's replayed history, and the abort below
+            // clears initializedSessionId (it names the abandoned session) —
+            // a same-session /resume of the old session would then skip
+            // initialize()'s early return, whose replay wipes the old
+            // session's live bucket (skill invocations are never persisted)
+            // and re-adds its stored telemetry on top of the aggregate that
+            // already contains it (#9844 review). Best-effort: if this
+            // throws too, sessionId + recorder are still back on the old
+            // session, which is the load-bearing invariant.
+            await config.getGeminiClient()?.initialize?.();
             // The forward path cleared the old session's in-memory
             // background agents (resetBackgroundStateForSessionSwitch above,
             // ~L158) before swapping core. After rolling core back to the old
@@ -284,8 +312,10 @@ export function useResumeCommand(
           // Core is back on the old session: put the usage aggregate (and
           // the two affected session buckets) back to pre-swap state,
           // dropping the abandoned session's replayed history. Must run
-          // AFTER the rollback above — restore overwrites, so anything the
-          // rollback itself replayed is correctly superseded (#9833).
+          // AFTER the rollback's re-initialize above — that re-initialize
+          // replays the old session's history on top of the abandoned
+          // session's replay, and restore overwrites rather than subtracts,
+          // so the final state is exactly pre-swap (#9833).
           config.getGeminiClient()?.abortTelemetrySwap?.();
         } else if (swapOpened) {
           // Either the core swap never happened (nothing was replayed — the

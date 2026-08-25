@@ -706,9 +706,11 @@ describe('useBranchCommand', () => {
     // against the parent session.
     expect(geminiClient.initialize).toHaveBeenCalledTimes(2);
     // The rollback aborted the transaction this attempt opened — never
-    // committed it. The fake models the real boolean return, so "abort ran
-    // and restored" (true) is observable here; a false return would mean
-    // "abort ran but restored nothing" (#9844 review).
+    // committed it. The true return is safe to assert here: initialize ran
+    // during the open transaction, so the real client armed an undo and
+    // also returns true — unlike the open-but-unarmed shape, which the
+    // slot fake over-approximates (#9844 review; see
+    // mock-swap-slot-client.ts).
     expect(geminiClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
     expect(geminiClient.abortTelemetrySwap).toHaveReturnedWith(true);
     expect(geminiClient.commitTelemetrySwap).not.toHaveBeenCalled();
