@@ -10,6 +10,7 @@ import {
   FileCode2Icon,
   HistoryIcon,
   PlayIcon,
+  PlusIcon,
   RefreshCwIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
@@ -24,13 +25,17 @@ type SavedWorkflow = NonNullable<
   DaemonSessionSupportedCommandsStatus['savedWorkflows']
 >[number];
 
+interface WorkflowRunsPageProps {
+  onCreateViaChat: () => void;
+}
+
 function isActiveStatus(
   status: DaemonSessionTaskWithWorkflowStatus['status'],
 ): boolean {
   return status === 'running' || status === 'pausing' || status === 'paused';
 }
 
-export function WorkflowRunsPage() {
+export function WorkflowRunsPage({ onCreateViaChat }: WorkflowRunsPageProps) {
   const { t } = useI18n();
   const actions = useActions();
   const connection = useConnection();
@@ -172,17 +177,23 @@ export function WorkflowRunsPage() {
               <Badge variant="secondary">{counts.history}</Badge>
             </TabsTrigger>
           </TabsList>
-          <Button
-            type="button"
-            variant="outline"
-            size="icon-sm"
-            onClick={() => void reload()}
-            disabled={loading || !connection.sessionId}
-            aria-label={t('workflowRuns.refresh')}
-            title={t('workflowRuns.refresh')}
-          >
-            <RefreshCwIcon />
-          </Button>
+          <div className={styles.toolbarActions}>
+            <Button type="button" size="sm" onClick={onCreateViaChat}>
+              <PlusIcon data-icon="inline-start" />
+              {t('workflowRuns.create')}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-sm"
+              onClick={() => void reload()}
+              disabled={loading || !connection.sessionId}
+              aria-label={t('workflowRuns.refresh')}
+              title={t('workflowRuns.refresh')}
+            >
+              <RefreshCwIcon />
+            </Button>
+          </div>
         </div>
 
         {loadError && (

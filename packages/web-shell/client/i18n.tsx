@@ -1100,6 +1100,7 @@ const EN: Messages = {
   'workflowRuns.saved': 'Saved',
   'workflowRuns.active': 'Running',
   'workflowRuns.history': 'History',
+  'workflowRuns.create': 'New',
   'workflowRuns.refresh': 'Refresh',
   'workflowRuns.loading': 'Loading workflow runs…',
   'workflowRuns.loadFailed': 'Failed to load workflow runs.',
@@ -1109,7 +1110,7 @@ const EN: Messages = {
   'workflowRuns.emptyHistory': 'No saved workflow runs yet.',
   'workflowRuns.emptySaved': 'No reusable workflows saved yet.',
   'workflowRuns.emptySavedHint':
-    'Save a completed run from the terminal, or add a .js file under .qwen/workflows.',
+    'Select New to create one with Qwen Code, save a completed run from the terminal, or add a .js file under .qwen/workflows.',
   'workflowRuns.project': 'Project',
   'workflowRuns.user': 'User',
   'workflowRuns.projectDescription': 'Available in this project',
@@ -4209,6 +4210,7 @@ const ZH: Messages = {
   'workflowRuns.saved': '已保存',
   'workflowRuns.active': '运行中',
   'workflowRuns.history': '历史',
+  'workflowRuns.create': '新建',
   'workflowRuns.refresh': '刷新',
   'workflowRuns.loading': '正在加载工作流…',
   'workflowRuns.loadFailed': '工作流加载失败。',
@@ -4217,7 +4219,7 @@ const ZH: Messages = {
   'workflowRuns.emptyHistory': '暂时没有已保存的工作流记录。',
   'workflowRuns.emptySaved': '还没有可复用的工作流。',
   'workflowRuns.emptySavedHint':
-    '可以在终端中保存一次已完成的运行，或在 .qwen/workflows 下添加 .js 文件。',
+    '可以点击“新建”让 Qwen Code 创建、在终端中保存一次已完成的运行，或在 .qwen/workflows 下添加 .js 文件。',
   'workflowRuns.project': '项目',
   'workflowRuns.user': '用户',
   'workflowRuns.projectDescription': '仅在当前项目中可用',

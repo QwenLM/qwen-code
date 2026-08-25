@@ -484,6 +484,9 @@ const {
         onCreateGoal?: (condition: string) => Promise<void>;
         onOpenSession?: (sessionId: string) => void;
       } | null,
+      latestWorkflowRunsProps: null as {
+        onCreateViaChat?: () => void;
+      } | null,
     },
     rawEnqueuePrompt: vi.fn(() => true),
     queuedTexts: [] as string[],
@@ -1604,10 +1607,12 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
 vi.doMock('./components/workflows/WorkflowRunsPage', async () => {
   const React = await import('react');
   return {
-    WorkflowRunsPage: () =>
-      React.createElement('div', {
+    WorkflowRunsPage: (props: { onCreateViaChat?: () => void }) => {
+      testState.latestWorkflowRunsProps = props;
+      return React.createElement('div', {
         'data-testid': 'workflow-runs-content',
-      }),
+      });
+    },
   };
 });
 vi.doMock('./components/extensions/ExtensionsManagerPage', async () => {
@@ -5091,6 +5096,7 @@ beforeEach(() => {
   testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
+  testState.latestWorkflowRunsProps = null;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
   editorCommit.mockClear();
@@ -23320,6 +23326,55 @@ describe('App /goal command', () => {
 });
 
 describe('App workflow history entry', () => {
+  it('starts a fresh workflow-creation chat from the runs page', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateViaChat = testState.latestWorkflowRunsProps?.onCreateViaChat;
+    if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
+    mockSessionActions.clearSession.mockClear();
+    editorInsertText.mockClear();
+
+    await act(async () => onCreateViaChat());
+    await flush();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(editorInsertText).toHaveBeenCalledWith('/workflow-creator ', {
+      mode: 'replace',
+    });
+  });
+
+  it('does not prime the current chat when workflow session creation fails', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/workflows';
+    await clickSubmit(container);
+    await flush();
+
+    const onCreateViaChat = testState.latestWorkflowRunsProps?.onCreateViaChat;
+    if (!onCreateViaChat) throw new Error('onCreateViaChat was not captured');
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('boom'));
+    editorInsertText.mockClear();
+
+    await act(async () => onCreateViaChat());
+    await flush();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(editorInsertText).not.toHaveBeenCalled();
+  });
+
   it('opens workflows from a session-less enabled workspace', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {

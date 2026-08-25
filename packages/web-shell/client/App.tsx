@@ -12669,7 +12669,24 @@ export function App({
                     </div>
                   </div>
                   <div className={styles.fullPageBody}>
-                    <WorkflowRunsPage />
+                    <WorkflowRunsPage
+                      onCreateViaChat={() => {
+                        void createNewSession(
+                          connection.workspaceCwd ??
+                            selectedWorkspaceCwdRef.current,
+                        ).then((created) => {
+                          if (!created) return;
+                          onSessionIdChange?.(undefined);
+                          window.setTimeout(() => {
+                            editorRef.current?.insertText(
+                              '/workflow-creator ',
+                              { mode: 'replace' },
+                            );
+                            editorRef.current?.focus();
+                          }, 0);
+                        });
+                      }}
+                    />
                   </div>
                 </div>
               )}
