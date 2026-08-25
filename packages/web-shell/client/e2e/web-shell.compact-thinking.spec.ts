@@ -22,24 +22,10 @@ function thoughtTextEvent(text: string): DaemonEvent {
   };
 }
 
-test('compact mode keeps the thinking block visible while streaming', async ({
+test('compact view keeps the thinking block visible while streaming', async ({
   page,
 }, testInfo) => {
-  const scenario = createWebShellDaemonScenario({
-    settings: {
-      settings: [
-        {
-          key: 'ui.compactMode',
-          type: 'boolean',
-          label: 'Compact Mode',
-          category: 'UI',
-          requiresRestart: false,
-          default: false,
-          values: { effective: true, workspace: true, user: false },
-        },
-      ],
-    },
-  });
+  const scenario = createWebShellDaemonScenario({});
   const daemon = await installScenario(page, scenario, testInfo);
 
   await gotoSession(page, scenario, daemon);
