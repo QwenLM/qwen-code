@@ -53,9 +53,10 @@ interface ArchiveEntry {
 }
 
 function normalizeArchiveEntryPath(entryPath: string): string {
-  return path.posix.normalize(
+  const normalized = path.posix.normalize(
     process.platform === 'win32' ? entryPath.replaceAll('\\', '/') : entryPath,
   );
+  return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
 }
 
 /**

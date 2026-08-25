@@ -442,6 +442,19 @@ describe('assertTarArchiveLinksAreSafe', () => {
       ).rejects.toThrow('4 unsupported link entries');
     });
 
+    it('rejects descendants of a trailing-separator symlink entry', async () => {
+      const archive = path.join(root, 'trailing-separator-link.tar');
+      await writeCraftedTar(archive, [
+        createTarFileHeader('target', 0),
+        symlinkHeader('alias/', 'target'),
+        createTarFileHeader('alias/child', 0),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
+
     it.runIf(process.platform !== 'win32')(
       'rejects unsafe symlinks in a restructured extracted tree',
       async () => {

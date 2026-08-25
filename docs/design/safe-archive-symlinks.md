@@ -12,4 +12,6 @@ Extraction runs in strict mode, then the archive wrapper is flattened. A second 
 
 Strict extraction and final-layout validation apply to every archive on this opt-in fallback path, including archives without symlinks. This intentionally makes extraction warnings fail closed and verifies the same resource ceiling against the filesystem that later conversion copies.
 
+Real symlink extraction is not exercised on Windows CI; support there depends on the host permitting symlink creation.
+
 Other archive sources retain their existing fail-closed behavior. Zip handling is unchanged.
