@@ -439,6 +439,33 @@ describe('mcp reconnect command', () => {
         ),
       );
     });
+
+    it('clarifies that single-server failure only covers this process', async () => {
+      // The note must not be success-only: a failed reconnect is exactly
+      // when the user's running session still has broken tools and might
+      // read the exit-1 output as session-level state. `--all` already
+      // prints the note on failure; pin the single-server path to match.
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockReturnValue('disconnected');
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'cannot refresh the MCP tools of an already-running Qwen Code session',
+        ),
+      );
+    });
   });
 
   describe('connection verification (issue #9944)', () => {

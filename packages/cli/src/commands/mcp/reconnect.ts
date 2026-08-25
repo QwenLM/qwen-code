@@ -239,6 +239,11 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
     writeStdoutLine(SESSION_SCOPE_NOTE);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    // The scope note applies to failure exactly as to success — a failed
+    // reconnect is precisely when the user's running session still has
+    // broken tools and the "separate process" caveat matters. `--all`
+    // prints it on failure too; the two paths must stay consistent.
+    writeStdoutLine(SESSION_SCOPE_NOTE);
     throw createReconnectError(
       `Failed to reconnect to server "${serverName}": ${message}`,
     );
