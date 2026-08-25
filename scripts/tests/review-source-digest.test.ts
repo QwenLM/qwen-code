@@ -19,6 +19,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readdirSync,
@@ -134,6 +135,20 @@ describe('the build stamp and the staleness check agree', () => {
         join(services, 'review-worktree-lease.ts'),
         'leases the worktree',
       );
+      // The utils review helpers are file-shaped roots outside `commands/`,
+      // same as the lease. Materialized here so their pins are local: the
+      // repo-tree case holds them only through the real files, and would
+      // silently drop the pins the day those files moved. The findings
+      // validator itself lives back under the `review/` directory root
+      // (#9146), materialized there below.
+      const utils = join(root, 'packages', 'cli', 'src', 'utils');
+      mkdirSync(utils, { recursive: true });
+      writeFileSync(join(utils, 'shell-args.ts'), 'tokenizes the args');
+      writeFileSync(join(utils, 'paths.ts'), 'flattens the slug');
+      writeFileSync(
+        join(cli, 'review', 'findings.ts'),
+        'validates the findings',
+      );
       writeFileSync(join(cli, 'review', 'drive.ts'), 'drives');
       writeFileSync(join(cli, 'review', 'lib', 'ledger.ts'), 'ledgers');
       // One production file per admitted code extension: dropping a member
@@ -152,13 +167,13 @@ describe('the build stamp and the staleness check agree', () => {
       mkdirSync(join(skillDir, '__fixtures__'), { recursive: true });
       writeFileSync(join(skillDir, '__fixtures__', 'example.md'), '# fixture');
       // DESIGN.md is the copier's deliberate skip, so it must move neither
-      // side of the digest — pinned by the count below staying at 12.
+      // side of the digest — pinned by the count below staying at 15.
       writeFileSync(join(skillDir, 'DESIGN.md'), '# design');
 
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(12);
+      expect(reviewSourceDigestForBuild(root).count).toBe(15);
 
       // ...and neither a test file, nor a spec, nor a fixture moves either.
       writeFileSync(join(cli, 'review', 'drive.test.ts'), 'a test');
@@ -207,7 +222,7 @@ describe('the build stamp and the staleness check agree', () => {
       expect(reviewSourceDigestForBuild(root).digest).toBe(
         reviewSourcesDigest(root, reviewSourceRoots(root)),
       );
-      expect(reviewSourceDigestForBuild(root).count).toBe(12);
+      expect(reviewSourceDigestForBuild(root).count).toBe(15);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -250,6 +265,38 @@ describe('the build stamp and the staleness check agree', () => {
       }
     },
   );
+
+  it('digests the review helpers that live outside commands/review/', () => {
+    // The two helpers of findings.ts live in utils/, outside the directory
+    // root. Root lists that lost them would keep both copies equal while a
+    // skipped rebuild silently runs the bundle's old validator — name the
+    // files so the omission fails here. findings.ts itself moved back into
+    // commands/review/ (#9146), which the directory root covers.
+    const roots = reviewSourceRoots(repoRoot).map((r) => r.path);
+    const utils = join(repoRoot, 'packages', 'cli', 'src', 'utils');
+    expect(roots).toContain(join(utils, 'shell-args.ts'));
+    expect(roots).toContain(join(utils, 'paths.ts'));
+    // findings.ts moved back into commands/review/ (#9146): re-adding its old
+    // utils/ root would find no file there, and both digest copies skip
+    // absent roots — every lane stays green while absentRoots darkens every
+    // review's staleness check. Pin the removal.
+    expect(roots).not.toContain(join(utils, 'findings.ts'));
+    // List membership is not tree existence: a moved file keeps its
+    // root listed — both digest copies stay equal — while absentRoots
+    // darkens every review's staleness check.
+    expect(existsSync(join(utils, 'shell-args.ts'))).toBe(true);
+    expect(existsSync(join(utils, 'paths.ts'))).toBe(true);
+    const reviewDir = join(
+      repoRoot,
+      'packages',
+      'cli',
+      'src',
+      'commands',
+      'review',
+    );
+    expect(roots).toContain(reviewDir);
+    expect(existsSync(join(reviewDir, 'findings.ts'))).toBe(true);
+  });
 
   it('the skill allowlist covers everything the copier would ship', () => {
     // The copier copies all of a bundled skill but test files, DESIGN.md and

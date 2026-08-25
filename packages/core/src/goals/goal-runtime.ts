@@ -12,6 +12,7 @@ import {
   InvalidGoalEvidenceReferenceError,
   validateGoalEvidenceReferences,
   type GoalEvidenceCatalog,
+  type GoalEvidenceCheckpointWindow,
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
 import {
@@ -26,6 +27,7 @@ import {
   isRepeatedBlockerProposal,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
+  type GoalLimitKind,
   type GoalSnapshotV2,
   type GoalStateCause,
   type GoalStateRecordPayloadV2,
@@ -67,6 +69,19 @@ export interface CreateGoalRuntimeOptions {
   evidenceSource?: GoalEvidenceSource;
   verifier?: GoalVerifier;
   checkpointVerifier?: GoalCheckpointVerifier;
+  tokenLedger?: GoalTurnTokenLedger;
+}
+
+/**
+ * The tokens a finished Goal turn billed.
+ *
+ * Scoped to the turn rather than to the session: the ledger is fed by the
+ * records the turn itself produced, so an interleaved user turn or a resumed
+ * session's replayed history is never attributed to a Goal.
+ */
+export interface GoalTurnTokenLedger {
+  /** Tokens billed to `turnId`, consumed so a turn is counted once. */
+  takeGoalTurnTokens(turnId: string): number;
 }
 
 export interface GoalEvidenceSource {
@@ -126,6 +141,12 @@ export interface GoalRuntime {
     listener: (snapshot: GoalSnapshotV2, cause?: GoalStateCause) => void,
   ): () => void;
   restore(records: readonly GoalRecoveryRecord[]): Promise<void>;
+  prepareRestore(
+    records: readonly GoalRecoveryRecord[],
+    checkpointWindow?: GoalEvidenceCheckpointWindow,
+  ): Promise<void>;
+  getPreparedRestore(): Promise<void>;
+  activateRestoredWork(): Promise<void>;
   dispatch(request: GoalControlRequest): Promise<GoalStateResponse>;
   bindHost(host: GoalTurnHost): () => void;
   beginTurn(turnKey: string): GoalTurnPermit | undefined;
@@ -214,6 +235,12 @@ export function createGoalRuntime(
   let nextVerifierFeedback: string | undefined;
   let currentTurnFeedback: string | undefined;
   let restored = false;
+  let restoreActivationPending = false;
+  let restorePreparation: Promise<CheckpointAttempt | undefined> | undefined;
+  let restoreActivation: Promise<void> | undefined;
+  let preparedRestoreCause: GoalStateCause | undefined;
+  let preparedRestoreHasSnapshot = false;
+  let preparedCheckpointWindow: GoalEvidenceCheckpointWindow | undefined;
   let disposed = false;
   let recoveryError: Error | undefined;
   /**
@@ -240,6 +267,22 @@ export function createGoalRuntime(
           controller: new AbortController(),
         }
       : undefined;
+
+  /**
+   * The finishing turn's spend, or zero when nothing can answer.
+   *
+   * Goal accounting is bookkeeping: a ledger that is absent or that throws
+   * costs the Goal its spend figure for this turn, never the turn itself.
+   */
+  const takeTurnTokens = (turnId: string): number => {
+    if (!options.tokenLedger) return 0;
+    try {
+      const tokens = options.tokenLedger.takeGoalTurnTokens(turnId);
+      return Number.isFinite(tokens) ? Math.max(0, tokens) : 0;
+    } catch {
+      return 0;
+    }
+  };
 
   const assertAvailable = () => {
     if (disposed) throw new Error(GOAL_RUNTIME_DISPOSED_MESSAGE);
@@ -349,6 +392,7 @@ export function createGoalRuntime(
 
   const queueContinuation = (cause?: GoalStateCause) => {
     if (
+      restoreActivationPending ||
       snapshot.goal?.status !== 'active' ||
       currentPermit ||
       pendingProposal ||
@@ -480,7 +524,11 @@ export function createGoalRuntime(
     attempt: VerificationAttempt,
     outcome:
       | { kind: 'decision'; result: GoalVerificationResult }
-      | { kind: 'usage_limited'; reason: string },
+      | {
+          kind: 'usage_limited';
+          reason: string;
+          limitKind?: GoalLimitKind;
+        },
   ): Promise<CheckpointAttempt | undefined> =>
     enqueue(async () => {
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
@@ -538,6 +586,9 @@ export function createGoalRuntime(
             activeTimeMs: elapsedActiveTime(snapshot.goal, now),
             updatedAt: now,
             lastReason: outcome.reason,
+            ...(outcome.limitKind === undefined
+              ? {}
+              : { limitKind: outcome.limitKind }),
           },
           activity: 'idle',
         };
@@ -641,7 +692,11 @@ export function createGoalRuntime(
 
     let outcome:
       | { kind: 'decision'; result: GoalVerificationResult }
-      | { kind: 'usage_limited'; reason: string };
+      | {
+          kind: 'usage_limited';
+          reason: string;
+          limitKind?: GoalLimitKind;
+        };
     try {
       await evidenceSource.flush();
       if (attempt.controller.signal.aborted) return;
@@ -664,7 +719,11 @@ export function createGoalRuntime(
       if (error instanceof InvalidGoalEvidenceReferenceError) {
         outcome =
           error.code === 'catalog_truncated'
-            ? { kind: 'usage_limited', reason: error.message }
+            ? {
+                kind: 'usage_limited',
+                reason: error.message,
+                limitKind: 'evidence_catalog',
+              }
             : {
                 kind: 'decision',
                 result: { decision: 'reject', reason: error.message },
@@ -729,6 +788,7 @@ export function createGoalRuntime(
   const recordCheckpointFailure = async (
     attempt: CheckpointAttempt,
     reason: string,
+    limitKind?: GoalLimitKind,
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
@@ -741,6 +801,7 @@ export function createGoalRuntime(
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
           lastReason: reason,
+          ...(limitKind === undefined ? {} : { limitKind }),
         },
         activity: 'idle',
       };
@@ -800,10 +861,13 @@ export function createGoalRuntime(
     });
   };
 
-  const runCheckpoint = async (attempt: CheckpointAttempt): Promise<void> => {
+  const runCheckpoint = async (
+    attempt: CheckpointAttempt,
+    preparedWindow?: GoalEvidenceCheckpointWindow,
+  ): Promise<void> => {
     const evidenceSource = options.evidenceSource;
     const checkpointVerifier = options.checkpointVerifier;
-    if (!evidenceSource || !checkpointVerifier) {
+    if ((!preparedWindow && !evidenceSource) || !checkpointVerifier) {
       await recordCheckpointFailure(
         attempt,
         'Goal checkpoint recovery dependencies are unavailable',
@@ -812,19 +876,27 @@ export function createGoalRuntime(
     }
 
     try {
-      await evidenceSource.flush();
-      if (attempt.controller.signal.aborted) return;
-      const records = await evidenceSource.readActiveTranscriptChain();
-      if (attempt.controller.signal.aborted) return;
-      const window = buildGoalEvidenceCheckpointWindow({
-        records,
-        goal: attempt.goal,
-        permit: attempt.permit,
-      });
-      if (window.truncated) {
+      let window = preparedWindow;
+      if (!window) {
+        await evidenceSource!.flush();
+        if (attempt.controller.signal.aborted) return;
+        const records = await evidenceSource!.readActiveTranscriptChain();
+        if (attempt.controller.signal.aborted) return;
+        window = buildGoalEvidenceCheckpointWindow({
+          records,
+          goal: attempt.goal,
+          permit: attempt.permit,
+        });
+      }
+      // A truncated window still compresses: `shouldCheckpoint` stays true
+      // whenever anything was captured, and folding that into claims is what
+      // frees the budget. Only a window that captured nothing at all has
+      // nothing to salvage, and that is the state this stops the Goal in.
+      if (window.truncated && !window.shouldCheckpoint) {
         await recordCheckpointFailure(
           attempt,
           GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+          'evidence_catalog',
         );
         return;
       }
@@ -860,6 +932,7 @@ export function createGoalRuntime(
           await recordCheckpointFailure(
             attempt,
             GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+            'checkpoint_request',
           );
           return;
         }
@@ -900,8 +973,14 @@ export function createGoalRuntime(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    restore(records: readonly GoalRecoveryRecord[]): Promise<void> {
-      const restoring = enqueue(
+    prepareRestore(
+      records: readonly GoalRecoveryRecord[],
+      checkpointWindow?: GoalEvidenceCheckpointWindow,
+    ): Promise<void> {
+      if (restorePreparation) return restorePreparation.then(() => undefined);
+      restoreActivationPending = true;
+      preparedCheckpointWindow = checkpointWindow;
+      const preparation = enqueue(
         async (): Promise<CheckpointAttempt | undefined> => {
           assertAvailable();
           if (restored) return;
@@ -961,14 +1040,15 @@ export function createGoalRuntime(
               recoveredSnapshot = structuredClone(payload.snapshot);
               recoveredCause = payload.cause;
             }
+            assertAvailable();
             if (recoveredSnapshot) snapshot = recoveredSnapshot;
             recoveryError = undefined;
             restored = true;
             if (recoveredSnapshot) {
               recoveryCause = recoveredCause;
-              broadcast(recoveredCause);
             }
-            if (!checkpointAttempt) queueContinuation();
+            preparedRestoreHasSnapshot = recoveredSnapshot !== undefined;
+            preparedRestoreCause = recoveredCause;
             return checkpointAttempt;
           } catch (error) {
             if (!disposed) {
@@ -979,10 +1059,57 @@ export function createGoalRuntime(
           }
         },
       );
-      return restoring.then(async (attempt) => {
-        if (!attempt) return;
+      restorePreparation = preparation;
+      return preparation.then(
+        () => undefined,
+        (error) => {
+          if (!restored && restorePreparation === preparation) {
+            restorePreparation = undefined;
+            restoreActivation = undefined;
+            restoreActivationPending = false;
+            preparedCheckpointWindow = undefined;
+          }
+          throw error;
+        },
+      );
+    },
+    getPreparedRestore(): Promise<void> {
+      if (!restorePreparation) {
+        return Promise.reject(
+          new GoalPersistenceUnavailableError(
+            'Goal restore preparation has not started',
+          ),
+        );
+      }
+      return restorePreparation.then(() => undefined);
+    },
+    activateRestoredWork(): Promise<void> {
+      try {
+        assertAvailable();
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      if (!restorePreparation) {
+        return Promise.reject(
+          new GoalPersistenceUnavailableError(
+            'Goal restore preparation has not started',
+          ),
+        );
+      }
+      if (restoreActivation) return restoreActivation;
+      restoreActivation = restorePreparation.then(async (attempt) => {
+        assertAvailable();
+        restoreActivationPending = false;
+        if (preparedRestoreHasSnapshot) broadcast(preparedRestoreCause);
+        if (!attempt) {
+          await enqueue(async () => {
+            assertAvailable();
+            queueContinuation();
+          });
+          return;
+        }
         try {
-          await runCheckpoint(attempt);
+          await runCheckpoint(attempt, preparedCheckpointWindow);
         } catch {
           // Recovery committed before the replay began, so a failed replay
           // degrades instead of bricking the runtime: drop the pending
@@ -990,6 +1117,11 @@ export function createGoalRuntime(
           await settleDanglingAttempt(attempt.permit);
         }
       });
+      return restoreActivation;
+    },
+    async restore(records: readonly GoalRecoveryRecord[]): Promise<void> {
+      await this.prepareRestore(records);
+      await this.activateRestoredWork();
     },
     bindHost(nextHost: GoalTurnHost): () => void {
       assertOperational();
@@ -1109,6 +1241,7 @@ export function createGoalRuntime(
           const recordUuid = randomUUID();
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
+            tokensUsed: takeTurnTokens(permit.turnId),
           });
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
@@ -1320,6 +1453,15 @@ export function createGoalRuntime(
           v: GOAL_STATE_VERSION,
           goal: nextGoal,
           activity: 'idle',
+          ...(request.action === 'clear' && snapshot.goal
+            ? {
+                clearedGoal: {
+                  goalId: snapshot.goal.goalId,
+                  revision: snapshot.goal.revision,
+                  updatedAt: snapshot.goal.updatedAt,
+                },
+              }
+            : {}),
         };
         try {
           await options.journal.recordGoalState(recordUuid, {

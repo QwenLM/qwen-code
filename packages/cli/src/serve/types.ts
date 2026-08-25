@@ -57,8 +57,6 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
-  /** Fail instead of retrying the next port when the requested port is busy. */
-  strictPort?: boolean;
   /**
    * Bearer token required on every request. Optional when bound to loopback
    * (developer convenience); required when bound beyond loopback (boot fails
@@ -127,17 +125,28 @@ export interface ServeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
-   * Per-session cap on replay entries retained in the in-flight live journal.
-   * Compatible text/thought chunks share bounded entries. Threaded into
-   * `BridgeOptions.maxJournalEvents`. Defaults to 10 000. Must be a positive
-   * safe integer.
+   * Per-session BASELINE cap on replay entries retained in the in-flight
+   * live journal. Compatible text/thought chunks share bounded entries.
+   * Threaded into `BridgeOptions.maxJournalEvents`. Defaults to 10 000.
+   * Must be a positive safe integer.
+   *
+   * Growth semantics: leaving BOTH this and `maxJournalBytes` unset enables
+   * adaptive growth — the daemon raises a breaching session's caps within a
+   * pool derived from the memory budget. Pinning either one fixes both
+   * dimensions at the configured baselines and disables growth entirely.
    */
   maxJournalEvents?: number;
   /**
-   * Per-session source-event byte cap on the in-flight live journal.
-   * Truncation drops whole entries, so the retained tail can be much smaller
-   * than the cap. Threaded into `BridgeOptions.maxJournalBytes`. Defaults to
-   * 8 MiB. Must be a positive safe integer.
+   * Per-session BASELINE source-event byte cap on the in-flight live
+   * journal. Truncation drops whole entries, so the retained tail can be
+   * much smaller than the cap. Threaded into `BridgeOptions.maxJournalBytes`.
+   * Defaults to 8 MiB. Must be a positive safe integer.
+   *
+   * Growth semantics: leaving BOTH this and `maxJournalEvents` unset
+   * enables adaptive growth — the daemon raises a breaching session's caps
+   * within a pool derived from the memory budget. Pinning either one fixes
+   * both dimensions at the configured baselines and disables growth
+   * entirely.
    */
   maxJournalBytes?: number;
   /**
@@ -330,9 +339,9 @@ export interface ServeOptions {
    */
   sessionRestoreTimeoutMs?: number;
   /**
-   * Wall-clock timeout in ms for a single human permission /
-   * ask_user_question response in daemon (ACP) mode. 0 = disabled
-   * (wait forever). Default: 300000 (5 min).
+   * Wall-clock timeout in ms for a human permission or `ask_user_question`
+   * response in daemon mode. 0 = disabled. Default: 0 (wait until an explicit
+   * decision or session lifecycle cancellation).
    */
   permissionResponseTimeoutMs?: number;
   /**
@@ -367,6 +376,11 @@ export interface ServeOptions {
   cdpTunnelOverWs?: boolean;
   /** Forward the experimental LSP opt-in to spawned ACP children. */
   experimentalLsp?: boolean;
+  /**
+   * When true, load/resume re-hangs a trailing unanswered ask_user_question.
+   * Default false. Forwarded to spawned ACP children.
+   */
+  restoreAskUserQuestion?: boolean;
   /**
    * Experimental: channels to host in a daemon-managed worker process.
    * Omitted means plain daemon mode with no channel worker.
@@ -464,6 +478,8 @@ export interface CapabilitiesEnvelope {
     maxSessionsPerWorkspace?: number | null;
     maxTotalSessions?: number | null;
     sessionRestoreTimeoutMs?: number;
+    /** Present when `workspace_file_upload` is advertised. */
+    maxWorkspaceFileUploadBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.

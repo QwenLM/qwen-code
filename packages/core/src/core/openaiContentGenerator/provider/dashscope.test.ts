@@ -17,6 +17,7 @@ import {
   DashScopeOpenAICompatibleProvider,
   selectDashScopeThinkingKnob,
 } from './dashscope.js';
+import { determineProvider } from '../index.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
@@ -246,6 +247,42 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for alicloudapi.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://api-id.cn-hangzhou.alicloudapi.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'DashScope provider activated via alicloudapi origin: api-id.cn-hangzhou.alicloudapi.com',
+      );
+    });
+
+    it('should return true for port-bearing alicloudapi.com URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://gateway.alicloudapi.com:8443/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false for bare alicloudapi.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://alicloudapi.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
     it('should return false for bare alibaba-inc.com domain', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
@@ -276,6 +313,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://aliyun-inc.com.evil.com/v1',
         'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+        'https://notalicloudapi.com/v1',
+        'https://alicloudapi.com.evil.com/v1',
       ];
 
       configs.forEach((baseUrl) => {
@@ -437,6 +476,42 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const result =
         DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
       expect(result).toBe(true);
+    });
+  });
+
+  // Guards the full acceptance path end-to-end: an alicloudapi.com base URL
+  // must route through the DashScope provider so buildRequest injects the
+  // session-tracking metadata into the request body.
+  describe('determineProvider routing for alicloudapi.com', () => {
+    const alicloudapiConfig = {
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://api-id.cn-hangzhou.alicloudapi.com/v1',
+      model: 'qwen-max',
+    } as ContentGeneratorConfig;
+
+    it('routes alicloudapi.com base URLs to the DashScope provider', () => {
+      const routed = determineProvider(alicloudapiConfig, mockCliConfig);
+      expect(routed).toBeInstanceOf(DashScopeOpenAICompatibleProvider);
+    });
+
+    it('injects session-tracking metadata into the request body', () => {
+      const routed = determineProvider(
+        alicloudapiConfig,
+        mockCliConfig,
+      ) as DashScopeOpenAICompatibleProvider;
+
+      const result = routed.buildRequest(
+        {
+          model: 'qwen-max',
+          messages: [{ role: 'user', content: 'Hello!' }],
+        },
+        'test-prompt-id',
+      );
+
+      expect(result.metadata).toEqual({
+        sessionId: 'test-session-id',
+        promptId: 'test-prompt-id',
+      });
     });
   });
 
@@ -625,7 +700,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
       '%s reasoning effort',
       (model) => {
-        it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)(
+        it.each(['low', 'medium', 'high', 'xhigh'] as const)(
           'passes %s through as reasoning_effort',
           (effort) => {
             const generator = new DashScopeOpenAICompatibleProvider(
@@ -654,6 +729,105 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         );
       },
     );
+
+    describe.each([
+      'qwen3.8-max',
+      'qwen3.8-max-preview',
+      'qwen3.8-max-latest',
+      'qwen3.8-max-2026-01-15',
+    ])('%s reasoning effort ceiling', (model) => {
+      it('warns once however many requests the same provider builds', () => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model,
+            reasoning: { effort: 'max' },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+        const request = {
+          ...baseRequest,
+          model,
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0];
+
+        generator.buildRequest(request, 'first');
+        generator.buildRequest(request, 'second');
+
+        const clampWarnings = mockDebugLogger.warn.mock.calls.filter(
+          (call: unknown[]) =>
+            typeof call[0] === 'string' &&
+            call[0].includes('tiered-effort family'),
+        );
+        expect(clampWarnings).toHaveLength(1);
+      });
+
+      it('clamps the max tier to xhigh, the strongest tier DashScope accepts', () => {
+        const generator = new DashScopeOpenAICompatibleProvider(
+          {
+            ...mockContentGeneratorConfig,
+            model,
+            reasoning: { effort: 'max' },
+          } as ContentGeneratorConfig,
+          mockCliConfig,
+        );
+
+        const result = generator.buildRequest(
+          {
+            ...baseRequest,
+            model,
+            reasoning: { effort: 'max' },
+          } as unknown as Parameters<typeof generator.buildRequest>[0],
+          'test-prompt-id',
+        ) as unknown as Record<string, unknown>;
+
+        expect(result['reasoning_effort']).toBe('xhigh');
+      });
+    });
+
+    it('caps a non-qwen model on a DashScope host at the generic ceiling', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'vendor-compatible-model',
+          reasoning: { effort: 'max' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'vendor-compatible-model',
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
+
+    it('caps a GLM model served over DashScope, which is not a Z.ai host', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'glm-5.2',
+          reasoning: { effort: 'max' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'glm-5.2',
+          reasoning: { effort: 'max' },
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toEqual({ effort: 'xhigh' });
+    });
 
     it('lets extra_body override qwen3.8-max reasoning_effort', () => {
       const generator = new DashScopeOpenAICompatibleProvider(

@@ -135,6 +135,7 @@ describe('ShellTool', () => {
       },
       getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
       getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
+      isTruncateToolOutputThresholdExplicit: vi.fn().mockReturnValue(false),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getGeminiClient: vi.fn(),
       getFileSystemService: vi.fn().mockReturnValue(mockFileSystemService),
@@ -3064,11 +3065,164 @@ describe('ShellTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
     });
 
+    describe('output truncation threshold', () => {
+      it('keeps the 30k Shell default when no threshold is configured', () => {
+        expect(shellTool.maxOutputChars).toBe(30_000);
+      });
+
+      it.each([25_000, 10_000, 100_000, Number.POSITIVE_INFINITY])(
+        'exposes the explicit threshold %s to the scheduler',
+        (threshold) => {
+          (
+            mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+          ).mockReturnValue(true);
+          (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+            threshold,
+          );
+
+          expect(shellTool.maxOutputChars).toBe(threshold);
+        },
+      );
+
+      it('passes the 30k Shell default to output truncation', async () => {
+        const truncationModule = await import('./truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockImplementation(async (_config, _toolName, content) => ({
+            content,
+          }));
+
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(35_000), exitCode: 0 });
+
+          await promise;
+
+          expect(spy).toHaveBeenCalledWith(
+            mockConfig,
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({ threshold: 30_000 }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('keeps 40k model-facing output when the explicit threshold is 100k', async () => {
+        (
+          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+        ).mockReturnValue(true);
+        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+          100_000,
+        );
+        const output = 'x'.repeat(40_000);
+        const invocation = shellTool.build({
+          command: 'large-output-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({ output, exitCode: 0 });
+
+        const result = await promise;
+
+        expect(result.llmContent).toContain(output);
+        expect(result.llmContent).not.toContain(
+          'Tool output was too large and has been truncated',
+        );
+        expect(result.persistedOutputFiles).toBeUndefined();
+      });
+
+      it('passes an explicit low threshold to output truncation', async () => {
+        (
+          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+        ).mockReturnValue(true);
+        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+          10_000,
+        );
+        const outputFile = '/tmp/qwen-temp/shell-output.txt';
+        const truncatedContent =
+          'Tool output was too large and has been truncated.';
+        const truncationModule = await import('./truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockResolvedValue({ content: truncatedContent, outputFile });
+
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(15_000), exitCode: 0 });
+
+          const result = await promise;
+
+          expect(spy).toHaveBeenCalledWith(
+            mockConfig,
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({
+              threshold: 10_000,
+              previewChars: 4000,
+              lines: Number.POSITIVE_INFINITY,
+            }),
+          );
+          expect(result.llmContent).toContain(truncatedContent);
+          expect(result.persistedOutputFiles).toEqual([outputFile]);
+        } finally {
+          spy.mockRestore();
+        }
+      });
+
+      it('limits the preview budget to an explicit threshold below 4k', async () => {
+        (
+          mockConfig.isTruncateToolOutputThresholdExplicit as Mock
+        ).mockReturnValue(true);
+        (mockConfig.getTruncateToolOutputThreshold as Mock).mockReturnValue(
+          1000,
+        );
+        const truncationModule = await import('./truncation.js');
+        const spy = vi
+          .spyOn(truncationModule, 'truncateToolOutput')
+          .mockImplementation(async (_config, _toolName, content) => ({
+            content,
+          }));
+
+        try {
+          const invocation = shellTool.build({
+            command: 'large-output-cmd',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({ output: 'x'.repeat(5000), exitCode: 0 });
+
+          await promise;
+
+          expect(spy).toHaveBeenCalledWith(
+            mockConfig,
+            ShellTool.Name,
+            expect.any(String),
+            expect.objectContaining({
+              threshold: 1000,
+              previewChars: 1000,
+            }),
+          );
+        } finally {
+          spy.mockRestore();
+        }
+      });
+    });
+
     it('retains shell truncation without an artifact and records the persistence decision', async () => {
       const originalOutput = 'A'.repeat(30_001);
       const shortenedContent =
         'Tool output was too large and has been truncated.\n[mocked truncated body]\n[Note: Could not save full output to file]';
-      const truncationModule = await import('../utils/truncation.js');
+      const truncationModule = await import('./truncation.js');
       const spy = vi
         .spyOn(truncationModule, 'truncateToolOutput')
         .mockResolvedValue({ content: shortenedContent });
@@ -3347,7 +3501,7 @@ describe('ShellTool', () => {
         // succeed (the catch fallback returns no `outputFile`, so the
         // shell.ts replacement branch never fires). Mocking here pins
         // ordering, which is all this test cares about.
-        const truncationModule = await import('../utils/truncation.js');
+        const truncationModule = await import('./truncation.js');
         const spy = vi
           .spyOn(truncationModule, 'truncateToolOutput')
           .mockResolvedValue({
@@ -3401,7 +3555,7 @@ describe('ShellTool', () => {
         // output (find /, ls -R) then got line-truncated while the 30k char
         // budget still had room — contradicting the per-tool char-only contract.
         // Pin that shell declares lines: Infinity.
-        const truncationModule = await import('../utils/truncation.js');
+        const truncationModule = await import('./truncation.js');
         const spy = vi
           .spyOn(truncationModule, 'truncateToolOutput')
           .mockImplementation(async (_config, _toolName, content) => ({
@@ -3422,7 +3576,7 @@ describe('ShellTool', () => {
           const result = await promise;
 
           // Shell must pass lines: Infinity so the global line cap can't
-          // undercut its declared 30k char budget.
+          // undercut its effective Shell char budget.
           expect(spy).toHaveBeenCalledWith(
             expect.anything(),
             ShellTool.Name,
@@ -7648,7 +7802,7 @@ describe('ShellTool', () => {
     });
 
     it('keeps truncated timeout detail out of the operational error summary', async () => {
-      const truncationModule = await import('../utils/truncation.js');
+      const truncationModule = await import('./truncation.js');
       const truncationSpy = vi
         .spyOn(truncationModule, 'truncateToolOutput')
         .mockResolvedValue({

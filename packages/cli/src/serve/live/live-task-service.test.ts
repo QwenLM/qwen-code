@@ -7,6 +7,7 @@
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import { LIVE_TASK_TOOL_NAMES } from '@qwen-code/acp-bridge/bridgeOptions';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -15,8 +16,8 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { LiveTaskService } from './live-task-service.js';
-import { LIVE_SESSION_SOURCE_PREFIX } from './session-source.js';
+import { isLiveTaskToolName, LiveTaskService } from './live-task-service.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
 
 const persistedSessions = vi.hoisted(() => new Map<string, unknown>());
 const persistedSessionOwners = vi.hoisted(() => new Map<string, string>());
@@ -58,6 +59,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         );
       }
 
+      async getSessionLocation(sessionId: string) {
+        return (await this.sessionExists(sessionId)) ? 'active' : undefined;
+      }
+
       readParentSessionId(sessionId: string) {
         return Promise.resolve(parentSessions.get(sessionId));
       }
@@ -72,6 +77,14 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         );
       }
 
+      async readCreationMetadataIfReadable(
+        sessionId: string,
+        _state: 'active' | 'archived',
+      ) {
+        if (!(await this.sessionExists(sessionId))) return undefined;
+        return this.readCreationMetadata(sessionId);
+      }
+
       removeSession(sessionId: string) {
         removeSessionRuntimeBaseDirs.push(actual.Storage.getRuntimeBaseDir());
         return removeSessionMock(sessionId);
@@ -83,6 +96,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 vi.mock('../server/session-list.js', () => ({
   listWorkspaceSessionsForResponse,
 }));
+
+describe('isLiveTaskToolName', () => {
+  it('uses the ACP bridge tool-name contract', () => {
+    for (const name of LIVE_TASK_TOOL_NAMES) {
+      expect(isLiveTaskToolName(name)).toBe(true);
+    }
+    expect(isLiveTaskToolName('unknown_tool')).toBe(false);
+  });
+});
 
 function message(
   type: 'user' | 'assistant' | 'tool_result',
@@ -232,6 +254,7 @@ function makeHarness() {
     sendPrompt,
     killSession: vi.fn(async () => true),
     detachClient: vi.fn(async () => undefined),
+    markSessionCatalogChanged: vi.fn(),
     getSessionEventEpoch: vi.fn(() => 'event-epoch'),
     getSessionLastEventId: vi.fn(() => 7),
     async *subscribeEvents(
@@ -262,7 +285,8 @@ function makeHarness() {
     bridge: projectBridge,
   } as WorkspaceRuntime;
   const registry = {
-    list: () => [runtime, projectRuntime],
+    list: () => [projectRuntime],
+    listAll: () => [runtime, projectRuntime],
     getByWorkspaceId: (workspaceId: string) =>
       workspaceId === projectRuntime.workspaceId ? projectRuntime : undefined,
     resolveLiveSessionOwner: (sessionId: string) =>
@@ -298,6 +322,8 @@ function makeHarness() {
     bridge,
     projectBridge,
     runtime,
+    projectRuntime,
+    registry,
     summaries,
     resident,
     sendPrompt,
@@ -321,6 +347,24 @@ beforeEach(() => {
 });
 
 describe('LiveTaskService', () => {
+  it('preserves the structured unavailable error for an inactive internal owner', async () => {
+    const harness = makeHarness();
+    vi.spyOn(harness.registry, 'resolveLiveSessionOwner').mockReturnValue({
+      kind: 'unavailable',
+    });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'read_thread',
+        arguments: { threadId: 'inactive-task' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'conversation_runtime_unavailable',
+      retryable: true,
+    });
+  });
+
   it('lists existing tasks in the current Codex wire shape without creating one', async () => {
     const harness = makeHarness();
     listWorkspaceSessionsForResponse
@@ -504,6 +548,50 @@ describe('LiveTaskService', () => {
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
   });
 
+  it('reports the later of the live watermark and the persisted transcript timestamp', async () => {
+    // `read_thread` and `wait_threads` read the raw bridge summary while
+    // `list_threads` reads the merged one. The recorder writes the transcript
+    // after the terminal that advanced the watermark, so preferring the live
+    // value here would report the same task as less recent than the list does
+    // and freeze the wait cursor across the transcript flush.
+    const harness = makeHarness();
+    const summary: BridgeSessionSummary = {
+      sessionId: 'task-1',
+      workspaceCwd: '/project',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      updatedAt: '2026-07-30T00:00:01.000Z',
+      displayName: 'Task one',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    harness.summaries.set('task-1', summary);
+    harness.resident.add('task-1');
+    persistedSessions.set('task-1', persisted('task-1'));
+
+    const read = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'read_thread',
+      arguments: { threadId: 'task-1', turnLimit: 1 },
+    });
+    // The transcript's 00:00:03 write wins over the 00:00:01 watermark.
+    expect((read['thread'] as { updatedAt: number }).updatedAt).toBe(
+      1_785_369_603,
+    );
+
+    const wait = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: { targets: [{ threadId: 'task-1' }], timeoutMs: 0 },
+    });
+    const poll = (wait['polls'] as Array<Record<string, unknown>>)[0]!;
+    expect(poll['revision']).toBe(1_785_369_603);
+    expect(
+      JSON.parse(
+        Buffer.from(String(poll['cursor']), 'base64url').toString('utf8'),
+      ),
+    ).toMatchObject({ updatedAt: '2026-07-30T00:00:03.000Z' });
+  });
+
   it('returns only final assistant text from read and wait results', async () => {
     const harness = makeHarness();
     const summary: BridgeSessionSummary = {
@@ -670,6 +758,110 @@ describe('LiveTaskService', () => {
     ).toEqual(['task-1', 'task-2']);
   });
 
+  it('polls a mixed-case task through its canonical bridge entry', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const persistedSessionId = sessionId.toUpperCase();
+    const liveSummary: BridgeSessionSummary = {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Active task',
+      clientCount: 1,
+      hasActivePrompt: true,
+    };
+    harness.summaries.set(sessionId, liveSummary);
+    harness.resident.add(sessionId);
+    persistedSessions.set(persistedSessionId, persisted(persistedSessionId));
+    persistedSessionOwners.set(persistedSessionId, '/conversations');
+    listWorkspaceSessionsForResponse.mockResolvedValue({
+      sessions: [{ ...liveSummary, sessionId: persistedSessionId }],
+    });
+    const resolveLiveSessionOwner = vi.spyOn(
+      harness.registry,
+      'resolveLiveSessionOwner',
+    );
+    const subscribeEvents = vi.spyOn(harness.bridge, 'subscribeEvents');
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: [{ threadId: persistedSessionId }],
+        timeoutMs: 10,
+      },
+    });
+
+    expect(result).toMatchObject({
+      timedOut: true,
+      polls: [{ thread: { id: persistedSessionId } }],
+    });
+    expect(resolveLiveSessionOwner).toHaveBeenCalledWith(sessionId);
+    expect(resolveLiveSessionOwner).not.toHaveBeenCalledWith(
+      persistedSessionId,
+    );
+    expect(harness.bridge.getSessionEventEpoch).toHaveBeenCalledWith(sessionId);
+    expect(harness.bridge.getSessionLastEventId).toHaveBeenCalledWith(
+      sessionId,
+    );
+    expect(subscribeEvents).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ lastEventId: 7 }),
+    );
+    expect(harness.bridge.getSessionEventEpoch).not.toHaveBeenCalledWith(
+      persistedSessionId,
+    );
+    expect(harness.bridge.getSessionLastEventId).not.toHaveBeenCalledWith(
+      persistedSessionId,
+    );
+    expect(subscribeEvents).not.toHaveBeenCalledWith(
+      persistedSessionId,
+      expect.any(Object),
+    );
+  });
+
+  it('keeps the caller-visible id when a mixed-case task has no user turn', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const persistedSessionId = sessionId.toUpperCase();
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Empty task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(persistedSessionId, {
+      conversation: {
+        sessionId: persistedSessionId,
+        startTime: '2026-07-30T00:00:00.000Z',
+        lastUpdated: '2026-07-30T00:00:00.000Z',
+        messages: [],
+      },
+    });
+    persistedSessionOwners.set(persistedSessionId, '/conversations');
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'wait_threads',
+      arguments: {
+        targets: [{ threadId: persistedSessionId }],
+        timeoutMs: 0,
+      },
+    });
+
+    expect(result).toMatchObject({
+      polls: [
+        {
+          thread: { id: persistedSessionId },
+          latestTurn: { id: persistedSessionId },
+        },
+      ],
+    });
+  });
+
   it('suppresses previously delivered text and markers for an unchanged cursor', async () => {
     const harness = makeHarness();
     const summary: BridgeSessionSummary = {
@@ -816,6 +1008,194 @@ describe('LiveTaskService', () => {
     expect(harness.sendPrompt).toHaveBeenCalledOnce();
   });
 
+  it('reuses the canonical bridge entry for a mixed-case persisted task', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const persistedSessionId = sessionId.toUpperCase();
+    const liveSummary: BridgeSessionSummary = {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Existing task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    const persistedSummary = {
+      ...liveSummary,
+      sessionId: persistedSessionId,
+    };
+    harness.summaries.set(sessionId, liveSummary);
+    harness.resident.add(sessionId);
+    persistedSessions.set(persistedSessionId, persisted(persistedSessionId));
+    persistedSessionOwners.set(persistedSessionId, '/conversations');
+    listWorkspaceSessionsForResponse.mockResolvedValue({
+      sessions: [persistedSummary],
+    });
+
+    const result = await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'send_message_to_thread',
+      arguments: {
+        threadId: persistedSessionId,
+        prompt: 'continue this task',
+      },
+    });
+
+    expect(result).toEqual({ threadId: persistedSessionId });
+    expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
+    expect(harness.bridge.changeSessionCwd).not.toHaveBeenCalled();
+    expect(harness.sendPrompt).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ sessionId }),
+      undefined,
+      expect.any(Object),
+    );
+    expect(harness.resident).not.toContain(persistedSessionId);
+  });
+
+  it('rejects a mixed-case task whose storage and live owners differ', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const persistedSessionId = sessionId.toUpperCase();
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/project',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Other workspace task',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(persistedSessionId, persisted(persistedSessionId));
+    persistedSessionOwners.set(persistedSessionId, '/conversations');
+    vi.spyOn(harness.registry, 'resolveLiveSessionOwner').mockReturnValue({
+      kind: 'found',
+      runtime: harness.projectRuntime,
+    });
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'send_message_to_thread',
+        arguments: {
+          threadId: persistedSessionId,
+          prompt: 'continue this task',
+        },
+      }),
+    ).rejects.toThrow(`Task id is ambiguous: ${persistedSessionId}`);
+    expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('uses persisted metadata if a canonical live task disappears', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const persistedSessionId = sessionId.toUpperCase();
+    const sourceId = `${LIVE_SESSION_SOURCE_PREFIX}mixed-case-race`;
+    harness.summaries.set(sessionId, {
+      sessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Disappearing task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    });
+    harness.resident.add(sessionId);
+    persistedSessions.set(persistedSessionId, persisted(persistedSessionId));
+    persistedSessionOwners.set(persistedSessionId, '/conversations');
+    sessionSources.set(persistedSessionId, {
+      sourceType: 'default',
+      sourceId,
+    });
+    const getSessionSummary = harness.bridge.getSessionSummary.bind(
+      harness.bridge,
+    );
+    vi.spyOn(harness.bridge, 'getSessionSummary').mockImplementation(
+      (requestedSessionId) => {
+        const summary = getSessionSummary(requestedSessionId);
+        if (requestedSessionId === sessionId) {
+          harness.resident.delete(sessionId);
+        }
+        return summary;
+      },
+    );
+
+    await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'send_message_to_thread',
+      arguments: {
+        threadId: persistedSessionId,
+        prompt: 'continue this task',
+      },
+    });
+
+    expect(harness.bridge.resumeSession).toHaveBeenCalledWith({
+      sessionId,
+      workspaceCwd: '/conversations',
+      sourceType: 'default',
+      sourceId,
+    });
+    expect(harness.sendPrompt).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ sessionId }),
+      undefined,
+      expect.any(Object),
+    );
+  });
+
+  it('uses one canonical bridge id while resuming a mixed-case persisted task', async () => {
+    const harness = makeHarness();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const persistedSessionId = sessionId.toUpperCase();
+    const sourceId = `${LIVE_SESSION_SOURCE_PREFIX}mixed-case`;
+    const summary: BridgeSessionSummary = {
+      sessionId: persistedSessionId,
+      workspaceCwd: '/conversations',
+      createdAt: '2026-07-30T00:00:00.000Z',
+      displayName: 'Persisted task',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    harness.summaries.set(persistedSessionId, summary);
+    persistedSessions.set(persistedSessionId, persisted(persistedSessionId));
+    persistedSessionOwners.set(persistedSessionId, '/conversations');
+    sessionSources.set(persistedSessionId, {
+      sourceType: 'default',
+      sourceId,
+    });
+    listWorkspaceSessionsForResponse.mockResolvedValue({ sessions: [summary] });
+
+    await harness.service.handle({
+      callerSessionId: 'live-root',
+      name: 'send_message_to_thread',
+      arguments: {
+        threadId: persistedSessionId,
+        prompt: 'continue this task',
+      },
+    });
+
+    expect(harness.bridge.resumeSession).toHaveBeenCalledWith({
+      sessionId,
+      workspaceCwd: '/conversations',
+      sourceType: 'default',
+      sourceId,
+    });
+    expect(harness.materializeConversationDirectory).toHaveBeenCalledWith(
+      sessionId,
+    );
+    expect(harness.bridge.changeSessionCwd).toHaveBeenCalledWith(sessionId, {
+      path: `/conversations/${sessionId}`,
+      allowedRoots: ['/conversations'],
+      managedRelocation: 'live-conversation',
+    });
+    expect(harness.sendPrompt).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({ sessionId }),
+      undefined,
+      expect.any(Object),
+    );
+    expect(harness.resident).not.toContain(persistedSessionId);
+  });
+
   it('restores Live source identity before following a cold Live task', async () => {
     const harness = makeHarness();
     const sourceId = `${LIVE_SESSION_SOURCE_PREFIX}call-2`;
@@ -925,6 +1305,33 @@ describe('LiveTaskService', () => {
     expect(removeSessionRuntimeBaseDirs).toEqual([
       path.resolve('/runtime/conversations'),
     ]);
+    // The persisted removal succeeded, so the catalog clock advances.
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledTimes(1);
     expect(harness.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not mark the catalog when the rollback transcript removal is a no-op', async () => {
+    const harness = makeHarness();
+    vi.mocked(harness.bridge.spawnOrAttach).mockResolvedValueOnce({
+      sessionId: 'new-task',
+      workspaceCwd: '/conversations',
+      attached: false,
+      sourcePersisted: false,
+    });
+    removeSessionMock.mockResolvedValueOnce(false);
+
+    await expect(
+      harness.service.handle({
+        callerSessionId: 'live-root',
+        name: 'create_thread',
+        arguments: {
+          prompt: 'build a separate report',
+          target: { type: 'projectless' },
+        },
+      }),
+    ).rejects.toThrow('Projectless task metadata was not persisted.');
+
+    expect(removeSessionMock).toHaveBeenCalledWith('new-task');
+    expect(harness.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 });

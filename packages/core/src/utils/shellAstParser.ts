@@ -965,7 +965,19 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
     new Set(['command_substitution', 'process_substitution']),
     true,
   );
-  if (substitutions.length === 0) return 'read-only';
+  if (substitutions.length === 0) {
+    for (const expansion of collectDescendants(node, new Set(['expansion']))) {
+      for (let i = 0; i < expansion.childCount - 1; i++) {
+        if (
+          expansion.child(i)?.type === '@' &&
+          expansion.child(i + 1)?.type === 'P'
+        ) {
+          return 'unknown';
+        }
+      }
+    }
+    return 'read-only';
+  }
   return mergeSafety(
     'unknown',
     ...substitutions
@@ -1149,6 +1161,13 @@ async function classifyInternal(
     const safety = mergeSafety(
       ...root.namedChildren.map(evaluateStatementSafety),
     );
+    if (safety === 'read-only' && command.includes('\\\n')) {
+      const normalizedSafety = await classifyInternal(
+        command.replaceAll('\\\n', ''),
+        cwd,
+      );
+      if (normalizedSafety !== 'read-only') return 'unknown';
+    }
     if (safety !== 'read-only' || !cwd) return safety;
     return localGitConfigMakesCommandUnsafe(root, cwd)
       ? 'unknown'

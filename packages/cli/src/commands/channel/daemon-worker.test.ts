@@ -121,7 +121,7 @@ const mockDefaultDaemonClient = vi.hoisted(() =>
 );
 const mockDefaultDaemonSessionClient = vi.hoisted(() => ({
   createOrAttach: vi.fn(),
-  load: vi.fn(),
+  resume: vi.fn(),
 }));
 
 const mockBridgeStart = vi.hoisted(() => vi.fn());
@@ -337,7 +337,7 @@ function createSdk() {
       setModel: vi.fn(),
       respondToPermission: vi.fn(),
     }),
-    load: vi.fn().mockResolvedValue({
+    resume: vi.fn().mockResolvedValue({
       sessionId: 'loaded-session',
       workspaceCwd: '/workspace',
       prompt: vi.fn(),
@@ -437,7 +437,7 @@ describe('createDaemonSessionFactory', () => {
       },
       'qwen-channel-worker',
     );
-    expect(sdk.DaemonSessionClient.load).toHaveBeenCalledWith(
+    expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
       sdk.client,
       'existing-session',
       {
@@ -477,7 +477,7 @@ describe('createDaemonSessionFactory', () => {
       },
       'qwen-channel-worker',
     );
-    expect(sdk.DaemonSessionClient.load).toHaveBeenCalledWith(
+    expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
       sdk.client,
       'existing-session',
       {
@@ -516,7 +516,7 @@ describe('createDaemonSessionFactory', () => {
     );
     // The load branch never re-stamps creation attribution: no sourceId in the
     // load request even when the factory request carried one.
-    expect(sdk.DaemonSessionClient.load).toHaveBeenCalledWith(
+    expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
       sdk.client,
       'existing-session',
       {

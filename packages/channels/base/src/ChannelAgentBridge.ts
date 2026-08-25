@@ -7,7 +7,9 @@ export const CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY =
   'qwen.daemon.promptDisplayText';
 export const CHANNEL_PROMPT_AUTHORIZATION_META_KEY =
   'qwen.daemon.channelPromptAuthorization';
-// Client-supplied routing hint only; never use it as an authorization boundary.
+// Channel-turn classification marker. Trusted-parent metadata: the daemon
+// strips it from untrusted callers and honors it only when an authenticated
+// channel worker (or a private-parent channel bridge) set it.
 export const CHANNEL_PROMPT_META_KEY = 'qwen.channel.prompt';
 // Private-parent capability handshake with the spawned `qwen --acp` child
 // (packages/core/src/utils/invocation-context.ts owns the same constants).

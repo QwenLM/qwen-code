@@ -39,6 +39,7 @@ function snapshot(
       evidenceCursor: { recordId: null },
       turnCount: 3,
       activeTimeMs: 2_000,
+      tokensUsed: 0,
       createdAt: 1_000,
       updatedAt: 7_000,
       ...overrides,

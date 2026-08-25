@@ -7,22 +7,27 @@
 import { createHash } from 'node:crypto';
 import {
   context as otelContext,
+  defaultTextMapGetter,
   propagation,
   ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
   trace,
+  TraceFlags,
   type Context,
   type Span,
+  type TextMapPropagator,
 } from '@opentelemetry/api';
 import { logs, type LogAttributes } from '@opentelemetry/api-logs';
 import { SERVICE_NAME } from './constants.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
+import { shouldForceSampled } from './tracer.js';
 import { truncateSpanError } from './session-tracing.js';
 import {
   formatTraceparent,
   getActiveSpanTraceContext,
 } from './trace-context.js';
+import { setSessionIdOnContext } from './session-context.js';
 
 export const DAEMON_TRACEPARENT_META_KEY = 'qwen.telemetry.traceparent';
 export const DAEMON_TRACESTATE_META_KEY = 'qwen.telemetry.tracestate';
@@ -47,6 +52,7 @@ export interface DaemonRequestSpanOptions {
   sessionId?: string;
   clientId?: string;
   permissionRequestId?: string;
+  parentContext?: Context;
 }
 
 function errorMessage(error: unknown): string {
@@ -58,9 +64,6 @@ function errorType(error: unknown): string {
   if (error instanceof Error) return error.name || 'Error';
   return typeof error;
 }
-
-const INVALID_TRACE_ID = '0'.repeat(32);
-const INVALID_SPAN_ID = '0'.repeat(16);
 
 function stripReservedTraceMeta(meta: unknown): Record<string, unknown> {
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return {};
@@ -102,18 +105,25 @@ export async function withDaemonSpan<T>(
     ...(options.startTime ? { startTime: options.startTime } : {}),
   };
   const run = async (span: Span): Promise<T> => {
-    try {
-      const result = await fn(span);
-      if (autoOkOnSuccess) {
-        span.setStatus({ code: SpanStatusCode.OK });
+    const sessionId = attributes['session.id'];
+    const scopedContext = setSessionIdOnContext(
+      otelContext.active(),
+      typeof sessionId === 'string' ? sessionId : undefined,
+    );
+    return await otelContext.with(scopedContext, async () => {
+      try {
+        const result = await fn(span);
+        if (autoOkOnSuccess) {
+          span.setStatus({ code: SpanStatusCode.OK });
+        }
+        return result;
+      } catch (error) {
+        recordDaemonError(span, error);
+        throw error;
+      } finally {
+        span.end();
       }
-      return result;
-    } catch (error) {
-      recordDaemonError(span, error);
-      throw error;
-    } finally {
-      span.end();
-    }
+    });
   };
   return options.parentContext
     ? await tracer.startActiveSpan(
@@ -156,7 +166,11 @@ export async function withDaemonRequestSpan<T>(
         : {}),
     },
     fn,
-    { autoOkOnSuccess: false, startTime: options.startTime },
+    {
+      autoOkOnSuccess: false,
+      startTime: options.startTime,
+      parentContext: options.parentContext,
+    },
   );
 }
 
@@ -283,6 +297,74 @@ export function injectDaemonTraceContext<T extends object>(request: T): T {
   };
 }
 
+// Fallback propagator for `contextFromTraceparentValues` below. The global
+// propagator stays a no-op unless the daemon SDK registered one (opt-in
+// outbound propagation), so extraction needs a direct W3C instance to apply
+// the same acceptance rules — future traceparent versions, tracestate,
+// all-zero ids — as the registered path. The instance is injected by the
+// lazy SDK chunk (`sdk-impl.ts`) instead of being constructed here: this
+// module sits on every CLI launch's static startup graph, and
+// @opentelemetry/core is a CJS barrel that tree-shaking cannot slim down
+// (~65 KB per launch even with telemetry off). Until the SDK initializes,
+// the holder stays empty and extraction returns no parent context — the
+// telemetry-off state, with no OTel side effects.
+let daemonFallbackPropagator: TextMapPropagator | undefined;
+
+/**
+ * Install the W3C fallback propagator used by inbound traceparent
+ * extraction. Called by the dynamically imported SDK chunk (`sdk-impl.ts`)
+ * once telemetry is actually enabled, so @opentelemetry/core never enters
+ * the static startup graph (the `TextMapPropagator` type import above costs
+ * nothing at runtime).
+ */
+export function setDaemonFallbackPropagator(
+  propagator: TextMapPropagator,
+): void {
+  daemonFallbackPropagator = propagator;
+}
+
+function contextFromTraceparentValues(
+  traceparent: string,
+  tracestate: unknown,
+): Context | undefined {
+  const carrier: Record<string, string> = { traceparent };
+  if (typeof tracestate === 'string' && tracestate.length > 0) {
+    carrier['tracestate'] = tracestate;
+  }
+  const extracted = propagation.extract(ROOT_CONTEXT, carrier);
+  if (trace.getSpanContext(extracted)) return extracted;
+  if (!daemonFallbackPropagator) return undefined;
+  const fallback = daemonFallbackPropagator.extract(
+    ROOT_CONTEXT,
+    carrier,
+    defaultTextMapGetter,
+  );
+  return trace.getSpanContext(fallback) ? fallback : undefined;
+}
+
+// A remote caller's `sampled=0` is head-based ratio sampling on their
+// side, not a request to drop daemon telemetry. Under the default
+// parentbased_always_on sampler a remote unsampled parent delegates to
+// AlwaysOff, silently deleting the request span, everything under it, and —
+// via _meta forwarding — the session subprocess spans. Reuse the
+// session-root decision matrix: parentbased defaults and always_on force
+// SAMPLED; parentbased_always_off honors the operator's opt-out;
+// non-parentbased samplers decide per span.
+function forceSampledUnderSampler(
+  extracted: Context | undefined,
+): Context | undefined {
+  if (!extracted || !shouldForceSampled()) return extracted;
+  const spanContext = trace.getSpanContext(extracted);
+  if (!spanContext) return extracted;
+  return trace.setSpan(
+    extracted,
+    trace.wrapSpanContext({
+      ...spanContext,
+      traceFlags: spanContext.traceFlags | TraceFlags.SAMPLED,
+    }),
+  );
+}
+
 export function extractDaemonTraceContext(
   source: unknown,
 ): Context | undefined {
@@ -295,37 +377,67 @@ export function extractDaemonTraceContext(
   if (typeof traceparent !== 'string' || traceparent.length === 0) {
     return undefined;
   }
-  const carrier: Record<string, string> = { traceparent };
-  const tracestate = record[DAEMON_TRACESTATE_META_KEY];
-  if (typeof tracestate === 'string' && tracestate.length > 0) {
-    carrier['tracestate'] = tracestate;
-  }
-  const extracted = propagation.extract(ROOT_CONTEXT, carrier);
-  if (trace.getSpanContext(extracted)) return extracted;
+  // The _meta path is reachable from two kinds of callers: the in-process
+  // bridge (injectDaemonTraceContext, values already SAMPLED so forcing is a
+  // no-op) and direct ACP clients whose request _meta is external input just
+  // like the HTTP header — so both edges get the same sampled protection.
+  return forceSampledUnderSampler(
+    contextFromTraceparentValues(
+      traceparent,
+      record[DAEMON_TRACESTATE_META_KEY],
+    ),
+  );
+}
 
-  const parts = traceparent.split('-');
-  const traceId = parts[1];
-  const spanId = parts[2];
-  const flags = parts[3];
-  if (
-    parts[0] !== '00' ||
-    !traceId?.match(/^[0-9a-f]{32}$/) ||
-    !spanId?.match(/^[0-9a-f]{16}$/) ||
-    !flags?.match(/^[0-9a-f]{2}$/) ||
-    traceId === INVALID_TRACE_ID ||
-    spanId === INVALID_SPAN_ID
-  ) {
+export function extractDaemonHttpTraceContext(
+  headers: Record<string, unknown> | undefined,
+): Context | undefined {
+  const traceparent = headers?.['traceparent'];
+  if (typeof traceparent !== 'string' || traceparent.length === 0) {
     return undefined;
   }
-  return trace.setSpan(
-    ROOT_CONTEXT,
-    trace.wrapSpanContext({
-      traceId,
-      spanId,
-      traceFlags: Number.parseInt(flags, 16),
-      isRemote: true,
-    }),
+  const extracted = contextFromTraceparentValues(
+    traceparent,
+    headers?.['tracestate'],
   );
+  return forceSampledUnderSampler(extracted);
+}
+
+const TRACEPARENT_RE =
+  /^\s?([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})(-.*)?\s?$/;
+const ALL_ZERO_TRACE_ID = '0'.repeat(32);
+const ALL_ZERO_SPAN_ID = '0'.repeat(16);
+
+/**
+ * Extract the caller's trace id from an inbound `traceparent` header without
+ * any OpenTelemetry machinery. Unlike {@link extractDaemonHttpTraceContext}
+ * (which builds a span parent and needs the W3C propagator — only installed
+ * once the telemetry SDK starts), this is a plain format check so the daemon
+ * log can carry the caller's trace id even with telemetry disabled: the
+ * log-based join then works with no trace backend at all. The acceptance
+ * rules mirror the vendored W3C propagator exactly (single optional leading/
+ * trailing whitespace, trailing fields allowed above version `00`, `ff` and
+ * all-zero ids rejected), so a header either joins on both paths or neither.
+ */
+export function extractInboundTraceId(
+  headers: Record<string, unknown> | undefined,
+): string | undefined {
+  const traceparent = headers?.['traceparent'];
+  if (typeof traceparent !== 'string' || traceparent.length === 0) {
+    return undefined;
+  }
+  const match = TRACEPARENT_RE.exec(traceparent);
+  if (!match) return undefined;
+  // match: [full, version, traceId, spanId, flags, trailingFields]
+  const [, version, traceId, spanId, , trailing] = match;
+  // Version 00 must be exactly four fields; higher versions may carry
+  // trailing extension fields the parser ignores — same as the propagator.
+  if (version === '00' && trailing !== undefined) return undefined;
+  if (version === 'ff') return undefined;
+  if (traceId === ALL_ZERO_TRACE_ID || spanId === ALL_ZERO_SPAN_ID) {
+    return undefined;
+  }
+  return traceId;
 }
 
 export interface DaemonBridgeTelemetryMetrics {

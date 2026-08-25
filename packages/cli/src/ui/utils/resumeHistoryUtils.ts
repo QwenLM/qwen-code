@@ -38,6 +38,7 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+import { coalesceFindingsHistoryItems } from './findings-coalescing.js';
 import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 import {
   collectInlineImages,
@@ -386,11 +387,16 @@ function convertToHistoryItems(
         }
         if (record.subtype === 'mid_turn_user_message') {
           const payload = record.systemPayload as
-            | { displayText?: string }
+            | { displayText?: string; attachmentReferences?: unknown[] }
             | undefined;
+          const hasAttachmentReferences =
+            Array.isArray(payload?.attachmentReferences) &&
+            payload.attachmentReferences.length > 0;
           const text =
             payload?.displayText ||
-            extractTextFromParts(record.message?.parts as Part[]);
+            (hasAttachmentReferences
+              ? '[User message with attachments]'
+              : extractTextFromParts(record.message?.parts as Part[]));
           if (text) {
             items.push({ type: MessageType.USER, text, sentToModel: false });
           }
@@ -434,8 +440,17 @@ function convertToHistoryItems(
         }
 
         const projection = projectUserTranscriptForDisplay(record);
+        const payload = record.systemPayload as
+          | { attachmentReferences?: unknown[] }
+          | undefined;
+        const hasAttachmentReferences =
+          Array.isArray(payload?.attachmentReferences) &&
+          payload.attachmentReferences.length > 0;
         const text =
-          projection.displayText ?? extractTextFromParts(projection.parts);
+          projection.displayText ||
+          (hasAttachmentReferences
+            ? '[User message with attachments]'
+            : extractTextFromParts(projection.parts));
         if (text) {
           items.push({ type: 'user', text });
         }
@@ -617,7 +632,10 @@ function convertToHistoryItems(
     });
   }
 
-  return items;
+  // A report_findings re-report REPLACES the earlier list — restored
+  // transcripts collapse the superseded displays so the initial report and
+  // its outcome re-report do not render two checklists at once.
+  return coalesceFindingsHistoryItems(items);
 }
 
 /**

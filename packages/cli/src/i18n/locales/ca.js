@@ -512,6 +512,7 @@ export default {
   'Tool Output Truncation Lines': "Línies de truncament de la sortida d'eines",
   'Folder Trust': 'Confiança de carpeta',
   'Tool Schema Compliance': 'Compliment de Tool Schema',
+  Unset: 'No definit',
   'Auto (detect from system)': 'Automàtic (detectar del sistema)',
   'Auto (follow user input)': "Automàtic (seguir l'entrada de l'usuari)",
   'Auto (detect terminal theme)': 'Automàtic (detectar el tema del terminal)',
@@ -1592,6 +1593,7 @@ export default {
     'rebutjat — editeu la configuració per tornar a aprovar',
   'Background agent needs approval': "L'agent en segon pla necessita aprovació",
   'Approve or deny the request above': 'Aprova o denega la sol·licitud de dalt',
+  'from nested agent': "de l'agent imbricat",
   Running: 'En execució',
   Pausing: 'Pausant',
   Paused: 'En pausa',
@@ -1988,6 +1990,19 @@ export default {
     'Desa una memòria duradora al sistema de memòria.',
   'Ask a quick side question without affecting the main conversation':
     'Fes una pregunta ràpida sense afectar la conversa principal',
+  'Get a second opinion on the current conversation from a reviewer model':
+    "Obtén una segona opinió sobre la conversa actual d'un model revisor",
+  'Consulting advisor...': "Consultant l'assessor...",
+  'Advisor review failed: {{error}}':
+    "La revisió de l'assessor ha fallat: {{error}}",
+  'No conversation context available for /advisor':
+    'No hi ha context de conversa disponible per a /advisor',
+  'Focus too long (max {{max}} chars)':
+    'El focus és massa llarg (màx. {{max}} caràcters)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    "Una altra operació està en curs, espereu que es completi abans d'executar /advisor",
+  'No response received.': "No s'ha rebut cap resposta.",
+  'No model configured.': 'No hi ha cap model configurat.',
   'Browser-based authentication with third-party providers (e.g. OpenRouter, ModelScope)':
     'Autenticació basada en navegador amb proveïdors de tercers (p. ex. OpenRouter, ModelScope)',
   'Manage Arena sessions': "Gestiona les sessions de l'Arena",
@@ -2388,6 +2403,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': 'Artefacte',
   'toolDisplayName.RecordArtifact': "Enregistra l'artefacte",
+  'toolDisplayName.ReportFindings': 'Informa de les troballes',
   'toolDisplayName.Skill': 'Habilitat',
   'toolDisplayName.EnterPlanMode': 'Entra al mode de planificació',
   'toolDisplayName.ExitPlanMode': 'Surt del mode de planificació',
@@ -2409,6 +2425,7 @@ export default {
   'toolDisplayName.TeamCreate': 'Crea equip',
   'toolDisplayName.TeamDelete': 'Suprimeix equip',
   'toolDisplayName.TeamPlanApproval': "Aprovació del pla d'equip",
+  'toolDisplayName.RequestShutdown': "Sol·licita l'aturada",
   'toolDisplayName.SendMessage': 'Envia missatge',
   'toolDisplayName.StructuredOutput': 'Sortida estructurada',
   'toolDisplayName.Monitor': 'Monitor',

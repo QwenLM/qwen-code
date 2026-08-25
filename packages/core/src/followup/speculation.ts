@@ -18,6 +18,7 @@
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { GeminiClient } from '../core/client.js';
+import type { ToolArtifact } from '../tools/tools.js';
 import { StreamEventType } from '../core/geminiChat.js';
 import {
   convertToFunctionErrorResponse,
@@ -34,13 +35,18 @@ import {
   createForkedChat,
   runForkedAgent,
   runWithForkedChatModel,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
-} from '../utils/tool-response-finalizer.js';
+} from '../tools/tool-response-finalizer.js';
+import {
+  observeToolResultBoundary,
+  toolResultBoundaryArtifact,
+  toolResultPartDiagnosticValues,
+} from '../tools/tool-result-boundary-diagnostics.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -50,6 +56,34 @@ const debugLogger = createDebugLogger('SPECULATION');
 
 const MAX_SPECULATION_TURNS = 20;
 const MAX_SPECULATION_MESSAGES = 100;
+
+function observeSpeculationProducer(params: {
+  config: Config;
+  callId: string;
+  toolName: string;
+  persistedOutputFiles?: string[];
+  artifacts?: ReadonlyArray<{ kind?: unknown }>;
+  knownNone?: boolean;
+  values: () => ReturnType<typeof toolResultPartDiagnosticValues>;
+}): void {
+  try {
+    observeToolResultBoundary({
+      stage: 'producer',
+      sessionId: params.config.getSessionId?.(),
+      toolCallId: params.callId,
+      toolName: params.toolName,
+      artifacts: [
+        toolResultBoundaryArtifact(
+          params.knownNone ? [] : params.persistedOutputFiles,
+          params.artifacts,
+        ),
+      ],
+      values: params.values,
+    });
+  } catch {
+    // Diagnostics must not affect speculative execution.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -107,7 +141,7 @@ export async function startSpeculation(
   parentSignal?: AbortSignal,
   options?: { model?: string },
 ): Promise<SpeculationState> {
-  const cacheSafe = getCacheSafeParams();
+  const cacheSafe = getCacheSafeParams(config.getSessionId());
   if (!cacheSafe) {
     throw new Error('CacheSafeParams not available for speculation');
   }
@@ -213,7 +247,7 @@ interface LoopResult {
 async function runSpeculativeLoop(
   config: Config,
   state: SpeculationState,
-  cacheSafe: import('../utils/forkedAgent.js').CacheSafeParams,
+  cacheSafe: import('../agents/forkedAgent.js').CacheSafeParams,
   modelOverride?: string,
 ): Promise<LoopResult> {
   const modelSelector =
@@ -294,6 +328,22 @@ async function runSpeculativeLoop(
         const args = (fc.args ?? {}) as Record<string, unknown>;
         const persistenceCallId =
           id ?? `${name}-${state.id}-${turn}-${responseEntries.length}`;
+        let producerObserved = false;
+        const observeProducer = (
+          params: Omit<
+            Parameters<typeof observeSpeculationProducer>[0],
+            'config' | 'callId' | 'toolName'
+          >,
+        ) => {
+          if (producerObserved) return;
+          producerObserved = true;
+          observeSpeculationProducer({
+            ...params,
+            config,
+            callId: persistenceCallId,
+            toolName: name,
+          });
+        };
         const gate = await evaluateToolCall(
           name,
           args,
@@ -330,6 +380,10 @@ async function runSpeculativeLoop(
                 response: { error: `Tool '${name}' not found` },
               },
             };
+            observeProducer({
+              knownNone: true,
+              values: () => toolResultPartDiagnosticValues(responsePart),
+            });
             functionResponses.push(responsePart);
             responseEntries.push({
               callId: persistenceCallId,
@@ -350,6 +404,8 @@ async function runSpeculativeLoop(
                 toolName: canonicalToolName(name),
                 args: invocation.params as Record<string, unknown>,
                 signal: state.abortController!.signal,
+                sessionId: config.getSessionId(),
+                cwd: config.getTargetDir(),
                 ...(invocationContext ? { invocationContext } : {}),
               },
             );
@@ -369,6 +425,34 @@ async function runSpeculativeLoop(
             state.abortController!.signal,
           );
           state.toolUseCount++;
+          let resultArtifacts: ToolArtifact[] | undefined;
+          let resultPersistedOutputFiles: string[] | undefined;
+          try {
+            resultArtifacts = result.artifacts;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
+          try {
+            resultPersistedOutputFiles = result.persistedOutputFiles;
+          } catch {
+            // Optional result metadata must not affect execution.
+          }
+
+          observeProducer({
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
+            values: () => [
+              ...toolResultPartDiagnosticValues(result.llmContent),
+              ...(typeof result.returnDisplay === 'string'
+                ? [
+                    {
+                      representation: 'display' as const,
+                      value: result.returnDisplay,
+                    },
+                  ]
+                : []),
+            ],
+          });
 
           const convertedResponseParts = result.error
             ? convertToFunctionErrorResponse(
@@ -396,7 +480,8 @@ async function runSpeculativeLoop(
             callId: persistenceCallId,
             toolName: name,
             responseParts,
-            persistedOutputFiles: result.persistedOutputFiles,
+            persistedOutputFiles: resultPersistedOutputFiles,
+            artifacts: resultArtifacts,
           });
         } catch (error: unknown) {
           const responsePart: Part = {
@@ -411,6 +496,10 @@ async function runSpeculativeLoop(
               },
             },
           };
+          observeProducer({
+            knownNone: true,
+            values: () => toolResultPartDiagnosticValues(responsePart),
+          });
           functionResponses.push(responsePart);
           responseEntries.push({
             callId: persistenceCallId,
@@ -629,7 +718,7 @@ The assistant responded: ${speculatedSummary || '(tool calls executed)'}
 
 ${SUGGESTION_PROMPT}`;
 
-    const cacheSafeParams = getCacheSafeParams();
+    const cacheSafeParams = getCacheSafeParams(config.getSessionId());
     if (!cacheSafeParams) return null;
     const model = modelOverride ?? config.getFastModel();
     const resolvedModel = model ?? cacheSafeParams.model;
