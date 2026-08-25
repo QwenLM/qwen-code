@@ -7253,14 +7253,18 @@ export class Session implements SessionContext {
         rawParts =
           message.kind === 'text'
             ? [{ text: message.message }]
-            : await withTimeoutSignal(
-                abortSignal,
-                MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                (signal) =>
-                  this.#resolvePrompt(message.content, signal, {
-                    onFullTurnModel: options.onFullTurnModel,
-                  }),
-              );
+            : hasInlineAttachmentContentBlock(message.content)
+              ? await this.#resolvePrompt(message.content, abortSignal, {
+                  onFullTurnModel: options.onFullTurnModel,
+                })
+              : await withTimeoutSignal(
+                  abortSignal,
+                  MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+                  (signal) =>
+                    this.#resolvePrompt(message.content, signal, {
+                      onFullTurnModel: options.onFullTurnModel,
+                    }),
+                );
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
           return parts;

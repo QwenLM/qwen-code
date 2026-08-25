@@ -12372,6 +12372,118 @@ describe('Session', () => {
         );
       });
 
+      it('lets the vision bridge own the timeout for mid-turn images', async () => {
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            }),
+          }),
+        };
+        const timeoutController = new AbortController();
+        const timeoutSpy = vi
+          .spyOn(AbortSignal, 'timeout')
+          .mockReturnValue(timeoutController.signal);
+        const bridgeResult = {
+          applied: true,
+          status: 'ok' as const,
+          parts: [{ text: '[transcribed image]' }],
+          transcript: '[transcribed image]',
+          convertedCount: 1,
+          omittedCount: 0,
+          modelId: 'vision-bridge',
+        };
+        let bridgeSignal: AbortSignal | undefined;
+        let bridgeStarted!: () => void;
+        let resolveBridge!: (result: typeof bridgeResult) => void;
+        const bridgeStartedPromise = new Promise<void>((resolve) => {
+          bridgeStarted = resolve;
+        });
+
+        try {
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+          mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+            id: 'vision-bridge',
+            baseUrl: 'https://vision.example.com/v1',
+          });
+          mockClient.extMethod = vi.fn().mockResolvedValue({
+            items: [
+              {
+                content: [
+                  { type: 'text', text: 'please inspect this image' },
+                  {
+                    type: 'image',
+                    mimeType: 'image/png',
+                    data: 'iVBORw0KGgo=',
+                  },
+                ],
+                displayText: 'please inspect this image',
+              },
+            ],
+          });
+          runVisionBridgeSpy.mockImplementation(
+            ({ signal }: { signal: AbortSignal }) =>
+              new Promise((resolve) => {
+                bridgeSignal = signal;
+                resolveBridge = resolve;
+                bridgeStarted();
+              }),
+          );
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValueOnce(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [
+                      {
+                        id: 'call-1',
+                        name: 'read_file',
+                        args: { path: '/tmp/test.txt' },
+                      },
+                    ],
+                  },
+                },
+              ]),
+            )
+            .mockResolvedValueOnce(createEmptyStream());
+
+          const prompt = session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          });
+          await bridgeStartedPromise;
+          timeoutController.abort(new Error('mid-turn resolution timed out'));
+
+          const bridgeWasAborted = bridgeSignal?.aborted;
+          resolveBridge(bridgeResult);
+          await prompt;
+
+          expect(bridgeWasAborted).toBe(false);
+          const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+            .calls[1];
+          expect(
+            textParts(secondCall?.[1].message as Part[]).some((text) =>
+              text.includes('[transcribed image]'),
+            ),
+          ).toBe(true);
+        } finally {
+          timeoutSpy.mockRestore();
+        }
+      });
+
       it('records inline-media-only mid-turn messages with a placeholder display text', async () => {
         // An inline image with no text and no references must not record an
         // empty displayText: resume and replay would otherwise fall back to
