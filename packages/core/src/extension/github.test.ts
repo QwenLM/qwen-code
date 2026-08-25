@@ -3998,6 +3998,35 @@ describe('git extension helpers', () => {
       },
     );
 
+    it.skipIf(process.platform === 'win32')(
+      'rejects a later entry beneath an earlier symlink before extraction',
+      async () => {
+        const archivePath = path.join(tempDir, 'symlink-descendant.tar.gz');
+        const extractionDest = path.join(tempDir, 'symlink-descendant-dest');
+        await fs.mkdir(extractionDest);
+
+        const output = fsSync.createWriteStream(archivePath);
+        const archive = archiver.create('tar', { gzip: true });
+        const finished = new Promise<void>((resolve, reject) => {
+          output.on('close', resolve);
+          archive.on('error', reject);
+        });
+        archive.pipe(output);
+        archive.append('target', { name: 'target' });
+        archive.symlink('alias', 'target');
+        archive.append('must not be written', { name: 'alias/child' });
+        await archive.finalize();
+        await finished;
+
+        await expect(
+          extractFile(archivePath, extractionDest, undefined, {
+            allowContainedSymlinks: true,
+          }),
+        ).rejects.toThrow('unsupported link entry');
+        expect(await fs.readdir(extractionDest)).toEqual([]);
+      },
+    );
+
     it('should throw an error for unsupported file types', async () => {
       const unsupportedFilePath = path.join(tempDir, 'test.txt');
       await fs.writeFile(unsupportedFilePath, 'some content');

@@ -349,4 +349,5 @@ export async function assertDirectorySymlinksAreSafe(
     }
   };
   await visit(resolvedRoot);
+  signal?.throwIfAborted();
 }
