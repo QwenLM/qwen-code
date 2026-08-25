@@ -26,6 +26,16 @@ const PEM_BODY_COLUMNS = 64;
  * contain `:`, so inside a block this cannot eat a body line.
  */
 const RFC1421_HEADER_LINE = /^[A-Za-z0-9-]+:.+$/;
+/**
+ * The UTF-8 byte order mark. The loader strips it only from the FIRST line
+ * each of its `PEM_read_bio_X509` scans reads — the file start, and the line
+ * immediately following a consumed block's END marker (measured on Node
+ * v22.23.2: a BOM'd BEGIN in either position loads; the SAME line preceded
+ * by a blank line, a prose line or nothing at all does not — the scan just
+ * walks past it and keeps whatever prefix it already has, with no warning).
+ * `extractCertificateBlocks` applies it at exactly those positions.
+ */
+const UTF8_BOM = '\uFEFF';
 
 /**
  * The label of a `-----BEGIN X-----`/`-----END X-----` line, or `undefined`
@@ -51,14 +61,19 @@ function pemMarkerLabel(line: string, prefix: string): string | undefined {
 }
 
 /**
- * Everything OpenSSL's line reader tolerates that a verbatim match does not: a
- * UTF-8 BOM at the start of ANY line (Windows tooling writes one, and
- * concatenating operator files puts one mid-file, in front of a later block —
- * a file-start-anchored strip left that block unmatched and lost it), CRLF
- * terminators, and trailing whitespace. Measured on Node 22 through real
- * `NODE_EXTRA_CA_CERTS` handshakes: every one of those shapes loads and
- * verifies, so rejecting any of them drops an operator CA the workers would
- * have trusted and blames a file that was never the problem.
+ * Everything OpenSSL's line reader tolerates that a verbatim match does not:
+ * CRLF terminators and trailing whitespace. Measured on Node 22 through real
+ * `NODE_EXTRA_CA_CERTS` handshakes: both shapes load and verify, so rejecting
+ * them drops an operator CA the workers would have trusted and blames a file
+ * that was never the problem.
+ *
+ * A UTF-8 BOM is NOT stripped here (R2-21 entrance B1): the loader removes
+ * one only from the first line each of its scans reads (see `UTF8_BOM`), and
+ * anywhere else it hides the marker — measured on Node v22.23.2, a serving
+ * file of leaf + blank line + BOM-prefixed issuing CA boots green and used
+ * to diagnose zero gaps here while the loader took only the leaf, leaving
+ * every worker restart-looping UNABLE_TO_VERIFY_LEAF_SIGNATURE. Stripping on
+ * ANY line counted such a rescued block as an anchor the workers never got.
  *
  * LEADING whitespace is deliberately NOT stripped (R2-21 entrance P1). It is
  * the one shape in this family the loader does not tolerate on a marker line:
@@ -72,10 +87,9 @@ function pemMarkerLabel(line: string, prefix: string): string | undefined {
  * joined below, which is what the decoder does too.
  */
 function normalizePemLine(line: string): string {
-  const normalized = line.replace(/^\uFEFF/, '');
-  let end = normalized.length;
-  while (end > 0 && normalized.charCodeAt(end - 1) <= 0x20) end -= 1;
-  return normalized.slice(0, end);
+  let end = line.length;
+  while (end > 0 && line.charCodeAt(end - 1) <= 0x20) end -= 1;
+  return line.slice(0, end);
 }
 
 /**
@@ -83,11 +97,11 @@ function normalizePemLine(line: string): string {
  * from `contents`, in file order, or `undefined` when it would take none.
  *
  * This walks the file the way OpenSSL's `PEM_read_bio_X509` loop does rather
- * than pattern-matching what a well-formed file looks like. Three rounds of
- * review found three more shapes the pattern-matching version rejected and the
- * loader accepts (embedded marker text, whitespace inside a base64 body line,
- * a mid-file BOM); the shape-by-shape surface is unbounded, so the framing
- * decisions themselves are the loader's here.
+ * than pattern-matching what a well-formed file looks like. Rounds of review
+ * found shape after shape the pattern-matching version rejected and the
+ * loader accepts (embedded marker text, whitespace inside a base64 body
+ * line, a BOM on a scan's first line); the shape-by-shape surface is
+ * unbounded, so the framing decisions themselves are the loader's here.
  *
  * The loader is PREFIX-loading, not all-or-nothing (measured on Node 22:
  * a good root followed by a fused block still handshakes `authorized=true`
@@ -114,8 +128,18 @@ export function extractCertificateBlocks(
   const lines = contents.split('\n').map(normalizePemLine);
   const blocks: string[] = [];
   let index = 0;
+  // A BOM is stripped only from the first line each loader scan reads: the
+  // file start, and the line immediately after a consumed block's END marker
+  // (`UTF8_BOM`). Anywhere else it hides the marker, the scan walks past the
+  // block, and the workers never receive it.
+  let atScanStart = true;
   scan: while (index < lines.length) {
-    const label = pemMarkerLabel(lines[index]!, BEGIN_PREFIX);
+    let line = lines[index]!;
+    if (atScanStart) {
+      if (line.startsWith(UTF8_BOM)) line = line.slice(UTF8_BOM.length);
+      atScanStart = false;
+    }
+    const label = pemMarkerLabel(line, BEGIN_PREFIX);
     if (label === undefined) {
       index += 1;
       continue;
@@ -123,24 +147,25 @@ export function extractCertificateBlocks(
     const body: string[] = [];
     let cursor = index + 1;
     for (; cursor < lines.length; cursor += 1) {
-      const line = lines[cursor]!;
-      if (line.startsWith(END_PREFIX)) {
+      const innerLine = lines[cursor]!;
+      if (innerLine.startsWith(END_PREFIX)) {
         // A mismatched or fused end line is `bad end line`: the loader stops
         // reading the file here and keeps only what it already has.
-        if (pemMarkerLabel(line, END_PREFIX) !== label) break scan;
+        if (pemMarkerLabel(innerLine, END_PREFIX) !== label) break scan;
         break;
       }
-      body.push(line);
+      body.push(innerLine);
     }
     // Ran off the end without an end line — same `bad end line` stop.
     if (cursor >= lines.length) break;
     // RFC 1421 header lines — the `Proc-Type:`/`DEK-Info:` pair of legacy
     // encrypted keys — sit between the BEGIN marker and the first blank
-    // line. The loader parses them, reads nothing certificate-shaped from
-    // the block, and CONTINUES with the next block; feeding the header text
-    // to the base64 judgement stopped the scan here and dropped every
-    // certificate after such a block (measured: the loader authorizes
-    // through a headered key block this scan never got past).
+    // line. The loader parses them, skips the block and CONTINUES — but only
+    // when that blank separator is present (R2-21 entrance B2): without it
+    // the block fails to load and the loader keeps nothing more from the
+    // rest of the file (measured on Node v22.23.2: leaf + no-blank key block
+    // + root hands the workers the leaf prefix alone, while the blank-line
+    // twin authorizes). `break scan` stops where the loader stops.
     let bodyStart = 0;
     while (
       bodyStart < body.length &&
@@ -149,13 +174,19 @@ export function extractCertificateBlocks(
       bodyStart += 1;
     }
     if (bodyStart > 0) {
-      if (body[bodyStart] === '') bodyStart += 1;
+      if (body[bodyStart] !== '') break scan;
+      bodyStart += 1;
       body.splice(0, bodyStart);
     }
     // Interior whitespace in a body line is skipped by the decoder, not an
     // error, so join first and judge the alphabet afterwards. OpenSSL decodes
     // every PEM block it walks, including blocks that are not certificates.
-    const encoded = body.join('').replace(/\s/g, '');
+    // "Whitespace" is the decoder's ASCII set, NOT JS `\s`: `\s` also strips
+    // a U+FEFF BOM, and a BOM'd body line is exactly what the decoder fails
+    // on (`bad base64 decode`, measured — the loader keeps only the prefix).
+    const encoded = [...body.join('')]
+      .filter((char) => char.charCodeAt(0) > 0x20)
+      .join('');
     if (!pemBodyDecodes(encoded)) {
       break;
     }
@@ -173,6 +204,7 @@ export function extractCertificateBlocks(
       blocks.push(block);
     }
     index = cursor + 1;
+    atScanStart = true;
   }
   return blocks.length > 0 ? blocks : undefined;
 }
@@ -209,7 +241,8 @@ function base64CharValue(code: number): number {
  * bodies, stopping the scan and dropping every block after them. Compare
  * only the bits the decoder consumes: everything before the last character
  * exactly, the last character masked to its used bits (two with `==`
- * padding, four with `=`).
+ * padding, four with `=`). Missing padding is fine too (measured the same
+ * way: an unpadded body loads and authorizes).
  */
 function pemBodyDecodes(encoded: string): boolean {
   if (encoded.length === 0 || /[^A-Za-z0-9+/=]/.test(encoded)) return false;

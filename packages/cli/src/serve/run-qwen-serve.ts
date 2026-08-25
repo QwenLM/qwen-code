@@ -725,7 +725,16 @@ export function formatChannelWorkerDaemonUrl(
   if (canonicalIp === '::') {
     return `${scheme}://[::1]:${port}`;
   }
-  if (canonicalIp === '0.0.0.0') {
+  // The v4 wildcard's IPv4-mapped spelling `::ffff:0.0.0.0` canonicalizes to
+  // `::ffff:0:0` (WHATWG URL serializes the mapped form by dropping the
+  // dotted quad), so it matches neither wildcard above. Node binds it as a
+  // WORKING wildcard (R14-2): measured on this Node, the socket reports
+  // family IPv6 yet serves v4 loopback — `dial 127.0.0.1` -> ok while
+  // `dial ::1` -> ECONNREFUSED — so it maps to v4 loopback, NOT `[::1]`,
+  // and an operator who copied the address from `ss`/`netstat` (which render
+  // v4 connections on dual-stack sockets as `::ffff:...`) gets channels
+  // that start instead of a boot refusal.
+  if (canonicalIp === '0.0.0.0' || canonicalIp === '::ffff:0:0') {
     return `${scheme}://127.0.0.1:${port}`;
   }
   return `${scheme}://${formatHostForUrl(host)}:${port}`;
@@ -929,6 +938,28 @@ export function describeWorkerTlsTrustGaps(opts: {
         `signing". Re-export that CA with keyCertSign in its keyUsage; ` +
         `pointing NODE_EXTRA_CA_CERTS at it again will not help — it is ` +
         `already there.`,
+    );
+  } else if (anchorPath.nameConstraintViolation) {
+    const { constrainer, violator, kind } = anchorPath.nameConstraintViolation;
+    const constrainerName = constrainer.subject.replace(/\r?\n/g, ', ');
+    const violatorName = violator.subject.replace(/\r?\n/g, ', ');
+    gaps.push(
+      kind === 'excluded'
+        ? `--tls-cert "${opts.certPath}" chains through "${constrainerName}", ` +
+            `whose name constraints carry an excluded subtree that ` +
+            `"${violatorName}" or one of its subject alternative names falls ` +
+            `within — OpenSSL refuses the chain, so every worker handshake to ` +
+            `the daemon will fail "excluded subtree violation" even though ` +
+            `every signature verifies. Reissue the chain outside the excluded ` +
+            `subtree, or anchor it with a CA that carries no such constraint, ` +
+            `and restart.`
+        : `--tls-cert "${opts.certPath}" chains through "${constrainerName}", ` +
+            `whose name constraints permit only their listed subtrees and ` +
+            `"${violatorName}" or one of its subject alternative names sits ` +
+            `outside all of them — every worker handshake to the daemon will ` +
+            `fail "permitted subtree violation" even though every signature ` +
+            `verifies. Reissue the chain inside a permitted subtree, or anchor ` +
+            `it with a CA that carries no such constraint, and restart.`,
     );
   } else if (!anchorPath.anchored) {
     gaps.push(
@@ -1300,6 +1331,356 @@ function pathLenConstraint(cert: X509Certificate): number | undefined {
   return result;
 }
 
+/** nameConstraints, 2.5.29.30, as the contents of its OBJECT IDENTIFIER. */
+const NAME_CONSTRAINTS_OID = Buffer.from([0x55, 0x1d, 0x1e]);
+/** subjectAltName, 2.5.29.17, as the contents of its OBJECT IDENTIFIER. */
+const SUBJECT_ALT_NAME_OID = Buffer.from([0x55, 0x1d, 0x11]);
+
+/** Context tags of the GeneralName CHOICE that name constraints use. */
+const GENERAL_NAME_RFC822_TAG = 0x81;
+const GENERAL_NAME_DNS_TAG = 0x82;
+/** `[4] EXPLICIT Name` — constructed context tags carry a nested element. */
+const GENERAL_NAME_DIRECTORY_TAG = 0xa4;
+const GENERAL_NAME_URI_TAG = 0x86;
+const GENERAL_NAME_IP_TAG = 0x87;
+/** An RDN is a SET OF AttributeTypeAndValue. */
+const RDN_SET_TAG = 0x31;
+
+interface GeneralNameEntry {
+  tag: number;
+  value: Buffer;
+}
+
+interface NameConstraintSubtrees {
+  permitted: readonly GeneralNameEntry[];
+  excluded: readonly GeneralNameEntry[];
+}
+
+/** A name of a certificate that name constraints can bind, with its match. */
+interface ConstrainableName {
+  tag: number;
+  matches: (subtree: Buffer) => boolean;
+}
+
+/**
+ * The permitted/excluded subtree bases `cert` asserts, or undefined when it
+ * carries no nameConstraints extension.
+ *
+ * NameConstraints ::= SEQUENCE { permittedSubtrees [0] GeneralSubtrees
+ * OPTIONAL, excludedSubtrees [1] GeneralSubtrees OPTIONAL }; each
+ * GeneralSubtree is SEQUENCE { base GeneralName, minimum, maximum } — the
+ * loader-side checks here only ever read `base` (minimum/maximum are ignored
+ * exactly the way OpenSSL ignores them outside iPAddress, where the mask
+ * travels inside the base itself).
+ */
+function nameConstraintSubtrees(
+  cert: X509Certificate,
+): NameConstraintSubtrees | undefined {
+  const value = certificateExtension(cert, NAME_CONSTRAINTS_OID);
+  if (value === undefined) return undefined;
+  const outer = derElementAt(value, 0);
+  if (outer?.tag !== SEQUENCE_TAG) return undefined;
+  const subtrees: {
+    permitted: GeneralNameEntry[];
+    excluded: GeneralNameEntry[];
+  } = { permitted: [], excluded: [] };
+  let at = outer.start;
+  while (at < outer.end) {
+    const member = derElementAt(value, at);
+    if (!member) return undefined;
+    const list =
+      member.tag === 0xa0
+        ? subtrees.permitted
+        : member.tag === 0xa1
+          ? subtrees.excluded
+          : undefined;
+    if (list !== undefined) {
+      // The [0]/[1] tags IMPLICITLY replace the GeneralSubtrees SEQUENCE OF
+      // tag, so the member's contents are the GeneralSubtree elements
+      // themselves — there is no nested SEQUENCE (confirmed by asn1parse).
+      let entry = member.start;
+      while (entry < member.end) {
+        const subtree = derElementAt(value, entry);
+        if (subtree?.tag !== SEQUENCE_TAG) return undefined;
+        const base = derElementAt(value, subtree.start);
+        if (!base) return undefined;
+        list.push({
+          tag: base.tag,
+          value: value.subarray(base.start, base.end),
+        });
+        entry = subtree.end;
+      }
+    }
+    at = member.end;
+  }
+  return subtrees;
+}
+
+/** The GeneralName entries of `cert`'s subjectAltName extension. */
+function subjectAltNameEntries(
+  cert: X509Certificate,
+): readonly GeneralNameEntry[] {
+  const value = certificateExtension(cert, SUBJECT_ALT_NAME_OID);
+  if (value === undefined) return [];
+  const sequence = derElementAt(value, 0);
+  if (sequence?.tag !== SEQUENCE_TAG) return [];
+  const entries: GeneralNameEntry[] = [];
+  let at = sequence.start;
+  while (at < sequence.end) {
+    const name = derElementAt(value, at);
+    if (!name) return [];
+    entries.push({
+      tag: name.tag,
+      value: value.subarray(name.start, name.end),
+    });
+    at = name.end;
+  }
+  return entries;
+}
+
+/**
+ * The contents of `cert`'s subject Name: the TBSCertificate member after the
+ * optional version, serialNumber, signature algorithm, issuer and validity.
+ * directoryName constraints compare RDN sequences, and neither
+ * `X509Certificate` nor its legacy view exposes them.
+ */
+function subjectNameContents(cert: X509Certificate): Buffer | undefined {
+  const tbs = tbsCertificateOf(cert);
+  if (!tbs) return undefined;
+  const der = cert.raw;
+  let at = tbs.start;
+  const first = derElementAt(der, at);
+  if (!first) return undefined;
+  if (first.tag === VERSION_TAG) at = first.end;
+  for (const expected of [
+    INTEGER_TAG,
+    SEQUENCE_TAG,
+    SEQUENCE_TAG,
+    SEQUENCE_TAG,
+  ]) {
+    const member = derElementAt(der, at);
+    if (!member || member.tag !== expected) return undefined;
+    at = member.end;
+  }
+  const subject = derElementAt(der, at);
+  return subject?.tag === SEQUENCE_TAG
+    ? der.subarray(subject.start, subject.end)
+    : undefined;
+}
+
+/** The Name SEQUENCE contents inside an explicit directoryName value. */
+function directoryNameContents(value: Buffer): Buffer | undefined {
+  const name = derElementAt(value, 0);
+  return name?.tag === SEQUENCE_TAG
+    ? value.subarray(name.start, name.end)
+    : undefined;
+}
+
+/** The full DER slice of every RDN in a Name SEQUENCE's contents. */
+function nameRdnSlices(nameContents: Buffer): readonly Buffer[] | undefined {
+  const slices: Buffer[] = [];
+  let at = 0;
+  while (at < nameContents.length) {
+    const elementStart = at;
+    const rdn = derElementAt(nameContents, at);
+    if (!rdn || rdn.tag !== RDN_SET_TAG) return undefined;
+    slices.push(nameContents.subarray(elementStart, rdn.end));
+    at = rdn.end;
+  }
+  return slices;
+}
+
+/**
+ * Whether a directoryName subtree contains a name: OpenSSL matches the
+ * subtree's RDN sequence against the START of the name's (R2-21 entrance N1,
+ * measured on Node v22.23.2 with openssl verify: an excluded `CN=localhost`
+ * subtree rejects a `CN=localhost, O=...` subject and admits `O=...,
+ * CN=localhost`). RDNs compare byte-for-byte.
+ */
+function directoryNameWithinSubtree(
+  nameContents: Buffer,
+  subtreeContents: Buffer,
+): boolean {
+  const name = nameRdnSlices(nameContents);
+  const subtree = nameRdnSlices(subtreeContents);
+  if (
+    !name ||
+    !subtree ||
+    subtree.length === 0 ||
+    subtree.length > name.length
+  ) {
+    return false;
+  }
+  return subtree.every((rdn, index) => rdn.equals(name[index]!));
+}
+
+/**
+ * Domain-style suffix match: a constraint `example.org` covers the name
+ * itself and every subdomain of it; a leading dot on the constraint changes
+ * nothing (measured: a permitted `.example.org` subtree admitted
+ * `host.example.org`).
+ */
+function dnsNameWithinSubtree(name: string, subtree: string): boolean {
+  const constraint = subtree.startsWith('.') ? subtree.slice(1) : subtree;
+  if (constraint === '') return false;
+  const lower = name.toLowerCase();
+  const target = constraint.toLowerCase();
+  return lower === target || lower.endsWith(`.${target}`);
+}
+
+function emailAddressWithinSubtree(email: string, subtree: string): boolean {
+  // A subtree carrying `@` pins the whole address; otherwise it constrains
+  // the domain half the way a DNS subtree does.
+  if (subtree.includes('@')) {
+    return email.toLowerCase() === subtree.toLowerCase();
+  }
+  const at = email.lastIndexOf('@');
+  return at !== -1 && dnsNameWithinSubtree(email.slice(at + 1), subtree);
+}
+
+function uriWithinSubtree(uri: string, subtree: string): boolean {
+  // RFC 5280 applies a URI constraint to the host part alone.
+  const schemeAt = uri.indexOf('://');
+  let host = schemeAt === -1 ? uri : uri.slice(schemeAt + 3);
+  const userinfoEnd = host.indexOf('@');
+  if (userinfoEnd !== -1) host = host.slice(userinfoEnd + 1);
+  for (let index = 0; index < host.length; index += 1) {
+    const char = host[index];
+    if (char === '/' || char === ':' || char === '?' || char === '#') {
+      host = host.slice(0, index);
+      break;
+    }
+  }
+  return dnsNameWithinSubtree(host, subtree);
+}
+
+function ipAddressWithinSubtree(ip: Buffer, subtree: Buffer): boolean {
+  // An iPAddress base is the address alone (exact match) or address + mask.
+  let base: Buffer;
+  let mask: Buffer | undefined;
+  if (subtree.length === 4 || subtree.length === 16) {
+    base = subtree;
+  } else if (subtree.length === 8 || subtree.length === 32) {
+    base = subtree.subarray(0, subtree.length / 2);
+    mask = subtree.subarray(subtree.length / 2);
+  } else {
+    return false;
+  }
+  if (ip.length !== base.length) return false;
+  for (let index = 0; index < ip.length; index += 1) {
+    const bit = mask?.[index] ?? 0xff;
+    if ((ip[index]! & bit) !== (base[index]! & bit)) return false;
+  }
+  return true;
+}
+
+/**
+ * The names of `cert` that name constraints can bind, each with the match
+ * for its own type. The subject is always present as a directoryName; the
+ * SAN entries contribute their constrained types. otherName, x400Address,
+ * ediPartyName and registeredID stay unconstrained here — vanishingly rare
+ * on serving chains, and the follow-up that drives the real loader closes
+ * the residue.
+ */
+function constrainableNames(
+  cert: X509Certificate,
+): readonly ConstrainableName[] {
+  const names: ConstrainableName[] = [];
+  const subject = subjectNameContents(cert);
+  if (subject) {
+    names.push({
+      tag: GENERAL_NAME_DIRECTORY_TAG,
+      matches: (subtree) => {
+        const subtreeName = directoryNameContents(subtree);
+        return (
+          subtreeName !== undefined &&
+          directoryNameWithinSubtree(subject, subtreeName)
+        );
+      },
+    });
+  }
+  for (const entry of subjectAltNameEntries(cert)) {
+    const { tag, value } = entry;
+    if (tag === GENERAL_NAME_DNS_TAG) {
+      names.push({
+        tag,
+        matches: (subtree) =>
+          dnsNameWithinSubtree(
+            value.toString('utf8'),
+            subtree.toString('utf8'),
+          ),
+      });
+    } else if (tag === GENERAL_NAME_RFC822_TAG) {
+      names.push({
+        tag,
+        matches: (subtree) =>
+          emailAddressWithinSubtree(
+            value.toString('utf8'),
+            subtree.toString('utf8'),
+          ),
+      });
+    } else if (tag === GENERAL_NAME_URI_TAG) {
+      names.push({
+        tag,
+        matches: (subtree) =>
+          uriWithinSubtree(value.toString('utf8'), subtree.toString('utf8')),
+      });
+    } else if (tag === GENERAL_NAME_IP_TAG) {
+      names.push({
+        tag,
+        matches: (subtree) => ipAddressWithinSubtree(value, subtree),
+      });
+    } else if (tag === GENERAL_NAME_DIRECTORY_TAG) {
+      const sanName = directoryNameContents(value);
+      if (sanName) {
+        names.push({
+          tag,
+          matches: (subtree) => {
+            const subtreeName = directoryNameContents(subtree);
+            return (
+              subtreeName !== undefined &&
+              directoryNameWithinSubtree(sanName, subtreeName)
+            );
+          },
+        });
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * How `cert` violates `subtrees`, when it does: a name inside an EXCLUDED
+ * subtree, or — when permitted subtrees of its type exist — a name outside
+ * all of them. OpenSSL fails the handshake with error 48 / 47 in those cases
+ * (both measured on Node v22.23.2), while the anchor walk used to predict
+ * "anchored, zero gaps" because it never read 2.5.29.30 (R2-21 entrance N1).
+ */
+function nameConstraintViolationKind(
+  cert: X509Certificate,
+  subtrees: NameConstraintSubtrees,
+): 'excluded' | 'permitted' | undefined {
+  for (const name of constrainableNames(cert)) {
+    if (
+      subtrees.excluded.some(
+        (subtree) => subtree.tag === name.tag && name.matches(subtree.value),
+      )
+    ) {
+      return 'excluded';
+    }
+    const permittedOfType = subtrees.permitted.filter(
+      (subtree) => subtree.tag === name.tag,
+    );
+    if (
+      permittedOfType.length > 0 &&
+      !permittedOfType.some((subtree) => name.matches(subtree.value))
+    ) {
+      return 'permitted';
+    }
+  }
+  return undefined;
+}
+
 /** Whether `cert`'s validity window contains `now`. */
 function certValidAt(cert: X509Certificate, now: number): boolean {
   return (
@@ -1389,12 +1770,49 @@ function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
    * that is already provided, so they re-export, restart and loop.
    */
   unusableIssuer?: X509Certificate;
+  /**
+   * Set when a CA on the walk carries name constraints (2.5.29.30) that a
+   * certificate below it violates — the handshake fails error 47/48 even
+   * though every signature verifies and the chain anchors.
+   */
+  nameConstraintViolation?: {
+    constrainer: X509Certificate;
+    violator: X509Certificate;
+    kind: 'excluded' | 'permitted';
+  };
 } {
   let next: X509Certificate | undefined = chain[0];
   const walked = new Set<string>();
   const path: X509Certificate[] = [];
   while (next) {
     const current: X509Certificate = next;
+    // A CA's name constraints bind EVERY certificate below it on the path,
+    // not just the one it signs directly (measured: a root's excluded
+    // subtree rejects a leaf two links down through an unconstrained
+    // intermediate, error 48 at depth 0). Check `current` against the whole
+    // path below before it joins the walk — including the self-signed
+    // terminator, which the anchored return below would otherwise exempt.
+    if (path.length > 0) {
+      const subtrees = nameConstraintSubtrees(current);
+      if (subtrees) {
+        for (const below of path) {
+          // RFC 5280 exempts self-issued certificates from name constraints.
+          if (isSelfIssuedCert(below)) continue;
+          const kind = nameConstraintViolationKind(below, subtrees);
+          if (kind) {
+            return {
+              anchored: false,
+              path: [...path, current],
+              nameConstraintViolation: {
+                constrainer: current,
+                violator: below,
+                kind,
+              },
+            };
+          }
+        }
+      }
+    }
     path.push(current);
     if (isSelfSignedCert(current)) {
       // OpenSSL applies `basicConstraints CA:TRUE` to certificates that sign

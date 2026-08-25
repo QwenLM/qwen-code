@@ -172,15 +172,61 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(spaced)).toEqual([ROOT_PEM.trim()]);
   });
 
-  it('takes a block behind a BOM that is not at the start of the file', () => {
-    // Oracle: authorized=true. Concatenating operator files puts a BOM in the
-    // MIDDLE of the result, and a file-start-anchored strip left
-    // a BOM-prefixed `-----BEGIN` line unmatched, so the second cert vanished.
+  it('takes a BOM-prefixed block that opens a fresh loader scan', () => {
+    // Oracle: authorized=true. The loader strips a BOM from the FIRST line
+    // each of its scans reads — the file start and the line immediately
+    // after a consumed block's END marker (both measured on Node v22.23.2).
+    // `LEAF_PEM` ends with a newline, so the BOM below is exactly that line.
     const concatenated = `${LEAF_PEM}\uFEFF${ROOT_PEM}`;
     expect(extractCertificateBlocks(concatenated)).toEqual([
       LEAF_PEM.trim(),
       ROOT_PEM.trim(),
     ]);
+  });
+
+  it('takes a file whose first line carries the BOM', () => {
+    // Oracle: authorized=true — the BOM on the first scan's first line is
+    // stripped (measured on Node v22.23.2).
+    expect(extractCertificateBlocks(`\uFEFF${ROOT_PEM}`)).toEqual([
+      ROOT_PEM.trim(),
+    ]);
+  });
+
+  // R2-21 round-15 entrance B1: the strip above used to run on ANY line. A
+  // BOM is stripped only from a scan's first line; anywhere else it hides
+  // the marker and the loader walks past the block. Oracle: authorized=false
+  // — the blank line means the BOM'd BEGIN is NOT the first line of the next
+  // scan, so the loader takes the leaf prefix ALONE with no warning
+  // (measured on Node v22.23.2), while this module counted the rescued block
+  // as an anchor, the boot diagnostic reported zero gaps, and every worker
+  // restart-looped UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+  it('drops a mid-scan BOM-prefixed block, keeping the loaded prefix', () => {
+    expect(extractCertificateBlocks(`${LEAF_PEM}\n\uFEFF${ROOT_PEM}`)).toEqual([
+      LEAF_PEM.trim(),
+    ]);
+  });
+
+  it('takes a BOM-prefixed block immediately after a consumed key block', () => {
+    // Oracle: authorized=true — the line after the key block's END marker is
+    // the first line of the next scan, so its BOM is stripped like a file
+    // start's (measured on Node v22.23.2).
+    expect(
+      extractCertificateBlocks(
+        `${RFC1421_ENCRYPTED_KEY}\uFEFF${LOADER_CA_PEM}`,
+      ),
+    ).toEqual([LOADER_CA_PEM.trim()]);
+  });
+
+  it('stops at a block whose body line carries a BOM, keeping the prefix', () => {
+    // Oracle: authorized=false with `Ignoring extra certs … bad base64
+    // decode` (measured on Node v22.23.2): inside a block the BOM is not a
+    // base64 character, the decode fails, and the loader keeps only what it
+    // already read.
+    const lines = ROOT_PEM.trim().split('\n');
+    lines[1] = `\uFEFF${lines[1]}`;
+    expect(
+      extractCertificateBlocks(`${LEAF_PEM}${lines.join('\n')}\n`),
+    ).toEqual([LEAF_PEM.trim()]);
   });
 
   it('rejects a file whose only block has a fused end line', () => {
@@ -314,6 +360,32 @@ describe('extractCertificateBlocks', () => {
         `${LOADER_CA_PEM}\n${RFC1421_ENCRYPTED_KEY}\n${LOADER_LEAF_PEM}`,
       ),
     ).toEqual([LOADER_CA_PEM.trim(), LOADER_LEAF_PEM.trim()]);
+  });
+
+  // R2-21 round-15 entrance B2: the blank separator line between RFC 1421
+  // headers and the body is load-bearing. Without it the block fails to load
+  // and the loader keeps NOTHING more from the rest of the file — measured
+  // on Node v22.23.2: leaf + no-blank key block + root hands the workers the
+  // leaf prefix alone while the blank-line twin above authorizes. The scan
+  // therefore stops where the loader stops instead of counting the blocks
+  // behind it and reporting zero gaps.
+  const rfc1421WithoutBlankSeparator = RFC1421_ENCRYPTED_KEY.replace(
+    'DEK-Info: AES-256-CBC,DF3B55948C8F8609B0D8D2F1FEB79878\n\n',
+    'DEK-Info: AES-256-CBC,DF3B55948C8F8609B0D8D2F1FEB79878\n',
+  );
+
+  it('stops at a headered block missing its blank separator, keeping the prefix', () => {
+    expect(
+      extractCertificateBlocks(
+        `${LEAF_PEM}${rfc1421WithoutBlankSeparator}${ROOT_PEM}`,
+      ),
+    ).toEqual([LEAF_PEM.trim()]);
+  });
+
+  it('takes nothing from a file starting with a separator-less headered block', () => {
+    expect(
+      extractCertificateBlocks(`${rfc1421WithoutBlankSeparator}${ROOT_PEM}`),
+    ).toBeUndefined();
   });
 
   it('takes a legacy X509 CERTIFICATE-labelled block, rendered canonically', () => {

@@ -1302,6 +1302,29 @@ describe('formatChannelWorkerDaemonUrl', () => {
     },
   );
 
+  // R14-2: the v4 wildcard's IPv4-mapped spelling canonicalizes to
+  // `::ffff:0:0` (WHATWG URL serializes `[::ffff:0.0.0.0]` by dropping the
+  // dotted quad), so it matches NEITHER wildcard branch above and used to
+  // fall through to the raw literal — which `assertChannelWorkerDaemonUrlIsLocal`
+  // then refused, even though Node binds it as a working wildcard. The
+  // mapping is v4 loopback, NOT `[::1]`: measured against such a bind,
+  // `dial 127.0.0.1` -> ok while `dial ::1` -> ECONNREFUSED even though
+  // the socket reports family IPv6.
+  it.each([
+    '::ffff:0.0.0.0',
+    '::ffff:0:0',
+    '[::ffff:0.0.0.0]',
+    '[::ffff:0:0]',
+    '::FFFF:0.0.0.0',
+  ])('uses IPv4 loopback for the v4-mapped wildcard spelling %j', (host) => {
+    expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
+      'http://127.0.0.1:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl(host, 4170, true)).toBe(
+      'https://127.0.0.1:4170',
+    );
+  });
+
   // The oracle for the two cases above: a real socket per family, dialled at
   // the address the worker is actually handed. A v6-only server models the
   // bindv6only host; the dual-stack control proves the fix costs nothing
@@ -1311,6 +1334,10 @@ describe('formatChannelWorkerDaemonUrl', () => {
       ['::', { host: '::', port: 0, ipv6Only: true }],
       ['::', { host: '::', port: 0 }],
       ['0.0.0.0', { host: '0.0.0.0', port: 0 }],
+      // R14-2: the v4-mapped wildcard binds a WORKING wildcard that serves
+      // v4 loopback only — measured here through the same dial the workers
+      // use; mutating the mapping to `[::1]` reddens this arm.
+      ['::ffff:0.0.0.0', { host: '::ffff:0.0.0.0', port: 0 }],
       // R10-1: the daemon's real bind shape for an empty --hostname. The
       // loopback family is read from the socket that actually bound, so on a
       // host without IPv6 this same arm binds 0.0.0.0 and exercises the
@@ -1396,6 +1423,8 @@ describe('assertChannelWorkerDaemonUrlIsLocal', () => {
       '0:0:0:0:0:0:0:0',
       '127.0.0.1',
       '::1',
+      '::ffff:0.0.0.0',
+      '::ffff:0:0',
     ]) {
       expect(() =>
         assertChannelWorkerDaemonUrlIsLocal(
@@ -2720,6 +2749,99 @@ OecFowc394YfnzdbX/IWz26I92YHQh4c/A==
 -----END CERTIFICATE-----
 `;
 
+// R2-21 round-15 entrance N1: a chain through a CA carrying nameConstraints
+// (2.5.29.30). The anchor walk read basicConstraints/keyUsage/EKU/dates/
+// pathlen but never the constraints, so both chains below walked up
+// "anchored" with zero gaps while every worker handshake failed — measured
+// on Node v22.23.2 with the fullchain as NODE_EXTRA_CA_CERTS and server:
+// excluded "excluded subtree violation" (openssl verify error 48 at depth 0,
+// control twin without the constraint authorizes); permitted "permitted
+// subtree violation" (error 47; the in-subtree twin authorizes). Not a real
+// secret.
+const TEST_TLS_CERT_FULLCHAIN_NC_EXCLUDED = `-----BEGIN CERTIFICATE-----
+MIIDTTCCAjWgAwIBAgIUX+rsS4pZeTFoimU9T+lFTxvEgMYwDQYJKoZIhvcNAQEL
+BQAwGDEWMBQGA1UEAwwNUHJvYmUgTkMgUm9vdDAeFw0yNjA4MjUwOTEzMTFaFw0y
+ODExMjcwOTEzMTFaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJKoZIhvcN
+AQEBBQADggEPADCCAQoCggEBAOKvYfAt28ZI0gJwKcQtrhaqc/kQqDqzQjM55SVH
+BfEAHdGHEYoRKLt2dhDES5Iz+rLQ0/0C8YXZob50snouWJb6c/pWRZwuRiTkCGWx
+hOL9QrFrGZBUmGNxtuFYR7Zzo6G3RnBxc/vnnD8Io4bw1L+C/KhL0zc9zyZeB4R1
+mCfDdEMNcOR0e2nGasAJMNmJa8brlXRgTzJwIGptKhvfuUMGj4Q3E4TSNOsX/Pw6
+rDXan4avaR7Aoj4u0QoAV6omgMYjPlBNXR0x2toOyo6bLliQrK0VsFO2roFNnaho
+SfpltROj2jXruB5vh/fsG2E4Budohc72a9Aueqm37Q5I6xMCAwEAAaOBkjCBjzAM
+BgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUEDDAKBggrBgEFBQcD
+ATAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0OBBYEFE95RARuQmW1
+O6OzciUjUfRa1+g+MB8GA1UdIwQYMBaAFArbgbNtS0waXxtMPywG0X4dy7wlMA0G
+CSqGSIb3DQEBCwUAA4IBAQB+1o/5nTFr3ucjWEF2EUqB696kzw29bdu7NfyxT8Tc
+IBEzHMt94lGJo6JQOF0V3MNdLFzjzYgQOsa90KME4gHjMMcCvVYS/Pl3lQWFQvcZ
+1CFG4EyH45c1rqn+psJ1bBaAc75QNSU2iEuOYACu6soSd7BO/0zNoYQVGs++A/cg
+RoFe/IdgdpQ2ErTeKttSr6Rv7nlb60wWWVJ/xWvArYBMjGCPmR+A/WrUTXC8s9YM
+jcoEAYP8DMe9PwXWZzKpa5XHQS39pYYiSfq9xBdsvnQTUpD3OQY0zqg9p1Hzkbo3
+VQAeVrvXsA/pQvzFVayuQOJrC8jApOqw3eUM2zplkOWh
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDPzCCAiegAwIBAgIUE55lUKD/MmiyNdfgSQPlaQVtahEwDQYJKoZIhvcNAQEL
+BQAwGDEWMBQGA1UEAwwNUHJvYmUgTkMgUm9vdDAeFw0yNjA4MjUwOTEzMTFaFw0z
+NjA4MjIwOTEzMTFaMBgxFjAUBgNVBAMMDVByb2JlIE5DIFJvb3QwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQCNVctZVFfJmIl544Ceq+I0q9f6GRaUscqy
+15EizWHBh+clh02SoXHlIo/Hh0HJP67ETdwb0J38YqOP0vcd8i5xEPp7Upjb1R/9
+e9eMZronrrou9VQNw0NKZ5dKeBtLGkfDX3O80yQg0qfg8u6SoVpMVugk86HOM/ub
+VuO752MdDRxL2HuXj8u/YgdThYLF30mYh6NuBVgg3qD+6FyeQDuvzkutgtlm9siv
+97dBfm/agAB2kr23VJFomvvZweezBgu1LosNn0r/HKA2KQnrqGK3tnqKv1JZi4o4
+JrEhzpxc39hZWIvL7Ri7CW3xd1DEqBHeZhkoLvNiZaglzmi2ovuHAgMBAAGjgYAw
+fjAdBgNVHQ4EFgQUCtuBs21LTBpfG0w/LAbRfh3LvCUwHwYDVR0jBBgwFoAUCtuB
+s21LTBpfG0w/LAbRfh3LvCUwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMC
+AQYwGwYDVR0eAQH/BBEwD6ENMAuCCWxvY2FsaG9zdDANBgkqhkiG9w0BAQsFAAOC
+AQEANAGEdSyPX+9Uv+r1unNHAEQVo6ikrK/HsWX80tZ593xhIXUFn5jwiV7jSSW7
+VZVuotHm4M+4ZElfTHfymEp7vF2CQn4DgR3JmO83o7DD+jvF5xdhA5vCgbGQy9yp
+uAL6VYYIxgdoMQYMxt5BiN+P28onxi/IfO2A+SnQ7PMy+1TZG4k+wUVMDZJnX8wN
+D9CyCiDSO01gu9F6mbMrmgIFctZJMUUYzhDPQVakDe+lk3GWxhwLUDXg4LdndKga
+0NqCit+y42gJ4w63da8X6uqWqTJSHSiC8STg2Igd6xRPpQ9nbNaSkTvhiNp/qmAA
+sVcEw/Ql3GEIIp0iX3MzLg2uSQ==
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_CERT_FULLCHAIN_NC_PERMITTED = `-----BEGIN CERTIFICATE-----
+MIIDTzCCAjegAwIBAgIUUny86ZuSPjncHPWmXSi7l22Npr0wDQYJKoZIhvcNAQEL
+BQAwGjEYMBYGA1UEAwwPUHJvYmUgUGVybSBSb290MB4XDTI2MDgyNTA5MTM1NVoX
+DTI4MTEyNzA5MTM1NVowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsET6x7y85D5BLUtom3jfUaLZ97CqNYx8Psh8
+OH9vymp3Ys5CB0etXN8rTQFZf3VRVr3mSZ8j9nISJMJTSBkpkDXaBM7cTLfCNkdW
+a2SduxMAbVZmMlaquNJDv6SthGhE++gPuADJfFKxNdobh2ICDCZBuTKc+UHfl5t3
+bShVOn1m5Mx2ok1op0/nG/EytFNqGi49sOQB/k4MCEX4WdsCyotTMTRcpxCF9X9r
+H7wLR6KERkrNQB5j/sLLWm+1u4iI7mLwSagYDjArHYWUt+/LnArmgLzU2gi2Qe5F
+9M8m+YGbUV+tvy0lIJRGDFDxMYVk2i/ciY/Gfxa7CjD6pWLkHwIDAQABo4GSMIGP
+MAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUF
+BwMBMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAdBgNVHQ4EFgQUcFxggRe2
+toJWfHzCkvqlWtB2kfowHwYDVR0jBBgwFoAUWb70RPnCwnmoBHJbDcvdiTGY1fow
+DQYJKoZIhvcNAQELBQADggEBAH6mBNBgg3Bxc8YiErQyKd85KA2iVrYJwwF8FGkB
+8vN34hhyI4PkllBvuPtKgOTqwOUzUSTFiaPno6rGBgpLqyEaN+TmbqWF/ik5g3Kb
+d9vYU3CeyCooRbtN3yq2tm/11V1rWoINI4IKCuSVsZ6/3N1AVDKOURp4yS/ngFsL
+sGC4tPKQMbyH6yh5GBYQARIWl+proAiXrwz6Gzny4CBW2ZC+tFKruyIt6lXI0esw
+EulliWORq+bB1w19JHH2dYYN656kSLVVzn2wAp8ztSuJhUra3vbYMcHLLuXtL7Nc
+EbUgBHCU69hqFJbFraBd/sDD7CuNFSKt9kAWdsAXdHB818U=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDRzCCAi+gAwIBAgIUY9OsbE3FcqRJqeFjqB1EIfmhLBAwDQYJKoZIhvcNAQEL
+BQAwGjEYMBYGA1UEAwwPUHJvYmUgUGVybSBSb290MB4XDTI2MDgyNTA5MTM1NVoX
+DTM2MDgyMjA5MTM1NVowGjEYMBYGA1UEAwwPUHJvYmUgUGVybSBSb290MIIBIjAN
+BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzMC2D4Ny/sadxU9vkZ4mOayNx+ax
+A6gC3GwapacASwX51ldPPLINk16KeRQbYqZzY67PQVDznC30whvVNqoX4AZvbMNz
+NYCZKMjn+QM4vpECO+ZwsZCdCjcp/reRKuLzJ7CAsDx1+IgYdLLK5RibTARePZOV
+ieo8te2IMxznFu0FOWNiUI3QaTCXdCo0Cmsjd2SuQPTjpLO7/KAiL2Tf5QNiSDzR
+amJpDjP+uHrJ07S10LovngRSXXVTpiJOmblesMUXR5f3kDxSobUAm1urf5SI5t/L
+6rnP+0QTzuwN2ddHTB7VLLtJTlVmh2ET2yesCko3uRxG62RFRzCsyLcexwIDAQAB
+o4GEMIGBMB0GA1UdDgQWBBRZvvRE+cLCeagEclsNy92JMZjV+jAfBgNVHSMEGDAW
+gBRZvvRE+cLCeagEclsNy92JMZjV+jAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB
+/wQEAwIBBjAeBgNVHR4BAf8EFDASoBAwDoIMLmV4YW1wbGUub3JnMA0GCSqGSIb3
+DQEBCwUAA4IBAQAn1Lw456Uqyoc/uKCGSfHUtMDyUg6F76LEvOkNfw5qdPltCTlo
+naAZ728Id6svDzPMie8by9IIhADhJBAy0G7K2o8USesjvPRPdtnhYeFXEwjQoB2t
+IlMqO9i8ICU95T4QGtz4lZReS2nDQFLJ0DV5G4BF2K1U+v1YJ2lfCljNKSr4+d6G
+naQueNhaPQ+WYywU16BoMby6TI/qHgq9k3C76i16hIvqkjCdFoJcBQv2TTasf8qY
+EfUI7FPqsK4p9mDr+QkVnPZCiJV93S0f1CzwNv/MwVB+jplbXv2TIy8B5/tmr5jw
+CygHOdqQN9ROgbylVVJLyD0r41vB67iGMoy8
+-----END CERTIFICATE-----
+`;
+
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
@@ -2908,6 +3030,33 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps[0]).toContain('PATH_LENGTH_EXCEEDED');
     expect(gaps[0]).toContain('pathlen:0');
     expect(gaps[0]).toContain('qwen decoy pathlen0 root');
+  });
+
+  // R2-21 round-15 entrance N1: nameConstraints were never modelled, so a
+  // chain through a constrained CA walked up "anchored" with zero gaps while
+  // every worker handshake failed. Both arms measured on Node v22.23.2 with
+  // the fullchain as NODE_EXTRA_CA_CERTS and server (error 48 / error 47),
+  // the constraint-free and in-subtree twins authorizing.
+  it('names the excluded-subtree gap for a chain through a constrained CA', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NC_EXCLUDED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('excluded subtree violation');
+    expect(gaps[0]).toContain('Probe NC Root');
+  });
+
+  it('names the permitted-subtree gap for a chain outside the permitted subtrees', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NC_PERMITTED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('permitted subtree violation');
+    expect(gaps[0]).toContain('Probe Perm Root');
   });
 
   // R2-21 entrance C1: the unloadable-serving-file gap used to be gated on an
