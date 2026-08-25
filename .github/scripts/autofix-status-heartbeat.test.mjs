@@ -678,8 +678,19 @@ describe('autofix-status-heartbeat loop', () => {
     });
     const child = startLoop(env);
     try {
-      const ok = await waitFor(() => readCalls(gh.records).length >= 2, 8000);
-      assert.ok(ok, 'expected at least two PATCH calls');
+      // The fake gh writes a tick's call record BEFORE it appends the env
+      // line, so the gate must cover what the assertion below reads — a
+      // call-count gate alone can pass in the window before that append
+      // lands, and the unretried read then sees one line instead of two.
+      const ok = await waitFor(
+        () =>
+          readCalls(gh.records).length >= 2 &&
+          readFileSync(join(gh.records, 'gh-env.log'), 'utf8')
+            .trim()
+            .split('\n').length >= 2,
+        8000,
+      );
+      assert.ok(ok, 'expected at least two PATCH calls and two env-log lines');
       const lines = readFileSync(join(gh.records, 'gh-env.log'), 'utf8')
         .trim()
         .split('\n');
