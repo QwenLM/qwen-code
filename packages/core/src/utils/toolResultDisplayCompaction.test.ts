@@ -68,7 +68,7 @@ describe('toolResultDisplayCompaction', () => {
   it('should preserve the unchanged flag through compaction', () => {
     const display = {
       type: 'todo_list' as const,
-      todos: [{ id: '1', content: 'Task', status: 'pending' }],
+      todos: [{ id: '1', content: 'Task', status: 'pending' as const }],
       changes: { created: [], completed: [] },
       unchanged: true,
     };

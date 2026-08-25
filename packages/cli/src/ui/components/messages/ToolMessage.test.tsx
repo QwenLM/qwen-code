@@ -825,7 +825,7 @@ describe('<ToolMessage />', () => {
               { id: '2', content: 'Task B', status: 'pending' },
             ],
             unchanged: true,
-          } as TodoResultDisplay & { unchanged: boolean }
+          } as TodoResultDisplay
         }
         forceShowResult
       />,

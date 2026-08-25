@@ -323,11 +323,13 @@ describe('TodoWriteTool', () => {
         }),
       );
 
-      const result = await tool
-        .build({
-          todos: [{ id: '1', content: 'Done', status: 'completed' }],
-        })
-        .execute(mockAbortSignal);
+      const result = await promptIdContext.run('todo-prompt', () =>
+        tool
+          .build({
+            todos: [{ id: '1', content: 'Done', status: 'completed' }],
+          })
+          .execute(mockAbortSignal),
+      );
 
       // Identical todos → no-op short-circuit, no write
       expect(mockAtomicWrite).not.toHaveBeenCalled();
@@ -335,6 +337,10 @@ describe('TodoWriteTool', () => {
         planId: 'finished-plan',
         unchanged: true,
       });
+      expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
+        'todo-prompt',
+        undefined,
+      );
     });
 
     it('should short-circuit with unchanged flag when todos are identical', async () => {
@@ -347,9 +353,9 @@ describe('TodoWriteTool', () => {
         JSON.stringify({ planId: 'plan-abc', todos: existingTodos }),
       );
 
-      const result = await tool
-        .build({ todos: existingTodos })
-        .execute(mockAbortSignal);
+      const result = await promptIdContext.run('todo-prompt', () =>
+        tool.build({ todos: existingTodos }).execute(mockAbortSignal),
+      );
 
       // No file write or hooks should fire
       expect(mockAtomicWrite).not.toHaveBeenCalled();
@@ -368,6 +374,11 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain('already up to date');
       expect(result.llmContent).toContain('No changes were needed');
       expect(result.llmContent).not.toContain('modified successfully');
+
+      expect(mockConfig.setActiveTodoReminder).toHaveBeenCalledWith(
+        'todo-prompt',
+        expect.stringContaining('Task 1'),
+      );
     });
 
     it('should not fire hooks on no-op todo_write', async () => {
