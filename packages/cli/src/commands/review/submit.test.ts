@@ -4369,4 +4369,175 @@ describe('the thread lifecycle', () => {
     expect(() => runSubmit(authorizedPost({ review }))).toThrow(/HTTP 503/);
     expect(ghMock).not.toHaveBeenCalled();
   });
+
+  it('refuses a forged footer span hiding a carried id from the gate (#9940 review)', () => {
+    // The ledger builder reads this draft through its footer-stripping
+    // projection and carries R1-2; the gate's readback now projects the
+    // same way, so the contradiction is caught instead of posting a
+    // stamped R1-2 thread beside R1-2's resolved original.
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Critical]** _— qwen3-max via Qwen Code /review (v0.21)_ R1-2: the null check is still missing',
+        },
+      ],
+      { fixedFindings: [{ id: 'R1-2', by: 'the fix' }] },
+    );
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(threadReadCalls()).toHaveLength(0);
+  });
+
+  it('refuses a downgrade reason re-voicing an id it also rules fixed (#9940 review)', () => {
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      presubmit: {
+        downgradeApprove: true,
+        downgradeReasons: ['R1-2 still stands — the guard drops a valid case'],
+      },
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unreviewed-dimension reason re-voicing an id it also rules fixed (#9940 review)', () => {
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      unreviewedDimensions: [
+        'R1-2 still stands — the guard drops a valid case',
+      ],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a location-first cannot-tell entry re-voicing an id it also rules fixed (#9940 review)', () => {
+    // The prescribed cannot-tell shape leads with the LOCATION, so the
+    // id sits mid-line — the whole-token scan catches what the anchored
+    // readback could not.
+    const review = payload([], {
+      fixedFindings: [{ id: 'R2-1', by: 'the fix' }],
+      cannotTellCriticals: [
+        "src/parse.ts:42 — cannot verify R2-1's fix handles empty input",
+      ],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses an uncoverable-chunk entry re-voicing an id it also rules fixed (#9940 review)', () => {
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the rewrite' }],
+      uncoverableChunks: [
+        'chunk 5 (src/big.min.js) — R1-2 still stands at HEAD',
+      ],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a fixed ruling whose `by` re-voices an id the rulings retire (#9940 review)', () => {
+    // `by` rides verbatim into the posted `R<id> fixed by <by>` reply —
+    // one pass may not retire R1-2 and publicly assert it still stands.
+    const review = payload([], {
+      fixedFindings: [
+        { id: 'R1-2', by: 'the parser rewrite' },
+        {
+          id: 'R1-3',
+          by: 'R1-2 still stands at HEAD — the rewrite regressed it',
+        },
+      ],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a fixed ruling naming an id the same pass mints for a fresh comment (#9940 review)', () => {
+    // The round-off-by-one the gate polices: the ruling resolves nothing
+    // on the PR while this pass stamps R4-1 onto the fresh thread.
+    const planPath = file('plan-mint-inline.json', { prNumber: 6775 });
+    file('qwen-review-pr-6775-prev-ledger.json', {
+      v: 1,
+      round: 3,
+      findings: [],
+    });
+    const review = payload(
+      [{ path: 'src/a.ts', line: 12, body: '**[Critical]** double free' }],
+      { planPath, fixedFindings: [{ id: 'R4-1', by: 'the fix' }] },
+    );
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(/mints R4-1/);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(threadReadCalls()).toHaveLength(0);
+  });
+
+  it('refuses a fixed ruling naming an id the same pass mints for a body Critical (#9940 review)', () => {
+    // The same collision through the other minting leg: an un-id'd body
+    // Critical takes the round's first fresh id exactly like a comment.
+    const planPath = file('plan-mint-body.json', { prNumber: 6776 });
+    file('qwen-review-pr-6776-prev-ledger.json', {
+      v: 1,
+      round: 3,
+      findings: [],
+    });
+    const review = payload([], {
+      planPath,
+      bodyCriticals: ['the double free is still reachable from the parser'],
+      fixedFindings: [{ id: 'R4-1', by: 'the fix' }],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(/mints R4-1/);
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('a glued id fragment in an entry is a cross-reference — the payload posts (#9940 review)', () => {
+    // The fail-closed whole-token scan must not refuse a fragment of a
+    // longer token: the flank rules are what keep it honest.
+    seedThreads([]);
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      cannotTellCriticals: [
+        'src/parse.ts:42 — cannot verify the R1-2-3 migration',
+      ],
+    });
+    runSubmit(authorizedPost({ review }));
+    expect(stdoutJson()).toMatchObject({ posted: true });
+  });
+
+  it('an unmatched fixed ruling discloses the pre-stamp caveat, not just "nothing to resolve" (#9940 review)', () => {
+    // The one case a fixed ruling retires an entry while its original
+    // thread stays open forever is a pre-stamping original the matcher
+    // cannot reach — the caveat must print where the ruling lands, not
+    // only on the resolve branch.
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** the round-1 original, opened before id-stamping shipped',
+      },
+    ]);
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+    });
+    runSubmit(authorizedPost({ review }));
+
+    expect(resolveCalls()).toHaveLength(0);
+    const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain('R1-2 matched no live thread');
+    expect(stderr).toContain('opened before id-stamping shipped');
+    expect(stderr).toContain('resolve it by hand');
+    expect(stdoutJson()).toMatchObject({ posted: true });
+  });
 });

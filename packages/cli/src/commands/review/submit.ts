@@ -91,6 +91,7 @@ import {
   parseRemoteUrl,
 } from './lib/remote-match.js';
 import { gitOpt } from './lib/git.js';
+import { LEDGER_ID_SCAN } from './lib/ledger.js';
 import {
   AonePartialPostError,
   submitAoneReview,
@@ -411,6 +412,13 @@ function compose(
    * rides the body (the ids exist to be carried).
    */
   draftedIds: Array<string | undefined> | undefined;
+  /**
+   * The ids the compose's ledger MINTS fresh this round — never the
+   * carried ones. Undefined exactly when `draftedIds` is: no ledger
+   * marker rides the body. The contradiction gate refuses a `fixed`
+   * ruling naming one (#9940 review).
+   */
+  mintedIds: string[] | undefined;
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
@@ -463,6 +471,7 @@ function compose(
     floorEnforced: r.floorEnforced,
     fixedFindings: r.fixedFindings,
     draftedIds: r.draftedIds,
+    mintedIds: r.mintedIds,
   };
 }
 
@@ -645,19 +654,29 @@ function inconsistencies(
    * re-voices an id a ruling retires is the payload contradicting itself:
    * the finding is either still standing (re-reported) or fixed (retired),
    * and posting both copies would reply "fixed" into the very thread the
-   * re-report just revived. The scan covers every id-carrying channel: the
-   * drafted comments AS COMPOSED — `preRerouteComments`, the set before
-   * the floor-enforcement removal, because a rerouted re-post still
-   * re-voices its id from the body's deferral list — the body Criticals,
-   * the cannot-tell Criticals (they cap the verdict by id exactly like
-   * the body ones), the duplicate-drop account (its entries lead with the
-   * confirmed finding's id), and the deferral entries — a deferred
-   * entry's title renders verbatim into the body's deferral list at any
-   * severity (#9940 review).
+   * re-report just revived. The scan covers every channel the compose
+   * renders model text through: the drafted comments AS COMPOSED —
+   * `preRerouteComments`, the set before the floor-enforcement removal,
+   * because a rerouted re-post still re-voices its id from the body's
+   * deferral list — read through the same claim-line projection the
+   * ledger builder applies; every one-line state entry rendered VERBATIM
+   * (the body Criticals, the cannot-tell Criticals, the duplicate-drop
+   * account, the uncoverable chunks, the not-reviewed dimensions, the
+   * downgrade reasons, and the deferral titles at any severity), scanned
+   * WHOLE-TOKEN because the prescribed entry shapes put the id mid-line;
+   * and the rulings' own `by` text, which rides verbatim into the posted
+   * reply (#9940 review).
    */
   fixedFindings: FixedFinding[] = [],
   preRerouteComments?: ReviewComment[],
   preRerouteAuthoredIndices?: number[],
+  /**
+   * The ids this pass MINTS fresh — the ledger's own account, never the
+   * carried ones. A fixed ruling retires a PREVIOUS round's entry, so one
+   * naming a minted id is the round-off-by-one this gate polices (#9940
+   * review).
+   */
+  mintedIds: readonly string[] = [],
 ): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
@@ -668,6 +687,30 @@ function inconsistencies(
       `${at} re-posts ${id}, which \`state.fixedFindings\` rules fixed — ` +
       `a finding is either still standing (re-reported under its id) or ` +
       `fixed (retired); rule it one way`;
+    // A fixed ruling retires a PREVIOUS round's entry. An id this same
+    // pass mints for a fresh finding — inline or body-Critical — cannot
+    // be one: the ruling would resolve nothing on the PR while this pass
+    // opens the id's thread as a standing defect, and the next round
+    // rules on it as a live defect nobody fixed (#9940 review).
+    for (const id of mintedIds) {
+      if (fixedIds.has(id)) {
+        problems.push(
+          `state.fixedFindings rules ${id} fixed, but this same pass ` +
+            `mints ${id} for a fresh finding — a fixed ruling retires a ` +
+            `previous round's entry; rule the new finding itself`,
+        );
+      }
+    }
+    // `by` rides VERBATIM into the posted `R<id> fixed by <by>` reply —
+    // a retired id re-voiced there contradicts the ruling it rides.
+    fixedFindings.forEach((f, i) => {
+      if (typeof f.by !== 'string') return;
+      for (const [, id] of f.by.matchAll(LEDGER_ID_SCAN)) {
+        if (id !== undefined && fixedIds.has(id)) {
+          problems.push(contradiction(`state.fixedFindings[${i}].by`, id));
+        }
+      }
+    });
     const drafted = preRerouteComments ?? comments;
     const indices = preRerouteComments
       ? preRerouteAuthoredIndices
@@ -681,12 +724,17 @@ function inconsistencies(
         );
       }
     });
-    // The still-standing re-post's OTHER channels (Step 6's still-stands
-    // rule: an unanchorable carried finding goes to the body with its id,
-    // and buildLedger reads it back there). Checking only the inline
-    // channel would let one payload resolve a finding's thread as fixed
-    // while its body lists the same id as a standing blocker — or caps on
-    // it, confirms it as a duplicate drop, or defers it as a Critical.
+    // The still-standing re-post's OTHER channels — every one-line state
+    // entry the compose renders VERBATIM (Step 6's still-stands rule: an
+    // unanchorable carried finding goes to the body with its id, and
+    // buildLedger reads it back there). Whole-token, not ^-anchored: the
+    // prescribed entry shapes put the id mid-line — a cannot-tell leads
+    // with the LOCATION, a chunk entry with the chunk, a downgrade or
+    // not-reviewed reason can carry it anywhere — and checking only the
+    // inline channel would let one payload resolve a finding's thread as
+    // fixed while its body lists the same id as a standing blocker, caps
+    // on it, discloses it as uncoverable, or downgrades over it (#9940
+    // review).
     const entryChannels: Array<[string, unknown]> = [
       ['state.bodyCriticals', payload.state?.bodyCriticals],
       ['state.cannotTellCriticals', payload.state?.cannotTellCriticals],
@@ -694,14 +742,21 @@ function inconsistencies(
         'state.suggestionsDroppedAsDuplicates',
         payload.state?.suggestionsDroppedAsDuplicates,
       ],
+      ['state.uncoverableChunks', payload.state?.uncoverableChunks],
+      ['state.unreviewedDimensions', payload.state?.unreviewedDimensions],
+      [
+        'state.presubmit.downgradeReasons',
+        payload.state?.presubmit?.downgradeReasons,
+      ],
     ];
     for (const [name, channel] of entryChannels) {
       if (!Array.isArray(channel)) continue;
       channel.forEach((entry, i) => {
-        const carried =
-          typeof entry === 'string' ? carriedFindingOf(entry) : null;
-        if (carried !== null && fixedIds.has(carried.id)) {
-          problems.push(contradiction(`${name}[${i}]`, carried.id));
+        if (typeof entry !== 'string') return;
+        for (const [, id] of entry.matchAll(LEDGER_ID_SCAN)) {
+          if (id !== undefined && fixedIds.has(id)) {
+            problems.push(contradiction(`${name}[${i}]`, id));
+          }
         }
       });
     }
@@ -716,12 +771,11 @@ function inconsistencies(
           return;
         }
         const { title } = entry as { title?: unknown };
-        const carried =
-          typeof title === 'string' ? carriedFindingOf(title) : null;
-        if (carried !== null && fixedIds.has(carried.id)) {
-          problems.push(
-            contradiction(`state.deferredSuggestions[${i}]`, carried.id),
-          );
+        if (typeof title !== 'string') return;
+        for (const [, id] of title.matchAll(LEDGER_ID_SCAN)) {
+          if (id !== undefined && fixedIds.has(id)) {
+            problems.push(contradiction(`state.deferredSuggestions[${i}]`, id));
+          }
         }
       });
     }
@@ -1343,21 +1397,29 @@ function submit(
   let floorEnforced: number[];
   let fixedFindings: FixedFinding[];
   let draftedIds: Array<string | undefined> | undefined;
+  let mintedIds: string[] | undefined;
   try {
-    ({ event, body, cappedBy, floorEnforced, fixedFindings, draftedIds } =
-      compose(
-        payload,
-        cliVersion,
-        attribution,
-        // The anchor's certifying identity is the model the runtime published
-        // for this session — Config publishes it per session, the shell tool
-        // injects it into this subprocess. It supersedes the typed id, but the
-        // launching command can still override the env (and a hijacked
-        // orchestrator can forge the marker outright via the API) — the same
-        // forgeable posture DESIGN.md records for the cache path.
-        // The identity this round runs under — see lib/round-model.ts.
-        roundModelIdFrom(process.env),
-      ));
+    ({
+      event,
+      body,
+      cappedBy,
+      floorEnforced,
+      fixedFindings,
+      draftedIds,
+      mintedIds,
+    } = compose(
+      payload,
+      cliVersion,
+      attribution,
+      // The anchor's certifying identity is the model the runtime published
+      // for this session — Config publishes it per session, the shell tool
+      // injects it into this subprocess. It supersedes the typed id, but the
+      // launching command can still override the env (and a hijacked
+      // orchestrator can forge the marker outright via the API) — the same
+      // forgeable posture DESIGN.md records for the cache path.
+      // The identity this round runs under — see lib/round-model.ts.
+      roundModelIdFrom(process.env),
+    ));
   } catch (err) {
     throw new Error(
       `The review state does not compose into a verdict; refusing to post:\n` +
@@ -1403,6 +1465,7 @@ function submit(
     fixedFindings,
     preRerouteComments,
     preRerouteAuthoredIndices,
+    mintedIds ?? [],
   );
   if (problems.length > 0) {
     throw new Error(
@@ -1550,6 +1613,16 @@ function submit(
             `one (one finding, one thread).`,
         );
       }
+      // Threads opened before id-stamping shipped carry no ledger id the
+      // matcher can reach — the ONE case a fixed ruling retires an entry
+      // while its original thread stays open forever, and nothing else
+      // names it. Stated once: every branch a ruling can take must carry
+      // it, or the disclosure misfires exactly in the state it exists for
+      // (#9940 review).
+      const preStampCaveat =
+        'Threads this account opened before id-stamping shipped carry ' +
+        'no ledger id and cannot be matched — if such an original is ' +
+        'still open, resolve it by hand.';
       if (plan.resolves.length > 0) {
         // The footer the inline comments carry, so the reply is attributed
         // the same way everything else this account posts is.
@@ -1569,17 +1642,15 @@ function submit(
         }));
         writeStderrLine(
           `Thread lifecycle: ${plan.resolves.length} thread(s) resolved ` +
-            `for ${fixedFindings.length} fixed ruling(s). Threads this ` +
-            `account opened before id-stamping shipped carry no ledger ` +
-            `id and cannot be matched — if such an original is still ` +
-            `open, resolve it by hand.`,
+            `for ${fixedFindings.length} fixed ruling(s). ` +
+            preStampCaveat,
         );
       }
       for (const id of plan.unmatchedFixed) {
         writeStderrLine(
           `Thread lifecycle: fixed ruling ${id} matched no live thread ` +
             `this account opened — already resolved, or never posted. ` +
-            `Nothing to resolve.`,
+            `Nothing to resolve. ${preStampCaveat}`,
         );
       }
     }

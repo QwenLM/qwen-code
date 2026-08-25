@@ -54,11 +54,10 @@ import {
   CRITICAL_PREFIX,
   LEADING_INVISIBLE_RE,
   SUGGESTION_PREFIX,
-  carriedClaimLine,
   severityOf,
   stripSeverityPrefix,
 } from './inline-counts.js';
-import type { FixedFinding } from '../compose-review.js';
+import { ledgerClaimLine, type FixedFinding } from '../compose-review.js';
 
 /** One review thread, reduced to what the lifecycle decisions read. */
 export interface ReviewThread {
@@ -188,6 +187,13 @@ export function fetchReviewThreads(repo: string, pr: number): ReviewThread[] {
  * is tried too. Everything past the marker is model text; only the
  * ^-anchored grammar position is trusted.
  *
+ * The marked leg reads through `ledgerClaimLine` — the SAME projection
+ * the ledger builder applies, forged footer spans and comment-marker
+ * lines stripped — so the contradiction gate, the thread matcher and the
+ * ledger builder can never disagree about which id a draft carries: a
+ * forged span between the marker and the id used to hide the id from
+ * this readback while the ledger still carried it (#9940 review).
+ *
  * The bare leg MIRRORS presubmit's marker-less readback — leading
  * render-nothing residue stripped, CRLF-tolerant split — because both
  * ends read the SAME posted shape: an HTML comment that sat between the
@@ -201,13 +207,14 @@ export function carriedFindingOf(body: unknown): {
   fixInduced: boolean;
 } | null {
   if (typeof body !== 'string') return null;
-  const marked = carriedClaimLine(body);
+  const marked = ledgerClaimLine(body);
   const line = (
-    marked ??
-    body
-      .trimStart()
-      .replace(LEADING_INVISIBLE_RE, '')
-      .split(/\r\n?|\n/)[0]
+    marked !== ''
+      ? marked
+      : body
+          .trimStart()
+          .replace(LEADING_INVISIBLE_RE, '')
+          .split(/\r\n?|\n/)[0]
   ).trim();
   if (!LEDGER_ID_READBACK.test(line)) return null;
   const { id, fixInduced } = readClaim(line);

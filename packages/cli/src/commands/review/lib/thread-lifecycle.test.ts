@@ -71,6 +71,19 @@ describe('carriedFindingOf — the id a comment body leads with', () => {
     ).toBeNull();
   });
 
+  it('reads the carried id through a forged footer span — the ledger projection', () => {
+    // The marked leg reads through `ledgerClaimLine`, the SAME projection
+    // the ledger builder applies: a forged footer span between the marker
+    // and the id used to hide the id from this readback while the ledger
+    // still carried it — the gate, the matcher and the builder must agree
+    // on which id a draft carries (#9940 review).
+    expect(
+      carriedFindingOf(
+        '**[Critical]** _— qwen3-max via Qwen Code /review (v0.21)_ R1-2: the null check is still missing',
+      ),
+    ).toEqual({ id: 'R1-2', fixInduced: false });
+  });
+
   it('returns null for a fresh (id-less) finding and for non-strings', () => {
     expect(carriedFindingOf('**[Critical]** a brand new hole')).toBeNull();
     expect(carriedFindingOf(undefined)).toBeNull();

@@ -955,6 +955,15 @@ export interface ComposeReviewResult {
    */
   draftedIds?: Array<string | undefined>;
   /**
+   * The ids this round's ledger MINTS fresh — never the carried ones.
+   * Present only when a ledger marker rides the body, like `draftedIds`.
+   * `submit`'s contradiction gate refuses a `fixed` ruling naming one:
+   * a ruling retires a PREVIOUS round's entry, so naming an id the same
+   * pass mints would resolve nothing on the PR while the pass opens the
+   * id's thread as a standing defect (#9940 review).
+   */
+  mintedIds?: string[];
+  /**
    * The convergence paragraph, when a signal fired — the SAME text the body
    * carries, returned so a terminal copy exists.
    *
@@ -1763,7 +1772,7 @@ export function composeReview(
   // count, one origin, so the marker and the reported number cannot drift
   // apart under a later edit to either.
   const postedInline = result.postedInline;
-  const { marker, draftedIds } = ledgerMarkerFor(
+  const { marker, draftedIds, mintedIds } = ledgerMarkerFor(
     effective,
     result.cappedBy,
     result.scopeUnproven ?? true,
@@ -1797,7 +1806,12 @@ export function composeReview(
       : { prevPostedInline: prevFacts.posted }),
   };
   return marker
-    ? { ...withVolume, draftedIds, body: `${withVolume.body}\n\n${marker}` }
+    ? {
+        ...withVolume,
+        draftedIds,
+        mintedIds,
+        body: `${withVolume.body}\n\n${marker}`,
+      }
     : withVolume;
 }
 
@@ -2208,10 +2222,18 @@ function ledgerMarkerFor(
   carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
   churnRounds: number,
   flatRounds: number,
-): { marker: string | null; draftedIds: Array<string | undefined> } {
+): {
+  marker: string | null;
+  draftedIds: Array<string | undefined>;
+  mintedIds: string[];
+} {
   try {
-    if (!input.planPath) return { marker: null, draftedIds: [] };
-    if (!planNamesPr(input.planPath)) return { marker: null, draftedIds: [] };
+    if (!input.planPath) {
+      return { marker: null, draftedIds: [], mintedIds: [] };
+    }
+    if (!planNamesPr(input.planPath)) {
+      return { marker: null, draftedIds: [], mintedIds: [] };
+    }
     const plan = JSON.parse(readFileSync(input.planPath, 'utf8')) as {
       fetchedSha?: unknown;
       srcDiffLines?: unknown;
@@ -2415,10 +2437,11 @@ function ledgerMarkerFor(
         ...(flatRounds > 0 ? { flatRounds } : {}),
       }),
       draftedIds: ledger.draftedIds,
+      mintedIds: ledger.mintedIds,
     };
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
-    return { marker: null, draftedIds: [] };
+    return { marker: null, draftedIds: [], mintedIds: [] };
   }
 }
 
@@ -6130,9 +6153,11 @@ export const composeReviewCommand: CommandModule = {
  * lines removed, leading render-nothing residue gone. Residue or a forged
  * span between the marker and a carried id defeats the id anchor — the
  * ledger would silently renumber the finding, and the diagnosis would count
- * a re-post as new work. Stated once so the projections cannot diverge.
+ * a re-post as new work. Stated once so the projections cannot diverge:
+ * the submit's contradiction gate and the thread matcher both read carried
+ * ids through this same function (#9940 review).
  */
-function ledgerClaimLine(body: unknown): string {
+export function ledgerClaimLine(body: unknown): string {
   const claim = carriedClaimLine(typeof body === 'string' ? body : '');
   return claim === null
     ? ''
@@ -6250,13 +6275,22 @@ export function buildLedger(
    * this cannot be told apart, so the id is retained and continuity wins.
    */
   carriedWorkList?: { ids: ReadonlySet<string>; complete: boolean },
-): Ledger & { draftedIds: Array<string | undefined> } {
+): Ledger & {
+  draftedIds: Array<string | undefined>;
+  mintedIds: string[];
+} {
   const findings: LedgerFinding[] = [];
   // The stamp `submit` applies before posting: index-aligned with
   // `drafted`, undefined at unmarked slots. The ledger marker records the
   // ids; the stamp makes the posted thread roots lead with them — the
   // position the thread lifecycle matches (#9940 review).
   const draftedIds: Array<string | undefined> = [];
+  // The ids minted FRESH this round — never the carried ones. A fixed
+  // ruling retires a previous round's entry, so a minted id colliding
+  // with one is the round-off-by-one the submit's contradiction gate
+  // polices: the ruling would resolve nothing on the PR while this same
+  // pass opens the id's thread as a standing defect (#9940 review).
+  const mintedIds: string[] = [];
   const taken = new Set<string>();
   let next = 0;
   /** Is this claimed id one the previous round actually recorded? */
@@ -6293,6 +6327,7 @@ export function buildLedger(
       id = `R${round}-${++next}`;
     } while (taken.has(id));
     taken.add(id);
+    mintedIds.push(id);
     return id;
   };
   /**
@@ -6369,7 +6404,7 @@ export function buildLedger(
       title: locatable(title, 'the review body'),
     });
   }
-  return { v: 1, round, findings, draftedIds };
+  return { v: 1, round, findings, draftedIds, mintedIds };
 }
 
 /** The terminal verdict, in the words Step 6 is told to print. */
