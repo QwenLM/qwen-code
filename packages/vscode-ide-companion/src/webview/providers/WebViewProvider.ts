@@ -351,15 +351,18 @@ export class WebViewProvider {
       });
     });
 
+    // Forward raw ACP session/update notifications for the WebShell transcript UI.
+    this.agentManager.onTranscriptUpdate((notification) => {
+      this.sendMessageToWebView({
+        type: 'transcriptUpdate',
+        data: notification,
+      });
+    });
+
     // Surface available modes and current mode (from ACP initialize)
     this.agentManager.onModeInfo((info) => {
       try {
-        const current = (info?.currentModeId || null) as
-          | 'plan'
-          | 'default'
-          | 'auto-edit'
-          | 'yolo'
-          | null;
+        const current = info?.currentModeId ?? null;
         this.currentModeId = current;
       } catch (_error) {
         // Ignore error when parsing mode info
@@ -2522,10 +2525,17 @@ export class WebViewProvider {
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
       this.messageHandler.setCurrentConversationId(null);
 
-      // Clear current conversation UI
+      // Clear current conversation UI. Publish the fresh ACP session id so
+      // the transcript guard drops trailing frames from the abandoned
+      // session (which may still be streaming) instead of adopting them
+      // into the new conversation.
       this.sendMessageToWebView({
         type: 'conversationCleared',
-        data: {},
+        data: {
+          ...(this.agentManager.currentSessionId
+            ? { sessionId: this.agentManager.currentSessionId }
+            : {}),
+        },
       });
     } catch (_error) {
       logger.error('[WebViewProvider] Failed to create new session:', _error);

@@ -10,7 +10,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
   stripSystemReminderBlocks,
-} from '../utils/environmentContext.js';
+} from '../core/environmentContext.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 
 const debugLogger = createDebugLogger('SESSION_RECAP');
