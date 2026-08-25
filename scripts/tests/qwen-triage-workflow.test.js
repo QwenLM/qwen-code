@@ -3967,6 +3967,25 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(script).toContain('--prefix "$prefix"');
   });
 
+  // The credential lifecycle is security-relevant: dropping the cleanup
+  // (or its always() condition) leaves the OSS key pair in $RUNNER_TEMP on
+  // the persistent ecs-qwen pool between jobs, and a dropped sha256 check
+  // installs whatever the mirror serves.
+  it('pins the ossutil install/configure/cleanup credential lifecycle', () => {
+    const install = stepIn('publish-verify', 'Install ossutil');
+    expect(install).toContain('continue-on-error: true');
+    expect(install).toContain('sha256sum -c');
+    const configure = stepIn(
+      'publish-verify',
+      'Configure Aliyun OSS credentials',
+    );
+    expect(configure).toContain('continue-on-error: true');
+    expect(configure).toContain('-c "$RUNNER_TEMP/.ossutilconfig"');
+    const cleanup = stepIn('publish-verify', 'Cleanup Aliyun OSS credentials');
+    expect(cleanup).toContain("if: '${{ always() }}'");
+    expect(cleanup).toContain('rm -f "$RUNNER_TEMP/.ossutilconfig"');
+  });
+
   // Every publish fixture returned [] for the comments listing, so the
   // PATCH arm — the one that must reuse a live status comment instead of
   // stranding it — was never executed by any test.

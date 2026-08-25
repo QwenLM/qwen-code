@@ -39,6 +39,25 @@ test('workflow hosts visuals on OSS without writing Git refs', () => {
   assert.doesNotMatch(workflow, /checkout -q --orphan/);
 });
 
+test('workflow pins the ossutil credential lifecycle (sha256 install, config, always() cleanup)', () => {
+  // The sha256-verified install and the credential config it feeds are
+  // best-effort here (a setup failure must not block the no-image path)...
+  const install =
+    workflow.split("'Install ossutil'")[1]?.split('- name:')[0] ?? '';
+  assert.match(install, /continue-on-error: true/);
+  assert.match(install, /sha256sum -c/);
+  const configure =
+    workflow.split("'Configure Aliyun OSS credentials'")[1]?.split('- name:')[0] ??
+    '';
+  assert.match(configure, /continue-on-error: true/);
+  assert.match(configure, /-c "\$RUNNER_TEMP\/\.ossutilconfig"/);
+  // ...but the cleanup must run even on failure, or the OSS key pair
+  // lingers in $RUNNER_TEMP after the job.
+  const cleanup = workflow.split("'Cleanup Aliyun OSS credentials'")[1] ?? '';
+  assert.match(cleanup, /if: '\$\{\{ always\(\) \}\}'/);
+  assert.match(cleanup, /rm -f "\$RUNNER_TEMP\/\.ossutilconfig"/);
+});
+
 test('sanitizeName preserves the extension (regression: a trailing char broke the .png filter)', () => {
   assert.equal(
     sanitizeName('session-transcript-light.png'),
