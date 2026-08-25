@@ -12318,7 +12318,7 @@ exit 1
           workspaces: [
             'packages/*',
             'packages/channels/*',
-            '!packages/desktop',
+            '!packages/desktop-shell',
           ],
         }),
       );
@@ -12327,7 +12327,7 @@ exit 1
         'packages/brandnew', // a new top-level workspace the branch adds
         'packages/channels/base',
         'packages/channels/newchannel', // a new nested workspace the branch adds
-        'packages/desktop', // excluded by the ! glob
+        'packages/desktop-shell', // excluded by the ! glob
         'packages/cli/src/commands/examples/starter', // fixture, NOT a workspace
       ]) {
         mkdirSync(join(dir, pkg), { recursive: true });
@@ -12339,7 +12339,7 @@ exit 1
           'packages/cli/src/commands/examples/starter/src/index.ts', // -> packages/cli
           'packages/brandnew/src/z.ts', // -> packages/brandnew (branch-added)
           'packages/channels/newchannel/src/y.ts', // -> newchannel (branch-added nested)
-          'packages/desktop/src/d.ts', // excluded workspace -> dropped
+          'packages/desktop-shell/src/d.ts', // excluded workspace -> dropped
           'packages/sdk-python/foo.py', // no manifest -> dropped
           'README.md', // outside packages/ -> dropped
         ].join('\n') + '\n';
@@ -12355,7 +12355,7 @@ exit 1
       ]);
       expect(out).not.toContain('examples/starter'); // fixture never owns
       expect(out).not.toContain('sdk-python');
-      expect(out).not.toContain('packages/desktop'); // ! negation honoured
+      expect(out).not.toContain('packages/desktop-shell'); // ! negation honoured
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
