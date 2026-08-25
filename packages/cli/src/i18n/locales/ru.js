@@ -2306,4 +2306,22 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
   'Kept model as {{model}}': 'Оставлена модель {{model}}',
+  // === reload-env command ===
+  'Reload environment variables and API keys from settings.json and .env files without restarting':
+    'Перезагрузить переменные окружения и API-ключи из settings.json и файлов .env без перезапуска',
+  'Warning: Failed to parse settings file. Check for JSON syntax errors.':
+    'Предупреждение: не удалось разобрать файл settings. Проверьте синтаксические ошибки JSON.',
+  'Updated keys':
+    'Обновлённые ключи',
+  'Removed keys':
+    'Удалённые ключи',
+  'No environment changes detected.':
+    'Изменений окружения не обнаружено.',
+  'Environment reloaded and API client refreshed. New keys are live.':
+    'Окружение перезагружено, API-клиент обновлён. Новые ключи активны.',
+  'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.':
+    'Окружение перезагружено, но обновление API-клиента завершилось ошибкой. Перезапустите CLI, чтобы применить новые ключи.',
+  'Environment reloaded. New API keys will take effect on the next request.':
+    'Окружение перезагружено. Новые API-ключи вступят в силу при следующем запросе.',
+
 };

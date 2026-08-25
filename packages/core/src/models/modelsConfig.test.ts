@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { ModelsConfig } from './modelsConfig.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
@@ -2875,6 +2875,121 @@ describe('ModelsConfig', () => {
           .getAvailableModelsForAuthType(AuthType.USE_OPENAI)
           .map((m) => m.id),
       ).toContain('qwen3.7-max');
+    });
+  });
+
+  describe('refreshEnvSourcedCredentials', () => {
+    afterEach(() => {
+      delete process.env['OPENAI_API_KEY'];
+      delete process.env['OPENAI_BASE_URL'];
+      delete process.env['OPENAI_MODEL'];
+      delete process.env['CUSTOM_PROVIDER_KEY'];
+    });
+
+    it('adopts a fresh apiKey via apiKeyEnvKey and records the env source', () => {
+      const modelsConfig = new ModelsConfig({
+        generationConfig: {
+          apiKey: 'old-key',
+          apiKeyEnvKey: 'CUSTOM_PROVIDER_KEY',
+        },
+      });
+      process.env['CUSTOM_PROVIDER_KEY'] = 'new-key';
+
+      expect(
+        modelsConfig.refreshEnvSourcedCredentials(AuthType.USE_OPENAI),
+      ).toBe(true);
+      const gc = modelsConfig.getGenerationConfig();
+      expect(gc.apiKey).toBe('new-key');
+      expect(
+        modelsConfig.getGenerationConfigSources()['apiKey'],
+      ).toEqual({ kind: 'env', envKey: 'CUSTOM_PROVIDER_KEY' });
+    });
+
+    it('returns false when the apiKeyEnvKey value is unchanged', () => {
+      const modelsConfig = new ModelsConfig({
+        generationConfig: {
+          apiKey: 'same-key',
+          apiKeyEnvKey: 'CUSTOM_PROVIDER_KEY',
+        },
+      });
+      process.env['CUSTOM_PROVIDER_KEY'] = 'same-key';
+
+      expect(
+        modelsConfig.refreshEnvSourcedCredentials(AuthType.USE_OPENAI),
+      ).toBe(false);
+    });
+
+    it('preserves the existing key when the env var is absent (no clear)', () => {
+      const modelsConfig = new ModelsConfig({
+        generationConfig: {
+          apiKey: 'working-key',
+          apiKeyEnvKey: 'CUSTOM_PROVIDER_KEY',
+        },
+      });
+      // CUSTOM_PROVIDER_KEY deliberately not set
+
+      expect(
+        modelsConfig.refreshEnvSourcedCredentials(AuthType.USE_OPENAI),
+      ).toBe(false);
+      expect(modelsConfig.getGenerationConfig().apiKey).toBe('working-key');
+      expect(
+        modelsConfig.getGenerationConfigSources()['apiKey'],
+      ).toBeUndefined();
+    });
+
+    it('adopts bare AUTH_ENV_MAPPINGS values for apiKey, baseUrl and model', () => {
+      const modelsConfig = new ModelsConfig({
+        generationConfig: {
+          apiKey: 'old-key',
+          baseUrl: 'https://old.example.com/v1',
+          model: 'old-model',
+        },
+      });
+      process.env['OPENAI_API_KEY'] = 'fresh-key';
+      process.env['OPENAI_BASE_URL'] = 'https://fresh.example.com/v1';
+      process.env['OPENAI_MODEL'] = 'fresh-model';
+
+      expect(
+        modelsConfig.refreshEnvSourcedCredentials(AuthType.USE_OPENAI),
+      ).toBe(true);
+      const gc = modelsConfig.getGenerationConfig();
+      expect(gc.apiKey).toBe('fresh-key');
+      expect(gc.baseUrl).toBe('https://fresh.example.com/v1');
+      expect(gc.model).toBe('fresh-model');
+      expect(modelsConfig.getGenerationConfigSources()['apiKey']).toEqual({
+        kind: 'env',
+        envKey: 'OPENAI_API_KEY',
+      });
+    });
+
+    it('never touches credentials for qwen-oauth (computed token placeholder)', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.QWEN_OAUTH,
+        generationConfig: {
+          apiKey: 'computed-oauth-token',
+        },
+      });
+
+      expect(
+        modelsConfig.refreshEnvSourcedCredentials(AuthType.QWEN_OAUTH),
+      ).toBe(false);
+      expect(modelsConfig.getGenerationConfig().apiKey).toBe(
+        'computed-oauth-token',
+      );
+    });
+
+    it('keeps manual credentials intact when no env var matches', () => {
+      const modelsConfig = new ModelsConfig({
+        generationConfig: {
+          apiKey: 'manual-key',
+        },
+      });
+      // OPENAI_API_KEY deliberately not set
+
+      expect(
+        modelsConfig.refreshEnvSourcedCredentials(AuthType.USE_OPENAI),
+      ).toBe(false);
+      expect(modelsConfig.getGenerationConfig().apiKey).toBe('manual-key');
     });
   });
 });
