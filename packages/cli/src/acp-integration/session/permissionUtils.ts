@@ -13,6 +13,7 @@ import type {
   RequestPermissionResponse,
   ToolCallContent,
 } from '@agentclientprotocol/sdk';
+import { DAEMON_PERMISSION_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 
 const basicPermissionOptions = [
   {
@@ -125,6 +126,14 @@ export function interactionMetaFields(
         qwenQuestions: confirmation.questions,
       }
     : {};
+}
+
+export function permissionCancelMessageFromResponse(
+  response: unknown,
+): string | undefined {
+  const reason = (response as { _meta?: Record<string, unknown> | null })
+    ._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+  return typeof reason === 'string' && reason.length > 0 ? reason : undefined;
 }
 
 export function buildPermissionRequestContent(

@@ -33,11 +33,11 @@ import {
   buildPermissionRequestContent,
   interactionMetaFields,
   type PermissionPersistencePolicy,
+  permissionCancelMessageFromResponse,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
-import { DAEMON_PERMISSION_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 
 const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
 
@@ -45,14 +45,6 @@ type PermissionRequester = (
   params: RequestPermissionRequest,
   signal: AbortSignal,
 ) => Promise<RequestPermissionResponse>;
-
-function permissionCancelMessageFromResponse(
-  response: RequestPermissionResponse,
-): string | undefined {
-  const reason = (response as { _meta?: Record<string, unknown> | null })
-    ._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
-  return typeof reason === 'string' ? reason : undefined;
-}
 
 /**
  * Tracks and emits events for sub-agent tool calls within AgentTool execution.

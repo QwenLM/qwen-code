@@ -346,6 +346,38 @@ describe('AskUserQuestionTool', () => {
       );
     });
 
+    it('should fall back to the default cancellation message for an empty reason', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Test?',
+            header: 'Test',
+            options: [
+              { label: 'A', description: 'Option A' },
+              { label: 'B', description: 'Option B' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      await confirmation.onConfirm(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: '',
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toBe('User declined to answer the questions.');
+      expect(result.returnDisplay).toBe(
+        'User declined to answer the questions.',
+      );
+    });
+
     it('should return formatted answers when user provides them', async () => {
       const params = {
         questions: [

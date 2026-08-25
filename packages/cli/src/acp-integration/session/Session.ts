@@ -234,7 +234,6 @@ import {
   type BridgeConversationDirectoryExpectation,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
-  DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -362,6 +361,7 @@ import {
   buildPermissionRequestContent,
   interactionMetaFields,
   type PermissionPersistencePolicy,
+  permissionCancelMessageFromResponse,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
@@ -509,14 +509,6 @@ function getAbortAwareEndTurnStopReason(
 
 function isUnattendedRestorePermissionCancel(reason: unknown): boolean {
   return reason === 'timeout' || reason === 'session_closed';
-}
-
-function permissionCancelMessageFromResponse(
-  response: unknown,
-): string | undefined {
-  const reason = (response as { _meta?: Record<string, unknown> | null })
-    ._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
-  return typeof reason === 'string' ? reason : undefined;
 }
 
 type RunToolResult = {
