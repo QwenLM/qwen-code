@@ -1573,6 +1573,115 @@ describe('goal runtime', () => {
     expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
   });
 
+  it('keeps the stall streak through a transient checkpoint verifier failure', async () => {
+    const { journal, host, runtime, checkpointVerifier, setRecords } =
+      stallHarness();
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'a',
+    );
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'b',
+    );
+    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(2);
+
+    // The window still overflows when the verifier fails intermittently, so
+    // the skipped checkpoint proves no room: resetting the streak there would
+    // let transient errors launder the count and the breaker would never fire.
+    checkpointVerifier.mockRejectedValueOnce(new Error('provider failed'));
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'c',
+    );
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'active',
+      checkpointStalls: 2,
+    });
+
+    // The failed turn wrote no checkpoint, so the next window starts from the
+    // same cursor: append the new evidence to the existing chain directly.
+    const permit = host.started.at(-1)!;
+    const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    records = [
+      ...records,
+      ...verifierEvidenceWindow(permit, cursor, 101, 'd').slice(1),
+    ];
+    setRecords(records);
+    await runtime.finishTurn(permit);
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(4);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+      },
+    });
+    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
+    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT + 1);
+  });
+
+  it('keeps the stall streak when a turn records no evidence at all', async () => {
+    const { host, runtime, setRecords } = stallHarness();
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    records = await runCheckpointTurn(
+      runtime,
+      host,
+      setRecords,
+      records,
+      101,
+      'a',
+    );
+    expect(runtime.getSnapshot().goal?.checkpointStalls).toBe(1);
+
+    // A turn that records no goal-owned transcript leaves the lineage tail
+    // at the previous turn, so the checkpoint check closes as bookkeeping
+    // only. That close proved nothing about room, so it keeps the streak.
+    const checkpoint = runtime.getSnapshot().goal!.evidenceCheckpoint!;
+    records = [
+      ...records,
+      {
+        uuid: checkpoint.checkpointId,
+        parentUuid: records.at(-1)!.uuid,
+        sessionId: 's-1',
+        timestamp: new Date(2).toISOString(),
+        type: 'system',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+        cwd: '/tmp',
+        version: 'test',
+      },
+    ];
+    setRecords(records);
+    await runtime.finishTurn(host.started.at(-1)!);
+
+    expect(runtime.getSnapshot().goal).toMatchObject({
+      status: 'active',
+      checkpointStalls: 1,
+    });
+    expect(host.started).toHaveLength(3);
+  });
+
   it('promotes queued user input before an automatic post-checkpoint turn', async () => {
     const result = deferred<GoalCheckpointVerificationResult>();
     const journal = fakeGoalJournal();

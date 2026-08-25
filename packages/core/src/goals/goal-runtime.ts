@@ -277,14 +277,6 @@ export function createGoalRuntime(
    * Goal accounting is bookkeeping: a ledger that is absent or that throws
    * costs the Goal its spend figure for this turn, never the turn itself.
    */
-  const withCheckpointStalls = (
-    goal: NonNullable<GoalSnapshotV2['goal']>,
-    checkpointStalls: number,
-  ): NonNullable<GoalSnapshotV2['goal']> => {
-    const { checkpointStalls: _previous, ...rest } = goal;
-    return checkpointStalls > 0 ? { ...rest, checkpointStalls } : rest;
-  };
-
   const takeTurnTokens = (turnId: string): number => {
     if (!options.tokenLedger) return 0;
     try {
@@ -293,6 +285,14 @@ export function createGoalRuntime(
     } catch {
       return 0;
     }
+  };
+
+  const withCheckpointStalls = (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    checkpointStalls: number,
+  ): NonNullable<GoalSnapshotV2['goal']> => {
+    const { checkpointStalls: _previous, ...rest } = goal;
+    return checkpointStalls > 0 ? { ...rest, checkpointStalls } : rest;
   };
 
   const assertAvailable = () => {
@@ -762,18 +762,23 @@ export function createGoalRuntime(
 
   const finishCheckpointCheck = async (
     attempt: CheckpointAttempt,
+    relieved = false,
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
       const persistedCause =
         nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
       const now = Date.now();
-      // The window had room, so compaction is keeping up: a stall streak
-      // ends here even though no checkpoint was written.
+      // Only a check that found room ends a stall streak. A check that
+      // erred or never ran proved nothing about the window; resetting
+      // there would let transient verifier failures launder the count.
+      const checkpointStalls = relieved
+        ? 0
+        : (snapshot.goal.checkpointStalls ?? 0);
       const checkedSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...withCheckpointStalls(snapshot.goal, 0),
+          ...withCheckpointStalls(snapshot.goal, checkpointStalls),
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
         },
@@ -940,7 +945,7 @@ export function createGoalRuntime(
         return;
       }
       if (!window.shouldCheckpoint) {
-        await finishCheckpointCheck(attempt);
+        await finishCheckpointCheck(attempt, true);
         return;
       }
       let checkpoint: GoalEvidenceCheckpoint;
