@@ -31,6 +31,15 @@ export function isSubAgentToolCall(tool: ACPToolCall): boolean {
   return Boolean(tool.args?.subagent_type);
 }
 
+// NOTE: This background-classification heuristic (top-level `agent` call, no
+// explicit `run_in_background`, no `working_dir`, no named teammate) is the
+// frozen compatibility path for frames lacking `executionMode` (older daemon
+// frames, recordings made before the projection, and current-core
+// blocked-spawn result frames). It must NOT be updated when the routing rule
+// changes in core — the live rule lives in packages/core/src/tools/agent/
+// agent.ts (`backgroundRequested`/`shouldRunInBackground`), and the desktop
+// adapter that used to mirror it has been forked out of this repo. A
+// divergence already exists: `subagentConfig.background` is invisible here.
 export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
   if (!isSubAgentToolCall(tool)) return false;
   if (tool.executionMode) return tool.executionMode === 'background';

@@ -2695,9 +2695,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // This decision is the source of truth for client classification. Its
       // resolved value is projected onto the task display so clients do not
       // have to replicate rules that depend on loaded subagent configuration.
-      // The desktop client does not receive this projection and still
-      // replicates the rule (packages/desktop/packages/shared/src/agent/
-      // tool-matching.ts, detectBackgroundEvents) — update it if this rule
+      // The desktop client (forked out of this repo with OpenWork and no
+      // longer vendored here) does not receive this projection and replicates
+      // the rule in its own copy — keep the fork informed if this rule
       // changes. The web-shell fallback in toolClassification.ts covers every
       // frame lacking executionMode (including blocked-spawn result frames and
       // pre-feature recordings) and must stay frozen at the legacy rule.
