@@ -751,9 +751,12 @@ const canWrite = (login) => {
     return false;
   }
 };
+// `"author": null` means the account was deleted — nobody to exclude, and
+// dereferencing it would throw, letting 2>/dev/null silently bypass the
+// deterministic resolver (the jq fallback below already defends this shape).
+const authorLogin = pr.author?.login?.toLowerCase() ?? '';
 const eligible = area.owners.filter(
-  (owner) =>
-    owner.toLowerCase() !== pr.author.login.toLowerCase() && canWrite(owner),
+  (owner) => owner.toLowerCase() !== authorLogin && canWrite(owner),
 );
 if (eligible.length === 0) process.exit(0);
 
