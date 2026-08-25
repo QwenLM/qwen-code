@@ -3396,7 +3396,7 @@ describe('git extension helpers', () => {
       await fs.writeFile(archivePath, archive);
 
       await expect(extractArchiveFile(archivePath, tempDir)).rejects.toThrow(
-        'Extension archive cannot be flattened because "README.md" exists at both the archive root and inside "wrapped".',
+        /Extension archive could not be extracted.*Extension archive cannot be flattened because "README.md" exists at both the archive root and inside "wrapped"\./,
       );
       await expect(
         fs.readFile(path.join(tempDir, 'README.md'), 'utf-8'),

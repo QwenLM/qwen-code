@@ -558,15 +558,11 @@ describe('extension tests', () => {
       ).toBe(false);
     });
 
-    it('installs a superpowers-style Gemini extension through the old-Git archive fallback', async () => {
+    it('materializes validated Agent Plugin symlinks from the old-Git archive fallback', async () => {
       mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
       mockDownloadPublicGitHubArchiveFallback.mockImplementation(
         async (_metadata: ExtensionInstallMetadata, destination: string) => {
-          fs.mkdirSync(destination, { recursive: true });
-          fs.writeFileSync(
-            path.join(destination, 'gemini-extension.json'),
-            JSON.stringify({ name: 'old-git-extension', version: '1.0.0' }),
-          );
+          createAgentPlugin(destination, { name: 'old-git-agent-plugin' });
           fs.writeFileSync(path.join(destination, 'CLAUDE.md'), '# agents\n');
           if (process.platform !== 'win32') {
             fs.symlinkSync('CLAUDE.md', path.join(destination, 'AGENTS.md'));
@@ -580,16 +576,17 @@ describe('extension tests', () => {
       const installed = await manager.installExtension(
         {
           type: 'git',
-          source: 'https://github.com/obra/superpowers',
+          source: 'https://github.com/example/agent-plugin',
         },
         async () => {},
       );
 
+      expect(installed.name).toBe('old-git-agent-plugin');
       expect(installed.installMetadata).toMatchObject({
         type: 'git',
-        source: 'https://github.com/obra/superpowers',
+        source: 'https://github.com/example/agent-plugin',
         gitCommit: '0123456789abcdef0123456789abcdef01234567',
-        originSource: 'Gemini',
+        originSource: 'AgentPlugins',
       });
       if (process.platform !== 'win32') {
         const installedAgents = path.join(installed.path, 'AGENTS.md');
@@ -601,7 +598,7 @@ describe('extension tests', () => {
       expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'git',
-          source: 'https://github.com/obra/superpowers',
+          source: 'https://github.com/example/agent-plugin',
         }),
         expect.any(String),
         undefined,

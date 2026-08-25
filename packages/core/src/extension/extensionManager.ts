@@ -1988,6 +1988,7 @@ export class ExtensionManager {
     let tempDir: string | undefined;
     let convertedSourcePath: string | undefined;
     let stagingPath: string | undefined;
+    let archiveSymlinksValidated = false;
     let preparedSettings: PreparedExtensionSettingsMutation | undefined;
     let preparedGitCredential: PreparedStoredGitCredential | undefined;
 
@@ -2070,6 +2071,7 @@ export class ExtensionManager {
                   tempDir,
                   signal,
                 );
+              archiveSymlinksValidated = true;
             } else {
               installMetadata.gitCommit = await cloneFromGit(
                 installMetadata,
@@ -2270,7 +2272,7 @@ export class ExtensionManager {
 
         if (installMetadata.type !== 'link') {
           await copyExtension(localSourcePath, stagingPath, {
-            skipSymlinks: isAgentPlugin,
+            skipSymlinks: isAgentPlugin && !archiveSymlinksValidated,
             excludeRootGitDirectory: remoteGitInstall,
           });
         }
