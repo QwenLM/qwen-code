@@ -24,6 +24,7 @@ import {
   createDaemonTranscriptStore,
   estimateDaemonTranscriptBlockBytes,
   extractServerTimestamp,
+  isTaskExecutionMode,
   isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   isUnrecognizedDiagnosticReason,
@@ -543,9 +544,7 @@ function projectSubagentToolUpdate(
         ...(subagentColor ? { subagentColor } : {}),
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
-        ...(executionMode === 'foreground' || executionMode === 'background'
-          ? { executionMode }
-          : {}),
+        ...(isTaskExecutionMode(executionMode) ? { executionMode } : {}),
         ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }

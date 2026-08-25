@@ -3636,6 +3636,28 @@ describe('transcriptBlocksToDaemonMessages', () => {
     });
   });
 
+  it('accepts the foreground executionMode literal over the frozen heuristic', () => {
+    // Shaped as a downgraded nested agent's block in the child session's
+    // transcript: top-level-shaped (no parentToolCallId) with an empty arg
+    // object. Without the authoritative literal, the frozen compatibility
+    // heuristic's defaultsToBackground branch would classify exactly this
+    // block background and hide the inline result — the literal must win so
+    // the downgrade direction stays pinned end-to-end.
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-start', 'agent-1', 'in_progress', 10, {
+        title: 'Agent: work',
+        toolName: 'agent',
+        rawInput: {},
+        rawOutput: { type: 'task_execution', executionMode: 'foreground' },
+      }),
+    ]);
+
+    const tool =
+      messages[0].role === 'tool_group' ? messages[0].tools[0] : undefined;
+    expect(tool?.executionMode).toBe('foreground');
+    expect(tool?.status).toBe('in_progress');
+  });
+
   it('does not merge assistant across error block', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('a1', 'assistant', 'analyzing...', 1),

@@ -2713,6 +2713,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 this.params.name === undefined)));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
 
+      if (this.params.working_dir !== undefined && shouldRunInBackground) {
+        // A caller-owned worktree has no lifecycle coupling to a backgrounded
+        // agent — the caller could reap the worktree while the detached agent
+        // is still running in it. validateToolParams rejects an explicit
+        // run_in_background up front; this covers the other route into the
+        // background: a subagent config with `background: true`. Guarding on
+        // the resolved shouldRunInBackground catches both and avoids
+        // over-rejecting a nested call that downgrades to the foreground.
+        // Like the other spawn guards, this returns before any display
+        // update: a never-running launch must not emit a running frame whose
+        // authoritative executionMode ('background') contradicts the blocked
+        // result frame, which carries no executionMode and therefore falls
+        // back to the frozen legacy heuristic (foreground for a
+        // working_dir-bearing call).
+        return this.buildSpawnBlockedResult(
+          'Error: "working_dir" cannot be used with a background agent — the caller owns the worktree and could remove it while the detached agent is still running there. Run this agent in the foreground, or drop "working_dir".',
+          'working_dir is incompatible with a background agent',
+        );
+      }
+
       this.currentDisplay = {
         type: 'task_execution' as const,
         subagentName: subagentConfig.name,
@@ -2726,19 +2746,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       updateOutput?.(this.currentDisplay);
 
       const backgroundOwnerId = getCurrentAgentId();
-      if (this.params.working_dir !== undefined && shouldRunInBackground) {
-        // A caller-owned worktree has no lifecycle coupling to a backgrounded
-        // agent — the caller could reap the worktree while the detached agent
-        // is still running in it. validateToolParams rejects an explicit
-        // run_in_background up front; this covers the other route into the
-        // background: a subagent config with `background: true`. Guarding on
-        // the resolved shouldRunInBackground catches both and avoids
-        // over-rejecting a nested call that downgrades to the foreground.
-        return this.buildSpawnBlockedResult(
-          'Error: "working_dir" cannot be used with a background agent — the caller owns the worktree and could remove it while the detached agent is still running there. Run this agent in the foreground, or drop "working_dir".',
-          'working_dir is incompatible with a background agent',
-        );
-      }
       if (backgroundRequested && !shouldRunInBackground) {
         debugLogger.debug(
           `[AgentTool] Background request downgraded to a foreground run for a nested sub-agent (type=${subagentConfig.name}).`,

@@ -108,6 +108,7 @@ export {
   getSessionUpdatePayload,
   isDaemonUiSensitiveKey,
   isSubagentChildBlock,
+  isTaskExecutionMode,
   isTrimmedPermissionBlockId,
   isTrimmedToolBlockId,
   isUnrecognizedDiagnosticReason,

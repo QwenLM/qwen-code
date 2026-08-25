@@ -412,14 +412,19 @@ function detectBackgroundEvents(
   // explicit opt-in behavior.
   //
   // NOTE: This heuristic (top-level `agent` call, no explicit
-  // `run_in_background`, no `working_dir`, no named teammate) mirrors two other
-  // implementations that must stay in sync:
-  //   - core dispatch (source of truth): packages/core/src/tools/agent/agent.ts
-  //     (`backgroundRequested`/`shouldRunInBackground` in AgentTool.execute)
-  //   - web-shell UI: packages/web-shell/client/adapters/toolClassification.ts
-  //     (`isBackgroundSubAgentToolCall`)
-  // If the routing rule changes in core, update all three. The web shell reads
-  // `rawOutput.status`; this adapter reads the serialized runtime result.
+  // `run_in_background`, no `working_dir`, no named teammate) mirrors core
+  // dispatch, the source of truth for the routing rule:
+  // packages/core/src/tools/agent/agent.ts (`backgroundRequested`/
+  // `shouldRunInBackground` in AgentTool.execute). The desktop client does
+  // not receive core's executionMode projection, so only this adapter tracks
+  // the core rule — if the routing rule changes in core, update these two
+  // together. The web-shell fallback
+  // (packages/web-shell/client/adapters/toolClassification.ts,
+  // `isBackgroundSubAgentToolCall`) is a frozen compatibility path covering
+  // only pre-projection data (legacy daemon frames and recorded sessions,
+  // which carry no executionMode) and must NOT be updated on rule changes.
+  // The web shell reads `rawOutput.status`; this adapter reads the
+  // serialized runtime result.
   const normalizedToolName = entry.name.toLowerCase();
   const isTopLevelQwenAgent =
     normalizedToolName === 'agent' && parentToolUseId === undefined;

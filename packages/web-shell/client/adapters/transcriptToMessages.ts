@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isTaskExecutionMode } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
@@ -1172,10 +1173,9 @@ function daemonToolBlockToToolCall(
     kind: inferToolKind(block.toolName, block.toolKind),
     rawOutput,
     args: block.rawInput as Record<string, unknown> | undefined,
-    executionMode:
-      executionMode === 'foreground' || executionMode === 'background'
-        ? executionMode
-        : undefined,
+    executionMode: isTaskExecutionMode(executionMode)
+      ? executionMode
+      : undefined,
     parentToolCallId: block.parentToolCallId,
     startTime: block.createdAt,
     endTime: isComplete && !isBackgroundAgent ? block.updatedAt : undefined,
