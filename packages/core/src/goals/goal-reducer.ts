@@ -154,6 +154,10 @@ export function reduceGoalControl(
       status: 'active',
       evidenceCursor: copyCursor(transition.cursor),
       evidenceCheckpoint: undefined,
+      // The streak counts checkpoints against one window; this resume starts
+      // a different one, so carrying it over would spend the new window's
+      // allowance on the old window's failures.
+      checkpointStalls: undefined,
       lastReason: undefined,
       limitKind: undefined,
     });

@@ -129,8 +129,9 @@ export interface GoalRecord {
    * `isGoalCheckpointStalled`) or the verifier result could not be folded
    * into claims at all. Persisted on the record rather than held in memory
    * so a daemon restart or session resume cannot launder the count; absent
-   * means zero. Reset by any checkpoint check that finds room, and by edit
-   * or replace.
+   * means zero. Reset by any checkpoint check that finds room, and by every
+   * control action that starts a different evidence window: edit, replace,
+   * and the resume of an evidence-limited Goal.
    */
   checkpointStalls?: number;
   lastReason?: string;
