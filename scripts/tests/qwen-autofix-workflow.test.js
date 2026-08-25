@@ -9955,10 +9955,14 @@ exit 1
       expect(step).toContain('sudo -n apt-get install');
       expect(step).not.toContain('sudo apt-get');
     }
-    // "Short jobs stay hosted" is an explicit design decision — only the
-    // three heavy jobs may route onto the persistent pool.
-    expect(routeJob).toContain("runs-on: 'ubuntu-latest'");
-    expect(reviewScanJob).toContain("runs-on: 'ubuntu-latest'");
+    // "Short jobs stay hosted" is the design rule — the carve-out is the
+    // scan lane: route and review-scan gate the WHOLE fan-out, and a
+    // hosted-runner backlog queued route past the cron period so the cron
+    // supersede rule starved every scan round (2026-08-25). They share the
+    // heavy jobs' exact expression, fork-trust clause and kill-switch
+    // included. The command jobs stay hosted.
+    expect(routeJob).toContain(ecsRunsOn);
+    expect(reviewScanJob).toContain(ecsRunsOn);
     for (const name of ['takeover-command', 'retry-command', 'takeover-ack']) {
       const job =
         workflow.match(

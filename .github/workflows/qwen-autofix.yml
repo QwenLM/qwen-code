@@ -200,7 +200,10 @@ jobs:
     # Full rationale → qwen-autofix.md#af-004
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && (startsWith(github.event.comment.body, '@qwen-code /takeover') || startsWith(github.event.comment.body, '@qwen-code /retry')))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') && (github.event_name != 'pull_request_review' || github.event.pull_request.state == 'open') }}
-    runs-on: 'ubuntu-latest'
+    # Persistent pool, not hosted: a hosted backlog queued route past the cron
+    # period, and af-005's supersede then starved every scan round.
+    # Full rationale → qwen-autofix.md#af-148
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     concurrency:
       # Concurrency is keyed by TARGET, not shared and not fully unique:
@@ -2054,7 +2057,8 @@ jobs:
     needs: 'route'
     if: |-
       ${{ needs.route.outputs.do_review == 'true' }}
-    runs-on: 'ubuntu-latest'
+    # Same pool decision as route. Full rationale → qwen-autofix.md#af-148
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 15
     # A forced scan can write the same status comment as review-address.
     # Share its per-PR lock so neither writer can erase the other's state.

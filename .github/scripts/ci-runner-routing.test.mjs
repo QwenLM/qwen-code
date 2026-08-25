@@ -1,4 +1,5 @@
-// Runner-routing regression guards for ci.yml and serve-ab.yml.
+// Runner-routing regression guards for ci.yml, serve-ab.yml, and the
+// qwen-autofix.yml scan lane.
 //
 // classify_pr carries the routing logic TWICE — the `runs-on` expression
 // (which selects the classify job's own runner) and the `pick_runner` shell
@@ -68,6 +69,13 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'merge_group'/,
       String(eventName === 'merge_group'),
     ],
+    // The review term MUST substitute before the plain pull_request one:
+    // 'pull_request' is a prefix of 'pull_request_review', so the plain
+    // pattern would otherwise eat the review term's head.
+    [
+      /github\.event_name != 'pull_request_review'/,
+      String(eventName !== 'pull_request_review'),
+    ],
     [
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
@@ -80,6 +88,7 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
       String(TRUSTED.includes(assoc)),
     ],
+    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
   ];
   let expr = expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
   for (const [term, value] of substitutions) {
@@ -420,4 +429,78 @@ describe('serve-ab.yml runner routing', () => {
       "the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist, anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
   });
+});
+
+describe('qwen-autofix.yml scan-lane runner routing', () => {
+  // route and review-scan gate the WHOLE fan-out: while they sit queued no
+  // review-address leg starts. A hosted-runner backlog queued them past the
+  // cron period, and the cron supersede rule then starved every scan round
+  // (2026-08-25) — so pin the lane on the persistent pool, with the
+  // fork-trust clause and the kill-switch intact.
+  const autofixDoc = parse(
+    readFileSync(join(workflowsDir, 'qwen-autofix.yml'), 'utf8'),
+  );
+  // evalRunsOn unwraps the winning fromJSON label to the array it names, so
+  // compare against arrays, not the ECS/HOSTED string constants above.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+
+  for (const jobName of ['route', 'review-scan']) {
+    const runsOn = String(autofixDoc.jobs[jobName]['runs-on']);
+
+    it(`${jobName} reaches the persistent pool on schedule and dispatch`, () => {
+      for (const eventName of ['schedule', 'workflow_dispatch']) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: false,
+            eventName,
+            sameRepo: false,
+            assoc: '',
+          }),
+          ECS_LABELS,
+          `${jobName} must scan from the pool on ${eventName}`,
+        );
+      }
+    });
+
+    it(`${jobName} keeps untrusted fork PR lanes hosted`, () => {
+      for (const eventName of ['pull_request', 'pull_request_review']) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: false,
+            eventName,
+            sameRepo: false,
+            assoc: 'NONE',
+          }),
+          HOSTED_LABELS,
+          `${jobName} fork lane (${eventName}) must stay hosted`,
+        );
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: false,
+            eventName,
+            sameRepo: true,
+            assoc: 'NONE',
+          }),
+          ECS_LABELS,
+          `${jobName} same-repo lane (${eventName}) must reach the pool`,
+        );
+      }
+    });
+
+    it(`${jobName} obeys the kill-switch on every event`, () => {
+      for (const eventName of ['schedule', 'workflow_dispatch']) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: true,
+            eventName,
+            sameRepo: true,
+            assoc: 'OWNER',
+          }),
+          HOSTED_LABELS,
+          `kill-switch must win on ${eventName}`,
+        );
+      }
+    });
+  }
 });

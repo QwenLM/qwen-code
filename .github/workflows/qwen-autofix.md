@@ -249,6 +249,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [145. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…](#af-145)
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
+- [148. route — Persistent pool, not hosted: a hosted backlog queued route past the cron period, and af-005's…](#af-148)
 
 ---
 
@@ -3726,4 +3727,34 @@ wrapper: a translation quoting HTML is pathological (SKILL
 forbids HTML in failure.zh.md), but must not be able to open
 or close a <details>/<summary> that swallows the closing tag
 the workflow emits below.
+```
+
+<a id="af-148"></a>
+
+### 148. route — Persistent pool, not hosted: a hosted backlog queued route past the cron period, and af-005's supersede then starved every scan round.
+
+In `route` and `review-scan`.
+
+```text
+route and review-scan run on the persistent pool, not the
+hosted one. They are short trusted base-repo jobs, but they
+gate the WHOLE fan-out: while they sit queued, no
+review-address leg starts. On 2026-08-25 a hosted-runner
+backlog queued route for over 20 minutes — longer than the
+cron period — and af-005's newer-tick-supersedes-older rule
+then cancelled every still-queued round: nine consecutive
+schedule runs died without scanning while the ecs-qwen pool
+stood mostly idle. The supersede rule stays — it is right
+once route gets a runner in seconds; the fix is taking the
+hosted queue out of the critical path. review-scan moves
+with it because it shares the gate, and its own hosted waits
+delayed every fan-out by the same backlog. Both keep the
+fork-trust clause of the sibling lanes: pull_request and
+pull_request_review resolve this file from the PR's own
+merge commit, so only same-repo heads and write-access
+authors may reach the persistent pool; everything else stays
+hosted, and the kill-switch wins everywhere. Neither job
+checks code out — route only decides phases, and review-scan
+only calls the API — so the shared workspace needs no
+restore or wipe step here.
 ```
