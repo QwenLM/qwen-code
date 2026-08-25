@@ -43,9 +43,13 @@ const initializeI18n = vi.fn();
 const resolveLanguageSetting = vi.fn((language?: string) => language || 'auto');
 
 vi.mock('../config/settings.js', () => ({ loadSettings }));
-vi.mock('../ui/utils/updateCheck.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../ui/utils/updateCheck.js')>()),
+vi.mock('../ui/utils/updateCheck.js', () => ({
   checkForUpdatesDetailed,
+  // Classification behavior is covered by updateCheck.test.ts; a fixed reason
+  // keeps this suite from importing the real update-check chain, which pulls
+  // the entire core package into the first handler call and blew the 15s
+  // per-test budget on slow full-suite CI workers.
+  describeUpdateCheckFailure: () => 'registry error',
 }));
 vi.mock('../utils/installationInfo.js', () => ({
   formatUpdateInstructions,
