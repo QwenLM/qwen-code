@@ -4341,7 +4341,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
         isIdle: vi.fn().mockReturnValue(true),
         isTurnIdle: vi.fn().mockReturnValue(true),
-        persistReasoningEffort: vi.fn(),
+        persistReasoningEffort: vi.fn((value: string | undefined) => ({
+          scope: SettingScope.User,
+          effectiveValue: value,
+        })),
         prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
       };
       lastSessionMock = sessionMock;
@@ -7675,6 +7678,76 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       });
       expect(persistReasoningEffort).toHaveBeenLastCalledWith('none');
       expect(generation.reasoning).toBe(false);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('aligns a cleared workspace override to the inherited persisted preference', async () => {
+    const sessionId = 'layered-reasoning-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation: {
+      reasoning?: false | { effort?: string };
+    } = { reasoning: false };
+    let preference: false | string | undefined = false;
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningPreference = vi.fn(() => preference);
+    innerConfig.getReasoningEffort = vi.fn(() =>
+      generation.reasoning ? generation.reasoning.effort : undefined,
+    );
+    innerConfig.setReasoningEffort = vi.fn((effort: string | undefined) => {
+      preference = effort;
+      generation.reasoning = effort
+        ? { effort }
+        : { effort: 'provider-default' };
+    });
+    innerConfig.disableReasoning = vi.fn(() => {
+      preference = false;
+      generation.reasoning = false;
+    });
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      lastSessionMock!.persistReasoningEffort.mockReturnValueOnce({
+        scope: SettingScope.Workspace,
+        effectiveValue: 'medium',
+      });
+
+      const inherited = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+        _meta: { 'qwenCode/persistReasoningEffort': true },
+      })) as SetSessionConfigOptionResponse;
+
+      expect(generation.reasoning).toEqual({ effort: 'medium' });
+      expect(
+        inherited.configOptions.find(
+          (option) => option.id === 'reasoning_effort',
+        )?.currentValue,
+      ).toBe('medium');
+      expect(inherited._meta).toEqual({
+        'qwenCode/reasoningEffortPersistence': { scope: 'workspace' },
+      });
+
+      lastSessionMock!.persistReasoningEffort.mockReturnValueOnce({
+        scope: SettingScope.Workspace,
+        effectiveValue: 'default',
+      });
+      await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+        _meta: { 'qwenCode/persistReasoningEffort': true },
+      });
+
+      expect(generation.reasoning).toEqual({ effort: 'default' });
+      expect(innerConfig.setReasoningEffort).toHaveBeenLastCalledWith(
+        'default',
+      );
     } finally {
       mockConnectionState.resolve();
       await agentPromise;

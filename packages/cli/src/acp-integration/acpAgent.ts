@@ -5344,6 +5344,7 @@ class QwenAgent implements Agent {
     }
 
     return this.runInSessionContext(session, async () => {
+      let responseMeta: SetSessionConfigOptionResponse['_meta'];
       switch (configId) {
         case 'mode': {
           await this.setSessionMode({
@@ -5403,9 +5404,31 @@ class QwenAgent implements Agent {
             }
           }
           if (persistReasoningEffort) {
-            session.persistReasoningEffort(
+            const persistence = session.persistReasoningEffort(
               selected === REASONING_EFFORT_DEFAULT ? undefined : selected,
             );
+            if (selected === REASONING_EFFORT_DEFAULT) {
+              const effectiveValue = persistence.effectiveValue;
+              if (effectiveValue === REASONING_EFFORT_NONE) {
+                config.disableReasoning();
+              } else {
+                if (
+                  effectiveValue &&
+                  config.getReasoningPreference() === false
+                ) {
+                  config.setReasoningEffort(undefined);
+                }
+                config.setReasoningEffort(effectiveValue);
+              }
+            }
+            responseMeta = {
+              'qwenCode/reasoningEffortPersistence': {
+                scope:
+                  persistence.scope === SettingScope.Workspace
+                    ? 'workspace'
+                    : 'user',
+              },
+            };
           }
           break;
         }
@@ -5418,6 +5441,7 @@ class QwenAgent implements Agent {
 
       return {
         configOptions: this.buildConfigOptions(session.getConfig()),
+        ...(responseMeta ? { _meta: responseMeta } : {}),
       };
     });
   }

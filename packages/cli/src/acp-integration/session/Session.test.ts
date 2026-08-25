@@ -41,7 +41,7 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
-import { SettingScope } from '../../config/settings.js';
+import { LoadedSettings, SettingScope } from '../../config/settings.js';
 import type {
   AgentSideConnection,
   PermissionOption,
@@ -50,7 +50,6 @@ import type {
   SessionNotification,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
-import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
@@ -880,10 +879,11 @@ describe('Session', () => {
     mockSettings = {
       merged: {},
       isTrusted: false,
-      user: { settings: {} },
-      workspace: { settings: {} },
+      user: { settings: {}, originalSettings: {} },
+      workspace: { settings: {}, originalSettings: {} },
       setValue: vi.fn(),
       reloadScopeFromDisk: vi.fn(),
+      recomputeMerged: vi.fn(),
     } as unknown as LoadedSettings;
 
     getAvailableCommandsSpy = vi.mocked(nonInteractiveCliCommands)
@@ -4396,6 +4396,73 @@ describe('Session', () => {
         undefined,
         { throwOnWriteFailure: true },
       );
+    });
+
+    it('returns the inherited effective value after clearing a workspace override', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-reasoning-settings-'),
+      );
+      const userPath = path.join(tempDir, 'user.json');
+      const workspacePath = path.join(tempDir, 'workspace.json');
+      const userSettings = {
+        model: { reasoningEffort: 'medium' },
+      };
+      const workspaceSettings = {
+        modelProviders: {},
+        model: { reasoningEffort: 'none' },
+      };
+      await fs.writeFile(userPath, JSON.stringify(userSettings));
+      await fs.writeFile(workspacePath, JSON.stringify(workspaceSettings));
+      const layeredSettings = new LoadedSettings(
+        {
+          path: path.join(tempDir, 'system.json'),
+          settings: {},
+          originalSettings: {},
+          rawJson: '{}',
+        },
+        {
+          path: path.join(tempDir, 'system-defaults.json'),
+          settings: {},
+          originalSettings: {},
+          rawJson: '{}',
+        },
+        {
+          path: userPath,
+          settings: structuredClone(userSettings),
+          originalSettings: structuredClone(userSettings),
+          rawJson: JSON.stringify(userSettings),
+        },
+        {
+          path: workspacePath,
+          settings: structuredClone(workspaceSettings),
+          originalSettings: structuredClone(workspaceSettings),
+          rawJson: JSON.stringify(workspaceSettings),
+        },
+        true,
+        new Set(),
+      );
+      const layeredSession = new Session(
+        'layered-reasoning-session',
+        mockConfig,
+        mockClient,
+        layeredSettings,
+      );
+
+      try {
+        expect(layeredSession.persistReasoningEffort(undefined)).toEqual({
+          scope: SettingScope.Workspace,
+          effectiveValue: 'medium',
+        });
+        expect(layeredSettings.merged.model?.reasoningEffort).toBe('medium');
+        expect(
+          Object.hasOwn(
+            layeredSettings.workspace.settings.model ?? {},
+            'reasoningEffort',
+          ),
+        ).toBe(false);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
     });
 
     it('writes through the LoadedSettings owned by each Session', () => {

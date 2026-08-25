@@ -10868,13 +10868,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         req.configId === 'reasoning_effort' &&
         req._meta?.['qwenCode/persistReasoningEffort'] === true
       ) {
-        broadcastWorkspaceEvent({
-          type: 'settings_changed',
-          data: {
-            key: 'model.reasoningEffort',
-            value: req.value === 'default' ? null : req.value,
-          },
-        });
+        const persistence =
+          response._meta?.['qwenCode/reasoningEffortPersistence'];
+        const scope =
+          typeof persistence === 'object' && persistence !== null
+            ? (persistence as Record<string, unknown>)['scope']
+            : undefined;
+        if (scope === 'user' || scope === 'workspace') {
+          broadcastWorkspaceEvent({
+            type: 'settings_changed',
+            data: {
+              key: 'model.reasoningEffort',
+              value: req.value === 'default' ? null : req.value,
+              scope,
+            },
+          });
+        }
       }
       return response;
     },

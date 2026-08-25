@@ -22214,7 +22214,12 @@ describe('createAcpSessionBridge', () => {
   describe('setSessionConfigOption', () => {
     it('broadcasts a persisted reasoning value after the ACP update succeeds', async () => {
       const handle = makeChannel({
-        setSessionConfigOptionImpl: () => ({ configOptions: [] }),
+        setSessionConfigOptionImpl: () => ({
+          configOptions: [],
+          _meta: {
+            'qwenCode/reasoningEffortPersistence': { scope: 'user' },
+          },
+        }),
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -22241,7 +22246,11 @@ describe('createAcpSessionBridge', () => {
       const next = await iter[Symbol.asyncIterator]().next();
       expect(next.value).toMatchObject({
         type: 'settings_changed',
-        data: { key: 'model.reasoningEffort', value: 'ultra' },
+        data: {
+          key: 'model.reasoningEffort',
+          value: 'ultra',
+          scope: 'user',
+        },
       });
 
       abort.abort();
@@ -22250,7 +22259,12 @@ describe('createAcpSessionBridge', () => {
 
     it('broadcasts a cleared persisted reasoning value as null', async () => {
       const handle = makeChannel({
-        setSessionConfigOptionImpl: () => ({ configOptions: [] }),
+        setSessionConfigOptionImpl: () => ({
+          configOptions: [],
+          _meta: {
+            'qwenCode/reasoningEffortPersistence': { scope: 'workspace' },
+          },
+        }),
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -22268,7 +22282,11 @@ describe('createAcpSessionBridge', () => {
           ?.liveJournal.filter((event) => event.type === 'settings_changed'),
       ).toContainEqual(
         expect.objectContaining({
-          data: { key: 'model.reasoningEffort', value: null },
+          data: {
+            key: 'model.reasoningEffort',
+            value: null,
+            scope: 'workspace',
+          },
         }),
       );
       await bridge.shutdown();

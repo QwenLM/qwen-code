@@ -273,6 +273,7 @@ import type {
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
+import { deleteNestedPropertySafe } from '../../config/settingsUtils.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
@@ -9009,9 +9010,15 @@ export class Session implements SessionContext {
       });
   }
 
-  persistReasoningEffort(value: string | undefined): void {
+  persistReasoningEffort(value: string | undefined): {
+    scope: SettingScope.User | SettingScope.Workspace;
+    effectiveValue: string | undefined;
+  } {
     const persistedValue = value?.trim() ? value : undefined;
-    const persistScope = getPersistScopeForModelSelection(this.settings);
+    const persistScope =
+      getPersistScopeForModelSelection(this.settings) === SettingScope.Workspace
+        ? SettingScope.Workspace
+        : SettingScope.User;
     try {
       this.settings.setValue(
         persistScope,
@@ -9020,6 +9027,21 @@ export class Session implements SessionContext {
         undefined,
         { throwOnWriteFailure: true },
       );
+      if (persistedValue === undefined) {
+        const settingsFile =
+          persistScope === SettingScope.Workspace
+            ? this.settings.workspace
+            : this.settings.user;
+        deleteNestedPropertySafe(
+          settingsFile.settings as Record<string, unknown>,
+          'model.reasoningEffort',
+        );
+        deleteNestedPropertySafe(
+          settingsFile.originalSettings as Record<string, unknown>,
+          'model.reasoningEffort',
+        );
+        this.settings.recomputeMerged();
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw RequestError.internalError(
@@ -9027,6 +9049,14 @@ export class Session implements SessionContext {
         `Reasoning effort is active for the current session, but the default could not be saved: ${message}`,
       );
     }
+    const effectiveValue = this.settings.merged.model?.reasoningEffort;
+    return {
+      scope: persistScope,
+      effectiveValue:
+        typeof effectiveValue === 'string' && effectiveValue.trim()
+          ? effectiveValue
+          : undefined,
+    };
   }
 
   /**
