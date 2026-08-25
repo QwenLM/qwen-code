@@ -578,11 +578,15 @@ describe('transcriptBlocksToDaemonMessages', () => {
           content: '检查项目结构',
           priority: 'medium',
           status: 'pending',
+          _meta: { qwenTodo: { id: 'inspect' } },
         },
         {
           content: '运行类型检查',
           priority: 'high',
           status: 'in_progress',
+          _meta: {
+            qwenTodo: { id: 'typecheck', blockedBy: ['inspect'] },
+          },
         },
       ],
     };
@@ -598,16 +602,17 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
         todos: [
           {
-            id: 'plan-0',
+            id: 'inspect',
             content: '检查项目结构',
             priority: 'medium',
             status: 'pending',
           },
           {
-            id: 'plan-1',
+            id: 'typecheck',
             content: '运行类型检查',
             priority: 'high',
             status: 'in_progress',
+            blockedBy: ['inspect'],
           },
         ],
       },
