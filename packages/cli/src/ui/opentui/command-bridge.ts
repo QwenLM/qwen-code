@@ -153,7 +153,14 @@ export function projectCommandItem(
 ): OpenTuiStreamEvent | null {
   switch (item.type) {
     case 'user':
-      return { type: 'user', text: item.text };
+      // promptId/sentToModel ride along so /rewind can match file
+      // checkpoints and filter out locally-handled command echoes.
+      return {
+        type: 'user',
+        text: item.text,
+        promptId: item.promptId,
+        sentToModel: item.sentToModel,
+      };
     case 'info':
     case 'success':
     case 'warning':
@@ -346,6 +353,12 @@ export interface BackendCommandSinks {
   ) => Promise<ShellConfirmationResolution>;
   /** Real yes/no action confirmation dialog. */
   presentActionConfirmation?: (promptText: string) => Promise<boolean>;
+  /**
+   * Live pending command item (spinner rows like /rename's title
+   * generation): rendered in a pending area, never committed to the
+   * transcript (ink pendingHistoryItems parity).
+   */
+  setPendingItem?: (item: HistoryItemWithoutId | null) => void;
 }
 
 /** Product context the backend lends the host for real session operations. */
@@ -381,6 +394,7 @@ export function createBackendCommandHost(
   const projectionContext = (): ItemProjectionContext => ({
     config: options?.config ?? null,
     stats: sinks.getSessionStats?.(),
+    settings: options?.settings,
     extensionsUpdateState: host.extensionsUpdateState,
   });
 
@@ -424,6 +438,7 @@ export function createBackendCommandHost(
     refreshStatic: () => {},
     clearPendingState: () => {
       pendingItem = null;
+      sinks.setPendingItem?.(null);
     },
     cancelBtw: () => {
       btwAbortControllerRef.current?.abort();
@@ -451,13 +466,11 @@ export function createBackendCommandHost(
       return pendingItem;
     },
     setPendingItem: (item) => {
+      // Pending rows live outside the transcript (ink pendingHistoryItems):
+      // ticks (e.g. /rename's 500ms spinner) must not append permanent
+      // history items.
       pendingItem = item;
-      if (item) {
-        // Make the pending work visible (compression guard parity also
-        // requires the item to be non-null while it runs).
-        const event = projectCommandItem(item, projectionContext());
-        if (event) sinks.applyEvent(event);
-      }
+      sinks.setPendingItem?.(item);
     },
     setDebugMessage: (message) => {
       if (sinks.setDebugMessage) {

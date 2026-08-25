@@ -164,13 +164,25 @@ export function foldLiveEvent(
     case 'user': {
       if (last?.kind === 'assistant' && last.streaming)
         items[items.length - 1] = { ...last, streaming: false };
-      items.push({ kind: 'user', id: nid('u'), text: ev.text });
+      items.push({
+        kind: 'user',
+        id: nid('u'),
+        text: ev.text,
+        promptId: ev.promptId,
+        sentToModel: ev.sentToModel,
+      });
       return items;
     }
     case 'thinking': {
       if (last?.kind === 'thinking' && !last.done) {
         items[items.length - 1] = { ...last, text: last.text + ev.delta };
       } else {
+        // A second thought burst after streamed content (the adapter resets
+        // thoughtClosed for exactly this interleaving) settles the trailing
+        // streaming assistant like every other push branch — `done` only
+        // settles the last item, so the earlier block would stream forever.
+        if (last?.kind === 'assistant' && last.streaming)
+          items[items.length - 1] = { ...last, streaming: false };
         items.push({
           kind: 'thinking',
           id: nid('th'),

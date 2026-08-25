@@ -33,11 +33,14 @@ import { calculateCost } from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 /** Runtime state the host supplies for items that read it in ink. */
 export interface ItemProjectionContext {
   config?: Config | null;
   stats?: SessionStatsState;
+  /** Merged settings (model pricing, …) — ink reads these via useSettings. */
+  settings?: LoadedSettings;
   /** Live extension update states (ExtensionsList's context data). */
   extensionsUpdateState?: Map<string, unknown>;
 }
@@ -137,7 +140,11 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
 
 /** Parity of views/ToolsList. */
 export function projectToolsList(
-  tools: ReadonlyArray<{ name: string; displayName?: string }>,
+  tools: ReadonlyArray<{
+    name: string;
+    displayName?: string;
+    description?: string;
+  }>,
   showDescriptions: boolean,
 ): string {
   const lines = ['Available Qwen Code CLI tools:', ''];
@@ -151,6 +158,11 @@ export function projectToolsList(
         showDescriptions ? ` (${tool.name})` : ''
       }`,
     );
+    // ink renders each tool's description under its name when
+    // showDescriptions is on (views/ToolsList's MarkdownDisplay row).
+    if (showDescriptions && tool.description?.trim()) {
+      lines.push(`   ${tool.description.trim()}`);
+    }
   }
   return lines.join('\n');
 }
@@ -196,6 +208,8 @@ export function projectSkillsList(
 }
 
 interface FlatModelEntry {
+  /** Structured key (raw model name + optional `::source` suffix). */
+  key: string;
   label: string;
   metrics: {
     api: { totalRequests: number; totalErrors: number; totalLatencyMs: number };
@@ -212,6 +226,7 @@ interface FlatModelEntry {
 /** Active-model rows; `flattenModelsBySource` already labels + filters. */
 function flattenActiveModels(metrics: SessionMetrics): FlatModelEntry[] {
   return flattenModelsBySource(metrics.models).map((entry) => ({
+    key: entry.key,
     label: entry.label,
     metrics: entry.metrics as FlatModelEntry['metrics'],
   }));
@@ -279,9 +294,12 @@ export function projectModelStats(
         inputTokens: entry.metrics.tokens.prompt,
         outputTokens:
           entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
-        pricing: (modelPricing ?? {})[
-          entry.label.split(' (')[0] ?? entry.label
-        ] as Parameters<typeof calculateCost>[0]['pricing'],
+        // ink looks pricing up under the RAW model name from the structured
+        // key (ModelStatsDisplay getModelName); the display label is
+        // normalized and may carry a ` (source)` suffix that never matches.
+        pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
+          typeof calculateCost
+        >[0]['pricing'],
       }),
     )
     .filter((cost): cost is number => cost != null);
@@ -562,8 +580,14 @@ export function projectMcpStatus(item: Record<string, unknown>): string {
       ? ` (from ${serverConfig.extensionName})`
       : '';
     let status = getMCPServerStatus(name);
-    if (status === MCPServerStatus.DISCONNECTED && serverTools.length > 0) {
-      // ink renders cached-tool servers as connected
+    if (
+      status === MCPServerStatus.DISCONNECTED &&
+      // ink upgrades on cached tools OR cached prompts (hasCachedItems):
+      // saved transcripts replay these, so reachability must not flip them
+      // to Disconnected.
+      (serverTools.length > 0 || serverPrompts.length > 0)
+    ) {
+      // ink renders cached-item servers as connected
       status = MCPServerStatus.CONNECTED;
     }
     if (status === MCPServerStatus.CONNECTING) {
@@ -784,16 +808,16 @@ export function projectSpecialItemText(
         ((record['tools'] ?? []) as Array<{
           name: string;
           displayName?: string;
+          description?: string;
         }>) ?? [],
         Boolean(record['showDescriptions']),
       );
     case 'model_stats': {
       const metrics = ctx.stats?.metrics ?? uiTelemetryService.getMetrics();
-      const modelPricing = (
-        ctx.config as unknown as
-          | { getModelPricing?: () => Record<string, unknown> }
-          | undefined
-      )?.getModelPricing?.();
+      // ink reads the pricing table from settings.merged.modelPricing
+      // (useSettings); the old probe of config.getModelPricing() hit a
+      // method that does not exist, so pricing never resolved.
+      const modelPricing = ctx.settings?.merged?.modelPricing;
       return projectModelStats(metrics, modelPricing);
     }
     case 'tool_stats':

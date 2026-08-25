@@ -90,6 +90,25 @@ describe('foldLiveEvent done (turn end)', () => {
   });
 });
 
+describe('foldLiveEvent user (promptId/sentToModel parity)', () => {
+  it('carries promptId and sentToModel onto the user item (R1-16)', () => {
+    const items = foldLiveEvent([assistant('hi')], {
+      type: 'user',
+      text: '/help',
+      promptId: 'session-1########0',
+      sentToModel: false,
+    });
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({ kind: 'assistant', streaming: false });
+    expect(items[1]).toMatchObject({
+      kind: 'user',
+      text: '/help',
+      promptId: 'session-1########0',
+      sentToModel: false,
+    });
+  });
+});
+
 describe('foldLiveEvent image', () => {
   it('pushes an image item and closes the streaming assistant', () => {
     const items = foldLiveEvent([assistant('caption')], {
@@ -104,6 +123,41 @@ describe('foldLiveEvent image', () => {
       mimeType: 'image/png',
       data: 'aW1hZ2U=',
     });
+  });
+});
+
+describe('foldLiveEvent thinking (interleaved thought bursts)', () => {
+  it('settles the trailing streaming assistant before a second thought burst', () => {
+    let items = foldLiveEvent([], { type: 'text', delta: 'answer start' });
+    items = foldLiveEvent(items, { type: 'thinking', delta: 'reconsider' });
+    expect(items).toHaveLength(2);
+    expect(items[0]).toMatchObject({ kind: 'assistant', streaming: false });
+    expect(items[1]).toMatchObject({ kind: 'thinking', done: false });
+  });
+
+  it('appends to an open thinking block without touching earlier items', () => {
+    let items = foldLiveEvent([assistant('x')], {
+      type: 'thinking',
+      delta: 't1',
+    });
+    items = foldLiveEvent(items, { type: 'thinking', delta: ' t2' });
+    expect(items).toHaveLength(2);
+    expect(items[1]).toMatchObject({ kind: 'thinking', text: 't1 t2' });
+  });
+
+  it('ends the interleaved turn with every assistant block settled', () => {
+    // Adapter sequence for text → thought → text (thoughtClosed resets so
+    // the second burst is a fresh thinking block): `done` settles only the
+    // last item, so the first assistant block must already be closed.
+    let items = foldLiveEvent([], { type: 'text', delta: 'before' });
+    items = foldLiveEvent(items, { type: 'thinking', delta: 'think' });
+    items = foldLiveEvent(items, { type: 'thinking-end' });
+    items = foldLiveEvent(items, { type: 'text', delta: 'after' });
+    items = foldLiveEvent(items, { type: 'done' });
+    expect(items).toHaveLength(3);
+    expect(items[0]).toMatchObject({ kind: 'assistant', streaming: false });
+    expect(items[1]).toMatchObject({ kind: 'thinking', done: true });
+    expect(items[2]).toMatchObject({ kind: 'assistant', streaming: false });
   });
 });
 

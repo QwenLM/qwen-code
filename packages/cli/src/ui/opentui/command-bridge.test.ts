@@ -31,6 +31,22 @@ describe('projectCommandItem', () => {
     });
   });
 
+  it('carries promptId/sentToModel on user events (R1-16)', () => {
+    expect(
+      projectCommandItem({
+        type: 'user',
+        text: '/help',
+        promptId: 'session-1########0',
+        sentToModel: false,
+      }),
+    ).toEqual({
+      type: 'user',
+      text: '/help',
+      promptId: 'session-1########0',
+      sentToModel: false,
+    });
+  });
+
   it('projects info/success/warning/error onto text events', () => {
     for (const type of ['info', 'success', 'warning', 'error'] as const) {
       expect(projectCommandItem({ type, text: `m-${type}` })).toEqual({
@@ -418,6 +434,28 @@ describe('createBackendCommandHost', () => {
     expect(host.getHistory()).toHaveLength(2);
   });
 
+  it('routes pending items to the setPendingItem sink, never the transcript (R1-20)', () => {
+    const captured = createCapturedSinks();
+    const pending: Array<HistoryItemWithoutId | null> = [];
+    const sinks: BackendCommandSinks = {
+      ...captured.sinks,
+      setPendingItem: (item) => pending.push(item),
+    };
+    const host = createBackendCommandHost(sinks);
+    host.setPendingItem({ type: 'info', text: 'Generating session title.' });
+    host.setPendingItem({ type: 'info', text: 'Generating session title…' });
+    // Spinner ticks live outside the transcript (ink pendingHistoryItems):
+    // no applyEvent may fire, so nothing is committed to history.
+    expect(captured.events).toEqual([]);
+    expect(pending).toEqual([
+      { type: 'info', text: 'Generating session title.' },
+      { type: 'info', text: 'Generating session title…' },
+    ]);
+    host.clearPendingState();
+    expect(pending).toHaveLength(3);
+    expect(pending[2]).toBeNull();
+  });
+
   it('clearItems empties both histories', () => {
     const captured = createCapturedSinks();
     const host = createBackendCommandHost(captured.sinks);
@@ -537,7 +575,12 @@ describe('createBackendCommandHost', () => {
 
   it('tracks pendingItem for the compression re-entrancy guard (G-12)', () => {
     const captured = createCapturedSinks();
-    const host = createBackendCommandHost(captured.sinks);
+    const pendingSink: Array<HistoryItemWithoutId | null> = [];
+    const sinks: BackendCommandSinks = {
+      ...captured.sinks,
+      setPendingItem: (item) => pendingSink.push(item),
+    };
+    const host = createBackendCommandHost(sinks);
     expect(host.pendingItem).toBeNull();
     const pending = {
       type: 'compression',
@@ -545,19 +588,18 @@ describe('createBackendCommandHost', () => {
     } as never;
     host.setPendingItem(pending);
     expect(host.pendingItem).toBe(pending);
-    // The pending work is visible immediately as a structured compaction
-    // event (spinner row, ink CompressionMessage parity).
-    const event = captured.events.at(-1);
-    if (event?.type === 'compaction') {
-      expect(event.compression.isPending).toBe(true);
-    } else {
-      throw new Error('expected a compaction event');
-    }
+    // The pending work surfaces through the setPendingItem sink (rendered
+    // in the pending area, ink pendingHistoryItems parity) — never as a
+    // transcript event, so spinner ticks don't commit permanent history
+    // (R1-20).
+    expect(pendingSink.at(-1)).toBe(pending);
+    expect(captured.events).toEqual([]);
     host.setPendingItem(null);
     expect(host.pendingItem).toBeNull();
     host.setPendingItem(pending);
     host.clearPendingState();
     expect(host.pendingItem).toBeNull();
+    expect(pendingSink).toEqual([pending, null, pending, null]);
   });
 
   it('surfaces completed btw answers in the transcript (G-14)', () => {

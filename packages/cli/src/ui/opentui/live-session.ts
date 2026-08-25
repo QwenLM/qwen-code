@@ -87,6 +87,12 @@ export interface LivePromptOptions {
    * refresh the memory instruction so the model sees the new content.
    */
   refreshContextFilesOnWrite?: boolean;
+  /**
+   * PromptId minted by the backend (`nextLivePromptId`) at submit time so
+   * the user item and this request share the checkpoint key. Omitted → one
+   * is minted here (first turn of a session, …).
+   */
+  promptId?: string;
 }
 
 /**
@@ -157,6 +163,17 @@ export function resetPromptCountForTesting(): void {
   promptCount = 0;
 }
 
+/**
+ * Ink-parity promptId (`sessionId########promptCount`): minted once per turn
+ * at submit time so the echoed user item and the model request share the key
+ * file checkpoints are recorded under.
+ */
+export function nextLivePromptId(config: Config): string {
+  const id = `${config.getSessionId()}########${promptCount}`;
+  promptCount += 1;
+  return id;
+}
+
 /** Compact token count for task-end stats (matches the scripted demo form). */
 function formatTokenCount(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
@@ -216,7 +233,7 @@ export async function* livePromptEvents(
     /* already initialized by command loading / startup */
   }
   const client = config.getGeminiClient();
-  const promptId = `${config.getSessionId()}########${promptCount++}`;
+  const promptId = options?.promptId ?? nextLivePromptId(config);
   const map = createEventMapper({
     // ink handleErrorEvent parity: auth-aware formatting. The Ctrl+Y retry
     // hint travels on the error event's `hint` field (ErrorMessage renders
@@ -355,6 +372,17 @@ export async function* livePromptEvents(
       },
       onToolCallsUpdate: (calls) => {
         if (!options?.onWaitingCall) return;
+        // Mirror the calls still awaiting approval: one that left the state
+        // (resolved, or bounced back by a PreToolUse 'ask' hook under the
+        // same callId) must be able to surface its dialog again.
+        const awaiting = new Set(
+          calls
+            .filter((c) => c.status === 'awaiting_approval')
+            .map((c) => c.request.callId),
+        );
+        for (const id of waitingSeen) {
+          if (!awaiting.has(id)) waitingSeen.delete(id);
+        }
         for (const c of calls) {
           if (c.status !== 'awaiting_approval') continue;
           const callId = c.request.callId;

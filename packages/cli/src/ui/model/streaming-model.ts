@@ -15,7 +15,15 @@
  */
 
 export type StreamEvent =
-  | { type: 'user'; text: string }
+  | {
+      type: 'user';
+      text: string;
+      /** Stable turn key (`sessionId########promptCount`) — file checkpoints
+       * are keyed by it, so /rewind needs it on the user item. */
+      promptId?: string;
+      /** False when the echoed command was handled locally (never sent). */
+      sentToModel?: boolean;
+    }
   | { type: 'thinking'; delta: string }
   | { type: 'thinking-end' }
   | { type: 'text'; delta: string }
@@ -34,7 +42,13 @@ export type StreamEvent =
   | { type: 'done' };
 
 export type HistoryItem =
-  | { kind: 'user'; id: string; text: string }
+  | {
+      kind: 'user';
+      id: string;
+      text: string;
+      promptId?: string;
+      sentToModel?: boolean;
+    }
   | { kind: 'thinking'; id: string; text: string; done: boolean }
   | { kind: 'assistant'; id: string; text: string; streaming: boolean }
   | {
@@ -103,7 +117,13 @@ export function reduceStreamEvent(
   switch (event.type) {
     case 'user': {
       closeTrailingAssistant();
-      items.push({ kind: 'user', id: `user-${nextSeq++}`, text: event.text });
+      items.push({
+        kind: 'user',
+        id: `user-${nextSeq++}`,
+        text: event.text,
+        promptId: event.promptId,
+        sentToModel: event.sentToModel,
+      });
       break;
     }
     case 'thinking': {

@@ -122,6 +122,7 @@ import type { Part, PartListUnion } from '@google/genai';
 import {
   livePromptEvents,
   nextApprovalMode,
+  nextLivePromptId,
   selectAutoApprovals,
   type WaitingCallInfo,
 } from './live-session.js';
@@ -135,6 +136,7 @@ import {
 import { OpenTuiSlashGateway, type SlashSettlement } from './slash-gateway.js';
 import {
   createBackendCommandHost,
+  projectCommandItem,
   resolveDispatchOutcome,
   type BackendAction,
   type MountedDialog,
@@ -171,7 +173,7 @@ import {
   TERMINAL_PROGRESS_SEQUENCES,
 } from '../hooks/useTerminalProgress.js';
 import { buildTerminalNotification } from '../hooks/useTerminalNotification.js';
-import { StreamingState } from '../types.js';
+import { StreamingState, type HistoryItemWithoutId } from '../types.js';
 import { sendNotification } from '../../services/notificationService.js';
 import { useOpenTuiFocus } from './use-opentui-focus.js';
 
@@ -925,6 +927,10 @@ function App({
   // watcher + poll instead of a synchronous `git` subprocess on every render.
   const gitBranch = useGitBranchName(targetDir);
   const [items, setItems] = useState<LiveHistoryItem[]>([]);
+  // Live pending command item (spinner rows): rendered after the transcript,
+  // never committed to it (ink pendingHistoryItems parity, R1-20).
+  const [pendingCommandItem, setPendingCommandItem] =
+    useState<HistoryItemWithoutId | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [streaming, setStreaming] = useState(false);
   const [loadingPhrase, setLoadingPhrase] = useState(WITTY_LOADING_PHRASES[0]);
@@ -1443,6 +1449,7 @@ function App({
           },
           setSessionName: (name) => setSessionNameState(name),
           setDebugMessage: (message) => setDebugMessageState(message || null),
+          setPendingItem: (item) => setPendingCommandItem(item),
           setGeminiMdFileCount: (count) => setMdFileCount(count),
           getSessionStats: () => ({
             sessionId: config?.getSessionId?.() ?? '',
@@ -1465,6 +1472,20 @@ function App({
       ),
     [applyEvent, config, settings],
   );
+
+  // Pending command item as a render-only history row: projected and folded
+  // into the same shape the transcript renders, but appended at render time
+  // so spinner ticks never commit to the transcript (ink pendingHistoryItems
+  // parity, R1-20).
+  const pendingLiveItem = useMemo<LiveHistoryItem | null>(() => {
+    if (!pendingCommandItem) return null;
+    const ev = projectCommandItem(pendingCommandItem, {
+      config: config ?? null,
+      settings,
+    });
+    if (!ev) return null;
+    return foldLiveEvent([], ev)[0] ?? null;
+  }, [pendingCommandItem, config, settings]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1637,6 +1658,9 @@ function App({
       approvalDialogCallIdRef.current = null;
       setConfirmReq(null);
       setQuestionReq(null);
+      // Pop the next queued call the mode switch left un-approved.
+      const next = pendingApprovalsRef.current.keys().next();
+      if (!next.done) presentApprovalDialogRef.current(next.value);
     }
   };
 
@@ -1682,8 +1706,11 @@ function App({
       return;
     }
     if (confirmReq) {
-      confirmReq.resolve(ToolConfirmationOutcome.Cancel);
+      // Clear the dialog state before resolving: the resolve chain may pop
+      // the next queued approval (R1-15) and its setConfirmReq must win over
+      // this null in the batch.
       setConfirmReq(null);
+      confirmReq.resolve(ToolConfirmationOutcome.Cancel);
       return;
     }
     if (dialog) {
@@ -1695,8 +1722,10 @@ function App({
       if (commandProcessingRef.current) {
         gateway.cancel();
       } else {
+        // Abort WITHOUT dropping the ref: the turn's finally owns the
+        // cleanup (ownership guard, R1-17) — nulling here would orphan it,
+        // leaving stale pending approvals and an undrained prompt queue.
         liveAbortRef.current?.abort();
-        liveAbortRef.current = null;
         setItems((prev) => settleOpenTools(prev, 'interrupted'));
         setStreaming(false);
       }
@@ -1843,8 +1872,10 @@ function App({
       // directly; y/n/esc kept as shortcuts from the old bare y/n prompt.
       const opts = confirmReq.options;
       const resolveWith = (outcome: ToolConfirmationOutcome) => {
-        confirmReq.resolve(outcome);
+        // Clear before resolving so a queued approval popped by the settle
+        // chain (R1-15) is not overwritten by this null in the batch.
         setConfirmReq(null);
+        confirmReq.resolve(outcome);
       };
       if (key.name === 'up') {
         setConfirmSel((s) => (s + opts.length - 1) % opts.length);
@@ -2040,9 +2071,9 @@ function App({
     }
     if (key.name === 'escape' && streaming) {
       // interrupt: abort the live stream (AbortSignal into sendMessageStream)
-      // and stop the scripted demo timer.
+      // and stop the scripted demo timer. The ref stays: the turn's finally
+      // owns the rest of the cleanup (ownership guard, R1-17).
       liveAbortRef.current?.abort();
-      liveAbortRef.current = null;
       if (timerRef.current) {
         clearInterval(timerRef.current);
         timerRef.current = null;
@@ -2251,6 +2282,62 @@ function App({
     [config],
   );
 
+  // One confirm/question dialog at a time (R1-15): a scheduling pass can
+  // park several calls in awaiting_approval; extras queue in
+  // pendingApprovalsRef and each settled dialog pops the next one instead of
+  // overwriting the open dialog (stranding its resolve).
+  const presentApprovalDialogRef = useRef<(callId: string) => void>(() => {});
+  const presentApprovalDialog = useCallback(
+    (callId: string) => {
+      const waiting = pendingApprovalsRef.current.get(callId);
+      if (!waiting) return;
+      const { confirmationDetails } = waiting;
+      const settleWaitingCall = () => {
+        pendingApprovalsRef.current.delete(callId);
+        if (approvalDialogCallIdRef.current === callId) {
+          approvalDialogCallIdRef.current = null;
+          const next = pendingApprovalsRef.current.keys().next();
+          if (!next.done) presentApprovalDialogRef.current(next.value);
+        }
+      };
+      approvalDialogCallIdRef.current = callId;
+      if (confirmationDetails.type === 'ask_user_question') {
+        const details = confirmationDetails;
+        qAnswersRef.current = {};
+        setQNav({
+          q: 0,
+          opt: 0,
+          other: false,
+          otherText: '',
+          multi: [],
+        });
+        setQuestionReq({
+          questions: details.questions,
+          resolve: (answers) => {
+            settleWaitingCall();
+            void details.onConfirm(
+              answers
+                ? ToolConfirmationOutcome.ProceedOnce
+                : ToolConfirmationOutcome.Cancel,
+              answers ? { answers } : undefined,
+            );
+          },
+        });
+      } else {
+        setConfirmSel(0);
+        setConfirmReq({
+          ...buildToolConfirmDialog(confirmationDetails),
+          resolve: (outcome) => {
+            settleWaitingCall();
+            void confirmationDetails.onConfirm(outcome);
+          },
+        });
+      }
+    },
+    [buildToolConfirmDialog],
+  );
+  presentApprovalDialogRef.current = presentApprovalDialog;
+
   // Scheduler awaiting_approval parity, shared by the live turn and the
   // client-initiated command tools (/restore, /setup-github).
   const handleSchedulerWaitingCall = useCallback(
@@ -2300,6 +2387,8 @@ function App({
         modelOverride?: string;
         onComplete?: () => Promise<void>;
         refreshContextFilesOnWrite?: boolean;
+        /** Turn key minted by the submitter; shared with the user item. */
+        promptId?: string;
       },
     ) => {
       if (!config) return;
@@ -2308,6 +2397,9 @@ function App({
       liveAbortRef.current?.abort();
       const controller = new AbortController();
       liveAbortRef.current = controller;
+      // Taking ownership invalidates the aborted turn's outstanding
+      // approvals — they can no longer resolve into this turn.
+      pendingApprovalsRef.current.clear();
       setStreaming(true);
       (async () => {
         try {
@@ -2322,6 +2414,7 @@ function App({
               ...(options?.refreshContextFilesOnWrite
                 ? { refreshContextFilesOnWrite: true }
                 : {}),
+              ...(options?.promptId ? { promptId: options.promptId } : {}),
               drainSteering,
               onWaitingCall: ({ callId, name, confirmationDetails }) => {
                 pendingApprovalsRef.current.set(callId, {
@@ -2329,45 +2422,10 @@ function App({
                   name,
                   confirmationDetails,
                 });
-                approvalDialogCallIdRef.current = callId;
-                const settleWaitingCall = () => {
-                  pendingApprovalsRef.current.delete(callId);
-                  if (approvalDialogCallIdRef.current === callId) {
-                    approvalDialogCallIdRef.current = null;
-                  }
-                };
-                if (confirmationDetails.type === 'ask_user_question') {
-                  const details = confirmationDetails;
-                  qAnswersRef.current = {};
-                  setQNav({
-                    q: 0,
-                    opt: 0,
-                    other: false,
-                    otherText: '',
-                    multi: [],
-                  });
-                  setQuestionReq({
-                    questions: details.questions,
-                    resolve: (answers) => {
-                      settleWaitingCall();
-                      void details.onConfirm(
-                        answers
-                          ? ToolConfirmationOutcome.ProceedOnce
-                          : ToolConfirmationOutcome.Cancel,
-                        answers ? { answers } : undefined,
-                      );
-                    },
-                  });
-                } else {
-                  setConfirmSel(0);
-                  setConfirmReq({
-                    ...buildToolConfirmDialog(confirmationDetails),
-                    resolve: (outcome) => {
-                      settleWaitingCall();
-                      void confirmationDetails.onConfirm(outcome);
-                    },
-                  });
-                }
+                // One dialog at a time (R1-15): queue behind the open one;
+                // settling it pops this call next.
+                if (approvalDialogCallIdRef.current !== null) return;
+                presentApprovalDialog(callId);
               },
             },
           ))
@@ -2398,20 +2456,26 @@ function App({
           );
           applyEvent({ type: 'done' });
         } finally {
-          if (liveAbortRef.current === controller) liveAbortRef.current = null;
-          pendingApprovalsRef.current.clear();
-          if (timerRef.current) {
-            clearInterval(timerRef.current);
-            timerRef.current = null;
+          // Ownership guard (R1-17): when this turn was aborted in favor of a
+          // replacement (Ctrl+Y, queued submit), the new turn already owns
+          // liveAbortRef — its microtask-later unwind must not clear the new
+          // turn's streaming state or drain the queue from under it.
+          if (liveAbortRef.current === controller) {
+            liveAbortRef.current = null;
+            pendingApprovalsRef.current.clear();
+            if (timerRef.current) {
+              clearInterval(timerRef.current);
+              timerRef.current = null;
+            }
+            setStreaming(false);
+            const next = queuedPromptsRef.current.shift();
+            setQueuedPrompts([...queuedPromptsRef.current]);
+            if (next) setTimeout(() => submitTextRef.current?.(next), 50);
           }
-          setStreaming(false);
-          const next = queuedPromptsRef.current.shift();
-          setQueuedPrompts([...queuedPromptsRef.current]);
-          if (next) setTimeout(() => submitTextRef.current?.(next), 50);
         }
       })();
     },
-    [config, applyEvent, drainSteering, buildToolConfirmDialog],
+    [config, applyEvent, drainSteering, presentApprovalDialog],
   );
   startLiveTurnRef.current = startLiveTurn;
 
@@ -2440,6 +2504,10 @@ function App({
       liveAbortRef.current?.abort();
       const controller = new AbortController();
       liveAbortRef.current = controller;
+      // Taking ownership invalidates the aborted turn's outstanding
+      // approvals — they can no longer resolve into this turn (same guard
+      // as startLiveTurn, R1-17).
+      pendingApprovalsRef.current.clear();
       setStreaming(true);
       void (async () => {
         try {
@@ -2470,8 +2538,11 @@ function App({
           );
           applyEvent({ type: 'done' });
         } finally {
-          if (liveAbortRef.current === controller) liveAbortRef.current = null;
-          setStreaming(false);
+          // Same ownership guard as startLiveTurn's finally (R1-17).
+          if (liveAbortRef.current === controller) {
+            liveAbortRef.current = null;
+            setStreaming(false);
+          }
         }
       })();
     },
@@ -2483,7 +2554,16 @@ function App({
     () =>
       items
         .filter((i) => i.kind === 'user')
-        .map((i) => ({ id: i.id, text: i.kind === 'user' ? i.text : '' })),
+        .map((i) =>
+          i.kind === 'user'
+            ? {
+                id: i.id,
+                text: i.text,
+                promptId: i.promptId,
+                sentToModel: i.sentToModel,
+              }
+            : { id: i.id, text: '' },
+        ),
     [items],
   );
 
@@ -2742,15 +2822,21 @@ function App({
         const imageParts = (imagePaths ?? [])
           .map(readImagePart)
           .filter((p): p is Part => p !== null);
+        // Mint the turn's promptId up front so the echoed user item and the
+        // model request share the key file checkpoints are recorded under
+        // (ink parity: user items carry promptId for /rewind).
+        const promptId = config ? nextLivePromptId(config) : undefined;
         applyEvent({
           type: 'user',
           text: imageParts.length > 0 ? `${text} 📎${imageParts.length}` : text,
+          promptId,
         });
         if (config) {
           // Disk history feed (ink logs submitted prompts via the Logger).
           logSubmittedPrompt(text);
           startLiveTurn(
             imageParts.length > 0 ? [{ text }, ...imageParts] : text,
+            promptId ? { promptId } : undefined,
           );
           return;
         }
@@ -2884,7 +2970,7 @@ function App({
       >
         {banner}
         {showTips && <Tips />}
-        {items.map((item) => {
+        {(pendingLiveItem ? [...items, pendingLiveItem] : items).map((item) => {
           switch (item.kind) {
             case 'user':
               return (
@@ -3394,8 +3480,9 @@ function App({
                 gateway.cancel();
                 return;
               }
+              // Keep the ref so the turn's finally performs the cleanup
+              // (ownership guard, R1-17).
               liveAbortRef.current?.abort();
-              liveAbortRef.current = null;
               setStreaming(false);
             }}
             placeholder="Type your message or @path/to/file"

@@ -48,21 +48,51 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       async schedule(
         calls: Array<{ callId: string; name?: string; args?: unknown }>,
       ): Promise<void> {
-        // Emit one awaiting_approval update per call (twice, to prove the
-        // live-session dedupe), then complete the calls.
-        for (let i = 0; i < 2; i++) {
-          await this.opts.onToolCallsUpdate?.(
+        const bounce = calls.some(
+          (c) =>
+            (c.args as { __bounceApproval?: boolean } | undefined)
+              ?.__bounceApproval,
+        );
+        if (bounce) {
+          // PreToolUse 'ask' bounce shape: awaiting → executing → back to
+          // awaiting_approval under the same callId with fresh details.
+          const waiting = (title: string) =>
             calls.map((c) => ({
               status: 'awaiting_approval',
               request: c,
               confirmationDetails: {
                 type: 'ask_user_question',
-                title: '',
+                title,
                 questions: [],
                 onConfirm: async () => {},
               },
-            })),
+            }));
+          const executing = calls.map((c) => ({
+            status: 'executing',
+            request: c,
+          }));
+          await this.opts.onToolCallsUpdate?.(waiting('original'));
+          await this.opts.onToolCallsUpdate?.(executing);
+          await this.opts.onToolCallsUpdate?.(
+            waiting('Hook requested confirmation to run'),
           );
+        } else {
+          // Emit one awaiting_approval update per call (twice, to prove the
+          // live-session dedupe), then complete the calls.
+          for (let i = 0; i < 2; i++) {
+            await this.opts.onToolCallsUpdate?.(
+              calls.map((c) => ({
+                status: 'awaiting_approval',
+                request: c,
+                confirmationDetails: {
+                  type: 'ask_user_question',
+                  title: '',
+                  questions: [],
+                  onConfirm: async () => {},
+                },
+              })),
+            );
+          }
         }
         // Live output bridge: one chunk per call before completion (the
         // shape is chosen by the individual tests via the call args).
@@ -177,6 +207,21 @@ describe('livePromptEvents', () => {
     expect(sendMessageStream).toHaveBeenCalledTimes(2);
     expect((sendMessageStream.mock.calls[0] as unknown[])[2]).toBe(
       (sendMessageStream.mock.calls[1] as unknown[])[2],
+    );
+  });
+
+  it('prefers the caller-minted promptId over the module counter (R1-16)', async () => {
+    const sendMessageStream = vi.fn(function* () {});
+    const config = createFakeConfig(sendMessageStream);
+
+    await drain(
+      livePromptEvents(config, 'go', undefined, {
+        promptId: 'session-9########7',
+      }),
+    );
+
+    expect((sendMessageStream.mock.calls[0] as unknown[])[2]).toBe(
+      'session-9########7',
     );
   });
 
@@ -301,6 +346,44 @@ describe('livePromptEvents', () => {
     expect(onWaitingCall.mock.calls[0][0]).toMatchObject({
       callId: 'w1',
       name: 'ask_user_question',
+    });
+  });
+
+  it('re-surfaces a call that bounces back to awaiting_approval (R1-102)', async () => {
+    let calls = 0;
+    const sendMessageStream = vi.fn(function* (): Generator<{
+      type: string;
+      value?: unknown;
+    }> {
+      calls += 1;
+      if (calls === 1) {
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'b1',
+            name: 'run_shell_command',
+            args: { __bounceApproval: true },
+          },
+        };
+        return;
+      }
+      yield { type: 'finished', value: {} };
+    });
+    const config = createFakeConfig(sendMessageStream);
+    const onWaitingCall = vi.fn();
+
+    await drain(livePromptEvents(config, 'q', undefined, { onWaitingCall }));
+
+    // The call left awaiting_approval (executing) and re-entered it via a
+    // PreToolUse 'ask' bounce under the same callId — the second waiting
+    // state must surface its dialog again, with the bounced details.
+    expect(onWaitingCall).toHaveBeenCalledTimes(2);
+    expect(onWaitingCall.mock.calls[0][0]).toMatchObject({ callId: 'b1' });
+    expect(onWaitingCall.mock.calls[1][0]).toMatchObject({
+      callId: 'b1',
+      confirmationDetails: {
+        title: 'Hook requested confirmation to run',
+      },
     });
   });
 

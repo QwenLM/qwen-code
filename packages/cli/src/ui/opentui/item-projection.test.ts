@@ -9,8 +9,8 @@
  * G-1/2/3/12/14/17): each builder must print what the ink component prints.
  */
 
-import { describe, it, expect } from 'vitest';
-import type { SessionMetrics } from '@qwen-code/qwen-code-core';
+import { describe, it, expect, vi } from 'vitest';
+import type { Config, SessionMetrics } from '@qwen-code/qwen-code-core';
 import {
   extractPromptText,
   projectContextUsage,
@@ -19,10 +19,25 @@ import {
   projectModelStats,
   projectQuit,
   projectSkillStats,
+  projectSpecialItemText,
   projectSummary,
   projectToolStats,
+  projectToolsList,
 } from './item-projection.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
+
+// R1-93 tests the cached-items upgrade from the DISCONNECTED base state;
+// the real registry reports unknown servers as disconnected anyway, but the
+// mock makes that independent of core's global state.
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    getMCPServerStatus: () => actual.MCPServerStatus.DISCONNECTED,
+  };
+});
 
 function makeMetrics(): SessionMetrics {
   return {
@@ -278,5 +293,117 @@ describe('extractPromptText', () => {
     };
     expect(extractPromptText(nested)).toBe('A B');
     expect(extractPromptText(42)).toBe('42');
+  });
+});
+
+describe('projectToolsList (R1-90: tool descriptions)', () => {
+  it('renders each tool description under its name when showDescriptions', () => {
+    const text = projectToolsList(
+      [
+        {
+          name: 'read_file',
+          displayName: 'ReadFile',
+          description: 'Reads a file. ',
+        },
+        { name: 'run_shell', description: '  Runs a shell command.' },
+      ],
+      true,
+    );
+    expect(text).toContain('- ReadFile (read_file)');
+    expect(text).toContain('   Reads a file.');
+    expect(text).toContain('- run_shell (run_shell)');
+    expect(text).toContain('   Runs a shell command.');
+  });
+
+  it('omits descriptions when showDescriptions is off', () => {
+    const text = projectToolsList(
+      [{ name: 'read_file', description: 'Reads a file.' }],
+      false,
+    );
+    expect(text).toContain('- read_file');
+    expect(text).not.toContain('Reads a file.');
+  });
+});
+
+describe('model pricing (R1-91/R1-92)', () => {
+  const pricingMetrics = (): SessionMetrics =>
+    ({
+      models: {
+        'qwen3-max-001': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 1000,
+            candidates: 500,
+            total: 1500,
+            cached: 0,
+            thoughts: 0,
+          },
+          bySource: Object.create(null),
+        },
+      },
+    }) as unknown as SessionMetrics;
+
+  it('looks pricing up under the raw model name, not the normalized label', () => {
+    // The display label renders as "qwen3-max" (normalizeModelName strips
+    // -001) but the pricing table is keyed by the raw name, exactly like
+    // ink's getModelName(key) — a label-based lookup would miss.
+    const text = projectModelStats(pricingMetrics(), {
+      'qwen3-max-001': {
+        inputPerMillionTokens: 1,
+        outputPerMillionTokens: 2,
+      },
+    });
+    expect(text).toContain('Cost');
+    expect(text).toContain('Estimated $0.0020');
+  });
+
+  it('resolves pricing from settings.merged.modelPricing (R1-92)', () => {
+    const settings = {
+      merged: {
+        modelPricing: {
+          'qwen3-max-001': {
+            inputPerMillionTokens: 1,
+            outputPerMillionTokens: 2,
+          },
+        },
+      },
+    } as unknown as LoadedSettings;
+    const stats = {
+      sessionId: 's',
+      sessionStartTime: new Date(),
+      metrics: pricingMetrics(),
+      lastPromptTokenCount: 0,
+      promptCount: 1,
+    } as unknown as SessionStatsState;
+    const text = projectSpecialItemText(
+      { type: 'model_stats' },
+      {
+        stats,
+        settings,
+        // Decoy: the old code probed this nonexistent config method; the
+        // pricing entry only exists in settings, so a Cost row proves the
+        // settings channel is the one being read.
+        config: {
+          getModelPricing: () => ({ decoy: {} }),
+        } as unknown as Config,
+      },
+    );
+    expect(text).toContain('Cost');
+    expect(text).toContain('Estimated $0.0020');
+  });
+});
+
+describe('projectMcpStatus cached-items upgrade (R1-93)', () => {
+  it('upgrades DISCONNECTED servers with cached prompts, not just tools', () => {
+    const text = projectMcpStatus({
+      servers: { ghost: {}, 'tools-only': {}, 'prompts-only': {} },
+      tools: [{ serverName: 'tools-only', name: 't1' }],
+      prompts: [{ serverName: 'prompts-only', name: 'p1' }],
+    });
+    // cached tools OR cached prompts upgrade the row to Ready (ink
+    // hasCachedItems); a server with neither stays Disconnected.
+    expect(text).toMatch(/tools-only[^\n]*Ready/);
+    expect(text).toMatch(/prompts-only[^\n]*Ready/);
+    expect(text).toMatch(/ghost[^\n]*Disconnected/);
   });
 });
