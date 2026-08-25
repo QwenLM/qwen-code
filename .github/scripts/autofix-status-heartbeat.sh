@@ -41,8 +41,10 @@
 # this loop; the verification gate ends the loop BEFORE the first step that
 # runs branch code on the host. Every gh call additionally runs under the
 # af-112 hermetic pins (pinned GH_HOST, dropped GH_TOKEN/GH_ENTERPRISE_TOKEN,
-# fresh GH_CONFIG_DIR), so a transport reroute planted in the shared HOME's
-# gh config cannot intercept the token. See af-148 for the trade.
+# a GH_CONFIG_DIR minted fresh milliseconds before the call and removed right
+# after — a long-lived minted dir under the same-UID-writable RUNNER_TEMP is
+# plantable between calls, R11-1), so a transport reroute planted in the
+# shared HOME's gh config cannot intercept the token. See af-148 for the trade.
 
 # -e is deliberately absent: the (( ... < 0 )) clamp guards exit non-zero
 # on a false test and are load-bearing here. pipefail matches the sibling
@@ -118,18 +120,18 @@ run_loop() {
   # Full rationale → qwen-autofix.md#af-148
   export PATH="${TRUSTED_PATH}"
   # Hermetic pins for every gh call this loop makes (the af-112 doctrine):
-  # pinned host, planted tokens dropped, and a fresh empty GH_CONFIG_DIR
-  # instead of the default ~/.config/gh on the shared attacker-writable
-  # HOME — its config.yml can carry http_unix_socket, which would deliver
-  # the tick's Authorization header (the bot PAT) to a planted listener.
-  local gh_config_dir
-  if ! gh_config_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/autofix-gh-config.XXXXXX")"; then
-    echo "autofix-status-heartbeat: could not create a gh config dir" >&2
-    exit 2
-  fi
+  # pinned host and planted tokens dropped here, at launch. The config dir
+  # is NOT minted here: it is minted per tick, milliseconds before each gh
+  # call, and removed right after (below) — RUNNER_TEMP is same-UID-writable,
+  # so a dir minted once at launch and reused across ticks is plantable: a
+  # watcher knowing the stable prefix writes a config.yml carrying
+  # http_unix_socket into it, and every later tick delivers the PATCH's
+  # Authorization header (the bot PAT) to the planted socket — for the loop
+  # the 600s sleep before the first call made the window a certainty, not a
+  # race (R11-1, probe-verified). The per-call shape shrinks the window to
+  # one call's mint→use race, the residual the pin documents.
   export GH_HOST=github.com
   unset GH_ENTERPRISE_TOKEN GH_TOKEN
-  export GH_CONFIG_DIR="${gh_config_dir}"
   # Self-detach from the launching step: log to WORKDIR and never hold the
   # step's pipes, or the step would never report completion.
   exec >> "${HB_WORKDIR}/heartbeat.log" 2>&1 < /dev/null
@@ -185,6 +187,18 @@ run_loop() {
       echo "$(date -u +%FT%TZ) body composition failed; skipping this tick"
       continue
     fi
+    # Hermetic gh config, minted milliseconds before the call and removed
+    # right after (the R11-1 shape): a dir reused across ticks is plantable
+    # under the same-UID-writable RUNNER_TEMP, and a planted http_unix_socket
+    # would capture the PATCH's Authorization header (the bot PAT). Fail
+    # CLOSED: a failed mint skips the tick, never runs gh with the PAT
+    # against the shared ~/.config/gh — a skip degrades one pulse, never
+    # the loop (the age cap still bounds it).
+    local gh_config_dir
+    if ! gh_config_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/autofix-gh-config.XXXXXX")"; then
+      echo "$(date -u +%FT%TZ) gh config mint failed; skipping this tick"
+      continue
+    fi
     # Best-effort: a transient API failure skips one tick, never the pulse.
     # `timeout` bounds the request itself — a black-holed connection must
     # not stall the loop past the age cap, which only runs between ticks
@@ -195,11 +209,12 @@ run_loop() {
     if command -v timeout > /dev/null 2>&1; then
       GH_PATCH=(timeout 60 gh)
     fi
-    if ! "${GH_PATCH[@]}" api --method PATCH \
+    if ! GH_CONFIG_DIR="${gh_config_dir}" "${GH_PATCH[@]}" api --method PATCH \
       "repos/${HB_REPO}/issues/comments/${HB_COMMENT_ID}" \
       -f body="${body}" > /dev/null 2>&1; then
       echo "$(date -u +%FT%TZ) PATCH failed; continuing"
     fi
+    rm -rf "${gh_config_dir}"
   done
 }
 

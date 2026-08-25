@@ -10728,7 +10728,7 @@ exit 1
       [prepareStep, 'PR_LIVE="$(gh pr view'],
       // The heartbeat's step: deep-link lookup, comment upsert, and the
       // loop launch all carry the PAT; the first gh call is the deep link.
-      [postStatusCommentStep, 'JOB_ID="$(gh api'],
+      [postStatusCommentStep, 'JOB_ID="$(hermetic_gh api'],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
@@ -10743,22 +10743,36 @@ exit 1
         'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
       );
     }
-    // post_status mints fail-CLOSED (R8-1): a declaration builtin does not
-    // propagate a failing command substitution, so the bare-export shape
-    // would mask a failing mktemp and continue with an EMPTY GH_CONFIG_DIR
-    // — gh treats that exactly as unset and falls back to the shared
-    // attacker-writable ~/.config/gh the pin exists to close off. The
-    // shape mirrors the upsert child and the loop's own mint.
+    // post_status mints hermetically PER CALL (R11-1): RUNNER_TEMP is
+    // same-UID-writable, so a dir minted once and reused across the step's
+    // gh calls is plantable — a config.yml carrying http_unix_socket
+    // written into it between calls would capture the next call's
+    // Authorization header (the PAT; probe-verified on the loop's twin,
+    // whose 600s sleep made the window a certainty). Every gh call rides
+    // a wrapper that mints fail-CLOSED milliseconds before the call and
+    // removes the dir right after; a bare call in the step would reopen
+    // the channel, and a long-lived export would hand every call the same
+    // plantable dir.
+    expect(postStatusCommentStep).toContain('hermetic_gh() {');
     expect(postStatusCommentStep).toContain(
-      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then',
+      'if ! cfg="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then',
     );
     expect(postStatusCommentStep).toContain('refusing gh calls with the PAT');
-    expect(postStatusCommentStep).toMatch(/\n\s*export GH_CONFIG_DIR\n/);
-    // Witness (R8-1): run the step's opening block verbatim with a mktemp
+    expect(postStatusCommentStep).toContain('GH_CONFIG_DIR="${cfg}" gh "$@"');
+    expect(postStatusCommentStep).toContain('rm -rf "${cfg}"');
+    expect(postStatusCommentStep).not.toMatch(/\n\s*export GH_CONFIG_DIR\n/);
+    // All four call sites (deep-link lookup, comment scan, PATCH, POST)
+    // ride the wrapper: every `gh api` in the step is a wrapped one.
+    expect((postStatusCommentStep.match(/gh api/g) ?? []).length).toBe(4);
+    expect((postStatusCommentStep.match(/hermetic_gh api/g) ?? []).length).toBe(
+      4,
+    );
+    // Witness (R11-1): run the step's opening block verbatim with a mktemp
     // that fails (a shim first on the TRUSTED_PATH the block pins itself
-    // to) — the step must REFUSE the PAT-carrying gh calls instead of
-    // continuing with an empty GH_CONFIG_DIR; the intact arm mints a real
-    // dir under RUNNER_TEMP.
+    // to) — the wrapper must REFUSE the call (nonzero rc, gh never runs,
+    // never a gh with the PAT against the shared config); the intact arm
+    // runs gh under a fresh dir under RUNNER_TEMP that is removed right
+    // after the call.
     const ghcfgOpenBlock =
       postStatusCommentStep
         .slice(
@@ -10766,42 +10780,68 @@ exit 1
           postStatusCommentStep.indexOf("MARKER='<!-- autofix-status -->'"),
         )
         .replace(/^ {10}/gm, '') +
-      '\nprintf \'GH_CONFIG_DIR=%s\\n\' "${GH_CONFIG_DIR}"\n';
+      '\nif hermetic_gh probe; then\n' +
+      '  echo "HERMETIC_GH_RAN rc=0"\n' +
+      'else\n' +
+      '  echo "HERMETIC_GH_REFUSED rc=$?"\n' +
+      'fi\n';
     const ghcfgTemp = mkdtempSync(join(tmpdir(), 'hb-ghcfg-temp-'));
     const ghcfgShimDir = mkdtempSync(join(tmpdir(), 'hb-ghcfg-shim-'));
+    const ghcfgBinDir = mkdtempSync(join(tmpdir(), 'hb-ghcfg-bin-'));
     try {
       writeFileSync(
         join(ghcfgShimDir, 'mktemp'),
         '#!/usr/bin/env bash\nexit 1\n',
       );
       chmodSync(join(ghcfgShimDir, 'mktemp'), 0o755);
+      writeFileSync(
+        join(ghcfgBinDir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          "printf 'STUB_GH GH_CONFIG_DIR=%s EXISTS=%s\\n' \\",
+          '  "${GH_CONFIG_DIR:-}" \\',
+          '  "$([ -d "${GH_CONFIG_DIR:-/nonexistent}" ] && echo yes || echo no)"',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(ghcfgBinDir, 'gh'), 0o755);
+      // Failing mint: the wrapper refuses — gh never runs.
       const mktempFailing = spawnSync('bash', ['-c', ghcfgOpenBlock], {
         encoding: 'utf8',
         env: {
           ...process.env,
-          TRUSTED_PATH: `${ghcfgShimDir}:/usr/bin:/bin`,
+          TRUSTED_PATH: `${ghcfgShimDir}:${ghcfgBinDir}:/usr/bin:/bin`,
           RUNNER_TEMP: ghcfgTemp,
         },
       });
-      expect(mktempFailing.status).toBe(1);
-      expect(mktempFailing.stdout).toContain(
+      expect(mktempFailing.status).toBe(0);
+      expect(mktempFailing.stdout).toContain('HERMETIC_GH_REFUSED rc=1');
+      expect(mktempFailing.stdout).not.toContain('STUB_GH');
+      expect(mktempFailing.stderr).toContain(
         '::error::autofix heartbeat: could not create hermetic gh config dir',
       );
+      // Intact mint: gh runs under a fresh dir, removed right after.
       const mktempIntact = spawnSync('bash', ['-c', ghcfgOpenBlock], {
         encoding: 'utf8',
         env: {
           ...process.env,
-          TRUSTED_PATH: '/usr/bin:/bin',
+          TRUSTED_PATH: `${ghcfgBinDir}:/usr/bin:/bin`,
           RUNNER_TEMP: ghcfgTemp,
         },
       });
       expect(mktempIntact.status).toBe(0);
-      const minted = mktempIntact.stdout.match(/GH_CONFIG_DIR=(.*)/)?.[1] ?? '';
-      expect(minted.startsWith(ghcfgTemp)).toBe(true);
-      expect(existsSync(minted)).toBe(true);
+      expect(mktempIntact.stdout).toContain('HERMETIC_GH_RAN rc=0');
+      const m = mktempIntact.stdout.match(
+        /STUB_GH GH_CONFIG_DIR=(\S+) EXISTS=(\S+)/,
+      );
+      expect(m).toBeTruthy();
+      expect(m[1].startsWith(ghcfgTemp)).toBe(true);
+      expect(m[2]).toBe('yes');
+      expect(existsSync(m[1])).toBe(false);
     } finally {
       rmSync(ghcfgTemp, { recursive: true, force: true });
       rmSync(ghcfgShimDir, { recursive: true, force: true });
+      rmSync(ghcfgBinDir, { recursive: true, force: true });
     }
     // post_status pins PATH BEFORE its first external resolves (the
     // mktemp minting the gh config dir): every command word after it —
@@ -15918,15 +15958,31 @@ exit 1
     // reopen the window this cap exists to shrink.
     expect(heartbeatScript).toContain('HB_MAX_AGE_SECONDS:-20400');
     expect(heartbeatScript).toContain('|| max_age=20400');
-    // Every tick's gh call runs under the af-112 hermetic pins, minted
-    // inside the loop itself: a planted http_unix_socket in the shared
-    // HOME's gh config would otherwise deliver the tick's Authorization
-    // header (the PAT) to a planted same-UID listener.
+    // Every tick's gh call runs under the af-112 hermetic pins: GH_HOST
+    // pinned and planted tokens dropped at launch, and the config dir
+    // minted PER TICK inside the loop (R11-1) — RUNNER_TEMP is
+    // same-UID-writable, so a dir minted once at launch and reused across
+    // ticks is plantable (a config.yml with http_unix_socket written into
+    // it delivers every later tick's Authorization header — the PAT — to
+    // the planted socket). The mint therefore sits fail-closed, adjacent
+    // to the call inside the loop body, with removal right after.
     expect(heartbeatScript).toContain('export GH_HOST=github.com');
     expect(heartbeatScript).toContain('unset GH_ENTERPRISE_TOKEN GH_TOKEN');
     expect(heartbeatScript).toContain(
-      'export GH_CONFIG_DIR="${gh_config_dir}"',
+      'if ! gh_config_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/autofix-gh-config.XXXXXX")"; then',
     );
+    expect(heartbeatScript).toContain(
+      'gh config mint failed; skipping this tick',
+    );
+    expect(heartbeatScript).toContain(
+      'GH_CONFIG_DIR="${gh_config_dir}" "${GH_PATCH[@]}" api --method PATCH',
+    );
+    expect(heartbeatScript).toContain('rm -rf "${gh_config_dir}"');
+    // The mint is INSIDE the loop body: a hoist back to launch time
+    // reopens the plantable window R11-1 closed.
+    expect(
+      heartbeatScript.indexOf('mktemp -d "${RUNNER_TEMP:-/tmp}'),
+    ).toBeGreaterThan(heartbeatScript.indexOf('while :; do'));
     // Auth rides on the step-level GITHUB_TOKEN only: the pins drop any
     // planted GH_TOKEN, so the fail-fast check must not admit it.
     expect(heartbeatScript).toContain('GITHUB_TOKEN is required');

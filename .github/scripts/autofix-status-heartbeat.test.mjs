@@ -51,8 +51,11 @@ function fakeGhBin(dir) {
       'set -u',
       'n=$(( $(ls -1 "${GH_RECORD_DIR}" | wc -l) + 1 ))',
       'for a in "$@"; do printf \'%s\\0\' "$a"; done > "${GH_RECORD_DIR}/call-${n}"',
-      "printf 'GH_HOST=%s GH_CONFIG_DIR=%s GITHUB_TOKEN=%s GH_TOKEN=%s GH_ENTERPRISE_TOKEN=%s\\n' \\",
-      '  "${GH_HOST:-}" "${GH_CONFIG_DIR:-}" "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${GH_ENTERPRISE_TOKEN:-}" \\',
+      "printf 'GH_HOST=%s GH_CONFIG_DIR=%s CFG_EXISTS=%s CFG_ENTRIES=%s GITHUB_TOKEN=%s GH_TOKEN=%s GH_ENTERPRISE_TOKEN=%s\\n' \\",
+      '  "${GH_HOST:-}" "${GH_CONFIG_DIR:-}" \\',
+      '  "$([ -d "${GH_CONFIG_DIR:-/nonexistent}" ] && echo yes || echo no)" \\',
+      '  "$(ls -1A "${GH_CONFIG_DIR:-/nonexistent}" 2>/dev/null | wc -l | tr -d \' \')" \\',
+      '  "${GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${GH_ENTERPRISE_TOKEN:-}" \\',
       '  >> "${GH_RECORD_DIR}/gh-env.log"',
       '[ "${GH_FAIL:-0}" = "1" ] && exit 1',
       'sleep "${GH_SLEEP_SECONDS:-0}"',
@@ -430,9 +433,7 @@ describe('autofix-status-heartbeat loop', () => {
       // a planted FIFO at heartbeat.pid cannot block the loop inside the
       // tick, past the age cap. The shim proves the read ran under
       // `timeout 5 cat` against the pid file.
-      const pidRead = timeoutCalls.find(
-        (c) => c[0] === '5' && c[1] === 'cat',
-      );
+      const pidRead = timeoutCalls.find((c) => c[0] === '5' && c[1] === 'cat');
       assert.ok(pidRead, 'the pid-identity read must run under timeout 5');
       assert.ok(
         pidRead.some((a) => a.endsWith('heartbeat.pid')),
@@ -650,20 +651,25 @@ describe('autofix-status-heartbeat loop', () => {
     }
   });
 
-  it('pins gh hermetically for every tick — planted channels never reach it', async () => {
+  it('pins gh hermetically for every tick — a fresh config dir per call, removed after', async () => {
     // The loop holds the bot PAT in env and calls gh on a shared host: a
     // planted http_unix_socket in the default ~/.config/gh would deliver
     // the tick's Authorization header to a planted listener, and a planted
     // GH_TOKEN would outrank the step-level GITHUB_TOKEN. Witness the
     // af-112 pins from the tick's own point of view: the fake gh records
-    // what it actually sees.
+    // what it actually sees. R11-1: RUNNER_TEMP is same-UID-writable, so
+    // the dir must be minted milliseconds BEFORE each call (a watcher that
+    // knows the stable prefix cannot pre-seed a random path) and removed
+    // right AFTER — a dir reused across ticks is plantable between calls,
+    // and the loop's 600s sleep before the first call made that window a
+    // certainty, not a race.
     const dir = freshTmp();
     const gh = fakeGhBin(dir);
     const poisonedConfig = join(dir, 'poisoned-gh-config');
     const runnerTemp = join(dir, 'runner-temp');
     mkdirSync(poisonedConfig, { recursive: true });
     mkdirSync(runnerTemp, { recursive: true });
-    const { env } = loopEnv(dir, gh, {
+    const { env, workdir } = loopEnv(dir, gh, {
       GH_HOST: 'evil.example',
       GH_TOKEN: 'planted-token',
       GH_ENTERPRISE_TOKEN: 'planted-enterprise-token',
@@ -672,18 +678,24 @@ describe('autofix-status-heartbeat loop', () => {
     });
     const child = startLoop(env);
     try {
-      const ok = await waitFor(() => readCalls(gh.records).length >= 1, 8000);
-      assert.ok(ok, 'expected at least one PATCH call');
+      const ok = await waitFor(() => readCalls(gh.records).length >= 2, 8000);
+      assert.ok(ok, 'expected at least two PATCH calls');
       const lines = readFileSync(join(gh.records, 'gh-env.log'), 'utf8')
         .trim()
         .split('\n');
-      assert.ok(lines.length >= 1, 'every tick must log its gh-visible env');
+      assert.ok(lines.length >= 2, 'every tick must log its gh-visible env');
+      const dirs = [];
       for (const line of lines) {
         assert.ok(line.startsWith('GH_HOST=github.com '), line);
         const cfg = line.match(/GH_CONFIG_DIR=(\S*) /)?.[1];
         assert.ok(cfg, line);
         assert.ok(cfg.startsWith(runnerTemp), line);
-        assert.ok(existsSync(cfg), `minted gh config dir must exist: ${cfg}`);
+        dirs.push(cfg);
+        // The mint precedes the call (the dir exists, empty of any plant,
+        // when gh loads its config) — witnessed by gh itself, since the
+        // post-call removal races any after-the-fact filesystem assertion.
+        assert.ok(line.includes(' CFG_EXISTS=yes '), line);
+        assert.ok(line.includes(' CFG_ENTRIES=0 '), line);
         // GITHUB_TOKEN is the loop's SOLE credential channel now — witness
         // the surviving channel reaches gh, not only that the planted ones
         // do not: a scrub broadened to drop it would keep this suite green
@@ -697,6 +709,57 @@ describe('autofix-status-heartbeat loop', () => {
         assert.ok(!line.includes('evil.example'), line);
         assert.ok(!line.includes(poisonedConfig), line);
       }
+      // Every tick mints its OWN dir: a config.yml planted into one tick's
+      // dir is inert for every later tick because the path is never reused.
+      assert.equal(
+        new Set(dirs).size,
+        dirs.length,
+        'each tick must mint a fresh GH_CONFIG_DIR',
+      );
+      // Clean self-exit (the pid removal lands between ticks, before any
+      // further mint), then witness the post-call removal: no minted dir
+      // outlives its gh call.
+      rmSync(join(workdir, 'heartbeat.pid'));
+      const code = await awaitExit(child, 8000);
+      assert.equal(code, 0, 'the loop must end cleanly on pid removal');
+      const leftovers = readdirSync(runnerTemp).filter((name) =>
+        name.startsWith('autofix-gh-config.'),
+      );
+      assert.deepEqual(
+        leftovers,
+        [],
+        'minted gh config dirs must not outlive their gh call',
+      );
+    } finally {
+      killGroup(child);
+    }
+  });
+
+  it('skips the tick on a failed config mint — never gh against a shared config', async () => {
+    // Fail CLOSED, the af-112 doctrine: a failing mktemp must skip the
+    // tick's gh call, never run gh with the PAT against an unpinned config
+    // (an empty GH_CONFIG_DIR falls back to the shared attacker-writable
+    // ~/.config/gh), and never stop the pulse — a skip degrades one tick,
+    // the age cap still bounds the loop. A fail-open mutant (bare
+    // assignment continuing on the empty value) would record gh calls and
+    // fail here.
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const { env, workdir } = loopEnv(dir, gh, {
+      RUNNER_TEMP: join(dir, 'no-such-runner-temp'),
+    });
+    const child = startLoop(env);
+    try {
+      // Several tick intervals at the 1s test interval.
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      assert.equal(
+        readCalls(gh.records).length,
+        0,
+        'a failed mint must skip the gh call entirely',
+      );
+      assert.ok(child.exitCode === null, 'a failed mint must not end the loop');
+      const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
+      assert.match(logText, /gh config mint failed; skipping this tick/);
     } finally {
       killGroup(child);
     }

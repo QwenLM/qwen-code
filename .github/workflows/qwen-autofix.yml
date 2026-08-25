@@ -4769,24 +4769,35 @@ jobs:
           # The gh calls in this step (deep-link lookup, comment upsert) and
           # the heartbeat loop launched here all carry the bot PAT: take the
           # af-112 hermetic pins BEFORE the first call — pinned host, planted
-          # tokens dropped, and a fresh empty GH_CONFIG_DIR instead of the
-          # default ~/.config/gh on the shared attacker-writable HOME (its
-          # config.yml http_unix_socket would deliver the Authorization
+          # tokens dropped, and a fresh empty GH_CONFIG_DIR per call instead
+          # of the default ~/.config/gh on the shared attacker-writable HOME
+          # (its config.yml http_unix_socket would deliver the Authorization
           # header — the PAT — to a planted same-UID listener).
           # Full rationale → qwen-autofix.md#af-112
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          # Fail CLOSED: a declaration builtin does not propagate a failing
-          # command substitution, so the bare-export shape would mask a
-          # failing mktemp and continue with an EMPTY GH_CONFIG_DIR — gh
-          # treats that exactly as unset and falls back to the shared
-          # attacker-writable ~/.config/gh this pin exists to close off.
-          # The shape mirrors the upsert child and the loop's own mint.
-          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
-            echo "::error::autofix heartbeat: could not create hermetic gh config dir; refusing gh calls with the PAT"
-            exit 1
-          fi
-          export GH_CONFIG_DIR
+          # The config dir is minted PER CALL (the R11-1 shape): every gh
+          # call below rides this wrapper, minting a fresh empty dir
+          # milliseconds before the call and removing it right after. A dir
+          # minted once and reused across the step's calls is plantable —
+          # RUNNER_TEMP is same-UID-writable, and a config.yml carrying
+          # http_unix_socket written into it between calls would capture
+          # the next call's Authorization header (the PAT). Fail CLOSED:
+          # a failed mint refuses the call — gh never runs with the PAT
+          # against the shared ~/.config/gh this pin exists to close off.
+          # (The loop mints per tick the same way; finalize mints adjacent
+          # to its single call.)
+          hermetic_gh() {
+            local cfg rc
+            if ! cfg="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+              echo "::error::autofix heartbeat: could not create hermetic gh config dir; refusing gh calls with the PAT" >&2
+              return 1
+            fi
+            GH_CONFIG_DIR="${cfg}" gh "$@"
+            rc=$?
+            rm -rf "${cfg}"
+            return "${rc}"
+          }
           MARKER='<!-- autofix-status -->'
           ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
           # ROUND counts rounds already DONE; every other message numbers the
@@ -4800,7 +4811,7 @@ jobs:
           # the run URL, so the link is never worse than before.
           # Full rationale → qwen-autofix.md#af-149
           JOB_URL="${RUN_URL}"
-          JOB_ID="$(gh api "repos/${REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs" --paginate |
+          JOB_ID="$(hermetic_gh api "repos/${REPO}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}/jobs" --paginate |
             jq -rs --arg pr "${PR}" \
               '[ .[] | .jobs[]? | select((.name // "") | startswith("review-address (\($pr),")) | .id ] | last // empty')" ||
             JOB_ID=''
@@ -4828,17 +4839,17 @@ jobs:
               "${MARKER}" "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}" \
               "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}")"
           fi
-          STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate |
+          STATUS_ID="$(hermetic_gh api "repos/${REPO}/issues/${PR}/comments" --paginate |
             jq -rs --arg m "${MARKER}" --arg ab "${AUTOFIX_BOT}" \
               '[ .[][] | select((.user.login // "") == $ab)
                  | select((.body // "") | contains($m)) ] | last | .id // empty')" ||
             STATUS_ID=''
           if [[ -n "${STATUS_ID}" ]]; then
-            gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
+            hermetic_gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
               -f body="${BODY}" > /dev/null ||
               echo "::warning::Failed to update the autofix status comment on PR #${PR}; continuing."
           else
-            STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" \
+            STATUS_ID="$(hermetic_gh api "repos/${REPO}/issues/${PR}/comments" \
               -f body="${BODY}" --jq '.id')" ||
               {
                 STATUS_ID=''

@@ -175,10 +175,14 @@ comment is never worse than today.
    under the loop's session). Within that phase the token never touches
    disk, the only concurrent host processes are trusted (run-agent.mjs,
    the bundled CLI), and the step's gh calls and every tick run under the
-   af-112 hermetic pins (pinned host, planted tokens dropped, fresh
-   `GH_CONFIG_DIR`) — a planted `http_unix_socket` in the shared HOME's
-   gh config would otherwise deliver the tick's Authorization header to a
-   same-UID listener inside the legitimate overlap. The alternative that
+   af-112 hermetic pins (pinned host, planted tokens dropped, a fresh
+   `GH_CONFIG_DIR` minted around every call and removed right after) — a
+   planted `http_unix_socket` in the shared HOME's gh config would
+   otherwise deliver the tick's Authorization header to a same-UID
+   listener inside the legitimate overlap. The mint sits under the
+   same-UID-writable `RUNNER_TEMP`, so the dir is created milliseconds
+   before each call and removed right after; a long-lived minted dir is
+   itself plantable between calls (R11-1). The alternative that
    avoids the overlap entirely —
    heartbeat from the schedule scan or a watcher job — was rejected on
    cadence and complexity (decision 2). The trade-off is recorded in the

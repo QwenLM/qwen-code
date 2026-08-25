@@ -3802,15 +3802,27 @@ landing mid-tick leaves it alive holding the PAT for up to
 60s (witnessed on the pool's host class); all three
 killers therefore kill pid, group, AND session. PINS: the
 step's gh calls and every tick run under the af-112
-hermetic pins (pinned GH_HOST, dropped
-GH_TOKEN/GH_ENTERPRISE_TOKEN, fresh GH_CONFIG_DIR) —
-without them the default ~/.config/gh on the shared
-attacker-writable HOME can carry http_unix_socket, and a
-planted same-UID listener then receives the tick's
-Authorization header WITH the PAT (witnessed with the
-pool's gh): exfil with no orphan, no /proc read and no
-kill miss, inside the legitimate overlap, where none of
-the trade arguments above reaches. RESOLUTION: the af-112
+hermetic pins — pinned GH_HOST, dropped
+GH_TOKEN/GH_ENTERPRISE_TOKEN, and a fresh empty
+GH_CONFIG_DIR minted around EVERY call (the loop mints
+per tick, post_status mints per call inside its
+hermetic_gh wrapper, finalize mints adjacent to its
+single call) and removed right after. Without them the
+default ~/.config/gh on the shared attacker-writable
+HOME can carry http_unix_socket, and a planted same-UID
+listener then receives the tick's Authorization header
+WITH the PAT (witnessed with the pool's gh): exfil with
+no orphan, no /proc read and no kill miss, inside the
+legitimate overlap, where none of the trade arguments
+above reaches. The mint sits under the same-UID-writable
+RUNNER_TEMP, and a LONG-LIVED minted dir is itself
+plantable between calls — a config.yml with
+http_unix_socket written into it is read by the next
+call, witnessed with the pool's gh on the loop's 600s
+launch→first-call window (R11-1) — so the dir is minted
+milliseconds before each call and removed right after:
+the residual is a per-call mint→use race, not a
+persistent channel. RESOLUTION: the af-112
 pins close gh's CONFIG channel; the binary-resolution
 channel is closed separately. The PAT-bearing step and
 the loop both pin PATH from the stage-time TRUSTED_PATH
