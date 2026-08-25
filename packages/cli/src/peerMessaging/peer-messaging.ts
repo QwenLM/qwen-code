@@ -68,10 +68,18 @@ export class PeerMessaging {
   ) => Promise<void> = async () => {};
   private submitFn: PeerSubmitFn | null = null;
   private readonly buffered: PeerUserFrame[] = [];
+  /**
+   * Accepted frames whose 'delivered' receipt has not been earned yet:
+   * still buffered here or still queued in the session's input queue.
+   * Settled with a corrective receipt at close.
+   */
+  private readonly outstanding: PeerUserFrame[] = [];
+  private queuedPeerCount: (() => number) | null = null;
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[]) => void
   >();
-  private listedHeldIds: readonly string[] | null = null;
+  private listedHeld: ReadonlyArray<{ id: string; heldAt: number }> | null =
+    null;
   private closed = false;
 
   // Options are consumed by `start`, which wires them into the gate and the
@@ -95,7 +103,7 @@ export class PeerMessaging {
       deliver: (frame) => messaging.deliver(frame),
       reportStatus: (frame, status) => {
         if (!frame.from) return;
-        void sendDeliveryStatus(frame.from, {
+        return sendDeliveryStatus(frame.from, {
           status,
           origMsgId: frame.msgId,
           from: messaging.inbox?.socketPath,
@@ -139,6 +147,7 @@ export class PeerMessaging {
    * the queue existed.
    */
   setSubmitFn(fn: PeerSubmitFn): void {
+    if (this.closed) return;
     this.submitFn = fn;
     // A refused frame means the queue is full; leave it and the rest
     // buffered — `deliver` retries them, in order, on the next arrival.
@@ -149,30 +158,53 @@ export class PeerMessaging {
     }
   }
 
+  /**
+   * Register a counter for the peer entries still waiting in the
+   * session's input queue. At close, that many of the most recently
+   * submitted frames are settled alongside the buffered ones: the queue
+   * drains in order, so the unconsumed tail is exactly the queue's
+   * current depth.
+   */
+  setQueuedPeerCount(fn: () => number): void {
+    this.queuedPeerCount = fn;
+  }
+
   getHeld(): readonly HeldMessage[] {
     return this.gate?.getHeld() ?? [];
   }
 
   /**
-   * Remember the held ids the `/peers` listing just showed the user.
+   * Remember the held entries the `/peers` listing just showed the user.
    *
    * Accept/deny decisions are bound to this snapshot: the held set moves
    * between listing and decision (arrivals, evictions, releases), and a
    * handle that uniquely named the message the user reviewed must not
-   * resolve to a different one by decide time.
+   * resolve to a different one by decide time. The snapshot pins each
+   * entry's `heldAt` as well as its id: once an id's eviction tombstone
+   * is pruned from the gate's bounded settled-memory, a peer can re-send
+   * it with a swapped body, and only the fresh hold timestamp tells the
+   * re-admitted entry apart from the one the user reviewed.
    */
-  recordHeldListing(ids: readonly string[]): void {
-    this.listedHeldIds = [...ids];
+  recordHeldListing(heldEntries: readonly HeldMessage[]): void {
+    this.listedHeld = heldEntries.map((entry) => ({
+      id: entry.frame.msgId,
+      heldAt: entry.heldAt,
+    }));
   }
 
   /** True when the held set no longer matches the last recorded listing. */
   heldSetChangedSinceListing(): boolean {
-    const listed = this.listedHeldIds;
+    const listed = this.listedHeld;
     if (listed === null) return true;
     const held = this.getHeld();
     return (
       held.length !== listed.length ||
-      held.some((entry, index) => entry.frame.msgId !== listed[index])
+      held.some((entry, index) => {
+        const snapshot = listed[index];
+        return (
+          entry.frame.msgId !== snapshot.id || entry.heldAt !== snapshot.heldAt
+        );
+      })
     );
   }
 
@@ -210,10 +242,37 @@ export class PeerMessaging {
     if (this.closed) return;
     this.closed = true;
     // Settle held messages before the socket goes away: the expiry
-    // receipts have to travel over it.
-    this.gate?.shutdown();
+    // receipts have to travel over it, and the process exits once close
+    // resolves — a receipt still in flight then is one the sender never
+    // receives.
+    await this.gate?.shutdown();
+    await this.settleUnconsumed();
     await this.inbox?.close();
     await this.updateSessionRegistryIpcPath(undefined);
+  }
+
+  /**
+   * Correct the 'delivered' receipts of accepted messages the session
+   * never consumed. Without this, a sender told "delivered" about a
+   * message that dies in the buffer or the input queue at exit cannot
+   * tell that from "delivered and read" — the distinction the receipts
+   * exist to carry.
+   */
+  private async settleUnconsumed(): Promise<void> {
+    const queued = this.queuedPeerCount?.() ?? 0;
+    const dropped = this.outstanding.slice(
+      Math.max(0, this.outstanding.length - this.buffered.length - queued),
+    );
+    const receipts = dropped
+      .filter((frame) => frame.from !== undefined)
+      .map((frame) =>
+        sendDeliveryStatus(frame.from!, {
+          status: 'expired',
+          origMsgId: frame.msgId,
+          from: this.inbox?.socketPath,
+        }),
+      );
+    await Promise.allSettled(receipts);
   }
 
   private onFrame(frame: PeerFrame): void {
@@ -235,6 +294,7 @@ export class PeerMessaging {
         throw new Error('accepted-message backlog is full');
       }
       this.buffered.push(frame);
+      this.trackOutstanding(frame);
       return;
     }
     while (this.buffered.length > 0) {
@@ -246,6 +306,18 @@ export class PeerMessaging {
     }
     if (!this.submit(frame)) {
       throw new Error('accepted-message backlog is full');
+    }
+    this.trackOutstanding(frame);
+  }
+
+  private trackOutstanding(frame: PeerUserFrame): void {
+    this.outstanding.push(frame);
+    // Only the unconsumed tail can ever matter, and it is bounded: at
+    // most MAX_ACCEPTED_BACKLOG frames wait here and another
+    // MAX_ACCEPTED_BACKLOG in the session's input queue. Anything older
+    // was necessarily consumed.
+    while (this.outstanding.length > 2 * MAX_ACCEPTED_BACKLOG) {
+      this.outstanding.shift();
     }
   }
 

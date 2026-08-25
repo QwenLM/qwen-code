@@ -604,9 +604,9 @@ describe('never-throw guarantee', () => {
     __setMockGlobalDir(null);
 
     await expect(listLiveSessions()).resolves.toEqual([]);
-    await expect(
-      patchSessionRecord({ sessionId: 'new' }),
-    ).resolves.toBeUndefined();
+    // Resolves (never rejects); the patch did not apply, so it reports
+    // false rather than the historical void.
+    await expect(patchSessionRecord({ sessionId: 'new' })).resolves.toBe(false);
     await expect(
       registerSession({ sessionId: 's1', cwd: '/w/app' }),
     ).resolves.toBe(false);
@@ -636,6 +636,17 @@ describe('patchSessionRecord', () => {
     // reset the AGE column and the newest-first ordering on every
     // /clear and /cd.
     expect(record.startedAt).toBe(before.startedAt);
+  });
+
+  it('reports true when the patch was written', async () => {
+    await registerSession({ sessionId: 'old', cwd: '/w/app' });
+    await expect(patchSessionRecord({ name: 'renamed' })).resolves.toBe(true);
+  });
+
+  it('reports false when the patch was skipped', async () => {
+    // No registration: the missing-record skip must be observable, or a
+    // caller with no later retry vehicle cannot tell it never landed.
+    await expect(patchSessionRecord({ name: 'renamed' })).resolves.toBe(false);
   });
 
   it('does not recreate a record once the session’s record is gone', async () => {

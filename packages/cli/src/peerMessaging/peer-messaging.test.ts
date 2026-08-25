@@ -17,6 +17,8 @@ import * as path from 'node:path';
 import {
   ApprovalMode,
   buildUserFrame,
+  MAX_HELD_MESSAGES,
+  MAX_SETTLED_IDS,
   sendPeerFrame,
   startPeerInbox,
   type PeerFrame,
@@ -420,6 +422,213 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(
       receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
     ).toHaveLength(overflow);
+  });
+
+  it('delivers every shutdown expiry receipt past the send cap', async () => {
+    // close() must await the expiry receipts and the cap must not drop the
+    // flush's tail: a session can hold MAX_HELD_MESSAGES messages, and
+    // each one's sender is owed the expiry receipt before the process
+    // exits.
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start(ApprovalMode.YOLO);
+
+    const heldCount = 40;
+    for (let i = 0; i < heldCount; i++) {
+      await sendPeerFrame(
+        m.socketPath!,
+        buildUserFrame({ content: `hold ${i}`, from: sender.socketPath }),
+      );
+    }
+    await vi.waitFor(() => expect(m.getHeld()).toHaveLength(heldCount));
+
+    await m.close();
+    messaging = null;
+
+    expect(
+      receipts.filter((r) => r.type === 'control' && r.status === 'expired'),
+    ).toHaveLength(heldCount);
+  });
+
+  it('corrects the delivered receipt of a buffered message dropped at exit', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    // No submit function wired: the frame is accepted into the buffer.
+
+    const frame = buildUserFrame({
+      content: 'early bird',
+      from: sender.socketPath,
+    });
+    await sendPeerFrame(started.socketPath!, frame);
+    await settle();
+    expect(receipts.map((r) => (r as { status: string }).status)).toEqual([
+      'delivered',
+    ]);
+
+    await started.close();
+    messaging = null;
+
+    expect(receipts.map((r) => (r as { status: string }).status)).toEqual([
+      'delivered',
+      'expired',
+    ]);
+
+    // Wiring after close must not resurrect a corrected message.
+    const submitted: string[] = [];
+    started.setSubmitFn((modelText) => {
+      submitted.push(modelText);
+      return true;
+    });
+    expect(submitted).toHaveLength(0);
+  });
+
+  it('corrects delivered receipts for messages still queued at exit', async () => {
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    const queued: string[] = [];
+    started.setSubmitFn((modelText) => {
+      queued.push(modelText);
+      return true;
+    });
+    started.setQueuedPeerCount(() => queued.length);
+
+    const consumed = buildUserFrame({
+      content: 'consumed',
+      from: sender.socketPath,
+    });
+    const waiting = buildUserFrame({
+      content: 'waiting',
+      from: sender.socketPath,
+    });
+    await sendPeerFrame(started.socketPath!, consumed);
+    await sendPeerFrame(started.socketPath!, waiting);
+    await settle();
+    expect(queued).toHaveLength(2);
+
+    // The session consumed the first message; the second dies in the queue.
+    queued.shift();
+
+    await started.close();
+    messaging = null;
+
+    const statusesFor = (msgId: string) =>
+      receipts
+        .filter((r) => r.type === 'control' && r.origMsgId === msgId)
+        .map((r) => (r as { status: string }).status);
+    expect(statusesFor(consumed.msgId)).toEqual(['delivered']);
+    expect(statusesFor(waiting.msgId)).toEqual(['delivered', 'expired']);
+  });
+
+  it('settles a partially flushed buffer alongside queued frames at exit', async () => {
+    // deliver() flushes the buffer before admitting anything new, so the
+    // unflushed tail of the buffer always sits after every queued frame in
+    // the outstanding set; close must correct both groups, not just one.
+    const sender = await startSenderInbox();
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+
+    const frames = [0, 1, 2].map((i) =>
+      buildUserFrame({ content: `mixed ${i}`, from: sender.socketPath }),
+    );
+    for (const frame of frames) {
+      await sendPeerFrame(started.socketPath!, frame);
+    }
+    await settle();
+
+    // The queue takes only the first flush; the rest stay buffered.
+    const queue: string[] = [];
+    started.setSubmitFn((modelText) => {
+      if (queue.length >= 1) return false;
+      queue.push(modelText);
+      return true;
+    });
+    started.setQueuedPeerCount(() => queue.length);
+
+    await started.close();
+    messaging = null;
+
+    const statusesFor = (msgId: string) =>
+      receipts
+        .filter((r) => r.type === 'control' && r.origMsgId === msgId)
+        .map((r) => (r as { status: string }).status);
+    for (const frame of frames) {
+      expect(statusesFor(frame.msgId)).toEqual(['delivered', 'expired']);
+    }
+  });
+
+  it('flags a re-admitted body under a reviewed id once its tombstone prunes', async () => {
+    // The listing guard must bind to the entries, not just their ids: an
+    // evicted id's tombstone is pruned after MAX_SETTLED_IDS further
+    // settlements, making the id re-admittable — the same ids in the same
+    // order can then mask a swapped body at decide time.
+    const sender = await startSenderInbox();
+    let mode = ApprovalMode.YOLO;
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => mode,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    started.setSubmitFn(() => true);
+
+    const target = buildUserFrame({
+      content: 'BODY-1',
+      from: sender.socketPath,
+    });
+    await sendPeerFrame(started.socketPath!, target);
+    await settle();
+    started.recordHeldListing(started.getHeld());
+
+    // Evict the target with newer holds, then release them again.
+    for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
+      await sendPeerFrame(
+        started.socketPath!,
+        buildUserFrame({ content: `evict ${i}`, from: sender.socketPath }),
+      );
+    }
+    mode = ApprovalMode.DEFAULT;
+    started.reevaluate('test');
+    expect(started.getHeld()).toHaveLength(0);
+
+    // Prune the target's tombstone with MAX_SETTLED_IDS fresh settlements.
+    for (let i = 0; i < MAX_SETTLED_IDS; i++) {
+      await sendPeerFrame(
+        started.socketPath!,
+        buildUserFrame({ content: `churn ${i}`, from: sender.socketPath }),
+      );
+    }
+
+    // The id is re-admittable now; ids and order match the old listing.
+    mode = ApprovalMode.YOLO;
+    await sendPeerFrame(started.socketPath!, {
+      ...target,
+      message: { role: 'user', content: 'BODY-2' },
+    });
+    await vi.waitFor(() => expect(started.getHeld()).toHaveLength(1));
+
+    expect(started.heldSetChangedSinceListing()).toBe(true);
   });
 
   it('is safe to close twice', async () => {

@@ -153,7 +153,7 @@ export const peersCommand: SlashCommand = {
       // Decisions bind to this listing: record exactly which messages
       // the user is reviewing so a later accept/deny can refuse when the
       // set has shifted underneath.
-      peerMessaging.recordHeldListing(held.map((entry) => entry.frame.msgId));
+      peerMessaging.recordHeldListing(held);
       return {
         type: 'message',
         messageType: 'info',
@@ -215,9 +215,7 @@ export const peersCommand: SlashCommand = {
         else if (outcome === 'failed') failed += 1;
       }
       // The user now knows what remains; bind later decisions to it.
-      peerMessaging.recordHeldListing(
-        peerMessaging.getHeld().map((entry) => entry.frame.msgId),
-      );
+      peerMessaging.recordHeldListing(peerMessaging.getHeld());
       return {
         type: 'message',
         messageType: 'info',
@@ -251,9 +249,7 @@ export const peersCommand: SlashCommand = {
 
     const outcome = peerMessaging.decide(resolved.msgId, decision);
     // The user now knows what remains; bind later decisions to it.
-    peerMessaging.recordHeldListing(
-      peerMessaging.getHeld().map((entry) => entry.frame.msgId),
-    );
+    peerMessaging.recordHeldListing(peerMessaging.getHeld());
     if (outcome === 'gone') {
       return {
         type: 'message',

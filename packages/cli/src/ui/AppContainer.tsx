@@ -2388,6 +2388,7 @@ export const AppContainer = (props: AppContainerProps) => {
     peekNextUserBatchKey,
     hasQueuedUserMessages,
     getPendingSubmissionCount,
+    getQueuedPeerCount,
     claimGoalTurn,
     claimDirectUserAdmission,
     removeGoalTurns,
@@ -2489,7 +2490,15 @@ export const AppContainer = (props: AppContainerProps) => {
       addPeerMessage(modelText, displayText);
       return true;
     });
-  }, [addPeerMessage, getPendingSubmissionCount, peerMessaging]);
+    // close() settles whatever is still queued with a corrective receipt;
+    // it needs the current depth to tell consumed entries from queued ones.
+    peerMessaging.setQueuedPeerCount(getQueuedPeerCount);
+  }, [
+    addPeerMessage,
+    getPendingSubmissionCount,
+    getQueuedPeerCount,
+    peerMessaging,
+  ]);
 
   // Surface parked messages. The model never sees a held message, so
   // without a notice the only symptom is a peer that seems to be ignored.

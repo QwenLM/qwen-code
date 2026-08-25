@@ -639,6 +639,23 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual(['<envelope>']);
     });
 
+    it('counts only peer entries still waiting in the queue', () => {
+      // close() settles exactly this many delivered frames at exit; user
+      // entries must not leak into the count.
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'A: one');
+        result.current.addMessage('typed');
+        result.current.addPeerMessage('<envelope two>', 'A: two');
+      });
+      expect(result.current.getQueuedPeerCount()).toBe(2);
+
+      act(() => {
+        result.current.popNextSubmission();
+      });
+      expect(result.current.getQueuedPeerCount()).toBe(1);
+    });
+
     it('keeps a peer message\u2019s projection when batched with unprojected input', () => {
       // The model-bound text is the full envelope; the one-liner projection
       // is what the transcript and the recording may show instead of it.

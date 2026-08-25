@@ -226,6 +226,7 @@ import {
   patchSessionRecord,
   unregisterSession,
 } from '../services/session-registry.js';
+import { delay } from '../utils/retry.js';
 import {
   SessionService,
   type ResumedSessionData,
@@ -4268,8 +4269,24 @@ export class Config {
     ipcPath: string | undefined,
   ): Promise<void> {
     if (!this.sessionRegistryActive) return;
+    let applied = false;
     this.queueSessionRegistryWrite(async () => {
-      await patchSessionRecord({ ipcPath });
+      applied = await patchSessionRecord({ ipcPath });
+      if (ipcPath === undefined || applied) return;
+      // The advertise is one-shot: no later patch re-asserts ipcPath, and
+      // every skip is transient (the fd-pressure window on this process's
+      // own start-token read, or a momentary read error) — the same window
+      // registration retries the same reads for. Without a retry here the
+      // session would keep a live inbox no peer can ever discover.
+      for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
+        await delay(250);
+        applied = await patchSessionRecord({ ipcPath });
+      }
+      if (!applied) {
+        this.debugLogger.warn(
+          'peer inbox address was not published to the session registry; peers cannot discover this session until it restarts',
+        );
+      }
     });
     await this.sessionRegistryWrite;
   }

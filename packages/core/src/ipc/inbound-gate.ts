@@ -241,7 +241,7 @@ export class InboundGate {
       debugLogger.debug(
         `re-sent msgId ${frame.msgId}; repeating earlier verdict ${settled}`,
       );
-      this.report(frame, settled);
+      void this.report(frame, settled);
       return 'refused';
     }
 
@@ -261,7 +261,7 @@ export class InboundGate {
       )
     ) {
       debugLogger.debug(`duplicate msgId ${frame.msgId}; already held`);
-      this.report(frame, 'held');
+      void this.report(frame, 'held');
       return 'held';
     }
 
@@ -270,7 +270,7 @@ export class InboundGate {
 
     if (policy === 'refuse') {
       debugLogger.debug(`refused peer message ${frame.msgId}`);
-      this.report(frame, 'denied');
+      void this.report(frame, 'denied');
       return 'refused';
     }
 
@@ -282,7 +282,7 @@ export class InboundGate {
       debugLogger.debug(
         `not admitting peer message ${frame.msgId} during shutdown; expiring it`,
       );
-      this.report(frame, 'expired');
+      void this.report(frame, 'expired');
       return 'refused';
     }
 
@@ -293,7 +293,7 @@ export class InboundGate {
       }
       // A failed delivery is transient (the input queue is full); the id
       // is deliberately not settled, so an honest sender retry can land.
-      this.report(frame, ok ? 'delivered' : 'expired');
+      void this.report(frame, ok ? 'delivered' : 'expired');
       return ok ? 'accept' : 'refused';
     }
 
@@ -302,7 +302,7 @@ export class InboundGate {
       if (evicted) {
         debugLogger.debug(`hold buffer full; expiring ${evicted.frame.msgId}`);
         this.recordSettled(evicted.frame.msgId, 'expired');
-        this.report(evicted.frame, 'expired');
+        void this.report(evicted.frame, 'expired');
       }
     }
 
@@ -311,7 +311,7 @@ export class InboundGate {
     debugLogger.debug(
       `held peer message ${frame.msgId} (cause=${cause}, ${this.held.length} held)`,
     );
-    this.report(frame, 'held');
+    void this.report(frame, 'held');
     this.notifyHeldChange();
     return 'held';
   }
@@ -340,15 +340,15 @@ export class InboundGate {
     if (decision === 'approve') {
       if (!this.tryDeliver(entry.frame)) {
         this.held.splice(index, 0, entry);
-        this.report(entry.frame, 'held');
+        void this.report(entry.frame, 'held');
         this.notifyHeldChange();
         return 'failed';
       }
       this.recordSettled(entry.frame.msgId, 'delivered');
-      this.report(entry.frame, 'delivered');
+      void this.report(entry.frame, 'delivered');
     } else {
       this.recordSettled(entry.frame.msgId, 'denied');
-      this.report(entry.frame, 'denied');
+      void this.report(entry.frame, 'denied');
     }
     this.notifyHeldChange();
     return 'done';
@@ -379,7 +379,7 @@ export class InboundGate {
       } else if (policy === 'refuse') {
         dropped += 1;
         this.recordSettled(entry.frame.msgId, 'denied');
-        this.report(entry.frame, 'denied');
+        void this.report(entry.frame, 'denied');
       } else {
         const cause = decision.policy === 'hold' ? decision.cause : entry.cause;
         stillHeld.push(cause === entry.cause ? entry : { ...entry, cause });
@@ -391,12 +391,12 @@ export class InboundGate {
       if (this.tryDeliver(entry.frame)) {
         released += 1;
         this.recordSettled(entry.frame.msgId, 'delivered');
-        this.report(entry.frame, 'delivered');
+        void this.report(entry.frame, 'delivered');
       } else {
         // A failed delivery must not drop a message the user can still
         // review: park it again and tell the sender it is still waiting.
         stillHeld.push(entry);
-        this.report(entry.frame, 'held');
+        void this.report(entry.frame, 'held');
       }
     }
 
@@ -418,17 +418,21 @@ export class InboundGate {
    * A sender blocked on a decision has to learn that no decision is
    * coming; silence would look identical to "delivered and ignored".
    */
-  shutdown(): void {
+  shutdown(): Promise<void> {
     this.shuttingDown = true;
-    if (this.held.length === 0) return;
+    if (this.held.length === 0) return Promise.resolve();
     const settling = this.held.splice(0, this.held.length);
     debugLogger.debug(
       `shutdown: expiring ${settling.length} held peer message(s)`,
     );
-    for (const entry of settling) {
-      this.report(entry.frame, 'expired');
-    }
+    const receipts = settling.map((entry) =>
+      this.report(entry.frame, 'expired'),
+    );
     this.notifyHeldChange();
+    // The caller tears the socket down next and the process exits right
+    // after: a receipt still in flight when close resolves is a receipt
+    // the sender never receives.
+    return Promise.allSettled(receipts).then(() => undefined);
   }
 
   /** Remember a settled id, pruning the oldest beyond the cap. */
@@ -460,15 +464,16 @@ export class InboundGate {
   private report(
     frame: PeerUserFrame,
     status: 'held' | 'denied' | 'expired' | 'delivered',
-  ): void {
+  ): Promise<void> {
     try {
-      this.options.reportStatus?.(frame, status);
+      return Promise.resolve(this.options.reportStatus?.(frame, status));
     } catch (error) {
       debugLogger.debug(
         `reportStatus(${status}) threw: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
+      return Promise.resolve();
     }
   }
 

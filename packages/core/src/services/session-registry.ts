@@ -361,12 +361,17 @@ export async function registerSession(
  * `procStart` and `pidNs` are excluded from the patch for the same
  * reason the pid is: they are the identity the sweep trusts, and a
  * caller-supplied value could only corrupt it.
+ *
+ * Reports whether the patch was actually written: every skip below is
+ * silent on the wire, and at least one caller (the peer inbox address
+ * advertise) has no later event that would retry a skipped patch, so it
+ * must be able to tell success from a no-op.
  */
 export async function patchSessionRecord(
   patch: Partial<
     Omit<SessionRegistryRecord, 'pid' | 'schemaVersion' | 'procStart' | 'pidNs'>
   >,
-): Promise<void> {
+): Promise<boolean> {
   try {
     // Inside the try: the fallback `getGlobalQwenDir()` resolution reads
     // the home directory and can throw, and this function promises never
@@ -380,7 +385,7 @@ export async function patchSessionRecord(
     // would write back something the reader will neither show nor sweep
     // — permanent litter.
     if (existing.status !== 'ok' || !matchesLocalIdentity(existing.record)) {
-      return;
+      return false;
     }
     const record = existing.record;
     // The identity check alone also passes for a stale record left by a
@@ -395,15 +400,17 @@ export async function patchSessionRecord(
     // patch and let a later /clear or /cd retry it.
     const currentToken = readProcStartToken(process.pid);
     if (record.procStart !== null && record.procStart !== currentToken) {
-      return;
+      return false;
     }
     await atomicWriteJSON(
       filePath,
       { ...record, ...patch },
       { mode: REGISTRY_FILE_MODE, forceMode: true, noFollow: true },
     );
+    return true;
   } catch (error) {
     debugLogger.debug(`patchSessionRecord failed: ${describe(error)}`);
+    return false;
   }
 }
 

@@ -61,6 +61,7 @@ export interface UseMessageQueueReturn {
   peekNextUserBatchKey: (goalTurnActive?: boolean) => string | undefined;
   hasQueuedUserMessages: () => boolean;
   getPendingSubmissionCount: () => number;
+  getQueuedPeerCount: () => number;
   claimGoalTurn: () => QueuedGoalTurn | undefined;
   claimDirectUserAdmission: () => DirectUserAdmission;
   removeGoalTurns: () => string[];
@@ -206,6 +207,11 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
   const getPendingSubmissionCount = useCallback(
     () => queueRef.current.length + goalQueueRef.current.length,
+    [],
+  );
+
+  const getQueuedPeerCount = useCallback(
+    () => queueRef.current.filter(({ peer }) => Boolean(peer)).length,
     [],
   );
 
@@ -389,6 +395,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
     peekNextUserBatchKey,
     hasQueuedUserMessages,
     getPendingSubmissionCount,
+    getQueuedPeerCount,
     claimGoalTurn,
     claimDirectUserAdmission,
     removeGoalTurns,

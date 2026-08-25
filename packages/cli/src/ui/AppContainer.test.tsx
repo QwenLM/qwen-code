@@ -6959,6 +6959,7 @@ describe('AppContainer State Management', () => {
         setSubmitFn: (fn: (modelText: string, displayText: string) => void) => {
           submitFn = fn;
         },
+        setQueuedPeerCount: vi.fn(),
         onHeldChange: (fn: (held: readonly HeldMessage[]) => void) => {
           heldListener = fn;
           return () => {};
@@ -7008,6 +7009,7 @@ describe('AppContainer State Management', () => {
         drainQueue: vi.fn().mockReturnValue([]),
         popNextTurn: vi.fn().mockReturnValue(null),
         getPendingSubmissionCount: vi.fn().mockReturnValue(0),
+        getQueuedPeerCount: vi.fn().mockReturnValue(0),
       });
       const peer = makePeerMessaging();
 
@@ -7021,6 +7023,10 @@ describe('AppContainer State Management', () => {
         'one-liner',
       );
       expect(addMessage).not.toHaveBeenCalled();
+      // close() settles still-queued entries; it needs the live depth.
+      expect(peer.value.setQueuedPeerCount).toHaveBeenCalledWith(
+        expect.any(Function),
+      );
     });
 
     it('refuses peer frames once the pending backlog reaches the cap', () => {
@@ -7040,6 +7046,7 @@ describe('AppContainer State Management', () => {
         getPendingSubmissionCount: vi
           .fn()
           .mockReturnValue(MAX_ACCEPTED_BACKLOG),
+        getQueuedPeerCount: vi.fn().mockReturnValue(0),
       });
       const peer = makePeerMessaging();
 

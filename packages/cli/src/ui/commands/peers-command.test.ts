@@ -43,6 +43,7 @@ function held(over: {
   content?: string;
   fromName?: string;
   cause?: HeldMessage['cause'];
+  heldAt?: number;
 }): HeldMessage {
   return {
     frame: {
@@ -55,7 +56,7 @@ function held(over: {
       message: { role: 'user', content: over.content ?? 'do a thing' },
     },
     cause: over.cause ?? 'mode-mismatch',
-    heldAt: 1_000,
+    heldAt: over.heldAt ?? 1_000,
   };
 }
 
@@ -95,22 +96,31 @@ async function run(
 
 let messages: HeldMessage[];
 let fake: Fake;
-let listedIds: string[] | null;
+let listed: ReadonlyArray<{ id: string; heldAt: number }> | null;
 
 beforeEach(() => {
   messages = [];
-  listedIds = null;
+  listed = null;
   fake = {
     getHeld: () => messages,
     decide: vi.fn(() => 'done'),
     recordHeldListing: vi.fn(
-      (ids: readonly string[]) => (listedIds = [...ids]),
+      (entries: readonly HeldMessage[]) =>
+        (listed = entries.map((entry) => ({
+          id: entry.frame.msgId,
+          heldAt: entry.heldAt,
+        }))),
     ),
-    // Mirrors PeerMessaging: decisions bind to the last recorded listing.
+    // Mirrors PeerMessaging: decisions bind to the last recorded listing,
+    // entry identity included — a re-admitted id gets a fresh heldAt.
     heldSetChangedSinceListing: () =>
-      listedIds === null ||
-      listedIds.length !== messages.length ||
-      messages.some((entry, index) => entry.frame.msgId !== listedIds![index]),
+      listed === null ||
+      listed.length !== messages.length ||
+      messages.some(
+        (entry, index) =>
+          entry.frame.msgId !== listed![index].id ||
+          entry.heldAt !== listed![index].heldAt,
+      ),
   };
 });
 
@@ -431,6 +441,30 @@ describe('/peers', () => {
       held({
         msgId: 'aaaaaa22-0000-4000-8000-000000000000',
         content: 'malicious',
+      }),
+    ];
+    const result = await run(fake, 'accept aaaaaa');
+    expect(result.messageType).toBe('error');
+    expect(result.content).toContain('changed since you listed it');
+    expect(fake.decide).not.toHaveBeenCalled();
+  });
+
+  it('refuses a decision when a re-admitted id reused the reviewed handle', async () => {
+    // An evicted id's tombstone prunes and the id becomes re-admittable;
+    // same id, same position — only the fresh heldAt tells the swapped
+    // entry apart from the one the user reviewed.
+    messages = [
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        content: 'benign',
+      }),
+    ];
+    await run(fake, '');
+    messages = [
+      held({
+        msgId: 'aaaaaa11-0000-4000-8000-000000000000',
+        content: 'swapped',
+        heldAt: 2_000,
       }),
     ];
     const result = await run(fake, 'accept aaaaaa');

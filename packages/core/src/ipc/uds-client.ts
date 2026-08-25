@@ -39,8 +39,13 @@ export const SEND_TIMEOUT_MS = 5_000;
  * timeout) can exhaust this session's fd limit with receipts alone — the
  * outbound mirror of what MAX_PEER_CONNECTIONS stops on the inbound side.
  * Sends over the ceiling are dropped; receipts are best-effort anyway.
+ *
+ * Must stay above MAX_HELD_MESSAGES: closing a session bursts one expiry
+ * receipt per held message all at once, and a ceiling below the burst
+ * drops the tail — the senders of the oldest held messages would never
+ * learn their message expired.
  */
-export const MAX_CONCURRENT_SENDS = 32;
+export const MAX_CONCURRENT_SENDS = 64;
 
 let inFlightSends = 0;
 
