@@ -8,18 +8,18 @@
  * Coalesces consecutive `text` stream events into one delta per window.
  * Token-level deltas arrive far faster than a terminal frame, and every one
  * re-folds the history and re-parses the whole streaming markdown block —
- * the dominant source of streaming flicker. A 60ms window batches them to
- * ~16 renders/s (smooth to the eye, far below the delta rate), while any
+ * the dominant source of streaming flicker. The window is the
+ * renderer-shared STREAM_UPDATE_WINDOW_MS (src/ui/model/stream-aggregation.ts)
+ * — ~16 renders/s, smooth to the eye, far below the delta rate — while any
  * other event flushes the pending text first so cross-kind ordering and
  * turn-boundary semantics are unchanged.
  */
+import { STREAM_UPDATE_WINDOW_MS } from '../model/stream-aggregation.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
-
-export const TEXT_BATCH_WINDOW_MS = 60;
 
 export async function* batchTextEvents(
   events: AsyncIterable<OpenTuiStreamEvent>,
-  windowMs: number = TEXT_BATCH_WINDOW_MS,
+  windowMs: number = STREAM_UPDATE_WINDOW_MS,
 ): AsyncGenerator<OpenTuiStreamEvent> {
   const it = events[Symbol.asyncIterator]();
   let fetch: Promise<IteratorResult<OpenTuiStreamEvent>> | null = null;

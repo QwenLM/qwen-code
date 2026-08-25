@@ -133,6 +133,7 @@ import {
   getInlineImageData,
   MAX_INLINE_IMAGES_PER_ITEM,
 } from '../utils/inline-image-parts.js';
+import { createStreamAggregator } from '../model/stream-aggregation.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -369,7 +370,6 @@ const EDIT_TOOL_NAMES = new Set([
   ToolNames.WRITE_FILE,
   ToolNames.NOTEBOOK_EDIT,
 ]);
-const STREAM_UPDATE_THROTTLE_MS = 60;
 const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
 // Rows kept in reserve below the commit budget so the incremental commit fires
 // BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
@@ -1109,10 +1109,10 @@ export const useGeminiStream = (
       return;
     }
     // Flush throttled stream chunks FIRST so anything sitting in the
-    // per-turn bufferedEvents lands on `pendingHistoryItemRef.current`
+    // per-turn aggregation window lands on `pendingHistoryItemRef.current`
     // before we snapshot. Snapshotting before flush would miss content
     // events that arrived inside the throttle window
-    // (STREAM_UPDATE_THROTTLE_MS), making AppContainer's auto-restore
+    // (STREAM_UPDATE_WINDOW_MS), making AppContainer's auto-restore
     // wrongly conclude the model produced nothing — and the subsequent
     // commitItem(pendingHistoryItemRef.current) below would commit content
     // that auto-restore then truncates away.
@@ -2350,56 +2350,58 @@ export const useGeminiStream = (
       let streamInteractionOwner = trackInteractionOwner
         ? activeInteractionOwnerRef.current
         : undefined;
-      const bufferedEvents: BufferedStreamEvent[] = [];
-      let flushTimer: ReturnType<typeof setTimeout> | null = null;
-
-      const discardBufferedStreamEvents = () => {
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = null;
-        }
-        bufferedEvents.length = 0;
-      };
-
-      const flushBufferedStreamEvents = () => {
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = null;
-        }
-
-        if (bufferedEvents.length === 0) {
-          return;
-        }
-
-        while (bufferedEvents.length > 0) {
-          const nextEvent = bufferedEvents.shift()!;
-
-          if (nextEvent.kind === 'content') {
-            const contentParts = [nextEvent.value];
-
-            while (bufferedEvents[0]?.kind === 'content') {
-              const queuedContent = bufferedEvents.shift();
-              if (queuedContent?.kind !== 'content') {
-                break;
+      // Shared renderer-level aggregation window
+      // (src/ui/model/stream-aggregation.ts): consecutive content and
+      // thought chunks coalesce per window; images ride as single events.
+      // Turn boundaries and the pre-snapshot drain flush explicitly; failed
+      // attempts discard.
+      const streamAggregator = createStreamAggregator<BufferedStreamEvent>({
+        sameGroup: (head, next) =>
+          (head.kind === 'content' && next.kind === 'content') ||
+          (head.kind === 'thought' && next.kind === 'thought'),
+        mergeGroup: (group) => {
+          const head = group[0];
+          if (head.kind === 'thought') {
+            let subject = head.value.subject;
+            const descriptions: string[] = [];
+            for (const event of group) {
+              if (event.kind !== 'thought') {
+                continue;
               }
-              contentParts.push(queuedContent.value);
+              subject = event.value.subject || subject;
+              if (event.value.description) {
+                descriptions.push(event.value.description);
+              }
             }
-
+            return {
+              kind: 'thought',
+              value: { subject, description: descriptions.join('') },
+            };
+          }
+          return {
+            kind: 'content',
+            value: group
+              .map((event) => (event.kind === 'content' ? event.value : ''))
+              .join(''),
+          };
+        },
+        onFlush: (event) => {
+          if (event.kind === 'content') {
             geminiMessageBuffer = handleContentEvent(
-              contentParts.join(''),
+              event.value,
               geminiMessageBuffer,
               userMessageTimestamp,
               assistantOutputStarted,
             );
-            if (contentParts.some((part) => part.trim().length > 0)) {
+            if (event.value.trim().length > 0) {
               assistantOutputStarted = true;
             }
-            continue;
+            return;
           }
 
-          if (nextEvent.kind === 'image') {
+          if (event.kind === 'image') {
             if (turnCancelledRef.current) {
-              continue;
+              return;
             }
             setIsReceivingContent(true);
             turnSawContentEventRef.current = true;
@@ -2420,7 +2422,7 @@ export const useGeminiStream = (
               });
               geminiMessageBuffer = '';
               assistantOutputStarted = true;
-              continue;
+              return;
             }
 
             if (pendingHistoryItemRef.current) {
@@ -2437,7 +2439,7 @@ export const useGeminiStream = (
               setPendingHistoryItem({
                 type: assistantOutputStarted ? 'gemini_content' : 'gemini',
                 text: '',
-                images: [nextEvent.value],
+                images: [event.value],
                 ...(!assistantOutputStarted ? { timestamp: Date.now() } : {}),
               });
               assistantInlineImageCount++;
@@ -2450,46 +2452,20 @@ export const useGeminiStream = (
               });
             }
             assistantOutputStarted = true;
-            continue;
-          }
-
-          let subject = nextEvent.value.subject;
-          const thoughtDescriptions: string[] = [];
-          if (nextEvent.value.description) {
-            thoughtDescriptions.push(nextEvent.value.description);
-          }
-
-          while (bufferedEvents[0]?.kind === 'thought') {
-            const queuedThought = bufferedEvents.shift();
-            if (queuedThought?.kind !== 'thought') {
-              break;
-            }
-            subject = queuedThought.value.subject || subject;
-            if (queuedThought.value.description) {
-              thoughtDescriptions.push(queuedThought.value.description);
-            }
+            return;
           }
 
           thoughtBuffer = handleThoughtEvent(
-            {
-              subject,
-              description: thoughtDescriptions.join(''),
-            },
+            event.value,
             thoughtBuffer,
             userMessageTimestamp,
           );
-        }
-      };
-
-      const scheduleBufferedStreamFlush = () => {
-        if (flushTimer) {
-          return;
-        }
-
-        flushTimer = setTimeout(() => {
-          flushBufferedStreamEvents();
-        }, STREAM_UPDATE_THROTTLE_MS);
-      };
+        },
+      });
+      const {
+        flushNow: flushBufferedStreamEvents,
+        discard: discardBufferedStreamEvents,
+      } = streamAggregator;
 
       flushBufferedStreamEventsRef.current.add(flushBufferedStreamEvents);
       dualOutput?.startAssistantMessage();
@@ -2507,14 +2483,13 @@ export const useGeminiStream = (
               // Subject-only chunks are discrete status updates for the
               // loading indicator and render immediately. Anything carrying
               // streamed text (with or without a subject) goes through the
-              // throttled buffer so it batches with adjacent reasoning
+              // aggregation window so it batches with adjacent reasoning
               // chunks; the flush merger preserves the subject.
               if (event.value.subject && !event.value.description) {
                 flushBufferedStreamEvents();
                 setThought(event.value);
               } else {
-                bufferedEvents.push({ kind: 'thought', value: event.value });
-                scheduleBufferedStreamFlush();
+                streamAggregator.push({ kind: 'thought', value: event.value });
               }
               break;
             case ServerGeminiEventType.Content: {
@@ -2525,7 +2500,7 @@ export const useGeminiStream = (
               // condition is false, so normal content batching resumes.
               if (
                 pendingThoughtItemRef.current ||
-                bufferedEvents.some((e) => e.kind === 'thought')
+                streamAggregator.hasPending((e) => e.kind === 'thought')
               ) {
                 flushBufferedStreamEvents();
                 commitPendingThought(userMessageTimestamp);
@@ -2536,18 +2511,20 @@ export const useGeminiStream = (
               for (const part of displayParts) {
                 if ('text' in part) {
                   if (part.text.length > 0) {
-                    bufferedEvents.push({ kind: 'content', value: part.text });
+                    streamAggregator.push({
+                      kind: 'content',
+                      value: part.text,
+                    });
                   }
                 } else {
                   const image = getInlineImageData({
                     inlineData: part.inlineData,
                   });
                   if (image) {
-                    bufferedEvents.push({ kind: 'image', value: image });
+                    streamAggregator.push({ kind: 'image', value: image });
                   }
                 }
               }
-              scheduleBufferedStreamFlush();
               break;
             }
             case ServerGeminiEventType.ToolCallRequest:

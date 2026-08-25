@@ -11935,7 +11935,7 @@ describe('useGeminiStream', () => {
           await vi.advanceTimersByTimeAsync(0);
         });
 
-        // Advance past STREAM_UPDATE_THROTTLE_MS (60ms) so the thought
+        // Advance past STREAM_UPDATE_WINDOW_MS (60ms) so the thought
         // buffer flushes and populates pendingThoughtItem state.
         await act(async () => {
           vi.advanceTimersByTime(100);
