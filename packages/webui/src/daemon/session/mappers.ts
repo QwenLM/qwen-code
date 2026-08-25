@@ -613,9 +613,6 @@ function getGoalState(
     return undefined;
   }
   const lastReason = getString(source, 'lastReason');
-  // `limitKind` tells a client which enumerated bound stopped the Goal.
-  // Unknown kinds are dropped rather than trusted; known ones must cross, or
-  // the wire copy silently narrows the record.
   const limitKindRaw = getString(source, 'limitKind');
   const limitKind =
     limitKindRaw === 'evidence_catalog' ||
