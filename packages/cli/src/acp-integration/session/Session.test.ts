@@ -18414,6 +18414,33 @@ describe('Session', () => {
       });
 
       it('returns a structured standalone-policy error for a blocked slash command', async () => {
+        session.dispose();
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          'standalone',
+        );
+        vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        const expectation = {
+          canonicalSessionId: 'test-session-id',
+          root: { canonicalPath: '/managed', device: 1, inode: 2 },
+          child: {
+            name: 'child',
+            canonicalPath: '/managed/child',
+            device: 1,
+            inode: 3,
+          },
+        };
+        session.installPendingManagedConversationBinding(
+          expectation,
+          vi.fn().mockResolvedValue(undefined),
+        );
+        await session.commitManagedConversationBinding(expectation);
+        await session.releaseManagedConversationBinding(expectation);
         vi.mocked(
           nonInteractiveCliCommands.handleSlashCommand,
         ).mockResolvedValueOnce({
@@ -18433,6 +18460,21 @@ describe('Session', () => {
         });
 
         expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).toHaveBeenCalledWith(
+          '/export',
+          expect.anything(),
+          mockConfig,
+          mockSettings,
+          expect.anything(),
+          expect.objectContaining({
+            allowSessionReset: false,
+            allowWorkspaceSettingsWrite: false,
+            persistModelSelection: false,
+            blockedBuiltinCommandNames: expect.arrayContaining(['export']),
+          }),
+        );
       });
 
       it('does not record /advisor in the ACP transcript', async () => {
@@ -22097,7 +22139,7 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'run wrapper' }],
       });
 
-      expect(build).toHaveBeenCalled();
+      expect(build).toHaveBeenCalledOnce();
       expect(getConfirmationDetails).not.toHaveBeenCalled();
       expect(mockClient.requestPermission).not.toHaveBeenCalled();
       expect(executeSpy).not.toHaveBeenCalled();

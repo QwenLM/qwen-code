@@ -225,7 +225,10 @@ import {
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
-import { getConversationDirectoryName } from '../utils/conversation-directory-identity.js';
+import {
+  getConversationDirectoryName,
+  isSameConversationPath,
+} from '../utils/conversation-directory-identity.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
@@ -247,11 +250,7 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
-import {
-  Session,
-  buildAvailableCommandsSnapshot,
-  registerCreateSubSessionTool,
-} from './session/Session.js';
+import { Session, registerCreateSubSessionTool } from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
@@ -3199,12 +3198,6 @@ function isOwnerOnlyDirectory(stats: Stats): boolean {
   return (stats.mode & 0o077) === 0;
 }
 
-function sameManagedConversationPath(left: string, right: string): boolean {
-  return process.platform === 'win32'
-    ? left.toLowerCase() === right.toLowerCase()
-    : left === right;
-}
-
 function hasOnlyKeys(
   value: Record<string, unknown>,
   keys: readonly string[],
@@ -3262,7 +3255,7 @@ function parseConversationDirectoryExpectation(
     !isManagedConversationPath(child['canonicalPath']) ||
     !isManagedConversationIdentityNumber(child['device']) ||
     !isManagedConversationIdentityNumber(child['inode']) ||
-    !sameManagedConversationPath(
+    !isSameConversationPath(
       path.dirname(child['canonicalPath']),
       root['canonicalPath'],
     ) ||
@@ -3313,16 +3306,15 @@ async function assertManagedConversationDirectoryIdentity(
     rootBefore = await fs.lstat(expectation.root.canonicalPath);
     canonicalRoot = await fs.realpath(expectation.root.canonicalPath);
     rootAfter = await fs.lstat(canonicalRoot);
-  } catch {
-    throw managedConversationDirectoryError(false);
+  } catch (error) {
+    throw managedConversationDirectoryError(
+      (error as NodeJS.ErrnoException).code === 'ENOENT',
+    );
   }
   if (
     !isOwnerOnlyDirectory(rootBefore) ||
     !isOwnerOnlyDirectory(rootAfter) ||
-    !sameManagedConversationPath(
-      canonicalRoot,
-      expectation.root.canonicalPath,
-    ) ||
+    !isSameConversationPath(canonicalRoot, expectation.root.canonicalPath) ||
     rootBefore.dev !== expectation.root.device ||
     rootBefore.ino !== expectation.root.inode ||
     rootAfter.dev !== expectation.root.device ||
@@ -3346,10 +3338,7 @@ async function assertManagedConversationDirectoryIdentity(
   if (
     !isOwnerOnlyDirectory(childBefore) ||
     !isOwnerOnlyDirectory(childAfter) ||
-    !sameManagedConversationPath(
-      canonicalChild,
-      expectation.child.canonicalPath,
-    ) ||
+    !isSameConversationPath(canonicalChild, expectation.child.canonicalPath) ||
     childBefore.dev !== expectation.child.device ||
     childBefore.ino !== expectation.child.inode ||
     childAfter.dev !== expectation.child.device ||
@@ -7485,7 +7474,7 @@ class QwenAgent implements Agent {
   ): Promise<ServeSessionSupportedCommandsStatus> {
     const session = this.sessionOrThrow(sessionId);
     const { availableCommands, availableSkills } =
-      await buildAvailableCommandsSnapshot(session.getConfig());
+      await session.buildAvailableCommandsSnapshot();
     return {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
@@ -9879,11 +9868,11 @@ class QwenAgent implements Agent {
             !Array.isArray(allowedRoots) ||
             allowedRoots.length !== 1 ||
             typeof allowedRoots[0] !== 'string' ||
-            !sameManagedConversationPath(
+            !isSameConversationPath(
               allowedRoots[0],
               conversationDirectoryExpectation.root.canonicalPath,
             ) ||
-            !sameManagedConversationPath(
+            !isSameConversationPath(
               targetPath,
               conversationDirectoryExpectation.child.canonicalPath,
             )
@@ -9984,7 +9973,7 @@ class QwenAgent implements Agent {
             rootBefore.dev !== rootAfter.dev ||
             rootBefore.ino !== rootAfter.ino ||
             (conversationDirectoryExpectation !== undefined &&
-              (!sameManagedConversationPath(
+              (!isSameConversationPath(
                 canonicalRoot,
                 conversationDirectoryExpectation.root.canonicalPath,
               ) ||
@@ -10026,7 +10015,7 @@ class QwenAgent implements Agent {
             targetBefore.dev !== targetAfter.dev ||
             targetBefore.ino !== targetAfter.ino ||
             (conversationDirectoryExpectation !== undefined &&
-              (!sameManagedConversationPath(
+              (!isSameConversationPath(
                 canonicalPath,
                 conversationDirectoryExpectation.child.canonicalPath,
               ) ||

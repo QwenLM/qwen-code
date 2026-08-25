@@ -1067,7 +1067,7 @@ export function createSubSessionLauncher(
       // If the spawn succeeded but a later step failed (e.g. sendPrompt threw
       // synchronously), roll back the orphaned session so it doesn't leak a slot
       // in the bridge's session pool while this launch reports failure.
-      if (spawnedSession !== undefined && isolatedWorkspace) {
+      if (spawnedSession !== undefined && isolatedWorkspace && !standalone) {
         let sessionClosed = false;
         try {
           if (spawnedSession.attached) {
@@ -1116,7 +1116,7 @@ export function createSubSessionLauncher(
             );
           }
         }
-      } else if (spawnedSession !== undefined) {
+      } else if (spawnedSession !== undefined && !standalone) {
         // Both guards are load-bearing. `.catch()` swallows the async
         // rejection; the try/catch contains a SYNCHRONOUS throw. We are already
         // inside the catch block, so an escaping throw here would replace `err`

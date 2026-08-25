@@ -3574,6 +3574,16 @@ export function registerSessionRoutes(
             ) {
               throw new SessionNotFoundError(sessionId);
             }
+            const {
+              sourceType: _reservedSourceType,
+              sourceId: _reservedSourceId,
+              ...metadataWithoutSource
+            } = metadata;
+            const restoreMetadata =
+              !isInternalWorkspaceRuntime(runtime) &&
+              isReservedStandaloneSessionSource(metadata)
+                ? metadataWithoutSource
+                : metadata;
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {
               sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -3611,14 +3621,14 @@ export function registerSessionRoutes(
                     ...(liveReplayMode !== undefined ? { liveReplayMode } : {}),
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...metadata,
+                    ...restoreMetadata,
                   })
                 : await runtime.bridge.resumeSession({
                     sessionId,
                     workspaceCwd,
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
-                    ...metadata,
+                    ...restoreMetadata,
                   });
             // Every path that can register a Live entry relocates it before a
             // prompt can start. Re-queuing cd for an active entry would block

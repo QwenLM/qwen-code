@@ -16,7 +16,11 @@ import {
   ApprovalMode,
   SessionIdCaseConflictError,
   SessionService,
+  writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
+import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
@@ -24,6 +28,14 @@ import {
   StandaloneSessionService,
   type StandaloneSessionServiceOptions,
 } from './standalone-session-service.js';
+
+const { listWorkspaceSessionsForResponse } = vi.hoisted(() => ({
+  listWorkspaceSessionsForResponse: vi.fn(),
+}));
+
+vi.mock('../server/session-list.js', () => ({
+  listWorkspaceSessionsForResponse,
+}));
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
 const root = {
@@ -135,7 +147,9 @@ function createHarness(): Harness {
   } as WorkspaceRuntime;
   const reservation = { release: vi.fn() };
   const restoreReservation = { release: vi.fn() };
+  let runtimeQuarantined = false;
   const quarantineRuntime = vi.fn(async (candidate: WorkspaceRuntime) => {
+    runtimeQuarantined = true;
     service.freezeForTerminalQuarantine(candidate);
   });
   const invalidateSessionListCache = vi.fn();
@@ -151,7 +165,13 @@ function createHarness(): Harness {
   const lifecycle = new SessionArchiveCoordinator();
   const options: StandaloneSessionServiceOptions = {
     ensureRuntime,
-    assertRuntimeCurrent: vi.fn(),
+    assertRuntimeCurrent: vi.fn(() => {
+      if (runtimeQuarantined) {
+        throw Object.assign(new Error('Conversation runtime unavailable'), {
+          code: 'conversation_runtime_unavailable',
+        });
+      }
+    }),
     quarantineRuntime,
     runRuntimeActivity: async (_runtime, operation) => operation(),
     workspace: {
@@ -454,6 +474,128 @@ describe('StandaloneSessionService', () => {
     });
   });
 
+  it('merges persisted PR bindings with live bindings by PR number', async () => {
+    const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'standalone-prs-'));
+    const sidecar = path.join(temp, `${sessionId}.pr.json`);
+    await writeSessionPrs(sidecar, [
+      {
+        number: 7,
+        url: 'https://example.com/persisted-only',
+        createdAt: '2026-08-24T00:00:00.000Z',
+      },
+      {
+        number: 8,
+        url: 'https://example.com/persisted-stale',
+        createdAt: '2026-08-24T00:01:00.000Z',
+      },
+    ]);
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(sessionId);
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'active',
+    );
+    vi.spyOn(
+      SessionService.prototype,
+      'readCreationMetadataIfReadable',
+    ).mockResolvedValue({ sourceType: 'standalone' });
+    vi.spyOn(SessionService.prototype, 'getSessionListItem').mockResolvedValue({
+      sessionId,
+      cwd: root.canonicalRoot,
+      startTime: '2026-08-24T00:00:00.000Z',
+      mtime: Date.parse('2026-08-24T01:00:00.000Z'),
+      prompt: 'persisted title',
+      filePath: '/transcripts/session.jsonl',
+      sourceType: 'standalone',
+      isArchived: false,
+    });
+    vi.spyOn(
+      SessionService.prototype,
+      'getPrSessionPathForArchiveState',
+    ).mockReturnValue(sidecar);
+    const harness = createHarness();
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 1,
+      hasActivePrompt: false,
+      prs: [
+        { number: 8, url: 'https://example.com/live-current' },
+        { number: 9, url: 'https://example.com/live-only' },
+      ],
+    });
+
+    try {
+      await expect(harness.service.get(sessionId)).resolves.toMatchObject({
+        prs: [
+          { number: 7, url: 'https://example.com/persisted-only' },
+          { number: 8, url: 'https://example.com/live-current' },
+          { number: 9, url: 'https://example.com/live-only' },
+        ],
+      });
+    } finally {
+      await fs.rm(temp, { recursive: true, force: true });
+    }
+  });
+
+  it('drops both spellings when the standalone catalog has a case conflict', async () => {
+    const uniqueSessionId = '22222222-2222-4222-8222-222222222222';
+    listWorkspaceSessionsForResponse.mockResolvedValueOnce({
+      sessions: [
+        {
+          sessionId,
+          workspaceCwd: root.canonicalRoot,
+          createdAt: '2026-08-24T00:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: sessionId.toUpperCase(),
+          workspaceCwd: root.canonicalRoot,
+          createdAt: '2026-08-24T00:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: uniqueSessionId.toUpperCase(),
+          workspaceCwd: '/untrusted-root',
+          createdAt: '2026-08-24T01:00:00.000Z',
+          sourceType: 'standalone',
+          sourceId: 'must-be-stripped',
+          parentSessionId: sessionId,
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+      ],
+    });
+    const harness = createHarness();
+
+    await expect(harness.service.list()).resolves.toEqual({
+      sessions: [
+        {
+          sessionId: uniqueSessionId,
+          workspaceCwd: root.canonicalRoot,
+          createdAt: '2026-08-24T01:00:00.000Z',
+          sourceType: 'standalone',
+          context: { kind: 'standalone' },
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+      ],
+    });
+    expect(listWorkspaceSessionsForResponse).toHaveBeenCalledWith(
+      harness.bridge,
+      root.canonicalRoot,
+      { conversationKind: 'standalone-top-level' },
+      { runtimeBaseDir: '/runtime' },
+    );
+  });
+
   it('maps case-only persisted ambiguity to a standalone conflict', async () => {
     vi.spyOn(
       SessionService.prototype,
@@ -740,6 +882,64 @@ describe('StandaloneSessionService', () => {
     expect(harness.restoreReservation.release).toHaveBeenCalledOnce();
   });
 
+  it('detaches a reused attach when its pinned directory changes during restore', async () => {
+    mockDurableStandalone();
+    const harness = createHarness();
+    await harness.service.createWithInitialPrompt({ sessionId }, 'first task');
+    harness.inspectStandaloneDirectory.mockClear();
+    harness.inspectStandaloneDirectory
+      .mockResolvedValueOnce({ status: 'ready', identity })
+      .mockResolvedValueOnce({ status: 'compromised' });
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      createdAt: '2026-08-24T00:00:00.000Z',
+      sourceType: 'standalone',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+    harness.bridge.restoreStandaloneSession.mockResolvedValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      currentCwd: identity.canonicalPath,
+      attached: true,
+      clientId: 'attached-client',
+      sourceType: 'standalone',
+      state: {},
+    });
+
+    await expect(harness.service.load(sessionId)).rejects.toMatchObject({
+      code: 'working_directory_compromised',
+      sessionId,
+    });
+    expect(harness.bridge.detachClient).toHaveBeenCalledWith(
+      sessionId,
+      'attached-client',
+    );
+  });
+
+  it('discards an unattached restore when the child reports a different cwd', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    harness.bridge.changeSessionCwd.mockResolvedValueOnce({
+      previousCwd: root.canonicalRoot,
+      newCwd: '/unexpected/path',
+      warnings: [],
+    });
+
+    await expect(harness.service.load(sessionId)).rejects.toMatchObject({
+      code: 'working_directory_compromised',
+      sessionId,
+    });
+    expect(harness.bridge.killSession).toHaveBeenCalledWith(sessionId, {
+      requireZeroAttaches: true,
+    });
+    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+    expect(
+      harness.bridge.commitManagedConversationBinding,
+    ).not.toHaveBeenCalled();
+  });
+
   it('rejects cwd-bound work when the live entry moved away from its pin', async () => {
     mockDurableStandalone();
     const harness = createHarness();
@@ -1018,8 +1218,33 @@ describe('StandaloneSessionService', () => {
     expect(SessionService.prototype.removeSession).toHaveBeenCalledWith(
       sessionId,
     );
+    expect(harness.bridge.markSessionCatalogChanged).toHaveBeenCalledOnce();
     expect(harness.quarantineRuntime).not.toHaveBeenCalled();
     expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('quarantines when rollback cannot prove the fresh transcript is absent', async () => {
+    vi.spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(sessionId);
+    vi.spyOn(SessionService.prototype, 'removeSession').mockResolvedValue(
+      false,
+    );
+    const harness = createHarness();
+    harness.bridge.spawnStandaloneSession.mockResolvedValueOnce({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      attached: false,
+      sourceType: 'standalone',
+      sourcePersisted: false,
+    });
+
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toMatchObject({ code: 'standalone_creation_outcome_unknown' });
+    expect(harness.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+    expect(harness.quarantineRuntime).toHaveBeenCalledWith(harness.runtime);
+    expect(harness.reservation.release).not.toHaveBeenCalled();
   });
 
   it('quarantines when binding commit remains unknown after one retry', async () => {

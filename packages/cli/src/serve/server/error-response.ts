@@ -246,6 +246,7 @@ export function sendBridgeError(
               err.code === 'standalone_creation_rolled_back'
             ? 500
             : 409;
+    if (status === 500) recordExpectedBridgeError(err, ctx, daemonLog);
     if (err.retryable) res.set('Retry-After', '5');
     res.status(status).json({
       error: err.message,

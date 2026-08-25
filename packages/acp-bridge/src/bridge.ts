@@ -10161,6 +10161,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           for (const warning of warnings) {
             if (!pending.warnings.includes(warning)) {
               pending.warnings.push(warning);
+              writeStderrLine(
+                `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
+                  warning,
+                )}`,
+              );
             }
           }
         }

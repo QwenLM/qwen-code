@@ -104,6 +104,10 @@ function makeFakeBridge(opts?: {
     };
   }> = [];
   const parentObserverClosures: string[] = [];
+  const subscriptions: Array<{
+    sessionId: string;
+    lastEventId?: number;
+  }> = [];
   let subscribeCalls = 0;
   let capturedPromptId = '';
   let n = 0;
@@ -237,8 +241,15 @@ function makeFakeBridge(opts?: {
       if (accepted) notifications.push({ sessionId, notification });
       return { sessionId, accepted };
     },
-    async *subscribeEvents(sessionId: string, o?: { signal?: AbortSignal }) {
+    async *subscribeEvents(
+      sessionId: string,
+      o?: { signal?: AbortSignal; lastEventId?: number },
+    ) {
       subscribeCalls++;
+      subscriptions.push({
+        sessionId,
+        ...(o?.lastEventId !== undefined ? { lastEventId: o.lastEventId } : {}),
+      });
       if (sessionId === opts?.reapedParentSessionId) {
         const delivered = notifications.find(
           (item) => item.sessionId === sessionId,
@@ -294,6 +305,7 @@ function makeFakeBridge(opts?: {
     operations,
     notifications,
     parentObserverClosures,
+    subscriptions,
     subscribeCalls: () => subscribeCalls,
   };
 }
@@ -378,7 +390,7 @@ describe('sub-session launcher', () => {
         workingDirectory: { state: 'ready' as const },
         initialPrompt: {
           promptId: request.promptId,
-          lastEventId: 0,
+          lastEventId: 37,
           turn: new Promise<never>(() => {}),
         },
         prompt,
@@ -419,6 +431,123 @@ describe('sub-session launcher', () => {
     expect(fake.spawns).toEqual([]);
     expect(fake.relocations).toEqual([]);
     expect(fake.prompts).toEqual([]);
+    expect(fake.subscriptions).toEqual([
+      { sessionId: result.sessionId, lastEventId: 37 },
+    ]);
+  });
+
+  it('returns a standalone first turn correlated to the managed prompt', async () => {
+    let managedPromptId = '';
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+      events: () => [chunk('managed result'), turnComplete(managedPromptId)],
+    });
+    const createChildWithInitialPrompt = vi.fn(
+      async (request: {
+        sessionId: string;
+        parentSessionId: string;
+        promptId: string;
+      }) => {
+        managedPromptId = request.promptId;
+        return {
+          session: {
+            sessionId: request.sessionId,
+            workspaceCwd: WS,
+            attached: false,
+            sourceType: 'standalone',
+            sourcePersisted: true,
+            parentSessionPersisted: true,
+          },
+          projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+          workingDirectory: { state: 'ready' as const },
+          initialPrompt: {
+            promptId: request.promptId,
+            lastEventId: 19,
+            turn: Promise.resolve({ stopReason: 'end_turn' as const }),
+          },
+        };
+      },
+    );
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt,
+        resume: vi.fn(),
+        continueSession: vi.fn(),
+      }),
+      boundWorkspace: WS,
+    });
+
+    const result = await launcher.launch({
+      prompt: 'standalone first turn',
+      completion: 'first-turn',
+      callerSessionId: 'caller-standalone',
+    });
+
+    expect(result).toMatchObject({
+      result: 'managed result',
+      stopReason: 'end_turn',
+      parentSessionPersisted: true,
+    });
+    expect(fake.subscriptions).toEqual([
+      { sessionId: result.sessionId, lastEventId: 19 },
+    ]);
+    expect(fake.spawns).toEqual([]);
+    expect(fake.prompts).toEqual([]);
+  });
+
+  it('leaves standalone child cleanup to the managed service after dispatch failure', async () => {
+    const fake = makeFakeBridge({
+      callerSourceTypes: { 'caller-standalone': 'standalone' },
+      blockAfterEvents: true,
+    });
+    const discarded: string[] = [];
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      getStandaloneSessionService: () => ({
+        createChildWithInitialPrompt: async (request: {
+          sessionId: string;
+          parentSessionId: string;
+          promptId: string;
+        }) => ({
+          session: {
+            sessionId: request.sessionId,
+            workspaceCwd: WS,
+            attached: false,
+            sourceType: 'standalone',
+            sourcePersisted: true,
+          },
+          projectlessOutputDirectory: `${WS}/conversation-${request.sessionId}`,
+          workingDirectory: { state: 'ready' as const },
+          initialPrompt: {
+            promptId: request.promptId,
+            lastEventId: 0,
+            turn: Promise.reject(new Error('managed dispatch failed')),
+          },
+        }),
+        resume: vi.fn(),
+        continueSession: vi.fn(),
+      }),
+      boundWorkspace: WS,
+      isolatedWorkspace: {
+        materializeDirectory: async (childSessionId) =>
+          `${WS}/conversation-${childSessionId}`,
+        discardEmptyDirectory: async (childSessionId) => {
+          discarded.push(childSessionId);
+        },
+      },
+    });
+
+    await expect(
+      launcher.launch({
+        prompt: 'standalone failing turn',
+        completion: 'first-turn',
+        callerSessionId: 'caller-standalone',
+      }),
+    ).rejects.toThrow('managed dispatch failed');
+    expect(fake.kills).toEqual([]);
+    expect(fake.closes).toEqual([]);
+    expect(discarded).toEqual([]);
   });
 
   it('observes recovered standalone completion with the canonical parent id', async () => {

@@ -1163,25 +1163,6 @@ export class BridgeClient implements Client {
     }
   }
 
-  async ingestSessionUpdateArtifacts(
-    entry: BridgeClientSessionEntry,
-    updates: SessionUpdate[],
-  ): Promise<void> {
-    for (const update of updates) {
-      const prepared = this.prepareSessionUpdateFrames(
-        { sessionId: entry.sessionId, update },
-        entry,
-      );
-      if (prepared.artifacts.length === 0) continue;
-      await this.upsertAndPublishArtifacts(
-        entry,
-        prepared.artifacts,
-        { trustedPublisher: prepared.trustedPublisher },
-        prepared.turn,
-      );
-    }
-  }
-
   async ingestSessionUpdateArtifactsReady(
     entry: BridgeClientSessionEntry,
     updates: SessionUpdate[],
@@ -1192,27 +1173,30 @@ export class BridgeClient implements Client {
         entry,
       );
       if (prepared.artifacts.length === 0) continue;
-      await this.upsertAndPublishArtifactsReady(
+      const ingested = await this.upsertAndPublishArtifactsReady(
         entry,
         prepared.artifacts,
         { trustedPublisher: prepared.trustedPublisher },
         prepared.turn,
       );
+      if (!ingested) throw new Error('Artifact ingestion failed.');
     }
   }
 
   async drainDeferredSessionArtifacts(
     entry: BridgeClientSessionEntry,
   ): Promise<void> {
-    const batches = entry.deferredArtifactBatches.splice(0);
-    entry.deferredArtifactInputCount = 0;
-    for (const batch of batches) {
-      await this.upsertAndPublishArtifactsReady(
+    while (entry.deferredArtifactBatches.length > 0) {
+      const batch = entry.deferredArtifactBatches[0];
+      const ingested = await this.upsertAndPublishArtifactsReady(
         entry,
         batch.artifacts,
         batch.options,
         batch.turn,
       );
+      if (!ingested) throw new Error('Deferred artifact ingestion failed.');
+      entry.deferredArtifactBatches.shift();
+      entry.deferredArtifactInputCount -= batch.artifacts.length;
     }
   }
 
@@ -2625,7 +2609,7 @@ export class BridgeClient implements Client {
     artifacts: SessionArtifactInput[],
     options?: Parameters<SessionArtifactStore['upsertMany']>[1],
     turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'> = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       const result = await entry.artifacts.upsertMany(artifacts, options);
       for (const warning of result.warnings ?? []) {
@@ -2636,12 +2620,14 @@ export class BridgeClient implements Client {
         );
       }
       this.publishArtifactChanges(entry, result.changes, turn);
+      return true;
     } catch (error) {
       writeStderrLine(
         `[artifacts] session=${entry.sessionId} action=dropped reason=${JSON.stringify(
           artifactIngestionErrorReason(error),
         )}`,
       );
+      return false;
     }
   }
 

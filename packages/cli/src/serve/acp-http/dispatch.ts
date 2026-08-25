@@ -1912,6 +1912,16 @@ export class AcpDispatcher {
                 ) {
                   throw new SessionNotFoundError(sessionId);
                 }
+                const {
+                  sourceType: _reservedSourceType,
+                  sourceId: _reservedSourceId,
+                  ...metadataWithoutSource
+                } = metadata;
+                const restoreMetadata =
+                  this.liveSessionIsolation === undefined &&
+                  isReservedStandaloneSessionSource(metadata)
+                    ? metadataWithoutSource
+                    : metadata;
                 // The private directory belongs to the live entry, which the
                 // bridge registers under the canonical id, so every other
                 // materialize/discard call site keys it the same way. Hashing
@@ -1930,13 +1940,13 @@ export class AcpDispatcher {
                         workspaceCwd: cwd,
                         clientId: conn.clientId,
                         historyReplay: 'response',
-                        ...metadata,
+                        ...restoreMetadata,
                       })
                     : await sessionRuntime.bridge.resumeSession({
                         sessionId,
                         workspaceCwd: cwd,
                         clientId: conn.clientId,
-                        ...metadata,
+                        ...restoreMetadata,
                       });
                 // Live creation and cold restore reserve this relocation before
                 // returning an id that can be prompted. An active entry has

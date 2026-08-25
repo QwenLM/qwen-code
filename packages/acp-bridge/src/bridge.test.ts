@@ -2056,14 +2056,15 @@ describe('createAcpSessionBridge', () => {
         _snapshot,
         options,
       ) {
+        const workspaceCwd = (this as unknown as { workspaceCwd: string })
+          .workspaceCwd;
         artifactRestores.push({
-          workspaceCwd: (this as unknown as { workspaceCwd: string })
-            .workspaceCwd,
+          workspaceCwd,
           ...(options?.workspaceAccess
             ? { workspaceAccess: options.workspaceAccess }
             : {}),
         });
-        return [];
+        return workspaceCwd === target ? ['late binding warning'] : [];
       });
     const originalUpsertMany = SessionArtifactStore.prototype.upsertMany;
     const artifactUpsertWorkspaceRoots: string[] = [];
@@ -2076,6 +2077,9 @@ describe('createAcpSessionBridge', () => {
         return originalUpsertMany.apply(this, args);
       });
     const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     try {
       await bridge.restoreStandaloneSession('resume', {
         sessionId,
@@ -2111,6 +2115,11 @@ describe('createAcpSessionBridge', () => {
         { workspaceCwd: WS_A, workspaceAccess: 'metadata-only' },
         { workspaceCwd: target, workspaceAccess: 'metadata-only' },
       ]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `session=${sessionId} action=restore_warning warning="late binding warning"`,
+        ),
+      );
       await handle.agentConnection.sessionUpdate({
         sessionId,
         update: {
@@ -2168,8 +2177,54 @@ describe('createAcpSessionBridge', () => {
     } finally {
       artifactRestoreSpy.mockRestore();
       artifactUpsertSpy.mockRestore();
+      stderr.mockRestore();
       await bridge.shutdown();
     }
+  });
+
+  it('rejects a standalone managed relocation when the child reports another cwd', async () => {
+    const sessionId = '33333333-3333-4333-8333-333333333333';
+    const target = path.join(WS_A, 'conversation-standalone');
+    const expectation = {
+      canonicalSessionId: sessionId,
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-standalone',
+        canonicalPath: target,
+        device: 1,
+        inode: 3,
+      },
+    };
+    const handle = makeChannel({
+      resumeSessionImpl: () => ({}),
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionCd
+          ? {
+              previousCwd: WS_A,
+              newCwd: path.join(WS_A, 'unexpected'),
+              warnings: [],
+            }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    await bridge.restoreStandaloneSession('resume', {
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+
+    await expect(
+      bridge.changeSessionCwd(sessionId, {
+        path: target,
+        allowedRoots: [WS_A],
+        managedRelocation: 'live-conversation',
+        conversationDirectoryExpectation: expectation,
+      }),
+    ).rejects.toMatchObject({
+      data: { errorKind: 'working_directory_missing' },
+    });
+    expect(bridge.getSessionCurrentCwd(sessionId)).toBe(WS_A);
+
+    await bridge.shutdown();
   });
 
   it('rechecks a standalone binding when a queued prompt reaches dispatch', async () => {

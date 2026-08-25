@@ -21,6 +21,7 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSource';
 import {
+  readSessionPrs,
   SessionIdCaseConflictError,
   type ApprovalMode,
   type SessionArchiveState,
@@ -300,7 +301,7 @@ function mergeLiveStandaloneSummary(
   persisted: StandaloneSessionSummary,
   live: BridgeSessionSummary,
 ): StandaloneSessionSummary {
-  return {
+  const merged: StandaloneSessionSummary = {
     ...persisted,
     ...(live.displayName !== undefined
       ? { displayName: live.displayName }
@@ -326,6 +327,17 @@ function mergeLiveStandaloneSummary(
       : {}),
     isArchived: false,
   };
+  if (persisted.prs || live.prs) {
+    const livePrs = live.prs ?? [];
+    merged.prs = [
+      ...(persisted.prs ?? []).filter(
+        (persistedPr) =>
+          !livePrs.some((livePr) => livePr.number === persistedPr.number),
+      ),
+      ...livePrs,
+    ];
+  }
+  return merged;
 }
 
 function isSameDirectoryIdentity(
@@ -803,7 +815,12 @@ export class StandaloneSessionService {
                 prepared.identity.canonicalPath,
               );
             if (canReuse) {
-              await this.assertPinnedDirectory(sessionId, prepared.identity);
+              try {
+                await this.assertPinnedDirectory(sessionId, prepared.identity);
+              } catch (error) {
+                await this.discardRestoreResult(runtime, sessionId, restored);
+                throw error;
+              }
             } else {
               if (restored.hasActivePrompt) {
                 await this.discardRestoreResult(runtime, sessionId, restored);
@@ -855,7 +872,6 @@ export class StandaloneSessionService {
     } catch (error) {
       if (error instanceof TerminalQuarantineSignal) {
         await error.completion.catch(() => undefined);
-        this.options.assertRuntimeCurrent(runtime);
         throw serviceError('standalone_session_conflict', sessionId);
       }
       if (error instanceof SessionIdCaseConflictError) {
@@ -1123,14 +1139,16 @@ export class StandaloneSessionService {
         sessionId,
         expectation,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof TerminalQuarantineSignal) throw error;
       try {
         this.assertRuntimeCurrentOrQuarantine(runtime);
         await runtime.bridge.commitManagedConversationBinding(
           sessionId,
           expectation,
         );
-      } catch {
+      } catch (retryError) {
+        if (retryError instanceof TerminalQuarantineSignal) throw retryError;
         this.beginTerminalQuarantine(runtime);
       }
     }
@@ -1150,14 +1168,16 @@ export class StandaloneSessionService {
         sessionId,
         expectation,
       );
-    } catch {
+    } catch (error) {
+      if (error instanceof TerminalQuarantineSignal) throw error;
       try {
         this.assertRuntimeCurrentOrQuarantine(runtime);
         await runtime.bridge.releaseManagedConversationBinding(
           sessionId,
           expectation,
         );
-      } catch {
+      } catch (retryError) {
+        if (retryError instanceof TerminalQuarantineSignal) throw retryError;
         this.directoryStates.set(sessionId, { pinned });
         this.beginTerminalQuarantine(runtime);
       }
@@ -1336,7 +1356,16 @@ export class StandaloneSessionService {
         return undefined;
       }
       const item = await service.getSessionListItem(storageSessionId, location);
-      return item ? { item, location, source } : undefined;
+      if (!item) return undefined;
+      let prs: Awaited<ReturnType<typeof readSessionPrs>>;
+      try {
+        prs = await readSessionPrs(
+          service.getPrSessionPathForArchiveState(storageSessionId, location),
+        );
+      } catch {
+        prs = null;
+      }
+      return { item, location, source, prs };
     });
     if (!durable) {
       throw serviceError('standalone_session_not_found', sessionId);
@@ -1344,13 +1373,19 @@ export class StandaloneSessionService {
     if (durable.item.sessionId.toLowerCase() !== sessionId) {
       throw serviceError('standalone_session_conflict', sessionId);
     }
-    return toStandaloneSummary(
+    const summary = toStandaloneSummary(
       durable.item,
       runtime.workspaceCwd,
       sessionId,
       durable.location === 'archived',
       durable.source,
     );
+    return durable.prs
+      ? {
+          ...summary,
+          prs: durable.prs.map(({ number, url }) => ({ number, url })),
+        }
+      : summary;
   }
 
   private async assertDurableStandaloneSession(

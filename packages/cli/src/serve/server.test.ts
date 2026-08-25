@@ -13064,6 +13064,8 @@ describe('createServeApp', () => {
           const calls =
             action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
           expect(calls).toHaveLength(1);
+          expect(calls[0]).not.toHaveProperty('sourceType');
+          expect(calls[0]).not.toHaveProperty('sourceId');
         } finally {
           readCreationMetadata.mockRestore();
         }
@@ -13104,6 +13106,8 @@ describe('createServeApp', () => {
           const calls =
             action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
           expect(calls).toHaveLength(1);
+          expect(calls[0]).not.toHaveProperty('sourceType');
+          expect(calls[0]).not.toHaveProperty('sourceId');
         } finally {
           findSessionId.mockRestore();
           readCreationMetadata.mockRestore();

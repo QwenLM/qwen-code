@@ -9239,14 +9239,18 @@ export class Session implements SessionContext {
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
+  buildAvailableCommandsSnapshot(): Promise<AvailableCommandsSnapshot> {
+    return buildAvailableCommandsSnapshot(
+      this.config,
+      undefined,
+      this.settings,
+      this.slashCommandPolicy,
+    );
+  }
+
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
     const { availableCommands, availableSkills, availableSkillDetails } =
-      await buildAvailableCommandsSnapshot(
-        this.config,
-        undefined,
-        this.settings,
-        this.slashCommandPolicy,
-      );
+      await this.buildAvailableCommandsSnapshot();
     const update: SessionUpdate = {
       sessionUpdate: 'available_commands_update',
       availableCommands,

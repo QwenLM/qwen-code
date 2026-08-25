@@ -17,6 +17,7 @@ import {
 import { sendBridgeError } from './error-response.js';
 import { DaemonDrainingError } from './session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import type { DaemonLogger } from '../daemon-logger.js';
 
 function responseMock(): {
   response: Response;
@@ -100,6 +101,31 @@ describe('sendBridgeError session writer errors', () => {
       expect(set).toHaveBeenCalledTimes(retryable ? 1 : 0);
     },
   );
+
+  it('records 500-class standalone failures with request context', () => {
+    const { response } = responseMock();
+    const daemonLog = {
+      warn: vi.fn(),
+    } as unknown as DaemonLogger;
+    const error = new StandaloneSessionServiceError(
+      'standalone_creation_outcome_unknown',
+      'session-1',
+      'standalone outcome unknown',
+    );
+
+    sendBridgeError(
+      response,
+      error,
+      { route: 'POST /standalone/session', sessionId: 'session-1' },
+      daemonLog,
+    );
+
+    expect(daemonLog.warn).toHaveBeenCalledWith('standalone outcome unknown', {
+      route: 'POST /standalone/session',
+      sessionId: 'session-1',
+      errorType: 'StandaloneSessionServiceError',
+    });
+  });
 
   it('maps case-only persisted conflicts without active/archive guidance', () => {
     const { response, status, json } = responseMock();

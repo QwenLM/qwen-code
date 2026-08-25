@@ -5019,6 +5019,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             ? bridge.loadRequests.length
             : bridge.resumeRequests.length,
         ).toBe((method === 'session/load' ? loadCount : resumeCount) + 1);
+        const restoreRequest =
+          method === 'session/load'
+            ? bridge.loadRequests.at(-1)
+            : bridge.resumeRequests.at(-1);
+        expect(restoreRequest).not.toHaveProperty('sourceType');
+        expect(restoreRequest).not.toHaveProperty('sourceId');
       });
     },
   );
@@ -5077,6 +5083,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
               ? bridge.loadRequests.length
               : bridge.resumeRequests.length,
           ).toBe((method === 'session/load' ? loadCount : resumeCount) + 1);
+          const restoreRequest =
+            method === 'session/load'
+              ? bridge.loadRequests.at(-1)
+              : bridge.resumeRequests.at(-1);
+          expect(restoreRequest).not.toHaveProperty('sourceType');
+          expect(restoreRequest).not.toHaveProperty('sourceId');
         } finally {
           readCreationMetadata.mockRestore();
           findSessionId.mockRestore();

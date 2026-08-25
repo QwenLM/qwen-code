@@ -4840,9 +4840,16 @@ describe('SessionArtifactStore', () => {
     const realpath = vi.spyOn(fs, 'realpath');
     const stat = vi.spyOn(fs, 'stat');
     const lstat = vi.spyOn(fs, 'lstat');
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
     const store = new SessionArtifactStore({
       sessionId,
       workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (snapshot) => {
+          snapshots.push(snapshot);
+        },
+      },
     });
 
     try {
@@ -4880,6 +4887,19 @@ describe('SessionArtifactStore', () => {
       expect(realpath).not.toHaveBeenCalled();
       expect(stat).not.toHaveBeenCalled();
       expect(lstat).not.toHaveBeenCalled();
+      await expect(store.recordSnapshot()).resolves.toEqual([]);
+      expect(snapshots).toMatchObject([
+        {
+          artifacts: [
+            {
+              id,
+              status: 'available',
+              sizeBytes: 17,
+              workspacePath,
+            },
+          ],
+        },
+      ]);
     } finally {
       realpath.mockRestore();
       stat.mockRestore();
