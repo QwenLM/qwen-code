@@ -10842,6 +10842,12 @@ export function App({
           handleClearScreen();
           return;
         }
+        if (e.key === 'o') {
+          // The compact toggle is gone; keep Ctrl+O suppressed everywhere so
+          // the key never falls through to the browser's Open File dialog.
+          e.preventDefault();
+          return;
+        }
         if (e.key === 'y') {
           e.preventDefault();
           handleRetry();

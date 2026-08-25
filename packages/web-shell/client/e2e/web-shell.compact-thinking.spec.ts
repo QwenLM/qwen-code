@@ -4,6 +4,8 @@ import {
   createWebShellDaemonScenario,
   installMockDaemon,
   replayCompleteEvent,
+  turnCompleteEvent,
+  userTextEvent,
   type DaemonEvent,
   type MockDaemonController,
   type WebShellDaemonScenario,
@@ -50,6 +52,58 @@ test('compact view keeps the thinking block visible while streaming', async ({
   await daemon.sse.split(assistantTextEvent('the weather is rainy'));
   await expect(list).not.toContainText('Thinking', { timeout: 5000 });
   await expect(list).toContainText('Processing');
+});
+
+test('compact view merges an agent group and a following tool into one summary row', async ({
+  page,
+}, testInfo) => {
+  // The background agent keeps its own tool group, so the agent group and the
+  // grep group only collapse into one aggregate summary row when the
+  // app-level CompactModeContext stays on — flipping that provider to false
+  // renders two standalone groups and this assertion fails.
+  const toolCallEvent = (
+    id: number,
+    toolCallId: string,
+    toolName: string,
+    rawInput: Record<string, unknown>,
+  ): DaemonEvent => ({
+    id,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'tool_call',
+        toolCallId,
+        toolName,
+        title: toolName,
+        kind: 'other',
+        status: 'completed',
+        rawInput,
+      },
+    },
+  });
+
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      userTextEvent('Audit the schema and grep the logs.', { id: 1 }),
+      toolCallEvent(2, 'call-agent-audit', 'Agent', {
+        description: 'Audit the schema drift between services',
+        run_in_background: true,
+      }),
+      toolCallEvent(3, 'call-grep-logs', 'grep_search', {
+        pattern: 'compact',
+      }),
+      turnCompleteEvent('prompt-compact-merge', { id: 4 }),
+    ],
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+
+  const list = page.locator('[data-web-shell-message-list]');
+  await expect(list).toContainText('Ran 1 agent · Ran 1 tool', {
+    timeout: 5000,
+  });
 });
 
 async function installScenario(

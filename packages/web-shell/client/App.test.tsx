@@ -5263,6 +5263,27 @@ describe('App live transcript boundary', () => {
   });
 });
 
+describe('App global shortcuts', () => {
+  it('keeps Ctrl+O suppressed after the compact toggle retirement', async () => {
+    renderApp();
+
+    const event = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      key: 'o',
+    });
+    await act(async () => {
+      window.dispatchEvent(event);
+      await Promise.resolve();
+    });
+
+    // The toggle is gone, but the key must stay inert: without the global
+    // preventDefault the browser's Open File dialog fires on Ctrl+O.
+    expect(event.defaultPrevented).toBe(true);
+  });
+});
+
 describe('App plan todos', () => {
   it('gates the exit-plan workflow on the experimental setting', async () => {
     const approvedEntries = [
