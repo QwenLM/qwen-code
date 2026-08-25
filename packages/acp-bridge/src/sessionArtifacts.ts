@@ -320,7 +320,8 @@ export class SessionArtifactStore {
       }
       if (isVanishedAutoRecordedWorkspaceArtifact(artifact)) {
         await this.forgetVanishedAutoRecordedArtifacts();
-        return undefined;
+        const kept = this.artifacts.get(artifactId);
+        return kept ? toPublicArtifact(kept) : undefined;
       }
       return toPublicArtifact(artifact);
     });
@@ -1736,6 +1737,17 @@ export class SessionArtifactStore {
       } else if (status.sizeBytes !== undefined) {
         artifact.sizeBytes = status.sizeBytes;
       }
+      if (artifact.status === 'available' && !status.escaped) {
+        artifact.metadata = withWorkspaceContentHashMetadata(
+          artifact.metadata,
+          {
+            status: 'available',
+            sha256: status.sha256,
+            mtimeMs: status.mtimeMs,
+            sizeBytes: status.sizeBytes,
+          },
+        );
+      }
       artifact.lastStatAt = options.now ?? Date.now();
       if (
         artifact.status !== previousStatus ||
@@ -1793,7 +1805,14 @@ export class SessionArtifactStore {
     }
     try {
       await this.persistChanges(changes, needsDurableTombstone);
-    } catch {
+    } catch (error) {
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} action=vanish_forget_failed artifactIds=${JSON.stringify(
+          vanished.map((artifact) => artifact.id),
+        )} reason=${JSON.stringify(
+          error instanceof Error ? error.message : String(error),
+        )}`,
+      );
       this.restoreState(before);
     }
   }
@@ -2296,7 +2315,17 @@ function needsWorkspaceStatusRefresh(
 ): boolean {
   return (
     shouldRefreshWorkspaceStatus(artifact, now) ||
-    (artifact.toolName === 'write_file' && artifact.status === 'available')
+    shouldRecheckWriteFilePresence(artifact)
+  );
+}
+
+function shouldRecheckWriteFilePresence(artifact: StoredArtifact): boolean {
+  return (
+    artifact.toolName === 'write_file' &&
+    (artifact.status === 'available' ||
+      (artifact.status === 'missing' &&
+        artifact.missingFromStatError !== true &&
+        artifact.hideWorkspacePath !== true))
   );
 }
 
