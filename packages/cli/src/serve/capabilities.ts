@@ -118,6 +118,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
+  session_storage_conflict_repair: { since: 'v1' },
   session_metadata: { since: 'v1' },
   session_organization: { since: 'v1' },
   session_export: { since: 'v1' },

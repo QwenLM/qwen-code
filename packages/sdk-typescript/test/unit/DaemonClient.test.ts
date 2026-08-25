@@ -583,6 +583,30 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('reads raw bytes with a relative base URL', async () => {
+      const payload = {
+        kind: 'file_bytes' as const,
+        path: 'reports/report.pdf',
+        offset: 0,
+        sizeBytes: 2,
+        returnedBytes: 2,
+        truncated: false,
+        contentBase64: Buffer.from([1, 2]).toString('base64'),
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: '/daemon', fetch });
+
+      await expect(
+        client.readWorkspaceFileBytes('reports/report.pdf', {
+          offset: 0,
+          maxBytes: 2,
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        '/daemon/file/bytes?path=reports%2Freport.pdf&offset=0&maxBytes=2',
+      );
+    });
+
     it('writes and edits files with JSON bodies and client identity', async () => {
       const writeResult = {
         kind: 'file_write',
@@ -3630,6 +3654,7 @@ describe('DaemonClient', () => {
       const result = {
         archived: ['s-1'],
         alreadyArchived: ['s-2'],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       };
@@ -3648,6 +3673,7 @@ describe('DaemonClient', () => {
       const result = {
         unarchived: ['s-1'],
         alreadyActive: ['s-2'],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       };
@@ -3662,6 +3688,31 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         sessionIds: ['s-1', 's-2'],
+      });
+    });
+
+    it('sends explicit conflict repair without changing the client-id overload', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          archived: ['s-1'],
+          alreadyArchived: [],
+          resolvedConflicts: ['s-1'],
+          notFound: [],
+          errors: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.archiveSessionsData(
+        ['s-1'],
+        { resolveConflicts: true },
+        'client-1',
+      );
+
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1'],
+        resolveConflicts: true,
       });
     });
   });
@@ -7615,12 +7666,14 @@ describe('DaemonClient', () => {
         '/sessions/archive': {
           archived: ['s-1'],
           alreadyArchived: [],
+          resolvedConflicts: [],
           notFound: [],
           errors: [],
         },
         '/sessions/unarchive': {
           unarchived: ['s-1'],
           alreadyActive: [],
+          resolvedConflicts: [],
           notFound: [],
           errors: [],
         },
@@ -7637,7 +7690,11 @@ describe('DaemonClient', () => {
         workspace.deleteSessionsData(['s-1'], 'client-1'),
       ).resolves.toEqual(replies['/sessions/delete']);
       await expect(
-        workspace.archiveSessionsData(['s-1'], 'client-2'),
+        workspace.archiveSessionsData(
+          ['s-1'],
+          { resolveConflicts: true },
+          'client-2',
+        ),
       ).resolves.toEqual(replies['/sessions/archive']);
       await expect(
         workspace.unarchiveSessionsData(['s-1'], 'client-3'),
@@ -7653,9 +7710,11 @@ describe('DaemonClient', () => {
         'client-2',
         'client-3',
       ]);
-      for (const call of calls) {
-        expect(JSON.parse(call.body!)).toEqual({ sessionIds: ['s-1'] });
-      }
+      expect(calls.map((call) => JSON.parse(call.body!))).toEqual([
+        { sessionIds: ['s-1'] },
+        { sessionIds: ['s-1'], resolveConflicts: true },
+        { sessionIds: ['s-1'] },
+      ]);
     });
 
     it('workspace metadata update uses encoded direct REST and client identity', async () => {

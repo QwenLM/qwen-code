@@ -36,7 +36,7 @@ vi.mock('../../../config/settings.js', async (importOriginal) => {
   return { ...actual, loadSettings: loadSettingsMock };
 });
 import { operatorReviewSettings } from './review-settings.js';
-import { getDialogSettingKeys } from '../../../utils/settingsUtils.js';
+import { getDialogSettingKeys } from '../../../config/settingsUtils.js';
 
 function setReview(review: unknown): void {
   loadSettingsMock.mockReturnValue({ merged: { review } });
@@ -140,6 +140,7 @@ describe('operatorReviewSettings', () => {
       comment: false,
       effort: undefined,
       reverseAuditRounds: undefined,
+      approachRounds: undefined,
     });
     // Every default is the conservative side: a review that loses its operator
     // policy loses it toward doing more work and writing nothing public.
@@ -167,8 +168,28 @@ describe('operatorReviewSettings', () => {
       comment: false,
       effort: undefined,
       reverseAuditRounds: undefined,
+      approachRounds: undefined,
     });
   });
+
+  // Same re-validation as the ceiling above: a settings file is hand-edited,
+  // and a threshold that is not a positive integer must read as absent so the
+  // built-in default applies rather than a nonsense number silencing or
+  // spamming the signal.
+  it('passes a real approach-round threshold through as a number', () => {
+    for (const rounds of [1, 5, 8, 40]) {
+      setReview({ approachRounds: rounds });
+      expect(operatorReviewSettings().approachRounds).toBe(rounds);
+    }
+  });
+
+  it.each([0, -1, 1.5, '5', NaN, null, true])(
+    'reads a non-positive-integer approach threshold as absent (%p)',
+    (bad) => {
+      setReview({ approachRounds: bad });
+      expect(operatorReviewSettings().approachRounds).toBeUndefined();
+    },
+  );
 
   it('passes a real reverse-audit ceiling through as a number', () => {
     for (const rounds of [3, 4, 9, 100]) {
@@ -205,7 +226,7 @@ describe('operatorReviewSettings', () => {
 });
 
 describe('review settings in the /settings dialog', () => {
-  it('exposes all four settings for toggling', () => {
+  it('exposes every review setting for toggling', () => {
     // Maintainer A/B verification of this PR caught the description claiming
     // dialog membership while the schema shipped showInDialog: false. Pin the
     // membership so the claim and the schema cannot drift again.
@@ -215,5 +236,6 @@ describe('review settings in the /settings dialog', () => {
     expect(dialogKeys).toContain('review.comment');
     expect(dialogKeys).toContain('review.severityFloor');
     expect(dialogKeys).toContain('review.reverseAuditRounds');
+    expect(dialogKeys).toContain('review.approachRounds');
   });
 });

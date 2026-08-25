@@ -580,6 +580,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_status',
   'session_close',
   'session_archive',
+  'session_storage_conflict_repair',
   'session_metadata',
   'session_organization',
   'session_export',
@@ -3863,6 +3864,22 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', host)
         .set('Accept', 'text/html');
+      expect(api.status).toBe(401);
+    });
+
+    it('serves /mcp-app-sandbox pre-auth while the API stays token-gated', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const sandbox = await request(app)
+        .get('/mcp-app-sandbox')
+        .set('Host', host);
+      expect(sandbox.status).toBe(200);
+      expect(sandbox.text).toContain('ui/notifications/sandbox-proxy-ready');
+      expect(sandbox.headers['content-security-policy']).toContain(
+        "form-action 'none'",
+      );
+      const api = await request(app).get('/capabilities').set('Host', host);
       expect(api.status).toBe(401);
     });
   });
@@ -25160,6 +25177,7 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({
         archived: [sid],
         alreadyArchived: [],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       });
@@ -25170,6 +25188,51 @@ describe('createServeApp', () => {
       await expect(
         fsp.access(sessionFilePath(sid, 'archived')),
       ).resolves.toBeUndefined();
+    });
+
+    it('requires an explicit boolean to repair active/archive conflicts', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeea';
+      await writeSession(sid);
+      await writeSession(sid, 'archived');
+      const app = createArchiveApp();
+
+      const invalid = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: 'yes' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_request');
+
+      const archived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: true });
+      expect(archived.status).toBe(200);
+      expect(archived.body).toMatchObject({
+        archived: [sid],
+        resolvedConflicts: [sid],
+        errors: [],
+      });
+      await expect(fsp.access(sessionFilePath(sid))).rejects.toThrow();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).resolves.toBeUndefined();
+
+      await writeSession(sid);
+      const unarchived = await request(app)
+        .post('/sessions/unarchive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: true });
+      expect(unarchived.status).toBe(200);
+      expect(unarchived.body).toMatchObject({
+        unarchived: [sid],
+        resolvedConflicts: [sid],
+        errors: [],
+      });
+      await expect(fsp.access(sessionFilePath(sid))).resolves.toBeUndefined();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).rejects.toThrow();
     });
 
     it('invalidates active and archived catalogs across archive, unarchive, and delete', async () => {
@@ -25438,6 +25501,7 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({
         unarchived: [sid],
         alreadyActive: [],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       });
@@ -34125,6 +34189,20 @@ describe('Live conversation runtime lifecycle', () => {
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
+    const getMaintainableLocation = vi
+      .spyOn(SessionService.prototype, 'getMaintainableSessionLocation')
+      .mockImplementation(async function (candidateId) {
+        if (candidateId === 'ordinary-session') {
+          return this.getProjectRoot() === '/work/live-primary'
+            ? 'active'
+            : undefined;
+        }
+        return this.getProjectRoot() === setup.root.canonicalRoot &&
+          candidateId !== 'not-live' &&
+          candidateId !== 'missing-live-session'
+          ? 'active'
+          : undefined;
+      });
     const sessionExists = vi
       .spyOn(SessionService.prototype, 'sessionExistsInAnyState')
       .mockImplementation(async function (candidateId) {
@@ -34235,6 +34313,7 @@ describe('Live conversation runtime lifecycle', () => {
       expect(updateOrganization).toHaveBeenCalledOnce();
     } finally {
       getLocation.mockRestore();
+      getMaintainableLocation.mockRestore();
       sessionExists.mockRestore();
       readMetadata.mockRestore();
       readMetadataIfReadable.mockRestore();
