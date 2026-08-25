@@ -20,7 +20,7 @@ This deliberately avoids splitting the shared context, changing public state typ
 
 ## Deferred work
 
-After measuring the two changes together, evaluate whether streaming content can safely move from a 60 ms to roughly 33 ms flush interval. Accept that follow-up only if paired PTY runs show bounded CPU, output, and event-loop latency and the stream buffering/cancellation tests remain correct.
+After measuring the two changes together, evaluate whether streaming content can safely move from a 60 ms to roughly 33 ms flush interval. Accept that follow-up only if a paired PTY re-run against the baseline recorded in Results shows bounded CPU, output, and event-loop latency and the stream buffering/cancellation tests remain correct.
 
 ## Verification
 
@@ -30,6 +30,29 @@ After measuring the two changes together, evaluate whether streaming content can
 - Repeat identical hook-off and hook-on PTY workloads for typing, streaming, PageUp/PageDown, wheel scrolling, and typing after a long response.
 
 ## Results
+
+### Measurement setup
+
+- Variants: the pre-change base build (control) versus this PR built and bundled from commit `712ea6d50a` (candidate), both from the same lockfile.
+- Host: macOS, idle system. Paired runs were collected serially. Hook-off runs were the authoritative source for CPU, stdout volume, event-loop lag, and input latency; React instrumentation perturbs timing and ran separately.
+- Driver: the bundled CLI in a deterministic 100×32 PTY against a local fake OpenAI-compatible SSE provider emitting 180 Markdown chunks at 10 ms intervals. Workloads: burst paste, 213 paced input characters, streamed Markdown, 24 PageUp/PageDown keys, 200 SGR wheel events, and 112 paced characters after the long response was visible.
+
+### Paired PTY results
+
+| Phase                                          | Writes, before → after | stdout bytes, before → after |                    CPU, before → after |         Event-loop p95, before → after |
+| ---------------------------------------------- | ---------------------: | ---------------------------: | -------------------------------------: | -------------------------------------: |
+| 212-character burst paste                      |                  3 → 3 |         3,315 → 851 (-74.3%) | Not compared due async snapshot timing | Not compared due async snapshot timing |
+| Paced input, 213 characters                    |      204 → 216 (+5.9%) |    218,833 → 13,710 (-93.7%) |                2,258 → 873 ms (-61.3%) |               12.65 → 4.30 ms (-66.0%) |
+| Streaming Markdown                             |     171 → 213 (+24.6%) |   254,033 → 162,989 (-35.8%) |              2,197 → 1,049 ms (-52.3%) |               18.77 → 3.57 ms (-81.0%) |
+| 24 PageUp/PageDown keys                        |        45 → 48 (+6.7%) |     70,338 → 57,460 (-18.3%) |                  739 → 342 ms (-53.8%) |               25.02 → 4.15 ms (-83.4%) |
+| 200 wheel events                               |       21 → 33 (+57.1%) |     33,430 → 41,565 (+24.3%) |                  351 → 131 ms (-62.8%) |               11.30 → 3.11 ms (-72.4%) |
+| Paced input after long history, 112 characters |      99 → 119 (+20.2%) |    151,754 → 16,765 (-89.0%) |                1,040 → 319 ms (-69.4%) |               15.47 → 1.69 ms (-89.1%) |
+
+Incremental rendering allows more small writes but sharply reduces the size and CPU cost of input frames. Wheel scrolling is the output-volume exception (writes and bytes increase) while CPU and event-loop lag still improve substantially. Input latency: the empty-history median increased by about 2 ms; its p95/max and every measured long-history latency improved.
+
+The full report — input-latency tables, identity-aware React attribution per phase, additional verification, and remaining scope (Windows and Linux interactive PTY behavior was not measured) — is recorded in the PR's E2E test report comment: https://github.com/QwenLM/qwen-code/pull/9970#issuecomment-5403787518
+
+### Outcome
 
 In the clean paired PTY run, paced typing reduced stdout bytes by 93.7%, CPU by 61.3%, and event-loop p95 by 66.0%. Typing after a long response reduced bytes by 89.0%, CPU by 69.4%, and event-loop p95 by 89.1%. Streaming CPU fell 52.3% and event-loop p95 fell 81.0% without changing the 60 ms content flush interval.
 

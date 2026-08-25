@@ -49,84 +49,87 @@ const mouseEvent = (
   button: 'left',
 });
 
-describe('TextSelectionController render invalidation', () => {
-  it('publishes a repaint without stale highlight after footer content changes', async () => {
-    const writes: string[] = [];
-    const stdout = Object.create(process.stdout, {
-      columns: { value: 80 },
-      rows: { value: 24 },
-      isTTY: { value: true },
-      write: {
-        value(
-          chunk: string | Uint8Array,
-          encodingOrCallback?: BufferEncoding | (() => void),
-          callback?: () => void,
-        ) {
-          writes.push(String(chunk));
-          const done =
-            typeof encodingOrCallback === 'function'
-              ? encodingOrCallback
-              : callback;
-          done?.();
-          return true;
+describe.each([false, true])(
+  'TextSelectionController render invalidation (incrementalRendering: %s)',
+  (incrementalRendering) => {
+    it('publishes a repaint without stale highlight after footer content changes', async () => {
+      const writes: string[] = [];
+      const stdout = Object.create(process.stdout, {
+        columns: { value: 80 },
+        rows: { value: 24 },
+        isTTY: { value: true },
+        write: {
+          value(
+            chunk: string | Uint8Array,
+            encodingOrCallback?: BufferEncoding | (() => void),
+            callback?: () => void,
+          ) {
+            writes.push(String(chunk));
+            const done =
+              typeof encodingOrCallback === 'function'
+                ? encodingOrCallback
+                : callback;
+            done?.();
+            return true;
+          },
         },
-      },
-    }) as NodeJS.WriteStream;
-    let updateFooter!: () => void;
+      }) as NodeJS.WriteStream;
+      let updateFooter!: () => void;
 
-    function Harness() {
-      const [footer, setFooter] = useState('status');
-      updateFooter = () => setFooter('footer');
-      return (
-        <Box flexDirection="column">
-          <Text>hello</Text>
-          <Text>{footer}</Text>
-          <TextSelectionController
-            isActive
-            getViewportRect={() => ({ x: 0, y: 0, width: 5, height: 1 })}
-            getAdditionalSelectableRects={() => [
-              { x: 0, y: 1, width: 6, height: 1 },
-            ]}
-            getScrollState={() => ({
-              scrollTop: 0,
-              scrollHeight: 1,
-              innerHeight: 1,
-            })}
-            hitTestScrollbar={() => false}
-          />
-        </Box>
-      );
-    }
+      function Harness() {
+        const [footer, setFooter] = useState('status');
+        updateFooter = () => setFooter('footer');
+        return (
+          <Box flexDirection="column">
+            <Text>hello</Text>
+            <Text>{footer}</Text>
+            <TextSelectionController
+              isActive
+              getViewportRect={() => ({ x: 0, y: 0, width: 5, height: 1 })}
+              getAdditionalSelectableRects={() => [
+                { x: 0, y: 1, width: 6, height: 1 },
+              ]}
+              getScrollState={() => ({
+                scrollTop: 0,
+                scrollHeight: 1,
+                innerHeight: 1,
+              })}
+              hitTestScrollbar={() => false}
+            />
+          </Box>
+        );
+      }
 
-    let app!: Instance;
-    await act(async () => {
-      app = render(<Harness />, {
-        stdout,
-        interactive: true,
-        incrementalRendering: false,
-        maxFps: 30,
-        patchConsole: false,
+      let app!: Instance;
+      await act(async () => {
+        app = render(<Harness />, {
+          stdout,
+          interactive: true,
+          incrementalRendering,
+          maxFps: 30,
+          patchConsole: false,
+        });
+        current = app;
       });
-      current = app;
-    });
-    await app.waitUntilRenderFlush();
+      await app.waitUntilRenderFlush();
 
-    await act(async () => {
-      mocks.mouseHandler!(mouseEvent('left-press', 1, 2));
-      mocks.mouseHandler!(mouseEvent('left-release', 6, 2));
-    });
-    await app.waitUntilRenderFlush();
-    expect(writes.some((write) => write.includes(SELECTION_BG))).toBe(true);
-    writes.length = 0;
+      await act(async () => {
+        mocks.mouseHandler!(mouseEvent('left-press', 1, 2));
+        mocks.mouseHandler!(mouseEvent('left-release', 6, 2));
+      });
+      await app.waitUntilRenderFlush();
+      expect(writes.some((write) => write.includes(SELECTION_BG))).toBe(true);
+      writes.length = 0;
 
-    await act(async () => {
-      updateFooter();
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    });
-    await app.waitUntilRenderFlush();
+      await act(async () => {
+        updateFooter();
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      });
+      await app.waitUntilRenderFlush();
 
-    const footerWrites = writes.filter((write) => write.includes('footer'));
-    expect(footerWrites.length).toBeGreaterThan(0);
-    expect(footerWrites.at(-1)).not.toContain(SELECTION_BG);
-  });
-});
+      const footerWrites = writes.filter((write) => write.includes('footer'));
+      expect(footerWrites.length).toBeGreaterThan(0);
+      expect(footerWrites.at(-1)).not.toContain(SELECTION_BG);
+    });
+  },
+);

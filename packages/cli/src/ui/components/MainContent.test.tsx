@@ -18,6 +18,7 @@ import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus, StreamingState } from '../types.js';
+import { CommandKind } from '../commands/types.js';
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
@@ -896,6 +897,174 @@ describe('<MainContent />', () => {
 
       expect(scrollableListPropsSpy).toHaveBeenCalledOnce();
     });
+
+    // Field-by-field guard for the wrapper's useMemo dependency array:
+    // dropping any one of the 17 slice fields ships green unless each field
+    // is isolated on its own (a stale slice skips MainContentView's
+    // re-render silently). Each case flips exactly one field on a single
+    // stable base — every other field keeps its reference, so only the
+    // tested dependency can invalidate the memo — and requires the VP view
+    // to re-render and receive the new value. `buffer`'s exclusion side is
+    // the test above.
+    const lastVpProps = () => scrollableListPropsSpy.mock.calls.at(-1)?.[0];
+    const lastDisplayPropsFor = (id: number) =>
+      historyItemDisplayPropsSpy.mock.calls
+        .map((c) => c[0])
+        .filter((p) => p?.item?.id === id)
+        .at(-1);
+    const probeCommands = [
+      {
+        name: 'probe',
+        description: 'probe command',
+        kind: CommandKind.BUILT_IN,
+      },
+    ];
+    const sliceFieldCases: Array<{
+      field: string;
+      modeSwitch?: boolean;
+      change: (base: UIState) => Partial<UIState>;
+      verify?: (ctx: { firstRenderItem: unknown }) => void;
+    }> = [
+      {
+        field: 'activePtyId',
+        change: () => ({ activePtyId: 7 }),
+        verify: () =>
+          expect(lastDisplayPropsFor(0)).toMatchObject({ activeShellPtyId: 7 }),
+      },
+      {
+        field: 'availableTerminalHeight',
+        change: () => ({ availableTerminalHeight: 12 }),
+        verify: () => expect(lastVpProps().containerHeight).toBe(12),
+      },
+      {
+        field: 'constrainHeight',
+        change: () => ({ constrainHeight: true }),
+        verify: () =>
+          expect(lastDisplayPropsFor(1)).toMatchObject({
+            availableTerminalHeight: 100,
+            availableTerminalHeightGemini: 65536,
+          }),
+      },
+      {
+        field: 'currentModel',
+        change: () => ({ currentModel: 'changed-model' }),
+      },
+      {
+        field: 'dialogsVisible',
+        change: () => ({ dialogsVisible: true }),
+        verify: () => expect(lastVpProps().hasFocus).toBe(false),
+      },
+      {
+        field: 'embeddedShellFocused',
+        change: () => ({ embeddedShellFocused: true }),
+        verify: () =>
+          expect(lastDisplayPropsFor(0)).toMatchObject({
+            embeddedShellFocused: true,
+          }),
+      },
+      {
+        field: 'history',
+        change: (base) => ({
+          history: [
+            ...base.history,
+            { id: 2, type: 'user', text: 'new history' },
+          ],
+        }),
+        verify: () =>
+          expect(
+            lastVpProps().data.map((item: { id: number }) => item.id),
+          ).toContain(2),
+      },
+      {
+        field: 'historyRemountKey',
+        change: () => ({ historyRemountKey: 2 }),
+      },
+      {
+        field: 'isEditorDialogOpen',
+        change: () => ({ isEditorDialogOpen: true }),
+        verify: () =>
+          expect(lastDisplayPropsFor(0)).toMatchObject({ isFocused: false }),
+      },
+      {
+        field: 'mainAreaWidth',
+        change: () => ({ mainAreaWidth: 90 }),
+        verify: () =>
+          expect(lastDisplayPropsFor(1)).toMatchObject({ mainAreaWidth: 90 }),
+      },
+      {
+        field: 'pendingHistoryItems',
+        change: (base) => ({
+          pendingHistoryItems: [
+            ...base.pendingHistoryItems,
+            { type: 'gemini_thought', text: 'more' },
+          ],
+        }),
+        verify: () =>
+          expect(
+            lastVpProps().data.map((item: { id: number }) => item.id),
+          ).toContain(-2),
+      },
+      {
+        field: 'showScrollbar',
+        change: () => ({ showScrollbar: false }),
+        verify: () => expect(lastVpProps().showScrollbar).toBe(false),
+      },
+      {
+        field: 'slashCommands',
+        change: () => ({ slashCommands: probeCommands }),
+        verify: () =>
+          expect(lastDisplayPropsFor(1).commands).toBe(probeCommands),
+      },
+      {
+        field: 'staticAreaMaxItemHeight',
+        change: () => ({ staticAreaMaxItemHeight: 80 }),
+        verify: ({ firstRenderItem }) =>
+          expect(lastVpProps().renderItem).not.toBe(firstRenderItem),
+      },
+      {
+        field: 'streamingState',
+        change: () => ({ streamingState: StreamingState.Responding }),
+      },
+      {
+        field: 'terminalWidth',
+        change: () => ({ terminalWidth: 100 }),
+        verify: () =>
+          expect(lastDisplayPropsFor(1)).toMatchObject({ terminalWidth: 100 }),
+      },
+      {
+        field: 'useTerminalBuffer',
+        modeSwitch: true,
+        change: () => ({ useTerminalBuffer: false }),
+      },
+    ];
+
+    it.each(sliceFieldCases)(
+      're-renders the memoized VP view when only $field changes',
+      ({ modeSwitch, change, verify }) => {
+        const base = createUIState({
+          useTerminalBuffer: true,
+          history: [{ id: 1, type: 'user', text: 'stable history' }],
+          pendingHistoryItems: [{ type: 'gemini_content', text: 'pending' }],
+        });
+        const { rerender } = renderMainContent(base);
+        const firstRenderItem = lastVpProps().renderItem;
+        scrollableListPropsSpy.mockClear();
+        staticPropsSpy.mockClear();
+        historyItemDisplayPropsSpy.mockClear();
+
+        rerender(createMainContentTree({ ...base, ...change(base) }));
+
+        // A field missing from the wrapper's useMemo deps keeps the slice
+        // identity stable, memo(MainContentView) bails, and the list below
+        // it never re-renders.
+        if (modeSwitch) {
+          expect(staticPropsSpy).toHaveBeenCalled();
+        } else {
+          expect(scrollableListPropsSpy).toHaveBeenCalled();
+        }
+        verify?.({ firstRenderItem });
+      },
+    );
 
     it('renders ScrollableList and skips <Static> entirely when useTerminalBuffer is true', () => {
       staticPropsSpy.mockClear();

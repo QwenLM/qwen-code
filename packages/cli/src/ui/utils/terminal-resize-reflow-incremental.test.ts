@@ -182,6 +182,41 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('passes a shrink diff through an armed clear window unmodified', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // A width shrink arms the clear window: ordinary erase-prefixed writes
+      // get their erase prefix swapped for CLEAR_VIEWPORT while it is armed.
+      // An incremental shrink diff must bypass that rewrite — the swap would
+      // blank its kept tail (no op is emitted for a kept last line).
+      stdout.columns = 12;
+      stdout.emit('resize');
+      const next = prev.slice(0, 6);
+      next[1] = 'CHANGED-LINE';
+      const diff = incrementalDiffFrame(prev, next, {
+        trailingNewline: false,
+        returnPrefix: RETURN_PREFIX,
+      });
+      stdout.written.length = 0;
+      stdout.write(diff);
+      expect(stdout.written).toEqual([diff]);
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('CHANGED-LINE');
+      expect(replay).toContain('line-5-');
+      expect(replay).not.toContain('line-6-');
+    } finally {
+      restore();
+    }
+  });
+
   it('preserves trailing cursor suffixes across diff application', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(
