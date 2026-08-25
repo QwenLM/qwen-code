@@ -9388,7 +9388,7 @@ export function App({
               inputAnnotations: submittedInputAnnotations,
             });
           }
-          if (startedWithoutSession && !admissionStarted) {
+          if (startedWithoutSession && !admissionAttempt.isStarted()) {
             const editor = editorRef.current;
             if (editor && !editor.hasInput()) {
               editor.setText(submittedPromptText);

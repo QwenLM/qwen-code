@@ -54,6 +54,10 @@ export class PromptAdmissionAttempt {
     this.admitted = true;
   }
 
+  isStarted(): boolean {
+    return this.started;
+  }
+
   isCurrent(): boolean {
     return this.ownerIsCurrent();
   }
