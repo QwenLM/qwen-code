@@ -14,9 +14,11 @@ import {
   SESSION_PR_URL_MAX_LENGTH,
   commandRunsGhPrCreate,
   mergeSessionPrLists,
+  moveSessionPrSidecar,
   readSessionPrs,
   updateSessionPrStates,
   upsertSessionPr,
+  upsertSessionPrs,
   writeSessionPrs,
   type SessionPr,
 } from './session-pr-service.js';
@@ -195,6 +197,55 @@ describe('upsertSessionPr', () => {
     expect(poisoned.map((p) => p.number)).toEqual([51]);
     expect(await readSessionPrs(filePath)).not.toBeNull();
   });
+
+  it('lets an explicitly supplied source win over the persisted one', async () => {
+    // Backfill binds transcript-mentioned PRs as reviews (authority 0); a
+    // later explicit bind of the same number must upgrade the provenance —
+    // the persisted source survives only a re-bind that does not name one.
+    await writeSessionPrs(filePath, [{ ...entry(10), source: 'review' }]);
+    const prs = await upsertSessionPr(filePath, {
+      number: 10,
+      url: entry(10).url,
+      state: 'open',
+      source: 'create',
+    });
+    expect(prs[0]?.source).toBe('create');
+    expect((await readSessionPrs(filePath))?.[0]?.source).toBe('create');
+  });
+
+  it('never downgrades the persisted provenance on a weaker explicit source', async () => {
+    // The worktree convention binding names the PR the session exists for;
+    // a client-driven metadata re-bind stamping 'create' must not drop it
+    // into the rank the tail cap evicts first.
+    await writeSessionPrs(filePath, [{ ...entry(42), source: 'worktree' }]);
+    const prs = await upsertSessionPr(filePath, {
+      number: 42,
+      url: entry(42).url,
+      state: 'open',
+      source: 'create',
+    });
+    expect(prs[0]?.source).toBe('worktree');
+    expect((await readSessionPrs(filePath))?.[0]?.source).toBe('worktree');
+  });
+
+  it('rewrites a same-URL refresh in place, keeping position and createdAt', async () => {
+    // A state-only refresh of an existing binding is not a re-bind: moving
+    // it to the tail with a fresh createdAt falsifies the binding-time
+    // order the badge and archive merges render by.
+    await writeSessionPrs(filePath, [
+      { ...entry(100), state: 'open' },
+      entry(101),
+    ]);
+    const prs = await upsertSessionPr(filePath, {
+      number: 100,
+      url: entry(100).url,
+      state: 'merged',
+    });
+    expect(prs.map((p) => p.number)).toEqual([100, 101]);
+    expect(prs[0]?.state).toBe('merged');
+    expect(prs[0]?.createdAt).toBe(entry(100).createdAt);
+    expect(await readSessionPrs(filePath)).toEqual(prs);
+  });
 });
 
 describe('upsertSessionPr failure handling', () => {
@@ -261,9 +312,216 @@ describe('upsertSessionPr state', () => {
     expect(prs).toHaveLength(1);
     expect(prs[0]?.state).toBe('merged');
   });
+
+  it('does not inherit state across a URL change', async () => {
+    // The same number in another repository is another PR: inheriting the
+    // previous entry's terminal 'merged' would poison the new binding
+    // permanently — the sweep never re-queries merged entries.
+    await writeSessionPrs(filePath, [{ ...entry(5), state: 'merged' }]);
+    const prs = await upsertSessionPr(filePath, {
+      number: 5,
+      url: 'https://github.com/other/repo/pull/5',
+    });
+    expect(prs).toHaveLength(1);
+    expect(prs[0]?.url).toBe('https://github.com/other/repo/pull/5');
+    expect(prs[0]?.state).toBeUndefined();
+    expect((await readSessionPrs(filePath))?.[0]?.state).toBeUndefined();
+  });
+});
+
+describe('upsertSessionPrs', () => {
+  it('leaves already-bound numbers untouched (position and createdAt)', async () => {
+    await writeSessionPrs(filePath, [entry(100), entry(101)]);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 100, url: 'https://github.com/owner/repo/pull/100?v=2' },
+      { number: 102, url: entry(102).url },
+    ]);
+    expect(result.added).toEqual([102]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.map((p) => p.number)).toEqual([100, 101, 102]);
+    expect(persisted?.[0]).toEqual(entry(100));
+  });
+
+  it('caps the merged list once, keeping the newest entries', async () => {
+    const seeded = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
+      entry(i + 1),
+    );
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 101, url: entry(101).url },
+      { number: 102, url: entry(102).url },
+    ]);
+    expect(result.prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+    // The single capped write drops the oldest seeded entries; the new
+    // bindings survive at the tail.
+    expect(result.prs.map((p) => p.number)).toEqual([
+      ...Array.from({ length: SESSION_PR_LIST_LIMIT - 2 }, (_, i) => i + 3),
+      101,
+      102,
+    ]);
+    expect(result.added).toEqual([101, 102]);
+    // Seeded survivors keep their original createdAt.
+    expect(result.prs[0]?.createdAt).toBe(entry(3).createdAt);
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
+  });
+
+  it('keeps a binding a concurrent writer lands while the batch runs', async () => {
+    // The batch reads INSIDE the locked mutation: a concurrently landed
+    // binding is part of the read and survives the capped write.
+    const seeded = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
+      entry(i + 1),
+    );
+    await writeSessionPrs(filePath, seeded);
+    await Promise.all([
+      upsertSessionPrs(filePath, [
+        { number: 101, url: entry(101).url },
+        { number: 102, url: entry(102).url },
+      ]),
+      upsertSessionPr(filePath, { number: 999, url: entry(999).url }),
+    ]);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted).toHaveLength(SESSION_PR_LIST_LIMIT);
+    expect(persisted?.map((p) => p.number)).toContain(999);
+    expect(persisted?.map((p) => p.number)).toContain(101);
+    expect(persisted?.map((p) => p.number)).toContain(102);
+  });
+
+  it('returns no write when every input number is already bound', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const before = await fs.readFile(filePath, 'utf-8');
+    const result = await upsertSessionPrs(filePath, [
+      { number: 100, url: entry(100).url },
+    ]);
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
+  });
+
+  it('evicts the oldest positions first among equally-ranked entries', async () => {
+    // Entries persisted before provenance was recorded all rank equal, so
+    // the cap drops the oldest positions — offered-or-not no longer
+    // protects anything, and an already-bound number keeps its entry
+    // untouched only while it survives the rank.
+    const seeded = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
+      entry(i + 1),
+    );
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 1, url: entry(1).url },
+      { number: 11, url: entry(11).url },
+      { number: 12, url: entry(12).url },
+    ]);
+    expect(result.added).toEqual([11, 12]);
+    expect(result.alreadyBound).toEqual([1]);
+    expect(result.prs.map((p) => p.number)).toEqual([
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+    expect(result.prs[0]).toEqual(entry(3));
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
+  });
+
+  it('never evicts a created binding under an accumulation of reviewed numbers', async () => {
+    // The session's created PR sits at the head while backfill runs keep
+    // re-offering reviewed numbers; once the merged list overflows the
+    // cap, eviction ranked by offered-or-not would drop the
+    // never-re-offered created binding. Provenance rank must protect it.
+    const seeded: SessionPr[] = [
+      { ...entry(100), source: 'create' },
+      ...Array.from({ length: SESSION_PR_LIST_LIMIT - 1 }, (_, i) => ({
+        ...entry(i + 1),
+        source: 'review' as const,
+      })),
+    ];
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(
+      filePath,
+      Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) => ({
+        number: i + 1,
+        url: entry(i + 1).url,
+        source: 'review' as const,
+      })),
+    );
+    expect(result.added).toEqual([10]);
+    expect(result.alreadyBound).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(result.prs.map((p) => p.number)).toEqual([
+      100, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+    expect(result.prs[0]?.source).toBe('create');
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
+  });
+
+  it('keeps the convention binding when a create lands on a full list', async () => {
+    // The shell hook offers a single created candidate; inserting it at
+    // the cap must evict the weakest entry, not the head — the head is
+    // the worktree convention binding the session exists for.
+    const seeded: SessionPr[] = [
+      { ...entry(7), source: 'worktree' },
+      ...Array.from({ length: SESSION_PR_LIST_LIMIT - 1 }, (_, i) => ({
+        ...entry(i + 21),
+        source: 'review' as const,
+      })),
+    ];
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 42, url: entry(42).url, state: 'open', source: 'create' },
+    ]);
+    expect(result.added).toEqual([42]);
+    expect(result.prs.map((p) => p.number)).toEqual([
+      7, 22, 23, 24, 25, 26, 27, 28, 29, 42,
+    ]);
+    expect(result.prs[0]).toEqual(seeded[0]);
+  });
+
+  it('drops a weak candidate instead of displacing strong bindings at the cap', async () => {
+    const seeded: SessionPr[] = Array.from(
+      { length: SESSION_PR_LIST_LIMIT },
+      (_, i) => ({ ...entry(i + 1), source: 'create' as const }),
+    );
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 99, url: entry(99).url, source: 'review' },
+    ]);
+    expect(result.added).toEqual([]);
+    expect(result.prs.map((p) => p.number)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+    ]);
+  });
+
+  it('persists candidate source and preserves the source of already-bound numbers', async () => {
+    const result = await upsertSessionPrs(filePath, [
+      { number: 7, url: entry(7).url, source: 'worktree' },
+      { number: 8, url: entry(8).url, source: 'review' },
+    ]);
+    expect(result.prs.map((p) => p.source)).toEqual(['worktree', 'review']);
+    const reoffered = await upsertSessionPrs(filePath, [
+      { number: 7, url: entry(7).url },
+    ]);
+    expect(reoffered.alreadyBound).toEqual([7]);
+    expect(reoffered.prs[0]?.source).toBe('worktree');
+  });
+
+  it('reports url-less candidates as unresolved, counting already-bound ones separately', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 7 },
+      { number: 100 },
+      { number: 8, url: entry(8).url },
+    ]);
+    expect(result.added).toEqual([8]);
+    expect(result.alreadyBound).toEqual([100]);
+    expect(result.unresolved).toEqual([7]);
+    expect(result.prs.map((p) => p.number)).toEqual([100, 8]);
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
+  });
 });
 
 describe('updateSessionPrStates', () => {
+  const stamp = (number: number, state: 'open' | 'merged' | 'closed') => ({
+    url: entry(number).url,
+    state,
+  });
+
   it('rewrites states in place without touching order or createdAt', async () => {
     await writeSessionPrs(filePath, [
       { ...entry(100), state: 'open' },
@@ -272,8 +530,8 @@ describe('updateSessionPrStates', () => {
     const changed = await updateSessionPrStates(
       filePath,
       new Map([
-        [100, 'merged'],
-        [101, 'open'],
+        [100, stamp(100, 'merged')],
+        [101, stamp(101, 'open')],
       ]),
     );
     // Only the entry whose state actually differs counts as rewritten.
@@ -289,21 +547,50 @@ describe('updateSessionPrStates', () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'merged' }]);
     const before = await fs.readFile(filePath, 'utf-8');
     expect(
-      await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+      await updateSessionPrStates(
+        filePath,
+        new Map([[100, stamp(100, 'merged')]]),
+      ),
     ).toBe(0);
     expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
   });
 
   it('returns 0 when the sidecar is absent', async () => {
     expect(
-      await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+      await updateSessionPrStates(
+        filePath,
+        new Map([[100, stamp(100, 'merged')]]),
+      ),
     ).toBe(0);
+  });
+
+  it('skips an entry re-bound to another URL between the sweep read and the stamp', async () => {
+    // The sweep reads sidecars before its gh round-trip and writes after
+    // it. A concurrent re-bind of the same number to another repository
+    // during that window must not receive the stale repo's state — a
+    // wrong 'merged' stamp is terminal: merged entries are never queried
+    // again, so the badge stays wrong permanently.
+    await writeSessionPrs(filePath, [{ ...entry(5), state: 'open' }]);
+    await upsertSessionPr(filePath, {
+      number: 5,
+      url: 'https://github.com/other/repo/pull/5',
+      state: 'open',
+      source: 'create',
+    });
+    const changed = await updateSessionPrStates(
+      filePath,
+      new Map([[5, stamp(5, 'merged')]]),
+    );
+    expect(changed).toBe(0);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.[0]?.url).toBe('https://github.com/other/repo/pull/5');
+    expect(persisted?.[0]?.state).toBe('open');
   });
 
   it('serializes against a concurrent upsert on the same sidecar', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
     const [changed, prs] = await Promise.all([
-      updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+      updateSessionPrStates(filePath, new Map([[100, stamp(100, 'merged')]])),
       upsertSessionPr(filePath, { number: 101, url: entry(101).url }),
     ]);
     expect(changed).toBe(1);
@@ -377,10 +664,85 @@ describe('commandRunsGhPrCreate', () => {
     ).toBe(true);
   });
 
+  it('matches a gh pr create on a later line of a multi-line command', () => {
+    expect(
+      commandRunsGhPrCreate('git push -u origin HEAD\ngh pr create --fill'),
+    ).toBe(true);
+    expect(
+      commandRunsGhPrCreate('git push -u origin HEAD\r\ngh pr create --fill'),
+    ).toBe(true);
+  });
+
   it('returns false when the command is not gh pr create', () => {
     expect(commandRunsGhPrCreate('gh pr view 1')).toBe(false);
     expect(commandRunsGhPrCreate('git commit -m gh')).toBe(false);
     // The phrase as a search argument is not an execution.
     expect(commandRunsGhPrCreate(`grep -rn 'gh pr create' .`)).toBe(false);
+  });
+});
+
+describe('moveSessionPrSidecar', () => {
+  let sourcePath: string;
+  let destinationPath: string;
+
+  beforeEach(() => {
+    sourcePath = path.join(tmpDir, 'active', 's.pr.json');
+    destinationPath = path.join(tmpDir, 'archived', 's.pr.json');
+  });
+
+  it('renames the sidecar when the destination is free', async () => {
+    await writeSessionPrs(sourcePath, [entry(1)]);
+    await moveSessionPrSidecar(sourcePath, destinationPath);
+    expect(await readSessionPrs(destinationPath)).toEqual([entry(1)]);
+    await expect(fs.stat(sourcePath)).rejects.toThrow();
+  });
+
+  it('merges a split pair instead of clobbering either half', async () => {
+    await writeSessionPrs(sourcePath, [entry(1)]);
+    await writeSessionPrs(destinationPath, [entry(2)]);
+    await moveSessionPrSidecar(sourcePath, destinationPath);
+    expect(
+      (await readSessionPrs(destinationPath))?.map((p) => p.number),
+    ).toEqual([2, 1]);
+    await expect(fs.stat(sourcePath)).rejects.toThrow();
+  });
+
+  it('does nothing when the source is absent', async () => {
+    await moveSessionPrSidecar(sourcePath, destinationPath);
+    expect(await readSessionPrs(destinationPath)).toBeNull();
+  });
+
+  it('waits for a lock held on the destination before moving', async () => {
+    // The move must serialize against pending mutations on BOTH endpoints:
+    // a binder write landing on the destination mid-transition must not be
+    // clobbered by the merge write.
+    await writeSessionPrs(sourcePath, [entry(1)]);
+    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+    await fs.writeFile(destinationPath, '', 'utf-8');
+    const release = await lockfile.lock(destinationPath);
+    const movePromise = moveSessionPrSidecar(sourcePath, destinationPath);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(await readSessionPrs(sourcePath)).toEqual([entry(1)]);
+    expect(await readSessionPrs(destinationPath)).toBeNull();
+    await release();
+    await movePromise;
+    expect(await readSessionPrs(destinationPath)).toEqual([entry(1)]);
+    await expect(fs.stat(sourcePath)).rejects.toThrow();
+  });
+
+  it('waits for a held sidecar lock before moving', async () => {
+    // The move runs under the cross-process lock: while another holder
+    // keeps the source locked, no binding may be relocated — an unlocked
+    // move would merge and unlink the source immediately.
+    await writeSessionPrs(sourcePath, [entry(1)]);
+    const release = await lockfile.lock(sourcePath);
+    const movePromise = moveSessionPrSidecar(sourcePath, destinationPath);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(await readSessionPrs(sourcePath)).toEqual([entry(1)]);
+    expect(await readSessionPrs(destinationPath)).toBeNull();
+    await release();
+    await movePromise;
+    expect(await readSessionPrs(destinationPath)).toEqual([entry(1)]);
+    await expect(fs.stat(sourcePath)).rejects.toThrow();
   });
 });

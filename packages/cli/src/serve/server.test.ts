@@ -80,6 +80,7 @@ import {
   BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
+  SESSION_PR_LIST_LIMIT,
   SessionIdCaseConflictError,
   SessionService,
   Storage,
@@ -15504,6 +15505,53 @@ describe('createServeApp', () => {
 
       const merged = result.sessions.find((s) => s.sessionId === id);
       expect(merged?.prs?.map((p) => p.number)).toEqual([9500, 9517]);
+    });
+
+    it('drops a live-only binding the sidecar evicted at the cap', async () => {
+      // Sidecar-only writers (shell hook) evict the oldest binding once the
+      // cap overflows while the live entry still holds it; the merge must
+      // not re-append that evicted binding as the session's latest.
+      const id = '550e8400-e29b-41d4-a716-446655440007';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      for (
+        let prNumber = 9501;
+        prNumber <= 9500 + SESSION_PR_LIST_LIMIT;
+        prNumber++
+      ) {
+        await upsertSessionPr(sidecarPath, {
+          number: prNumber,
+          url: `https://github.com/o/r/pull/${prNumber}`,
+        });
+      }
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 9500, url: 'https://github.com/o/r/pull/9500' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+      expect(merged?.prs?.map((p) => p.number)).toEqual(
+        Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) => 9501 + i),
+      );
     });
 
     it('dedupes by number on merge, preferring the live url', async () => {

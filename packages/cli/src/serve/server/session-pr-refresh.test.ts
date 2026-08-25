@@ -75,6 +75,37 @@ describe('resolveSessionPrRefreshIntervalMs', () => {
       }),
     ).toBe(300_000);
   });
+
+  it('treats a blank value as unset, not a disable', () => {
+    // `Number('')` is 0: without the blank check an env var that is set
+    // but empty would silently turn the sweep off.
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '',
+      }),
+    ).toBe(300_000);
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '   ',
+      }),
+    ).toBe(300_000);
+  });
+
+  it('clamps values beyond the setTimeout delay limit back to the default', () => {
+    // Node clamps delays above 2^31-1 ms to ~1ms — an unclamped minutes
+    // value would fire the sweep in a tight loop.
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '43200',
+      }),
+    ).toBe(300_000);
+    // The largest whole-minute value still under the limit stays honored.
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '35791',
+      }),
+    ).toBe(2_147_460_000);
+  });
 });
 
 describe('refreshWorkspaceSessionPrStates', () => {
@@ -211,7 +242,9 @@ describe('refreshWorkspaceSessionPrStates', () => {
       state: 'open',
     });
     fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'cli_unavailable',
+      kind: 'failed',
+      message: 'boom',
+      gitRoot: workspaceCwd,
     });
 
     const result = await refreshWorkspaceSessionPrStates(runtime);
@@ -221,6 +254,8 @@ describe('refreshWorkspaceSessionPrStates', () => {
   });
 
   it('does not write back open for bindings missing from the gh page', async () => {
+    // Seeded 'closed': resurrecting page-absent bindings to 'open' would
+    // rewrite this entry (an 'open' seed makes that regression vacuous).
     await seedSession(SESSION_A);
     const prPath = sessionService.getPrSessionPathForArchiveState(
       SESSION_A,
@@ -229,7 +264,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
     await upsertSessionPr(prPath, {
       number: 999,
       url: 'https://github.com/o/r/pull/999',
-      state: 'open',
+      state: 'closed',
     });
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
@@ -239,7 +274,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
     const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 0 });
-    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('closed');
   });
 
   it('updates nothing when the gh page is unavailable', async () => {
@@ -347,6 +382,96 @@ describe('refreshWorkspaceSessionPrStates', () => {
     expect(result).toEqual({ scanned: 0, updated: 0 });
     const raw = JSON.parse(await fsp.readFile(escapedSidecar, 'utf8'));
     expect(raw.prs[0].state).toBe('open');
+  });
+
+  it('reaches sessions whose mtime ties a pagination boundary', async () => {
+    // 1007 sidecars, four of them sharing the mtime of the 1000th file:
+    // listSessions' strict-`<` cursor boundary drops those boundary twins
+    // on every paging run, so no sweep that pages it can ever refresh them.
+    const total = 1007;
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    const baseMtime = Date.UTC(2026, 7, 1);
+    for (let i = 0; i < total; i++) {
+      const sessionId = `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`;
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-08-01T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+          cwd: workspaceCwd,
+        })}\n`,
+        'utf8',
+      );
+      await fsp.writeFile(
+        path.join(chatsDir, `${sessionId}.pr.json`),
+        JSON.stringify({
+          prs: [
+            {
+              number: 100_000 + i,
+              url: `https://github.com/o/r/pull/${100_000 + i}`,
+              createdAt: '2026-08-01T00:00:00.000Z',
+              state: 'open',
+            },
+          ],
+        }),
+        'utf8',
+      );
+      const mtimeMs =
+        i >= 999 && i <= 1002 ? baseMtime - 999_000 : baseMtime - i * 1000;
+      const mtime = new Date(mtimeMs);
+      await fsp.utimes(path.join(chatsDir, `${sessionId}.jsonl`), mtime, mtime);
+    }
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result.scanned).toBe(total);
+    expect(result.updated).toBe(0);
+  }, 60_000);
+
+  it('never stamps a number re-bound to another repo during the gh window', async () => {
+    // The sweep reads sidecars before its gh round-trip and stamps after
+    // it. A concurrent writer re-binding the same number to another
+    // repository inside that window must not receive the stale repo's
+    // state — a wrong 'merged' stamp is terminal: the sweep never queries
+    // merged entries again, so the badge stays wrong permanently.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 5,
+      url: 'https://github.com/o/r/pull/5',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockImplementation(async () => {
+      await upsertSessionPr(prPath, {
+        number: 5,
+        url: 'https://github.com/other/repo/pull/5',
+        state: 'open',
+        source: 'create',
+      });
+      return { kind: 'ok', pullRequests: [pr(5, 'merged')] };
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    const persisted = await readSessionPrs(prPath);
+    expect(persisted?.[0]?.url).toBe('https://github.com/other/repo/pull/5');
+    expect(persisted?.[0]?.state).toBe('open');
   });
 
   it('never stamps a same-number PR of another repository', async () => {

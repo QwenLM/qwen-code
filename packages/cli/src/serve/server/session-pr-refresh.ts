@@ -30,19 +30,28 @@ const FIRST_RUN_DELAY_MS = 60_000;
 
 /**
  * `QWEN_SESSION_PR_REFRESH_MINUTES`: refresh interval in minutes; `0`
- * disables the sweep. Missing/invalid values fall back to the default.
+ * disables the sweep. Missing, blank, or invalid values fall back to the
+ * default — a blank env var is unset, not a disable.
  */
 export function resolveSessionPrRefreshIntervalMs(
   env: Readonly<Record<string, string | undefined>>,
 ): number | undefined {
   const raw = env['QWEN_SESSION_PR_REFRESH_MINUTES'];
-  if (raw === undefined) return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
+  }
   const minutes = Number(raw);
   if (!Number.isFinite(minutes) || minutes < 0) {
     return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
   }
   if (minutes === 0) return undefined;
-  return minutes * 60_000;
+  const intervalMs = minutes * 60_000;
+  // Node clamps setTimeout delays above this to ~1ms, which would turn the
+  // sweep into a gh-spawning busy loop; use the default instead.
+  if (intervalMs > 2_147_483_647) {
+    return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
+  }
+  return intervalMs;
 }
 
 export interface SessionPrRefreshResult {
@@ -70,42 +79,37 @@ export async function refreshWorkspaceSessionPrStates(
   }> = [];
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
-    let cursor: number | undefined;
-    do {
-      const page = await sessionService.listSessions({
-        cursor,
-        size: 1000,
+    // Enumerate the chats dir directly: paging listSessions would
+    // permanently skip every session whose mtime ties a page's last entry
+    // (its mtime cursor boundary is a strict `<`).
+    for (const sessionId of await sessionService.enumerateSessionIdsForArchiveState(
+      archiveState,
+    )) {
+      // The id comes verbatim from the transcript's first record and names
+      // the sidecar path below — a traversal id must be rejected before
+      // path construction (the backfill route shares this sink).
+      if (!isValidSessionId(sessionId)) continue;
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        sessionId,
         archiveState,
-      });
-      for (const item of page.items) {
-        // `item.sessionId` comes verbatim from the transcript's first
-        // record and names the sidecar path below — a traversal id must be
-        // rejected before path construction (the backfill route shares
-        // this sink).
-        if (!isValidSessionId(item.sessionId)) continue;
-        const prPath = sessionService.getPrSessionPathForArchiveState(
-          item.sessionId,
-          archiveState,
-        );
-        let prs: Awaited<ReturnType<typeof readSessionPrs>>;
-        try {
-          prs = await readSessionPrs(prPath);
-        } catch {
-          continue;
-        }
-        if (!prs) continue;
-        scanned += 1;
-        const bindings = prs
-          // Only merged is terminal: closed PRs can be reopened, so they
-          // keep participating in the sweep.
-          .filter((p) => p.state !== 'merged')
-          .map((p) => ({ number: p.number, url: p.url }));
-        if (bindings.length > 0) {
-          pendingBindings.push({ prPath, bindings });
-        }
+      );
+      let prs: Awaited<ReturnType<typeof readSessionPrs>>;
+      try {
+        prs = await readSessionPrs(prPath);
+      } catch {
+        continue;
       }
-      cursor = page.nextCursor;
-    } while (cursor !== undefined);
+      if (!prs) continue;
+      scanned += 1;
+      const bindings = prs
+        // Only merged is terminal: closed PRs can be reopened, so they
+        // keep participating in the sweep.
+        .filter((p) => p.state !== 'merged')
+        .map((p) => ({ number: p.number, url: p.url }));
+      if (bindings.length > 0) {
+        pendingBindings.push({ prPath, bindings });
+      }
+    }
   }
   if (pendingBindings.length === 0) return { scanned, updated: 0 };
 
@@ -138,7 +142,7 @@ export async function refreshWorkspaceSessionPrStates(
 
   let updated = 0;
   for (const target of pendingBindings) {
-    const states = new Map<number, SessionPrState>();
+    const states = new Map<number, { url: string; state: SessionPrState }>();
     for (const binding of target.bindings) {
       const bindingRepoKey = repoKeyFromWebUrl(binding.url);
       const state = bindingRepoKey
@@ -146,8 +150,13 @@ export async function refreshWorkspaceSessionPrStates(
         : undefined;
       // Only a number ABSENT from gh's page is skipped (out of the limit
       // window); a present one is authoritative — including an 'open' that
-      // supersedes a stale 'closed' after a reopen.
-      if (state !== undefined) states.set(binding.number, state);
+      // supersedes a stale 'closed' after a reopen. The stamp carries the
+      // URL it was resolved for: the writer verifies it inside the locked
+      // mutation, so a concurrent re-bind of the same number to another
+      // repo during this run's gh window never receives a stale state.
+      if (state !== undefined) {
+        states.set(binding.number, { url: binding.url, state });
+      }
     }
     if (states.size === 0) continue;
     updated += await updateSessionPrStates(target.prPath, states);

@@ -8,14 +8,17 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
 import {
-  commandRunsGhPrCreate,
+  fetchAttributionRepoKeys,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
   readSessionPrs,
   readWorktreeSession,
   repoKeyFromWebUrl,
-  upsertSessionPr,
+  SESSION_PR_LIST_LIMIT,
+  upsertSessionPrs,
   type SessionArchiveState,
+  type SessionPrSource,
+  type SessionPrState,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
 import { isValidSessionId } from '../../config/session-id.js';
@@ -70,106 +73,56 @@ interface BackfillCandidate {
   archiveState: SessionArchiveState;
   /** PR number named by the worktree slug/branch convention, if any. */
   conventionNumber: number | undefined;
-  /** PRs the session created via `gh pr create` (number → printed URL). */
-  direct: ReadonlyMap<number, string>;
-  /** PR numbers the session was asked to review (`/review <N|url>`). */
+  /** `/review <N|#N>` numbers the session was asked to review. */
   reviewed: readonly number[];
+  /** `/review <url>` forms, repo-gated once gh's page key is known. */
+  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
 }
 
-// A printed URL only counts when gh itself printed it in the response of
-// the very `gh pr create` run (paired by part id) AND it belongs to the
-// workspace's own repo — text alone must never forge a binding.
-const PRINTED_PR_URL_PATTERN =
-  /https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})/g;
-
-// `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`. Bare
-// session git branches are NOT a source: they bind the workspace's current
-// branch PR onto every session (including unrelated chats and reviews of
-// other PRs) — measured pure noise, removed with cleanup.
+// `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`, read
+// only at COMMAND position — the very start of the prompt the user typed.
+// User records lead with that prompt; @-imported file content is appended
+// as later text parts, and shipped docs contain line-leading `/review N`
+// examples, so nothing after the first part may seed a binding. `[ \t]+`
+// (not `\s+`) keeps the number on the command's own line and isolates the
+// command token — `/review-skill …` is another command and must not forge
+// a binding. The bare-number alternative closes its token against filename
+// characters (`(?!\w)`-class): `/review <file-path>` is another documented
+// invocation form, so `/review 001_init.sql` must not forge PR 1. The URL
+// alternative keeps `(?!\d)`: it rejects 10+-digit numbers instead of
+// truncating them to a 9-digit prefix. The bare-number alternative comes
+// first: `/review 42 and fix #7` names 42. Bare session git branches are
+// NOT a source: they bind the workspace's current branch PR onto every
+// session — measured pure noise, removed with cleanup.
 const REVIEW_COMMAND_PATTERN =
-  /\/review\b[^\n"\\]*?(?:pull\/|#)(\d{1,9})|\/review\s+(\d{1,9})/g;
+  /^\s*\/review(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
 
-interface TranscriptToolPart {
-  functionCall?: {
-    id?: string;
-    name?: string;
-    args?: { command?: string };
-  };
-  functionResponse?: {
-    id?: string;
-    name?: string;
-    response?: { output?: string };
-  };
-}
+const EMPTY_NUMBER_URL_MAP: ReadonlyMap<number, string> = new Map();
+const EMPTY_STATE_MAP: ReadonlyMap<number, SessionPrState> = new Map();
 
-function collectGhPrCreateBindings(
-  raw: string,
-  workspaceRepoKey: string | undefined,
-): ReadonlyMap<number, string> {
-  const commandById = new Map<string, string>();
-  const bindings = new Map<number, string>();
-  for (const line of raw.split('\n')) {
-    if (!line.includes('run_shell_command')) continue;
-    let parts: unknown;
-    try {
-      parts = (JSON.parse(line) as { message?: { parts?: unknown } })?.message
-        ?.parts;
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(parts)) continue;
-    for (const part of parts as TranscriptToolPart[]) {
-      const call = part.functionCall;
-      if (
-        call?.name === 'run_shell_command' &&
-        typeof call.id === 'string' &&
-        typeof call.args?.command === 'string'
-      ) {
-        commandById.set(call.id, call.args.command);
-        continue;
-      }
-      const response = part.functionResponse;
-      if (
-        response?.name !== 'run_shell_command' ||
-        typeof response.id !== 'string' ||
-        typeof response.response?.output !== 'string'
-      ) {
-        continue;
-      }
-      const command = commandById.get(response.id);
-      if (command === undefined || !commandRunsGhPrCreate(command)) {
-        continue;
-      }
-      if (command.includes('--dry-run')) continue;
-      for (const match of response.response.output.matchAll(
-        PRINTED_PR_URL_PATTERN,
-      )) {
-        const url = match[0];
-        // Elided owner/repo placeholders are not link targets; foreign
-        // repos must never bind into this workspace.
-        if (url.includes('...')) continue;
-        if (
-          workspaceRepoKey === undefined ||
-          repoKeyFromWebUrl(url) !== workspaceRepoKey
-        ) {
-          continue;
-        }
-        bindings.set(Number(match[1]), url);
-      }
-    }
-  }
-  return bindings;
-}
-
-// Only USER text records count: assistant prose, tool calls, and tool
-// results (read_file echoes of fixtures/docs) quote `/review <N>` without
-// requesting one, and raw-text matching over escaped JSON would bind them.
-function collectReviewedPrNumbers(raw: string): readonly number[] {
+// Only the prompt the user typed counts: assistant prose, tool calls, and
+// tool results (read_file echoes of fixtures/docs) quote `/review <N>`
+// without requesting one, and the parts after the first carry @-imported
+// file content whose line-leading examples would forge bindings. The TUI
+// expands bundled skills BEFORE recording: the user record's first part is
+// the skill body with the typed command appended at its END, so the typed
+// `/review <N>` survives only in the `slash_command` system record's
+// `rawCommand` — read that when present, falling back to the user record's
+// first text part (the daemon-provided prompt path carries no payload).
+// The URL form names the repo it reviewed; it is repo-gated once gh's page
+// key is known (see backfillWorkspaceSessionPrs) rather than here.
+function collectReviewedPrNumbers(raw: string): {
+  reviewed: readonly number[];
+  reviewedUrlForms: ReadonlyArray<{ number: number; url: string }>;
+} {
   const numbers = new Set<number>();
+  const urlForms: Array<{ number: number; url: string }> = [];
   for (const line of raw.split('\n')) {
     if (!line.includes('/review')) continue;
     let record: {
       type?: string;
+      subtype?: string;
+      systemPayload?: { phase?: string; rawCommand?: string };
       message?: {
         parts?: Array<{ text?: string; functionResponse?: unknown }>;
       };
@@ -179,37 +132,56 @@ function collectReviewedPrNumbers(raw: string): readonly number[] {
     } catch {
       continue;
     }
-    if (record.type !== 'user') continue;
-    for (const part of record.message?.parts ?? []) {
-      if (typeof part.text !== 'string' || part.functionResponse) {
-        continue;
-      }
-      for (const match of part.text.matchAll(REVIEW_COMMAND_PATTERN)) {
-        const value = match[1] ?? match[2];
-        if (value !== undefined) numbers.add(Number(value));
+    let prompt: string | undefined;
+    if (
+      record.type === 'system' &&
+      record.subtype === 'slash_command' &&
+      record.systemPayload?.phase === 'invocation' &&
+      typeof record.systemPayload.rawCommand === 'string'
+    ) {
+      prompt = record.systemPayload.rawCommand;
+    } else if (record.type === 'user') {
+      const firstPart = record.message?.parts?.[0];
+      if (typeof firstPart?.text === 'string' && !firstPart.functionResponse) {
+        prompt = firstPart.text;
       }
     }
+    if (prompt === undefined) continue;
+    const match = REVIEW_COMMAND_PATTERN.exec(prompt);
+    if (!match) continue;
+    const bareNumber = match[1];
+    if (bareNumber !== undefined) {
+      // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
+      // declines it, so it must never count as a binding.
+      if (Number(bareNumber) > 0) numbers.add(Number(bareNumber));
+      continue;
+    }
+    const url = match[2];
+    const urlNumber = match[3];
+    if (url === undefined || urlNumber === undefined) continue;
+    if (Number(urlNumber) > 0) {
+      urlForms.push({ number: Number(urlNumber), url });
+    }
   }
-  return [...numbers];
+  return { reviewed: [...numbers], reviewedUrlForms: urlForms };
 }
 
 /**
  * Backfills PR bindings onto a workspace's persisted sessions. Sources, in
- * priority order: the worktree slug/branch convention (names the number
- * without any network); and one batched `gh pr list --state all` per
- * workspace mapping head branches — the worktree branch and every
- * `gitBranch` recorded in the session's transcript — to PR numbers and URLs.
- * The URL comes from `gh` when available, else from the git remote web URL
- * (convention numbers only). A session may bind several PRs.
- *
- * URLs printed in transcripts are NOT a source: text cannot attribute a
- * printed URL to the session's own `gh pr create`, so persisting one would
- * let forged bindings survive retroactively. What gh itself cannot vouch
- * for stays unbound.
+ * ascending authority order: `/review <N|#N|url>` commands the user typed
+ * (the session merely looked at that PR), and the worktree slug/branch
+ * convention last (the session exists FOR that PR, so it must never be
+ * evicted by weaker numbers). Transcript `gh pr create` traces are
+ * deliberately NOT a source: no gh-side attribution exists per historical
+ * command, so text alone could forge a binding — live creates bind through
+ * the shell tool post-hook, which verifies with gh itself. Numbers resolve
+ * to URLs via one batched `gh pr list --state all` per workspace, else the
+ * workspace's git remote web URL; a session may bind several PRs.
  */
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
+  fetchRepoKeys: typeof fetchAttributionRepoKeys = fetchAttributionRepoKeys,
 ): Promise<SessionPrBackfillWorkspaceResult> {
   const result: SessionPrBackfillWorkspaceResult = {
     workspaceCwd: runtime.workspaceCwd,
@@ -221,8 +193,8 @@ export async function backfillWorkspaceSessionPrs(
   };
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
   // One remote lookup per backfill run, before transcript scanning so the
-  // gh-create source can repo-validate printed URLs; async so the daemon
-  // event loop is never blocked by it.
+  // /review URL form can repo-gate against it; async so the daemon event
+  // loop is never blocked by it.
   const remote = await fetchRemoteWebUrl(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
@@ -230,68 +202,60 @@ export async function backfillWorkspaceSessionPrs(
   const workspaceRepoKey = remote ? repoKeyFromWebUrl(remote) : undefined;
   const candidates: BackfillCandidate[] = [];
   for (const archiveState of ['active', 'archived'] as const) {
-    let cursor: number | undefined;
-    do {
-      const page = await sessionService.listSessions({
-        cursor,
-        size: 1000,
-        archiveState,
-      });
-      for (const item of page.items) {
-        // `item.sessionId` comes verbatim from the transcript's first
-        // record, and every sidecar path below embeds it — a traversal id
-        // must be rejected before path construction, the same way the
-        // sibling sidecar routes gate.
-        if (!isValidSessionId(item.sessionId)) continue;
-        result.scanned += 1;
-        const dir = path.dirname(
-          sessionService.getWorktreeSessionPathForArchiveState(
-            item.sessionId,
-            archiveState,
-          ),
-        );
-        let worktree: Awaited<ReturnType<typeof readWorktreeSession>>;
-        try {
-          worktree = await readWorktreeSession(
-            path.join(dir, `${item.sessionId}.worktree.json`),
-          );
-        } catch {
-          worktree = null;
-        }
-        let transcriptRaw: string;
-        try {
-          transcriptRaw = await fs.readFile(
-            path.join(dir, `${item.sessionId}.jsonl`),
-            'utf8',
-          );
-        } catch {
-          transcriptRaw = '';
-        }
-        const direct = collectGhPrCreateBindings(
-          transcriptRaw,
-          workspaceRepoKey,
-        );
-        const reviewed = collectReviewedPrNumbers(transcriptRaw);
-        const conventionNumber = worktree
-          ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
-          : undefined;
-        if (
-          conventionNumber === undefined &&
-          direct.size === 0 &&
-          reviewed.length === 0
-        ) {
-          continue;
-        }
-        candidates.push({
-          sessionId: item.sessionId,
+    // Enumerate the chats dir directly: paging listSessions would
+    // permanently skip every session whose mtime ties a page's last entry
+    // (its cursor boundary is a strict `<`).
+    for (const sessionId of await sessionService.enumerateSessionIdsForArchiveState(
+      archiveState,
+    )) {
+      // The id comes verbatim from the transcript's first record, and every
+      // sidecar path below embeds it — a traversal id must be rejected
+      // before path construction, the same way the sibling sidecar routes
+      // gate.
+      if (!isValidSessionId(sessionId)) continue;
+      result.scanned += 1;
+      const dir = path.dirname(
+        sessionService.getWorktreeSessionPathForArchiveState(
+          sessionId,
           archiveState,
-          conventionNumber,
-          direct,
-          reviewed,
-        });
+        ),
+      );
+      let worktree: Awaited<ReturnType<typeof readWorktreeSession>>;
+      try {
+        worktree = await readWorktreeSession(
+          path.join(dir, `${sessionId}.worktree.json`),
+        );
+      } catch {
+        worktree = null;
       }
-      cursor = page.nextCursor;
-    } while (cursor !== undefined);
+      let transcriptRaw: string;
+      try {
+        transcriptRaw = await fs.readFile(
+          path.join(dir, `${sessionId}.jsonl`),
+          'utf8',
+        );
+      } catch {
+        transcriptRaw = '';
+      }
+      const reviewed = collectReviewedPrNumbers(transcriptRaw);
+      const conventionNumber = worktree
+        ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
+        : undefined;
+      if (
+        conventionNumber === undefined &&
+        reviewed.reviewed.length === 0 &&
+        reviewed.reviewedUrlForms.length === 0
+      ) {
+        continue;
+      }
+      candidates.push({
+        sessionId,
+        archiveState,
+        conventionNumber,
+        reviewed: reviewed.reviewed,
+        reviewedUrlForms: reviewed.reviewedUrlForms,
+      });
+    }
   }
   if (candidates.length === 0) return result;
 
@@ -304,17 +268,29 @@ export async function backfillWorkspaceSessionPrs(
   const numberToUrl = new Map<number, string>();
   const pageUrlByNumber = new Map<number, string>();
   const pageStateByNumber = new Map<number, 'open' | 'merged' | 'closed'>();
+  // gh lists one repo per page — the PARENT's in the fork layout. Record
+  // its key once: PR URLs always point there in that layout, so
+  // `/review <url>` forms naming it are legitimate even though the
+  // workspace origin's key is the fork's.
+  let pageRepoKey: string | undefined;
   const prs = await fetchPullRequests(
     runtime.workspaceCwd,
     runtime.env.effectiveEnv,
     { state: 'all', limit: 500, slim: true },
   );
+  // gh's page may only feed bindings when it lists the workspace's OWN
+  // repo or a CONFIRMED fork parent: gh's repo resolution is git-config
+  // driven (`gh repo set-default`, remaining remotes), so it can diverge
+  // from the workspace repo entirely, and bare numbers resolving through a
+  // divergent page would bind a stranger's same-numbered PR.
+  let pageMapTrusted = false;
   if (prs.kind === 'ok') {
     for (const pr of prs.pullRequests) {
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
       const state = pr.state === 'draft' ? 'open' : pr.state;
       pageUrlByNumber.set(pr.number, pr.url);
       pageStateByNumber.set(pr.number, state);
+      pageRepoKey ??= repoKeyFromWebUrl(pr.url);
       // Fork layout: gh resolves the PARENT repo for list queries when the
       // origin is a fork, so the page can hold another repository's PRs. A
       // bare head-branch collision with one of them would bind a stranger's
@@ -330,20 +306,49 @@ export async function backfillWorkspaceSessionPrs(
       }
       numberToUrl.set(pr.number, pr.url);
     }
+    if (pageRepoKey !== undefined) {
+      if (workspaceRepoKey !== undefined && pageRepoKey === workspaceRepoKey) {
+        pageMapTrusted = true;
+      } else {
+        // Fork layout: gh lists the PARENT repo's PRs from a fork
+        // checkout. Confirm the parent relationship before trusting the
+        // page; an unrelated page fails closed.
+        const { parent } = await fetchRepoKeys(
+          runtime.workspaceCwd,
+          runtime.env.effectiveEnv,
+        );
+        pageMapTrusted = parent === pageRepoKey;
+      }
+    }
   }
+
+  // `/review <url>` names the repo it reviewed: accept the workspace's own
+  // key OR the repo gh's page actually resolved to (the fork layout's
+  // parent); a third repo's PR must never bind into this workspace. Fail
+  // closed only when BOTH keys are unknown — with neither an origin nor a
+  // gh page there is nothing to attribute the URL to.
+  const allowedRepoKeys = new Set<string>();
+  if (workspaceRepoKey !== undefined) allowedRepoKeys.add(workspaceRepoKey);
+  if (pageRepoKey !== undefined) allowedRepoKeys.add(pageRepoKey);
 
   for (const candidate of candidates) {
     // Insert in ASCENDING authority so the strongest bindings survive the
     // sidecar's tail-10 cap: reviewed first (the session merely looked at
-    // that PR), then gh-create traces, and the worktree slug/branch
-    // convention last (the session exists FOR that PR, so it must never be
-    // evicted by weaker numbers).
+    // that PR), and the worktree slug/branch convention last (the session
+    // exists FOR that PR, so it must never be evicted by weaker numbers).
     const numbers: number[] = [];
     for (const reviewedNumber of candidate.reviewed) {
       if (!numbers.includes(reviewedNumber)) numbers.push(reviewedNumber);
     }
-    for (const directNumber of candidate.direct.keys()) {
-      if (!numbers.includes(directNumber)) numbers.push(directNumber);
+    for (const form of candidate.reviewedUrlForms) {
+      const repoKey = repoKeyFromWebUrl(form.url);
+      if (
+        repoKey !== undefined &&
+        allowedRepoKeys.has(repoKey) &&
+        !numbers.includes(form.number)
+      ) {
+        numbers.push(form.number);
+      }
     }
     if (candidate.conventionNumber !== undefined) {
       const conventionNumber = candidate.conventionNumber;
@@ -352,6 +357,39 @@ export async function backfillWorkspaceSessionPrs(
       numbers.push(...rest, conventionNumber);
     }
     if (numbers.length === 0) continue;
+    // Offer only FREE sidecar slots. Occupants this run does not re-offer
+    // (live `create` bindings, pre-provenance entries) already hold slots;
+    // offering past the free count would evict the weakest persisted entry
+    // and re-append it with a fresh createdAt on every re-run — a
+    // permanent rotation falsifying the binding-time order and bumping the
+    // catalog each call. Sizing to the free slots keeps re-runs idempotent:
+    // the strongest candidates land in the persisted tail and later runs
+    // find everything bound. The pre-read is an unlocked sizing hint — the
+    // locked mutation re-reads authoritative state.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      candidate.sessionId,
+      candidate.archiveState,
+    );
+    let existing = null as Awaited<ReturnType<typeof readSessionPrs>>;
+    try {
+      existing = await readSessionPrs(prPath);
+    } catch {
+      // An unwritable sidecar keeps today's offer shape; the write fails
+      // and is counted per candidate below.
+    }
+    const freeSlots = SESSION_PR_LIST_LIMIT - (existing?.length ?? 0);
+    if (freeSlots <= 0) {
+      if (existing) {
+        const present = new Set(existing.map((entry) => entry.number));
+        result.alreadyBound += numbers.filter((number) =>
+          present.has(number),
+        ).length;
+      }
+      continue;
+    }
+    if (numbers.length > freeSlots) {
+      numbers.splice(0, numbers.length - freeSlots);
+    }
     // One unwritable sidecar (EISDIR/EACCES/EIO) must not abort the whole
     // workspace run and drop every later candidate; record and continue.
     try {
@@ -361,8 +399,18 @@ export async function backfillWorkspaceSessionPrs(
         numbers,
         {
           numberToUrl,
-          pageUrlByNumber,
-          pageStateByNumber,
+          // The page maps hold foreign entries whenever gh resolved another
+          // repo (divergent default, fork parent); only a RELATED page —
+          // the workspace's own repo or a confirmed fork parent — may feed
+          // a binding. Consuming a divergent page would bind a stranger's
+          // same-numbered PR, the exact collision numberToUrl fails closed
+          // on.
+          pageUrlByNumber: pageMapTrusted
+            ? pageUrlByNumber
+            : EMPTY_NUMBER_URL_MAP,
+          pageStateByNumber: pageMapTrusted
+            ? pageStateByNumber
+            : EMPTY_STATE_MAP,
           remote,
         },
         result,
@@ -390,67 +438,53 @@ async function bindCandidateNumbers(
     candidate.sessionId,
     candidate.archiveState,
   );
-  let existing: Awaited<ReturnType<typeof readSessionPrs>>;
-  try {
-    existing = await readSessionPrs(prPath);
-  } catch {
-    existing = null;
-  }
-  const initialNumbers = new Set(existing?.map((pr) => pr.number));
-  let persisted: Awaited<ReturnType<typeof upsertSessionPr>> | undefined;
+  // `/review <url>` forms name their PR's URL explicitly and were already
+  // repo-gated against the workspace/page keys — bind the named URL itself
+  // instead of re-resolving the bare number, which could land another
+  // repo's same-numbered PR.
+  const formUrlByNumber = new Map<number, string>(
+    candidate.reviewedUrlForms.map((form) => [form.number, form.url]),
+  );
+  const bindings: Array<{
+    number: number;
+    url?: string;
+    state?: SessionPrState;
+    source?: SessionPrSource;
+  }> = [];
   for (const number of numbers) {
-    const isConvention = number === candidate.conventionNumber;
-    if (initialNumbers.has(number)) {
-      result.alreadyBound += 1;
-      // Plain skip for EVERY already-bound number: a re-upsert would move
-      // the entry to the end with a fresh createdAt, violating the
-      // binding-time order the badge and tooltip render by.
-      continue;
+    let url = sources.numberToUrl.get(number);
+    if (url === undefined) {
+      url = formUrlByNumber.get(number);
     }
-    let url = sources.numberToUrl.get(number) ?? candidate.direct.get(number);
-    if (
-      url === undefined &&
-      (isConvention || candidate.reviewed.includes(number))
-    ) {
-      // Fork layout: the repo gate above rejects the parent-repo page, but
-      // gh's own attribution still names the PR authoritatively — prefer it
-      // over a synthesized fork URL (forks host no PRs, the link would
-      // 404). Only a number gh's page lacks entirely falls back to the
-      // workspace remote (gh unavailable or outside the list window).
+    if (url === undefined) {
+      // Fork layout: gh's own attribution names the parent repo's PR
+      // authoritatively — a RELATED page (same repo or confirmed fork
+      // parent) is preferred over a synthesized fork URL (forks host no
+      // PRs, the link would 404). Only a number gh's page lacks entirely
+      // falls back to the workspace remote (gh unavailable, divergent
+      // page, or outside the list window).
       url = sources.pageUrlByNumber.get(number);
       if (url === undefined && sources.remote !== undefined) {
         url = `${sources.remote}/pull/${number}`;
       }
     }
-    if (url === undefined) {
-      result.unresolved += 1;
-      continue;
-    }
     const state = sources.pageStateByNumber.get(number);
-    persisted = await upsertSessionPr(prPath, {
+    bindings.push({
       number,
       url,
+      source: number === candidate.conventionNumber ? 'worktree' : 'review',
       ...(state ? { state } : {}),
     });
-    result.bound += 1;
   }
-  // Eviction repair: this run's NEW bindings can push pre-existing entries
-  // past the tail cap — including live gh-backed bindings, the strongest
-  // signal class, which no other path restores. Re-upsert every initially
-  // bound number the run evicted (URL/state from the pre-run snapshot).
-  // Runs that bind nothing new leave the sidecar untouched.
-  if (persisted !== undefined && existing) {
-    let survivors = new Set(persisted.map((pr) => pr.number));
-    for (const entry of existing) {
-      if (survivors.has(entry.number)) continue;
-      persisted = await upsertSessionPr(prPath, {
-        number: entry.number,
-        url: entry.url,
-        ...(entry.state ? { state: entry.state } : {}),
-      });
-      survivors = new Set(persisted.map((pr) => pr.number));
-    }
-  }
+  // One locked read-modify-write per session: the read inside the mutation
+  // sees bindings concurrent writers land during this run, the capped list
+  // is computed once (a repeated re-upsert repair would cascade and evict
+  // this run's own new bindings), and nothing is persisted until the final
+  // list is complete — a mid-write failure cannot strand evicted entries.
+  const applied = await upsertSessionPrs(prPath, bindings);
+  result.bound += applied.added.length;
+  result.alreadyBound += applied.alreadyBound.length;
+  result.unresolved += applied.unresolved.length;
 }
 
 export function registerSessionPrBackfillRoutes(
