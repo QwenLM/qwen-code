@@ -874,6 +874,44 @@ describe('R22-4 round-22 Critical regressions', () => {
   });
 });
 
+describe('R25-1 round-25 Critical regressions', () => {
+  // R25-1 factor 1: when the cut line is NOT the final line, every bracket
+  // still unclosed at the cut paid a newline probe over the whole anchored
+  // window in markerSpanShape — quadratic (round-25 probe: 906 ms at
+  // k=10,000, over the 800 ms budget this family pins). The shape verdict
+  // is one comparison against the hoisted cut-line start.
+  it('truncates a multi-line bracket run cut short of the final line fast', () => {
+    const text =
+      '[FILE: [x '.repeat(15000) + ']' + '\nprose line\n' + 'tail line';
+    const startedCpu = process.cpuUsage();
+    const truncated = truncateOutboundMediaText(text, 20000, TRUNCATION_MARKER);
+    const elapsedCpu = process.cpuUsage(startedCpu);
+    expect((elapsedCpu.user + elapsedCpu.system) / 1000).toBeLessThan(800);
+    expect(truncated.length).toBeLessThanOrEqual(20000);
+    expect(truncated.startsWith(TRUNCATION_MARKER)).toBe(true);
+    expect(truncated).not.toContain('[FILE:');
+    expect(truncated.endsWith('tail line')).toBe(true);
+  });
+
+  // R25-1 factor 2: the residue-continuation memo keyed on (line, depth)
+  // never amortises a nested depth ladder followed by bracket-free prose —
+  // each walk enters every ladder line at a depth no earlier walk used, so
+  // the walk re-scanned the whole ladder once per bracket (round-25 probe:
+  // 1,080 ms at k=2,200). A stop that never closed is depth-independent;
+  // it is recorded per visited line and replayed for deeper repeats.
+  it('truncates a depth ladder followed by prose in bounded time', () => {
+    const text = '[FILE: [\n'.repeat(3000) + 'prose line\n'.repeat(1272);
+    const startedCpu = process.cpuUsage();
+    const truncated = truncateOutboundMediaText(text, 20000, TRUNCATION_MARKER);
+    const elapsedCpu = process.cpuUsage(startedCpu);
+    expect((elapsedCpu.user + elapsedCpu.system) / 1000).toBeLessThan(800);
+    expect(truncated.length).toBeLessThanOrEqual(20000);
+    expect(truncated.startsWith(TRUNCATION_MARKER)).toBe(true);
+    expect(truncated).not.toContain('[FILE:');
+    expect(truncated).toContain('prose line');
+  });
+});
+
 describe('R19-x round-19 Critical regressions (R6-3 closure)', () => {
   // (A) The walker follows marked v15's real token shapes.
   it('masks code inside list items and table cells', () => {

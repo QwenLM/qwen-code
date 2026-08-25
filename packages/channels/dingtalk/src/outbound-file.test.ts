@@ -602,10 +602,15 @@ describe('stripPartialMediaMarkersBeforeBake (R19-x / R6-3)', () => {
     // fail-closed removal.
     expect(out).not.toContain('/ws/a.png');
 
+    // R24-2: the mirror must fail CLOSED exactly like the forward twin —
+    // the nested marker shares the residue's removal, the well-formed one
+    // delivers. The old toContain-only assertion shipped green with the
+    // nested marker still deliverable.
     const mirror = stripPartialMediaMarkersBeforeBake(
       '[IMAGE: [FILE: /ws/a.txt] junk\n[FILE: /ws/b.txt]',
     );
-    expect(findFileMarkers(mirror).map((m) => m.path)).toContain('/ws/b.txt');
+    expect(findFileMarkers(mirror).map((m) => m.path)).toEqual(['/ws/b.txt']);
+    expect(mirror).not.toContain('/ws/a.txt');
   });
 
   // R23-1: a gap sanitizer used to bound its residue only by its OWN kind's
@@ -623,5 +628,22 @@ describe('stripPartialMediaMarkersBeforeBake (R19-x / R6-3)', () => {
       '[FILE: /a [b]] [IMAGE: /ws/c.png]',
     );
     expect(findImageMarkers(mirror).map((m) => m.path)).toEqual(['/ws/c.png']);
+  });
+
+  // R24-1: a prose `[` is residue to no layer, yet raw bracket counting gave
+  // it a balance obligation that deleted legitimate prose — everything after
+  // the last kept marker when no balancing `]` exists. The obligation counts
+  // marker-shaped openings only.
+  it('keeps prose brackets from deleting message content', () => {
+    expect(
+      stripPartialMediaMarkersBeforeBake(
+        'I [promise to deliver [FILE: /ws/a.pdf] today]',
+      ),
+    ).toBe('I [promise to deliver [FILE: /ws/a.pdf] today]');
+    expect(
+      stripPartialMediaMarkersBeforeBake(
+        'Draft [notes\n[FILE: /ws/report.pdf]\nHere is the summary',
+      ),
+    ).toBe('Draft [notes\n[FILE: /ws/report.pdf]\nHere is the summary');
   });
 });

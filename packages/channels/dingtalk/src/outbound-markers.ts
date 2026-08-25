@@ -132,6 +132,7 @@ interface ResidueContinuationMemo {
   exact: Map<number, Map<number, number>>;
   noCloseMinDepth: Map<number, number>;
   noCloseAnyDepth: Set<number>;
+  stops: Map<number, { minDepth: number; result: number }>;
 }
 
 /**
@@ -163,6 +164,15 @@ interface ResidueContinuationMemo {
  * depth — a depth that reaches end-of-text without balancing leaves every
  * larger depth unbalanced too — which the no-close cache uses to answer
  * deeper repeats without walking at all.
+ *
+ * R25-1: the no-close caches never fire for a walk that STOPS — a nested
+ * depth ladder followed by bracket-free prose enters every ladder line at a
+ * depth no earlier walk used, so no (line, depth) key repeats. A stop that
+ * never closed is depth-independent: a deeper entry reaches the same stop
+ * line without closing anywhere on the way (line classification is
+ * depth-independent and the result is monotone in depth), so the walk now
+ * records those stops per visited line and consults the memo on EVERY line
+ * it enters, not just the walk's first.
  */
 function residueContinuationEnd(
   text: string,
@@ -176,13 +186,34 @@ function residueContinuationEnd(
     if (exact !== undefined) return exact;
     const noClose = memo.noCloseMinDepth.get(pos);
     if (noClose !== undefined && depth >= noClose) return -1;
+    const stop = memo.stops.get(pos);
+    if (stop !== undefined && depth >= stop.minDepth) return stop.result;
   }
   const trajectory: Array<{ line: number; depth: number }> = [];
   let lineStart = pos;
   let openDepth = depth;
   let result = -1;
   let sawClose = false;
+  let closed = false;
   while (lineStart < text.length && openDepth > 0) {
+    // R25-1: a line entered deep enough into a known no-close tail or a
+    // recorded depth-independent stop answers without re-walking it.
+    if (memo) {
+      if (memo.noCloseAnyDepth.has(lineStart)) {
+        result = -1;
+        break;
+      }
+      const noClose = memo.noCloseMinDepth.get(lineStart);
+      if (noClose !== undefined && openDepth >= noClose) {
+        result = -1;
+        break;
+      }
+      const stop = memo.stops.get(lineStart);
+      if (stop !== undefined && openDepth >= stop.minDepth) {
+        result = stop.result;
+        break;
+      }
+    }
     trajectory.push({ line: lineStart, depth: openDepth });
     const eol = lineEndAt(text, lineStart);
     const lineEnd = eol === -1 ? text.length : eol;
@@ -205,6 +236,7 @@ function residueContinuationEnd(
     }
     if (closedAt !== -1) {
       result = closedAt + 1;
+      closed = true;
       break;
     }
     if (firstOpen === -1) {
@@ -237,20 +269,35 @@ function residueContinuationEnd(
       for (const state of trajectory) {
         memo.noCloseAnyDepth.add(state.line);
       }
-    } else {
+    } else if (closed) {
+      // Where a CLOSING walk stops depends on the entry depth — record the
+      // exact (line, depth) states only.
       for (const state of trajectory) {
-        if (result === -1) {
-          const known = memo.noCloseMinDepth.get(state.line);
-          if (known === undefined || state.depth < known) {
-            memo.noCloseMinDepth.set(state.line, state.depth);
-          }
-        } else {
-          let atPos = memo.exact.get(state.line);
-          if (!atPos) {
-            atPos = new Map();
-            memo.exact.set(state.line, atPos);
-          }
-          if (!atPos.has(state.depth)) atPos.set(state.depth, result);
+        let atPos = memo.exact.get(state.line);
+        if (!atPos) {
+          atPos = new Map();
+          memo.exact.set(state.line, atPos);
+        }
+        if (!atPos.has(state.depth)) atPos.set(state.depth, result);
+      }
+    } else if (result === -1) {
+      for (const state of trajectory) {
+        const known = memo.noCloseMinDepth.get(state.line);
+        if (known === undefined || state.depth < known) {
+          memo.noCloseMinDepth.set(state.line, state.depth);
+        }
+      }
+    } else {
+      // R25-1: a stop WITHOUT a close (a bracket-free path line or the
+      // prefix before a mid-line bracket) stops at the same position for
+      // every deeper entry depth too — a deeper walk cannot close anywhere
+      // the recorded one did not, so it reaches the same stop line. Record
+      // the minimum entry depth per line and replay the stop for deeper
+      // repeats instead of re-walking the ladder to it.
+      for (const state of trajectory) {
+        const known = memo.stops.get(state.line);
+        if (known === undefined || state.depth < known.minDepth) {
+          memo.stops.set(state.line, { minDepth: state.depth, result });
         }
       }
     }
@@ -382,12 +429,19 @@ function balancedMarkerEnd(
  * and the cut; `cross-line-named` means the cut sits on a later line but the
  * span's own line still starts with a full marker name; `undefined` means
  * the span is not marker-shaped. Case folds one source character at a time
- * exactly as the recognition gates do (R6-2).
+ * exactly as the recognition gates do (R6-2). `cutLineStart` is the start of
+ * the line containing the cut.
+ *
+ * R25-1: whether the cut sits on a LATER line than a completed name is one
+ * comparison against `cutLineStart` — the per-bracket newline scan over the
+ * whole window between name and cut was one of the guard's two remaining
+ * quadratic factors on a multi-line bracket run.
  */
 function markerSpanShape(
   text: string,
   open: number,
   start: number,
+  cutLineStart: number,
 ): 'same-line-prefix' | 'same-line-named' | 'cross-line-named' | undefined {
   let index = open + 1;
   while (index < start && /[^\S\r\n]/u.test(text[index]!)) index++;
@@ -402,12 +456,7 @@ function markerSpanShape(
     upper += char.toUpperCase();
     index++;
     if (MEDIA_MARKER_PREFIXES.includes(upper)) {
-      for (let rest = index; rest < start; rest++) {
-        if (text[rest] === '\r' || text[rest] === '\n') {
-          return 'cross-line-named';
-        }
-      }
-      return 'same-line-named';
+      return cutLineStart > index ? 'cross-line-named' : 'same-line-named';
     }
     if (!MEDIA_MARKER_PREFIXES.some((prefix) => prefix.startsWith(upper))) {
       return undefined;
@@ -450,6 +499,16 @@ function markerSafeTruncationStart(
   // cut and the cut-to-close newline probe are the same for every bracket,
   // and {@link markerSpanShape} reads the ORIGINAL text by index with a
   // name-length cap instead of copying the retained window per bracket.
+  // R25-1: the cut's own line start, hoisted once — markerSpanShape's
+  // same-vs-cross verdict is one comparison against it instead of a
+  // per-bracket newline scan over the whole anchored window.
+  const cutLineStart =
+    start === 0
+      ? 0
+      : Math.max(
+          text.lastIndexOf('\n', start - 1),
+          text.lastIndexOf('\r', start - 1),
+        ) + 1;
   const close = text.indexOf(']', start);
   let cutToCloseCrossesLine = false;
   if (close !== -1) {
@@ -482,11 +541,12 @@ function markerSafeTruncationStart(
     exact: new Map(),
     noCloseMinDepth: new Map(),
     noCloseAnyDepth: new Set(),
+    stops: new Map(),
   };
   let advanced = start;
   while (unclosed.length > 0) {
     const open = unclosed.pop()!;
-    const shape = markerSpanShape(text, open, start);
+    const shape = markerSpanShape(text, open, start, cutLineStart);
     if (shape === undefined) continue;
     if (shape === 'cross-line-named') {
       // R2-7: the cut sits on a later line of a marker whose first line
@@ -735,13 +795,47 @@ export function bracketDepth(text: string, start: number, end: number): number {
 }
 
 /**
+ * The residue balance obligation `text[start, end)` leaves open, counting
+ * only marker-shaped openings: like {@link bracketDepth}, but a `[` adds to
+ * the depth only when it opens a marker-name residue of EITHER kind
+ * (immediate or spaced). A prose `[` owns no obligation — counting one
+ * deleted legitimate prose from delivered messages whenever an unclosed
+ * prose bracket preceded a deliverable marker, and de-protected a kept
+ * marker nested in prose brackets (R24-1/R24-2).
+ */
+export function markerResidueDepth(
+  text: string,
+  start: number,
+  end: number,
+): number {
+  let depth = 0;
+  for (let i = start; i < end && i < text.length; i++) {
+    if (text[i] === '[') {
+      if (
+        markerOpeningShape(text, i, 'FILE:') !== undefined ||
+        markerOpeningShape(text, i, 'IMAGE:') !== undefined
+      ) {
+        depth++;
+      }
+    } else if (text[i] === ']') {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return depth;
+}
+
+/**
  * When `depth` is positive the gap starts INSIDE an unclosed bracket opening
  * from the text before it — an ill-formed outer marker whose balanced extent
  * runs on past the deliverable marker the gap follows. That residue owns the
  * gap up to the balancing close; without removing it, a nested shape like
  * `[FILE: [FILE: /in] /etc/shadow]` delivers the inner marker and ships the
  * outer's bracket-less path fragment. A gap whose balance never closes is
- * residue to its end.
+ * residue to its end — except the line breaks survive: residue extents are
+ * line-disciplined, and deleting a gap's final newline merges the NEXT kept
+ * marker onto the residue's own line, where a later sweep's same-line residue
+ * eats it (R24-2: a deliverable FILE marker lost to an `[IMAGE:` opening two
+ * sweeps earlier). Newlines carry no path; keeping them is fail-safe.
  */
 export function dropUnbalancedGapPrefix(gap: string, depth: number): string {
   if (depth <= 0) return gap;
@@ -754,7 +848,7 @@ export function dropUnbalancedGapPrefix(gap: string, depth: number): string {
       if (d === 0) return gap.slice(i + 1);
     }
   }
-  return '';
+  return gap.replace(/[^\r\n]/gu, '');
 }
 
 export function findOutboundMediaMarkers(
@@ -889,6 +983,7 @@ export function stripPartialOutboundMediaMarker(
     exact: new Map(),
     noCloseMinDepth: new Map(),
     noCloseAnyDepth: new Set(),
+    stops: new Map(),
   };
   let open = text.indexOf('[');
   let skipUntil = -1;

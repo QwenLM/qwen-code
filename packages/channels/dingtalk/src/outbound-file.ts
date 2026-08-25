@@ -1,9 +1,9 @@
 import { basename, extname } from 'node:path';
 import { readValidatedLocalFile } from './outbound-local-file.js';
 import {
-  bracketDepth,
   dropUnbalancedGapPrefix,
   findOutboundMediaMarkers,
+  markerResidueDepth,
   neutralizeMediaMarkerOpenings,
   replaceOutboundMediaMarkers,
   stripPartialOutboundMediaMarker,
@@ -121,6 +121,29 @@ export function sanitizeMediaMarkersToStable(
 }
 
 /**
+ * Whether an aligned marker starts outside its own line's residue: no
+ * unclosed marker-shaped opening sits between the line start and the marker.
+ * The same-line window is the precise discriminator for "inside a genuine
+ * residue span" — a residue extent covers its opening's own line, and the
+ * continuation rules never cover a LATER line that carries brackets, which a
+ * complete marker always does. Counting openings over the whole prefix
+ * reaches too far: an obligation whose residue stopped at an earlier line
+ * end still de-protected markers on later lines (R24-2), losing a
+ * deliverable marker the line-disciplined residue would have kept.
+ */
+function outsideResidueLine(
+  text: string,
+  marker: OutboundMediaMarker,
+): boolean {
+  const lineStart =
+    Math.max(
+      text.lastIndexOf('\n', marker.start - 1),
+      text.lastIndexOf('\r', marker.start - 1),
+    ) + 1;
+  return markerResidueDepth(text, lineStart, marker.start) === 0;
+}
+
+/**
  * The markers of `markerName` in `text` that align — by path, in order —
  * with the `expected` list locked at the pipeline's entry.
  *
@@ -188,6 +211,12 @@ function stripAlignedMarkers(
   // keeps its balance obligation even after its own residue is stripped, so
   // the gap after a delivered inner marker loses the outer's bracket-less
   // path fragment instead of shipping it.
+  //
+  // R24-1: the obligation counts MARKER-SHAPED openings only. A prose `[`
+  // is residue to no layer, yet raw bracket counting gave it a balance
+  // obligation that deleted legitimate prose — up to the entire remainder
+  // of the message after the last kept marker — whenever an unclosed prose
+  // bracket preceded a deliverable marker.
   const sanitizeGap = (gap: string, depth: number): string => {
     const remainder = dropUnbalancedGapPrefix(gap, depth);
     return markerName === 'FILE'
@@ -199,14 +228,17 @@ function stripAlignedMarkers(
   for (const island of islands) {
     sanitized += sanitizeGap(
       text.slice(previousEnd, island.start),
-      bracketDepth(text, 0, previousEnd),
+      markerResidueDepth(text, 0, previousEnd),
     );
     sanitized += text.slice(island.start, island.end);
     previousEnd = island.end;
   }
   return (
     sanitized +
-    sanitizeGap(text.slice(previousEnd), bracketDepth(text, 0, previousEnd))
+    sanitizeGap(
+      text.slice(previousEnd),
+      markerResidueDepth(text, 0, previousEnd),
+    )
   );
 }
 
@@ -258,14 +290,15 @@ export function stripPartialMediaMarkersBeforeBake(text: string): string {
     // R23-1: the FILE sweep's residue must stop at an IMAGE marker the
     // entry alignment keeps — otherwise an ill-formed `[FILE:` whose line
     // balances before a kept IMAGE marker eats it to end-of-line. Only a
-    // span starting at bracket depth 0 qualifies: one still inside an
+    // span outside its own line's residue qualifies: one still inside an
     // unclosed opening sits within a genuine residue span and shares its
-    // fail-closed removal (the R16-5 pin).
+    // fail-closed removal (the R16-5 pin). R24-1: prose brackets are not
+    // residue openings and must not de-protect a kept marker.
     const protectedImages = alignMarkers(
       current,
       'IMAGE',
       expectedImage,
-    ).filter((marker) => bracketDepth(current, 0, marker.start) === 0);
+    ).filter((marker) => outsideResidueLine(current, marker));
     const afterFile = stripAlignedMarkers(
       current,
       'FILE',
@@ -276,7 +309,14 @@ export function stripPartialMediaMarkersBeforeBake(text: string): string {
     // sweep's alignment kept. Re-align against the FILE sweep's OUTPUT: the
     // spans that survive it are exactly the kept ones — a splice artifact
     // the sweep minted fails the entry-locked alignment and stays residue.
-    const protectedFiles = alignMarkers(afterFile, 'FILE', expectedFile);
+    // R24-2: the SAME residue-line qualification the IMAGE protection
+    // applies — without it a complete FILE marker nested inside an unclosed
+    // `[IMAGE:` opening survived the strip and was delivered, while the
+    // forward twin removed its nested IMAGE marker: a fail-open asymmetry
+    // in the fail-closed sanitizer.
+    const protectedFiles = alignMarkers(afterFile, 'FILE', expectedFile).filter(
+      (marker) => outsideResidueLine(afterFile, marker),
+    );
     const next = stripAlignedMarkers(
       afterFile,
       'IMAGE',
