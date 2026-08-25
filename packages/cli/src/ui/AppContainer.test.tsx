@@ -68,6 +68,7 @@ import {
   type Config,
   makeFakeConfig,
   SendMessageType,
+  ToolNames,
   type GeminiClient,
   type GoalTurnHost,
   type SubagentManager,
@@ -463,6 +464,7 @@ describe('AppContainer State Management', () => {
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
       createSubagent: vi.fn(),
+      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,
@@ -873,6 +875,27 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('boots AgentTool from the SubagentManager mock without unhandled rejections', async () => {
+      // AppContainer renders call the real Config.initialize(), whose
+      // warmAll() instantiates AgentTool against this file's mock; a mock
+      // method missing there rejects refreshSubagents() unhandled and fails
+      // the run on the Linux lanes.
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        await mockConfig.initialize();
+        const agentTool = await mockConfig
+          .getToolRegistry()
+          .ensureTool(ToolNames.AGENT);
+        expect(agentTool).toBeDefined();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled);
+      }
+      expect(unhandled).toEqual([]);
     });
   });
 
