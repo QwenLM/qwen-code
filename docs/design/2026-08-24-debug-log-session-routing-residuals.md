@@ -25,6 +25,13 @@ rotation only update the process-wide debug fallback when no session context is
 active. The workspace MCP discovery Config receives its own explicit context,
 so neither kind of daemon Config can move the single-session fallback.
 
+Generating the ID before Config loading must not change session-management
+behavior: the caller-id occupancy check exists to protect caller-chosen IDs
+from case-twins, so a daemon-generated fresh UUID is marked as such
+(`sessionIdGenerated`) and skips the check — otherwise the id-less creation
+hot path would pay two readdirs per session and a transient FS error would
+fail closed into a spurious `session_id_conflict`.
+
 MCP budget callbacks and persisted-session delete/rename operations restore the
 target session context at callback or dispatch time. Budget notifications keep
 the stable ACP-facing session ID in their payload, while debug logging follows
@@ -44,7 +51,11 @@ The latest-log alias remains best-effort. After calling the existing
 best-effort `updateSymlink`, the debug logger verifies the link's target and
 clears its dedup marker only when the latest scheduled update failed. This lets
 the next write for that session retry without changing the shared symlink API,
-while preserving serialized cross-session updates.
+while preserving serialized cross-session updates. Retries are bounded: after a
+few consecutive failures the marker stays sticky (one attempt per session
+change, the pre-retry behavior), so hosts where symlinks never succeed — e.g.
+Windows without symlink privilege — do not re-run a doomed unlink/symlink
+cycle on every debug line. A single success resets the streak.
 
 ## Non-goals
 

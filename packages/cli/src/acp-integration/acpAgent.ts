@@ -11776,8 +11776,13 @@ class QwenAgent implements Agent {
     const inheritedSessionId = preserveIdlessSession
       ? sessionIdContext.getStore()
       : undefined;
+    // A generated id exists only to bind the debug-log context before Config
+    // construction; loadCliConfig must not treat it as caller-supplied (the
+    // occupancy check is for caller-chosen ids that may have a case-twin).
+    const sessionIdGenerated =
+      sessionId === undefined && !preserveIdlessSession;
     const effectiveSessionId =
-      sessionId ?? (preserveIdlessSession ? undefined : randomUUID());
+      sessionId ?? (sessionIdGenerated ? randomUUID() : undefined);
     const debugSessionId =
       effectiveSessionId ?? inheritedSessionId ?? 'transcript-replay';
     try {
@@ -11798,6 +11803,7 @@ class QwenAgent implements Agent {
             initializeOptions,
             chatRecording,
             restoreOptions,
+            sessionIdGenerated,
           );
         }),
       );
@@ -11830,6 +11836,7 @@ class QwenAgent implements Agent {
     initializeOptions: ConfigInitializeOptions = {},
     chatRecording?: boolean,
     restoreOptions?: SelectiveSessionRestoreOptions,
+    sessionIdGenerated?: boolean,
   ): Promise<Config> {
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
@@ -11902,7 +11909,11 @@ class QwenAgent implements Agent {
     const sessionArg =
       resume === true
         ? { resume: sessionId, sessionId: undefined }
-        : { sessionId, resume: undefined };
+        : {
+            sessionId,
+            sessionIdGenerated: sessionIdGenerated === true || undefined,
+            resume: undefined,
+          };
     const argvForSession = {
       ...this.argv,
       // Docker sandbox relaunch injects a fixed --sandbox-session-id into

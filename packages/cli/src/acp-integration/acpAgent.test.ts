@@ -3614,6 +3614,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(argv).toMatchObject({
       sessionId: '550e8400-e29b-41d4-a716-446655440000',
     });
+    // Caller-supplied ids keep the occupancy check: the generated-id skip
+    // must not be set for them.
+    expect(argv.sessionIdGenerated).toBeUndefined();
     expect(configLoadSessionContext).toBe(
       '550e8400-e29b-41d4-a716-446655440000',
     );
@@ -3641,6 +3644,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(argv.sessionId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
+    // A daemon-generated fresh UUID must skip the caller-id occupancy check
+    // (readdir cost + fail-closed policy don't apply to it).
+    expect(argv.sessionIdGenerated).toBe(true);
     expect(configLoadSessionContext).toBe(argv.sessionId);
 
     mockConnectionState.resolve();

@@ -176,6 +176,30 @@ describe('non-interactive OpenAI log housekeeping', () => {
     expect(observedContexts).toEqual([undefined, undefined]);
   });
 
+  it('keeps a failing start outside the spawning session context', async () => {
+    // Pins the START-side sessionIdContext.exit: production starts
+    // housekeeping from inside a session's context, and a target-resolution
+    // failure there logs through the module debugLogger — that error line
+    // must not route into the spawning session's debug file.
+    const observed: Array<string | undefined> = [];
+    const throwingConfig = {
+      getContentGeneratorConfig: () => {
+        observed.push(sessionIdContext.getStore());
+        throw new Error('target resolution failed');
+      },
+      getModelsConfig: () => ({ getGenerationConfig: () => ({}) }),
+      getWorkingDir: () => process.cwd(),
+      getSessionId: () => 'session-a',
+    } as unknown as Config;
+
+    sessionIdContext.run('session-a', () => {
+      startNonInteractiveOpenAILogHousekeeping(throwingConfig, makeSettings());
+    });
+
+    expect(observed).toEqual([undefined]);
+    expect(mocks.cleanupOldOpenAILogs).not.toHaveBeenCalled();
+  });
+
   it('uses ModelsConfig as the fallback for the CLI logging directory', async () => {
     const modelLogDir = path.join(qwenHome, 'from-models-config');
     const settingsLogDir = path.join(qwenHome, 'from-settings');

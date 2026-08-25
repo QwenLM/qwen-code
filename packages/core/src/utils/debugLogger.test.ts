@@ -497,6 +497,85 @@ describe('debugLogger', () => {
         '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
         expectedLatestPath,
       );
+
+      // A successful (re)try must leave the dedup marker in place: another
+      // write for the same session may not re-run the alias update.
+      createDebugLogger().info('same session again');
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+    });
+
+    it('stops retrying the alias after consecutive persistent failures', async () => {
+      resetDebugLoggingState();
+      vi.mocked(fs.symlink).mockRejectedValue(new Error('EPERM'));
+      vi.mocked(fs.readlink).mockRejectedValue(new Error('ENOENT'));
+
+      setDebugLogSession(uuidSession);
+      await vi.runAllTimersAsync();
+
+      const logger = createDebugLogger();
+      for (let i = 0; i < 5; i += 1) {
+        logger.info(`doomed alias attempt ${i}`);
+        await vi.runAllTimersAsync();
+      }
+
+      // Attempts 1-3 retry; at the streak cap the marker stays sticky, so
+      // the remaining writes must not re-run the doomed unlink/symlink.
+      expect(fs.symlink).toHaveBeenCalledTimes(3);
+
+      // Restore the factory defaults for later tests.
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink).mockResolvedValue('');
+    });
+
+    it('does not let a stale failed update clear a newer session marker', async () => {
+      resetDebugLoggingState();
+      vi.clearAllMocks();
+
+      const otherSession = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      const deferreds: Array<{
+        resolve: () => void;
+        reject: (err: Error) => void;
+      }> = [];
+      vi.mocked(fs.symlink).mockImplementation(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            deferreds.push({ resolve: () => resolve(), reject });
+          }),
+      );
+      vi.mocked(fs.unlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink).mockResolvedValue(`${otherSession}.txt`);
+
+      const logger = createDebugLogger();
+      sessionIdContext.run('92ec0176-d354-4147-848b-5cd2d80609c4', () => {
+        logger.info('message from A');
+      });
+      sessionIdContext.run(otherSession, () => {
+        logger.info('message from B');
+      });
+      await vi.runAllTimersAsync();
+
+      // A's update fails only after B's was scheduled (B owns the marker).
+      deferreds[0]!.reject(new Error('EPERM'));
+      await vi.runAllTimersAsync();
+      deferreds[1]!.resolve();
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+
+      // B's marker must have survived A's stale failure: another write from
+      // B may not re-run the alias update.
+      sessionIdContext.run(otherSession, () => {
+        logger.info('B again');
+      });
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+
+      // Restore the factory defaults for later tests.
+      vi.mocked(fs.symlink).mockResolvedValue(undefined);
+      vi.mocked(fs.readlink).mockResolvedValue('');
     });
 
     it('does not create symlink when debug logging is disabled', async () => {
