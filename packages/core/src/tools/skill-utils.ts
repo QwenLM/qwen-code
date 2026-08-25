@@ -270,6 +270,14 @@ ${escapeXml(entry.description)}
  * auto-approved for the rest of the session instead of prompting. This is an
  * additive grant only — it never hides or restricts the tools the model sees.
  *
+ * Caveat under an active `permissions.allow` registry allowlist (#9827): the
+ * grant flips the runtime permission predicate, but it can never REGISTER a
+ * tool that the startup allowlist skipped at registration — the registry is
+ * built once in `Config.initialize`, so such a tool still fails
+ * TOOL_NOT_REGISTERED until the rule is added to settings `permissions.allow`
+ * and the session restarts. `PermissionManager.addSessionAllowRule` logs this
+ * caveat on the first such grant.
+ *
  * No-ops when there is no permission manager or nothing to grant.
  */
 export function applySkillAllowedTools(
