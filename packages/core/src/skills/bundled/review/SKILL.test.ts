@@ -1241,6 +1241,17 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       "deleted concurrent file reviews' live plans mid-round",
     );
+    // The plan-derived record directory (`<plan minus .json>-prompts`,
+    // prompt-record.ts) rode the same free stem out of every cleanup sweep
+    // and retention scan, and nothing else removed it — the manual-removal
+    // duty must cover it beside the plan JSON.
+    expect(body).toContain('and the `-prompts` directory beside it');
+    expect(body).toContain('nothing else removes it');
+    // …and the token-bearing inventory must not claim the reverse-audit
+    // transcripts carry the CLI-derived token: they ride the plan's stem
+    // via the record directory, which the same block declares free.
+    expect(body).toContain('the roster, coverage,');
+    expect(body).not.toContain('coverage, the reverse-audit');
   });
   it('never asks the orchestrator to derive the file-review target', () => {
     // Two derivations of one name is how `qwen review run` came to poll for

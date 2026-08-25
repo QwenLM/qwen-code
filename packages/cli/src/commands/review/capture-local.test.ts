@@ -19,7 +19,7 @@ import { DEADLINE_ENV } from './lib/deadline.js';
 
 const captureMock = vi.hoisted(() => vi.fn());
 const settingsMock = vi.hoisted(() => vi.fn(() => ({ merged: {} })));
-const visibilityMock = vi.hoisted(() => vi.fn(() => [] as string[]));
+const visibilityMock = vi.hoisted(() => vi.fn((): string[] | null => []));
 vi.mock('../../config/settings.js', async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   loadSettings: settingsMock,
@@ -219,6 +219,32 @@ describe('capture-local (command boundary)', () => {
 
     const plan = JSON.parse(readFileSync(join(dir, 'plan.json'), 'utf8'));
     expect(plan.effort).toBeUndefined();
+  });
+
+  it('withholds the cache candidate when the visibility bits cannot be enumerated', () => {
+    // The candidate records the identity of the tree this round reviewed;
+    // an oracle the capture cannot run leaves that identity uncertified, so
+    // the write fails closed exactly like the decided stops do.
+    capture();
+    visibilityMock.mockReturnValue(null);
+    run('plan.json');
+    expect(
+      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
+    ).toBe(false);
+    expect(errs.join('')).toContain('could not be enumerated');
+  });
+
+  it('withholds the cache candidate while tracked paths carry a visibility bit', () => {
+    // `hash-object` reads through a set --assume-unchanged/--skip-worktree
+    // bit while `git diff` cannot see the edit it hides — the candidate
+    // would record the identity of bytes this round never reviewed.
+    capture();
+    visibilityMock.mockReturnValue(['src/pay.ts']);
+    run('plan.json');
+    expect(
+      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
+    ).toBe(false);
+    expect(errs.join('')).toContain('the cache candidate is withheld');
   });
 
   it('escapes a filename carrying terminal control characters', () => {

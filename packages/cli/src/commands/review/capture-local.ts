@@ -215,6 +215,27 @@ function invisibleStopRefusal(invisible: string[] | null): string {
 }
 
 /**
+ * Why the cache candidate is withheld when tracked paths carry a visibility
+ * bit — or when the bits themselves could not be enumerated.
+ */
+function invisibleCandidateRefusal(invisible: string[] | null): string {
+  return invisible === null
+    ? 'The tracked-file visibility bits could not be enumerated ' +
+        '(`git ls-files -v` failed) — the cache candidate is withheld: an ' +
+        'anchor recorded over a tree the capture cannot measure would let ' +
+        'a later round certify bytes no round ever read. Re-run the review.'
+    : `${invisible.length} tracked path(s) carry an --assume-unchanged or ` +
+        `--skip-worktree bit (e.g. ${display(
+          invisible[0].slice(0, 96),
+        )}) — \`hash-object\` reads the worktree bytes through the bit ` +
+        `while \`git diff\` cannot see them, so the cache candidate is ` +
+        `withheld: promoted, it would anchor a later round on bytes this ` +
+        `round never reviewed. Clear the bit(s) ` +
+        `(\`git update-index --no-assume-unchanged\` / ` +
+        `\`--no-skip-worktree\`) and re-run the review.`;
+}
+
+/**
  * Why the previous round's anchor cannot scope this capture — or null when it
  * can. Every reason is said out loud: an anchor silently ignored looks
  * exactly like an anchor honoured over a full-size diff.
@@ -555,8 +576,35 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // erased the first file's anchor and its open findings.
     ...(sourcePath !== undefined ? { source: sourcePath } : {}),
   };
+  // The visibility-bit oracle, asked at most once per capture — see
+  // `invisibleTrackedPaths`. Every stop is a claim that nothing in the tree
+  // needs review, and the candidate records the identity of the tree this
+  // round reviewed; `git diff` is blind to the marked paths, so the three
+  // stops AND the candidate write are conditioned on the enumeration coming
+  // back clean.
+  let invisibleBits: string[] | null | undefined;
+  const invisibleTracked = (): string[] | null => {
+    if (invisibleBits === undefined) {
+      invisibleBits = invisibleTrackedPaths(capture.repoRoot);
+    }
+    return invisibleBits;
+  };
+  const invisibleCertified = (): boolean => {
+    const inv = invisibleTracked();
+    return inv !== null && inv.length === 0;
+  };
   const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
-  if (treeHeldStill) {
+  // The same uncertainty that withholds a decided stop withholds the
+  // candidate: `hash-object` reads the worktree bytes THROUGH a set
+  // assume-unchanged/skip-worktree bit while `git diff` cannot see them, so
+  // the hashes above record the identity of bytes this round's diff never
+  // showed. Promoted, the unread bytes become anchor state — and when the
+  // bit is cleared between rounds keeping the bytes, every comparison finds
+  // no change, every visibility gate reads clean, and the unchanged-since
+  // stop certifies them: a loop deciding "nothing to re-review" over bytes
+  // no round ever read.
+  const invisible = invisibleTracked();
+  if (treeHeldStill && invisible !== null && invisible.length === 0) {
     writeFileSync(cacheCandidatePath, JSON.stringify(candidate, null, 2));
   } else {
     // The path is stable per target, so an earlier round's candidate still
@@ -568,12 +616,16 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     } catch {
       // nothing to remove
     }
-    writeStderrLine(
-      'The working tree changed while the capture was being hashed — the ' +
-        'cache candidate is withheld, so the next round cannot anchor on ' +
-        'bytes this round never reviewed. The review itself proceeds on ' +
-        'the first capture.',
-    );
+    if (treeHeldStill) {
+      writeStderrLine(invisibleCandidateRefusal(invisible));
+    } else {
+      writeStderrLine(
+        'The working tree changed while the capture was being hashed — the ' +
+          'cache candidate is withheld, so the next round cannot anchor on ' +
+          'bytes this round never reviewed. The review itself proceeds on ' +
+          'the first capture.',
+      );
+    }
   }
 
   // Incremental scoping, when the caller brought the previous round's anchor.
@@ -596,21 +648,6 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // from HEAD — see `vanishedStillOnDisk`. Empty when no `--cache` scoped
   // this round. Read by the anchor refusal AND the stop gates below.
   let vanishedPresent: readonly string[] = [];
-  // The visibility-bit oracle, asked at most once per capture — see
-  // `invisibleTrackedPaths`. Every stop is a claim that nothing in the tree
-  // needs review, and `git diff` is blind to the marked paths, so all three
-  // are conditioned on the enumeration coming back clean.
-  let invisibleBits: string[] | null | undefined;
-  const invisibleTracked = (): string[] | null => {
-    if (invisibleBits === undefined) {
-      invisibleBits = invisibleTrackedPaths(capture.repoRoot);
-    }
-    return invisibleBits;
-  };
-  const invisibleCertified = (): boolean => {
-    const inv = invisibleTracked();
-    return inv !== null && inv.length === 0;
-  };
   if (args.cache !== undefined) {
     // A DIRECTORY resolves to this command's own target, because the caller
     // cannot name the file.

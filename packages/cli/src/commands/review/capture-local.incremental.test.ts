@@ -1454,3 +1454,59 @@ describe('capture-local — round-13 findings: visibility bits and empty anchors
     expect(third['nothingToReview']).toEqual({ reason: 'scope-emptied' });
   });
 });
+
+describe('capture-local — round-15 findings: the candidate under visibility bits', () => {
+  it('a visibility bit withholds the cache candidate (R14-1)', () => {
+    // The three decided stops are conditioned on the visibility bits, but
+    // the candidate write was not: `hash-object` reads the worktree bytes
+    // THROUGH a set bit while `git diff` cannot see them, so the candidate
+    // recorded the identity of bytes the round's diff never showed.
+    // Promoted, they became anchor state — and when the bit was cleared
+    // between rounds keeping the bytes, every comparison found no change,
+    // every visibility gate read clean, and the unchanged-since stop
+    // certified them: the loop decided "nothing to re-review" over bytes no
+    // round ever read. The same uncertainty that withholds a stop withholds
+    // the candidate.
+    write('.gitignore', '.qwen/\nplan.json\n');
+    write('src/foo.ts', 'export const v = 0;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    // A staged edit — visible to `git diff HEAD`.
+    write('src/foo.ts', 'export const v = 1;\n');
+    git('add', 'src/foo.ts');
+    const plain = capture({ model: 'model-a' });
+    expect(existsSync(plain.cacheCandidatePath)).toBe(true);
+
+    // A further edit hidden behind the bit on the SAME file: the diff still
+    // shows the staged hunk alone, while the candidate hashes read through.
+    git('update-index', '--assume-unchanged', 'src/foo.ts');
+    write('src/foo.ts', 'export const v = 999; // hidden edit\n');
+    stderrLines.length = 0;
+    const hidden = capture({ model: 'model-a' });
+    // Withheld — including the unlink of the earlier round's candidate,
+    // whose name this plan publishes and Step 8 would otherwise promote.
+    expect(existsSync(hidden.cacheCandidatePath)).toBe(false);
+    const err = stderrLines.join('\n');
+    expect(err).toContain('carry an --assume-unchanged or');
+    expect(err).toContain('the cache candidate is withheld');
+    // The round itself still proceeds on the first capture — only the
+    // anchor is withheld.
+    expect(hidden.chunks.length).toBeGreaterThan(0);
+
+    // The hole the withholding closes, end to end: nothing was promoted, so
+    // clearing the bit between rounds keeping the bytes cannot produce an
+    // "unchanged since last round" stop over the hidden bytes — the next
+    // round captures full and the now-visible edit is in scope.
+    git('update-index', '--no-assume-unchanged', 'src/foo.ts');
+    stderrLines.length = 0;
+    const next = capture({
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    expect(next['nothingToReview']).toBeUndefined();
+    expect(next.incremental).toBeUndefined();
+    expect(readFileSync(join(repo, next.diffPath), 'utf8')).toContain(
+      'hidden edit',
+    );
+  });
+});
