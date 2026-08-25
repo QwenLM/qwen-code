@@ -119,6 +119,16 @@ function isReasoningEffortPersistenceFailure(error: unknown): boolean {
 const REASONING_EFFORT_PERSISTENCE_FAILURE_MESSAGE =
   'The current session was updated, but the default value was not saved';
 
+function isReasoningEffortConfirmed(
+  value: string,
+  reasoning: { enabled: boolean; effort: string } | undefined,
+): boolean {
+  if (!reasoning) return false;
+  if (value === 'none') return reasoning.enabled === false;
+  if (value === 'default') return true;
+  return reasoning.enabled === true && reasoning.effort === value;
+}
+
 function promptFilesForTranscript(
   files: ReturnType<typeof normalizePromptFiles>,
   fileReferences: ReadonlyArray<DaemonSessionAttachmentReference | undefined>,
@@ -1117,6 +1127,15 @@ export function createDaemonSessionActions({
           ),
           'Set reasoning effort timed out',
         );
+        const nextReasoning = mapReasoningControls(
+          result.configOptions,
+          getConnection().reasoning?.effort,
+        );
+        if (!isReasoningEffortConfirmed(value, nextReasoning)) {
+          throw new Error(
+            `Daemon did not confirm reasoning effort ${JSON.stringify(value)}`,
+          );
+        }
         let providers: DaemonWorkspaceProvidersStatus | undefined;
         try {
           providers = await refreshWorkspaceProviders?.(session.workspaceCwd);
@@ -1144,10 +1163,7 @@ export function createDaemonSessionActions({
             return {
               ...current,
               ...(providers ? { providers } : {}),
-              reasoning: mapReasoningControls(
-                configOptions,
-                current.reasoning?.effort,
-              ),
+              reasoning: nextReasoning,
               context: current.context
                 ? {
                     ...current.context,
@@ -1159,6 +1175,7 @@ export function createDaemonSessionActions({
         }
       } catch (error) {
         const persistenceFailure = isReasoningEffortPersistenceFailure(error);
+        let liveReasoningConfirmed = false;
         if (persistenceFailure && sessionRef.current === session) {
           try {
             const context = await withActionTimeout(
@@ -1167,12 +1184,18 @@ export function createDaemonSessionActions({
             );
             if (Array.isArray(context.state.configOptions)) {
               const current = getConnection();
+              const nextReasoning = mapSessionContextReasoning(
+                context,
+                current.reasoning?.effort,
+              );
               if (
                 sessionRef.current === session &&
                 sourceModelGeneration === modelMutationGeneration &&
                 current.currentModel === sourceModel &&
-                actionToken > appliedReasoningActionToken
+                actionToken > appliedReasoningActionToken &&
+                isReasoningEffortConfirmed(value, nextReasoning)
               ) {
+                liveReasoningConfirmed = true;
                 appliedReasoningActionToken = actionToken;
                 setConnection((current) => {
                   if (
@@ -1185,10 +1208,7 @@ export function createDaemonSessionActions({
                   return {
                     ...current,
                     context,
-                    reasoning: mapSessionContextReasoning(
-                      context,
-                      current.reasoning?.effort,
-                    ),
+                    reasoning: nextReasoning,
                   };
                 });
               }
@@ -1198,7 +1218,7 @@ export function createDaemonSessionActions({
             // live-state refresh is unavailable.
           }
         }
-        throw dispatchActionError(
+        const actionError = dispatchActionError(
           noticeForSession(session),
           'Set reasoning effort failed',
           persistenceFailure
@@ -1206,6 +1226,8 @@ export function createDaemonSessionActions({
             : error,
           'set_reasoning_effort',
         );
+        if (persistenceFailure && liveReasoningConfirmed) return;
+        throw actionError;
       }
     },
 

@@ -2531,9 +2531,7 @@ describe('createDaemonSessionActions', () => {
       },
     });
 
-    await expect(actions.setReasoningEffort('xhigh')).rejects.toThrow(
-      'The current session was updated, but the default value was not saved',
-    );
+    await expect(actions.setReasoningEffort('xhigh')).resolves.toBeUndefined();
 
     expect(source.context).toHaveBeenCalledOnce();
     expect(addNotice).toHaveBeenCalledWith(
@@ -2546,6 +2544,138 @@ describe('createDaemonSessionActions', () => {
       context: liveContext,
       reasoning: { enabled: true, effort: 'xhigh', efforts },
     });
+  });
+
+  it('rejects a persistence failure when live reasoning cannot confirm the selection', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    source.setConfigOption.mockRejectedValueOnce(
+      new DaemonHttpError(
+        500,
+        {
+          data: { errorKind: 'reasoning_effort_persistence_failed' },
+        },
+        'Internal error',
+      ),
+    );
+    source.context.mockResolvedValueOnce({
+      ...contextStatus(source.sessionId),
+      state: { configOptions: reasoningConfigOptions('medium') },
+    });
+    const { actions } = createActionsHarness({
+      session: source,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: source.sessionId,
+        clientId: source.clientId,
+        currentModel: 'qwen3.8-max',
+        reasoning: {
+          enabled: true,
+          effort: 'medium',
+          efforts: [
+            { value: 'low', name: 'low' },
+            { value: 'medium', name: 'medium' },
+            { value: 'xhigh', name: 'xhigh' },
+          ],
+        },
+      },
+    });
+
+    await expect(actions.setReasoningEffort('xhigh')).rejects.toThrow(
+      'The current session was updated, but the default value was not saved',
+    );
+  });
+
+  it('applies a reasoning effort only when the daemon confirms it', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: reasoningConfigOptions('medium'),
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+      },
+      session,
+    });
+
+    await expect(actions.setReasoningEffort('medium')).resolves.toBeUndefined();
+
+    expect(session.setConfigOption).toHaveBeenCalledWith(
+      'reasoning_effort',
+      'medium',
+    );
+    expect(getConnection().reasoning).toEqual({
+      enabled: true,
+      effort: 'medium',
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
+    });
+  });
+
+  it('accepts default when the daemon confirms the resolved model default', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'default', name: 'Default' },
+            { value: 'xhigh', name: 'Extra High' },
+          ],
+        },
+      ],
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+      },
+      session,
+    });
+
+    await expect(
+      actions.setReasoningEffort('default'),
+    ).resolves.toBeUndefined();
+
+    expect(session.setConfigOption).toHaveBeenCalledWith(
+      'reasoning_effort',
+      'default',
+    );
+    expect(getConnection().reasoning).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: [
+        { value: 'default', name: 'Default' },
+        { value: 'xhigh', name: 'Extra High' },
+      ],
+    });
+  });
+
+  it('rejects a reasoning effort when live config options do not confirm it', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({ configOptions: [] });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+      },
+      session,
+    });
+
+    await expect(actions.setReasoningEffort('medium')).rejects.toThrow(
+      'Daemon did not confirm reasoning effort "medium"',
+    );
+
+    expect(getConnection().reasoning).toBeUndefined();
   });
 
   it('does not apply a late approval mode to a replacement attachment', async () => {
@@ -2771,12 +2901,12 @@ function createMockSession(
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
+    setModel: vi.fn(async () => ({})),
     setConfigOption: vi.fn<DaemonSessionClient['setConfigOption']>(
-      async () => ({
-        configOptions: [],
+      async (_configId: string, value: string) => ({
+        configOptions: reasoningConfigOptions(value),
       }),
     ),
-    setModel: vi.fn(async () => ({})),
     uploadAttachment: vi.fn(
       async (data: Blob, name: string, mimeType: string) => ({
         type: mimeType.startsWith('image/')
@@ -2799,6 +2929,21 @@ function createMockSession(
     goal: vi.fn(),
     controlGoal: vi.fn(),
   };
+}
+
+function reasoningConfigOptions(currentValue: string) {
+  return [
+    {
+      id: 'reasoning_effort',
+      currentValue,
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+    },
+  ];
 }
 
 function createDeferred<T>() {
