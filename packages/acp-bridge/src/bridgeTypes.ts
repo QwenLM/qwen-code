@@ -1480,6 +1480,19 @@ export interface AcpSessionBridge {
   seedSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
 
   /**
+   * Replace the in-memory PR binding list of a live session with the
+   * authoritative persisted one. The metadata routes call this after the
+   * sidecar upsert succeeds: the sidecar cap evicts by provenance
+   * authority while the bridge merge caps positionally, so once the list
+   * overflows the cap the two stores evict different entries — the live
+   * entry must mirror the persisted list or later events and rename
+   * responses serve the diverged one. Optional like
+   * {@link seedSessionPrs}. Callers own sidecar I/O; the bridge stays
+   * storage-agnostic.
+   */
+  setSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
+
+  /**
    * List the structured artifacts registered for a live session. Throws
    * `SessionNotFoundError` when the id is unknown.
    */

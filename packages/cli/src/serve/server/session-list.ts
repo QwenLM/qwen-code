@@ -517,10 +517,15 @@ function mergeLiveSessionSummary(
     const persistedNumbers = new Set(persistedPrs.map((p) => p.number));
     const ordered = persistedPrs.map((p) => {
       const liveEntry = liveByNumber.get(p.number);
+      // The same number in another repository is another PR: a persisted
+      // state resolved for the old URL must never be stamped onto a
+      // live entry already re-bound elsewhere.
       return liveEntry
         ? {
             ...liveEntry,
-            ...(p.state !== undefined ? { state: p.state } : {}),
+            ...(p.state !== undefined && p.url === liveEntry.url
+              ? { state: p.state }
+              : {}),
           }
         : p;
     });
