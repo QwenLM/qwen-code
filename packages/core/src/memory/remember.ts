@@ -257,11 +257,31 @@ export async function runManagedRememberByAgent(params: {
   if (result.status === 'cancelled') {
     throw new Error(result.terminateReason || 'Remember agent cancelled');
   }
+  // Classify every successful write — MEMORY.md included — so a hand-written
+  // index still triggers the rebuild that atomically regenerates it from the
+  // entry files. MEMORY.md loads verbatim into every future session, so no
+  // exit path may leave the agent's index write on disk unrepaired.
+  const writtenScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
+  const rebuildWrittenScopes = () =>
+    Promise.all([
+      writtenScopes.includes('project')
+        ? rebuildManagedAutoMemoryIndex(params.projectRoot)
+        : Promise.resolve(),
+      writtenScopes.includes('user')
+        ? params.scope === 'user'
+          ? rebuildUserAutoMemoryIndex()
+          : rebuildUserAutoMemoryIndex().catch((err: unknown) => {
+              // Automatic scope selection keeps user memory best-effort.
+              debugLogger.error('User memory index rebuild failed:', err);
+            })
+        : Promise.resolve(),
+    ]);
   if (entryFilesWritten.length === 0) {
     debugLogger.warn('Remember agent completed without writing memory.', {
       filesTouched: result.filesTouched,
       finalTextLength: result.finalText?.length ?? 0,
     });
+    await rebuildWrittenScopes();
     throw Object.assign(new Error('Remember agent did not update any memory'), {
       code: 'remember_no_update',
     });
@@ -271,6 +291,7 @@ export async function runManagedRememberByAgent(params: {
     params.projectRoot,
   );
   if (params.scope && touchedScopes.some((scope) => scope !== params.scope)) {
+    await rebuildWrittenScopes();
     throw Object.assign(
       new Error(
         `Remember agent wrote outside the requested ${params.scope} scope`,
@@ -279,19 +300,7 @@ export async function runManagedRememberByAgent(params: {
     );
   }
 
-  await Promise.all([
-    touchedScopes.includes('project')
-      ? rebuildManagedAutoMemoryIndex(params.projectRoot)
-      : Promise.resolve(),
-    touchedScopes.includes('user')
-      ? params.scope === 'user'
-        ? rebuildUserAutoMemoryIndex()
-        : rebuildUserAutoMemoryIndex().catch((err: unknown) => {
-            // Automatic scope selection keeps user memory best-effort.
-            debugLogger.error('User memory index rebuild failed:', err);
-          })
-      : Promise.resolve(),
-  ]);
+  await rebuildWrittenScopes();
 
   return {
     summary: 'Memory update completed.',

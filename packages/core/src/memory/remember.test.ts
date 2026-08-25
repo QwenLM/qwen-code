@@ -279,7 +279,9 @@ describe('remember memory helper', () => {
         scope: 'project',
       }),
     ).rejects.toMatchObject({ code: 'remember_scope_mismatch' });
-    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+    // A mismatch aborts the update but still repairs any hand-written index.
+    expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
   });
 
   it('enforces an explicit user target at the permission boundary', async () => {
@@ -358,7 +360,8 @@ describe('remember memory helper', () => {
         scope: 'user',
       }),
     ).rejects.toMatchObject({ code: 'remember_scope_mismatch' });
-    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
   });
 
   it('hides the project tier from the system prompt of an explicit user-targeted remember', async () => {
@@ -425,8 +428,8 @@ describe('remember memory helper', () => {
         scope: 'project',
       }),
     ).rejects.toMatchObject({ code: 'remember_scope_mismatch' });
-    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
-    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+    expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a user-targeted result that mixes user and project writes', async () => {
@@ -456,8 +459,8 @@ describe('remember memory helper', () => {
         scope: 'user',
       }),
     ).rejects.toMatchObject({ code: 'remember_scope_mismatch' });
-    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
-    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+    expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
   });
 
   it('fails an explicit user target when its index cannot be rebuilt', async () => {
@@ -525,7 +528,39 @@ describe('remember memory helper', () => {
         scope: 'project',
       }),
     ).rejects.toMatchObject({ code: 'remember_no_update' });
-    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    // The hand-written index must still be rebuilt from the entry files
+    // before the throw: MEMORY.md loads verbatim into every future session,
+    // so leaving the agent's write unrepaired is a persistent instruction
+    // channel.
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it('rebuilds a store whose only write was a hand-written MEMORY.md', async () => {
+    const projectEntry = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'real-entry.md',
+    );
+    const userIndex = path.join(getUserAutoMemoryRoot(), 'MEMORY.md');
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved.',
+      filesTouched: [projectEntry, userIndex],
+      filesWritten: [projectEntry, userIndex],
+    } satisfies ForkedAgentResult);
+
+    const result = await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(result.filesTouched).toEqual([projectEntry]);
+    expect(result.touchedScopes).toEqual(['project']);
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+    expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
   });
 
   it('threads the configured memory agent timeout into the forked agent', async () => {
