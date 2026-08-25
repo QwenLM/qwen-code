@@ -522,6 +522,24 @@ export function transcriptBlocksToDaemonMessages(
           });
           break;
         }
+        const meta = getRecord(textBlock.meta);
+        if (meta?.['source'] === 'vision_bridge_notice') {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'vision_bridge_notice',
+            ...(meta['visionBridgeNotice'] !== undefined
+              ? { data: meta['visionBridgeNotice'] }
+              : {}),
+            timestamp: blockTime,
+          });
+          break;
+        }
         if (!textBlock.text && !textBlock.usage) break;
 
         const parentSubAgent = textBlock.parentToolCallId
