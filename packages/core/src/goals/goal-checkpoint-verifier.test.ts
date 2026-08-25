@@ -7,7 +7,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { BaseLlmClient } from '../core/baseLlmClient.js';
-import type { GoalCheckpointVerifierInput } from './goal-checkpoint.js';
+import {
+  InvalidGoalCheckpointError,
+  type GoalCheckpointVerifierInput,
+} from './goal-checkpoint.js';
 import {
   GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
@@ -139,6 +142,25 @@ describe('createGoalCheckpointVerifier', () => {
     expect(request.systemInstruction).toContain(
       'to carry one forward, cite its id in sourceRefs',
     );
+  });
+
+  it('surfaces unusable model output as InvalidGoalCheckpointError', async () => {
+    // The stall breaker counts unusable results by error class, so every
+    // parse-level rejection must keep it, not degrade to a plain Error.
+    for (const reply of [
+      JSON.stringify({ claims: [] }),
+      'not json',
+      JSON.stringify({
+        claims: [
+          { proofKind: 'external_fact', claim: '', sourceRefs: ['tool-1'] },
+        ],
+      }),
+    ]) {
+      const { config } = configFor(reply);
+      await expect(
+        createGoalCheckpointVerifier(config)(input()),
+      ).rejects.toBeInstanceOf(InvalidGoalCheckpointError);
+    }
   });
 
   it('rejects oversized input before calling the provider', async () => {

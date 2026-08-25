@@ -51,6 +51,17 @@ const mocks = vi.hoisted(() => ({
   aoneWhoamiAccount: vi.fn(() => 'reviewer'),
 }));
 
+// The fixtures below key on POSIX path literals (`/repo/.qwen/tmp/…`), but
+// cleanup.ts and the helpers it calls (redirectedAncestor, promptRecordDir,
+// the deadline readers) run those strings through node:path. On Windows that
+// would spell them with a drive letter and backslashes, so no literal-keyed
+// mock or assertion could ever match. Pin POSIX semantics for this module
+// graph; on POSIX hosts this is the identity.
+vi.mock('node:path', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:path')>();
+  return { ...actual, ...actual.posix, default: actual.posix };
+});
+
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {

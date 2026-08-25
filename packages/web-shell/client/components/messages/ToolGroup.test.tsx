@@ -10,8 +10,9 @@ import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
+import { McpAppHostContext } from '../../mcpAppHostContext';
 
-vi.mock('../../App', async () => {
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     TodoTimelineContext: createContext(new Map()),
@@ -92,18 +93,26 @@ function renderToolGroup(
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
   language: 'en' | 'zh-CN' = 'en',
   generateContent?: SessionContentGenerator,
+  mcpAppHostUrl?: string,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    const group = (
+    const toolGroup = (
       <ToolGroup
         tools={tools}
         thoughts={thoughts}
         compactSummary={compactSummary}
         generateContent={generateContent}
       />
+    );
+    const group = mcpAppHostUrl ? (
+      <McpAppHostContext.Provider value={mcpAppHostUrl}>
+        {toolGroup}
+      </McpAppHostContext.Provider>
+    ) : (
+      toolGroup
     );
     root.render(
       <I18nProvider language={language}>
@@ -483,25 +492,50 @@ describe('tool group summary logic', () => {
   });
 
   it('opens a completed MCP App result in the session transcript', () => {
-    const container = renderToolGroup([
-      makeTool({
-        toolName: 'mcp__demo__show_dashboard',
-        rawOutput: {
-          type: 'mcp_app',
-          serverName: 'demo',
-          resourceUri: 'ui://demo/dashboard',
-          html: '<main>Dashboard</main>',
-          toolResult: { content: [] },
-          toolArguments: {},
-          fallbackText: 'Dashboard ready',
-        },
-      }),
-    ]);
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__show_dashboard',
+          rawOutput: {
+            type: 'mcp_app',
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Dashboard</main>',
+            toolResult: { content: [] },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+        }),
+      ],
+      {},
+      undefined,
+      false,
+      undefined,
+      undefined,
+      'en',
+      undefined,
+      'http://localhost:5173',
+    );
 
     expect(
       container.querySelector('button')?.getAttribute('aria-expanded'),
     ).toBe('true');
-    expect(container.textContent).toContain('Dashboard ready');
+
+    const content = container.querySelector(
+      '[class*="chatSummaryContentClip"]',
+    );
+    const iframe = container.querySelector('iframe');
+    expect(iframe).not.toBeNull();
+    iframe!.dataset['testState'] = 'preserved';
+    act(() => container.querySelector('button')?.click());
+    expect(content).toBe(
+      container.querySelector('[class*="chatSummaryContentClip"]'),
+    );
+    expect((content as HTMLElement | null)?.style.display).toBe('none');
+    act(() => container.querySelector('button')?.click());
+    expect(container.querySelector('iframe')).toBe(iframe);
+    expect(iframe?.dataset['testState']).toBe('preserved');
+    expect((content as HTMLElement | null)?.style.display).toBe('');
   });
 
   it('keeps an MCP App open when multiple tools share a summary', () => {
@@ -588,6 +622,7 @@ describe('tool group summary logic', () => {
         args: { file_path: 'README.md' },
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     expect(container.textContent).toContain('Shell');
     expect(container.textContent).toContain('查询用户工作空间列表');
@@ -828,7 +863,6 @@ describe('tool row rendering', () => {
       const content = container.querySelector(
         '[class*="chatSummaryContentClip"]',
       );
-      expect(content?.className).not.toContain('chatSummaryContentCollapsed');
       expect(content?.textContent).toContain('custom 5s');
 
       act(() => {
@@ -998,6 +1032,7 @@ describe('tool row rendering', () => {
         },
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -1012,6 +1047,7 @@ describe('tool row rendering', () => {
         content: [{ type: 'content', content: { text: 'Permission denied' } }],
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -1022,6 +1058,7 @@ describe('tool row rendering', () => {
     const container = renderToolGroup([
       makeTool({ toolName: 'glob', status: 'failed' }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -1805,19 +1842,19 @@ describe('thinking rows in the compact summary', () => {
       true,
     );
     const outerSummary = container.querySelector('button')!;
-    const parallelSummary = Array.from(
-      container.querySelectorAll('button'),
-    ).find((button) => button.textContent?.includes('Parallel agents'))!;
 
     expect(outerSummary.textContent).toContain('Ran 2 agents');
     expect(
       container.querySelector('[data-testid="compact-parallel-agents"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     expect(outerSummary.getAttribute('aria-expanded')).toBe('false');
-    expect(parallelSummary.getAttribute('aria-expanded')).toBe('false');
 
     act(() => outerSummary.click());
+    const parallelSummary = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('Parallel agents'))!;
     expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(parallelSummary.getAttribute('aria-expanded')).toBe('false');
     expect(parallelSummary.textContent).toContain('2/2 done');
 
     act(() => parallelSummary.click());
@@ -1841,6 +1878,15 @@ describe('thinking rows in the compact summary', () => {
     expect(container.querySelector('button')?.textContent).toContain(
       'Thinking',
     );
+    expect(
+      container.querySelector('[class*="chatSummaryThoughtHeader"]'),
+    ).toBeNull();
+
+    act(() => container.querySelector('button')?.click());
+
+    expect(
+      container.querySelector('[class*="chatSummaryThoughtHeader"]'),
+    ).not.toBeNull();
   });
 
   it('renders a completed thought line that expands its content on click', () => {
@@ -2032,8 +2078,8 @@ describe('thinking rows in the compact summary', () => {
       ],
     );
 
+    act(() => container.querySelector('button')?.click());
     act(() => {
-      container.querySelector('button')?.click();
       for (const header of container.querySelectorAll(
         '[data-testid="compact-thinking-summary"]',
       )) {
