@@ -352,7 +352,7 @@ describe('resolveWorkspaceRuntimeWithLiveCompatibilityFromParam', () => {
   });
 });
 
-describe('resolveTrustedRuntime', () => {
+describe('resolveTrustedRuntime (route selection)', () => {
   it('returns the selected active trusted runtime', () => {
     const runtime = makeRuntime();
     const registry = createSingleWorkspaceRegistry(runtime);
