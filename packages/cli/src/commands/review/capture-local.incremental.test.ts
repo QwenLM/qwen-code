@@ -645,6 +645,41 @@ describe('capture-local — the decided stops are machine-readable', () => {
     expect(plan.chunks.length).toBe(0);
     expect(plan['nothingToReview']).toEqual({ reason: 'clean-tree' });
   });
+
+  it('withholds the clean-tree stop under --no-untracked, out loud', () => {
+    // R15-2: the stop's claim is "nothing staged, nothing unstaged, nothing
+    // untracked", and with `--no-untracked` the third clause is checked by
+    // nobody — the untracked enumeration never runs and records no
+    // `skipped` entries, so a tracked-clean tree with pending untracked
+    // work passed every conjunct and `qwen review run` exited 0 decided
+    // over files no round enumerated. SKILL.md's own recovery from an
+    // oversized-untracked skip re-runs with exactly this flag. The anchor
+    // gate has carried the exclusion since the candidate recorded
+    // `untracked`; this pins the stop gate's copy, and the prose twin's.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+    write('pending-work.ts', 'export const untrackedEdit = 1;\n');
+
+    const plan = capture({ untracked: false });
+    expect(plan.chunks.length).toBe(0);
+    expect(plan['nothingToReview']).toBeUndefined();
+    expect(
+      existsSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json')),
+    ).toBe(false);
+    const err = stderrLines.join('\n');
+    expect(err).toContain(
+      'untracked files were not enumerated (--no-untracked)',
+    );
+    expect(err).not.toContain('the working tree is clean');
+    // The same flag on a genuinely clean tree is withheld too — the capture
+    // cannot tell the two apart, and fail-closed is the direction every
+    // sibling gate leans.
+    stderrLines.length = 0;
+    rmSync(join(repo, 'pending-work.ts'));
+    const second = capture({ untracked: false });
+    expect(second['nothingToReview']).toBeUndefined();
+  });
 });
 
 describe('capture-local — --cache takes the DIRECTORY', () => {
