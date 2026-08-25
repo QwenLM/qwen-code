@@ -1292,6 +1292,15 @@ describe('bundled review skill', () => {
       'WARNING: 0 chunks, but a cached path dropped out of this capture while still on disk and diverges from HEAD',
     );
     expect(body).toContain('diverges from HEAD invisibly to git');
+    // The round-15 shape: `--no-untracked` leaves the clean-tree stop's
+    // third clause ("nothing untracked") checked by nobody, so the capture
+    // withholds the stop — same signature, its own sentence, and its own
+    // guidance: a re-run changes nothing (the flag is the cause), so the
+    // branch reports the untracked scope as not reviewed instead.
+    expect(body).toContain(
+      'the tracked tree is clean, but untracked files were not enumerated (--no-untracked)',
+    );
+    expect(body).toContain('for the `--no-untracked` shape do NOT re-run');
   });
   it('keys the local cache write to the marker\u2019s withholding conditions', () => {
     // R8-2: the local fail-closed LIST was "completed" three times and a

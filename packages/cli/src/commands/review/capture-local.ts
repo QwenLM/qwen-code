@@ -432,6 +432,17 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   const target =
     sourcePath !== undefined ? safeTarget(sourcePath) : args.target;
 
+  // Visibility-bit sample 0 — BEFORE the first capture. The oracle rides the
+  // same both-endpoints discipline as the diffs and hashes below: sampled
+  // only after the loop, a bit set through every diff pass and cleared just
+  // before the one query read clean while the captured diffs were blind to
+  // the edit it hid — the candidate then certified bytes no pass ever
+  // showed. Bracketing narrows that to a set-AND-cleared toggle inside one
+  // inter-sample gap, the same honest-tightening the capture loop claims
+  // for itself.
+  const invisibleSamples: Array<string[] | null> = [
+    invisibleTrackedPaths(gitOpt('rev-parse', '--show-toplevel') ?? '.'),
+  ];
   const capture = captureLocalDiff({
     file,
     includeUntracked: args.untracked,
@@ -531,6 +542,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       captureLocalDiff({ file, includeUntracked: args.untracked }).diff,
     );
     hashPasses.push(hashWorktreeFiles(capture.repoRoot, planPaths));
+    // Visibility-bit samples 1 and 2 — interleaved with the re-captures for
+    // the same reason the hashes are: see sample 0 above.
+    invisibleSamples.push(invisibleTrackedPaths(capture.repoRoot));
   }
   const treeHeldStill =
     captures.every((d) => d.equals(captures[0])) &&
@@ -576,18 +590,29 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // erased the first file's anchor and its open findings.
     ...(sourcePath !== undefined ? { source: sourcePath } : {}),
   };
-  // The visibility-bit oracle, asked at most once per capture — see
-  // `invisibleTrackedPaths`. Every stop is a claim that nothing in the tree
-  // needs review, and the candidate records the identity of the tree this
-  // round reviewed; `git diff` is blind to the marked paths, so the three
-  // stops AND the candidate write are conditioned on the enumeration coming
-  // back clean.
+  // The visibility-bit oracle — every stop is a claim that nothing in the
+  // tree needs review, and the candidate records the identity of the tree
+  // this round reviewed; `git diff` is blind to the marked paths, so the
+  // three stops AND the candidate write are conditioned on the enumeration
+  // coming back clean AT EVERY SAMPLE POINT: the three bracketing samples
+  // taken alongside the captures above, plus a final one here after the
+  // loop. A bit visible at ANY of them withholds (the union is reported),
+  // and a single failed enumeration withholds everything — the same
+  // fail-closed lean as one unhashable path.
   let invisibleBits: string[] | null | undefined;
   const invisibleTracked = (): string[] | null => {
     if (invisibleBits === undefined) {
       invisibleBits = invisibleTrackedPaths(capture.repoRoot);
     }
-    return invisibleBits;
+    if (invisibleBits === null || invisibleSamples.some((v) => v === null)) {
+      return null;
+    }
+    return [
+      ...new Set([
+        ...invisibleSamples.flatMap((v) => v ?? []),
+        ...invisibleBits,
+      ]),
+    ];
   };
   const invisibleCertified = (): boolean => {
     const inv = invisibleTracked();
@@ -866,7 +891,26 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // the stop, because the capture cannot tell which marked path diverges.
     invisibleCertified()
   ) {
-    nothingToReview = { reason: 'clean-tree' };
+    if (args.untracked !== false) {
+      nothingToReview = { reason: 'clean-tree' };
+    } else {
+      // The stop's claim is "nothing staged, nothing unstaged, nothing
+      // untracked", and under `--no-untracked` the third clause was never
+      // checked: the untracked enumeration does not run and records no
+      // `skipped` entries, so a tracked-clean tree with pending untracked
+      // work passed every conjunct above. SKILL.md's own recovery from an
+      // oversized-untracked skip is "re-run with `--no-untracked`", which
+      // lands exactly here — deciding clean over the very content the first
+      // run could not read. The ANCHOR gate has carried this exclusion
+      // since the candidate recorded `untracked`; the stop follows it, out
+      // loud like every other withheld stop.
+      writeStderrLine(
+        'The tracked tree is clean, but untracked files were not ' +
+          'enumerated (--no-untracked), so this is NOT a decided clean ' +
+          'tree: report the untracked scope under "Not reviewed" and end ' +
+          'the round without a clean verdict.',
+      );
+    }
   }
 
   // …and the third decided shape, which the two above miss because both are
@@ -1033,8 +1077,17 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
           : treeHeldStill &&
               vanishedPresent.length === 0 &&
               invisibleCertified()
-            ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
-              'to review; do not run the review agents.'
+            ? // The prose channel carries the field gate's untracked
+              // exclusion too — the orchestrator reads BOTH, and a prose
+              // "clean" beside a withheld field re-opens the contradiction
+              // the moved-tree branch below closed.
+              args.untracked !== false
+              ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
+                'to review; do not run the review agents.'
+              : '0 chunks — the tracked tree is clean, but untracked files ' +
+                'were not enumerated (--no-untracked). This is NOT a decided ' +
+                'clean tree: report the untracked scope under "Not ' +
+                'reviewed" and end the round without a clean verdict.'
             : vanishedPresent.length > 0
               ? // …and NOT when the anchor refusal just proved a path
                 // diverges while invisible to `git diff` — the field gate
