@@ -679,16 +679,18 @@ The countermeasure is cheap and needs no new machinery: before Step 4, sanity-ch
 - **A `--quick` boolean:** two modes, but "quick" hides what is and isn't checked (rules? cross-file? build?).
 - **Three levels (chosen):** **low** = 3-6 directed angles (per `plan.budget.inlineAngles`) plus a gap sweep, all in the orchestrator's own context over the chunk plan — hunk-visible bugs only, ≤10 unverified findings. **medium** = the high pipeline minus its most expensive passes: the parallel finder fan-out over a reduced dimension set (no adversarial personas, no Agent 8), build & test, and a single verification pass — verified findings, Approve capped at Comment, no reverse audit. **high** = the full pipeline, unchanged.
 
-**Guardrails, because an unverified pass is recall-limited by construction.** These guardrails defend against findings that no verifier ever checked, which since medium became a verified fan-out means **low alone**; medium shares only the cache and posting rules (its Approve cap is Step 6's own rule, not one of these).
+**Guardrails, because an unverified pass is recall-limited by construction.** These guardrails defend against findings that no verifier ever checked, which since medium became a verified fan-out means **low and `--topology minimal` alone**; medium shares only the cache and posting rules (its Approve cap is Step 6's own rule, not one of these).
 
 - Labeled **unverified**; no Approve/Request-changes verdict is emitted. A verdict is a claim the pipeline earns in Steps 4–5; a quick pass claims findings, not absence of findings.
-- Never posts to the PR: `--comment` forces high, and a "post comments" follow-up after a quick pass is declined.
+- Never posts to the PR: `--comment` forces high at low effort, and the parser forces `comment.effective` to false on the minimal arm (terminal-only); a "post comments" follow-up is declined in both.
 - Never consults or writes the incremental cache — otherwise a medium run's SHA would make a later high run report "No new changes since last review", silently converting a quick pass into a full-review verdict.
 - Scope handling (worktree, diff capture, chunk plan) is identical at all levels. The levels change who reads the diff and what runs afterwards, never how the diff is obtained — the base-resolution and truncation traps do not care how fast the user wants the answer.
 
 **Defaults:** PR targets → high (the product is a public verdict); local-diff / file-path targets → medium (the product is fast feedback; the closing tip advertises `--effort high`). Findings caps exist only at the unverified levels — at high effort, verification is the noise filter, so no cap is needed.
 
 ## LLM call budget
+
+**`--topology minimal` — 0 subagent calls.** The minimal arm (issue #9783, Step 3M) is a single careful pass over the diff in the orchestrator's own context — no fan-out, no verification, no reverse audit, no build/test. It costs one model turn, the same shape as the low tier's inline pass, and it is priced here for completeness, not as a recommended default: it exists so the full pipeline and this minimal prompt can be run over the same PR set and compared per model. This section tracks per-topology _cost_; the A/B the minimal arm enables extends it with per-model _quality_, which is what decides whether any cell of a future model-family × effort routing table routes away from the full pipeline. Until that data exists, every review runs the topology below.
 
 **Small diffs (≤ 500 source lines AND ≤ 3200 total diff lines, Step 3A, high effort) — 17-28 calls (typically 17-19):**
 
