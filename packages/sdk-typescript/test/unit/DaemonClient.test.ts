@@ -7115,7 +7115,15 @@ describe('DaemonClient', () => {
         createdAt: '2026-06-26T00:00:00.000Z',
         updatedAt: '2026-06-26T00:00:00.000Z',
       };
-      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['workspace_memory_remember_project_scope'],
+            })
+          : jsonResponse(202, reply),
+      );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(
         client.rememberWorkspaceMemory('remember this', {
@@ -7125,14 +7133,40 @@ describe('DaemonClient', () => {
         }),
       ).resolves.toEqual(reply);
 
-      expect(calls[0]?.method).toBe('POST');
-      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/remember');
-      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
-      expect(JSON.parse(calls[0]!.body!)).toEqual({
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+        'http://daemon/workspace/memory/remember',
+      ]);
+      expect(calls[1]?.method).toBe('POST');
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
         content: 'remember this',
         contextMode: 'clean',
         scope: 'project',
       });
+    });
+
+    it('refuses a scoped remember when the daemon lacks the scope capability', async () => {
+      // Pre-PR daemons silently ignore `scope` and auto-route the write; the
+      // SDK must fail loudly instead of degrading.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['workspace_memory_remember'],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.rememberWorkspaceMemory('remember this', { scope: 'user' }),
+      ).rejects.toMatchObject({
+        name: 'DaemonCapabilityMissingError',
+        capability: 'workspace_memory_remember_user_scope',
+      });
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
     });
 
     it('omits the scope key from the remember body when no scope is supplied', async () => {
@@ -7195,7 +7229,15 @@ describe('DaemonClient', () => {
         createdAt: '2026-07-03T00:00:00.000Z',
         updatedAt: '2026-07-03T00:00:00.000Z',
       };
-      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const { fetch, calls } = recordingFetch((request) =>
+        request.url.endsWith('/capabilities')
+          ? jsonResponse(200, {
+              v: 1,
+              mode: 'http-bridge',
+              features: ['workspace_memory_forget_scope'],
+            })
+          : jsonResponse(202, reply),
+      );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(
         client.forgetWorkspaceMemory('old preference', {
@@ -7204,13 +7246,39 @@ describe('DaemonClient', () => {
         }),
       ).resolves.toEqual(reply);
 
-      expect(calls[0]?.method).toBe('POST');
-      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/forget');
-      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
-      expect(JSON.parse(calls[0]!.body!)).toEqual({
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+        'http://daemon/workspace/memory/forget',
+      ]);
+      expect(calls[1]?.method).toBe('POST');
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
         query: 'old preference',
         scope: 'user',
       });
+    });
+
+    it('refuses a scoped forget when the daemon lacks the scope capability', async () => {
+      // Without the pre-flight an old daemon would run an UNSCOPED forget
+      // that can delete entries from both stores.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['workspace_memory_forget'],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.forgetWorkspaceMemory('old preference', { scope: 'user' }),
+      ).rejects.toMatchObject({
+        name: 'DaemonCapabilityMissingError',
+        capability: 'workspace_memory_forget_scope',
+      });
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/capabilities',
+      ]);
     });
 
     it('omits the scope key from the forget body when no scope is supplied', async () => {

@@ -251,17 +251,25 @@ export async function runManagedRememberByAgent(params: {
   const entryFilesWritten = filesWritten.filter(
     (filePath) => path.basename(filePath) !== 'MEMORY.md',
   );
-  if (result.status === 'failed') {
-    throw new Error(result.terminateReason || 'Remember agent failed');
-  }
-  if (result.status === 'cancelled') {
-    throw new Error(result.terminateReason || 'Remember agent cancelled');
-  }
   // Classify every successful write — MEMORY.md included — so a hand-written
   // index still triggers the rebuild that atomically regenerates it from the
   // entry files. MEMORY.md loads verbatim into every future session, so no
-  // exit path may leave the agent's index write on disk unrepaired.
-  const writtenScopes = classifyTouchedScopes(filesWritten, params.projectRoot);
+  // exit path may leave the agent's index write on disk unrepaired — failed
+  // and cancelled runs included.
+  const writtenScopes = (() => {
+    try {
+      return classifyTouchedScopes(filesWritten, params.projectRoot);
+    } catch (err) {
+      if (result.status === 'completed') {
+        throw err;
+      }
+      // A failed or cancelled run surfaces its termination reason, not a
+      // path-escape audit; the best-effort repair below skips what it cannot
+      // classify.
+      debugLogger.error('Remember write audit failed:', err);
+      return [];
+    }
+  })();
   const rebuildWrittenScopes = () =>
     Promise.all([
       writtenScopes.includes('project')
@@ -276,6 +284,18 @@ export async function runManagedRememberByAgent(params: {
             })
         : Promise.resolve(),
     ]);
+  if (result.status === 'failed' || result.status === 'cancelled') {
+    // Best-effort: a rebuild failure must not mask the termination reason.
+    await rebuildWrittenScopes().catch((err: unknown) => {
+      debugLogger.error('Memory index rebuild failed:', err);
+    });
+    throw new Error(
+      result.terminateReason ||
+        (result.status === 'failed'
+          ? 'Remember agent failed'
+          : 'Remember agent cancelled'),
+    );
+  }
   if (entryFilesWritten.length === 0) {
     debugLogger.warn('Remember agent completed without writing memory.', {
       filesTouched: result.filesTouched,

@@ -536,6 +536,50 @@ describe('remember memory helper', () => {
     expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
   });
 
+  it('repairs a hand-written index even when the run fails or is cancelled', async () => {
+    const indexFile = path.join(getAutoMemoryRoot(projectRoot), 'MEMORY.md');
+    vi.mocked(runForkedAgent).mockResolvedValueOnce({
+      status: 'failed',
+      terminateReason: 'max turns exceeded',
+      filesTouched: [indexFile],
+      filesWritten: [indexFile],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember this.',
+        contextMode: 'workspace',
+        scope: 'project',
+      }),
+    ).rejects.toThrow('max turns exceeded');
+    // A failed run that hand-wrote the index must still rebuild it before
+    // surfacing the termination reason: MEMORY.md loads verbatim into every
+    // future session, so the agent's write may not outlive the run.
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+
+    vi.mocked(rebuildManagedAutoMemoryIndex).mockClear();
+    vi.mocked(runForkedAgent).mockResolvedValueOnce({
+      status: 'cancelled',
+      terminateReason: 'aborted',
+      filesTouched: [indexFile],
+      filesWritten: [indexFile],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Remember this.',
+        contextMode: 'workspace',
+        scope: 'project',
+      }),
+    ).rejects.toThrow('aborted');
+    expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
   it('rebuilds a store whose only write was a hand-written MEMORY.md', async () => {
     const projectEntry = path.join(
       getAutoMemoryRoot(projectRoot),
