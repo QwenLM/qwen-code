@@ -283,7 +283,7 @@ export const SystemMessage = memo(function SystemMessage({
           </div>
         )}
         {source === 'turn_error' && variant === 'error' && (
-          <div className={styles.actions}>
+          <div className={styles.actions} data-web-shell-message-actions>
             <button
               type="button"
               className={styles.copyButton}

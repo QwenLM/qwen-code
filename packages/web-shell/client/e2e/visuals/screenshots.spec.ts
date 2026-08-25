@@ -98,12 +98,19 @@ for (const theme of THEMES) {
         name: 'Copy',
         exact: true,
       });
-      const actions = copyButton.locator('..');
+      const actions = errorRow.locator('[data-web-shell-message-actions]');
+      await expect(actions).toHaveCSS('opacity', '0');
+      await copyButton.focus();
+      await expect(actions).toHaveCSS('opacity', '1');
+      await copyButton.evaluate((button) => button.blur());
+      await expect(actions).toHaveCSS('opacity', '0');
       await errorRow.hover();
       await expect(actions).toHaveCSS('opacity', '1');
       await captureScreenshot(page, `terminal-turn-error-copy-${theme}`);
 
       await page.setViewportSize({ width: 720, height: 800 });
+      await page.mouse.move(0, 0);
+      await expect(actions).toHaveCSS('opacity', '0');
       await errorRow.hover();
       await expect(actions).toHaveCSS('opacity', '1');
       await captureScreenshot(page, `terminal-turn-error-copy-narrow-${theme}`);
@@ -135,7 +142,9 @@ for (const theme of THEMES) {
           name: 'Copy',
           exact: true,
         });
-        await expect(touchCopyButton.locator('..')).toHaveCSS('opacity', '1');
+        await expect(
+          touchErrorRow.locator('[data-web-shell-message-actions]'),
+        ).toHaveCSS('opacity', '1');
         await expect(touchCopyButton).toBeVisible();
         await captureScreenshot(
           touchPage,
