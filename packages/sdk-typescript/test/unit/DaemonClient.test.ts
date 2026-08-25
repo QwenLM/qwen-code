@@ -7135,6 +7135,31 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('omits the scope key from the remember body when no scope is supplied', async () => {
+      // Scope absence is the switch that selects server-side automatic
+      // classification; a client-side default would silently convert it into
+      // forced routing, so the omission needs its own exact-body pin.
+      const reply = {
+        taskId: 'remember-2',
+        status: 'queued' as const,
+        contextMode: 'workspace' as const,
+        createdAt: '2026-06-26T00:00:00.000Z',
+        updatedAt: '2026-06-26T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rememberWorkspaceMemory('remember this'),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/remember');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        content: 'remember this',
+        contextMode: 'workspace',
+      });
+    });
+
     it('GETs /workspace/memory/remember/:taskId', async () => {
       const reply = {
         taskId: 'remember/a b',
@@ -7186,6 +7211,24 @@ describe('DaemonClient', () => {
         query: 'old preference',
         scope: 'user',
       });
+    });
+
+    it('omits the scope key from the forget body when no scope is supplied', async () => {
+      const reply = {
+        taskId: 'forget-2',
+        status: 'queued' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.forgetWorkspaceMemory('old preference'),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/forget');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ query: 'old preference' });
     });
 
     it('GETs /workspace/memory/forget/:taskId', async () => {

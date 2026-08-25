@@ -361,6 +361,105 @@ describe('remember memory helper', () => {
     expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
   });
 
+  it('hides the project tier from the system prompt of an explicit user-targeted remember', async () => {
+    const userFile = path.join(
+      getUserAutoMemoryRoot(),
+      'feedback',
+      'shared-preference.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved user memory.',
+      filesTouched: [userFile],
+      filesWritten: [userFile],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Across all working directories, prefer concise answers.',
+      contextMode: 'workspace',
+      scope: 'user',
+    });
+
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      systemPrompt: string;
+    };
+    // The permission boundary denies project writes on this run, so the
+    // system prompt must not advertise the project directory: advertising it
+    // burns turns on denied writes and can surface as remember_no_update.
+    expect(params.systemPrompt).toContain(
+      `You have a persistent, file-based memory system at \`${getUserAutoMemoryRoot()}\``,
+    );
+    expect(params.systemPrompt).not.toContain(getAutoMemoryRoot(projectRoot));
+    expect(params.systemPrompt).not.toContain('PROJECT memory');
+    expect(params.systemPrompt).not.toContain(
+      'decide which directory it belongs in',
+    );
+  });
+
+  it('rejects a project-targeted result that mixes project and user writes', async () => {
+    const projectFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'in-scope.md',
+    );
+    const userFile = path.join(
+      getUserAutoMemoryRoot(),
+      'feedback',
+      'out-of-scope.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved.',
+      filesTouched: [projectFile, userFile],
+      filesWritten: [projectFile, userFile],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Keep this in the working directory.',
+        contextMode: 'workspace',
+        scope: 'project',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_scope_mismatch' });
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it('rejects a user-targeted result that mixes user and project writes', async () => {
+    const userFile = path.join(
+      getUserAutoMemoryRoot(),
+      'feedback',
+      'in-scope.md',
+    );
+    const projectFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'feedback',
+      'out-of-scope.md',
+    );
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved.',
+      filesTouched: [userFile, projectFile],
+      filesWritten: [userFile, projectFile],
+    } satisfies ForkedAgentResult);
+
+    await expect(
+      runManagedRememberByAgent({
+        config: createConfig(projectRoot),
+        projectRoot,
+        content: 'Use this preference everywhere.',
+        contextMode: 'workspace',
+        scope: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'remember_scope_mismatch' });
+    expect(rebuildManagedAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
   it('fails an explicit user target when its index cannot be rebuilt', async () => {
     const userFile = path.join(
       getUserAutoMemoryRoot(),

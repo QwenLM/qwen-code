@@ -71,30 +71,39 @@ async function buildCleanMemorySystemPrompt(
   projectRoot: string,
   scope?: WorkspaceRememberTargetScope,
 ): Promise<string> {
-  const includeProjectMemory = scope !== 'user';
-  const includeUserMemory = scope !== 'project';
-  if (includeProjectMemory) await ensureAutoMemoryScaffold(projectRoot);
+  if (scope === 'user') {
+    await ensureUserAutoMemoryScaffold();
+    // Render the user store as the sole tier: the run's permission boundary
+    // denies project writes, so a project tier here would only steer the agent
+    // into burning turns on denied writes. Mirrors how an explicit project
+    // target omits the user section below.
+    return buildManagedAutoMemoryPrompt(
+      getUserAutoMemoryRoot(),
+      await readUserAutoMemoryIndex().catch(() => null),
+      /* userSection */ undefined,
+      /* teamSection */ undefined,
+      // The remember agent needs the full protocol (type definitions, scope
+      // routing, exclusion rules) to write correct memories — do not remove.
+      { forceFullProtocol: true },
+    );
+  }
+
+  await ensureAutoMemoryScaffold(projectRoot);
   let userMemory:
     | { memoryDir: string; indexContent: string | null }
     | undefined;
-  if (includeUserMemory) {
-    if (scope === 'user') {
+  if (scope !== 'project') {
+    try {
       await ensureUserAutoMemoryScaffold();
-    } else {
-      try {
-        await ensureUserAutoMemoryScaffold();
-      } catch {
-        // User-level memory remains best-effort for automatic scope selection.
-      }
+    } catch {
+      // User-level memory remains best-effort for automatic scope selection.
     }
     userMemory = {
       memoryDir: getUserAutoMemoryRoot(),
       indexContent: await readUserAutoMemoryIndex().catch(() => null),
     };
   }
-  const projectIndex = includeProjectMemory
-    ? await readAutoMemoryIndex(projectRoot)
-    : null;
+  const projectIndex = await readAutoMemoryIndex(projectRoot);
 
   return buildManagedAutoMemoryPrompt(
     getAutoMemoryRoot(projectRoot),
