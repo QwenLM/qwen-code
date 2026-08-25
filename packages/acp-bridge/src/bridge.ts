@@ -42,6 +42,7 @@ import {
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
+  canonicalSessionPrUrl,
   normalizeTurnResultError,
   normalizeSnapshotPayload,
   ShellExecutionService,
@@ -9904,8 +9905,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // Same binding repeated — no change, no event.
         } else {
           // Re-binding a number refreshes it and moves it to latest; an
-          // omitted state preserves the known one (mirrors the sidecar).
-          const known = existing.find((p) => p.number === bound.number);
+          // omitted state preserves the known one (mirrors the sidecar) —
+          // only for the same PR: a different repository's same-numbered
+          // PR is a different PR and must not inherit its state.
+          const known = existing.find(
+            (p) =>
+              p.number === bound.number &&
+              canonicalSessionPrUrl(p.url) === canonicalSessionPrUrl(bound.url),
+          );
           entry.prs = [
             ...existing.filter((p) => p.number !== bound.number),
             {

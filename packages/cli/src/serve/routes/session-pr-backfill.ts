@@ -330,6 +330,9 @@ export async function backfillWorkspaceSessionPrs(
       candidate.sessionId,
       candidate.archiveState,
     );
+    // Captured before the snapshot read: an entry committed while this run
+    // is in flight is newer than the plan and must not be trimmed by it.
+    const snapshotAt = new Date().toISOString();
     let existing: Awaited<ReturnType<typeof readSessionPrs>>;
     try {
       existing = await readSessionPrs(prPath);
@@ -383,9 +386,13 @@ export async function backfillWorkspaceSessionPrs(
         if (!existsSync(candidate.transcriptPath)) return null;
         const freshNumbers = new Set(fresh.map((entry) => entry.number));
         // Only entries seen in the snapshot are subject to this plan; newer
-        // ones are bindings this run never planned for and must keep.
+        // ones are bindings this run never planned for and must keep. A
+        // re-bind of a snapshot-held number commits with a fresh createdAt,
+        // so it is no longer the entry this run planned for.
         const plannedFor = (entry: SessionPr): boolean =>
-          droppable.has(entry.number) && existingNumbers.has(entry.number);
+          droppable.has(entry.number) &&
+          existingNumbers.has(entry.number) &&
+          entry.createdAt < snapshotAt;
         const foreignCount = fresh.filter((entry) => !plannedFor(entry)).length;
         const slots = Math.max(0, SESSION_PR_LIST_LIMIT - foreignCount);
         let plan = numbers.filter((number) => droppable.has(number));

@@ -174,10 +174,30 @@ function enqueuePrMutation<T>(
 }
 
 /**
+ * Canonical form of a binding url for same-target comparison: host/path
+ * case, trailing slashes, query, and fragment never change which PR a url
+ * names (GitHub hosts and repo paths are case-insensitive; query variants
+ * are cache-busters), while the repository path does — a same-numbered PR
+ * of a different repository is a different PR.
+ */
+export function canonicalSessionPrUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`
+      .toLowerCase()
+      .replace(/\/+$/, '');
+  } catch {
+    return url.toLowerCase().replace(/\/+$/, '');
+  }
+}
+
+/**
  * Insert or refresh a binding (matched by PR number) and persist the list,
  * keeping at most {@link SESSION_PR_LIST_LIMIT} latest entries. A re-bound
  * number moves to the end (latest) with a fresh createdAt. An omitted
- * `state` preserves the existing entry's state on re-bind.
+ * `state` preserves the existing entry's state when the re-bind targets the
+ * same PR (same canonical url) — a different repository's same-numbered PR
+ * is a different PR and must not inherit its state.
  */
 export function upsertSessionPr(
   filePath: string,
@@ -185,7 +205,11 @@ export function upsertSessionPr(
 ): Promise<SessionPr[]> {
   return enqueuePrMutation(filePath, async () => {
     const existing = (await readSessionPrs(filePath)) ?? [];
-    const known = existing.find((entry) => entry.number === pr.number);
+    const known = existing.find(
+      (entry) =>
+        entry.number === pr.number &&
+        canonicalSessionPrUrl(entry.url) === canonicalSessionPrUrl(pr.url),
+    );
     const rest = existing.filter((entry) => entry.number !== pr.number);
     const next = [
       ...rest,

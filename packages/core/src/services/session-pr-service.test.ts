@@ -223,6 +223,34 @@ describe('upsertSessionPr state', () => {
     expect(prs).toHaveLength(1);
     expect(prs[0]?.state).toBe('merged');
   });
+
+  it('does not carry state onto a same-numbered PR of another repository', async () => {
+    await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/repo-a/owner/pull/100',
+      state: 'merged',
+    });
+    const prs = await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/repo-b/owner/pull/100',
+    });
+    expect(prs).toHaveLength(1);
+    expect(prs[0]?.url).toBe('https://github.com/repo-b/owner/pull/100');
+    expect(prs[0]?.state).toBeUndefined();
+  });
+
+  it('carries state when the re-bind spells the same PR differently', async () => {
+    await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/Owner/Repo/pull/100/',
+      state: 'merged',
+    });
+    const prs = await upsertSessionPr(filePath, {
+      number: 100,
+      url: 'https://github.com/owner/repo/pull/100?v=2',
+    });
+    expect(prs[0]?.state).toBe('merged');
+  });
 });
 
 describe('updateSessionPrStates', () => {

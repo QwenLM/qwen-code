@@ -1388,6 +1388,51 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(result).toMatchObject({ bound: 0, alreadyBound: 1, overLimit: 1 });
   });
 
+  it('keeps a snapshot-held number a client re-binds during the run', async () => {
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 5, 7);
+    const prPath = await seedPrSidecar(
+      SESSION_A,
+      [101, 102, 103, 104, 105, 106, 107, 108, 5],
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(5, 'b-5'), pr(6, 'b-6'), pr(7, 'b-7')],
+    });
+    // The client re-binds #5 — a planned number the snapshot already held —
+    // in the seam between the snapshot read and the queued rewrite. The
+    // fresh entry is not the one this run planned for: trimming it out of
+    // the plan would evict a binding the daemon just confirmed.
+    sidecarReadHook.current = {
+      path: prPath,
+      run: () =>
+        upsertSessionPr(prPath, {
+          number: 5,
+          url: 'https://github.com/o/r/pull/5',
+        }).then(() => undefined),
+    };
+    const setSessionPrs = vi.fn();
+    const runtimeWithBridge = {
+      ...runtime,
+      bridge: { markSessionCatalogChanged: vi.fn(), setSessionPrs },
+    } as unknown as WorkspaceRuntime;
+
+    const result = await backfillWorkspaceSessionPrs(runtimeWithBridge);
+
+    const prs = await readSessionPrs(prPath);
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      101, 102, 103, 104, 105, 106, 107, 108, 5, 7,
+    ]);
+    expect(prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+    expect(result).toMatchObject({ bound: 1, overLimit: 2 });
+    // The live-entry sync must publish the surviving binding, not the
+    // cap-trimmed list that dropped it.
+    expect(setSessionPrs).toHaveBeenCalledWith(
+      SESSION_A,
+      expect.arrayContaining([expect.objectContaining({ number: 5 })]),
+    );
+  });
+
   it('counts in bound only the bindings the write actually persisted', async () => {
     await seedSession(SESSION_A);
     await seedTranscriptBranches(SESSION_A, 1, 3);
