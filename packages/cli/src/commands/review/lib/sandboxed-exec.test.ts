@@ -23,6 +23,7 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { CLI_VERSION } from '../../../generated/git-commit.js';
 import { fileURLToPath } from 'node:url';
 import type { spawnSync } from 'node:child_process';
 import { isolateOperatorReviewSettings } from './test-utils.js';
@@ -924,6 +925,48 @@ describe('reviewSandboxImage', () => {
     expect(reviewSandboxImage({ QWEN_SANDBOX_IMAGE: 'theirs:2' })).toBe(
       'theirs:2',
     );
+    // ORDER, with both set at once — the only way a reordering of the chain
+    // can be seen. Reviewed-repository-specific beats the operator's general
+    // one, because the review override exists for a toolchain the repository
+    // declared it needs; the other way round runs the build in an image
+    // missing it.
+    expect(
+      reviewSandboxImage({
+        QWEN_REVIEW_SANDBOX_IMAGE: 'mine:1',
+        QWEN_SANDBOX_IMAGE: 'theirs:2',
+      }),
+    ).toBe('mine:1');
+    expect(
+      reviewSandboxImage({
+        QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'custom:3',
+        QWEN_SANDBOX_IMAGE: 'theirs:2',
+      }),
+    ).toBe('custom:3');
+    expect(
+      reviewSandboxImage({
+        QWEN_REVIEW_SANDBOX_IMAGE: 'mine:1',
+        QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'custom:3',
+      }),
+    ).toBe('mine:1');
+  });
+
+  it('consults the manifest, and falls back to a name that exists', () => {
+    // These two cannot be told apart by their VALUE: `DEFAULT_IMAGE`'s tag is
+    // `CLI_VERSION`, generated from the same manifest version, so today the
+    // fallback string-equals the manifest field. Deleting the manifest lookup
+    // entirely therefore leaves the pin below green. Injecting the reader is
+    // what makes the mechanism visible at all.
+    expect(reviewSandboxImage({}, () => 'manifest-image:test')).toBe(
+      'manifest-image:test',
+    );
+    // ...and when the manifest cannot be found — the unusual install layout
+    // the literal exists for — the argv still names something that resolves.
+    // This is the branch the defect this PR fixes lived in: with no coverage,
+    // reverting it to an unpullable name ships green.
+    const fallback = reviewSandboxImage({}, () => undefined);
+    expect(fallback).toBe(`ghcr.io/qwenlm/qwen-code:${CLI_VERSION}`);
+    expect(fallback).not.toContain('/sandbox');
+    expect(fallback).not.toContain(':latest');
   });
 
   it('defaults to the image this CLI actually ships with', () => {

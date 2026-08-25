@@ -742,12 +742,29 @@ let manifestImage: string | null | undefined;
  * hardcoded name made it false; it is now a description of the code rather
  * than an intention about it.
  *
+ * The parity is over the DEFAULT, not over every channel `--sandbox` reads.
+ * An operator who set `QWEN_SANDBOX_IMAGE` in a user-level `~/.qwen/.env` or
+ * in `settings.env` loses it here and falls back to that default: the loader
+ * records every key it applies from a file without distinguishing the user's
+ * own from the reviewed repository's, and this side cannot afford to guess
+ * wrong about which one it is holding. Exporting it in the shell keeps
+ * parity. Widening that would mean teaching the loader to carry the
+ * home-scoped classification it already computes — a change to the loader,
+ * not to this pick.
+ *
  * `QWEN_REVIEW_SANDBOX_IMAGE` overrides it for a repository whose toolchain
  * needs more (a JDK, a Python, a specific Node major), which is the case this
  * default cannot cover and should not pretend to.
  */
 export function reviewSandboxImage(
   env: NodeJS.ProcessEnv = process.env,
+  // Injected so a test can tell the manifest apart from the fallback. It
+  // cannot otherwise: `DEFAULT_IMAGE`'s tag comes from `CLI_VERSION`, which is
+  // generated from the same manifest version, so the two currently produce the
+  // SAME string — deleting the manifest lookup falls through to a literal that
+  // string-equals it and the suite stays green. That is the mechanism this
+  // change exists to add, pinned by nothing until the two can be told apart.
+  manifest: () => string | undefined = cliSandboxImage,
 ): string {
   // File-sourced overrides are ignored for the same reason the policy ignores
   // them, and this one is sharper: the image IS the code the reviewed
@@ -763,7 +780,7 @@ export function reviewSandboxImage(
     // `qwen --sandbox`. Through `pick`, so a repository shipping it in its
     // `.qwen/.env` cannot choose the image its own code runs in.
     pick('QWEN_SANDBOX_IMAGE') ||
-    cliSandboxImage() ||
+    manifest() ||
     DEFAULT_IMAGE
   );
 }
