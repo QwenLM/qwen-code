@@ -138,6 +138,14 @@ serialization or billing tokenizer.
 | `skills_tokens`        | The Skill tool declaration plus loaded `SKILL.md` bodies that can be matched in the logical request messages from the committed SkillManager cache.                                                                                           |
 | `messages_tokens`      | User, assistant, and tool-result content in the request, excluding loaded skill bodies already attributed to `skills_tokens`. On finalization it becomes the residual after the fixed categories are normalized against provider input usage. |
 
+Memory attribution uses exact segment removal. For each non-empty value from
+`getUserMemory()` and `getAutoMemoryPrompt()`, remove its exact trimmed text
+from the effective system instruction before estimating
+`system_prompt_tokens`, then count the removed text once in
+`memory_files_tokens`. A configured block that is absent from the request, or
+whose exact match fails, remains part of `system_prompt_tokens` and is not also
+added to `memory_files_tokens`.
+
 System instructions, tool definitions, memory, and skill text use the
 CJK-aware heuristic already used by `/context`: ASCII characters are estimated
 at four characters per token and non-ASCII characters at 1.5 tokens per
@@ -151,11 +159,28 @@ base64 as ordinary prompt text. This reporting change does not alter
 `estimateContentTokens` or the safety-critical compaction gate that already
 depends on it.
 
+The two estimators are intentionally asymmetric at request start. Fixed text
+categories use the CJK-aware context-reporting heuristic, while structured
+messages retain the compaction estimator's flat character ratio. CJK-heavy
+messages may therefore be under-attributed on failed, cancelled, or
+TTL-abandoned spans that never receive provider usage. Completed spans absorb
+that difference when `messages_tokens` becomes the provider-total residual.
+The extracted helper has a distinct context-reporting name and must not replace
+`estimateContentTokens` in the compaction gate.
+
 The telemetry path never calls `SkillManager.listSkills()`. It uses
-`getCachedSkills()` so span creation cannot trigger filesystem discovery. On a
-cold cache, an otherwise unrecognized loaded skill body remains in
-`messages_tokens`; the attribute stays complete and non-blocking, while
-`estimated: true` communicates that attribution is approximate.
+`getLoadedSkillNames()` from the in-memory Skill tool to narrow candidates and
+`getCachedSkills()` so span creation cannot trigger filesystem discovery. With
+a warm cache, one pass over cached skills indexes only loaded candidates by the
+exact output of `buildSkillLlmContent`, and one pass over request parts matches
+exact Skill function-response outputs against that index. A matched output is
+counted once in `skills_tokens` and excluded from `messages_tokens`. This avoids
+substring matches and per-skill scans of the full request. On a cold cache, an
+unrecognized body that is still present remains in `messages_tokens`. When
+compaction has removed the exact body, no body tokens are added to
+`skills_tokens`; any remaining summary stays in `messages_tokens`. The
+attribute remains complete and non-blocking, while `estimated: true`
+communicates that attribution is approximate.
 
 ### Provider-total normalization
 
@@ -166,8 +191,11 @@ a valid `gen_ai.usage.input_tokens`, finalization applies the following rules:
 1. Preserve the five fixed-category proportions: system prompt, built-in
    tools, MCP tools, memory files, and skills.
 2. If their estimated sum exceeds the provider total, scale them down
-   proportionally using deterministic integer allocation so their sum never
-   exceeds the provider total.
+   proportionally using largest-remainder allocation: multiply each category
+   by the common scale, floor all five results, then distribute the remaining
+   tokens by descending fractional remainder. Ties use the schema field order
+   above. This makes the integer allocation deterministic and keeps its sum at
+   the provider total.
 3. Set `messages_tokens` to the remaining provider total.
 4. Set `available_before_compaction_tokens` from the window, reserve, and the
    same provider total.
@@ -179,8 +207,10 @@ sum(breakdown.*_tokens) == gen_ai.usage.input_tokens
 ```
 
 when the provider reports a valid input total. Cached-input tokens require no
-special treatment: cache reads affect billing and latency, not which context
-category the tokens belong to.
+special treatment: do not copy `/context`'s `apiCachedTokens` branch or subtract
+cache reads from `messages_tokens`. Cache reads affect billing and latency, not
+which context category the tokens belong to, and remain represented only by
+`gen_ai.usage.cache_read.input_tokens`.
 
 When no valid provider total is available, the request-start estimates remain
 on the span, the breakdown is not forced to an unknown total, and
@@ -274,10 +304,11 @@ need; version 1 does not pre-allocate such aliases.
 
 ## Implementation plan
 
-1. Extract the existing `/context` text estimator into the dependency-light
-   `services/tokenEstimation.ts` module and export it through the core package.
-   Make `/context` import that helper. Leave CLI detail parsing, localization,
-   and rendering in the CLI package.
+1. Add the existing `/context` CJK-aware text estimator to the dependency-light
+   `services/tokenEstimation.ts` module under a distinct context-reporting name
+   and export it through the core package. Make `/context` import that helper.
+   Leave the existing `estimateContentTokens` compaction estimator unchanged,
+   and keep CLI detail parsing, localization, and rendering in the CLI package.
 2. Add a pure `telemetry/context-usage.ts` module defining the V1 type,
    provider-total normalization, validation, the 1024-character limit, and
    compact serialization. It must not import `Config`, tool implementations,
@@ -303,10 +334,15 @@ Unit tests for the context-usage module cover:
 - CJK and ASCII estimation parity with `/context`;
 - structured messages with inline media, without base64-size inflation;
 - system-prompt versus memory attribution;
+- exact-match failure that leaves memory only in the system-prompt category;
 - built-in, revealed MCP, hidden deferred, and Skill tool attribution from the
   logical request;
-- loaded-skill attribution with a warm cache and no discovery on a cold cache;
-- deterministic normalization whose breakdown sum equals provider input;
+- loaded-skill attribution with a warm cache, no discovery on a cold cache,
+  and no stale body attribution after compaction;
+- largest-remainder normalization, including deterministic ties, whose
+  breakdown sum equals provider input;
+- cached provider input remaining in the full category sum while cache reads
+  stay on the standard cache-read attribute;
 - omission of availability without provider input and its calculation against
   the derived auto threshold when input is present;
 - rejection of invalid or non-finite values; and
