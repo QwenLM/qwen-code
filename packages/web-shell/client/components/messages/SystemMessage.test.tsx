@@ -60,6 +60,75 @@ describe('SystemMessage — prompt_cancelled marker', () => {
   });
 });
 
+describe('SystemMessage — terminal turn error copy', () => {
+  it('copies the displayed error without triggering retry', async () => {
+    const clipboardDescriptor = Object.getOwnPropertyDescriptor(
+      navigator,
+      'clipboard',
+    );
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    const onRetryClick = vi.fn();
+
+    try {
+      const container = render(
+        <SystemMessage
+          content="The model stream was interrupted."
+          variant="error"
+          source="turn_error"
+          showRetryHint
+          onRetryClick={onRetryClick}
+        />,
+      );
+      const copyButton = container.querySelector<HTMLButtonElement>(
+        'button[aria-label="Copy"]',
+      );
+      expect(copyButton).not.toBeNull();
+      expect(container.textContent).toContain('Press Ctrl+Y to retry');
+
+      await act(async () => {
+        copyButton?.click();
+      });
+
+      expect(writeText).toHaveBeenCalledOnce();
+      expect(writeText).toHaveBeenCalledWith(
+        'The model stream was interrupted.',
+      );
+      expect(onRetryClick).not.toHaveBeenCalled();
+    } finally {
+      if (clipboardDescriptor) {
+        Object.defineProperty(navigator, 'clipboard', clipboardDescriptor);
+      } else {
+        Reflect.deleteProperty(navigator, 'clipboard');
+      }
+    }
+  });
+
+  it('shows Copy for non-retryable terminal turn errors', () => {
+    const container = render(
+      <SystemMessage
+        content="The model stopped because it was repeating itself."
+        variant="error"
+        source="turn_error"
+      />,
+    );
+
+    expect(container.querySelector('button[aria-label="Copy"]')).not.toBeNull();
+    expect(container.textContent).not.toContain('retry');
+  });
+
+  it('does not add Copy to ordinary system errors', () => {
+    const container = render(
+      <SystemMessage content="A system error occurred." variant="error" />,
+    );
+
+    expect(container.querySelector('button[aria-label="Copy"]')).toBeNull();
+  });
+});
+
 describe('SystemMessage — background notification label', () => {
   it('labels background task notifications and preserves display text', () => {
     const container = render(

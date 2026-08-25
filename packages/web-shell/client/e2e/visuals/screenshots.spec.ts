@@ -63,6 +63,49 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-transcript-${theme}`);
     });
 
+    test(`terminal turn error`, async ({ page }, testInfo) => {
+      const sessionId = 'turn-error-copy-visual';
+      const scenario = createWebShellDaemonScenario({
+        sessionId,
+        events: [
+          userTextEvent('Summarize the current workspace.', { id: 1 }),
+          {
+            id: 2,
+            v: 1,
+            type: 'turn_error',
+            data: {
+              sessionId,
+              message:
+                'The model provider closed the response stream before the answer finished. Retry the request or copy these details when reporting the failure.',
+              promptId: 'prompt-turn-error-visual',
+            },
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      const errorRow = page
+        .locator('[data-web-shell-message-row]')
+        .filter({ hasText: 'The model provider closed the response stream' });
+      await errorRow.hover();
+      await expect(
+        errorRow.getByRole('button', { name: 'Copy', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `terminal-turn-error-copy-${theme}`);
+
+      await page.setViewportSize({ width: 720, height: 800 });
+      await errorRow.hover();
+      await expect(
+        errorRow.getByRole('button', { name: 'Copy', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `terminal-turn-error-copy-narrow-${theme}`);
+    });
+
     test(`parallel agents group`, async ({ page }, testInfo) => {
       // The group renders only when a turn carries two or more background
       // Agent tool calls; seed both as completed so the rows are static and
