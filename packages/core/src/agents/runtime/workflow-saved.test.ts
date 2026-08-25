@@ -180,7 +180,100 @@ describe('workflow-saved', () => {
           { scriptPath: outside },
           fakeConfig(projectDir),
         ),
-      ).rejects.toThrow(/outside the saved-workflow directories/);
+      ).rejects.toThrow(/outside the saved-workflow and generated-workflow/);
+    });
+  });
+
+  describe('resolveSavedWorkflowScript — generated-scripts root', () => {
+    let generatedDir: string;
+
+    beforeEach(() => {
+      generatedDir = new Storage(projectDir).getGeneratedWorkflowsDir();
+    });
+
+    it('reads a {scriptPath} under the generated root', async () => {
+      await fs.mkdir(generatedDir, { recursive: true });
+      const p = path.join(generatedDir, 'qwen-review-1a2b3c.js');
+      await fs.writeFile(p, `return 'generated';`, 'utf8');
+      const resolved = await resolveSavedWorkflowScript(
+        { scriptPath: p },
+        fakeConfig(projectDir),
+      );
+      expect(resolved.script).toBe(`return 'generated';`);
+      expect(resolved.name).toBe('qwen-review-1a2b3c');
+    });
+
+    it('trusts the whole subtree, so a writer may nest per session', async () => {
+      const nested = path.join(generatedDir, 's-abc', 'fanout.js');
+      await fs.mkdir(path.dirname(nested), { recursive: true });
+      await fs.writeFile(nested, `return 'nested';`, 'utf8');
+      const resolved = await resolveSavedWorkflowScript(
+        { scriptPath: nested },
+        fakeConfig(projectDir),
+      );
+      expect(resolved.script).toBe(`return 'nested';`);
+    });
+
+    it('is neither listed as a slash command nor resolvable by name', async () => {
+      await fs.mkdir(generatedDir, { recursive: true });
+      await fs.writeFile(
+        path.join(generatedDir, 'emitted.js'),
+        `return 'generated';`,
+        'utf8',
+      );
+      expect(await listSavedWorkflows(fakeConfig(projectDir))).toEqual([]);
+      await expect(
+        resolveSavedWorkflowScript('emitted', fakeConfig(projectDir)),
+      ).rejects.toThrow(/no workflow with that name.*\(none\)/);
+    });
+
+    it('refuses a sibling of the generated root (no prefix match)', async () => {
+      // `<runs>/generated-evil/x.js` shares the string prefix `generated`
+      // with the root but is not inside it.
+      const sibling = path.join(`${generatedDir}-evil`, 'x.js');
+      await fs.mkdir(path.dirname(sibling), { recursive: true });
+      await fs.writeFile(sibling, `return 'pwned';`, 'utf8');
+      await expect(
+        resolveSavedWorkflowScript(
+          { scriptPath: sibling },
+          fakeConfig(projectDir),
+        ),
+      ).rejects.toThrow(/outside the saved-workflow and generated-workflow/);
+    });
+
+    it('refuses a file that symlinks out of the generated root', async () => {
+      const outside = path.join(projectDir, 'secret.js');
+      await fs.writeFile(outside, `return 'EXFILTRATED';`, 'utf8');
+      await fs.mkdir(generatedDir, { recursive: true });
+      const link = path.join(generatedDir, 'link.js');
+      await fs.symlink(outside, link, 'file');
+      await expect(
+        resolveSavedWorkflowScript(
+          { scriptPath: link },
+          fakeConfig(projectDir),
+        ),
+      ).rejects.toThrow(/outside the saved-workflow and generated-workflow/);
+    });
+
+    it('refuses a symlinked generated root', async () => {
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-gen-evil-'));
+      try {
+        await fs.writeFile(
+          path.join(external, 'leak.js'),
+          `return 'EXFILTRATED';`,
+          'utf8',
+        );
+        await fs.mkdir(path.dirname(generatedDir), { recursive: true });
+        await fs.symlink(external, generatedDir, 'dir');
+        await expect(
+          resolveSavedWorkflowScript(
+            { scriptPath: path.join(generatedDir, 'leak.js') },
+            fakeConfig(projectDir),
+          ),
+        ).rejects.toThrow(/outside the saved-workflow and generated-workflow/);
+      } finally {
+        await fs.rm(external, { recursive: true, force: true });
+      }
     });
   });
 
@@ -378,7 +471,7 @@ describe('workflow-saved', () => {
       const p = path.join(projectWorkflowsDir, 'leak.js');
       await expect(
         resolveSavedWorkflowScript({ scriptPath: p }, fakeConfig(projectDir)),
-      ).rejects.toThrow(/outside the saved-workflow directories/);
+      ).rejects.toThrow(/outside the saved-workflow and generated-workflow/);
     });
 
     it('save into a symlinked root is refused (no write-through)', async () => {
