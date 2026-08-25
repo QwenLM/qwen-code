@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
@@ -14,7 +14,7 @@ import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, discoverProviderModels } from '@qwen-code/qwen-code-core';
 import type {
   ProviderConfig,
   BaseUrlOption,
@@ -194,6 +194,8 @@ interface ModelOption {
   label: string;
 }
 
+type ModelRecommendationSource = 'provider' | 'fallback';
+
 function formatModelOptionLabel(model: ModelSpec): string {
   const details: string[] = [];
   if (model.contextWindowSize) {
@@ -240,10 +242,13 @@ function mergeModelIds(
 function getRecommendedSelections(
   selectedModelIds: string[],
   modelOptions: ModelOption[],
+  builtInModelIds: Set<string>,
 ): string[] {
   const selectedSet = new Set(selectedModelIds);
   return modelOptions
-    .filter((item) => selectedSet.has(item.key))
+    .filter(
+      (item) => selectedSet.has(item.key) && builtInModelIds.has(item.key),
+    )
     .map((item) => item.key);
 }
 
@@ -259,37 +264,44 @@ function getCustomModelIdsText(
 function ModelIdsStep({
   config,
   flow,
+  models = config.models ?? [],
+  recommendationSource,
+  syncChangesToFlow = true,
 }: {
   config: ProviderConfig;
   flow: ProviderSetupFlow;
+  models?: ModelSpec[];
+  recommendationSource?: ModelRecommendationSource;
+  syncChangesToFlow?: boolean;
 }): React.JSX.Element {
   const defaultIds = config.models?.map((m) => m.id).join(', ') ?? '';
-  const hasSelectableModels = (config.models?.length ?? 0) > 0;
+  const hasSelectableModels = models.length > 0;
   const selectedModelIds = useMemo(
     () => normalizeModelIds(flow.state.modelIds),
     [flow.state.modelIds],
   );
   const modelOptions = useMemo<ModelOption[]>(
     () =>
-      config.models?.map((model) => ({
+      models.map((model) => ({
         key: model.id,
         value: model.id,
         label: formatModelOptionLabel(model),
-      })) ?? [],
-    [config.models],
+      })),
+    [models],
   );
-  const recommendedModelIds = useMemo(
-    () => new Set(modelOptions.map((item) => item.key)),
-    [modelOptions],
+  const builtInModelIds = useMemo(
+    () => new Set(config.models?.map((model) => model.id) ?? []),
+    [config.models],
   );
   const [focusedModelIndex, setFocusedModelIndex] = useState(
     MODEL_CUSTOM_INPUT_FOCUS_INDEX,
   );
   const [customModelIdsText, setCustomModelIdsText] = useState(() =>
-    getCustomModelIdsText(selectedModelIds, recommendedModelIds),
+    getCustomModelIdsText(selectedModelIds, builtInModelIds),
   );
   const [selectedRecommendationKeys, setSelectedRecommendationKeys] = useState(
-    () => getRecommendedSelections(selectedModelIds, modelOptions),
+    () =>
+      getRecommendedSelections(selectedModelIds, modelOptions, builtInModelIds),
   );
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const filteredModelOptions = useMemo(() => {
@@ -318,11 +330,13 @@ function ModelIdsStep({
 
   const syncModelIds = useCallback(
     (customText: string, recommendationKeys: string[]) => {
-      flow.changeModelIds(
-        mergeModelIds(customText, recommendationKeys).join(', '),
-      );
+      if (syncChangesToFlow) {
+        flow.changeModelIds(
+          mergeModelIds(customText, recommendationKeys).join(', '),
+        );
+      }
     },
-    [flow],
+    [flow, syncChangesToFlow],
   );
 
   const handleSubmitModelIds = useCallback(() => {
@@ -440,7 +454,12 @@ function ModelIdsStep({
           </Text>
         </Box>
         <Box marginTop={1}>
-          <Text color={theme.text.secondary}>{t('Recommended models')}</Text>
+          <Text color={theme.text.secondary}>
+            {t('Recommended models')}
+            {recommendationSource === 'provider' && t(' · from the provider')}
+            {recommendationSource === 'fallback' &&
+              t(' · provider list unavailable, showing built-ins')}
+          </Text>
         </Box>
         <Box marginTop={0} flexDirection="column">
           <Text color={theme.text.secondary}>{t('Search')}</Text>
@@ -537,6 +556,69 @@ function ModelIdsStep({
       )}
       <NAV_HINT_INPUT />
     </Box>
+  );
+}
+
+function DiscoveringModelIdsStep({
+  config,
+  flow,
+}: {
+  config: ProviderConfig;
+  flow: ProviderSetupFlow;
+}): React.JSX.Element {
+  const [snapshot, setSnapshot] = useState<{
+    models: ModelSpec[];
+    source: ModelRecommendationSource;
+  } | null>(null);
+  const baseUrl = flow.state.baseUrl;
+  const apiKey = flow.state.apiKey;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    const builtInModels = config.models ?? [];
+
+    void discoverProviderModels({
+      baseUrl,
+      apiKey,
+      staticModels: builtInModels,
+      signal: controller.signal,
+    }).then((models) => {
+      if (active) {
+        setSnapshot({
+          models: models ?? builtInModels,
+          source: models ? 'provider' : 'fallback',
+        });
+      }
+    });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [apiKey, baseUrl, config.models]);
+
+  if (!snapshot) {
+    return (
+      <Box marginTop={1} flexDirection="column">
+        <Text color={theme.text.secondary}>
+          {t('Loading models from provider…')}
+        </Text>
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>{t('Esc to go back')}</Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  return (
+    <ModelIdsStep
+      config={config}
+      flow={flow}
+      models={snapshot.models}
+      recommendationSource={snapshot.source}
+      syncChangesToFlow={false}
+    />
   );
 }
 
@@ -794,6 +876,9 @@ export function ProviderSetupSteps({
       return <ApiKeyStep config={provider} flow={flow} />;
 
     case 'models':
+      if (provider.supportsModelDiscovery) {
+        return <DiscoveringModelIdsStep config={provider} flow={flow} />;
+      }
       return <ModelIdsStep config={provider} flow={flow} />;
 
     case 'advancedConfig':

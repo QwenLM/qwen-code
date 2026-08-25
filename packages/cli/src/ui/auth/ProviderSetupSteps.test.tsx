@@ -8,6 +8,7 @@ import { renderWithProviders } from '../../test-utils/render.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { AuthType } from '@qwen-code/qwen-code-core';
+import type { ModelSpec } from '@qwen-code/qwen-code-core';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -15,6 +16,12 @@ import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
 
 type UseKeypressMockOptions = { isActive: boolean };
 
+const discoverProviderModelsMock = vi.hoisted(() => vi.fn());
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  discoverProviderModels: discoverProviderModelsMock,
+}));
 vi.mock('../hooks/useKeypress.js');
 
 let activeKeypressHandlers: KeypressHandler[] = [];
@@ -22,6 +29,7 @@ let activeKeypressHandlers: KeypressHandler[] = [];
 describe('ProviderSetupSteps', () => {
   beforeEach(() => {
     activeKeypressHandlers = [];
+    discoverProviderModelsMock.mockReset();
     vi.mocked(useKeypress).mockImplementation(
       (handler: KeypressHandler, options?: UseKeypressMockOptions) => {
         if (options?.isActive) {
@@ -259,6 +267,18 @@ describe('ProviderSetupSteps', () => {
     } as unknown as ProviderSetupFlow;
   };
 
+  const enableDiscovery = (flow: ProviderSetupFlow) => {
+    if (!flow.state.provider) {
+      throw new Error('Expected a provider');
+    }
+    flow.state.provider = {
+      ...flow.state.provider,
+      supportsModelDiscovery: true,
+    };
+    flow.state.baseUrl = 'https://example.com/v1';
+    flow.state.apiKey = 'secret-key';
+  };
+
   it('maps Ctrl+P/N to advanced-config focus navigation', () => {
     const flow = createAdvancedConfigFlow();
 
@@ -386,5 +406,108 @@ describe('ProviderSetupSteps', () => {
 
     expect(submitModelIds).toHaveBeenCalledTimes(1);
     unmount();
+  });
+
+  it('does not mount the model editor before discovery settles', () => {
+    discoverProviderModelsMock.mockReturnValue(new Promise(() => {}));
+    const flow = createModelIdsFlow();
+    enableDiscovery(flow);
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Loading models from provider…');
+    expect(frame).toContain('Esc to go back');
+    expect(frame).not.toContain('Enter model IDs directly');
+    expect(discoverProviderModelsMock).toHaveBeenCalledWith({
+      baseUrl: 'https://example.com/v1',
+      apiKey: 'secret-key',
+      staticModels: flow.state.provider?.models,
+      signal: expect.any(AbortSignal),
+    });
+    unmount();
+  });
+
+  it('mounts one provider snapshot without promoting new models', async () => {
+    let resolveDiscovery!: (models: ModelSpec[]) => void;
+    discoverProviderModelsMock.mockReturnValue(
+      new Promise<ModelSpec[]>((resolve) => {
+        resolveDiscovery = resolve;
+      }),
+    );
+    const submitModelIds = vi.fn();
+    const flow = createModelIdsFlow({
+      modelIds: 'custom-model, MiniMax-M3, MiniMax-M2.7',
+      submitModelIds,
+    });
+    enableDiscovery(flow);
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    await act(async () => {
+      resolveDiscovery([
+        {
+          id: 'MiniMax-M3',
+          contextWindowSize: 1000000,
+          modalities: { image: true, video: true },
+        },
+        { id: 'MiniMax-M4' },
+        { id: 'custom-model' },
+      ]);
+    });
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Recommended models · from the provider');
+    expect(frame).toContain('custom-model');
+    expect(frame).toContain('MiniMax-M3');
+    expect(frame).toContain('MiniMax-M4');
+    expect(frame).not.toContain('MiniMax-M2.7');
+    expect(frame).toMatch(/◉\uFE0E\s+MiniMax-M3/);
+    expect(frame).toMatch(/○\uFE0E\s+MiniMax-M4/);
+    expect(frame).toMatch(/○\uFE0E\s+custom-model/);
+    await act(async () => {
+      pressLatestKey('x', 'x');
+    });
+    expect(lastFrame()).toContain('xcustom-model');
+    expect(flow.changeModelIds).not.toHaveBeenCalled();
+    pressKey('return', '\r');
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['xcustom-model', 'MiniMax-M3'],
+    });
+    unmount();
+  });
+
+  it('falls back to built-ins after an unavailable catalog', async () => {
+    discoverProviderModelsMock.mockResolvedValue(null);
+    const flow = createModelIdsFlow();
+    enableDiscovery(flow);
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+    await act(async () => {});
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain(
+      'Recommended models · provider list unavailable, showing built-ins',
+    );
+    expect(frame).toContain('MiniMax-M2.7');
+    unmount();
+  });
+
+  it('cancels a pending discovery when the step unmounts', () => {
+    discoverProviderModelsMock.mockReturnValue(new Promise(() => {}));
+    const flow = createModelIdsFlow();
+    enableDiscovery(flow);
+    const { unmount } = renderWithProviders(<ProviderSetupSteps flow={flow} />);
+    const signal = discoverProviderModelsMock.mock.calls[0]?.[0]
+      .signal as AbortSignal;
+
+    unmount();
+
+    expect(signal.aborted).toBe(true);
   });
 });
