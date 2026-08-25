@@ -11628,15 +11628,18 @@ exit 1
     // The review gate additionally kills the round heartbeat FIRST — it is
     // the first step that runs branch code on the host, and the loop holds
     // the bot PAT (af-148). Parent-shell statements under the same
-    // doctrine: absolute-path/builtin command words, step-level pin as the
-    // kill target, nothing executable read from disk. The repair gate does
-    // not repeat it — the loop is already dead by then.
+    // doctrine: ABSOLUTE-PATH-ONLY command words (this block runs in the
+    // gate's outer shell, where a BASH_FUNC_builtin%% plant shadows the
+    // `builtin` keyword itself — R10-1; `builtin kill` is sound only
+    // inside finalize's env -i clean child), step-level pin as the kill
+    // target, nothing executable read from disk. The repair gate does not
+    // repeat it — the loop is already dead by then.
     const heartbeatKillStatements = [
       '/usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true',
       'HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"',
       'if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then',
-      'builtin kill -- -"${HB_PID}" 2> /dev/null || true',
-      'builtin kill "${HB_PID}" 2> /dev/null || true',
+      '/usr/bin/kill -- -"${HB_PID}" 2> /dev/null || true',
+      '/usr/bin/kill "${HB_PID}" 2> /dev/null || true',
       // The mid-tick cover: each tick's `timeout 60 gh` subtree runs in
       // its OWN process group (coreutils timeout default) under the
       // loop's setsid session, so the group+pid kills above miss a kill
@@ -16349,6 +16352,12 @@ exit 1
       'PATH="${TRUSTED_PATH}"',
       'HOME="${HOME}"',
       'GITHUB_TOKEN="${GITHUB_TOKEN}"',
+      // R10-2: the child's gh call carries the PAT; GH_HOST pins the host
+      // and RUNNER_TEMP lets the child mint a hermetic GH_CONFIG_DIR
+      // (pinning HOME's path does not sanitize its contents), the upsert
+      // twin's shape.
+      'GH_HOST=github.com',
+      'RUNNER_TEMP="${RUNNER_TEMP}"',
       'WORKDIR="${WORKDIR}"',
       'HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"',
       'STATUS_ID="${STATUS_ID}"',
@@ -16420,6 +16429,9 @@ exit 1
       TRUSTED_PATH: `${finalizeProbeBin}:/usr/bin:/bin`,
       HOME: finalizeProbeDir,
       GITHUB_TOKEN: 'SECRET_PAT',
+      // The child mints its hermetic GH_CONFIG_DIR under RUNNER_TEMP
+      // (R10-2); the probe dir stands in for it.
+      RUNNER_TEMP: finalizeProbeDir,
       WORKDIR: finalizeProbeDir,
       STATUS_ID: '12345',
       PUSH_REPORTED: 'true',
@@ -16500,11 +16512,12 @@ exit 1
     expect(cleanupStep.indexOf('kill -- -"${HB_PID}"')).toBeLessThan(
       cleanupStep.indexOf('rm -rf "${WORKDIR}"'),
     );
-    // Same-round killers also carry the bare-pid fallback. The gate and
-    // finalize hold the PAT and take the builtin form of the step's
-    // shadowing doctrine; cleanup carries no token and keeps the bare
-    // form.
-    expect(gateStep).toContain('builtin kill "${HB_PID}"');
+    // Same-round killers also carry the bare-pid fallback. Finalize holds
+    // the PAT inside its env -i clean child, where the builtin form is
+    // sound; the gate's kill runs in the OUTER shell (BASH_FUNC_builtin%%
+    // shadowable — R10-1), so it takes the absolute-path form; cleanup
+    // carries no token and keeps the bare form.
+    expect(gateStep).toContain('/usr/bin/kill "${HB_PID}"');
     expect(finalizeStatusCommentStep).toContain(
       'builtin kill "${HB_PID}" 2>/dev/null || true',
     );

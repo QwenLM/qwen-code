@@ -5040,14 +5040,19 @@ jobs:
           # its OWN process group (coreutils timeout default), which the
           # group+pid kills miss — but the loop owns its session via
           # setsid, so -s <pid> targets exactly this round's tree.
-          # Absolute-path/builtin-only command words, same doctrine as the
-          # gate body below.
+          # ABSOLUTE-PATH-ONLY command words here, NOT builtin: this block
+          # runs in the gate's OUTER shell, which inherits every
+          # $GITHUB_ENV plant — a BASH_FUNC_builtin%% import shadows the
+          # `builtin` keyword itself (the R6-4 doctrine the gate body
+          # below documents). `builtin kill` is sound only inside the
+          # env -i clean child (finalize); here kill is /usr/bin/kill,
+          # the same procps already relied on for pkill.
           # Full rationale → qwen-autofix.md#af-148
           /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
-            builtin kill -- -"${HB_PID}" 2> /dev/null || true
-            builtin kill "${HB_PID}" 2> /dev/null || true
+            /usr/bin/kill -- -"${HB_PID}" 2> /dev/null || true
+            /usr/bin/kill "${HB_PID}" 2> /dev/null || true
             /usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true
           fi
           # The gate decides whether the PAT push runs, and the first pass
@@ -6227,6 +6232,8 @@ jobs:
             PATH="${TRUSTED_PATH}" \
             HOME="${HOME}" \
             GITHUB_TOKEN="${GITHUB_TOKEN}" \
+            GH_HOST=github.com \
+            RUNNER_TEMP="${RUNNER_TEMP}" \
             WORKDIR="${WORKDIR}" \
             HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}" \
             STATUS_ID="${STATUS_ID}" \
@@ -6258,6 +6265,18 @@ jobs:
                 /usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true
                 /usr/bin/sleep 2
               fi
+              # Hermetic gh config, the upsert twin'"'"'s shape: pinning
+              # HOME'"'"'s PATH does not sanitize its CONTENTS, which the
+              # gate-phase host-side branch code (same UID) can write
+              # before finalize — a planted http_unix_socket would capture
+              # the PATCH'"'"'s Authorization header. Fail closed (the
+              # post_status R8-1 shape): refuse the finalize PATCH rather
+              # than run gh with the PAT against an untrusted config.
+              if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+                echo "::error::autofix finalize: could not create hermetic gh config dir; refusing the finalize PATCH with the PAT"
+                exit 1
+              fi
+              export GH_CONFIG_DIR
               MARKER="<!-- autofix-status -->"
               if [[ -z "${STATUS_ID}" ]]; then
                 echo "This round posted no status comment on PR #${PR}; nothing to finalize."
