@@ -989,6 +989,34 @@ function processSafety(root: string, args: string[]): Safety {
   return 'write';
 }
 
+/**
+ * The subset that runs inside a heredoc body, where expansion follows
+ * double-quote rules. `<(…)` is not expanded there, so including it would only
+ * refuse a body that quotes the text.
+ */
+const HEREDOC_SUBSTITUTION = /\$\(|`/;
+
+/**
+ * `${v@P}` prompt expansion, which runs any `$(…)` held in the variable's
+ * value. In a pattern word it is a leaf, so the `@`/`P` child-adjacency check
+ * never sees it.
+ *
+ * Deliberately not anchored to a brace-free span: `${a[${b}]@P}` nests a brace
+ * inside the expansion, and a `[^{}]*` bridge stops at it — so the computed
+ * subscript form escaped while bash still ran the expansion. This is a leaf
+ * fallback for sites the node walk cannot reach, so treating any `@P` that
+ * co-occurs with a `${` as unsafe costs at most a prompt.
+ */
+const PROMPT_EXPANSION = /\$\{[\s\S]*@P/;
+
+/**
+ * A command or process substitution that survived the substitution-node walk.
+ * Both openers count: bash runs `<(…)` and `>(…)` wherever it runs `$(…)` —
+ * in a pattern word, that is. See `HEREDOC_SUBSTITUTION` for the one place it
+ * does not.
+ */
+const HIDDEN_SUBSTITUTION = /\$\(|`|<\(|>\(/;
+
 function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
   const substitutions = collectDescendants(
     node,
@@ -1005,6 +1033,36 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
           return 'unknown';
         }
       }
+      // tree-sitter-bash parses the pattern word of `${v%%…}`, `${v%…}`,
+      // `${v##…}` and `${v#…}` as a single leaf, so a substitution inside it
+      // yields no node of its own even though bash runs it while expanding.
+      // Nothing was collected above, so an opener still present in an
+      // expansion is exactly that hidden channel.
+      if (
+        HIDDEN_SUBSTITUTION.test(expansion.text) ||
+        PROMPT_EXPANSION.test(expansion.text)
+      ) {
+        return 'unknown';
+      }
+    }
+    // A heredoc body is one leaf too (`<<-` bodies always, `<<` bodies when
+    // nothing inside them parsed), and bash expands it before feeding it to
+    // stdin — unless the delimiter is quoted, which makes the body inert.
+    // Expansion there follows double-quote rules: `$(…)`, backticks and `@P`
+    // run, `<(…)` does not.
+    for (const body of collectDescendants(node, new Set(['heredoc_body']))) {
+      if (
+        !HEREDOC_SUBSTITUTION.test(body.text) &&
+        !PROMPT_EXPANSION.test(body.text)
+      ) {
+        continue;
+      }
+      const delimiter = body.parent?.namedChildren.find(
+        (child) => child.type === 'heredoc_start',
+      );
+      // `<<\EOF` quotes the delimiter as surely as `<<'EOF'` does.
+      if (delimiter && /['"\\]/.test(delimiter.text)) continue;
+      return 'unknown';
     }
     return 'read-only';
   }

@@ -1498,3 +1498,215 @@ describe('statements nested inside a heredoc redirect', () => {
     }
   });
 });
+
+describe('substitution hidden in an expansion pattern word', () => {
+  // tree-sitter-bash parses the pattern word as a leaf, so the substitution
+  // never becomes a command_substitution node — but bash still runs it.
+  it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
+    'refuses a command substitution hidden by the operator %s',
+    async (operator) => {
+      expect(
+        await classifyShellCommandSafety(
+          `echo \${HOME${operator}$(rm -rf build)}`,
+        ),
+      ).toBe('unknown');
+      expect(
+        await classifyShellCommandSafety(
+          `echo "\${HOME${operator}$(rm -rf build)}"`,
+        ),
+      ).toBe('unknown');
+      expect(
+        await classifyShellCommandSafety(
+          `echo \${HOME${operator}\`rm -rf build\`}`,
+        ),
+      ).toBe('unknown');
+    },
+  );
+
+  // bash runs `<(…)` and `>(…)` in a pattern word exactly as it runs `$(…)`,
+  // and tree-sitter emits no node for those either.
+  it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
+    'refuses a process substitution hidden by the operator %s',
+    async (operator) => {
+      for (const opener of ['<(', '>(']) {
+        expect(
+          await classifyShellCommandSafety(
+            `echo \${HOME${operator}${opener}rm -rf build)}`,
+          ),
+        ).toBe('unknown');
+        expect(
+          await classifyShellCommandSafety(
+            `echo "\${HOME${operator}${opener}rm -rf build)}"`,
+          ),
+        ).toBe('unknown');
+      }
+    },
+  );
+
+  // `${v@P}` runs any $(…) held in the variable's value, and in a pattern word
+  // it is a leaf, so the @/P child-adjacency check never sees it either.
+  it.each(['%%', '%', '##', '#', '^^', '^', ',,', ','])(
+    'refuses a prompt expansion hidden by the operator %s',
+    async (operator) => {
+      expect(
+        await classifyShellCommandSafety(`echo \${x${operator}\${v@P}}`),
+      ).toBe('unknown');
+    },
+  );
+
+  // `${var/pat/rep}` has two halves and bash expands both, so each needs its
+  // own pin — the pattern half is where the other operators put their word,
+  // and the replacement half is the one an operator-shaped test never reaches.
+  // A `$(…)` here does become a real command_substitution node, so it is
+  // classified from the command inside it — `write`, which is stronger than
+  // the `unknown` the leaf-parsed spellings get. Both are refusals; they are
+  // pinned apart so that a spelling silently changing category is a failure.
+  it.each([
+    ['pattern', 'echo ${x/$(rm -rf build)/rep}', 'write'],
+    ['pattern', 'echo ${x/`rm -rf build`/rep}', 'unknown'],
+    ['pattern', 'echo ${x/<(rm -rf build)/rep}', 'unknown'],
+    ['pattern', 'echo ${x/${v@P}/rep}', 'unknown'],
+    ['replacement', 'echo ${x/pat/$(rm -rf build)}', 'write'],
+    ['replacement', 'echo ${x/pat/`rm -rf build`}', 'unknown'],
+    ['replacement', 'echo ${x/pat/<(rm -rf build)}', 'unknown'],
+    ['replacement', 'echo ${x//pat/$(rm -rf build)}', 'write'],
+  ])(
+    'refuses a substitution in the %s half of ${var/…/…}',
+    async (_half, command, expected) => {
+      expect(await classifyShellCommandSafety(command)).toBe(expected);
+      expect(await classifyShellCommandSafety(`"${command}"`)).toBe(expected);
+    },
+  );
+
+  it('treats ${var/pat/${v@P}} as unknown', async () => {
+    expect(await classifyShellCommandSafety('echo ${x/pat/${v@P}}')).toBe(
+      'unknown',
+    );
+  });
+
+  // The default/assign/error/alternate operators take a *word* just as the
+  // trim and case operators do, and bash expands it the same way.
+  it.each([':-', '-', ':=', '=', ':?', '?', ':+', '+'])(
+    'refuses a substitution behind the value operator %s',
+    async (operator) => {
+      // `$(…)` becomes a real node and is classified from the command inside
+      // it; the leaf-parsed spellings reach the regex instead.
+      expect(
+        await classifyShellCommandSafety(`echo \${x${operator}$(rm -rf b)}`),
+      ).toBe('write');
+      for (const payload of ['`rm -rf b`', '<(rm -rf b)', '${v@P}']) {
+        expect(
+          await classifyShellCommandSafety(`echo \${x${operator}${payload}}`),
+        ).toBe('unknown');
+      }
+    },
+  );
+
+  it('refuses a substitution in a substring or subscript position', async () => {
+    expect(await classifyShellCommandSafety('echo ${x:1:$(rm -rf b)}')).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('echo ${x[$(rm -rf b)]}')).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('echo ${!x@P}')).toBe('unknown');
+  });
+
+  it('does not flag expansions without a substitution', async () => {
+    expect(await classifyShellCommandSafety('echo ${HOME%%/*}')).toBe(
+      'read-only',
+    );
+    expect(await classifyShellCommandSafety('echo ${HOME}')).toBe('read-only');
+  });
+});
+
+describe('substitution hidden in a heredoc body', () => {
+  // The body is one leaf too, and bash expands it before feeding it to stdin.
+  // Expansion there follows double-quote rules, so `$(…)`, backticks and the
+  // `@P` operator run while `<(…)` does not.
+  it('treats an unquoted-delimiter body containing a substitution as unsafe', async () => {
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n`rm -rf build`\nEOF'),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n`rm -rf build`\nEOF'),
+    ).toBe('unknown');
+  });
+
+  it('treats $(…) in a body as unsafe, tab-stripped form included', async () => {
+    // A `<<-` body is always one raw leaf, so the `$(` branch of the body
+    // regex is the only thing that catches this — the AST walk sees no
+    // command_substitution node to classify.
+    // Only the tab-indented `<<-` spelling is the always-leaf case the body
+    // regex has to catch; the others parse into a real command_substitution
+    // node and are classified from the command inside it. Pinned apart so a
+    // spelling silently changing category is a failure, not a pass.
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n\t$(rm -rf build)\n\tEOF'),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n$(rm -rf build)\nEOF'),
+    ).toBe('write');
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n$(rm -rf build)\nEOF'),
+    ).toBe('write');
+    // Nested one level deep, where the closing paren is not the last
+    // character of the line.
+    expect(
+      await classifyShellCommandSafety(
+        'cat <<-EOF\n\tprefix $(rm -rf build) suffix\n\tEOF',
+      ),
+    ).toBe('write');
+  });
+
+  it('treats ${v@P} in a body as unsafe, tab-stripped form included', async () => {
+    // A `<<-` body is always one raw leaf, so the expansion never becomes a
+    // child node the walk above could see.
+    expect(
+      await classifyShellCommandSafety('cat <<-EOF\n\t${v@P}\n\tEOF'),
+    ).toBe('unknown');
+    expect(await classifyShellCommandSafety('cat <<EOF\n${v@P}\nEOF')).toBe(
+      'unknown',
+    );
+  });
+
+  it('does not flag a process substitution in a body, which bash never runs', async () => {
+    expect(
+      await classifyShellCommandSafety('cat <<EOF\n<(rm -rf build)\nEOF'),
+    ).toBe('read-only');
+  });
+
+  it('leaves a quoted delimiter alone, which makes the body inert', async () => {
+    expect(
+      await classifyShellCommandSafety("cat <<'EOF'\n`rm -rf build`\nEOF"),
+    ).toBe('read-only');
+    expect(
+      await classifyShellCommandSafety('cat <<"EOF"\n`rm -rf build`\nEOF'),
+    ).toBe('read-only');
+    // `<<\EOF` quotes the delimiter just as surely.
+    expect(
+      await classifyShellCommandSafety('cat <<\\EOF\n$(rm -rf build)\nEOF'),
+    ).toBe('read-only');
+  });
+
+  it('refuses a substitution in the heredoc DELIMITER, which bash expands', async () => {
+    // The body and the opener-line segments are pinned above and below, but
+    // the delimiter itself was not — and bash expands it. Today the refusal
+    // rides on two mechanisms this block never asserts (the `root.hasError`
+    // bailout and the ERROR node landing in the unknown-floored default arm),
+    // so a tree-sitter upgrade that parses the `$(…)` into real nodes, or a
+    // refactor of either mechanism, would flip this to read-only unnoticed.
+    expect(
+      await classifyShellCommandSafety('cat <<$(rm -rf build)\nhello\nEOF'),
+    ).toBe('unknown');
+    expect(
+      await classifyShellCommandSafety('cat <<`rm -rf build`\nhello\nEOF'),
+    ).toBe('unknown');
+  });
+
+  it('does not flag a body without a substitution', async () => {
+    expect(await classifyShellCommandSafety('cat <<EOF\nplain\nEOF')).toBe(
+      'read-only',
+    );
+  });
+});
