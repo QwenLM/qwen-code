@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdtempSync,
+  appendFileSync,
   cpSync,
   mkdirSync,
   writeFileSync,
@@ -356,6 +357,13 @@ describe('the review worktree is the first pointer a probe run trusts', () => {
         readFileSync(join(repo, 'out.json'), 'utf8'),
       ) as Record<string, unknown>;
       expect(JSON.stringify(out)).toContain('review temp dir');
+      // ORDER, which the message alone cannot show: the same detail is
+      // serialized whether the gate throws before the spawn or after it, so a
+      // refactor that moves `worktree add` above the gate — the very thing the
+      // comment beside it warns against — would check files out through the
+      // planted pointer, execute its filters on the host, and still produce
+      // this string. The tree not existing is what says the spawn never ran.
+      expect(existsSync(`${wt}-probe`)).toBe(false);
     },
   );
 });
@@ -378,8 +386,28 @@ describe('the revert phase is reached after the gates refuse', () => {
 
       // A runner that rewrites its own tree's `.git` the first time it is
       // asked to run anything, then answers normally.
+      // A COHERENT planted repository carrying a real smudge filter, so the
+      // oracle can be the thing itself — a canary the host writes only if a
+      // checkout ran through this pointer — rather than the refusal message,
+      // which reads the same whichever side of the write the gate fires on.
       const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-      mkdirSync(planted, { recursive: true });
+      const fakeCommon = join(repo, '.qwen', 'tmp', '.evil-common');
+      const canary = join(repo, 'PWNED');
+      cpSync(join(repo, '.git'), fakeCommon, { recursive: true });
+      rmSync(join(fakeCommon, 'worktrees'), { recursive: true, force: true });
+      appendFileSync(
+        join(fakeCommon, 'config'),
+        `\n[filter "evil"]\n\tsmudge = sh -c "echo PWNED > ${canary}; cat"\n`,
+      );
+      mkdirSync(join(fakeCommon, 'info'), { recursive: true });
+      writeFileSync(join(fakeCommon, 'info', 'attributes'), '* filter=evil\n');
+      cpSync(
+        readFileSync(join(wt, '.git'), 'utf8').trim().replace('gitdir: ', ''),
+        planted,
+        { recursive: true },
+      );
+      writeFileSync(join(planted, 'commondir'), `${fakeCommon}\n`);
+      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(wt, '.git')}\n`);
       writeFileSync(
         vitestScript(),
         `#!/usr/bin/env node
@@ -411,9 +439,12 @@ process.stdout.write(JSON.stringify({
       });
 
       const out = readFileSync(join(repo, 'out.json'), 'utf8');
-      // Whichever gate spoke, the run must not have reverted through the
-      // rewritten pointer — and the refusal must name why.
+      // The refusal names why...
       expect(out).toContain('review temp dir');
+      // ...and nothing checked out through the planted pointer. This is the
+      // property; the message above is only its explanation, and it reads the
+      // same whether the gate fires before the write or after it.
+      expect(existsSync(canary)).toBe(false);
     },
   );
 });
