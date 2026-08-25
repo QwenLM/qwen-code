@@ -22,6 +22,7 @@ type PromptSessionActions = {
   clearSession: () => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
   setModel: (modelId: string) => Promise<unknown>;
+  setReasoningEffort: (value: string) => Promise<void>;
 };
 
 export function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
@@ -31,6 +32,7 @@ export function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
 export async function createAndAttachSessionForPrompt({
   sessionActions,
   modelId,
+  reasoningEffort,
   modeId,
   workspaceCwd,
   worktree,
@@ -42,6 +44,7 @@ export async function createAndAttachSessionForPrompt({
 }: {
   sessionActions: PromptSessionActions;
   modelId?: string;
+  reasoningEffort?: string;
   modeId?: string;
   workspaceCwd?: string;
   worktree?: { slug?: string };
@@ -115,6 +118,23 @@ export async function createAndAttachSessionForPrompt({
         `Session changed while attaching: expected ${sessionId}, found ${sessionIdAfterAttach}`,
       );
     }
+
+    // The model is normally best-effort because the composer may already match
+    // the daemon. An explicit model-bound reasoning choice is different: it
+    // must never be applied after a failed switch to an unknown model.
+    if (modelId) {
+      preparationStep = 'set model for new session';
+      try {
+        await sessionActions.setModel(modelId);
+      } catch (error) {
+        if (reasoningEffort) throw error;
+        warn('[WebShell] failed to set model for new session:', error);
+      }
+    }
+    if (reasoningEffort) {
+      preparationStep = 'set reasoning effort';
+      await sessionActions.setReasoningEffort(reasoningEffort);
+    }
   } catch (error) {
     warn(`[WebShell] failed to ${preparationStep}:`, error);
     await sessionActions
@@ -133,15 +153,6 @@ export async function createAndAttachSessionForPrompt({
       );
     }
     throw error;
-  }
-  // The model still needs a post-create call: `POST /session` only accepts a
-  // `modelServiceId`, whereas the composer selects a plain `modelId`. The
-  // `POST /session/:id/model` route now resolves the owning workspace runtime,
-  // so this succeeds for non-primary workspaces too.
-  if (modelId) {
-    await sessionActions.setModel(modelId).catch((error: unknown) => {
-      warn('[WebShell] failed to set model for new session:', error);
-    });
   }
   return {
     ...(worktreeInfo ? { worktree: worktreeInfo } : {}),

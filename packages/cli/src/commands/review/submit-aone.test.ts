@@ -425,6 +425,7 @@ describe('submit posts an authorised Aone target through a1', () => {
   it('an UNAUTHORISED Aone run takes the normal auth-refusal path first', () => {
     authMock.mockReturnValue({
       ok: false,
+      cls: 'comment-not-requested',
       why: '`--comment` was not in the review arguments',
     });
     expect(() =>

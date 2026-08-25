@@ -1902,11 +1902,9 @@ describe('DaemonSessionProvider', () => {
     expect(sessionId).toBeDefined();
     await act(async () => {
       actions?.applyGoalSnapshot(sessionId!, created);
-    });
-    expect(connection?.goalState).toBe(created);
-
-    pendingGoal.resolve({ snapshot: { v: 2, goal: null, activity: 'idle' } });
-    await act(async () => {
+      pendingGoal.resolve({
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      });
       await flushPromises();
     });
 
@@ -8572,6 +8570,145 @@ describe('DaemonSessionProvider', () => {
     expect(loadCalls[1]?.[3]).toBe('client-a');
   });
 
+  it('hydrates Goal state without waiting for session metadata after a switch', async () => {
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    const providers = createDeferred<unknown>();
+    const commands =
+      createDeferred<Awaited<ReturnType<MockSession['supportedCommands']>>>();
+    const context =
+      createDeferred<Awaited<ReturnType<MockSession['context']>>>();
+    sdkMocks.workspaceProviders.mockReturnValueOnce(providers.promise);
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-b',
+        supportedCommands: vi.fn(() => commands.promise),
+        context: vi.fn(() => context.promise),
+      }),
+    );
+
+    let loadSession: Promise<void> | undefined;
+    act(() => {
+      loadSession = requireActions(actions).loadSession('session-b');
+    });
+    await act(async () => {
+      await wait(5);
+      await loadSession;
+      await flushPromises();
+    });
+    const goalStateBeforeMetadata = connection?.goalState;
+
+    providers.resolve({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      providers: [],
+    });
+    commands.resolve({
+      v: 1,
+      sessionId: 'session-b',
+      availableCommands: [],
+      availableSkills: [],
+    });
+    context.resolve({
+      v: 1,
+      sessionId: 'session-b',
+      workspaceCwd: '/mock-workspace',
+      state: {},
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(goalStateBeforeMetadata).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+    expect(connection?.goalState).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+  });
+
+  it('preserves hydrated Goal state when the event stream starts', async () => {
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+    const goal = createDeferred<GoalStateResponse>();
+    const eventApplied = createDeferred<void>();
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-b',
+        goal: vi.fn(() => goal.promise),
+        events: async function* events(opts = {}) {
+          yield {
+            v: 1,
+            type: 'git_branch_changed',
+            data: { branch: 'feature' },
+          };
+          eventApplied.resolve();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    act(() => {
+      void requireActions(actions).loadSession('session-b');
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection?.goalState).toBeUndefined();
+
+    await act(async () => {
+      goal.resolve({
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      });
+      await eventApplied.promise;
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-b',
+      gitBranch: 'feature',
+      goalState: { v: 2, goal: null, activity: 'idle' },
+    });
+  });
+
   it('retries a session switch while the target session is closing', async () => {
     const firstSession = createMockSession({ sessionId: 'session-a' });
     const secondSession = createMockSession({ sessionId: 'session-b' });
@@ -9113,6 +9250,7 @@ describe('DaemonSessionProvider', () => {
     expect(connection).toMatchObject({
       sessionId: 'session-1',
       displayName: 'Updated session',
+      goalState: { v: 2, goal: null, activity: 'idle' },
     });
   });
 
