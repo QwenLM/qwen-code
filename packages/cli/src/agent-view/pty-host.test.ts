@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { AgentViewLaunchFile } from './protocol.js';
-import { PTY_HOST_AUTH_TOKEN_ENV } from './pty-host-env.js';
+import { PTY_HOST_AUTH_TOKEN_ENV, PTY_HOST_ID_ENV } from './pty-host-env.js';
 import {
   AgentViewLaunchConfigError,
   AgentViewPtyUnavailableError,
@@ -160,6 +160,20 @@ describe('validateAgentViewLaunchConfig', () => {
       ]),
     });
   });
+
+  it('rejects a non-string initialPrompt', () => {
+    const result = validateAgentViewLaunchConfig({
+      ...createLaunch(),
+      initialPrompt: 42,
+    });
+
+    expect(result).toEqual({
+      ok: false,
+      errors: expect.arrayContaining([
+        'initialPrompt must be a string when present',
+      ]),
+    });
+  });
 });
 
 describe('launchAgentViewPtyHost', () => {
@@ -202,7 +216,10 @@ describe('launchAgentViewPtyHost', () => {
     pty.process.emitData(' world');
     pty.process.emitExit({ exitCode: 0 });
 
-    await expect(handle.exited).resolves.toEqual({ exitCode: 0 });
+    await expect(handle.exited).resolves.toEqual({
+      kind: 'exited',
+      exitCode: 0,
+    });
     expect(handle.output.toString()).toBe('lo world');
   });
 
@@ -213,6 +230,78 @@ describe('launchAgentViewPtyHost', () => {
 
     expect(pty.spawnCalls[0]?.file).toBe('qwen');
     expect(pty.spawnCalls[0]?.args).toEqual(['--agent-view-worker']);
+  });
+
+  it('does not inherit color-disabling or CI supervisor environment into workers', async () => {
+    const pty = createFakePty();
+    const originalTerm = process.env['TERM'];
+    const originalNoColor = process.env['NO_COLOR'];
+    const originalForceColor = process.env['FORCE_COLOR'];
+    const originalCi = process.env['CI'];
+    process.env['TERM'] = 'dumb';
+    process.env['NO_COLOR'] = '1';
+    process.env['FORCE_COLOR'] = '0';
+    process.env['CI'] = '1';
+    try {
+      await launchAgentViewPtyHost(createLaunch(), { pty });
+    } finally {
+      if (originalTerm === undefined) {
+        delete process.env['TERM'];
+      } else {
+        process.env['TERM'] = originalTerm;
+      }
+      if (originalNoColor === undefined) {
+        delete process.env['NO_COLOR'];
+      } else {
+        process.env['NO_COLOR'] = originalNoColor;
+      }
+      if (originalForceColor === undefined) {
+        delete process.env['FORCE_COLOR'];
+      } else {
+        process.env['FORCE_COLOR'] = originalForceColor;
+      }
+      if (originalCi === undefined) {
+        delete process.env['CI'];
+      } else {
+        process.env['CI'] = originalCi;
+      }
+    }
+
+    expect(pty.spawnCalls[0]?.options.name).toBe('xterm-256color');
+    expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-256color');
+    expect(pty.spawnCalls[0]?.options.env['NO_COLOR']).toBeUndefined();
+    expect(pty.spawnCalls[0]?.options.env['FORCE_COLOR']).toBeUndefined();
+    expect(pty.spawnCalls[0]?.options.env['CI']).toBeUndefined();
+  });
+
+  it('falls back when launch TERM is empty', async () => {
+    const pty = createFakePty();
+
+    await launchAgentViewPtyHost(
+      {
+        ...createLaunch(),
+        env: { TERM: '' },
+      },
+      { pty },
+    );
+
+    expect(pty.spawnCalls[0]?.options.name).toBe('xterm-256color');
+    expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-256color');
+  });
+
+  it('honours a launch-provided TERM for the pty name and worker env', async () => {
+    const pty = createFakePty();
+
+    await launchAgentViewPtyHost(
+      {
+        ...createLaunch(),
+        env: { TERM: 'xterm-direct' },
+      },
+      { pty },
+    );
+
+    expect(pty.spawnCalls[0]?.options.name).toBe('xterm-direct');
+    expect(pty.spawnCalls[0]?.options.env['TERM']).toBe('xterm-direct');
   });
 
   it('exposes PTY write, data subscription, and resize controls', async () => {
@@ -338,6 +427,7 @@ describe('launchAgentViewPtyHost', () => {
         env: {
           QWEN_AGENT_VIEW_WORKER: '1',
           [PTY_HOST_AUTH_TOKEN_ENV]: 'injected-token',
+          [PTY_HOST_ID_ENV]: 'injected-host-id',
           TMUX: '/tmp/tmux-501/default,456,0',
           TMUX_PANE: '%1',
           STY: '12345.pts-0.host',
@@ -356,6 +446,7 @@ describe('launchAgentViewPtyHost', () => {
     );
     for (const key of [
       PTY_HOST_AUTH_TOKEN_ENV,
+      PTY_HOST_ID_ENV,
       'TMUX',
       'TMUX_PANE',
       'STY',
@@ -497,7 +588,7 @@ describe('launchAgentViewPtyHost', () => {
     expect(pty.process.killCalls).toEqual(
       process.platform === 'win32' ? [undefined] : ['SIGTERM'],
     );
-    await expect(handle.exited).resolves.toEqual({ exitCode: 1 });
+    await expect(handle.exited).resolves.toEqual({ kind: 'unreachable' });
   });
 
   it.skipIf(process.platform === 'win32')(

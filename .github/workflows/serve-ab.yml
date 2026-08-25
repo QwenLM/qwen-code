@@ -88,14 +88,13 @@ jobs:
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
 
-      - name: 'Wipe stale workspace before checkout'
+      - name: 'Wipe stale workspace except the shared .git before checkout'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           set -uo pipefail
-          # The two checkouts clone into head/ and base/ subdirectories;
-          # leftovers there from a previous run on the same reusable runner
-          # could bleed into the builds and silently change the posted A/B
-          # diff. Hosted runners are ephemeral and never see this. After the
+          # Leftovers from a previous run on the same reusable runner could
+          # bleed into the builds and silently change the posted A/B diff.
+          # Hosted runners are ephemeral and never see this. After the
           # ownership-restore step everything is user-owned, so no sudo.
           #
           # Guard, ported from qwen-code-pr-review.yml's checkout heal
@@ -166,6 +165,8 @@ jobs:
           # Canonicalize before matching: the kernel resolves non-canonical
           # spellings to the guarded roots (`/home/.` -> /home, `//usr` ->
           # /usr), so a raw string match lets them slip past the case arms.
+          # Realpath also resolves a symlinked workspace root before the
+          # match, so the wipe below never starts from a link.
           WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize ${GITHUB_WORKSPACE}"; exit 1; }
           while [ "${WS%/}" != "$WS" ]; do WS="${WS%/}"; done
           case "$WS" in
@@ -181,10 +182,40 @@ jobs:
             "$RWS"/*) ;;
             *) echo "::error::refusing to wipe workspace outside the runner workspace: ${WS} (runner workspace: ${RWS})"; exit 1 ;;
           esac
-          # Bare on purpose: this job runs under `bash -eo pipefail`, so a
-          # wipe that cannot clear the workspace fails the job here instead
-          # of building both checkouts on top of the leftovers.
-          find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          # Everything is removed except a real shared root .git directory:
+          # wiping the .git forces the next job on this runner to re-fetch
+          # the full ~900 MB of history from github.com. On the ECS pool's
+          # slow link that stalls checkouts for 20+ minutes and the fetches
+          # drop mid-pack often enough to read as hung runners. Only a plain
+          # directory survives the find: a symlink or gitfile named .git can
+          # point at an attacker-controlled repo outside the workspace, so it
+          # is removed like any other leftover. The kept repo is then reduced
+          # to plumbing — hooks and info/attributes deleted, local config
+          # scrubbed to the same allowlist as qwen-triage.yml's config-
+          # sanitize (git's exec knobs are an open-ended class; an allowlist
+          # closes the class instead of denylisting knobs one by one).
+          # Objects and refs — the reason the .git is kept — are untouched,
+          # and actions/checkout re-establishes remote/auth when it reuses
+          # the repo. The find and the defang rm stay bare on purpose: under
+          # the job's `bash -eo pipefail` a wipe that cannot clear the
+          # workspace fails the job here instead of building both checkouts
+          # on top of the leftovers. Only the config scrub is best-effort,
+          # mirroring qwen-triage.yml's config-sanitize. Worktree-scoped
+          # config first, the same defang pair as qwen-triage's hardened
+          # config-sanitize: extensions.worktreeConfig activates
+          # .git/config.worktree, a second local file that `git config
+          # --local` neither lists nor unsets and that CAN carry exec
+          # vectors like core.hooksPath — delete the file and drop the
+          # extension, closing a bypass the allowlist sweep cannot see.
+          # Every git call is anchored to $WS/.git instead of discovering
+          # the repo from the CWD: after the heal above unlinks a symlinked
+          # workspace root, the step's CWD still is the link's target, and
+          # CWD discovery would scrub a repo outside the workspace.
+          find "$WS" -mindepth 1 -maxdepth 1 ! \( -name '.git' -type d \) -exec rm -rf {} +
+          rm -rf "$WS/.git/hooks" "$WS/.git/info/attributes"
+          rm -f "$(git --git-dir="$WS/.git" rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git --git-dir="$WS/.git" config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
+          { git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done
 
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
