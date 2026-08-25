@@ -9966,6 +9966,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         .slice(-SESSION_PR_LIST_LIMIT);
     },
 
+    setSessionPrs(sessionId, prs) {
+      const entry = byId.get(sessionId);
+      if (!entry) return;
+      entry.prs = prs
+        .map(({ number, url, state }) => ({
+          number,
+          url,
+          ...(state ? { state } : {}),
+        }))
+        .slice(-SESSION_PR_LIST_LIMIT);
+    },
+
     async getSessionArtifacts(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);

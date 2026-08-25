@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { existsSync } from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -31,6 +32,20 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   fetchGitHubPullRequests: vi.fn(),
 }));
+
+const fsMocks = vi.hoisted(() => ({
+  readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
+  realReadFile: undefined as
+    | undefined
+    | typeof import('node:fs/promises').readFile,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  fsMocks.realReadFile = actual.readFile;
+  fsMocks.readFile.mockImplementation(actual.readFile);
+  return { ...actual, readFile: fsMocks.readFile };
+});
 
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 
@@ -165,6 +180,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
 
   afterEach(async () => {
     delete process.env['QWEN_RUNTIME_DIR'];
+    fsMocks.readFile.mockImplementation(fsMocks.realReadFile!);
     await fsp.rm(runtimeDir, { recursive: true, force: true });
     await fsp.rm(workspaceCwd, { recursive: true, force: true });
   });
@@ -217,6 +233,78 @@ describe('refreshWorkspaceSessionPrStates', () => {
       { GH_TOKEN: 'x' },
       { state: 'all', limit: 500, slim: true },
     );
+  });
+
+  it("never applies this workspace's state to a binding pointing at another repository", async () => {
+    // The metadata route accepts any http(s) pr.url, so a client can bind a
+    // foreign-repo PR whose number collides with this workspace's own; the
+    // workspace's same-numbered PR state must not leak onto it (a wrong
+    // 'merged' would also be permanent — merged entries leave the sweep).
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/other-org/other-repo/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+  });
+
+  it('does not resurrect a sidecar whose session is deleted mid-sweep', async () => {
+    // Session deletion unlinks the transcript and sidecar outside the
+    // mutation queue. Land the deletion the moment the queued refresh read
+    // resolves; without the commit-step guard the write recreates the
+    // sidecar at the stale path and it haunts every future sweep.
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    const transcriptPath = path.join(chatsDir, `${SESSION_A}.jsonl`);
+    let prPathReads = 0;
+    fsMocks.readFile.mockImplementation(async (...args) => {
+      const content = await fsMocks.realReadFile!(...args);
+      if (args[0] === prPath) {
+        prPathReads += 1;
+        // Second read is the queued refresh write's own read — the
+        // deletion lands right after it captured the contents.
+        if (prPathReads === 2) {
+          await fsp.unlink(transcriptPath);
+          await fsp.unlink(prPath);
+        }
+      }
+      return content;
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    expect(existsSync(prPath)).toBe(false);
+    expect(markSessionCatalogChanged).not.toHaveBeenCalled();
   });
 
   it('counts only the bindings whose state was rewritten', async () => {

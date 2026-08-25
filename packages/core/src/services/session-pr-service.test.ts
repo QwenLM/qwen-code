@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -17,7 +18,18 @@ import {
   upsertSessionPr,
   writeSessionPrs,
   type SessionPr,
+  type SessionPrState,
 } from './session-pr-service.js';
+
+const fsMocks = vi.hoisted(() => ({
+  readFile: vi.fn<typeof import('node:fs/promises').readFile>(),
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  fsMocks.readFile.mockImplementation(actual.readFile);
+  return { ...actual, readFile: fsMocks.readFile };
+});
 
 const entry = (number: number): SessionPr => ({
   number,
@@ -29,6 +41,7 @@ let tmpDir: string;
 let filePath: string;
 
 beforeEach(async () => {
+  fsMocks.readFile.mockClear();
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'session-pr-test-'));
   filePath = path.join(tmpDir, 'test.pr.json');
 });
@@ -213,6 +226,13 @@ describe('upsertSessionPr state', () => {
 });
 
 describe('updateSessionPrStates', () => {
+  const fetched = (
+    number: number,
+    state: SessionPrState,
+    url: string = entry(number).url,
+  ): ReadonlyMap<number, { state: SessionPrState; url: string }> =>
+    new Map([[number, { state, url }]]);
+
   it('rewrites states in place without touching order or createdAt', async () => {
     await writeSessionPrs(filePath, [
       { ...entry(100), state: 'open' },
@@ -220,7 +240,7 @@ describe('updateSessionPrStates', () => {
     ]);
     const updated = await updateSessionPrStates(
       filePath,
-      new Map([[100, 'merged']]),
+      fetched(100, 'merged'),
     );
     expect(updated).toBe(1);
     const persisted = await readSessionPrs(filePath);
@@ -233,22 +253,22 @@ describe('updateSessionPrStates', () => {
   it('returns 0 without writing when nothing changes', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'merged' }]);
     const before = await fs.readFile(filePath, 'utf-8');
-    expect(
-      await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBe(0);
+    expect(await updateSessionPrStates(filePath, fetched(100, 'merged'))).toBe(
+      0,
+    );
     expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
   });
 
   it('returns 0 when the sidecar is absent', async () => {
-    expect(
-      await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBe(0);
+    expect(await updateSessionPrStates(filePath, fetched(100, 'merged'))).toBe(
+      0,
+    );
   });
 
   it('serializes against a concurrent upsert on the same sidecar', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
     const [updated, prs] = await Promise.all([
-      updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+      updateSessionPrStates(filePath, fetched(100, 'merged')),
       upsertSessionPr(filePath, { number: 101, url: entry(101).url }),
     ]);
     expect(updated).toBe(1);
@@ -257,6 +277,54 @@ describe('updateSessionPrStates', () => {
     const persisted = await readSessionPrs(filePath);
     expect(persisted?.find((p) => p.number === 100)?.state).toBe('merged');
     expect(persisted?.find((p) => p.number === 101)).toBeDefined();
+  });
+
+  it('applies a fetched state only when its url matches the entry', async () => {
+    // The map is keyed by number, but the metadata route accepts any
+    // http(s) url: a binding that points at another repository must never
+    // pick up this repo's same-numbered PR state (and a wrong terminal
+    // state would be permanent — merged entries leave the sweep).
+    await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
+    const updated = await updateSessionPrStates(
+      filePath,
+      fetched(
+        100,
+        'merged',
+        'https://github.com/other-org/other-repo/pull/100',
+      ),
+    );
+    expect(updated).toBe(0);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.[0]?.state).toBe('open');
+  });
+
+  it('does not resurrect a sidecar deleted between the queued read and the write commit', async () => {
+    // Deletion and archive moves unlink the sidecar outside the mutation
+    // queue. Force the race deterministically: the queued read captures the
+    // contents, the deletion lands the moment the read resolves, and only
+    // the commit-step guard can still stop the stale write.
+    await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
+    const raw = await fs.readFile(filePath, 'utf-8');
+    fsMocks.readFile.mockImplementationOnce(async () => {
+      fsSync.unlinkSync(filePath);
+      return raw;
+    });
+    await expect(
+      updateSessionPrStates(filePath, fetched(100, 'merged'), {
+        assertCanCommit: () => {
+          if (!fsSync.existsSync(filePath)) {
+            throw new Error('sidecar vanished during refresh');
+          }
+        },
+      }),
+    ).rejects.toThrow('sidecar vanished during refresh');
+    expect(fsSync.existsSync(filePath)).toBe(false);
+    // The rejected write must not wedge the queue for later mutations.
+    const recovered = await upsertSessionPr(filePath, {
+      number: 101,
+      url: entry(101).url,
+    });
+    expect(recovered.map((p) => p.number)).toEqual([101]);
   });
 });
 

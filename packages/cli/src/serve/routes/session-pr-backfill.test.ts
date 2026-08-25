@@ -27,6 +27,8 @@ import {
   type WorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   backfillWorkspaceSessionPrs,
   normalizeRemoteToWebUrl,
@@ -213,6 +215,7 @@ describe('backfillWorkspaceSessionPrs', () => {
         overlayKeys: [],
         effectiveEnv: { GH_TOKEN: 'x' },
       },
+      bridge: { markSessionCatalogChanged: vi.fn() },
     } as unknown as WorkspaceRuntime;
     sessionService = createWorkspaceRuntimeSessionService(runtime);
   });
@@ -420,6 +423,53 @@ describe('backfillWorkspaceSessionPrs', () => {
       sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
     );
     expect(prs?.[0]).toMatchObject({ number: 31, state: 'merged' });
+  });
+
+  it('ignores gitBranch keys nested inside structured record values', async () => {
+    // Tool-call arguments/results and MCP payloads serialize nested
+    // objects with unescaped keys; a text scan cannot tell them from the
+    // record's own branch field, and the injected branch would map to a
+    // PR the session never ran on (also consuming the 64-branch cap).
+    await seedSession(SESSION_A);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_A}-tool-1`,
+        parentUuid: `${SESSION_A}-user-1`,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                response: { gitBranch: 'feature/injected' },
+              },
+            },
+          ],
+        },
+        cwd: workspaceCwd,
+        gitBranch: 'real-branch',
+      })}\n` + 'not-json-at-all\n',
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(7, 'real-branch'), pr(8, 'feature/injected')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.map((p) => p.number)).toEqual([7]);
   });
 
   it('persists a draft PR as open', async () => {
@@ -1104,6 +1154,96 @@ describe('backfillWorkspaceSessionPrs', () => {
 
     const third = await backfillWorkspaceSessionPrs(runtime);
     expect(third).toMatchObject({ bound: 0, alreadyBound: 9, overLimit: 1 });
+  });
+
+  it('syncs the live bridge entry when a capped plan evicts bindings', async () => {
+    // The summary merge unions persisted sidecar and hydrated live entry by
+    // number. An eviction that only rewrites the sidecar leaves the stale
+    // entry resurrecting the evicted numbers until a daemon restart — the
+    // rendered badge list even grows past the cap.
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 1, 12);
+    await seedPrSidecar(SESSION_A, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    // Models the real bridge: the live entry is hydrated from the full
+    // sidecar (as a metadata PATCH does), and setSessionPrs overwrites it.
+    const hydrated = Array.from({ length: 10 }, (_, i) => ({
+      number: i + 1,
+      url: `https://github.com/o/r/pull/${i + 1}`,
+    }));
+    const liveSummary: {
+      sessionId: string;
+      workspaceCwd: string;
+      createdAt: string;
+      updatedAt: string;
+      displayName: string;
+      clientCount: number;
+      hasActivePrompt: boolean;
+      isArchived: boolean;
+      prs: SessionPrInfo[];
+    } = {
+      sessionId: SESSION_A,
+      workspaceCwd,
+      createdAt: '2026-08-01T00:00:00.000Z',
+      updatedAt: '2026-08-03T00:00:00.000Z',
+      displayName: 'live session',
+      clientCount: 0,
+      hasActivePrompt: false,
+      isArchived: false,
+      prs: hydrated,
+    };
+    const bridge = {
+      markSessionCatalogChanged: vi.fn(),
+      setSessionPrs: vi.fn((sessionId: string, prs: SessionPrInfo[]) => {
+        if (sessionId === SESSION_A) liveSummary.prs = prs;
+      }),
+      listWorkspaceSessions: vi.fn(() => [liveSummary]),
+    };
+    const runtimeWithBridge = {
+      ...runtime,
+      bridge,
+    } as unknown as WorkspaceRuntime;
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: Array.from({ length: 12 }, (_, i) =>
+        pr(i + 1, `b-${i + 1}`),
+      ),
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtimeWithBridge);
+
+    expect(result).toMatchObject({ bound: 2, written: 1, overLimit: 2 });
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const persisted = await readSessionPrs(prPath);
+    expect(persisted?.map((p) => p.number)).toEqual([
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+    // The hydrated entry of a live session must be rewritten to the
+    // persisted membership, not left stale at the pre-eviction list.
+    expect(bridge.setSessionPrs).toHaveBeenCalledTimes(1);
+    expect(bridge.setSessionPrs).toHaveBeenCalledWith(
+      SESSION_A,
+      persisted?.map(({ number, url, state }) => ({
+        number,
+        url,
+        ...(state ? { state } : {}),
+      })),
+    );
+
+    // End-to-end witness: the sidebar list merge must not resurrect the
+    // evicted numbers from the stale hydrated entry.
+    const list = await sessionListModule.listWorkspaceSessionsForResponse(
+      bridge as unknown as AcpSessionBridge,
+      workspaceCwd,
+      undefined,
+      { runtimeBaseDir: runtimeDir },
+    );
+    const summary = list.sessions.find((s) => s.sessionId === SESSION_A);
+    expect(summary?.prs?.map((p) => p.number)).toEqual([
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
   });
 
   it('never evicts an unresolvable binding even when it is the oldest entry', async () => {

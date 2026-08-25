@@ -11,6 +11,7 @@
 // static — a dynamic import() of the barrel from inside would make the
 // barrel's full namespace live and poison the shared chunk for every
 // static barrel importer (ACP agent included).
+import { existsSync } from 'node:fs';
 import {
   fetchGitHubPullRequests,
   readSessionPrs,
@@ -123,25 +124,45 @@ export async function refreshWorkspaceSessionPrStates(
     { state: 'all', limit: 500, slim: true },
   );
   if (result.kind !== 'ok') return { scanned, updated: 0 };
-  const numberToState = new Map<number, SessionPrState>();
+  // The url rides along with the state: the map is keyed by number, but a
+  // binding may point at another repository whose same-numbered PR must
+  // never supply this workspace's state.
+  const numberToFetch = new Map<
+    number,
+    { state: SessionPrState; url: string }
+  >();
   for (const pr of result.pullRequests) {
     // The sidecar snapshot has no 'draft' variant — a draft is still open.
-    numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
+    numberToFetch.set(pr.number, {
+      state: pr.state === 'draft' ? 'open' : pr.state,
+      url: pr.url,
+    });
   }
 
   let updated = 0;
   for (const target of pendingNumbers) {
-    const states = new Map<number, SessionPrState>();
+    const states = new Map<number, { state: SessionPrState; url: string }>();
     for (const number of target.numbers) {
-      const state = numberToState.get(number);
+      const fetched = numberToFetch.get(number);
       // Only a number ABSENT from gh's page is skipped (out of the limit
       // window); a present one is authoritative — including an 'open' that
       // supersedes a stale 'closed' after a reopen.
-      if (state !== undefined) states.set(number, state);
+      if (fetched !== undefined) states.set(number, fetched);
     }
     if (states.size === 0) continue;
     try {
-      updated += await updateSessionPrStates(target.prPath, states);
+      updated += await updateSessionPrStates(target.prPath, states, {
+        assertCanCommit: () => {
+          // Deletion and archive moves unlink or rename the sidecar outside
+          // the mutation queue; if it vanished between the queued read and
+          // this commit step, the write would resurrect a stale sidecar.
+          if (!existsSync(target.prPath)) {
+            throw new Error(
+              `session PR sidecar vanished during refresh: ${target.prPath}`,
+            );
+          }
+        },
+      });
     } catch {
       // One unwritable sidecar must not starve the rest of the sweep.
     }

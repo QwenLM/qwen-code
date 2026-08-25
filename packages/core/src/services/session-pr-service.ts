@@ -205,26 +205,37 @@ export function upsertSessionPr(
 
 /**
  * Rewrites bound PR states in place — order and createdAt are preserved, so
- * a refresh sweep never reshuffles the badge's "latest" entry. Returns the
- * number of entries rewritten; 0 when the sidecar is absent/invalid or
- * nothing changed (no write then).
+ * a refresh sweep never reshuffles the badge's "latest" entry. A fetched
+ * state applies only when its url matches the entry's: the map is keyed by
+ * number, but a binding may point at any repository, and a same-numbered PR
+ * of a different repo is a different PR. Returns the number of entries
+ * rewritten; 0 when the sidecar is absent/invalid or nothing changed (no
+ * write then). `assertCanCommit` runs inside the mutation queue right
+ * before the irreversible write commit; a throw aborts the write.
  */
 export function updateSessionPrStates(
   filePath: string,
-  states: ReadonlyMap<number, SessionPrState>,
+  states: ReadonlyMap<number, { state: SessionPrState; url: string }>,
+  options: { assertCanCommit?: () => void } = {},
 ): Promise<number> {
   return enqueuePrMutation(filePath, async () => {
     const existing = await readSessionPrs(filePath);
     if (!existing) return 0;
     let changed = 0;
     const next = existing.map((entry) => {
-      const state = states.get(entry.number);
-      if (state === undefined || state === entry.state) return entry;
+      const fetched = states.get(entry.number);
+      if (
+        fetched === undefined ||
+        fetched.url !== entry.url ||
+        fetched.state === entry.state
+      ) {
+        return entry;
+      }
       changed += 1;
-      return { ...entry, state };
+      return { ...entry, state: fetched.state };
     });
     if (changed === 0) return 0;
-    await writeSessionPrs(filePath, next);
+    await writeSessionPrs(filePath, next, options);
     return changed;
   });
 }

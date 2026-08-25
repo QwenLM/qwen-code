@@ -146,7 +146,6 @@ interface BackfillCandidate {
 
 // Transcript records carry the branch the session was on; the set is small
 // per session and only ever compared against PR head branches.
-const GIT_BRANCH_PATTERN = /"gitBranch":"([^"]+)"/g;
 const MAX_DISTINCT_BRANCHES = 64;
 
 async function collectTranscriptBranches(
@@ -159,9 +158,24 @@ async function collectTranscriptBranches(
     return [];
   }
   const branches = new Set<string>();
-  for (const match of raw.matchAll(GIT_BRANCH_PATTERN)) {
-    branches.add(match[1]);
-    if (branches.size >= MAX_DISTINCT_BRANCHES) break;
+  // Structured per-line parse: a `gitBranch` key nested anywhere inside a
+  // record (tool-call arguments/results, MCP payloads) must not be taken
+  // for the record's own top-level branch — a text regex cannot tell them
+  // apart once the record is JSON-stringified.
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (record === null || typeof record !== 'object') continue;
+    const branch = (record as Record<string, unknown>)['gitBranch'];
+    if (typeof branch === 'string' && branch.length > 0) {
+      branches.add(branch);
+      if (branches.size >= MAX_DISTINCT_BRANCHES) break;
+    }
   }
   return [...branches];
 }
@@ -429,6 +443,18 @@ export async function backfillWorkspaceSessionPrs(
       if (persisted !== null) {
         result.bound += added;
         result.written += 1;
+        // Every other binding writer keeps the hydrated bridge entry in
+        // step with the sidecar; a capped plan can evict numbers, and the
+        // stale entry would resurrect them in the summary merge until a
+        // daemon restart. No-op when the session is not live.
+        runtime.bridge.setSessionPrs?.(
+          candidate.sessionId,
+          persisted.map(({ number, url, state }) => ({
+            number,
+            url,
+            ...(state ? { state } : {}),
+          })),
+        );
       }
     } catch {
       // One unwritable sidecar must not abort the whole workspace.
