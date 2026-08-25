@@ -351,8 +351,9 @@ describe('cmd.exe relink destinations stay tracked', () => {
       // Pre-fix the `/MIR` switch was resolved and recorded as a relinked
       // path, so the later `-C /MIR` matched it and drew the dynamic-
       // relocation denial. With the switch unrecorded, `/MIR` is judged on
-      // its own (unresolvable) merits and the reason names it.
-      reason: expect.stringContaining('/MIR'),
+      // its own (unresolvable) merits and the reason names it, in the lane's
+      // own path spelling (`/MIR` on POSIX, backslashed on win32).
+      reason: expect.stringMatching(/[/\\]MIR/),
     });
   });
 });
