@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MAX_ARCHIVE_ENTRIES,
   MAX_ARCHIVE_EXPANDED_BYTES,
+  MAX_ARCHIVE_PATH_BYTES,
   assertDirectorySymlinksAreSafe,
   assertTarArchiveLinksAreSafe,
 } from './archive-safety.js';
@@ -217,6 +218,31 @@ describe('assertTarArchiveLinksAreSafe', () => {
     );
   });
 
+  it('bounds retained archive path metadata', async () => {
+    const archive = path.join(root, 'too-many-path-bytes.tar');
+    const suffix = 'x'.repeat(90);
+    const pathLength = 97;
+    await writeCraftedTar(
+      archive,
+      Array.from(
+        { length: Math.ceil(MAX_ARCHIVE_PATH_BYTES / pathLength) + 1 },
+        (_, index) =>
+          createTarFileHeader(
+            `${index.toString().padStart(6, '0')}-${suffix}`,
+            0,
+          ),
+      ),
+    );
+
+    await expect(
+      assertTarArchiveLinksAreSafe(archive, undefined, {
+        allowContainedSymlinks: true,
+      }),
+    ).rejects.toThrow(
+      `Tar archive path metadata exceeds ${MAX_ARCHIVE_PATH_BYTES} bytes.`,
+    );
+  });
+
   it('skips resource limits for trusted archives by default', async () => {
     const archive = path.join(root, 'huge-but-trusted.tar');
     await fs.writeFile(
@@ -350,6 +376,17 @@ describe('assertTarArchiveLinksAreSafe', () => {
       const archive = path.join(root, 'backslash.tar');
       await writeCraftedTar(archive, [
         symlinkHeader('escape', '..\\..\\outside'),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
+
+    it('rejects a UNC target without requiring Windows symlink support', async () => {
+      const archive = path.join(root, 'unc-target.tar');
+      await writeCraftedTar(archive, [
+        symlinkHeader('escape', '\\\\server\\share\\file'),
       ]);
 
       await expect(

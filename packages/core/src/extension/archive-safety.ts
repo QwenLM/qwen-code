@@ -15,6 +15,7 @@ const MAX_REPORTED_LINK_ENTRIES = 10;
 const MAX_LINK_ENTRIES = 100;
 export const MAX_ARCHIVE_ENTRIES = 100_000;
 export const MAX_ARCHIVE_EXPANDED_BYTES = 1024 * 1024 * 1024;
+export const MAX_ARCHIVE_PATH_BYTES = 8 * 1024 * 1024;
 
 export interface TarArchiveSafetyOptions {
   /**
@@ -127,6 +128,7 @@ export async function assertTarArchiveLinksAreSafe(
   let linkCount = 0;
   let entryCount = 0;
   let expandedBytes = 0;
+  let retainedPathBytes = 0;
   let validationError: Error | undefined;
   const recordUnsupportedLink = (entryPath: string) => {
     unsupportedLinkCount += 1;
@@ -151,6 +153,15 @@ export async function assertTarArchiveLinksAreSafe(
         failValidation(
           new Error(
             `Tar archive contains duplicate entry path: ${formatEntryPath(entry.path)}`,
+          ),
+        );
+        return;
+      }
+      retainedPathBytes += Buffer.byteLength(entryPath);
+      if (retainedPathBytes > MAX_ARCHIVE_PATH_BYTES) {
+        failValidation(
+          new Error(
+            `Tar archive path metadata exceeds ${MAX_ARCHIVE_PATH_BYTES} bytes.`,
           ),
         );
         return;
@@ -199,6 +210,15 @@ export async function assertTarArchiveLinksAreSafe(
           entry.linkpath,
         );
         if (targetPath) {
+          retainedPathBytes += Buffer.byteLength(targetPath);
+          if (retainedPathBytes > MAX_ARCHIVE_PATH_BYTES) {
+            failValidation(
+              new Error(
+                `Tar archive path metadata exceeds ${MAX_ARCHIVE_PATH_BYTES} bytes.`,
+              ),
+            );
+            return;
+          }
           acceptedSymlinks.push({ entryPath, targetPath });
           return;
         }
@@ -220,12 +240,21 @@ export async function assertTarArchiveLinksAreSafe(
   }
   signal?.throwIfAborted();
   if (validationError) throw validationError;
+  const archiveEntryPaths = [...archiveEntries.keys()].sort();
   const hasArchiveDescendant = (entryPath: string) => {
-    for (const candidatePath of archiveEntries.keys()) {
+    const prefix = `${entryPath}/`;
+    let low = 0;
+    let high = archiveEntryPaths.length;
+    while (low < high) {
       signal?.throwIfAborted();
-      if (candidatePath.startsWith(`${entryPath}/`)) return true;
+      const middle = Math.floor((low + high) / 2);
+      if (archiveEntryPaths[middle]! < prefix) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
     }
-    return false;
+    return archiveEntryPaths[low]?.startsWith(prefix) === true;
   };
   for (const link of acceptedSymlinks) {
     signal?.throwIfAborted();
@@ -284,7 +313,11 @@ export async function assertDirectorySymlinksAreSafe(
         accountForMaterializedFile(entryStat.size);
         continue;
       }
-      if (!entryStat.isSymbolicLink()) continue;
+      if (!entryStat.isSymbolicLink()) {
+        throw new Error(
+          `Tar archive contains unsupported entry: ${formatEntryPath(path.relative(resolvedRoot, entryPath))}`,
+        );
+      }
       const linkPath = await fs.promises.readlink(entryPath);
       const targetPath = path.resolve(path.dirname(entryPath), linkPath);
       let targetSize: number | undefined;
