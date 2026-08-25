@@ -267,7 +267,8 @@ class SessionTest {
                 "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"error\","
                         + "\"error\":\"set model failed\"}}",
                 "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"still consumed\"}]}}",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
 
         Session session = new Session(transport);
         AtomicInteger controlResponses = new AtomicInteger();
@@ -301,7 +302,8 @@ class SessionTest {
         FakeTransport transport = new FakeTransport(
                 "{\"type\":\"control_response\",\"subtype\":\"error\",\"response\":{\"request_id\":\"set-model\","
                         + "\"error\":\"set model failed\"}}",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
 
         Session session = new Session(transport);
         ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
@@ -322,7 +324,8 @@ class SessionTest {
         FakeTransport transport = new FakeTransport(
                 "{\"type\":\"control_response\",\"subtype\":\"error\",\"request_id\":\"set-model\","
                         + "\"error\":\"set model failed\"}",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
 
         Session session = new Session(transport);
         ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
@@ -342,7 +345,8 @@ class SessionTest {
         FakeTransport transport = new FakeTransport(
                 "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"success\","
                         + "\"response\":{\"message\":\"ok\"}}}",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
 
         Session session = new Session(transport);
         AtomicInteger controlResponses = new AtomicInteger();
@@ -377,7 +381,8 @@ class SessionTest {
         FakeTransport transport = new FakeTransport(
                 "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"error_extra\","
                         + "\"error\":\"not an exact error subtype\"}}",
-                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}");
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
 
         Session session = new Session(transport);
         ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
@@ -391,6 +396,50 @@ class SessionTest {
         assertEquals(2, transport.getProcessedPromptLineCount());
         assertFalse(
                 hasControlResponseErrorWarning(logAppender, "not an exact error subtype"));
+    }
+
+    @Test
+    void sendPromptDoesNotWarnWhenControlResponseSubtypeIsProgress()
+            throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\",\"subtype\":\"progress\","
+                        + "\"response\":{\"message\":\"still working\"}}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
+
+        Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertFalse(hasControlResponseErrorWarning(logAppender, "still working"));
+    }
+
+    @Test
+    void sendPromptDoesNotWarnWhenControlResponseSubtypeIsMissing()
+            throws SessionControlException, SessionSendPromptException {
+        FakeTransport transport = new FakeTransport(
+                "{\"type\":\"control_response\",\"response\":{\"request_id\":\"set-model\","
+                        + "\"response\":{\"message\":\"no subtype\"}}}",
+                "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false}",
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"canary\"}]}}");
+
+        Session session = new Session(transport);
+        ListAppender<ILoggingEvent> logAppender = attachSessionLogAppender();
+
+        try {
+            session.sendPrompt("hello", new SessionEventSimpleConsumers());
+        } finally {
+            detachSessionLogAppender(logAppender);
+        }
+
+        assertEquals(2, transport.getProcessedPromptLineCount());
+        assertFalse(hasControlResponseErrorWarning(logAppender, "no subtype"));
     }
 
     private static ListAppender<ILoggingEvent> attachSessionLogAppender() {
