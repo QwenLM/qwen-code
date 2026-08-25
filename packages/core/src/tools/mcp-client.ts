@@ -35,12 +35,18 @@ import { ServiceAccountImpersonationProvider } from '../mcp/sa-impersonation-pro
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
-import { MCPServerStatus, updateMCPServerStatus } from './mcp-status.js';
+import {
+  MCPServerStatus,
+  recordMCPServerLastError,
+  updateMCPServerStatus,
+} from './mcp-status.js';
 export {
   addMCPStatusChangeListener,
   getAllMCPServerStatuses,
+  getMCPServerLastError,
   getMCPServerStatus,
   MCPServerStatus,
+  recordMCPServerLastError,
   removeMCPServerStatus,
   removeMCPStatusChangeListener,
   updateMCPServerStatus,
@@ -594,6 +600,12 @@ export class McpClient {
         }
       }
       this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Preserve the cause: the manager's discovery catch swallows this
+      // error (best-effort discovery), leaving the status registry's enum as
+      // the only other witness. Recording it lets status consumers (e.g.
+      // `qwen mcp reconnect`) tell the user WHY the connection failed
+      // instead of a bare "status: disconnected" (issue #9944).
+      recordMCPServerLastError(this.serverName, getErrorMessage(error));
       throw error;
     }
   }
@@ -727,6 +739,10 @@ export class McpClient {
       return { tools, prompts, resources };
     } catch (error) {
       this.updateStatus(MCPServerStatus.DISCONNECTED);
+      // Same carrier as `connect()`'s catch: the manager swallows this error
+      // for best-effort discovery; keep the cause retrievable for status
+      // consumers (issue #9944).
+      recordMCPServerLastError(this.serverName, getErrorMessage(error));
       throw error;
     }
   }

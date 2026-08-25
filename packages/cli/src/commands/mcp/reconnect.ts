@@ -11,6 +11,7 @@ import {
   Config,
   FileDiscoveryService,
   ExtensionManager,
+  getMCPServerLastError,
   getMCPServerStatus,
   MCPServerStatus,
 } from '@qwen-code/qwen-code-core';
@@ -187,6 +188,12 @@ function describeSkippedConnectionReason(
  * "Reconnected successfully" for a server it never reached — e.g. a
  * single-session HTTP server whose only session is held by a running Qwen
  * Code session, or a server that is simply down (issue #9944).
+ *
+ * When verification fails, the underlying connect cause (ECONNREFUSED, an
+ * OAuth 401, a spawn error...) is retrievable via `getMCPServerLastError`:
+ * the client records it into the status registry before discovery's
+ * best-effort catch swallows it. Append it so the failure output tells the
+ * user WHY instead of a bare status enum.
  */
 async function discoverAndVerifyConnection(
   config: Config,
@@ -200,8 +207,10 @@ async function discoverAndVerifyConnection(
     if (skippedReason) {
       throw new SkippedConnectionError(skippedReason);
     }
+    const lastError = getMCPServerLastError(serverName);
     throw new Error(
-      `connection attempt finished without a live connection (status: ${status})`,
+      `connection attempt finished without a live connection (status: ${status})` +
+        (lastError ? `: ${lastError}` : ''),
     );
   }
 }

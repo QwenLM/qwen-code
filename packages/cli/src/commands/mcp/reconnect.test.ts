@@ -40,6 +40,7 @@ vi.mock('../../config/mcpApprovals.js', () => ({
 }));
 
 const mockGetMCPServerStatus = vi.hoisted(() => vi.fn());
+const mockGetMCPServerLastError = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   Config: vi.fn(),
@@ -47,6 +48,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   ExtensionManager: vi.fn(),
   getErrorMessage: (e: unknown) => (e instanceof Error ? e.message : String(e)),
   getMCPServerStatus: mockGetMCPServerStatus,
+  getMCPServerLastError: mockGetMCPServerLastError,
   MCPServerStatus: {
     DISCONNECTED: 'disconnected',
     CONNECTING: 'connecting',
@@ -109,6 +111,8 @@ describe('mcp reconnect command', () => {
     // verifies the outcome through the status registry; default to a live
     // connection so success-path tests stay green.
     mockGetMCPServerStatus.mockReturnValue('connected');
+    // No recorded failure cause by default; failure-path tests opt in.
+    mockGetMCPServerLastError.mockReturnValue(undefined);
     mockedAssembleMcpServers.mockImplementation((servers) => servers ?? {});
     mockedIsWorkspaceTrusted.mockReturnValue({
       isTrusted: true,
@@ -501,6 +505,56 @@ describe('mcp reconnect command', () => {
           'cannot refresh the MCP tools of an already-running Qwen Code session',
         ),
       );
+    });
+
+    it('surfaces the recorded failure cause when verification fails', async () => {
+      // Discovery swallows the connect error (debugLogger only), but the
+      // client records the cause in the status registry before it is
+      // swallowed. The failure output must carry it — a bare
+      // "(status: disconnected)" sends debugging in no direction at all.
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { httpUrl: 'http://127.0.0.1:3939/mcp' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockReturnValue('disconnected');
+      mockGetMCPServerLastError.mockReturnValue(
+        'connect ECONNREFUSED 127.0.0.1:3939',
+      );
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Failed to reconnect to server "test-server": connection attempt finished without a live connection (status: disconnected): connect ECONNREFUSED 127.0.0.1:3939',
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
+    });
+
+    it('--all surfaces the recorded failure cause per server', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'server-one': { httpUrl: 'http://127.0.0.1:3939/mcp' },
+          },
+        },
+      });
+      mockGetMCPServerStatus.mockReturnValue('disconnected');
+      mockGetMCPServerLastError.mockReturnValue('HTTP 401 Unauthorized');
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': undefined, all: true });
+
+      expect(mockWriteStdoutLine).toHaveBeenCalledWith(
+        '✗ server-one: Failed - connection attempt finished without a live connection (status: disconnected): HTTP 401 Unauthorized',
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
     });
   });
 

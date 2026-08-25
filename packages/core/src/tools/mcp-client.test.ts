@@ -41,6 +41,7 @@ import {
   discoverPrompts,
   discoverResources,
   getAllMCPServerStatuses,
+  getMCPServerLastError,
   getMcpOAuthDialogInstruction,
   getMCPServerStatus,
   hasNetworkTransport,
@@ -3751,6 +3752,51 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('records the connect failure cause in the status registry (issue #9944)', async () => {
+      // Discovery is best-effort and swallows connect errors (the manager's
+      // catch logs them via debugLogger only), so the status enum alone
+      // cannot tell a consumer WHY a server is not CONNECTED. connect() must
+      // record the cause so `qwen mcp reconnect` can print it.
+      const mockedClient = {
+        connect: vi
+          .fn()
+          .mockRejectedValue(new Error('connect ECONNREFUSED 127.0.0.1:3939')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn().mockResolvedValue(undefined),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+
+      const client = new McpClient(
+        'cause-recording-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await expect(client.connect()).rejects.toThrow(
+        'connect ECONNREFUSED 127.0.0.1:3939',
+      );
+      expect(getMCPServerLastError('cause-recording-server')).toBe(
+        'connect ECONNREFUSED 127.0.0.1:3939',
+      );
+
+      // A recovered connection clears the stale cause.
+      mockedClient.connect.mockResolvedValue(undefined);
+      await client.connect();
+      expect(getMCPServerLastError('cause-recording-server')).toBeUndefined();
+
+      removeMCPServerStatus('cause-recording-server');
     });
   });
 
