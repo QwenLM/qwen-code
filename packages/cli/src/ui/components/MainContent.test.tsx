@@ -253,18 +253,20 @@ const createUIActions = (): UIActions =>
     refreshStatic: vi.fn(),
   }) as unknown as UIActions;
 
+const createMainContentTree = (uiState: UIState) => (
+  <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+    <UIActionsContext.Provider value={createUIActions()}>
+      <UIStateContext.Provider value={uiState}>
+        <OverflowProvider>
+          <MainContent />
+        </OverflowProvider>
+      </UIStateContext.Provider>
+    </UIActionsContext.Provider>
+  </AppContext.Provider>
+);
+
 const renderMainContent = (uiState: UIState) =>
-  render(
-    <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-      <UIActionsContext.Provider value={createUIActions()}>
-        <UIStateContext.Provider value={uiState}>
-          <OverflowProvider>
-            <MainContent />
-          </OverflowProvider>
-        </UIStateContext.Provider>
-      </UIActionsContext.Provider>
-    </AppContext.Provider>,
-  );
+  render(createMainContentTree(uiState));
 
 describe('<MainContent />', () => {
   it('renders AppHeader inside Static at the top of the static content', () => {
@@ -863,6 +865,38 @@ describe('<MainContent />', () => {
   });
 
   describe('virtual viewport path (ui.useTerminalBuffer)', () => {
+    it('skips history work when only the composer buffer changes', () => {
+      const uiState = createUIState({
+        useTerminalBuffer: true,
+        history: [{ id: 1, type: 'user', text: 'stable history' }],
+      });
+      const { rerender } = renderMainContent(uiState);
+      scrollableListPropsSpy.mockClear();
+      historyItemDisplayPropsSpy.mockClear();
+
+      rerender(
+        createMainContentTree({
+          ...uiState,
+          buffer: {} as UIState['buffer'],
+        }),
+      );
+
+      expect(scrollableListPropsSpy).not.toHaveBeenCalled();
+      expect(historyItemDisplayPropsSpy).not.toHaveBeenCalled();
+
+      rerender(
+        createMainContentTree({
+          ...uiState,
+          history: [
+            ...uiState.history,
+            { id: 2, type: 'user', text: 'new history' },
+          ],
+        }),
+      );
+
+      expect(scrollableListPropsSpy).toHaveBeenCalledOnce();
+    });
+
     it('renders ScrollableList and skips <Static> entirely when useTerminalBuffer is true', () => {
       staticPropsSpy.mockClear();
       scrollableListPropsSpy.mockClear();

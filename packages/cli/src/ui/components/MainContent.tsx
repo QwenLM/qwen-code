@@ -24,7 +24,7 @@ import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
-import { useUIState } from '../contexts/UIStateContext.js';
+import { useUIState, type UIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { AppHeader } from './AppHeader.js';
@@ -127,10 +127,39 @@ interface MainContentProps {
   footerRef?: RefObject<DOMElement | null>;
 }
 
-export const MainContent = ({ footerRef }: MainContentProps) => {
-  const { version } = useAppContext();
-  const uiState = useUIState();
-  const { allExpanded: fullDetail } = useThoughtExpanded();
+type MainContentUIState = Pick<
+  UIState,
+  | 'activePtyId'
+  | 'availableTerminalHeight'
+  | 'constrainHeight'
+  | 'currentModel'
+  | 'dialogsVisible'
+  | 'embeddedShellFocused'
+  | 'history'
+  | 'historyRemountKey'
+  | 'isEditorDialogOpen'
+  | 'mainAreaWidth'
+  | 'pendingHistoryItems'
+  | 'showScrollbar'
+  | 'slashCommands'
+  | 'staticAreaMaxItemHeight'
+  | 'streamingState'
+  | 'terminalWidth'
+  | 'useTerminalBuffer'
+>;
+
+interface MainContentViewProps extends MainContentProps {
+  fullDetail: boolean;
+  uiState: MainContentUIState;
+  version: string;
+}
+
+const MainContentView = ({
+  footerRef,
+  fullDetail,
+  uiState,
+  version,
+}: MainContentViewProps) => {
   const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
   const {
@@ -634,5 +663,62 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
         </Box>
       </OverflowProvider>
     </>
+  );
+};
+
+const MemoizedMainContentView = memo(MainContentView);
+
+export const MainContent = ({ footerRef }: MainContentProps) => {
+  const { version } = useAppContext();
+  const uiState = useUIState();
+  const { allExpanded: fullDetail } = useThoughtExpanded();
+  const mainContentState = useMemo<MainContentUIState>(
+    () => ({
+      activePtyId: uiState.activePtyId,
+      availableTerminalHeight: uiState.availableTerminalHeight,
+      constrainHeight: uiState.constrainHeight,
+      currentModel: uiState.currentModel,
+      dialogsVisible: uiState.dialogsVisible,
+      embeddedShellFocused: uiState.embeddedShellFocused,
+      history: uiState.history,
+      historyRemountKey: uiState.historyRemountKey,
+      isEditorDialogOpen: uiState.isEditorDialogOpen,
+      mainAreaWidth: uiState.mainAreaWidth,
+      pendingHistoryItems: uiState.pendingHistoryItems,
+      showScrollbar: uiState.showScrollbar,
+      slashCommands: uiState.slashCommands,
+      staticAreaMaxItemHeight: uiState.staticAreaMaxItemHeight,
+      streamingState: uiState.streamingState,
+      terminalWidth: uiState.terminalWidth,
+      useTerminalBuffer: uiState.useTerminalBuffer,
+    }),
+    [
+      uiState.activePtyId,
+      uiState.availableTerminalHeight,
+      uiState.constrainHeight,
+      uiState.currentModel,
+      uiState.dialogsVisible,
+      uiState.embeddedShellFocused,
+      uiState.history,
+      uiState.historyRemountKey,
+      uiState.isEditorDialogOpen,
+      uiState.mainAreaWidth,
+      uiState.pendingHistoryItems,
+      uiState.showScrollbar,
+      uiState.slashCommands,
+      uiState.staticAreaMaxItemHeight,
+      uiState.streamingState,
+      uiState.terminalWidth,
+      uiState.useTerminalBuffer,
+    ],
+  );
+
+  return (
+    <MemoizedMainContentView
+      footerRef={footerRef}
+      fullDetail={fullDetail}
+      uiState={mainContentState}
+      version={version}
+    />
   );
 };
