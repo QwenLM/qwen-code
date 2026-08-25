@@ -802,12 +802,18 @@ describe('renderMechanismHealth — is the machinery working', () => {
     // The onset is hedged: a fail-closed round that leaves a COMPLETE work
     // list beside a strictly-earlier anchored own marker is grafted onto
     // one round later, so "the next review re-reads the whole diff" is
-    // false there and the wording says so.
+    // false there and the wording says so. The hedge carries the SAME
+    // usability qualifier as the termination clause: a graft that landed
+    // but the running round cannot use (certifier mismatch, fetch refusal,
+    // resolved to the head) does NOT spare the re-read, and an onset
+    // promising otherwise contradicts the disclosure on exactly that
+    // shape — the one 'discloses a grafted anchor the running model
+    // cannot use' pins with 're-reads the whole diff' still in the body.
     expect(r.en).toContain(
-      'unless recovery grafts an earlier own anchor onto the complete work list this round leaves behind',
+      'unless recovery grafts an earlier own anchor that the round running it can use onto the complete work list this round leaves behind',
     );
     expect(r.zh).toContain(
-      '除非恢复流程把更早的自有锚点嫁接到本轮留下的完整工作清单上',
+      '除非恢复流程把本轮能使用的更早自有锚点嫁接到本轮留下的完整工作清单上',
     );
     // The termination list names BOTH exits: a round whose own marker
     // carries an anchor again, and a USABLE graft — a grafted anchor whose

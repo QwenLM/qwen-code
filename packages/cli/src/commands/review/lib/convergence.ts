@@ -688,10 +688,10 @@ export function renderMechanismHealth(
   }
   if (h.anchorChainBroken) {
     en.push(
-      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had no anchor this round could use either — none at all, one with no certifier, one certified by an identity other than the one this round runs under, or one this round's fetch refused or resolved to the head — so the next review re-reads the whole diff unless recovery grafts an earlier own anchor onto the complete work list this round leaves behind, and keeps doing so until a round's marker carries an anchor again or a graft lands that the round running it can use`,
+      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had no anchor this round could use either — none at all, one with no certifier, one certified by an identity other than the one this round runs under, or one this round's fetch refused or resolved to the head — so the next review re-reads the whole diff unless recovery grafts an earlier own anchor that the round running it can use onto the complete work list this round leaves behind, and keeps doing so until a round's marker carries an anchor again or a graft lands that the round running it can use`,
     );
     zh.push(
-      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有留下本轮可用的锚点——要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证、要么被本轮的获取拒绝或解析为头提交——因此下一次评审将重读整个 diff，除非恢复流程把更早的自有锚点嫁接到本轮留下的完整工作清单上；并会一直如此，直到某一轮的标记重新带上锚点，或落地的嫁接能被运行该轮的评审使用`,
+      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有留下本轮可用的锚点——要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证、要么被本轮的获取拒绝或解析为头提交——因此下一次评审将重读整个 diff，除非恢复流程把本轮能使用的更早自有锚点嫁接到本轮留下的完整工作清单上；并会一直如此，直到某一轮的标记重新带上锚点，或落地的嫁接能被运行该轮的评审使用`,
     );
   }
   if (en.length === 0) return null;

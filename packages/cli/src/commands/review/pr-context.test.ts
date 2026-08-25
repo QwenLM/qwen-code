@@ -1777,6 +1777,34 @@ describe('latestLedger — the split trust surface', () => {
     expect(recovered?.anchorFromRound).toBeUndefined();
   });
 
+  it('never grafts when the own latest marker parses empty but PARTIAL — its dropped is invisible to the merge', () => {
+    // The completeness guard reads `ledger.dropped`, but a FOREIGN winner's
+    // own-side count reaches it only through the merge branch — gated on a
+    // non-empty own list. An own latest marker that parses to zero findings
+    // with non-zero `dropped` (entries the admission test rejects under
+    // version drift, or a hand-edited marker) therefore never enters the
+    // merge, the winner's own `dropped` is zero, and the guard would graft
+    // past findings that are in no work list and may reference code before
+    // the candidate sha — the silent retirement the guard exists to
+    // prevent. The shape degrades to the full range instead.
+    const ownPartial =
+      'x <!-- qwen-review-ledger {"v":1,"round":4,"findings":[],"dropped":2} -->';
+    const foreignWinner =
+      'y <!-- qwen-review-ledger {"v":1,"round":5,"findings":[{"id":"R5-1","sev":"S","file":"c.ts","title":"theirs"}]} -->';
+    const { recovered } = recoverLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', serializeLedger(anchored)),
+        review('bot', '2026-01-02T00:00:00Z', ownPartial),
+        review('ci-bot', '2026-01-03T00:00:00Z', foreignWinner),
+      ],
+      'bot',
+    );
+    expect(recovered?.ledger.round).toBe(5);
+    expect(recovered?.foreign).toBe(true);
+    expect(recovered?.ledger.sha).toBeUndefined();
+    expect(recovered?.anchorFromRound).toBeUndefined();
+  });
+
   it('drops the churn state from ANOTHER account, keeping the work list', () => {
     // The streak is the same class of claim as the anchor: a fact ABOUT
     // the round that posted it, certified by the account that ran it.

@@ -1149,7 +1149,12 @@ export function recoverLedger(
   // reference code the grafted scope may never re-see — a fail-closed round
   // that ran FULL range sheds findings spanning the whole diff, some before
   // the candidate sha, and scoping past them retires them silently — the
-  // exact shape the serializer's truncation withhold exists to prevent. And
+  // exact shape the serializer's truncation withhold exists to prevent. For
+  // a FOREIGN winner the own side's count reaches `ledger.dropped` only
+  // through the merge, which an own latest marker parsing to zero findings
+  // never enters — entries the admission test rejects under version drift,
+  // or a hand-edited list — yet still counts them, so that marker's own
+  // `dropped` is read directly. And
   // the winner must not have RUN at the candidate sha: its `commit_id` is
   // the head it reviewed at, and when the two are equal the next round's
   // `--since <sha>` resolves to the head — `upToDate` — whose same-sha stop
@@ -1167,6 +1172,12 @@ export function recoverLedger(
     me &&
     ledger.sha === undefined &&
     (ledger.dropped ?? 0) === 0 &&
+    !(
+      best.foreign &&
+      bestOwn &&
+      bestOwn.ledger.findings.length === 0 &&
+      (bestOwn.ledger.dropped ?? 0) > 0
+    ) &&
     bestOwnAnchor &&
     bestOwnAnchor.round < ledger.round &&
     (best.commitId === null ||
