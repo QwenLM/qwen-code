@@ -25,7 +25,7 @@ Read-only teammates have a positive execution allowlist. They cannot use shell, 
 When the goal requires code changes:
 
 1. Finish the parallel investigation first.
-2. Send each investigation teammate a `shutdown_request`. Once shutdown is pending, they are excluded from automatic task assignment.
+2. Call `request_shutdown` for each investigation teammate. Once shutdown is pending, they are excluded from automatic task assignment.
 3. Call `enter_worktree` once and keep the returned path.
 4. Create the implementation task, then spawn exactly one named writer with `subagent_type: "general-purpose"` and `working_dir: <path>`. Do not set `read_only` for this teammate.
 5. Give the writer the accepted investigation evidence and require all changes to stay inside the worktree.
@@ -34,7 +34,7 @@ When the goal requires code changes:
 
 If the checkout is not a Git repository or worktree creation fails, keep all teammates read-only and let the leader make the final change in the current checkout.
 
-After synthesis, send each still-active teammate a `shutdown_request`, then delete the team.
+After synthesis, call `request_shutdown` for each still-active teammate, then delete the team.
 
 The existing Agent View tabs show teammate conversations, messages, status, and approvals. Do not create another roster, session manager, or terminal UI.
 

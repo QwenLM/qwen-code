@@ -16,6 +16,7 @@ import {
   type DaemonTuiEvent,
   type DaemonTuiSessionClient,
 } from './daemon-tui-adapter.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
 import { ToolCallStatus } from '../types.js';
 
 class EventQueue implements AsyncGenerator<DaemonTuiEvent> {
@@ -162,6 +163,220 @@ describe('reduceDaemonEventToTuiUpdates', () => {
     ]);
   });
 
+  it('preserves a findings_list result as structured output', () => {
+    const updates = reduceDaemonEventToTuiUpdates({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-findings',
+          kind: 'think',
+          title: 'ReportFindings',
+          status: 'completed',
+          rawOutput: {
+            type: 'findings_list',
+            level: 'high',
+            // Compaction's eviction count is part of the trusted shape and
+            // must pass the boundary, or a compacted re-report degrades to
+            // text exactly where the omission matters.
+            omittedFindings: 3,
+            findings: [
+              {
+                id: 'R1-1',
+                severity: 'Critical',
+                confidence: 'high',
+                file: 'src/foo.ts',
+                line: 42,
+                summary: 'wrong return value on cold cache',
+                shortSummary: 'wrong return value on cold cache',
+                failureScenario: 'first call after start returns undefined',
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    expect(updates).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: {
+          tools: [
+            {
+              resultDisplay: {
+                type: 'findings_list',
+                level: 'high',
+                omittedFindings: 3,
+                findings: [
+                  {
+                    id: 'R1-1',
+                    severity: 'Critical',
+                    file: 'src/foo.ts',
+                    line: 42,
+                    shortSummary: 'wrong return value on cold cache',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  it('replaces the previous findings list in the projection when a new one arrives', () => {
+    // The daemon reducer holds one logical report: a delivered findings list
+    // supersedes the earlier call's list instead of rendering beside it.
+    const state = createDaemonTuiReducerState();
+    const findingsEvent = (toolCallId: string, outcome?: string) => ({
+      id: 1,
+      v: 1 as const,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId,
+          kind: 'think',
+          title: 'ReportFindings',
+          status: 'completed',
+          rawOutput: {
+            type: 'findings_list',
+            level: 'high',
+            findings: [
+              {
+                id: 'R1-1',
+                severity: 'Critical',
+                confidence: 'high',
+                file: 'src/foo.ts',
+                line: 42,
+                summary: 'wrong return value on cold cache',
+                shortSummary: 'wrong return value on cold cache',
+                failureScenario: 'first call after start returns undefined',
+                ...(outcome ? { outcome } : {}),
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    reduceDaemonEventToTuiUpdates(findingsEvent('tool-report-1'), state);
+    const updates = reduceDaemonEventToTuiUpdates(
+      findingsEvent('tool-report-2', 'fixed'),
+      state,
+    );
+
+    const group = updates.find((u) => u.type === 'tool_group_update');
+    expect(group).toBeDefined();
+    if (!group || group.type !== 'tool_group_update') return;
+    expect(group.item.tools).toHaveLength(2);
+    const byId = Object.fromEntries(
+      group.item.tools.map((tool) => [tool.callId, tool]),
+    );
+    expect(byId['tool-report-1'].resultDisplay).toBe(
+      SUPERSEDED_FINDINGS_MESSAGE,
+    );
+    expect(byId['tool-report-2'].resultDisplay).toMatchObject({
+      type: 'findings_list',
+      findings: [{ id: 'R1-1', outcome: 'fixed' }],
+    });
+  });
+
+  it('falls back to text for findings_list payloads that fail the shape check', () => {
+    // The daemon boundary must not hand FindingsDisplay a payload it would
+    // read `findings.length` off — a discriminator-only shape used to crash
+    // the TUI.
+    const payloads: unknown[] = [
+      { type: 'findings_list' },
+      { type: 'findings_list', findings: [{ severity: 'Critical' }] },
+      { type: 'findings_list', findings: 'not-an-array' },
+      { type: 'findings_list', level: 'ultra', findings: [] },
+      {
+        type: 'findings_list',
+        findings: [
+          {
+            severity: 'Critical',
+            file: 'a.ts',
+            summary: 's',
+            shortSummary: 's',
+            failureScenario: 'f',
+            outcome: 'wontfix',
+          },
+        ],
+      },
+    ];
+    for (const rawOutput of payloads) {
+      const updates = reduceDaemonEventToTuiUpdates({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-findings-bad',
+            kind: 'think',
+            title: 'ReportFindings',
+            status: 'completed',
+            rawOutput,
+          },
+        },
+      });
+      const resultDisplay = (
+        updates[0] as {
+          item: { tools: Array<{ resultDisplay: unknown }> };
+        }
+      ).item.tools[0].resultDisplay;
+      expect(typeof resultDisplay).toBe('string');
+      expect(resultDisplay as string).toContain('findings_list');
+    }
+  });
+
+  it('falls back to text for malformed findings_list payloads even when permissive keys are present', () => {
+    // A `findings_list` record must be judged by its full shape BEFORE the
+    // permissive display arms run: `ansiOutput`/`fileDiff` keys used to
+    // short-circuit the OR chain and smuggle an unvalidated payload through
+    // as structured output, which then crashed FindingsDisplay.
+    const payloads: unknown[] = [
+      {
+        type: 'findings_list',
+        ansiOutput: '',
+        findings: [{ severity: 'bogus' }],
+      },
+      { type: 'findings_list', fileDiff: '--- a\n+++ b', findings: null },
+      { type: 'findings_list', ansiOutput: 'x' },
+    ];
+    for (const rawOutput of payloads) {
+      const updates = reduceDaemonEventToTuiUpdates({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'tool-findings-bypass',
+            kind: 'think',
+            title: 'ReportFindings',
+            status: 'completed',
+            rawOutput,
+          },
+        },
+      });
+      const resultDisplay = (
+        updates[0] as {
+          item: { tools: Array<{ resultDisplay: unknown }> };
+        }
+      ).item.tools[0].resultDisplay;
+      expect(typeof resultDisplay).toBe('string');
+      expect(resultDisplay as string).toContain('findings_list');
+    }
+  });
+
   it('maps assistant, tool, model, and disconnect daemon events while suppressing thought history', () => {
     expect(
       reduceDaemonEventToTuiUpdates({
@@ -273,6 +488,46 @@ describe('reduceDaemonEventToTuiUpdates', () => {
       },
       daemonEventId: 3,
     });
+
+    const mcpAppHtml = `<main>PROBE_MCP_APP_HTML${'x'.repeat(200)}</main>`;
+    const mcpAppUpdates = reduceDaemonEventToTuiUpdates({
+      id: 31,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-app',
+          kind: 'mcp',
+          title: 'Show dashboard',
+          status: 'completed',
+          rawOutput: {
+            type: 'mcp_app',
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: mcpAppHtml,
+            toolResult: {
+              content: [{ type: 'text', text: 'Dashboard ready' }],
+            },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+        },
+      },
+    });
+    expect(mcpAppUpdates).toHaveLength(1);
+    expect(mcpAppUpdates[0]).toMatchObject({
+      type: 'tool_group_update',
+      item: {
+        tools: [
+          {
+            resultDisplay: 'Dashboard ready',
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(mcpAppUpdates)).not.toContain('PROBE_MCP_APP_HTML');
 
     expect(
       reduceDaemonEventToTuiUpdates({

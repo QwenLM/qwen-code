@@ -13,7 +13,7 @@ import {
 import type { Config } from '../config/config.js';
 
 // Mock the memoryTool module
-vi.mock('../memory/const.js', () => ({
+vi.mock('./memory-constants.js', () => ({
   getAllGeminiMdFilenames: vi.fn(() => ['GEMINI.md', 'AGENTS.md']),
 }));
 
