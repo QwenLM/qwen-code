@@ -162,7 +162,18 @@ run_loop() {
     # new round's body on the same comment. The file must still hold THIS
     # loop's own pid — removed OR replaced (by a newer round) ends the loop.
     # This reads the file to self-identify only; it never kills anything.
-    if [[ "$(cat "${HB_WORKDIR}/heartbeat.pid" 2> /dev/null)" != "$$" ]]; then
+    # The read is BOUNDED: WORKDIR is sandbox-writable, so the path can hold
+    # a planted FIFO whose open blocks cat indefinitely — stalling the loop
+    # inside the tick, past the age cap above. Mirrors the gh wrapper's
+    # conditional timeout form below; a timeout kill yields empty → identity
+    # mismatch → the clean self-exit just below.
+    local pid_now
+    if command -v timeout > /dev/null 2>&1; then
+      pid_now="$(timeout 5 cat "${HB_WORKDIR}/heartbeat.pid" 2> /dev/null)"
+    else
+      pid_now="$(cat "${HB_WORKDIR}/heartbeat.pid" 2> /dev/null)"
+    fi
+    if [[ "${pid_now}" != "$$" ]]; then
       echo "$(date -u +%FT%TZ) self-exit: pid file removed or replaced"
       exit 0
     fi

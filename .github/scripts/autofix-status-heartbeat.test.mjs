@@ -420,8 +420,24 @@ describe('autofix-status-heartbeat loop', () => {
         timeoutCalls.length >= 1,
         'gh must run UNDER timeout, not bare',
       );
-      assert.equal(timeoutCalls[0][0], '60', 'the bound must be 60s');
-      assert.equal(timeoutCalls[0][1], 'gh');
+      // The gh PATCH call specifically must be bounded. The pid-identity
+      // read now ALSO runs under timeout, so find the gh call rather than
+      // assuming it is the first recorded one.
+      const ghCall = timeoutCalls.find((c) => c[1] === 'gh');
+      assert.ok(ghCall, 'the gh PATCH must run under timeout');
+      assert.equal(ghCall[0], '60', 'the gh bound must be 60s');
+      // R10-3: the pid-identity self-check must ALSO be a bounded read, so
+      // a planted FIFO at heartbeat.pid cannot block the loop inside the
+      // tick, past the age cap. The shim proves the read ran under
+      // `timeout 5 cat` against the pid file.
+      const pidRead = timeoutCalls.find(
+        (c) => c[0] === '5' && c[1] === 'cat',
+      );
+      assert.ok(pidRead, 'the pid-identity read must run under timeout 5');
+      assert.ok(
+        pidRead.some((a) => a.endsWith('heartbeat.pid')),
+        `the bounded read must target heartbeat.pid: ${pidRead.join(' ')}`,
+      );
     } finally {
       killGroup(child);
     }
@@ -754,6 +770,46 @@ describe('autofix-status-heartbeat loop', () => {
         assert.ok(emptied, 'the session kill must empty the loop session');
       } finally {
         spawnSync('bash', ['-c', `pkill -KILL -s ${pid} 2>/dev/null || true`]);
+        killGroup(child);
+      }
+    },
+  );
+
+  it(
+    'a planted FIFO at heartbeat.pid cannot block the loop past the bounded read',
+    {
+      skip: haveSessionKillTools
+        ? false
+        : 'requires coreutils timeout (the bounded-read guard)',
+    },
+    async () => {
+      // R10-3: WORKDIR is sandbox-writable, so an attacker can replace
+      // heartbeat.pid with a FIFO whose open blocks cat indefinitely —
+      // stalling the loop inside the tick, past the age cap. The bounded
+      // `timeout 5 cat` must kill the read, and the identity mismatch
+      // (empty != $$) must then end the loop cleanly. Real coreutils
+      // timeout runs here — no shim on PATH in this test.
+      const dir = freshTmp();
+      const gh = fakeGhBin(dir);
+      const { env, workdir } = loopEnv(dir, gh);
+      const child = startLoop(env);
+      try {
+        const started = await waitFor(
+          () => existsSync(join(workdir, 'heartbeat.pid')),
+          8000,
+        );
+        assert.ok(started, 'the loop must register its pid first');
+        rmSync(join(workdir, 'heartbeat.pid'));
+        spawnSync('mkfifo', [join(workdir, 'heartbeat.pid')]);
+        const code = await awaitExit(child, 15000);
+        assert.equal(
+          code,
+          0,
+          'the bounded read must end the loop cleanly, not block it',
+        );
+        const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
+        assert.match(logText, /self-exit: pid file removed or replaced/);
+      } finally {
         killGroup(child);
       }
     },
