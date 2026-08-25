@@ -141,6 +141,40 @@ const deliveryRequest: ChannelDeliveryRequest = {
 };
 
 describe('createChannelWorkerGroup', () => {
+  it('passes workerTlsCaCertPath through to every supervisor', () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared: { ...shared, workerTlsCaCertPath: '/certs/daemon.pem' },
+    });
+
+    expect(recorded[0]!.opts.tlsCaCertPath).toBe('/certs/daemon.pem');
+  });
+
+  it('omits tlsCaCertPath when the daemon does not serve TLS', () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['b'] } },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    expect(recorded[0]!.opts.tlsCaCertPath).toBeUndefined();
+  });
+
   it('wires loop MCP to the exact workspace session with owner-safe cleanup', async () => {
     const addSessionRuntimeMcpServer = vi.fn(async () => ({ toolCount: 3 }));
     const removeSessionRuntimeMcpServer = vi.fn(async () => ({}));
