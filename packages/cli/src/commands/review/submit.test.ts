@@ -663,7 +663,7 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
   it('the fast path honours the user ask even under minimal (documented layering)', () => {
     // posting.md documents the slow/fast contrast this PR's topology refusal
     // makes observable on the identical record: the slow path refuses
-    // ("…ran with \`--topology minimal\`…"), while the \`--user-authorized\`
+    // ("…ran with `--topology minimal`…"), while the `--user-authorized`
     // fast path never consults the topology — the skill's Step 7 rule, not
     // the gate, is the layer that catches a minimal run whose decline was
     // missed. Pin the fast side here (the slow side is pinned above), so a
@@ -1613,7 +1613,7 @@ describe('the posting gate', () => {
     // A minimal-topology run: the record bound this target on every axis,
     // so the binding arm's "Nothing recorded" preamble is false for it and
     // its remedies misdirect — "a review invoked naming it" re-refuses
-    // while the topology stands, and \`--user-authorized\` mechanically
+    // while the topology stands, and `--user-authorized` mechanically
     // posts what the topology bars. The advice restates the refusal's own
     // remedy and nothing else.
     runSubmit(
