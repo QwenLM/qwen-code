@@ -723,7 +723,7 @@ if [ -z "$MAINTAINER" ]; then
   MAINTAINER=$(REPO="${REPO:-}" PR_NUMBER="${PR_NUMBER:-}" node --input-type=module <<'EOF' 2>/dev/null
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { loadPolicy, matchArea, pickOwner } from './.github/scripts/assign-issue-owner.mjs';
+import { loadPolicy, matchArea, openIssueCount, pickOwner } from './.github/scripts/assign-issue-owner.mjs';
 
 const gh = (args) => {
   const r = spawnSync('gh', args, { encoding: 'utf8' });
@@ -757,12 +757,10 @@ const eligible = area.owners.filter(
 );
 if (eligible.length === 0) process.exit(0);
 
-// Same load metric as issue assignment: open assigned issues repo-wide.
+// Same load metric as issue assignment — reuse the exported counter instead
+// of re-implementing it, so the two assignment paths cannot drift.
 const load = new Map(
-  eligible.map((owner) => [
-    owner,
-    Number(gh(['issue', 'list', '--repo', repo, '--state', 'open', '--assignee', owner, '--limit', '100', '--json', 'number', '--jq', 'length'])),
-  ]),
+  eligible.map((owner) => [owner, openIssueCount(repo, owner)]),
 );
 console.log(pickOwner(eligible, load, Number(prNumber)));
 EOF
