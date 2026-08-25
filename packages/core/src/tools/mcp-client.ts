@@ -64,7 +64,10 @@ import {
   resetDispatcherCache,
 } from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { discoveryTimeoutFor } from './mcp-discovery-timeout.js';
+import {
+  discoveryTimeoutFor,
+  runWithTimeout,
+} from './mcp-discovery-timeout.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
@@ -771,23 +774,14 @@ export class McpClient {
           // controller is only aborted by `close()` below — after this
           // await. A live-but-unresponsive server would otherwise hang
           // `disconnect()` (and every teardown caller) indefinitely. On
-          // timeout we fall through to `close()`, which aborts the
-          // still-in-flight request.
-          let timeout: ReturnType<typeof setTimeout> | undefined;
-          const timedOut = new Promise<void>((resolve) => {
-            timeout = setTimeout(resolve, TERMINATE_SESSION_TIMEOUT_MS);
-            timeout.unref?.();
-          });
-          try {
-            await Promise.race([
-              streamableTransport.terminateSession(),
-              timedOut,
-            ]);
-          } finally {
-            if (timeout) {
-              clearTimeout(timeout);
-            }
-          }
+          // timeout `runWithTimeout` rejects into the catch below (logged,
+          // then falls through to `close()`, which aborts the still-in-flight
+          // request) — same contract as the pool spawn/restart bounds.
+          await runWithTimeout(
+            streamableTransport.terminateSession(),
+            TERMINATE_SESSION_TIMEOUT_MS,
+            `terminateSession for server '${this.serverName}'`,
+          );
         } catch (error) {
           debugLogger.debug(
             `Could not terminate MCP session for server '${this.serverName}' during disconnect (continuing): ${getErrorMessage(error)}`,
