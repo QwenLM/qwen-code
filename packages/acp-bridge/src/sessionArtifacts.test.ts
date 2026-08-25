@@ -207,6 +207,159 @@ describe('SessionArtifactStore', () => {
     await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
   });
 
+  it('forgets a vanished write_file artifact from list before the refresh ttl', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-vanished-list',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        toolName: 'write_file',
+      },
+    ]);
+
+    await fs.rm(path.join(workspace, 'alibaba.html'));
+    vi.setSystemTime(new Date('2026-08-24T00:00:02.000Z'));
+
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('keeps a write_file artifact when list refresh hits a transient fs error', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-stat-error',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    const created = await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        toolName: 'write_file',
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const realpathSpy = vi
+      .spyOn(fs, 'realpath')
+      .mockRejectedValueOnce(
+        Object.assign(new Error('permission denied'), { code: 'EACCES' }),
+      );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [{ id: artifactId, status: 'missing' }],
+      });
+
+      realpathSpy.mockRestore();
+      vi.setSystemTime(new Date(Date.now() + 6_000));
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [{ id: artifactId, status: 'available' }],
+      });
+    } finally {
+      realpathSpy.mockRestore();
+      stderr.mockRestore();
+    }
+  });
+
+  it('keeps a vanished write_file artifact when tombstone persistence fails', async () => {
+    let failWrites = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-persist-fail',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (failWrites) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'alibaba.html',
+          workspacePath: 'alibaba.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+
+    await fs.rm(path.join(workspace, 'alibaba.html'));
+    failWrites = true;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: artifactId, status: 'missing' }],
+    });
+
+    failWrites = false;
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('does not rehash a changed write_file artifact before the refresh ttl', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-changed-ttl',
+      workspaceCwd: workspace,
+    });
+    const filePath = path.join(workspace, 'alibaba.html');
+    await fs.writeFile(filePath, 'hello');
+    await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        toolName: 'write_file',
+      },
+    ]);
+
+    await fs.writeFile(filePath, 'HELLO');
+    await fs.utimes(
+      filePath,
+      new Date('2026-08-24T00:00:01.000Z'),
+      new Date('2026-08-24T00:00:01.000Z'),
+    );
+    vi.setSystemTime(new Date('2026-08-24T00:00:06.000Z'));
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ status: 'changed', sizeBytes: 5 }],
+    });
+
+    const openSpy = vi.spyOn(fs, 'open');
+    try {
+      vi.setSystemTime(new Date('2026-08-24T00:00:08.000Z'));
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [{ status: 'changed', sizeBytes: 5 }],
+      });
+      expect(openSpy).not.toHaveBeenCalled();
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
   it('keeps an explicit record_artifact entry missing after its file is deleted', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-record-artifact-missing',
@@ -221,15 +374,18 @@ describe('SessionArtifactStore', () => {
       },
     ]);
     const artifactId = created.changes[0]!.artifactId;
+    const createdAt = created.changes[0]?.artifact?.createdAt;
 
     await fs.rm(path.join(workspace, 'alibaba.pdf'));
     vi.useFakeTimers();
     vi.setSystemTime(new Date(Date.now() + 6_000));
 
-    await expect(store.get(artifactId)).resolves.toMatchObject({
+    const missing = await store.get(artifactId);
+    expect(missing).toMatchObject({
       id: artifactId,
       status: 'missing',
     });
+    expect(missing?.updatedAt).not.toBe(createdAt);
   });
 
   it('exposes the live size after a workspace file grows without re-registering', async () => {

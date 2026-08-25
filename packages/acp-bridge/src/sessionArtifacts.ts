@@ -243,6 +243,7 @@ interface StoredArtifact extends NormalizedArtifact {
   insertSeq: number;
   durableTombstoneRequired?: boolean;
   hideWorkspacePath?: boolean;
+  missingFromStatError?: boolean;
 }
 
 interface WorkspaceStatusExpected {
@@ -313,8 +314,7 @@ export class SessionArtifactStore {
       if (!artifact) return undefined;
       if (
         artifact.workspacePath &&
-        (artifact.toolName === 'write_file' ||
-          shouldRefreshWorkspaceStatus(artifact, Date.now()))
+        needsWorkspaceStatusRefresh(artifact, Date.now())
       ) {
         await this.refreshWorkspaceStatus(artifact, { onError: 'missing' });
       }
@@ -1647,11 +1647,7 @@ export class SessionArtifactStore {
     const now = Date.now();
     const staleWorkspaceArtifacts = Array.from(this.artifacts.values())
       .filter((artifact) => artifact.workspacePath)
-      .filter(
-        (artifact) =>
-          artifact.toolName === 'write_file' ||
-          shouldRefreshWorkspaceStatus(artifact, now),
-      );
+      .filter((artifact) => needsWorkspaceStatusRefresh(artifact, now));
 
     await runInBatches(
       staleWorkspaceArtifacts,
@@ -1730,6 +1726,7 @@ export class SessionArtifactStore {
       );
       const contentChanged = isWorkspaceContentChanged(artifact, status);
       artifact.status = contentChanged ? 'changed' : status.status;
+      artifact.missingFromStatError = undefined;
       if (status.escaped) {
         artifact.status = 'missing';
         artifact.sizeBytes = undefined;
@@ -1755,6 +1752,7 @@ export class SessionArtifactStore {
       if (options.onError === 'missing') {
         artifact.status = 'missing';
         artifact.sizeBytes = undefined;
+        artifact.missingFromStatError = true;
         artifact.lastStatAt = options.now ?? Date.now();
         if (previousStatus !== 'missing' || previousSizeBytes !== undefined) {
           artifact.updatedAt = new Date(artifact.lastStatAt).toISOString();
@@ -1786,12 +1784,15 @@ export class SessionArtifactStore {
         removedClientId: existing.clientId,
       }),
     );
+    const needsDurableTombstone = changes.some(
+      (change) => change.durableTombstoneRequired === true,
+    );
     const before = this.cloneState();
     for (const artifact of vanished) {
       this.artifacts.delete(artifact.id);
     }
     try {
-      await this.persistChanges(changes, false);
+      await this.persistChanges(changes, needsDurableTombstone);
     } catch {
       this.restoreState(before);
     }
@@ -2273,7 +2274,9 @@ function isVanishedAutoRecordedWorkspaceArtifact(
   return (
     artifact.toolName === 'write_file' &&
     artifact.workspacePath !== undefined &&
-    artifact.status === 'missing'
+    artifact.status === 'missing' &&
+    artifact.missingFromStatError !== true &&
+    artifact.hideWorkspacePath !== true
   );
 }
 
@@ -2284,6 +2287,16 @@ function shouldRefreshWorkspaceStatus(
   return (
     artifact.lastStatAt === undefined ||
     now - artifact.lastStatAt >= WORKSPACE_STATUS_REFRESH_TTL_MS
+  );
+}
+
+function needsWorkspaceStatusRefresh(
+  artifact: StoredArtifact,
+  now: number,
+): boolean {
+  return (
+    shouldRefreshWorkspaceStatus(artifact, now) ||
+    (artifact.toolName === 'write_file' && artifact.status === 'available')
   );
 }
 
