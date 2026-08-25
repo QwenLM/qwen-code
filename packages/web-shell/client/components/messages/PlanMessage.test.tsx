@@ -5,10 +5,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import type { TodoItem } from '../../adapters/types';
 
-// PlanMessage's expanded list reads TodoTimelineContext and (via TodoFullList)
-// TodoDetailContext from App; mock both so the unit test doesn't pull the whole
-// application graph.
-vi.mock('../../App', async () => {
+// Mock the todo contexts so the unit test controls their provider values.
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     TodoTimelineContext: createContext(new Map()),
@@ -17,7 +15,7 @@ vi.mock('../../App', async () => {
 });
 
 const { PlanMessage } = await import('./PlanMessage');
-const { TodoTimelineContext } = await import('../../App');
+const { TodoTimelineContext } = await import('../../WebShellContexts');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
