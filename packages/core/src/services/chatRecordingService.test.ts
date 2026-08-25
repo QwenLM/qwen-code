@@ -2893,6 +2893,52 @@ describe('ChatRecordingService', () => {
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
+    it('re-anchors the live session model after a checkpoint restore', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+      const checkpoint = chatRecordingService.captureRewindCheckpoint();
+
+      // A model switch between the rewind and the restore lands on the
+      // post-rewind tail the checkpoint is about to roll back. The restore
+      // must re-append the live binding — the abandoned branch keeps the
+      // stale M1 record, and an in-process re-set is deduped away
+      // (sessionModelPayloadsEqual) so it never heals the transcript.
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.restoreRewindCheckpoint(checkpoint);
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(written.map((record) => record.subtype)).toEqual([
+        'rewind',
+        'session_model',
+      ]);
+      expect(written[1]?.parentUuid).toBe(written[0]?.uuid);
+      expect(written[1]?.systemPayload).toEqual({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-flash',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
     it('writes a second record when only the isRuntime flag differs', async () => {
       await chatRecordingService.recordSessionModel({
         modelId: 'qwen3-coder-plus',

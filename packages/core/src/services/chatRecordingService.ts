@@ -1897,6 +1897,23 @@ export class ChatRecordingService {
       systemPayload: { truncatedCount: 0 },
     };
     this.appendRecord(record);
+
+    // Last-wins session_model may now sit on the abandoned branch: a model
+    // switch between the rewind and this restore appends to the post-rewind
+    // tail the checkpoint rolls back, while the in-memory binding keeps the
+    // new model. Mirror rewindRecording's re-append so cold restore still
+    // sees the model Config is on — an in-process re-set never heals the
+    // transcript (sessionModelPayloadsEqual dedupes it away without
+    // writing).
+    if (this.currentSessionModel) {
+      this.appendRecord({
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_model',
+        systemPayload: this.currentSessionModel,
+      });
+    }
+
     if (survivingFileHistorySnapshots?.length) {
       this.recordFileHistorySnapshotBatch(survivingFileHistorySnapshots);
     }
