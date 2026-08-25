@@ -5453,7 +5453,11 @@ jobs:
               --prefix "$prefix" \
               "$stage_dir"/*.png; then
               if [ -n "$trusted_bin" ]; then rm -rf "$trusted_bin"; fi
-              echo "::warning::Failed to upload evidence images; posting a text-only report." >&2
+              # Report the local preconditions so a tooling/credential gap
+              # (the install/config steps are continue-on-error and render
+              # green when they fail) is distinguishable from a transient
+              # upload blip without trawling three steps of logs.
+              echo "::warning::Failed to upload evidence images (ossutil=$([ -x "${RUNNER_TEMP:-/tmp}/ossutil" ] && echo ok || echo MISSING), config=$([ -f "${RUNNER_TEMP:-/tmp}/.ossutilconfig" ] && echo ok || echo MISSING)); posting a text-only report." >&2
               EVIDENCE_SECTION=''
               return 0
             fi
