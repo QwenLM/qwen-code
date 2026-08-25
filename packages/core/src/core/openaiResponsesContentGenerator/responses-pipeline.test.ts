@@ -2013,6 +2013,37 @@ describe('ResponsesPipeline', () => {
             'maximum length 64, but got a string with length 8 instead.',
         ),
       ],
+      [
+        'a matching object quoted inside an unrelated debug field',
+        400,
+        JSON.stringify({
+          error: {
+            message: 'Unsupported model',
+            param: 'model',
+            code: 'model_not_found',
+          },
+          debug: `example: ${directBody('input[1].id', MAX_64_MESSAGE)}`,
+        }),
+      ],
+      [
+        'trailing non-whitespace after the top-level object',
+        400,
+        `${directBody('input[1].id', MAX_64_MESSAGE)} trailing`,
+      ],
+      [
+        'an unterminated string tail after a matching object',
+        400,
+        `{"error":{"message":"${MAX_64_MESSAGE}","param":"input[1].id",` +
+          '"code":"string_above_max_length"},"tail":"oops',
+      ],
+      [
+        'an unknown backslash escape in the rejection fields',
+        400,
+        '{"error":{"message":"Invalid \'input[1]\\.id\': string too long. ' +
+          'Expected a string with maximum length 64, but got a string with ' +
+          'length 83 instead.","param":"input[1]\\.id",' +
+          '"code":"string_above_max_length"}}',
+      ],
     ])('control: does not retry on %s', async (_label, status, body) => {
       fetchMock.mockResolvedValueOnce(errorResponse(status as number, body));
       fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));

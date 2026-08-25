@@ -23,7 +23,20 @@ const REJECTION_CODE = 'string_above_max_length';
 const PARAM_PATTERN = /^input\[(\d+)\]\.id$/;
 const PARAM_REFERENCE_PATTERN = /input\[\d+\]\.id/g;
 const MAXIMUM_LENGTH_PATTERN = /maximum length \d+/gi;
-const RELEVANT_KEYS = new Set(['code', 'param', 'message']);
+
+// The escapes the JSON grammar defines, mapped to what they denote. Anything
+// else after a backslash makes the body invalid JSON, and a body we cannot
+// read exactly is a body we refuse to act on.
+const SIMPLE_ESCAPES: Readonly<Record<string, string>> = {
+  '"': '"',
+  '\\': '\\',
+  '/': '/',
+  b: '\b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+};
 
 // Work bounds. A gateway can echo an entire request back inside its error
 // body, so both the text scanned and the number of objects considered are
@@ -32,10 +45,9 @@ const RELEVANT_KEYS = new Set(['code', 'param', 'message']);
 const MAX_BODY_CHARS = 64_000;
 const MAX_OBJECT_CANDIDATES = 32;
 
-interface RelevantFields {
-  code?: string;
-  param?: string;
-  message?: string;
+interface Envelope {
+  readonly value: unknown;
+  readonly objects: number;
 }
 
 /**
@@ -46,14 +58,20 @@ interface RelevantFields {
  * The outer evidence is the HTTP status: only an exact 400 is considered, so
  * a matching body under any other status is never acted on.
  *
- * Two body shapes are supported: the API's own JSON, and ONE level of a
- * gateway that quotes the upstream error JSON inside its own error message.
- * The nested shape cannot be read with `JSON.parse` -- proxies splice raw
- * newlines and tabs into that quoted message, which makes the whole body
- * invalid JSON -- so the body is walked with a quote/escape-aware scanner
- * that ignores braces inside strings and tolerates raw control characters.
- * A loose whole-body regex is deliberately not used: `code` and `param` must
- * come from the same object, or the classification is rejected.
+ * The body must be ONE well-formed top-level object -- balanced, with only
+ * JSON's own escapes, and nothing but whitespace after it -- and the verdict
+ * is read from that object's own `error` member alone. Text the endpoint
+ * merely quoted somewhere else (a `debug` field, an example, a request it
+ * echoed back) is never evidence about the request we sent.
+ *
+ * `JSON.parse` cannot be used directly: proxies splice raw newlines and tabs
+ * into the message they quote, which makes the whole body invalid JSON. So
+ * the body is walked once to validate it and re-escape exactly those raw
+ * control characters, and the result is then parsed strictly.
+ *
+ * ONE level of nesting is supported, for the gateway that quotes the upstream
+ * error JSON inside its own `error.message`, and only out of that recognized
+ * member.
  */
 export function parseReasoningIdRejection(
   status: number,
@@ -64,40 +82,66 @@ export function parseReasoningIdRejection(
   const text = toEnvelopeText(responseBody);
   if (text === undefined) return undefined;
 
-  const spans = collectObjectSpans(text, MAX_OBJECT_CANDIDATES);
-  if (spans === undefined) return undefined;
-  // One nesting level only: rescan quoted strings that could carry an
-  // embedded error object, sharing the same candidate budget.
-  for (const embedded of collectEmbeddedStrings(text)) {
-    const nested = collectObjectSpans(
-      embedded,
-      MAX_OBJECT_CANDIDATES - spans.length,
-    );
-    if (nested === undefined) return undefined;
-    spans.push(...nested);
-  }
+  const envelope = readEnvelope(text, MAX_OBJECT_CANDIDATES);
+  if (!envelope) return undefined;
 
-  let match: { index: number; param: string; message?: string } | undefined;
-  for (const span of spans) {
-    const fields = readRelevantFields(span);
-    // A duplicated `code`/`param`/`message` (or an unterminated string) means
-    // the body cannot be read unambiguously.
-    if (fields === undefined) return undefined;
-    if (fields.code !== REJECTION_CODE || fields.param === undefined) continue;
-    const named = PARAM_PATTERN.exec(fields.param);
-    if (!named) continue;
-    const index = Number(named[1]);
-    if (!Number.isSafeInteger(index) || index < 0) continue;
-    // A second matching object means two different rejections; refuse both.
-    if (match) return undefined;
-    match = { index, param: fields.param, message: fields.message };
-  }
-  if (!match) return undefined;
+  const error = readErrorMember(envelope.value);
+  if (!error) return undefined;
 
+  return (
+    matchRejection(error) ??
+    matchQuotedRejection(error, MAX_OBJECT_CANDIDATES - envelope.objects)
+  );
+}
+
+/** The rejection declared directly by one coherent structured error object. */
+function matchRejection(
+  error: Record<string, unknown>,
+): ReasoningIdRejection | undefined {
+  if (error['code'] !== REJECTION_CODE) return undefined;
+  const param = error['param'];
+  if (typeof param !== 'string') return undefined;
+  const named = PARAM_PATTERN.exec(param);
+  if (!named) return undefined;
+  const index = Number(named[1]);
+  if (!Number.isSafeInteger(index) || index < 0) return undefined;
+  const message = error['message'];
   return {
-    namedIndex: match.index,
-    maxLength: extractMaxLength(match.message, match.param),
+    namedIndex: index,
+    maxLength: extractMaxLength(
+      typeof message === 'string' ? message : undefined,
+      param,
+    ),
   };
+}
+
+/**
+ * The rejection a gateway quoted inside its own `error.message`. Only that
+ * one member is reopened, and only for a single object that runs to the end
+ * of the message -- not for every brace the message happens to contain.
+ */
+function matchQuotedRejection(
+  error: Record<string, unknown>,
+  budget: number,
+): ReasoningIdRejection | undefined {
+  const message = error['message'];
+  if (typeof message !== 'string') return undefined;
+  const start = message.indexOf('{');
+  if (start < 0) return undefined;
+  const quoted = readEnvelope(message.slice(start), budget);
+  if (!quoted) return undefined;
+  const inner = readErrorMember(quoted.value);
+  return inner ? matchRejection(inner) : undefined;
+}
+
+function readErrorMember(value: unknown): Record<string, unknown> | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const error = value['error'];
+  return isPlainObject(error) ? error : undefined;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -230,187 +274,129 @@ function toEnvelopeText(responseBody: unknown): string | undefined {
 }
 
 /**
- * Every balanced `{...}` region, ignoring braces inside strings. Returns
- * `undefined` when the budget is exhausted, so an oversized body fails closed
- * instead of being classified from a truncated view of itself.
+ * Read `text` as exactly one top-level JSON object, tolerating only the raw
+ * control characters proxies splice into a quoted message. Returns
+ * `undefined` for anything else: an unbalanced object or string, a duplicated
+ * key, non-whitespace past the top-level object, an escape JSON does not
+ * define, or more than `budget` objects.
  */
-function collectObjectSpans(
+function readEnvelope(text: string, budget: number): Envelope | undefined {
+  const normalized = normalizeEnvelope(text, budget);
+  if (!normalized) return undefined;
+  try {
+    return { value: JSON.parse(normalized.json), objects: normalized.objects };
+  } catch {
+    return undefined;
+  }
+}
+
+interface NormalizedEnvelope {
+  readonly json: string;
+  readonly objects: number;
+}
+
+interface Container {
+  readonly object: boolean;
+  readonly keys: Set<string>;
+  atKey: boolean;
+}
+
+function normalizeEnvelope(
   text: string,
   budget: number,
-): string[] | undefined {
-  const spans: string[] = [];
-  const starts: number[] = [];
+): NormalizedEnvelope | undefined {
+  const out: string[] = [];
+  const stack: Container[] = [];
+  let objects = 0;
+  let closed = false;
   let i = 0;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === '"') {
-      const literal = readStringLiteral(text, i);
-      if (!literal) break;
-      i = literal.next;
-      continue;
-    }
-    if (ch === '{') {
-      if (starts.length >= budget) return undefined;
-      starts.push(i);
-    } else if (ch === '}') {
-      const start = starts.pop();
-      if (start !== undefined) {
-        if (spans.length >= budget) return undefined;
-        spans.push(text.slice(start, i + 1));
-      }
-    }
-    i++;
-  }
-  return spans;
-}
 
-/** Unescaped string literals that could themselves contain an error object. */
-function collectEmbeddedStrings(text: string): string[] {
-  const embedded: string[] = [];
-  let i = 0;
-  while (i < text.length && embedded.length < MAX_OBJECT_CANDIDATES) {
-    if (text[i] !== '"') {
-      i++;
-      continue;
-    }
-    const literal = readStringLiteral(text, i);
-    if (!literal) break;
-    if (literal.value.includes('{')) embedded.push(literal.value);
-    i = literal.next;
-  }
-  return embedded;
-}
-
-/**
- * The `code`/`param`/`message` string values declared directly on one object
- * (nested objects are skipped whole, so an outer envelope never inherits its
- * child's fields). `undefined` means the object is unreadable or declares a
- * relevant key twice.
- */
-function readRelevantFields(span: string): RelevantFields | undefined {
-  const fields: RelevantFields = {};
-  const seen = new Set<string>();
-  let i = 1;
-  while (i < span.length) {
-    const ch = span[i];
-    if (ch === '}') break;
-    if (ch !== '"') {
-      i++;
-      continue;
-    }
-    const key = readStringLiteral(span, i);
-    if (!key) return undefined;
-    i = skipWhitespace(span, key.next);
-    if (span[i] !== ':') continue;
-    i = skipWhitespace(span, i + 1);
-
-    let value: string | undefined;
-    if (span[i] === '"') {
-      const literal = readStringLiteral(span, i);
-      if (!literal) return undefined;
-      value = literal.value;
-      i = literal.next;
-    } else {
-      i = skipValue(span, i);
-    }
-
-    if (!RELEVANT_KEYS.has(key.value)) continue;
-    if (seen.has(key.value)) return undefined;
-    seen.add(key.value);
-    if (value !== undefined) {
-      fields[key.value as keyof RelevantFields] = value;
-    }
-  }
-  return fields;
-}
-
-/**
- * Read one JSON string literal starting at the opening quote and return its
- * unescaped value. A raw newline or tab inside the literal is kept as-is
- * rather than rejected -- that is exactly the shape proxies emit.
- */
-function readStringLiteral(
-  text: string,
-  start: number,
-): { value: string; next: number } | undefined {
-  let value = '';
-  let i = start + 1;
   while (i < text.length) {
     const ch = text[i]!;
-    if (ch === '"') return { value, next: i + 1 };
-    if (ch !== '\\') {
-      value += ch;
+    // Past the single top-level object nothing but whitespace may follow;
+    // trailing garbage means we are not reading the body we think we are.
+    if (closed) {
+      if (!isJsonWhitespace(ch)) return undefined;
       i++;
       continue;
     }
-    const escape = text[i + 1];
-    if (escape === undefined) return undefined;
-    switch (escape) {
-      case 'n':
-        value += '\n';
-        break;
-      case 't':
-        value += '\t';
-        break;
-      case 'r':
-        value += '\r';
-        break;
-      case 'b':
-        value += '\b';
-        break;
-      case 'f':
-        value += '\f';
-        break;
-      case 'u': {
-        const hex = text.slice(i + 2, i + 6);
-        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
-          value += String.fromCharCode(parseInt(hex, 16));
-          i += 6;
-          continue;
-        }
-        value += escape;
-        break;
-      }
-      default:
-        // Covers \" \\ \/ and any unknown escape.
-        value += escape;
-        break;
-    }
-    i += 2;
-  }
-  return undefined;
-}
-
-/** Skip a non-string value, including a nested object or array. */
-function skipValue(text: string, start: number): number {
-  let i = start;
-  let depth = 0;
-  while (i < text.length) {
-    const ch = text[i];
     if (ch === '"') {
       const literal = readStringLiteral(text, i);
-      if (!literal) return text.length;
+      if (!literal) return undefined;
+      const top = stack[stack.length - 1];
+      if (top?.object && top.atKey) {
+        // A key declared twice makes the object's meaning reader-dependent.
+        if (top.keys.has(literal.value)) return undefined;
+        top.keys.add(literal.value);
+        top.atKey = false;
+      }
+      out.push(literal.json);
       i = literal.next;
       continue;
     }
     if (ch === '{' || ch === '[') {
-      depth++;
+      const object = ch === '{';
+      if (object && ++objects > budget) return undefined;
+      stack.push({ object, keys: new Set(), atKey: object });
     } else if (ch === '}' || ch === ']') {
-      if (depth === 0) return i;
-      depth--;
-      if (depth === 0) return i + 1;
-    } else if (ch === ',' && depth === 0) {
-      return i + 1;
+      const top = stack.pop();
+      if (!top || top.object !== (ch === '}')) return undefined;
+      if (stack.length === 0) closed = true;
+    } else if (ch === ',') {
+      const top = stack[stack.length - 1];
+      if (top?.object) top.atKey = true;
     }
+    out.push(ch);
     i++;
   }
-  return i;
+
+  if (!closed || stack.length > 0) return undefined;
+  return { json: out.join(''), objects };
 }
 
-function skipWhitespace(text: string, start: number): number {
-  let i = start;
-  while (i < text.length && /\s/.test(text[i]!)) i++;
-  return i;
+function isJsonWhitespace(ch: string): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+}
+
+/**
+ * Read one JSON string literal starting at the opening quote, returning both
+ * its unescaped value and a strictly valid JSON re-encoding of it. Only the
+ * escapes JSON defines are accepted; a raw control character is kept, but
+ * re-escaped, because that is exactly the shape proxies emit.
+ */
+function readStringLiteral(
+  text: string,
+  start: number,
+): { value: string; json: string; next: number } | undefined {
+  let value = '';
+  let json = '"';
+  let i = start + 1;
+  while (i < text.length) {
+    const ch = text[i]!;
+    if (ch === '"') return { value, json: `${json}"`, next: i + 1 };
+    if (ch === '\\') {
+      const escape = text[i + 1];
+      if (escape === 'u') {
+        const hex = text.slice(i + 2, i + 6);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) return undefined;
+        value += String.fromCharCode(parseInt(hex, 16));
+        json += text.slice(i, i + 6);
+        i += 6;
+        continue;
+      }
+      const simple = escape === undefined ? undefined : SIMPLE_ESCAPES[escape];
+      if (simple === undefined) return undefined;
+      value += simple;
+      json += `\\${escape}`;
+      i += 2;
+      continue;
+    }
+    const code = ch.charCodeAt(0);
+    value += ch;
+    json += code < 0x20 ? `\\u${code.toString(16).padStart(4, '0')}` : ch;
+    i++;
+  }
+  return undefined;
 }
 
 /** Metadata-only counter for the retry diagnostic. */

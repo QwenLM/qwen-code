@@ -172,6 +172,71 @@ describe('parseReasoningIdRejection', () => {
     expect(parseReasoningIdRejection(400, value)).toBeUndefined();
   });
 
+  // A matching object is only ever read out of the body's own structured
+  // error. Anything the endpoint merely quoted -- in a debug field, past the
+  // envelope, or behind an escape the JSON grammar does not define -- is not
+  // evidence about the request we sent.
+  it.each<[string, string]>([
+    [
+      'a matching object is quoted inside an unrelated debug field',
+      JSON.stringify({
+        error: {
+          message: 'Unsupported model',
+          param: 'model',
+          code: 'model_not_found',
+        },
+        debug: `example: ${rejection('input[1].id', MAX_64)}`,
+      }),
+    ],
+    [
+      'trailing non-whitespace follows the top-level object',
+      `${rejection('input[1].id', MAX_64)} trailing`,
+    ],
+    [
+      'an unterminated string tail follows a matching object',
+      `{"error":{"message":"${MAX_64}","param":"input[1].id",` +
+        '"code":"string_above_max_length"},"tail":"oops',
+    ],
+    [
+      'the body uses an unknown backslash escape',
+      '{"error":{"message":"Invalid \'input[1]\\.id\': string too long. ' +
+        'Expected a string with maximum length 64, but got a string with ' +
+        'length 83 instead.","param":"input[1]\\.id",' +
+        '"code":"string_above_max_length"}}',
+    ],
+    [
+      'a \\u escape is not followed by four hex digits',
+      '{"error":{"message":"Invalid \'input[1].id\' \\u00ZZ: string too long. ' +
+        'Expected a string with maximum length 64.","param":"input[1].id",' +
+        '"code":"string_above_max_length"}}',
+    ],
+    [
+      'the envelope declares a key twice',
+      `{"error":{"param":"input[1].id","code":"string_above_max_length"},` +
+        `"error":{"other":1}}`,
+    ],
+    [
+      'a raw control character sits outside every string',
+      '{"error":\u0001{"param":"input[1].id",' +
+        '"code":"string_above_max_length"}}',
+    ],
+  ])('returns undefined when %s', (_label, value) => {
+    expect(parseReasoningIdRejection(400, value)).toBeUndefined();
+  });
+
+  it('preserves the valid JSON escapes the grammar does define', () => {
+    const message =
+      'Invalid \\"input[1].id\\" \\\\ \\/ \\u2014 string too long. ' +
+      'Expected a string with maximum length 64.';
+    expect(
+      parseReasoningIdRejection(
+        400,
+        `{"error":{"message":"${message}","param":"input[1].id",` +
+          '"code":"string_above_max_length"}}',
+      ),
+    ).toEqual({ namedIndex: 1, maxLength: 64 });
+  });
+
   it("never inherits a nested object's fields onto its envelope", () => {
     // The outer object declares neither code nor param; only the inner one
     // matches, so this stays a single match rather than two.
