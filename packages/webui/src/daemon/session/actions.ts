@@ -1049,6 +1049,19 @@ export function createDaemonSessionActions({
           ),
           'Set reasoning effort timed out',
         );
+        const nextReasoning = mapReasoningControls(
+          result.configOptions,
+          getConnection().reasoning?.effort,
+        );
+        const confirmed =
+          value === 'none'
+            ? nextReasoning?.enabled === false
+            : nextReasoning?.enabled === true && nextReasoning.effort === value;
+        if (!confirmed) {
+          throw new Error(
+            `Daemon did not confirm reasoning effort ${JSON.stringify(value)}`,
+          );
+        }
         const current = getConnection();
         if (
           sessionRef.current === session &&
@@ -1068,10 +1081,7 @@ export function createDaemonSessionActions({
             const configOptions = result.configOptions;
             return {
               ...current,
-              reasoning: mapReasoningControls(
-                configOptions,
-                current.reasoning?.effort,
-              ),
+              reasoning: nextReasoning,
               context: current.context
                 ? {
                     ...current.context,

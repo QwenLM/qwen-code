@@ -4256,7 +4256,17 @@ describe('GeminiChat', async () => {
       }
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
-      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(123_456);
+      // The seeded authoritative count is the baseline of this attempt's
+      // effective count (seed + locally-estimated pending message), so the
+      // published number is the effective count, not the bare seed. Pin the
+      // exact deterministic value — seed 123,456 + char/4 estimate of the
+      // pending 'go' message (2 chars -> ceil(2/4) = 1 token), with
+      // lastOutputTokenCount still 0 — so over-counting regressions on the
+      // send path are caught too, not just under-counting.
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(123_457);
+      expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+        123_457,
+      );
     });
 
     it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {
@@ -4632,6 +4642,12 @@ describe('GeminiChat', async () => {
       ).mock.calls[1]![0];
       expect(secondRequest.contents).toEqual(expectedRequestContents);
       expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      // The overflow message reports the actual token count (135000), so the
+      // published original count is provider-authoritative — no `~` marker.
+      expect(
+        (events[0] as { type: StreamEventType; info: ChatCompressionInfo }).info
+          .originalTokenCountIsEstimated,
+      ).toBe(false);
       expect(events[1]?.type).toBe(StreamEventType.RETRY);
       expect(events[1]).not.toHaveProperty('retryInfo');
       expect(
@@ -4678,12 +4694,23 @@ describe('GeminiChat', async () => {
         { message: 'latest' },
         'prompt-id-reactive-limit-only',
       );
-      for await (const _ of stream) {
-        /* consume */
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
       }
 
       expect(compressSpy).toHaveBeenCalledTimes(2);
       expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(128_000);
+      // The overflow message carries no actual token count, so the published
+      // original count is the parsed limit — a projection that must keep
+      // the `~` estimated marker.
+      const compressedEvent = events.find(
+        (event) => event.type === StreamEventType.COMPRESSED,
+      );
+      expect(
+        (compressedEvent as { info: ChatCompressionInfo }).info
+          .originalTokenCountIsEstimated,
+      ).toBe(true);
     });
 
     it('uses the configured context window when reactive overflow has no token counts', async () => {
@@ -4723,12 +4750,22 @@ describe('GeminiChat', async () => {
         { message: 'latest' },
         'prompt-id-reactive-window-fallback',
       );
-      for await (const _ of stream) {
-        /* consume */
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
       }
 
       expect(compressSpy).toHaveBeenCalledTimes(2);
       expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(262_144);
+      // Neither actual nor limit tokens parsed — the configured window is a
+      // fallback projection and must keep the `~` estimated marker.
+      const compressedEvent = events.find(
+        (event) => event.type === StreamEventType.COMPRESSED,
+      );
+      expect(
+        (compressedEvent as { info: ChatCompressionInfo }).info
+          .originalTokenCountIsEstimated,
+      ).toBe(true);
     });
 
     it('does not attempt reactive compression more than once per send', async () => {
@@ -16716,6 +16753,186 @@ describe('GeminiChat', async () => {
           info: expect.objectContaining({ newTokenCountIsEstimated: true }),
         }),
       );
+    });
+
+    // Reproduction for issue #9309: /compress-fast followed by /compress
+    // shows banners on two different scales — compressFast anchors on the
+    // API-reported prompt count (system prompt + tools + history) while a
+    // later tryCompress re-estimates history-only once the stored count is
+    // estimate-derived. The numbers therefore cannot chain across commands;
+    // each banner must at least expose which side is an estimate so the UI
+    // can mark it instead of presenting the jump as lost context.
+    it('exposes provenance on fast-compression info: API baseline authoritative, adjusted count estimated', () => {
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      });
+      const fastChat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          userMsg('question'),
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning '.repeat(100), thought: true },
+              { text: 'answer' },
+            ],
+          },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+      fastChat.seedResumeTokenCounts(5000, 0, false);
+
+      const { info } = fastChat.compressFast();
+
+      expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(info.originalTokenCountIsEstimated).toBe(false);
+      expect(info.newTokenCountIsEstimated).toBe(true);
+    });
+
+    it('marks the fast-compression baseline as estimated when no API count exists', () => {
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      });
+      const fastChat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          userMsg('question'),
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning '.repeat(100), thought: true },
+              { text: 'answer' },
+            ],
+          },
+        ],
+        undefined,
+        uiTelemetryService,
+      );
+
+      const { info } = fastChat.compressFast();
+
+      expect(info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(info.originalTokenCount).toBeGreaterThan(0);
+      expect(info.originalTokenCountIsEstimated).toBe(true);
+    });
+
+    it('reports original-count provenance on the summarize path after a fast compression', async () => {
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      });
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([
+        userMsg('question'),
+        {
+          role: 'model',
+          parts: [
+            { text: 'reasoning '.repeat(100), thought: true },
+            { text: 'answer' },
+          ],
+        },
+      ]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      // /compress-fast leaves the stored count estimate-derived...
+      chat.compressFast();
+      expect(chat.isLastPromptTokenCountEstimated()).toBe(true);
+      const adjustedAfterFast = chat.getLastPromptTokenCount();
+
+      // ...so the subsequent /compress re-estimates the history locally
+      // (a different scale than the fast banner) and must expose that its
+      // "before" number is an estimate.
+      const info = await chat.tryCompress('p-after-fast', true);
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).not.toBe(
+        adjustedAfterFast,
+      );
+      expect(info.originalTokenCountIsEstimated).toBe(true);
+    });
+
+    it('reports an authoritative original count when the API count is fresh', async () => {
+      mockCompressionService('compressed');
+      chat.setHistory([userMsg('a'), modelMsg('b')]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      const info = await chat.tryCompress('p-authoritative-original', true);
+
+      expect(info.originalTokenCountIsEstimated).toBe(false);
+    });
+
+    it('marks the precomputed effective count as estimated even when the stored API count is authoritative', async () => {
+      // Normal/hard-rescue auto-compaction: the send path publishes the
+      // precomputed effective count (stored baseline + locally estimated
+      // pending message / previous output). That projection must carry the
+      // `~` marker even though the stored baseline came from the API
+      // (review probe on #9568).
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([userMsg('a'), modelMsg('b')]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      const info = await chat.tryCompress(
+        'p-precomputed-effective-estimated',
+        true,
+        undefined,
+        {
+          precomputedEffectiveTokens: 6200,
+          pendingUserMessage: userMsg('next'),
+          trigger: 'auto',
+        },
+      );
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(6200);
+      expect(info.originalTokenCountIsEstimated).toBe(true);
+    });
+
+    it('keeps a fallback override estimated while publishing its count', async () => {
+      // Reactive overflow without a provider-reported actual count: the
+      // limit/config/default fallback override is a projection and must
+      // keep the `~` marker.
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([userMsg('a'), modelMsg('b')]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      const info = await chat.tryCompress(
+        'p-override-fallback-estimated',
+        true,
+        undefined,
+        {
+          originalTokenCountOverride: { count: 128_000, isEstimated: true },
+          precomputedEffectiveTokens: 128_000,
+          trigger: 'auto',
+        },
+      );
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(128_000);
+      expect(info.originalTokenCountIsEstimated).toBe(true);
+    });
+
+    it('treats a provider-reported actualTokens override as authoritative', async () => {
+      // Reactive overflow whose error message reports the actual token
+      // count: only this override variant may drop the `~` marker.
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([userMsg('a'), modelMsg('b')]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      const info = await chat.tryCompress(
+        'p-override-actual-authoritative',
+        true,
+        undefined,
+        {
+          originalTokenCountOverride: { count: 135_000, isEstimated: false },
+          precomputedEffectiveTokens: 135_000,
+          trigger: 'auto',
+        },
+      );
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(135_000);
+      expect(info.originalTokenCountIsEstimated).toBe(false);
     });
   });
 
