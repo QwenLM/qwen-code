@@ -3444,6 +3444,62 @@ describe('what the reviewer caught in this change', () => {
     ).body;
     expect(body).toContain('中文说明');
   });
+
+  it('strips a caller-supplied stopReRule — a posted verdict can never ride the stop exemption', () => {
+    // The sibling seam test above pins the prBodyFetcher strip; this one
+    // pins the stopReRule strip, which the PR calls the defence that
+    // "decisively" closes the laundering path — yet deleting
+    // `stopReRule: _droppedStopReRule` from the destructure ships green
+    // without it. A PR round is never a decided stop, so a state carrying
+    // the flag here is a full round laundering itself past the evidence
+    // floors: with the strip gone, the fence grants on sidecar PRESENCE
+    // alone (an interactive submit publishes no run id), the floors skip,
+    // and the unverified Critical flips from a softened COMMENT to a posted
+    // REQUEST_CHANGES. The stop-shaped plan and the sidecar under the
+    // cwd-relative `.qwen/tmp` are exactly what the mutation needs to fire.
+    const prevRunId = process.env['QWEN_REVIEW_RUN_ID'];
+    delete process.env['QWEN_REVIEW_RUN_ID'];
+    mkdirSync(join('.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      join('.qwen', 'tmp', 'qwen-review-local-stop.json'),
+      JSON.stringify({ reason: 'clean-tree' }),
+    );
+    const planPath = file('stop-plan.json', {
+      chunks: [],
+      nothingToReview: { reason: 'clean-tree' },
+      ownerRepo: 'QwenLM/qwen-code',
+      prNumber: '6771',
+    });
+    try {
+      runSubmit(
+        authorized({
+          review: file('stop-strip.json', {
+            commit_id: 'abc123',
+            comments: [],
+            state: {
+              modelId: 'm',
+              planPath,
+              stopReRule: true,
+              bodyCriticals: [
+                'R1-1 fabricated blocker (x.ts:1) — still stands',
+              ],
+            },
+          }),
+          dryRun: true,
+        }),
+      );
+      const out = JSON.parse(
+        (writeStdoutSpy.mock.calls.at(-1)?.[0] as string) ?? '{}',
+      ) as { event: string; cappedBy: string[] };
+      // The strip holds: the exemption never reaches composeReview, the
+      // floors fire over the unverifiable Critical, and the verdict softens.
+      expect(out.event).toBe('COMMENT');
+      expect(out.cappedBy).toContain('criticals-unverified');
+    } finally {
+      if (prevRunId === undefined) delete process.env['QWEN_REVIEW_RUN_ID'];
+      else process.env['QWEN_REVIEW_RUN_ID'] = prevRunId;
+    }
+  });
 });
 
 // The submit receipt is the WRITE half of cleanup's bypass-audit contract:
