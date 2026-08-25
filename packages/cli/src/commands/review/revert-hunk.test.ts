@@ -720,30 +720,46 @@ describe('runRevertHunk', () => {
     expect(r.harnessFailure).toBe(true);
   });
 
-  it('returns the applied report even if the staging sweep cannot remove the dir', () => {
-    // The finally's rmSync is best-effort: an un-removable staging dir (a
-    // same-uid peer chmods it mid-apply) must not throw out of the finally
-    // and turn applied:true into a refusal exit. Simulate by making the dir
-    // read-only right as the apply runs, via the exec seam.
-    const { dir, diffPath } = twoHunkFixture();
-    let stagingDir: string | undefined;
-    const r = runRevertHunk({
-      diff: diffPath,
-      tree: dir,
-      hunk: 'f.txt:1',
-      exec: (cwd, gitArgs) => {
-        // The patch path is the last arg; its dirname is the staging dir.
-        const patch = gitArgs[gitArgs.length - 1];
-        stagingDir = dirname(patch);
-        if (!gitArgs.includes('--check')) chmodSync(stagingDir, 0o500);
-        // Delegate to real git so the revert actually applies.
-        const res = spawnSync('git', gitArgs, { cwd, encoding: 'utf8' });
-        return { status: res.status ?? null, stderr: res.stderr ?? '' };
-      },
-    });
-    if (stagingDir) chmodSync(stagingDir, 0o700); // let afterAll clean up
-    expect(r.applied).toBe(true);
-  });
+  it.skipIf(process.getuid?.() === 0)(
+    'returns the applied report even if the staging sweep cannot remove the dir',
+    () => {
+      // The finally's rmSync is best-effort: an un-removable staging dir (a
+      // same-uid peer chmods it mid-apply) must not throw out of the finally
+      // and turn applied:true into a refusal exit. Simulate by making the
+      // dir read-only right as the apply runs, via the exec seam. Skipped at
+      // uid 0: root bypasses the 0o500 mode, so rmSync succeeds and there is
+      // no un-removable dir to simulate.
+      const { dir, diffPath } = twoHunkFixture();
+      let stagingDir: string | undefined;
+      const r = runRevertHunk({
+        diff: diffPath,
+        tree: dir,
+        hunk: 'f.txt:1',
+        exec: (cwd, gitArgs) => {
+          // The patch path is the last arg; its dirname is the staging dir.
+          const patch = gitArgs[gitArgs.length - 1];
+          stagingDir = dirname(patch);
+          if (!gitArgs.includes('--check')) chmodSync(stagingDir, 0o500);
+          // Delegate to real git so the revert actually applies.
+          const res = spawnSync('git', gitArgs, { cwd, encoding: 'utf8' });
+          return { status: res.status ?? null, stderr: res.stderr ?? '' };
+        },
+      });
+      expect(r.applied).toBe(true);
+      // Clean the dir the command's finally could not remove — afterAll only
+      // sweeps tempDir() paths, not runRevertHunk's internal mkdtemp, so this
+      // file must remove it itself or leak one dir per run. The chmod-back is
+      // guarded: at some uids rmSync may have partially removed it.
+      if (stagingDir !== undefined) {
+        try {
+          chmodSync(stagingDir, 0o700);
+        } catch {
+          /* already gone */
+        }
+        rmSync(stagingDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('cleans its patch staging directory up on every outcome', () => {
     const countStaging = () =>

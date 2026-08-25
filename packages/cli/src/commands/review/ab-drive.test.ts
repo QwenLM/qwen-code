@@ -296,7 +296,7 @@ describe('runAbDrive, harnessed', () => {
     expect(r2.note).toContain('--shared-cwd');
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'refuses a directory whose search bit is revoked — tmux -c would fall back',
     () => {
       // A mode-000 dir passes isDirectory() but `tmux new-session -c` cannot
@@ -357,7 +357,7 @@ describe('runAbDrive, harnessed', () => {
     expect(h.events()).not.toContain('new:arm-b');
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     're-validates --shared-cwd for a revoked search bit, not only deletion',
     () => {
       const sharedCwd = tempDir('ab-shcwd3-');
