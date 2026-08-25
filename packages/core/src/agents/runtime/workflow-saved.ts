@@ -187,7 +187,7 @@ async function readWorkflowFileSecurely(
   const inside = dirs.some((d) => real === d || real.startsWith(d + path.sep));
   if (!inside) {
     throw new Error(
-      `refusing to load a workflow file outside the saved-workflow and generated-workflow directories: '${filePath}'.`,
+      `refusing to load a workflow file outside the workflow script roots (checked: ${dirs.join(', ')}): '${filePath}'.`,
     );
   }
   return fs.readFile(real, 'utf8');
