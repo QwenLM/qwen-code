@@ -3609,6 +3609,13 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
 
       // The entry must remain absent — no resurrection.
       expect(getAllMCPServerStatuses().has('racy-server')).toBe(false);
+      // Same invariant for the failure-cause map: the status write is
+      // suppressed by the `isDisconnecting` guard, and the lastError record
+      // in connect()'s catch must be gated the same way — otherwise the
+      // doomed in-flight connect resurrects an orphan cause entry that
+      // `removeMCPServerStatus` already dropped (persisting until process
+      // exit and misattributing to a later re-added incarnation).
+      expect(getMCPServerLastError('racy-server')).toBeUndefined();
     });
 
     it('disconnect() propagates DISCONNECTED to the global registry', async () => {

@@ -605,7 +605,12 @@ export class McpClient {
       // the only other witness. Recording it lets status consumers (e.g.
       // `qwen mcp reconnect`) tell the user WHY the connection failed
       // instead of a bare "status: disconnected" (issue #9944).
-      recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      // Same guard as `updateStatus()`: a late rejection from a doomed
+      // in-flight connect (server disabled/removed mid-connect) must not
+      // resurrect a cause entry that `removeMCPServerStatus` already dropped.
+      if (!this.isDisconnecting) {
+        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      }
       throw error;
     }
   }
@@ -741,8 +746,11 @@ export class McpClient {
       this.updateStatus(MCPServerStatus.DISCONNECTED);
       // Same carrier as `connect()`'s catch: the manager swallows this error
       // for best-effort discovery; keep the cause retrievable for status
-      // consumers (issue #9944).
-      recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      // consumers (issue #9944). Gated like the status write so a server
+      // removed mid-discovery doesn't get an orphan cause entry resurrected.
+      if (!this.isDisconnecting) {
+        recordMCPServerLastError(this.serverName, getErrorMessage(error));
+      }
       throw error;
     }
   }
