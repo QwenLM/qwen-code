@@ -15,6 +15,7 @@ import {
   type GoalTurnHost,
 } from './goal-runtime.js';
 import {
+  type GetGoalToolParams,
   GetGoalTool,
   UpdateGoalTool,
   type GoalToolConfig,
@@ -350,6 +351,7 @@ describe('GetGoalTool', () => {
     expect(getSnapshotForPermit).toHaveBeenCalledWith(permit);
     expect(JSON.parse(String(result.llmContent))).toEqual({
       active: true,
+      view: 'summary',
       snapshot,
       evidenceCatalog: {
         entries: [
@@ -367,6 +369,169 @@ describe('GetGoalTool', () => {
     });
     expect(String(result.llmContent)).not.toContain('must not leak');
     expect(result.returnDisplay).toBe('Active goal · revision 3');
+  });
+
+  it('exposes the view parameter and nothing else', () => {
+    const tool = new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() }));
+    expect(tool.schema.parametersJsonSchema).toEqual({
+      type: 'object',
+      properties: {
+        view: {
+          type: 'string',
+          enum: ['summary', 'full'],
+          description: expect.stringContaining('summary (default)'),
+        },
+      },
+      additionalProperties: false,
+    });
+  });
+
+  // A long-running Goal after a few checkpoints: 32 claims of the maximum
+  // length, a catalog at its entry cap, and a lineage at its cap.
+  const LONG_CLAIM = 'C'.repeat(2_000);
+  const LONG_PREVIEW_ASCII = 'p'.repeat(240);
+  const LONG_PREVIEW_CJK = '证'.repeat(80); // 240 bytes
+  const checkpointedGoal = () => ({
+    goalId: 'goal-1',
+    revision: 3,
+    objective: 'Ship Goal v3',
+    status: 'active' as const,
+    evidenceCursor: { recordId: 'checkpoint-9' },
+    turnCount: 40,
+    activeTimeMs: 120,
+    tokensUsed: 0,
+    createdAt: 10,
+    updatedAt: 20,
+    evidenceCheckpoint: {
+      checkpointId: 'checkpoint-9',
+      createdAt: 15,
+      claims: Array.from({ length: 32 }, (_, index) => ({
+        id: `checkpoint-9:${index + 1}`,
+        proofKind: 'external_fact' as const,
+        claim: `SECRET_CLAIM_TEXT ${LONG_CLAIM}`,
+        sourceRefs: Array.from(
+          { length: 4 },
+          (_, ref) => `src-${index}-${ref}`,
+        ),
+      })),
+    },
+  });
+  const checkpointedCatalog = () => ({
+    entries: [
+      ...Array.from({ length: 32 }, (_, index) => ({
+        uuid: `checkpoint-9:${index + 1}`,
+        provenance: 'goal_checkpoint' as const,
+        turnId: 'checkpoint:checkpoint-9',
+        preview: `claim ${index + 1} ${LONG_PREVIEW_ASCII}`.slice(0, 240),
+        proofKind: 'external_fact' as const,
+      })),
+      ...Array.from({ length: 60 }, (_, index) => ({
+        uuid: `earlier-${index}`,
+        provenance: 'tool_result' as const,
+        turnId: `earlier-turn-${index % 12}`,
+        preview: index % 2 === 0 ? LONG_PREVIEW_ASCII : LONG_PREVIEW_CJK,
+        proofKind: 'external_fact' as const,
+      })),
+      ...Array.from({ length: 8 }, (_, index) => ({
+        uuid: `current-${index}`,
+        provenance: 'assistant_output' as const,
+        turnId: permit.turnId,
+        preview: LONG_PREVIEW_ASCII,
+        proofKind: 'delivered_output' as const,
+      })),
+    ],
+    lineageTurnIds: [
+      ...Array.from({ length: 15 }, (_, index) => `earlier-turn-${index}`),
+      permit.turnId,
+    ],
+    truncated: false,
+  });
+  const checkpointedTool = () =>
+    new GetGoalTool(
+      makeConfig({
+        getGoalForWorker: vi.fn().mockResolvedValue({
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          evidenceCursor: { recordId: 'checkpoint-9' },
+          evidenceCatalog: checkpointedCatalog(),
+        }),
+        getSnapshotForPermit: vi.fn(() => ({
+          v: 2 as const,
+          activity: 'running' as const,
+          goal: checkpointedGoal(),
+        })),
+      }),
+    );
+  const read = async (params: GetGoalToolParams) => {
+    const invocation = goalTurnContext.run(permit, () =>
+      checkpointedTool().build(params),
+    );
+    const result = await invocation.execute(new AbortController().signal);
+    return String(result.llmContent);
+  };
+
+  it('collapses checkpoint claims and shortens earlier previews in the summary view', async () => {
+    const content = await read({});
+    const payload = JSON.parse(content);
+
+    // The claims' text is the duplicate: each claim is already a catalog entry.
+    expect(content).not.toContain('SECRET_CLAIM_TEXT');
+    expect(payload.snapshot.goal.evidenceCheckpoint).toEqual({
+      checkpointId: 'checkpoint-9',
+      createdAt: 15,
+      claimCount: 32,
+    });
+    expect(payload.view).toBe('summary');
+
+    const entries: Array<{
+      uuid: string;
+      turnId: string;
+      provenance: string;
+      preview: string;
+    }> = payload.evidenceCatalog.entries;
+    // Every uuid survives: the summary changes what is shown, not what is
+    // citable.
+    expect(entries.map((entry) => entry.uuid)).toEqual(
+      checkpointedCatalog().entries.map((entry) => entry.uuid),
+    );
+    for (const entry of entries) {
+      const bytes = Buffer.byteLength(entry.preview, 'utf8');
+      if (
+        entry.provenance === 'goal_checkpoint' ||
+        entry.turnId === permit.turnId
+      ) {
+        expect(bytes).toBe(240);
+      } else {
+        expect(bytes).toBeLessThanOrEqual(80);
+      }
+    }
+    // Multi-byte previews are cut on a code point, not mid-character.
+    expect(entries.find((entry) => entry.uuid === 'earlier-1')?.preview).toBe(
+      '证'.repeat(26),
+    );
+    expect(payload.evidenceCatalog.shortenedPreviews).toBe(60);
+    expect(payload.evidenceCatalog.lineageTurnIds).toHaveLength(16);
+  });
+
+  it('returns the whole checkpoint and catalog in the full view', async () => {
+    const payload = JSON.parse(await read({ view: 'full' }));
+
+    expect(payload.view).toBe('full');
+    expect(payload.snapshot.goal).toEqual(checkpointedGoal());
+    expect(payload.evidenceCatalog).toEqual(checkpointedCatalog());
+    expect(payload.evidenceCatalog).not.toHaveProperty('shortenedPreviews');
+  });
+
+  it('keeps a steady-state summary read under a fixed byte ceiling', async () => {
+    const summaryBytes = Buffer.byteLength(await read({}), 'utf8');
+    const fullBytes = Buffer.byteLength(await read({ view: 'full' }), 'utf8');
+
+    // The full read of this fixture is what a long Goal paid on every
+    // get_goal before: the 2,000-character claims alone are ~64 KB.
+    expect(fullBytes).toBeGreaterThan(100_000);
+    expect(summaryBytes).toBeLessThanOrEqual(36_000);
+    expect(fullBytes / summaryBytes).toBeGreaterThanOrEqual(3);
   });
 });
 
