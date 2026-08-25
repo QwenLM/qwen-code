@@ -29,6 +29,10 @@ export const GOAL_CHECKPOINT_STALLED_REASON =
  * tokens on the `tokensUsed` metric (`totalTokenCount` summed per model call,
  * so a call's full input context counts every time it is sent).
  *
+ * The meter bills Goal-turn model calls only -- per-turn side queries and
+ * checkpoint-verifier calls are unmetered -- so real provider spend at a
+ * stop runs above this window.
+ *
  * This is an authorization quantum, not a cost estimate: it bounds how much
  * autonomous continuation one explicit user action (create, or a later
  * resume) pays for before the Goal stops and asks again. Sized to a few hours
