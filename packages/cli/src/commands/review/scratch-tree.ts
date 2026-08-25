@@ -47,7 +47,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   assertWritableOutPath,
@@ -159,9 +159,10 @@ const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
 // must stay inert for EVERY value; anything executable, or uncertifiable,
 // belongs out of it — a miss costs a refusal, never an execution.
 const INERT_KEY_SHAPES: RegExp[] = [
-  // Written by `git init`, `git clone` and `git worktree add` itself — and
-  // `core.worktree` by `git submodule` into every module gitdir.
-  /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|sharedrepository|worktree)$/,
+  // Written by `git init`, `git clone` and `git worktree add` itself.
+  // `core.worktree` — written by `git submodule` into every module gitdir —
+  // is value-checked below: it redirects where checkouts WRITE (R18-3).
+  /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|sharedrepository)$/,
   // Identity and per-branch plumbing — names, addresses, refs, booleans.
   /^(user|author|committer)\./,
   /^branch\./,
@@ -180,6 +181,14 @@ const INERT_KEY_SHAPES: RegExp[] = [
   /^submodule\..+\.(active|branch)$/,
 ];
 
+// The containing file and the repository's registered worktrees, where a
+// value-checked shape's decision needs them (core.worktree, R18-3).
+interface ValueCheckContext {
+  file: string;
+  commonDir: string;
+  worktreeRoots: string[];
+}
+
 // Key shapes whose inertness the VALUE decides, and the decision.
 // `alias.*` is deliberately absent: an alias value reaches execution through
 // an open set of routes — program-carrying options (`clone
@@ -190,7 +199,7 @@ const INERT_KEY_SHAPES: RegExp[] = [
 // refused like any other uncertified key.
 const VALUE_CHECKED_SHAPES: Array<{
   shape: RegExp;
-  valueIsInert: (value: string) => boolean;
+  valueIsInert: (value: string, ctx: ValueCheckContext) => boolean;
 }> = [
   {
     // Boolean values select git's builtin fsmonitor daemon (true) or nothing
@@ -225,6 +234,29 @@ const VALUE_CHECKED_SHAPES: Array<{
     // Update strategies are checkout, rebase, merge, none — or `!command`.
     shape: /^submodule\..+\.update$/,
     valueIsInert: (value) => !value.trimStart().startsWith('!'),
+  },
+  {
+    // `core.worktree` is the config analogue of GIT_WORK_TREE: it redirects
+    // WHERE git writes the checkout. `git submodule` writes a relative
+    // `../../<path>` value into every module gitdir — admitted while it
+    // resolves inside a registered worktree. An absolute or escaping value
+    // aims checkouts at any directory git can reach, and the plant survives
+    // the copy's discard (R18-3, probed live).
+    shape: /^core\.worktree$/,
+    valueIsInert: (value, ctx) => {
+      const v = value.trim();
+      if (v === '' || v.startsWith('~') || isAbsolute(v)) return false;
+      const target = resolve(dirname(ctx.file), v);
+      // The common dir sits INSIDE the main worktree's path in the standard
+      // layout, so containment alone admits it — and a checkout aimed there
+      // writes through the hooks dir and the metadata git executes from.
+      if (target === ctx.commonDir || target.startsWith(ctx.commonDir + sep)) {
+        return false;
+      }
+      return ctx.worktreeRoots.some(
+        (root) => target === root || target.startsWith(root + sep),
+      );
+    },
   },
 ];
 
@@ -271,6 +303,9 @@ function localCommandConfig(worktree: string): string[] {
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
+  // Registered worktree paths anchor the core.worktree value check below;
+  // a list that cannot be read certifies nothing — fail closed there.
+  const worktreeRoots = registeredWorktreePaths(worktree);
   const candidates = [
     join(common, 'config'),
     // The MAIN worktree's own per-worktree config: honored by every checkout
@@ -291,16 +326,19 @@ function localCommandConfig(worktree: string): string[] {
     for (const entry of readdirSync(join(common, 'worktrees'))) {
       const admin = join(common, 'worktrees', entry);
       candidates.push(join(admin, 'config.worktree'));
-      // ...and the submodule gitdirs under the admin entry, where git since
-      // 2.47 puts a submodule initialized inside a linked worktree.
-      const adminModules = moduleGitdirsUnder(admin);
-      if (adminModules === null) {
+      // ...and the submodule layout under the admin entry, where git since
+      // 2.47 puts a submodule initialized inside a linked worktree — its
+      // gitdirs, and the per-worktree configs of worktrees created inside
+      // such a submodule (R18-1).
+      const adminLayout = submoduleLayoutUnder(admin);
+      if (adminLayout === null) {
         return ['(the submodule gitdirs could not be enumerated)'];
       }
-      for (const gitdir of adminModules) {
+      for (const gitdir of adminLayout.gitdirs) {
         candidates.push(join(gitdir, 'config'));
         candidates.push(join(gitdir, 'config.worktree'));
       }
+      candidates.push(...adminLayout.worktreeConfigs);
     }
   } catch (err) {
     // ENOENT means no linked worktrees registered — the candidates above
@@ -314,15 +352,20 @@ function localCommandConfig(worktree: string): string[] {
   // The repository's OWN submodule gitdirs — `<common>/modules/<name>` —
   // carry repo-local config git honors at the user's own operations inside
   // each submodule, and discard never wipes them: `worktree remove --force`
-  // leaves `modules/` standing (R17-3, probed live).
-  const modules = moduleGitdirsUnder(common);
-  if (modules === null) {
+  // leaves `modules/` standing (R17-3, probed live). The same holds one
+  // level deeper for a worktree created INSIDE a submodule: git honors its
+  // `<module-gitdir>/worktrees/<x>/config.worktree` once the module carries
+  // `extensions.worktreeConfig`, and it was never among these candidates
+  // (R18-1, probed live).
+  const layout = submoduleLayoutUnder(common);
+  if (layout === null) {
     return ['(the submodule gitdirs could not be enumerated)'];
   }
-  for (const gitdir of modules) {
+  for (const gitdir of layout.gitdirs) {
     candidates.push(join(gitdir, 'config'));
     candidates.push(join(gitdir, 'config.worktree'));
   }
+  candidates.push(...layout.worktreeConfigs);
   const found: string[] = [];
   for (const file of candidates) {
     if (!existsSync(file)) continue;
@@ -336,10 +379,11 @@ function localCommandConfig(worktree: string): string[] {
       const checked = VALUE_CHECKED_SHAPES.find(({ shape }) => shape.test(key));
       if (checked) {
         const values = configValuesIn(file, key, worktree);
+        const ctx = { file, commonDir: common, worktreeRoots };
         if (
           values !== null &&
           values.length > 0 &&
-          values.every(checked.valueIsInert)
+          values.every((value) => checked.valueIsInert(value, ctx))
         ) {
           continue;
         }
@@ -407,6 +451,71 @@ function moduleGitdirsUnder(base: string): string[] | null {
   return walk(base) ? out : null;
 }
 
+// The submodule layout honored under `base`, one level deeper than
+// moduleGitdirsUnder: a worktree created INSIDE a submodule is a linked
+// worktree of the submodule's repo, and a submodule initialized inside any
+// linked worktree nests its gitdir under that worktree's admin entry (git
+// ≥ 2.47) — so the walk must follow `worktrees/` inside each module gitdir
+// too, or the class it reaches is read by git and unseen here (R18-1). The
+// per-worktree configs of those inner worktrees ride along: honored once the
+// module carries extensions.worktreeConfig. `null` is the fail-closed
+// answer, like moduleGitdirsUnder's.
+function submoduleLayoutUnder(base: string): {
+  gitdirs: string[];
+  worktreeConfigs: string[];
+} | null {
+  const gitdirs: string[] = [];
+  const worktreeConfigs: string[] = [];
+  const queue = [base];
+  while (queue.length > 0) {
+    const dir = queue.shift()!;
+    const found = moduleGitdirsUnder(dir);
+    if (found === null) return null;
+    for (const gitdir of found) {
+      gitdirs.push(gitdir);
+      let entries: string[];
+      try {
+        entries = readdirSync(join(gitdir, 'worktrees'));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+        continue;
+      }
+      for (const entry of entries) {
+        const admin = join(gitdir, 'worktrees', entry);
+        let stats;
+        try {
+          stats = lstatSync(admin);
+        } catch {
+          return null;
+        }
+        if (stats.isSymbolicLink()) return null;
+        if (!stats.isDirectory()) continue;
+        worktreeConfigs.push(join(admin, 'config.worktree'));
+        queue.push(admin);
+      }
+    }
+  }
+  return { gitdirs, worktreeConfigs };
+}
+
+// The paths `git worktree list` records — the containment anchors for the
+// core.worktree value check (R18-3). An unreadable list certifies nothing:
+// the check then admits no value, and the screen fails closed on the key.
+function registeredWorktreePaths(worktree: string): string[] {
+  const r = spawnSync('git', [...NO_HOOKS, 'worktree', 'list', '--porcelain'], {
+    cwd: worktree,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
+  if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return [];
+  const roots: string[] = [];
+  for (const line of r.stdout.split('\n')) {
+    if (!line.startsWith('worktree ')) continue;
+    roots.push(line.slice('worktree '.length));
+  }
+  return roots;
+}
+
 /**
  * The executable hooks standing in the repository's own hooks dir — its own
  * and each submodule gitdir's — when any.
@@ -437,6 +546,29 @@ function localExecutableHooks(worktree: string): string[] {
   const [commonDir, hooksPath] = r.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
   const ownHooksDir = join(common, 'hooks');
+  // A RELATIVE hooksPath redirect resolves per-invocation cwd — from the
+  // user's own main worktree `.git/hooks` IS this common dir's hooks, the
+  // planting surface this screen owns — and no resolution from this linked
+  // worktree certifies what the value reaches at any other cwd (R18-2,
+  // probed live). The redirect is asked for directly because `--git-path`
+  // prints relative paths for the DEFAULT dir too; a repo-local redirect
+  // was already refused upstream by the config screen, so the effective
+  // value here can only be the user's global/system contract — honored
+  // when absolute, uncertifiable when relative.
+  // NO_HOOKS must NOT ride along: it sets the very key being read.
+  // `git config` fires no hooks, so the plain call is safe here.
+  const redirect = spawnSync('git', ['config', '--get', 'core.hookspath'], {
+    cwd: worktree,
+    encoding: 'utf8',
+    env: sanitizedGitEnv(),
+  });
+  const redirectValue =
+    redirect.status === 0 && typeof redirect.stdout === 'string'
+      ? redirect.stdout.trim()
+      : '';
+  if (redirectValue !== '' && !isAbsolute(redirectValue)) {
+    return ['(the hooks redirect could not be certified)'];
+  }
   // The resolved path honors any hooksPath redirect; only the default dirs
   // are the planting surface this screen owns (see the doc comment). By the
   // time this runs the redirect can only be a GLOBAL hooksPath — a repo-local
@@ -474,8 +606,11 @@ function localExecutableHooks(worktree: string): string[] {
     }
   }
   for (const base of bases) {
-    const gitdirs = moduleGitdirsUnder(base);
-    if (gitdirs === null) {
+    // submoduleLayoutUnder, not moduleGitdirsUnder: the hooks of a
+    // submodule nested inside a worktree of ANOTHER submodule are the same
+    // shared surface one level deeper (R18-1).
+    const gitdirs = submoduleLayoutUnder(base)?.gitdirs;
+    if (!gitdirs) {
       return ['(the submodule gitdirs could not be enumerated)'];
     }
     for (const gitdir of gitdirs) {

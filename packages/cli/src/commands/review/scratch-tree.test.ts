@@ -396,6 +396,123 @@ describe('runScratchTree', () => {
     expect(r2.note).toContain('alias.pwn');
   });
 
+  it('screens the per-worktree configs of worktrees created INSIDE a submodule', () => {
+    // A worktree created inside a submodule is a linked worktree of the
+    // submodule's repo: once the module carries extensions.worktreeConfig,
+    // git honors its `<module-gitdir>/worktrees/<x>/config.worktree` — and
+    // the screen read only the module's own config and config.worktree, so a
+    // filter planted there fired at the next checkout in that worktree while
+    // this command reported the repository clean. The placement is
+    // fail-closed one level deeper under a superproject worktree's admin
+    // entry too (R18-1, probed live).
+    const common = execFileSync(
+      'git',
+      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+      { cwd: worktree, encoding: 'utf8' },
+    ).trim();
+    const first = run();
+    expect(first.available).toBe(true);
+
+    const innerConfig = join(
+      common,
+      'modules',
+      'vendor',
+      'worktrees',
+      'vendor-wt',
+      'config.worktree',
+    );
+    mkdirSync(dirname(innerConfig), { recursive: true });
+    writeFileSync(
+      innerConfig,
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-should-never-run\n',
+    );
+
+    const r = run();
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    rmSync(innerConfig);
+    expect(run().available).toBe(true);
+
+    // The same class under a superproject worktree admin entry's module.
+    const adminInnerConfig = join(
+      common,
+      'worktrees',
+      basename(first.path!),
+      'modules',
+      'vendor',
+      'worktrees',
+      'vendor-wt',
+      'config.worktree',
+    );
+    mkdirSync(dirname(adminInnerConfig), { recursive: true });
+    writeFileSync(
+      adminInnerConfig,
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-should-never-run\n',
+    );
+
+    const r2 = run();
+    expect(r2.available).toBe(false);
+    expect(r2.note).toContain('filter.evil.smudge');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'fails CLOSED when a module gitdir’s worktrees dir cannot be listed',
+    () => {
+      // The per-worktree configs of worktrees inside a submodule are read
+      // by git whatever a readdir sees; a dir that cannot be listed leaves
+      // the class unknowable — a refusal, like every sibling error path.
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const worktreesDir = join(common, 'modules', 'vendor', 'worktrees');
+      mkdirSync(join(worktreesDir, 'vendor-wt'), { recursive: true });
+      chmodSync(worktreesDir, 0o111);
+      try {
+        const r = run();
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('submodule gitdirs could not be enumerated');
+      } finally {
+        chmodSync(worktreesDir, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'screens the hooks of submodules nested inside a worktree of another submodule',
+    () => {
+      // git since 2.47 puts a submodule initialized inside a linked
+      // worktree under that worktree's admin entry — for a worktree INSIDE
+      // a submodule that nests lands under the module gitdir. Its hooks
+      // fire at the user's own commits there and survive the copy's
+      // discard: the same shared surface one level deeper (R18-1).
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const hook = join(
+        common,
+        'modules',
+        'vendor',
+        'worktrees',
+        'vendor-wt',
+        'modules',
+        'inner',
+        'hooks',
+        'pre-commit',
+      );
+      mkdirSync(dirname(hook), { recursive: true });
+      writeFileSync(hook, '#!/bin/sh\ntouch PWNED\n');
+      chmodSync(hook, 0o755);
+
+      const r = run();
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('pre-commit');
+    },
+  );
+
   it.skipIf(process.platform === 'win32')(
     'refuses an EXECUTABLE hook in the hooks dir — the config screen cannot see it',
     () => {
@@ -518,6 +635,28 @@ describe('runScratchTree', () => {
     expect(r.available).toBe(true);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'fails CLOSED on a RELATIVE global hooksPath — it resolves per-invocation cwd',
+    () => {
+      // A relative redirect cannot be certified from a LINKED worktree: git
+      // resolves it per-invocation cwd, and from the user's own MAIN
+      // worktree `.git/hooks` IS the common dir's hooks — the planting
+      // surface this screen owns. The old catch resolved it once from here,
+      // threw on the gitfile-shaped `.git`, and read the throw as "no
+      // redirect" — admitting the planted hook (R18-2, probed live).
+      git(repo, 'config', '--global', 'core.hooksPath', '.git/hooks');
+      const hook = join(repo, '.git', 'hooks', 'pre-commit');
+      writeFileSync(hook, '#!/bin/sh\ntouch PWNED\n');
+      chmodSync(hook, 0o755);
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('hooks redirect could not be certified');
+      expect(existsSync(join(repo, 'PWNED'))).toBe(false);
+    },
+  );
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'fails CLOSED when the modules dir cannot be listed — git still reads module gitdirs by name',
     () => {
@@ -634,10 +773,48 @@ describe('runScratchTree', () => {
     );
     git(worktree, 'config', 'submodule.vendor.url', '/srv/vendor.git');
     git(worktree, 'config', 'submodule.vendor.update', 'merge');
+    // core.worktree resolving INSIDE a registered worktree: '..' from the
+    // common dir is the main worktree itself.
+    git(worktree, 'config', 'core.worktree', '..');
 
     const r = run();
 
     expect(r.available).toBe(true);
+  });
+
+  it('refuses core.worktree VALUES that redirect checkouts outside the repository', () => {
+    // core.worktree is the config analogue of GIT_WORK_TREE: the screen
+    // used to admit it unread for every value, so a plant in the common
+    // dir aimed the user's own next checkout at any directory git can
+    // reach — absent paths at the target are written without a refusal
+    // (R18-3, probed live). Only values resolving inside a registered
+    // worktree stay admitted; the submodule ../../<path> shape is one
+    // (pinned by the initialized-submodule test above).
+    for (const value of [
+      // An absolute path names any directory.
+      '/tmp/qwen-should-never-be-a-worktree',
+      // A relative escape resolves past every registered worktree.
+      '../../../../evil',
+      // The common dir sits inside the main worktree's path, so
+      // containment alone admits it — and a checkout aimed there writes
+      // through the hooks dir git executes from.
+      'hooks',
+    ]) {
+      git(worktree, 'config', 'core.worktree', value);
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('core.worktree');
+
+      git(worktree, 'config', '--unset', 'core.worktree');
+      expect(run().available).toBe(true);
+      rmSync(scratchWorktreePath(worktree, 'verify--round-1--abc123'), {
+        recursive: true,
+        force: true,
+      });
+      git(worktree, 'worktree', 'prune');
+    }
   });
 
   it('refuses the executable VALUE shapes of the value-checked keys', () => {
