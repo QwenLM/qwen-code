@@ -11,10 +11,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
+  realpathSync,
   rmSync,
   existsSync,
   writeFileSync,
   mkdirSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,6 +31,11 @@ let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 function git(...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' });
 }
+
+// Git prints worktree paths with forward slashes on Windows, while
+// `join`/`realpathSync` build backslash spellings there; compare both sides
+// slash-normalized (the identity on POSIX).
+const fwd = (value: string): string => value.replace(/\\/g, '/');
 
 beforeEach(() => {
   repo = mkdtempSync(join(tmpdir(), 'review-wt-'));
@@ -73,7 +80,7 @@ describe('releaseWorktree', () => {
 
     expect(existsSync(join(repo, 'wt'))).toBe(false);
     // Not `.not.toContain('wt')` — the fixture's own path holds that substring.
-    expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+    expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
   });
 
   it('removes an unregistered non-empty leftover git no longer tracks', () => {
@@ -84,7 +91,7 @@ describe('releaseWorktree', () => {
     mkdirSync(join(repo, 'wt', 'junk'), { recursive: true });
     writeFileSync(join(repo, 'wt', 'junk', 'f'), 'x');
     // Negative control: it is not a registered worktree.
-    expect(git('worktree', 'list')).not.toContain(join(repo, 'wt'));
+    expect(fwd(git('worktree', 'list'))).not.toContain(fwd(join(repo, 'wt')));
 
     expect(releaseWorktree(join(repo, 'wt'))).toMatchObject({
       existed: true,
@@ -144,6 +151,75 @@ describe('releaseWorktree', () => {
     // mask the error that got us there.
     process.chdir(tmpdir()); // not a repo
     expect(() => releaseWorktree('/nonexistent/wt')).not.toThrow();
+  });
+
+  it('unlinks a symlink at the path instead of releasing the worktree it points at', () => {
+    // `existsSync` follows a LIVE link and `git worktree remove --force`
+    // resolves it — together they delete whichever registered worktree the
+    // link names (the user's own, another review's live tree) while
+    // reporting this path as swept. `cleanStale` releases with no guard of
+    // its own, so the guard lives at this choke point.
+    git('worktree', 'add', '-q', 'victim', '-b', 'victim-topic');
+    writeFileSync(join(repo, 'victim', 'keep.txt'), 'must survive\n');
+    symlinkSync(join(repo, 'victim'), join(repo, 'wt-link'));
+
+    expect(releaseWorktree(join(repo, 'wt-link'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
+
+    expect(existsSync(join(repo, 'wt-link'))).toBe(false);
+    // The victim is still registered AND still on disk. `realpathSync`,
+    // because git prints the CANONICAL path and `tmpdir()` is a symlink on
+    // macOS (`/var` → `/private/var`): the raw spelling passes there only by
+    // accident — the canonical path happens to contain it as a substring —
+    // and would not on a Linux fixture reached through a symlinked ancestor.
+    expect(fwd(git('worktree', 'list'))).toContain(
+      fwd(join(realpathSync(repo), 'victim')),
+    );
+    expect(existsSync(join(repo, 'victim', 'keep.txt'))).toBe(true);
+  });
+
+  it('refuses to release through an ANCESTOR symlink, which lstat cannot see', () => {
+    // `lstatSync` dereferences every component except the last, so the leaf
+    // guard below is blind one level up: a link at `.qwen/tmp` leaves every
+    // path under it looking like an ordinary directory while
+    // `git worktree remove --force` and the `rmSync` fallback both land in
+    // whatever checkout it names. `runCleanup` refuses its whole sweep on
+    // this; `cleanStale` releases with no guard of its own, so the refusal
+    // belongs here where every caller inherits it.
+    mkdirSync(join(repo, 'real'));
+    git('worktree', 'add', '-q', join('real', 'victim'), '-b', 'victim-topic');
+    writeFileSync(join(repo, 'real', 'victim', 'keep.txt'), 'must survive\n');
+    symlinkSync(join(repo, 'real'), join(repo, 'link'));
+
+    const got = releaseWorktree(join(repo, 'link', 'victim'));
+
+    expect(got.freed).toBe(false);
+    expect(got.reason).toContain('symlink');
+    // Registered and on disk, both.
+    expect(fwd(git('worktree', 'list'))).toContain(
+      fwd(join(realpathSync(repo), 'real', 'victim')),
+    );
+    expect(existsSync(join(repo, 'real', 'victim', 'keep.txt'))).toBe(true);
+  });
+
+  it('unlinks a DANGLING symlink, which existsSync cannot see', () => {
+    // `existsSync` reports a dangling link as never existed, so the removal
+    // skips it — while the link still wedges the next `worktree add` at the
+    // path with `already exists`.
+    symlinkSync(join(repo, 'never-existed'), join(repo, 'wt-link'));
+
+    expect(releaseWorktree(join(repo, 'wt-link'))).toMatchObject({
+      existed: true,
+      freed: true,
+    });
+
+    expect(existsSync(join(repo, 'wt-link'))).toBe(false);
+    // The path is reusable — the wedge is gone.
+    expect(() =>
+      git('worktree', 'add', '-q', 'wt-link', '-b', 'topic2'),
+    ).not.toThrow();
   });
 });
 

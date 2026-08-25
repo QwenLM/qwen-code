@@ -30,9 +30,13 @@ import {
   AuthType,
 } from '../../core/contentGenerator.js';
 import { GeminiChat } from '../../core/geminiChat.js';
-import { normalizeModelToolCallIds } from '../../core/toolCallIdUtils.js';
+import { GeminiEventType } from '../../core/turn.js';
+import {
+  getToolCallFingerprint,
+  normalizeModelToolCallIds,
+} from '../../core/toolCallIdUtils.js';
 import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
-import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import { getInitialChatHistory } from '../../core/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
 import {
@@ -58,6 +62,7 @@ import { AgentTerminateMode } from './agent-types.js';
 import { WriteFileTool } from '../../tools/write-file.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { normalizeToolNameForProvider } from '../../utils/tool-name-utils.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -69,9 +74,7 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     createContentGenerator: vi.fn().mockResolvedValue({
       generateContent: vi.fn(),
       generateContentStream: vi.fn(),
-      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
       embedContent: vi.fn(),
-      useSummarizedThinking: vi.fn().mockReturnValue(false),
     }),
     createContentGeneratorConfig: vi.fn().mockReturnValue({
       model: DEFAULT_QWEN_MODEL,
@@ -87,7 +90,7 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     }),
   };
 });
-vi.mock('../../utils/environmentContext.js', () => ({
+vi.mock('../../core/environmentContext.js', () => ({
   SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
@@ -311,7 +314,7 @@ describe('subagent.ts', () => {
 
   describe('AgentHeadless', () => {
     let mockSendMessageStream: Mock;
-    let mockGetHistoryFunctionResponseIds: Mock;
+    let mockGetHistoryToolCallFingerprints: Mock;
 
     const defaultModelConfig: ModelConfig = {
       model: 'qwen3-coder-plus',
@@ -343,13 +346,15 @@ describe('subagent.ts', () => {
       });
 
       mockSendMessageStream = vi.fn();
-      mockGetHistoryFunctionResponseIds = vi.fn(() => new Set<string>());
+      mockGetHistoryToolCallFingerprints = vi.fn(
+        () => new Map<string, string>(),
+      );
       vi.mocked(GeminiChat).mockImplementation(
         () =>
           ({
             sendMessageStream: mockSendMessageStream,
             setLastPromptTokenCount: vi.fn(),
-            getHistoryFunctionResponseIds: mockGetHistoryFunctionResponseIds,
+            getHistoryToolCallFingerprints: mockGetHistoryToolCallFingerprints,
           }) as unknown as GeminiChat,
       );
 
@@ -2258,7 +2263,11 @@ describe('subagent.ts', () => {
           new Set(['call_1']),
           new Set<string>(),
         );
-        mockGetHistoryFunctionResponseIds.mockReturnValue(new Set(['call_1']));
+        mockGetHistoryToolCallFingerprints.mockReturnValue(
+          new Map([
+            ['call_1', getToolCallFingerprint('list_files', { path: '.' })],
+          ]),
+        );
 
         mockSendMessageStream.mockImplementation(
           createMockStream([[duplicateNormalizedPart!.functionCall!], 'stop']),
@@ -2326,6 +2335,204 @@ describe('subagent.ts', () => {
         const secondCallArgs = mockSendMessageStream.mock.calls[1][1];
         const parts = secondCallArgs.message as Part[];
         expect(parts[0].functionResponse?.id).toBe('call_1__qwen_dup_2');
+        expect(parts[0].functionResponse?.response?.['error']).toContain(
+          'Duplicate provider tool call id "call_1"',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
+      it('should execute an id-colliding tool call whose args differ from the handled call', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+        const [collidingNormalizedPart] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: 'src' },
+              },
+            },
+          ],
+          new Set(['call_1']),
+          new Set<string>(),
+        );
+        mockGetHistoryToolCallFingerprints.mockReturnValue(
+          new Map([
+            ['call_1', getToolCallFingerprint('list_files', { path: '.' })],
+          ]),
+        );
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([[collidingNormalizedPart!.functionCall!], 'stop']),
+        );
+
+        const listFilesInvocation = {
+          params: { path: 'src' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'src/main.ts',
+            returnDisplay: 'Listed 1 file',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(1);
+        expect(toolResultEvents).toHaveLength(1);
+        expect(toolResultEvents[0].callId).toBe('call_1__qwen_dup_2');
+        expect(toolResultEvents[0].error).toBeUndefined();
+
+        const secondCallArgs = mockSendMessageStream.mock.calls[1][1];
+        const parts = secondCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_1__qwen_dup_2');
+        expect(parts[0].functionResponse?.response?.['error']).toBeUndefined();
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+
+      it('should keep suppressing replays of the original call after an id-colliding execution', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+        // Rounds share one usedIds set so the collisions get _2 and _3
+        // suffixes, mirroring how normalization accumulates across rounds.
+        const usedIds = new Set(['call_1']);
+        const [round2Part] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: 'src' },
+              },
+            },
+          ],
+          usedIds,
+          new Set<string>(),
+        );
+        const [round3Part] = normalizeModelToolCallIds(
+          [
+            {
+              functionCall: {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            },
+          ],
+          usedIds,
+          new Set<string>(),
+        );
+
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [{ id: 'call_1', name: 'list_files', args: { path: '.' } }],
+            [round2Part!.functionCall!],
+            [round3Part!.functionCall!],
+            'stop',
+          ]),
+        );
+
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt',
+            returnDisplay: 'Listed 1 file',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        // Round 1 (original) and round 2 (different-args collision) execute;
+        // round 3 replays the ORIGINAL call under the reused id and must be
+        // suppressed — first-occurrence recording keeps the id naming the
+        // round-1 call even after the collision executed.
+        expect(listFilesInvocation.execute).toHaveBeenCalledTimes(2);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(4);
+        const fourthCallArgs = mockSendMessageStream.mock.calls[3][1];
+        const parts = fourthCallArgs.message as Part[];
+        expect(parts[0].functionResponse?.id).toBe('call_1__qwen_dup_3');
         expect(parts[0].functionResponse?.response?.['error']).toContain(
           'Duplicate provider tool call id "call_1"',
         );
@@ -2670,7 +2877,9 @@ describe('subagent.ts', () => {
             ({
               sendMessageStream: mockSendMessageStream,
               setLastPromptTokenCount: vi.fn(),
-              getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
+              getHistoryToolCallFingerprints: vi.fn(
+                () => new Map<string, string>(),
+              ),
             }) as unknown as GeminiChat,
         );
 
@@ -2764,7 +2973,9 @@ describe('subagent.ts', () => {
             ({
               sendMessageStream: mockSendMessageStream,
               setLastPromptTokenCount: vi.fn(),
-              getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
+              getHistoryToolCallFingerprints: vi.fn(
+                () => new Map<string, string>(),
+              ),
             }) as unknown as GeminiChat,
         );
 
@@ -2830,7 +3041,9 @@ describe('subagent.ts', () => {
             ({
               sendMessageStream: mockSendMessageStream,
               setLastPromptTokenCount: vi.fn(),
-              getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
+              getHistoryToolCallFingerprints: vi.fn(
+                () => new Map<string, string>(),
+              ),
             }) as unknown as GeminiChat,
         );
 
@@ -3222,6 +3435,62 @@ describe('subagent.ts', () => {
           'rejected to prevent writing truncated content',
         );
       });
+
+      it.each([
+        { retry: { type: 'retry' as const, isContinuation: true } },
+        { retry: { type: 'retry' as const } },
+      ])(
+        'forwards retry events to subagent loop detection',
+        async ({ retry }) => {
+          const loopSpy = vi
+            .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+            .mockReturnValue(false);
+
+          const { config } = await createMockConfig();
+          mockSendMessageStream.mockResolvedValue(
+            (async function* () {
+              yield {
+                ...retry,
+              };
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      finishReason: 'STOP',
+                      content: { parts: [{ text: 'done' }] },
+                    },
+                  ],
+                },
+              };
+            })(),
+          );
+
+          const scope = await AgentHeadless.create(
+            'test-agent',
+            config,
+            promptConfig,
+            defaultModelConfig,
+            defaultRunConfig,
+            { tools: [] },
+            new AgentEventEmitter(),
+          );
+
+          await scope.execute(new ContextState());
+
+          const retryArg = loopSpy.mock.calls.find(
+            ([event]) => event.type === GeminiEventType.Retry,
+          )?.[0] as { type: GeminiEventType; isContinuation?: boolean };
+          expect(retryArg).toEqual(
+            expect.objectContaining({ type: GeminiEventType.Retry }),
+          );
+          if ('isContinuation' in retry) {
+            expect(retryArg.isContinuation).toBe(true);
+          } else {
+            expect(retryArg).not.toHaveProperty('isContinuation');
+          }
+        },
+      );
 
       it('keeps automatic max token escalation warm for the next agent round', async () => {
         const writeFileToolDef: FunctionDeclaration = {

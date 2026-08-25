@@ -403,6 +403,45 @@ established the principle: "telemetry's scope of work doesn't include
 sending identifiers to LLM providers"; correlation-header work moves to
 its own design discussion rather than landing under telemetry.
 
+## Inbound correlation (daemon HTTP API)
+
+The daemon HTTP API accepts the standard W3C `traceparent` header on every
+request. Two consumers read it independently:
+
+- **Request span re-parenting (telemetry enabled).** When the telemetry SDK
+  is initialized, a valid header is extracted as the request span's remote
+  parent, so daemon spans attach under the caller's trace instead of
+  starting a new one. The `_meta` forwarding path reads the same parent
+  chain, so session subprocess spans forwarded through a daemon request
+  inherit it too.
+- **Access-log `traceId` field (both modes).** A dedicated pre-auth capture
+  middleware parses the header on every request — including ones
+  short-circuited at auth (401), the rate limiter (429), the JSON body
+  parser (400), or never matched by any route (404) — and the access log
+  emits the caller trace id as a camelCase `traceId` field. With telemetry
+  disabled this field is the only join between a daemon log line and the
+  caller's logs (or trace backend), so one saved query works for both modes
+  with no telemetry configuration.
+
+An invalid-but-present header is rejected (the span stays parentless) and
+leaves a rate-limited DEBUG breadcrumb
+(`qwen-code.daemon.traceparent.invalid`) recording the rejected value, so a
+broken cross-service join is diagnosable from daemon logs alone.
+
+### Forced sampling under inbound parents
+
+Under the default `parentbased_always_on` sampler (and other parentbased
+defaults), a remote parent's `sampled=0` flag is a head-based decision on
+the caller's side, not a request to drop daemon telemetry, so extraction
+forces the SAMPLED flag on inbound parents. The only opt-out is
+`OTEL_TRACES_SAMPLER=parentbased_always_off`, which honors the caller's
+flags — note it also disables root-span sampling for the whole daemon, not
+just inbound-linked requests.
+
+**Warning:** a constant `traceparent` (e.g. hardcoded in a load-test
+client) re-parents every daemon request into one single trace; generate a
+fresh header per request.
+
 ## Aliyun Telemetry
 
 ### Manual OTLP Export

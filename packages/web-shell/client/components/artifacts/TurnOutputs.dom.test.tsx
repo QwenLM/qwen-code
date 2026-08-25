@@ -140,6 +140,7 @@ describe('TurnOutputs artifact downloads', () => {
       'audio',
       'pdf',
       'notebook',
+      'document',
       'other',
     ];
     const artifacts = kinds.map(
@@ -172,6 +173,20 @@ describe('TurnOutputs artifact downloads', () => {
           />
         </I18nProvider>,
       );
+    });
+
+    expect(
+      Array.from(container.querySelectorAll('button')).filter(
+        (button) => button.textContent?.trim() === 'Download',
+      ),
+    ).toHaveLength(3);
+
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('more artifacts'),
+    );
+    expect(showMore).toBeTruthy();
+    act(() => {
+      showMore?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     expect(
@@ -545,6 +560,14 @@ describe('TurnOutputs artifact downloads', () => {
           />
         </I18nProvider>,
       );
+    });
+
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('more artifacts'),
+    );
+    expect(showMore).toBeTruthy();
+    act(() => {
+      showMore?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
 
     expect(

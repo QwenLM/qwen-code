@@ -3,33 +3,77 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import { useAnimationFrameTranscriptBlocks } from './useAnimationFrameTranscriptBlocks';
+import type {
+  DaemonTranscriptBlock,
+  DaemonTranscriptBlockChangeSummary,
+} from '@qwen-code/sdk/daemon';
+import { useAnimationFrameTranscriptSnapshot } from './useAnimationFrameTranscriptBlocks';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 const testStore = vi.hoisted(() => {
   let blocks: readonly DaemonTranscriptBlock[] = [];
   let blockIndexById: Readonly<Record<string, number>> = {};
+  const blockChangeSource = {};
+  let blockChangeSummary = {
+    source: blockChangeSource,
+    revision: 0,
+    tailAppendBarrierRevision: 0,
+  };
+  let blockChangeSummaryEnabled = true;
   const listeners = new Set<() => void>();
   return {
     getSnapshot: () => ({ blocks, blockIndexById }),
+    getBlockChangeSummary: () =>
+      blockChangeSummaryEnabled ? blockChangeSummary : undefined,
     subscribe: (listener: () => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
     update(nextBlocks: readonly DaemonTranscriptBlock[]) {
       blocks = nextBlocks;
+      blockChangeSummary = {
+        source: blockChangeSource,
+        revision: blockChangeSummary.revision + 1,
+        tailAppendBarrierRevision: blockChangeSummary.revision + 1,
+      };
+      listeners.forEach((listener) => listener());
+    },
+    appendTail(
+      nextBlocks: readonly DaemonTranscriptBlock[],
+      tailBlockId: string,
+    ) {
+      blocks = nextBlocks;
+      blockChangeSummary = {
+        source: blockChangeSource,
+        revision: blockChangeSummary.revision + 1,
+        tailAppendBarrierRevision: blockChangeSummary.tailAppendBarrierRevision,
+        tailBlockId,
+      };
       listeners.forEach((listener) => listener());
     },
     resetBlocks(nextBlocks: readonly DaemonTranscriptBlock[] = []) {
       blocks = nextBlocks;
       blockIndexById = {};
+      blockChangeSummary = {
+        source: blockChangeSource,
+        revision: blockChangeSummary.revision + 1,
+        tailAppendBarrierRevision: blockChangeSummary.revision + 1,
+      };
       listeners.forEach((listener) => listener());
+    },
+    disableBlockChangeSummary() {
+      blockChangeSummaryEnabled = false;
     },
     reset() {
       blocks = [];
       blockIndexById = {};
+      blockChangeSummary = {
+        source: blockChangeSource,
+        revision: 0,
+        tailAppendBarrierRevision: 0,
+      };
+      blockChangeSummaryEnabled = true;
       listeners.clear();
     },
   };
@@ -48,12 +92,25 @@ let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let renderCount = 0;
 let latestBlocks: readonly DaemonTranscriptBlock[] = [];
-let renderLog: string[][] = [];
+let latestSummary: DaemonTranscriptBlockChangeSummary | undefined;
+let renderLog: Array<{
+  ids: string[];
+  texts: Array<string | undefined>;
+  revision?: number;
+}> = [];
 
-function Harness() {
-  latestBlocks = useAnimationFrameTranscriptBlocks();
+function Harness({ structuralOnly = false }: { structuralOnly?: boolean }) {
+  const snapshot = useAnimationFrameTranscriptSnapshot({ structuralOnly });
+  latestBlocks = snapshot.blocks;
+  latestSummary = snapshot.blockChangeSummary;
   renderCount += 1;
-  renderLog.push(latestBlocks.map((block) => block.id));
+  renderLog.push({
+    ids: latestBlocks.map((block) => block.id),
+    texts: latestBlocks.map((block) =>
+      'text' in block ? block.text : undefined,
+    ),
+    revision: latestSummary?.revision,
+  });
   return null;
 }
 
@@ -64,13 +121,107 @@ afterEach(() => {
   container = null;
   renderCount = 0;
   latestBlocks = [];
+  latestSummary = undefined;
   renderLog = [];
   testStore.reset();
   testConnection.sessionId = 'session-a';
   vi.restoreAllMocks();
 });
 
-describe('useAnimationFrameTranscriptBlocks', () => {
+describe('useAnimationFrameTranscriptSnapshot', () => {
+  it('caches structural snapshots when the store has no change summary', () => {
+    let pendingFrame: FrameRequestCallback | null = null;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      pendingFrame = callback;
+      return 1;
+    });
+    testStore.disableBlockChangeSummary();
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+
+    act(() => root!.render(<Harness structuralOnly />));
+
+    expect(renderCount).toBe(1);
+    expect(latestBlocks).toEqual([]);
+
+    // Without a change summary every notification may be structural, so the
+    // consumer must keep the pre-change update behavior and wake.
+    act(() => testStore.update([{ id: 'a' } as DaemonTranscriptBlock]));
+    act(() => pendingFrame?.(1_000));
+
+    expect(renderCount).toBeGreaterThan(1);
+    expect(latestBlocks).toHaveLength(1);
+  });
+
+  it('keeps structural consumers asleep for pure tail appends', () => {
+    let pendingFrame: FrameRequestCallback | null = null;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      pendingFrame = callback;
+      return 1;
+    });
+    vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    const first = { id: 'thought', text: 'a' } as DaemonTranscriptBlock;
+    testStore.update([first]);
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => root!.render(<Harness structuralOnly />));
+    const initialRenderCount = renderCount;
+
+    act(() => testStore.appendTail([{ ...first, text: 'ab' }], 'thought'));
+
+    expect(pendingFrame).toBeNull();
+    expect(renderCount).toBe(initialRenderCount);
+    expect(latestBlocks).toEqual([first]);
+
+    const tool = { id: 'tool', kind: 'tool' } as DaemonTranscriptBlock;
+    act(() => testStore.update([{ ...first, text: 'ab' }, tool]));
+    act(() => pendingFrame?.(1_000));
+
+    expect(renderCount).toBeGreaterThan(initialRenderCount);
+    expect(latestBlocks).toEqual([{ ...first, text: 'ab' }, tool]);
+  });
+
+  it('keeps coalesced tail blocks paired with their change summary', () => {
+    let pendingFrame: FrameRequestCallback | null = null;
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      pendingFrame = callback;
+      return 1;
+    });
+    vi.spyOn(performance, 'now').mockReturnValue(1_000);
+    const first = { id: 'thought', text: 'a' } as DaemonTranscriptBlock;
+    testStore.update([first]);
+    container = document.createElement('div');
+    document.body.append(container);
+    root = createRoot(container);
+    act(() => root!.render(<Harness />));
+    const barrier = latestSummary?.tailAppendBarrierRevision;
+
+    const second = { ...first, text: 'ab' };
+    const third = { ...second, text: 'abc' };
+    act(() => {
+      testStore.appendTail([second], 'thought');
+      testStore.appendTail([third], 'thought');
+    });
+    act(() => pendingFrame?.(1_000));
+
+    expect(latestBlocks).toEqual([third]);
+    expect(latestSummary).toMatchObject({
+      revision: 3,
+      tailAppendBarrierRevision: barrier,
+      tailBlockId: 'thought',
+    });
+    const revisionByText = new Map([
+      ['a', 1],
+      ['ab', 2],
+      ['abc', 3],
+    ]);
+    for (const entry of renderLog) {
+      expect(entry.revision).toBe(revisionByText.get(entry.texts[0] ?? ''));
+    }
+  });
+
   it('coalesces transcript notifications into one render per frame', () => {
     let pendingFrame: FrameRequestCallback | null = null;
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
@@ -234,7 +385,7 @@ describe('useAnimationFrameTranscriptBlocks', () => {
     // session's snapshot.
     expect(renderLog.length).toBeGreaterThan(0);
     for (const entry of renderLog) {
-      expect(entry).toEqual(['b1']);
+      expect(entry.ids).toEqual(['b1']);
     }
     expect(latestBlocks).toEqual([blockB]);
   });
@@ -257,7 +408,7 @@ describe('useAnimationFrameTranscriptBlocks', () => {
     act(() => testStore.resetBlocks());
     act(() => pendingFrame?.(1_000));
 
-    expect(renderLog).not.toContainEqual(['old']);
+    expect(renderLog.some((entry) => entry.ids.includes('old'))).toBe(false);
     expect(latestBlocks).toEqual([]);
   });
 });

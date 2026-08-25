@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
   existsSync,
   rmSync,
@@ -29,8 +30,11 @@ import {
   shellQuote,
   driveCommand,
   DRIVE_SENTINEL,
+  parseCaptureSpecs,
+  extractCaptures,
   type ExecResult,
 } from './drive.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
@@ -87,6 +91,61 @@ function harness(opts: {
     log,
     nextPane: () => pane[Math.min(poll++, pane.length - 1)] ?? '',
   };
+}
+
+/**
+ * The fake tmux lifecycle shared by every test that fakes a drive:
+ * `new-session` writes the drive log, then — unless the run must not
+ * finish — the sentinel file. The protocol (log name, sentinel path,
+ * sentinel line format) lives in ONE place, so a change to it cannot
+ * leave a copy still modelling the old shape while passing.
+ */
+function driveExec(opts: {
+  server: string;
+  logText: string;
+  finish?: boolean;
+}) {
+  const dir = mkdtempSync(join(tmpdir(), 'drv-cap-'));
+  const logPath = join(dir, 'drive.log');
+  const workDir = join(tmpdir(), `qwen-review-drive-${opts.server}`);
+  const exec = (cmd: string, args: string[]): ExecResult => {
+    if (cmd === 'tmux' && args[0] === '-V') return ok();
+    if (cmd === 'tmux' && args[2] === 'new-session') {
+      writeFileSync(logPath, opts.logText);
+      if (opts.finish !== false) {
+        mkdirSync(workDir, { recursive: true });
+        writeFileSync(join(workDir, 'drive.rc'), `${DRIVE_SENTINEL} rc=0\n`);
+      }
+      return ok();
+    }
+    return ok();
+  };
+  return { dir, logPath, workDir, exec };
+}
+
+/** A full runDrive against a faked tmux lifecycle that writes `logText`. */
+function driveWithLog(
+  logText: string,
+  opts: { server: string; capture?: string[]; finish?: boolean },
+) {
+  const { dir, logPath, workDir, exec } = driveExec({
+    server: opts.server,
+    logText,
+    finish: opts.finish,
+  });
+  const report = runDrive({
+    script: 'drive it',
+    cwd: dir,
+    readyTimeout: 1,
+    timeout: opts.finish === false ? 0 : 30,
+    server: opts.server,
+    capture: opts.capture,
+    exec,
+    logPath,
+  });
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(workDir, { recursive: true, force: true });
+  return report;
 }
 
 describe('the sentinel', () => {
@@ -502,6 +561,505 @@ describe('the log cap', () => {
     expect(r.observed).toBe(false);
     expect(r.note).toContain('was stopped');
     expect(poll).toBeLessThan(20); // stopped early, did not sit out the timeout
+  });
+});
+
+describe('--capture', () => {
+  // The address a service BOUND is not the address it was asked for. `qwen
+  // serve` handed a taken port prints `port 8931 is in use, trying 8932...`
+  // and listens on the next one; a caller that keeps addressing 8931 reads a
+  // different, stale process for the rest of the run while the drive completes
+  // and looks clean. These pin the one thing that makes that detectable: the
+  // value in the report came out of this run's own output.
+
+  it('reports the address the service bound, not the one it was asked for', () => {
+    const r = driveWithLog(
+      [
+        'port 8931 is in use, trying 8932...',
+        'qwen serve listening on http://127.0.0.1:8932',
+        'ready',
+      ].join('\n'),
+      {
+        server: 'cap1',
+        capture: ['baseUrl=listening on (http://\\S+)'],
+      },
+    );
+    expect(r.outcome).toBe('completed');
+    expect(r.captured).toEqual({ baseUrl: 'http://127.0.0.1:8932' });
+    // The requested port appears in the log too; the capture must not be it.
+    expect(r.captured?.['baseUrl']).not.toContain('8931');
+  });
+
+  it('reads the UNTRIMMED log, so a value printed at startup survives a noisy run', () => {
+    // `trimCapture` keeps the TAIL, and the line a service prints when it binds
+    // is at the HEAD. Capturing from the report's `output` would lose exactly
+    // the value this flag exists for — on the loudest runs, which are the ones
+    // most likely to need it.
+    const head = 'listening on http://127.0.0.1:8432\n';
+    const r = driveWithLog(head + 'x'.repeat(400_000), {
+      server: 'cap2',
+      capture: ['baseUrl=listening on (http://\\S+)'],
+    });
+    expect(r.truncated).toBe(true);
+    expect(r.output).not.toContain('listening on');
+    expect(r.captured).toEqual({ baseUrl: 'http://127.0.0.1:8432' });
+  });
+
+  it('names an unmatched pattern in the note instead of reporting a blank', () => {
+    // null, never ''. A service that did not print what it was expected to
+    // print is a different fact from one that printed nothing, and the note
+    // has to say WHICH value a witness is about to quote by assumption.
+    const r = driveWithLog('started, but quietly\n', {
+      server: 'cap3',
+      capture: ['baseUrl=listening on (http://\\S+)', 'pid=pid=(\\d+)'],
+    });
+    expect(r.captured).toEqual({ baseUrl: null, pid: null });
+    expect(r.note).toContain('"baseUrl"');
+    expect(r.note).toContain('"pid"');
+    expect(r.note).toContain('addressed by assumption');
+  });
+
+  it('phrases a miss neutrally when the pattern matched but its group did not', () => {
+    // "no output matched" is falsified by a declared group that did not
+    // participate: the pattern's text IS present in the log, and a reader
+    // grepping for it would blame the extraction instead of the pattern.
+    const r = driveWithLog('b\n', {
+      server: 'cap7',
+      capture: ['v=(?:a(x))?b'],
+    });
+    expect(r.captured).toEqual({ v: null });
+    expect(r.note).toContain('produced no value for "v"');
+    expect(r.note).toContain(
+      'the pattern never matched, or its group did not participate',
+    );
+    expect(r.note).not.toContain('no output matched');
+  });
+
+  it('captures on a drive that did NOT finish', () => {
+    // A timed-out drive still bound its port, and that address is often what
+    // explains where the rest of it went.
+    const r = driveWithLog('listening on http://127.0.0.1:9001\n', {
+      server: 'cap4',
+      capture: ['baseUrl=listening on (http://\\S+)'],
+      finish: false,
+    });
+    expect(r.observed).toBe(false);
+    expect(r.captured).toEqual({ baseUrl: 'http://127.0.0.1:9001' });
+  });
+
+  it('omits the field entirely when nothing was asked for', () => {
+    // An empty object would claim a result set; a drive that asked for nothing
+    // has none.
+    const r = driveWithLog('anything\n', { server: 'cap5' });
+    expect(r.captured).toBeUndefined();
+    expect(r.note).not.toContain('--capture');
+  });
+
+  it('refuses a malformed pattern before starting anything', () => {
+    // Discovering it after a 300-second drive costs the drive. `tmux -V` is
+    // the first thing runDrive would otherwise touch, so its absence from the
+    // log is the proof that nothing was started.
+    const seen: string[][] = [];
+    const exec = (cmd: string, args: string[]): ExecResult => {
+      seen.push([cmd, ...args]);
+      return ok();
+    };
+    const r = runDrive({
+      script: 's',
+      cwd: '/tmp',
+      readyTimeout: 1,
+      timeout: 1,
+      server: 'cap6',
+      capture: ['baseUrl=[unclosed'],
+      exec,
+    });
+    expect(r.outcome).toBe('unavailable');
+    expect(r.note).toContain('not a valid regular expression');
+    expect(r.note).toContain('Nothing was started.');
+    expect(seen).toEqual([]);
+  });
+
+  it('rejects the whole set rather than dropping the bad entry', () => {
+    // A silently dropped capture reports the others beside a missing key,
+    // which reads as "the service never printed it" — the one meaning null is
+    // reserved for.
+    const bad = parseCaptureSpecs(['ok=a', '9bad=b']);
+    expect('error' in bad).toBe(true);
+    expect(parseCaptureSpecs(['a=x', 'a=y'])).toHaveProperty('error');
+    expect(parseCaptureSpecs(['noequals'])).toHaveProperty('error');
+    expect(parseCaptureSpecs(['empty='])).toHaveProperty('error');
+    expect(
+      parseCaptureSpecs(Array.from({ length: 9 }, (_, i) => `n${i}=x`)),
+    ).toHaveProperty('error');
+  });
+
+  it('refuses a bare --capture — an empty ask must not pass as no ask', () => {
+    // A bare flag or an empty array expansion parses to [], and without a
+    // rejection the drive runs to its timeout and reports identically to
+    // never having asked — the one malformed shape that would escape the
+    // rejects-rather-than-skips rule.
+    expect(parseCaptureSpecs([])).toHaveProperty('error');
+    expect(parseCaptureSpecs(undefined)).toEqual({ specs: [] });
+  });
+
+  it('holds the length caps at their documented boundary', () => {
+    // "A pattern of 1 to 200 characters" existed only in prose: deleting the
+    // cap check survives the rest of this suite (mutation-verified).
+    expect('specs' in parseCaptureSpecs(['p=' + 'x'.repeat(200)])).toBe(true);
+    expect(parseCaptureSpecs(['p=' + 'x'.repeat(201)])).toHaveProperty('error');
+    expect('specs' in parseCaptureSpecs([`n${'a'.repeat(31)}=x`])).toBe(true);
+    expect(parseCaptureSpecs([`n${'a'.repeat(32)}=x`])).toHaveProperty('error');
+  });
+
+  it('splits on the first = only, so a pattern may hold its own', () => {
+    const parsed = parseCaptureSpecs(['port=listening=(\\d+)']);
+    expect('specs' in parsed).toBe(true);
+    if (!('specs' in parsed)) throw new Error('unreachable');
+    expect(parsed.specs[0].name).toBe('port');
+    expect(parsed.specs[0].re.source).toBe('listening=(\\d+)');
+  });
+
+  it('prefers group 1, falls back to the whole match', () => {
+    const grouped = parseCaptureSpecs(['a=on (\\d+)']);
+    const whole = parseCaptureSpecs(['a=on \\d+']);
+    if (!('specs' in grouped) || !('specs' in whole))
+      throw new Error('unreachable');
+    expect(extractCaptures('on 42', grouped.specs)).toEqual({ a: '42' });
+    expect(extractCaptures('on 42', whole.specs)).toEqual({ a: 'on 42' });
+    expect(extractCaptures('nothing', grouped.specs)).toEqual({ a: null });
+  });
+
+  it('reads the FIRST match when a log holds several', () => {
+    // The sentinel takes the LAST occurrence because its decoys come from the
+    // driven script's own text; the value this flag exists for is printed
+    // once, at startup. Two occurrences are not exotic — a wrapper echoing
+    // the startup line, or a script that restarts the service — and the
+    // last-match mutant passes the rest of this suite (mutation-verified).
+    const parsed = parseCaptureSpecs(['baseUrl=listening on (http://\\S+)']);
+    if (!('specs' in parsed)) throw new Error('unreachable');
+    expect(
+      extractCaptures(
+        'listening on http://127.0.0.1:1\nlistening on http://127.0.0.1:2\n',
+        parsed.specs,
+      ),
+    ).toEqual({ baseUrl: 'http://127.0.0.1:1' });
+  });
+
+  it("keeps an empty group-1 as '' — a printed empty value is a measurement", () => {
+    // The ?? is what distinguishes it from null: the || mutant turns an
+    // empty group-1 into the whole match and passes the rest of this suite
+    // (mutation-verified).
+    const parsed = parseCaptureSpecs(['v=value: (.*)']);
+    if (!('specs' in parsed)) throw new Error('unreachable');
+    expect(extractCaptures('value: ', parsed.specs)).toEqual({ v: '' });
+  });
+
+  it('caps each captured VALUE — the one channel no other cap covers', () => {
+    // Extraction reads the UNTRIMMED log before trimCapture, so one group
+    // could otherwise carry megabytes into the report — written to BOTH
+    // stdout and the --out file — and the brief tells agents to quote
+    // captured values in the witness.
+    const parsed = parseCaptureSpecs(['data=data=(.*)']);
+    if (!('specs' in parsed)) throw new Error('unreachable');
+    const out = extractCaptures(`data=${'d'.repeat(1_000_000)}`, parsed.specs);
+    const v = out['data'] as string;
+    expect(v.length).toBeLessThan(10_000);
+    expect(v.startsWith('d'.repeat(4096))).toBe(true);
+    expect(v).toContain('[truncated, 1000000 characters total]');
+  });
+});
+
+describe('--capture: the invariants the docblocks claim', () => {
+  const specsOf = (entries: string[]) => {
+    const parsed = parseCaptureSpecs(entries);
+    if (!('specs' in parsed))
+      throw new Error(`unexpected error: ${parsed.error}`);
+    return parsed.specs;
+  };
+
+  it('a declared group the match left unfilled is null, not the whole match', () => {
+    // `m[1] ?? m[0]` reads as "group 1, or else the match", and for an OPTIONAL
+    // group that is a silent substitution: the caller asked what `x` matched
+    // and would receive the whole match under the same name, with nothing in
+    // the report saying a different question had been answered.
+    expect(extractCaptures('b', specsOf(['v=(?:a(x))?b']))).toEqual({
+      v: null,
+    });
+    // ...while a pattern that declares NO group still yields the whole match.
+    expect(extractCaptures('b', specsOf(['v=(?:ax)?b']))).toEqual({ v: 'b' });
+  });
+
+  it('keeps an empty capture as "", which is a measurement, not an absence', () => {
+    // The two are different claims and the report must not merge them: `null`
+    // is "nothing was captured", `''` is "the group captured zero characters".
+    expect(extractCaptures('pid=abc', specsOf(['pid=pid=(\\d*)']))).toEqual({
+      pid: '',
+    });
+    expect(extractCaptures('pid=abc', specsOf(['pid=pid=(\\d+)']))).toEqual({
+      pid: null,
+    });
+  });
+
+  it('takes the FIRST match, so a restart later in the log cannot rewrite it', () => {
+    // Every other capture test has exactly one occurrence, where first and last
+    // are the same value — which pins nothing about the rule the docblock
+    // states. This one differs on purpose.
+    const log = [
+      'listening on http://127.0.0.1:8932',
+      'restarting',
+      'listening on http://127.0.0.1:9999',
+    ].join('\n');
+    expect(extractCaptures(log, specsOf(['u=listening on (\\S+)']))).toEqual({
+      u: 'http://127.0.0.1:8932',
+    });
+  });
+
+  it('rejects a pattern past the length cap, not just an empty one', () => {
+    // The cap's lower bound was pinned and its upper bound was not, so the
+    // number could drift to anything without a test noticing.
+    expect(parseCaptureSpecs([`v=${'a'.repeat(200)}`])).toHaveProperty('specs');
+    expect(parseCaptureSpecs([`v=${'a'.repeat(201)}`])).toHaveProperty('error');
+  });
+});
+
+describe('--capture and the head-trim are reconciled in the note', () => {
+  it('says captures survive the trim, for the matched and the missed alike', () => {
+    // Without this the report reads as a self-contradiction: "early output is
+    // missing" sits directly beside a value that came OUT of the missing head,
+    // and beside a null the reader would reasonably blame the trim for.
+    const r = driveWithLog(
+      `listening on http://127.0.0.1:8432\n${'x'.repeat(400_000)}`,
+      {
+        server: 'trim1',
+        capture: ['baseUrl=listening on (\\S+)', 'pid=pid=(\\d+)'],
+      },
+    );
+
+    expect(r.truncated).toBe(true);
+    expect(r.captured).toEqual({
+      baseUrl: 'http://127.0.0.1:8432',
+      pid: null,
+    });
+    // the trim clause, the reconciliation, and the named miss — in that order
+    expect(r.note).toContain('trimmed at the head');
+    expect(r.note).toContain('--capture reads the untrimmed log');
+    expect(r.note).toContain('"pid"');
+    expect(r.note.indexOf('trimmed at the head')).toBeLessThan(
+      r.note.indexOf('--capture reads the untrimmed log'),
+    );
+    expect(r.note.indexOf('--capture reads the untrimmed log')).toBeLessThan(
+      r.note.indexOf('"pid"'),
+    );
+  });
+
+  it('scopes the reconciliation to completed drives', () => {
+    // The clause points at "the head-trim above" — emitted only in the
+    // completed note — and claims "the whole run". An overflowed drive was
+    // stopped at the log cap, so extraction never saw past it and a null
+    // there is NOT a miss against the whole run; the clause must not fire.
+    const r = driveWithLog('x'.repeat(9 * 1024 * 1024), {
+      server: 'trim3',
+      capture: ['baseUrl=listening on (\\S+)'],
+      finish: false,
+    });
+    expect(r.outcome).toBe('overflowed');
+    expect(r.truncated).toBe(true);
+    expect(r.captured).toEqual({ baseUrl: null });
+    expect(r.note).not.toContain('--capture reads the untrimmed log');
+  });
+
+  it('stays silent on a timed-out drive too', () => {
+    // The run had not ended either, so the same two claims do not hold.
+    const r = driveWithLog(
+      `listening on http://127.0.0.1:9001\n${'x'.repeat(400_000)}`,
+      {
+        server: 'trim4',
+        capture: ['baseUrl=listening on (\\S+)'],
+        finish: false,
+      },
+    );
+    expect(r.outcome).toBe('timed-out');
+    expect(r.truncated).toBe(true);
+    expect(r.note).not.toContain('--capture reads the untrimmed log');
+  });
+
+  it('adds no reconciliation when nothing was trimmed', () => {
+    // The clause is scoped to the case it explains; a short log gets no
+    // sentence about a trim that did not happen.
+    const r = runDrive({
+      script: 's',
+      cwd: '/tmp',
+      readyTimeout: 1,
+      timeout: 0,
+      server: 'trim2',
+      capture: ['v=nope'],
+      exec: harness({}).exec,
+    });
+    expect(r.truncated).toBe(false);
+    expect(r.note).not.toContain('--capture reads the untrimmed log');
+  });
+});
+
+describe("the verify brief's bound-address recipe actually captures", () => {
+  // The recipe is what agents copy, and a recipe that cannot work is worse
+  // than none: measured on the first version of it, the service was redirected
+  // to a file of its own, so `captured.baseUrl` came back null on every
+  // faithful run while the miss note said the value "was never measured".
+  //
+  // So this runs the brief's OWN text rather than a retyped copy — the script
+  // body and the capture pattern are both extracted from it — under the same
+  // redirect contract runDrive imposes (`bash <script> > <log> 2>&1`). No tmux
+  // is involved: what broke was the shell, and the shell is what this drives.
+  const briefText = () =>
+    Object.values(BRIEFS.verify)
+      .filter((v): v is string => typeof v === 'string')
+      .join('\n\n');
+
+  const recipe = () => {
+    const text = briefText();
+    const start = text.indexOf("--capture 'baseUrl=");
+    expect(start).toBeGreaterThan(-1);
+    const fence = text.indexOf('```', start);
+    const body = text.slice(text.lastIndexOf('```bash', start), fence);
+    const pattern = /--capture '([^']+)'/.exec(body)?.[1];
+    const script = /--script '([\s\S]*?)'\s*$/m.exec(body)?.[1];
+    // If either is missing the brief no longer teaches the recipe at all,
+    // which is a change this test exists to make somebody notice.
+    expect(pattern).toBeTruthy();
+    expect(script).toBeTruthy();
+    return { pattern: pattern as string, script: script as string };
+  };
+
+  const have = (bin: string) =>
+    spawnSync('sh', ['-lc', `command -v ${bin}`]).status === 0;
+
+  it.skipIf(!have('curl') || !have('mktemp'))(
+    "puts the service's own address in the drive log, not the response body",
+    async () => {
+      const { pattern, script } = recipe();
+      const dir = mkdtempSync(join(tmpdir(), 'drv-recipe-'));
+      // A service whose RESPONSE BODY also carries a listening-on line: if the
+      // capture came from the request rather than the service, this is the
+      // address it would report, and the assertion below would catch it.
+      const svc = join(dir, 'svc.mjs');
+      writeFileSync(
+        svc,
+        [
+          "import http from 'node:http';",
+          "const s=http.createServer((_q,r)=>{r.writeHead(200);r.end('listening on http://127.0.0.1:59999\\n')});",
+          "s.listen(0,'127.0.0.1',()=>console.log(`svc listening on http://127.0.0.1:${s.address().port}`));",
+          'setTimeout(()=>process.exit(0),5000);',
+        ].join('\n'),
+      );
+
+      const filled = script
+        .replace(
+          '<start the service; --port 0 wherever it allows one>',
+          `${JSON.stringify(process.execPath)} ${JSON.stringify(svc)}`,
+        )
+        .replace('<the endpoint the claim is about>', 'whatever');
+      const scriptPath = join(dir, 'recipe.sh');
+      writeFileSync(scriptPath, filled);
+      const logPath = join(dir, 'drive.log');
+
+      // Exactly what runDrive does with the script it is given.
+      const ran = spawnSync(
+        'bash',
+        ['-lc', `bash ${shellQuote(scriptPath)} > ${shellQuote(logPath)} 2>&1`],
+        { cwd: dir, timeout: 30_000, encoding: 'utf8' },
+      );
+      // Thrown rather than asserted so the shell's own stderr reaches the
+      // failure message — a recipe that dies takes its reason with it.
+      if (ran.status !== 0) {
+        throw new Error(`the recipe exited ${ran.status}: ${ran.stderr}`);
+      }
+
+      // `pattern` already carries its `name=` prefix, straight from the brief.
+      const parsed = parseCaptureSpecs([pattern]);
+      if (!('specs' in parsed)) throw new Error(parsed.error);
+      const captured = extractCaptures(
+        readFileSync(logPath, 'utf8'),
+        parsed.specs,
+      );
+
+      // The whole point: a value, and the SERVICE's value.
+      expect(captured['baseUrl']).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(captured['baseUrl']).not.toContain('59999');
+      // ...and the recipe left nothing behind in the working directory.
+      expect(
+        readdirSync(dir).filter((f) => f.endsWith('.log') && f !== 'drive.log'),
+      ).toEqual([]);
+
+      // On Windows the backgrounded service keeps the working directory
+      // busy (EBUSY) until its self-exit timer fires; retry the removal
+      // until the handle is released.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+          break;
+        } catch (error) {
+          if (attempt >= 40) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
+    },
+  );
+});
+
+describe('--capture reaches runDrive through the real CLI seam', () => {
+  // The handler casts `argv as unknown as DriveArgs`, which type-checks
+  // whatever the option is called. Rename `DriveArgs.capture` — or the yargs
+  // option — and `--capture` silently stops working end to end while every
+  // runDrive test above stays green and tsc exits 0. This drives the real
+  // builder with a real flag string and asserts the value lands in the report
+  // the handler prints.
+  it('parses the flag and the captured value reaches the printed report', async () => {
+    const { default: yargs } = await import('yargs');
+    const { dir, logPath, workDir, exec } = driveExec({
+      server: 'seam1',
+      logText: 'listening on http://127.0.0.1:8932\n',
+    });
+
+    const argv = (
+      yargs([
+        'drive',
+        '--script',
+        'true',
+        '--cwd',
+        dir,
+        '--server',
+        'seam1',
+        '--capture',
+        'baseUrl=listening on (\\S+)',
+      ]).command({
+        ...driveCommand,
+        handler: () => {},
+      }) as unknown as { parseSync: () => Record<string, unknown> }
+    ).parseSync();
+
+    // The flag string reached the option name the handler reads.
+    expect(argv['capture']).toEqual(['baseUrl=listening on (\\S+)']);
+
+    vi.mocked(writeStdoutLine).mockClear();
+    const originalExit = process.exitCode;
+    try {
+      (driveCommand.handler as (a: unknown) => void)({
+        ...argv,
+        readyTimeout: 1,
+        timeout: 30,
+        exec,
+        logPath,
+      });
+    } finally {
+      process.exitCode = originalExit;
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(workDir, { recursive: true, force: true });
+    }
+
+    const printed = vi.mocked(writeStdoutLine).mock.calls.at(-1)?.[0] as string;
+    expect(JSON.parse(printed).captured).toEqual({
+      baseUrl: 'http://127.0.0.1:8932',
+    });
   });
 });
 

@@ -46,6 +46,9 @@ import type {
   ExtensionArchiveInstallRequest,
   ExtensionInstallResponse,
   ExtensionUpdateCheckResponse,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
@@ -278,6 +281,8 @@ export interface DaemonCreateScheduledTaskRequest {
   recurring?: boolean;
   /** Defaults to true. */
   enabled?: boolean;
+  /** Reuse an existing live, idle session instead of creating one. */
+  sessionId?: string | null;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are
@@ -320,6 +325,8 @@ export interface DaemonGoal {
    * the loop working, but a manual prompt in the same session sets it too.
    */
   hasActivePrompt: boolean;
+  /** Canonical lifecycle state; UI controls must use its goalId/revision. */
+  snapshot: GoalSnapshotV2;
 }
 
 /** The `GET /goals` payload. */
@@ -557,8 +564,12 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonScheduledTask>;
   deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
 
-  // Goals (session-scoped Stop hooks, listed workspace-wide)
+  // Goals (session-scoped runtimes, listed workspace-wide)
   listGoals(): Promise<DaemonGoalList>;
+  controlGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+  ): Promise<GoalStateResponse>;
   /** Drop a session's goal hook. No-op when that session has no active goal. */
   clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 

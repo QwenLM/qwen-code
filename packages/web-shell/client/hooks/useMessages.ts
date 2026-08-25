@@ -4,6 +4,7 @@ import {
   isSessionLevelNotFound,
   isSubagentSessionNotFound,
   type DaemonTranscriptBlock,
+  type DaemonTranscriptBlockChangeSummary,
 } from '@qwen-code/sdk/daemon';
 import {
   useConnection,
@@ -35,12 +36,25 @@ const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
 // registration. Require repeated misses before treating the agent as gone.
 const MISSING_BACKGROUND_AGENT_GRACE_MISSES = 2;
 // Insight JSON can split one growing text block into multiple projected
-// messages, so prefix identity reuse is unsafe once its marker appears.
+// messages, so the tail needs a full projection once its marker appears.
 const INSIGHT_CONTENT_MARKER = '"insight_';
+
+interface MessageProjection {
+  blocks: readonly DaemonTranscriptBlock[];
+  messages: Message[];
+  t: Translator;
+  blockChangeSummary?: DaemonTranscriptBlockChangeSummary;
+}
 
 export interface BackgroundAgentResolution {
   status: string;
   durationMs?: number;
+}
+
+interface CommittedMessageProjection extends MessageProjection {
+  connectionSessionId?: string;
+  resolutionSessionId?: string;
+  resolutions?: ReadonlyMap<string, BackgroundAgentResolution>;
 }
 
 interface ReconciliationRound {
@@ -65,13 +79,7 @@ export function transcriptBlocksToLocalizedMessages(
 }
 
 function reuseUnchangedProjectedPrefix(
-  previous:
-    | {
-        blocks: readonly DaemonTranscriptBlock[];
-        messages: Message[];
-        t: Translator;
-      }
-    | undefined,
+  previous: MessageProjection | undefined,
   blocks: readonly DaemonTranscriptBlock[],
   messages: Message[],
   t: Translator,
@@ -135,6 +143,108 @@ function reuseUnchangedProjectedPrefix(
     result[i] = previous.messages[i];
   }
   return result;
+}
+
+export function projectStreamingTailMessages(
+  previous: MessageProjection | undefined,
+  blocks: readonly DaemonTranscriptBlock[],
+  t: Translator,
+  blockChangeSummary?: DaemonTranscriptBlockChangeSummary,
+): Message[] | undefined {
+  if (
+    !previous ||
+    previous.t !== t ||
+    previous.blocks.length !== blocks.length ||
+    blocks.length === 0 ||
+    previous.messages.length === 0
+  ) {
+    return undefined;
+  }
+
+  const previousSummary = previous.blockChangeSummary;
+  let summaryProvesTailAppend = false;
+  if (previousSummary && blockChangeSummary) {
+    if (
+      blockChangeSummary.source !== previousSummary.source ||
+      blockChangeSummary.revision <= previousSummary.revision ||
+      blockChangeSummary.tailAppendBarrierRevision !==
+        previousSummary.tailAppendBarrierRevision
+    ) {
+      return undefined;
+    }
+    summaryProvesTailAppend = true;
+  } else {
+    for (let i = 0; i < blocks.length - 1; i += 1) {
+      if (previous.blocks[i] !== blocks[i]) return undefined;
+    }
+  }
+
+  const before = previous.blocks[blocks.length - 1];
+  const after = blocks[blocks.length - 1];
+  const previousTail = previous.messages[previous.messages.length - 1];
+  if (
+    (before.kind !== 'assistant' && before.kind !== 'thought') ||
+    after.kind !== before.kind ||
+    before.id !== after.id ||
+    (blockChangeSummary !== undefined &&
+      after.id !== blockChangeSummary.tailBlockId) ||
+    before.streaming !== true ||
+    after.streaming !== true ||
+    before.parentToolCallId !== undefined ||
+    after.parentToolCallId !== undefined ||
+    before.meta !== after.meta ||
+    before.usage !== after.usage ||
+    before.branchRecordId !== after.branchRecordId ||
+    before.clientReceivedAt !== after.clientReceivedAt ||
+    before.promptId !== after.promptId ||
+    before.sourceRecordIds !== after.sourceRecordIds ||
+    typeof before.text !== 'string' ||
+    typeof after.text !== 'string' ||
+    after.text.length < before.text.length ||
+    (!summaryProvesTailAppend && !after.text.startsWith(before.text))
+  ) {
+    return undefined;
+  }
+
+  if (after.text.includes(INSIGHT_CONTENT_MARKER)) {
+    const tailPrefix = `${before.id}-`;
+    const firstTailMessageIndex = previous.messages.findIndex(
+      (message) =>
+        message.id === before.id || message.id.startsWith(tailPrefix),
+    );
+    if (firstTailMessageIndex < 0) return undefined;
+    const messages = transcriptBlocksToLocalizedMessages(blocks, t);
+    for (let i = 0; i < firstTailMessageIndex; i += 1) {
+      if (
+        messages[i]?.id !== previous.messages[i]?.id ||
+        messages[i]?.role !== previous.messages[i]?.role
+      ) {
+        break;
+      }
+      messages[i] = previous.messages[i];
+    }
+    return messages;
+  }
+
+  if (
+    (previousTail.role !== 'assistant' && previousTail.role !== 'thinking') ||
+    previousTail.isStreaming !== true ||
+    (after.kind === 'assistant') !== (previousTail.role === 'assistant')
+  ) {
+    return undefined;
+  }
+
+  const messages = previous.messages.slice();
+  const appendedText = after.text.slice(before.text.length);
+  messages[messages.length - 1] = {
+    ...previousTail,
+    content: previousTail.content + appendedText,
+    isStreaming: true,
+    ...(previousTail.id === after.id
+      ? { timestamp: after.serverTimestamp ?? after.clientReceivedAt }
+      : {}),
+  };
+  return messages;
 }
 
 function isTerminalBackgroundAgentStatus(status: string): boolean {
@@ -286,35 +396,50 @@ export function reconcileBackgroundAgentResolutions(
 export function useMessagesFromBlocks(
   t: Translator,
   blocks: readonly DaemonTranscriptBlock[],
+  blockChangeSummary?: DaemonTranscriptBlockChangeSummary,
 ): Message[] {
   const workspace = useWorkspace();
   const connection = useConnection();
-  const previousProjectionRef = useRef<
-    | {
-        blocks: readonly DaemonTranscriptBlock[];
-        messages: Message[];
-        t: Translator;
-      }
-    | undefined
-  >(undefined);
-  const messages = useMemo(
-    () =>
-      reuseUnchangedProjectedPrefix(
-        previousProjectionRef.current,
-        blocks,
-        transcriptBlocksToLocalizedMessages(blocks, t),
-        t,
-      ),
-    [blocks, t],
-  );
-  useLayoutEffect(() => {
-    previousProjectionRef.current = { blocks, messages, t };
-  }, [blocks, messages, t]);
   const [resolutionSnapshot, setResolutionSnapshot] = useState<{
     sessionId: string;
     resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
   }>();
+  const previousProjectionRef = useRef<CommittedMessageProjection | undefined>(
+    undefined,
+  );
+  const projection = useMemo(() => {
+    const previous = previousProjectionRef.current;
+    const streamingTailMessages = projectStreamingTailMessages(
+      previous,
+      blocks,
+      t,
+      blockChangeSummary,
+    );
+    return {
+      previous,
+      reusedStreamingTail: streamingTailMessages !== undefined,
+      messages:
+        streamingTailMessages ??
+        reuseUnchangedProjectedPrefix(
+          previous?.resolutions === undefined ? previous : undefined,
+          blocks,
+          transcriptBlocksToLocalizedMessages(blocks, t),
+          t,
+        ),
+    };
+  }, [blockChangeSummary, blocks, t]);
+  const messages = projection.messages;
   const reconciledMessages = useMemo(() => {
+    const previous = projection.previous;
+    if (
+      projection.reusedStreamingTail &&
+      previous !== undefined &&
+      previous.connectionSessionId === connection.sessionId &&
+      previous.resolutionSessionId === resolutionSnapshot?.sessionId &&
+      previous.resolutions === resolutionSnapshot?.resolutions
+    ) {
+      return messages;
+    }
     if (
       !resolutionSnapshot ||
       resolutionSnapshot.sessionId !== connection.sessionId
@@ -325,22 +450,74 @@ export function useMessagesFromBlocks(
       messages,
       resolutionSnapshot.resolutions,
     );
-  }, [connection.sessionId, messages, resolutionSnapshot]);
-  const pendingBackgroundAgentKey = useMemo(
-    () => getPendingBackgroundAgentKey(reconciledMessages),
-    [reconciledMessages],
-  );
-  // A stable primitive key for the effect dependency: the Set's identity
-  // changes on every transcript delta, which would re-run the reconciliation
-  // effect on each streamed update and defeat the retry backoff.
-  const pendingPermissionKey = useMemo(
-    () => [...getPendingPermissionCallIds(blocks)].sort().join('|'),
-    [blocks],
-  );
-  const backgroundAgentNotificationKey = useMemo(
-    () => getBackgroundAgentNotificationKey(blocks),
-    [blocks],
-  );
+  }, [connection.sessionId, messages, projection, resolutionSnapshot]);
+  useLayoutEffect(() => {
+    previousProjectionRef.current = {
+      blocks,
+      messages: reconciledMessages,
+      t,
+      blockChangeSummary,
+      connectionSessionId: connection.sessionId,
+      resolutionSessionId: resolutionSnapshot?.sessionId,
+      resolutions: resolutionSnapshot?.resolutions,
+    };
+  }, [
+    blockChangeSummary,
+    blocks,
+    connection.sessionId,
+    reconciledMessages,
+    resolutionSnapshot,
+    t,
+  ]);
+  const reconciliationKeysRef = useRef<
+    | {
+        source?: object;
+        barrierRevision?: number;
+        connectionSessionId?: string;
+        resolutionSessionId?: string;
+        resolutions?: ReadonlyMap<string, BackgroundAgentResolution>;
+        pendingBackgroundAgentKey: string;
+        pendingPermissionKey: string;
+        backgroundAgentNotificationKey: string;
+      }
+    | undefined
+  >(undefined);
+  const cachedReconciliationKeys = reconciliationKeysRef.current;
+  const canReuseReconciliationKeys =
+    blockChangeSummary !== undefined &&
+    cachedReconciliationKeys !== undefined &&
+    cachedReconciliationKeys.source === blockChangeSummary.source &&
+    cachedReconciliationKeys.barrierRevision ===
+      blockChangeSummary.tailAppendBarrierRevision &&
+    cachedReconciliationKeys.connectionSessionId === connection.sessionId &&
+    cachedReconciliationKeys.resolutionSessionId ===
+      resolutionSnapshot?.sessionId &&
+    cachedReconciliationKeys.resolutions === resolutionSnapshot?.resolutions;
+  const reconciliationKeys =
+    canReuseReconciliationKeys && cachedReconciliationKeys
+      ? cachedReconciliationKeys
+      : {
+          source: blockChangeSummary?.source,
+          barrierRevision: blockChangeSummary?.tailAppendBarrierRevision,
+          connectionSessionId: connection.sessionId,
+          resolutionSessionId: resolutionSnapshot?.sessionId,
+          resolutions: resolutionSnapshot?.resolutions,
+          pendingBackgroundAgentKey:
+            getPendingBackgroundAgentKey(reconciledMessages),
+          pendingPermissionKey: [...getPendingPermissionCallIds(blocks)]
+            .sort()
+            .join('|'),
+          backgroundAgentNotificationKey:
+            getBackgroundAgentNotificationKey(blocks),
+        };
+  useLayoutEffect(() => {
+    reconciliationKeysRef.current = reconciliationKeys;
+  });
+  const {
+    pendingBackgroundAgentKey,
+    pendingPermissionKey,
+    backgroundAgentNotificationKey,
+  } = reconciliationKeys;
   const [reconciliationAttempt, setReconciliationAttempt] = useState(0);
   const reconciliationRequestRef = useRef<
     | {

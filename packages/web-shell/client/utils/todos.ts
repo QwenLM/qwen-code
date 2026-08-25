@@ -3,8 +3,8 @@ import type {
   Message,
   PermissionRequest,
   TodoItem,
-} from '../adapters/types';
-import { isSubAgentToolCall } from '../adapters/toolClassification';
+} from '../adapters/types.js';
+import { isSubAgentToolCall } from '../adapters/toolClassification.js';
 
 /**
  * The todo tool is registered as `todo_write` on the wire, but older paths and
@@ -253,6 +253,8 @@ interface TodoSnapshot {
   todos: TodoItem[];
   /** Cumulative-usage baseline the agent stamped on this snapshot, if any. */
   stats?: TodoStatsSnapshot;
+  /** Per-tool boundary time; one merged group may contain several snapshots. */
+  timestamp?: number;
 }
 
 /**
@@ -290,7 +292,9 @@ export function todoStateKey(todo: TodoItem): string {
  */
 function todoSnapshotsOf(message: Message): TodoSnapshot[] {
   if (message.role === 'plan') {
-    return [{ key: message.id, todos: message.todos }];
+    return [
+      { key: message.id, todos: message.todos, timestamp: message.timestamp },
+    ];
   }
   if (message.role === 'tool_group') {
     const snapshots: TodoSnapshot[] = [];
@@ -301,6 +305,7 @@ function todoSnapshotsOf(message: Message): TodoSnapshot[] {
           key: tool.callId,
           todos,
           stats: extractTodoStats(tool),
+          timestamp: tool.endTime ?? tool.startTime ?? message.timestamp,
         });
       }
     }
@@ -377,31 +382,29 @@ export function todoTimelineSignature(messages: readonly Message[]): string {
 
 /**
  * Like {@link todoTimelineSignature} but folds in everything
- * {@link computeTodoDetails} reads beyond item status: each snapshot's message
- * timestamp and stamped stats, plus every non-todo tool span (whose durations
- * feed tool time). App memoizes the detail map on this so the TodoDetailContext
- * value stays referentially stable across streaming ticks that touch none of it.
+ * {@link computeTodoDetails} reads beyond item status: each snapshot's boundary
+ * timestamp and stamped stats, plus every tool span (non-todo spans feed tool
+ * time; todo spans supply snapshot boundaries). App memoizes the detail map on
+ * this so the TodoDetailContext value stays referentially stable across
+ * streaming ticks that touch none of it.
  */
 export function todoDetailSignature(messages: readonly Message[]): string {
   const parts: string[] = [];
   for (const message of messages) {
     if (message.role === 'tool_group') {
       for (const tool of message.tools) {
-        if (
-          !isTodoWriteToolName(tool.toolName) &&
-          (tool.startTime !== undefined || tool.endTime !== undefined)
-        ) {
+        if (tool.startTime !== undefined || tool.endTime !== undefined) {
           parts.push(
             JSON.stringify(['span', tool.callId, tool.startTime, tool.endTime]),
           );
         }
       }
     }
-    for (const { key, todos, stats } of todoSnapshotsOf(message)) {
+    for (const { key, todos, stats, timestamp } of todoSnapshotsOf(message)) {
       parts.push(
         JSON.stringify([
           key,
-          message.timestamp,
+          timestamp,
           todos.map((t) => [t.id, t.status, t.content]),
           stats,
         ]),
@@ -662,8 +665,7 @@ export function computeTodoDetails(
   };
 
   for (const message of messages) {
-    const ts = message.timestamp;
-    for (const { todos, stats } of todoSnapshotsOf(message)) {
+    for (const { todos, stats, timestamp: ts } of todoSnapshotsOf(message)) {
       for (const todo of todos) {
         const stateKey = todoStateKey(todo);
         const prev = lastStatus.get(stateKey);

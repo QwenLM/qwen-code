@@ -69,6 +69,15 @@ export const TURN_OUTPUT_KINDS: readonly TurnOutputKind[] = [
   'scheduled_task',
 ];
 
+export const TURN_OUTPUT_VISIBLE_LIMIT = 3;
+
+export function visibleTurnOutputs<T>(
+  items: readonly T[],
+  expanded: boolean,
+): readonly T[] {
+  return expanded ? items : items.slice(0, TURN_OUTPUT_VISIBLE_LIMIT);
+}
+
 export type TurnOutputOpenRequest = (
   | {
       id: 'review';
@@ -87,6 +96,17 @@ export type TurnOutputOpenRequest = (
       turnId: string;
       src: string;
       alt?: string;
+    }
+  | {
+      id: string;
+      kind: 'attachment';
+      title: string;
+      turnId: string;
+      mimeType?: string;
+      data?: Blob;
+      text?: string;
+      workspacePath?: string;
+      workspaceCwd?: string;
     }
   | {
       id: string;
@@ -159,6 +179,7 @@ function TurnOutputsComponent({
   const [showAllChanges, setShowAllChanges] = useState(false);
   const [sharedArtifact, setSharedArtifact] =
     useState<DaemonSessionArtifact | null>(null);
+  const [showAllArtifacts, setShowAllArtifacts] = useState(false);
   if (
     changes.length === 0 &&
     artifacts.length === 0 &&
@@ -166,8 +187,10 @@ function TurnOutputsComponent({
   ) {
     return null;
   }
-  const visibleChanges = showAllChanges ? changes : changes.slice(0, 3);
-  const remainingChanges = changes.length - 3;
+  const visibleChanges = visibleTurnOutputs(changes, showAllChanges);
+  const remainingChanges = changes.length - TURN_OUTPUT_VISIBLE_LIMIT;
+  const visibleArtifacts = visibleTurnOutputs(artifacts, showAllArtifacts);
+  const remainingArtifacts = artifacts.length - TURN_OUTPUT_VISIBLE_LIMIT;
   const totals = sumLineStats(changes);
   const openReview = (selectedPath?: string) => {
     if (onOpenRequest) {
@@ -347,7 +370,7 @@ function TurnOutputsComponent({
         </div>
       )}
 
-      {artifacts.map((artifact) => (
+      {visibleArtifacts.map((artifact) => (
         <ArtifactCard
           key={artifact.id}
           artifact={artifact}
@@ -377,6 +400,22 @@ function TurnOutputsComponent({
           }
         />
       ))}
+      {remainingArtifacts > 0 && (
+        <button
+          type="button"
+          className={styles.showMoreButton}
+          onClick={() => setShowAllArtifacts((value) => !value)}
+        >
+          <span>
+            {showAllArtifacts
+              ? t('turnOutputs.collapseArtifacts')
+              : t('turnOutputs.showMoreArtifacts', {
+                  count: remainingArtifacts,
+                })}
+          </span>
+          <ChevronIcon open={showAllArtifacts} />
+        </button>
+      )}
 
       {scheduledTasks.map((task) => (
         <ScheduledTaskCard
@@ -514,6 +553,7 @@ const ARTIFACT_FORMAT_ICONS: Readonly<Record<string, LucideIcon>> = {
   audio: FileAudioIcon,
   pdf: FileTextIcon,
   notebook: NotebookTabsIcon,
+  document: FileTextIcon,
 };
 
 export function getArtifactFormatIcon(kind: string): LucideIcon | undefined {
