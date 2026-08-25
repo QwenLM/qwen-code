@@ -773,18 +773,23 @@ describe('renderMechanismHealth — is the machinery working', () => {
     })!;
     expect(r.en).toContain('re-reads the whole diff');
     expect(r.zh).toContain('重读整个 diff');
-    // The clause splits the two shapes that fire it: a recovered round with
-    // no anchor at all, and one whose side file holds a GRAFTED anchor the
-    // running identity cannot use. The split is load-bearing: before it, the
-    // wording said the recovered round "had none either" — false beside a
-    // side file that visibly holds the sha, and pointing away from the
-    // actual cause (identity mismatch).
+    // The clause splits the shapes that fire it: a recovered round with no
+    // anchor at all, one whose side file holds a GRAFTED anchor the running
+    // identity cannot use, and one whose graft the running round's fetch
+    // refused or resolved to the head. The split is load-bearing: before it,
+    // the wording said the recovered round "had none either" — false beside
+    // a side file that visibly holds the sha, and pointing away from the
+    // actual cause (identity mismatch, or a deterministic refusal the graft
+    // re-derives every round).
     expect(r.en).toContain(
-      'none at all, one with no certifier, or one certified by an identity other than',
+      'none at all, one with no certifier, one certified by an identity other than',
+    );
+    expect(r.en).toContain(
+      "or one this round's fetch refused or resolved to the head",
     );
     expect(r.en).not.toContain('had none either');
     expect(r.zh).toContain(
-      '要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证',
+      '要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证、要么被本轮的获取拒绝或解析为头提交',
     );
     // The termination condition is "an anchor again", not "a clean close":
     // the marker also withholds on a missing fetched sha and on a model
@@ -794,16 +799,27 @@ describe('renderMechanismHealth — is the machinery working', () => {
     // as "until one closes cleanly", which an exact-string pin missed.
     expect(r.en).not.toMatch(/until (a round|one) closes cleanly/);
     expect(r.zh).toContain('直到某一轮的标记重新带上锚点');
-    // The termination list names BOTH exits: a round whose own marker
-    // carries an anchor again, and the graft — recovery carrying an
-    // earlier own anchor onto a complete work list ends the full-range
-    // streak one round later with NO marker carrying an anchor. Before the
-    // clause, the disclosure predicted an endless re-read on exactly the
-    // large-PR shapes the graft exists for.
+    // The onset is hedged: a fail-closed round that leaves a COMPLETE work
+    // list beside a strictly-earlier anchored own marker is grafted onto
+    // one round later, so "the next review re-reads the whole diff" is
+    // false there and the wording says so.
     expect(r.en).toContain(
-      'or recovery grafts an earlier own anchor onto a complete work list',
+      'unless recovery grafts an earlier own anchor onto the complete work list this round leaves behind',
     );
-    expect(r.zh).toContain('或恢复流程把更早的自有锚点嫁接到完整的工作清单上');
+    expect(r.zh).toContain(
+      '除非恢复流程把更早的自有锚点嫁接到本轮留下的完整工作清单上',
+    );
+    // The termination list names BOTH exits: a round whose own marker
+    // carries an anchor again, and a USABLE graft — a grafted anchor whose
+    // certifier mismatches the round running it (or whose fetch refuses it)
+    // re-fires every round without ending the streak, so the exit is a
+    // graft the running round can use, not any graft. Before the clause,
+    // the disclosure predicted an endless re-read on exactly the large-PR
+    // shapes the graft exists for.
+    expect(r.en).toContain(
+      'or a graft lands that the round running it can use',
+    );
+    expect(r.zh).toContain('或落地的嫁接能被运行该轮的评审使用');
     // The design once prescribed a re-anchor round here; the measurements
     // did not bear out its premise, so the shape is disclosed and nothing
     // is recommended.
@@ -1015,6 +1031,24 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.en).toContain('already resolve to a critical posting floor');
     expect(r.en).not.toContain('--severity-floor critical');
     expect(r.zh).toContain('已解析为 critical 发布下限');
+  });
+
+  it('names a signal-engaged floor with the reason it engaged early', () => {
+    // The trigger engages ahead of the round-6 schedule (#9903); an
+    // "already at the floor" sentence that does not say WHY reads as an
+    // unexplained posture change — the exact defect this wording exists
+    // for. It must also hold back the floor rung, exactly as the
+    // round-6 kind does: recommending a posture the round is already
+    // running under.
+    const r = renderConvergenceDiagnosis({
+      ...base,
+      clusters: [],
+      criticalFloorKind: 'auto-signaled',
+    });
+    expect(r.en).toContain('already engage the critical posting floor');
+    expect(r.en).toContain('resolved early');
+    expect(r.en).not.toContain('--severity-floor critical');
+    expect(r.zh).toContain('提前生效');
   });
 
   it('reports both readings when both signals fired', () => {

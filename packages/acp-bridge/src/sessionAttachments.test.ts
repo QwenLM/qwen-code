@@ -763,6 +763,64 @@ describe('SessionAttachmentStore', () => {
     }
   });
 
+  it('checks the runtime generation before deleting persisted attachments', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachment-fence-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session-a');
+    const reference = await store.putAttachment(
+      Uint8Array.of(1),
+      'application/octet-stream',
+      'kept.bin',
+    );
+    const generationClosed = new Error('generation closed');
+
+    await expect(
+      store.delete({
+        assertCanCommit: () => {
+          throw generationClosed;
+        },
+      }),
+    ).rejects.toBe(generationClosed);
+    await expect(
+      fs.stat(path.join(root, 'session-session-a', reference.attachmentId)),
+    ).resolves.toBeDefined();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  it('deletes a claimed tombstone without touching a successor directory', async () => {
+    const root = await fs.mkdtemp(
+      path.join(tmpdir(), 'qwen-attachment-successor-'),
+    );
+    const store = new SessionAttachmentStore(root, 'session-a');
+    const reference = await store.putAttachment(
+      Uint8Array.of(1),
+      'application/octet-stream',
+      'old.bin',
+    );
+    const directory = path.join(root, 'session-session-a');
+    const remove = fs.rm.bind(fs);
+    const rmSpy = vi.spyOn(fs, 'rm').mockImplementationOnce(async (target) => {
+      expect(target).not.toBe(directory);
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, 'new.bin'), Uint8Array.of(2));
+      await remove(target, { recursive: true, force: true });
+    });
+
+    try {
+      await store.delete();
+      await expect(
+        fs.stat(path.join(directory, 'new.bin')),
+      ).resolves.toBeDefined();
+      await expect(
+        fs.stat(path.join(directory, reference.attachmentId)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      rmSpy.mockRestore();
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('forgets attachments whose backing file disappeared', async () => {
     const root = await fs.mkdtemp(path.join(tmpdir(), 'qwen-attachment-gone-'));
     const store = new SessionAttachmentStore(root, 'session-a');

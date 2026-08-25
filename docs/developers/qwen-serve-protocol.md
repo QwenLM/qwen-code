@@ -256,7 +256,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_organization` advertises custom session groups and pinning. It adds `GET/POST/PATCH/DELETE /workspace/:id/session-groups`, `PATCH /session/:id/organization`, and the opt-in organized list view `GET /workspace/:id/sessions?view=organized`. When both `session_organization` and `workspace_qualified_rest_core` are advertised, the workspace-qualified organization mutation `PATCH /workspaces/:workspace/session/:id/organization` is also available. The legacy mutation remains primary-workspace-only. Older daemons return `404` for the mutation/group routes and ignore the organized view contract, so WebShell/SDK clients must pre-flight these tags before showing the matching grouping or pinning UI.
 
-`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
+`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived. `session_storage_conflict_repair` advertises the additive `resolveConflicts` request option and `resolvedConflicts` response bucket described below.
 
 `workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability explicitly defines a narrower read-only policy, such as `workspace_persisted_transcript`. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
 
@@ -2434,7 +2434,7 @@ Archive one or more sessions. Archive is a state transition, not deletion: the J
 Request:
 
 ```json
-{ "sessionIds": ["<uuid>"] }
+{ "sessionIds": ["<uuid>"], "resolveConflicts": true }
 ```
 
 `sessionIds` must be a non-empty string array with at most 100 ids. Duplicates are collapsed.
@@ -2445,12 +2445,15 @@ Response:
 {
   "archived": ["<uuid>"],
   "alreadyArchived": [],
+  "resolvedConflicts": ["<uuid>"],
   "notFound": [],
   "errors": []
 }
 ```
 
-`errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`. Active and archived files with the same id are treated as a conflict and reported in `errors`; no file is overwritten.
+`resolveConflicts` is optional and defaults to `false`. By default, active and archived files with the same id are reported in `errors`, and neither copy is moved, removed, or overwritten. Archiving a live session still performs the strict close described above before classifying the conflict, so that close may flush queued records to the active transcript. With `resolveConflicts: true`, archive keeps the archived copy, removes the active copy, and reports the id in both `archived` and `resolvedConflicts`. `errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`.
+
+Lifecycle conflicts are batch item outcomes: the workspace-less and workspace-qualified routes return HTTP `200` with the conflict in `errors`. This replaces the earlier workspace-qualified HTTP `409 session_conflict` envelope; clients that called that route must inspect the batch response. Internal-runtime REST batches preserve the safe conflict message while continuing to redact other per-session failure details.
 
 ### `POST /sessions/unarchive`
 
@@ -2459,7 +2462,7 @@ Restore archived sessions to the active directory. This does not resume the sess
 Request:
 
 ```json
-{ "sessionIds": ["<uuid>"] }
+{ "sessionIds": ["<uuid>"], "resolveConflicts": true }
 ```
 
 Response:
@@ -2468,12 +2471,13 @@ Response:
 {
   "unarchived": ["<uuid>"],
   "alreadyActive": [],
+  "resolvedConflicts": ["<uuid>"],
   "notFound": [],
   "errors": []
 }
 ```
 
-If an active JSONL already exists for the id, unarchive reports a conflict in `errors` and does not overwrite it. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
+`resolveConflicts` is optional and defaults to `false`. By default, simultaneous active and archived JSONL files produce a conflict in `errors`, and neither copy is moved, removed, or overwritten; an active-only session is returned in `alreadyActive`. With `resolveConflicts: true`, unarchive keeps the active copy, removes the archived copy, and reports the id in both `unarchived` and `resolvedConflicts`. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
 
 ACP-over-HTTP uses the same request and response bodies through vendor methods `_qwen/sessions/archive` and `_qwen/sessions/unarchive`. The REST route table maps `POST /sessions/archive` and `POST /sessions/unarchive` to those methods for ACP transports.
 

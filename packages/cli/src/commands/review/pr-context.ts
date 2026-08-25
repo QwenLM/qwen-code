@@ -1479,10 +1479,11 @@ export function persistRecoveredLedger(
       // carried either: the marker omits a zero streak, so writing one back
       // records a shape the serializer never emits.
       //
-      // Reads the ONE decision-bearing member by name rather than the whole
-      // group. `CHURN_FIELDS` is a single field today and a test pins that,
-      // so a second member cannot be added without this site being revisited
-      // — the drift the volume group's own `floor` history warns about.
+      // Each decision-bearing member is read by name through the group's own
+      // projection rather than spreading the group: the carry has to clamp
+      // each streak independently, and a spread would carry a third member
+      // added later without this site deciding it should — the drift the
+      // volume group's own `floor` history warns about.
       //
       // No "and the recovery brought none of its own" term, because it is an
       // INVARIANT of the strip above, not a separate condition: churn
@@ -1491,7 +1492,9 @@ export function persistRecoveredLedger(
       // An explicit term for it was unreachable code no mutation could
       // redden. If the strip is ever loosened so a foreign streak can
       // survive recovery, this site needs that term back.
-      const carriedStreak = streakOf(pickChurn(existing ?? {})['churnRounds']);
+      const carriedChurn = pickChurn(existing ?? {});
+      const carriedStreak = streakOf(carriedChurn['churnRounds']);
+      const carriedFlat = streakOf(carriedChurn['flatRounds']);
       // `identityKnown` is DEFENCE IN DEPTH here, and deliberately kept
       // although no mutation can redden its removal: an anonymous recovery
       // over an existing file returns above (equal-or-lower round) or takes
@@ -1506,11 +1509,22 @@ export function persistRecoveredLedger(
       // round — so it stays as a statement of intent for whoever next moves
       // one of those early returns.
       const carryFileChurn =
-        identityKnown &&
-        recovered.ownMarkerRead === false &&
-        carriedStreak !== undefined &&
-        carriedStreak > 0
-          ? { churnRounds: Math.min(carriedStreak, recovered.ledger.round) }
+        identityKnown && recovered.ownMarkerRead === false
+          ? {
+              ...(carriedStreak !== undefined && carriedStreak > 0
+                ? {
+                    churnRounds: Math.min(
+                      carriedStreak,
+                      recovered.ledger.round,
+                    ),
+                  }
+                : {}),
+              ...(carriedFlat !== undefined && carriedFlat > 0
+                ? {
+                    flatRounds: Math.min(carriedFlat, recovered.ledger.round),
+                  }
+                : {}),
+            }
           : {};
       // The anonymous whole-write sheds BOTH groups. The volume can genuinely
       // arrive here — recovery keeps it on an anonymous walk on purpose, since
@@ -1695,6 +1709,15 @@ function pickChurnState(ledger: Ledger): Partial<Ledger> {
 /**
  * The convergence state group, named ONCE.
  *
+ * Both members are streaks another account's marker must never set for this
+ * one: `churnRounds` arms the non-convergence blocker, `flatRounds` engages
+ * the severity floor early (#9903). Their carry contracts differ at COMPOSE
+ * time (churn carries across an unmeasured round, flat resets) but are
+ * identical at THIS seam: a round this account never ran — an interleaved
+ * foreign winner — is not a measurement in either direction, so the restore
+ * carries both and neither arms off the carry alone (a carry never adds;
+ * engaging or filing still takes this account's own measured rounds).
+ *
  * Two production seams shed or restore this group — the recovery strip
  * above and the union's restore beside it — and the adjacent volume group
  * already paid for the alternative: `withoutVolume`'s own note records how a
@@ -1704,7 +1727,7 @@ function pickChurnState(ledger: Ledger): Partial<Ledger> {
  * own data on the merged recoveries the union exists to protect. Same
  * hazard, same remedy.
  */
-export const CHURN_FIELDS = ['churnRounds'] as const;
+export const CHURN_FIELDS = ['churnRounds', 'flatRounds'] as const;
 
 /** Drop the whole churn group from a record, whatever shape it is in. */
 export function withoutChurn<T extends Record<string, unknown>>(record: T): T {

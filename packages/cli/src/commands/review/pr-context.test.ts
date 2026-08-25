@@ -1793,12 +1793,20 @@ describe('latestLedger — the split trust surface', () => {
       round: 4,
       findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
       churnRounds: 4,
+      // 2 is the honest maximum at round 4 — the flat streak clamps tighter
+      // than the churn one, so a higher planted value would measure the
+      // seam through the clamp instead of the strip.
+      flatRounds: 2,
     };
     const foreign = latestLedger(
       [review('ci-bot', '2026-01-01T00:00:00Z', serializeLedger(churning))],
       'maintainer',
     );
     expect(foreign?.ledger.churnRounds).toBeUndefined();
+    // The floor trigger's streak is the same class of claim: a stranger's
+    // planted value must not ride the identity-known write into the side
+    // file and latch THIS account's floor off rounds it never measured.
+    expect(foreign?.ledger.flatRounds).toBeUndefined();
     expect(foreign?.ledger.findings).toEqual(churning.findings);
     expect(foreign?.ledger.round).toBe(4);
     // The OWN account's churn state round-trips through the same seam: it is
@@ -1810,6 +1818,7 @@ describe('latestLedger — the split trust surface', () => {
       'bot',
     );
     expect(own?.ledger.churnRounds).toBe(4);
+    expect(own?.ledger.flatRounds).toBe(2);
   });
 
   it("recovers the winning review's own commit_id as the age reference", () => {
