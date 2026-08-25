@@ -370,6 +370,7 @@ describe('binding semantics through the real kernel', () => {
       expect(r.status).toBe('ok');
       expect(textOf(r.events).trim()).toBe('via-symlink');
     } finally {
+      manager.dispose();
       fs.rmSync(store, { recursive: true, force: true });
       fs.rmSync(work, { recursive: true, force: true });
     }

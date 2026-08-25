@@ -5,7 +5,10 @@
  */
 
 import process from 'node:process';
+import { setTimeout } from 'node:timers';
 
 process.stderr.write('[event] ready\n');
 process.stderr.write('{"message":"stale marker","retryable":false}\n');
-process.stdout.write('{"type":"recovered"}\n', () => process.exit(0));
+process.stdout.write('{"type":"recovered"}\n', () => {
+  setTimeout(() => process.exit(0), 100);
+});
