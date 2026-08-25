@@ -208,7 +208,6 @@ function makeFakeEnv() {
       return currentSessionId;
     },
     getChatRecordingService: () => ({
-      getCurrentCustomTitle: () => undefined,
       finalize: vi.fn(),
       flush: vi.fn().mockResolvedValue(undefined),
       rebuildTurnBoundaries: vi.fn(),
