@@ -62,7 +62,7 @@ vi.mock('./render/runtime-gate.js', () => ({
 }));
 
 vi.mock('./render/opentui-entry.js', () => ({
-  startOpenTuiUI: (...args: unknown[]) => startOpenTuiUI(...args),
+  startOpenTuiUI,
 }));
 
 vi.mock('../remoteInput/RemoteInputWatcher.js', () => ({
