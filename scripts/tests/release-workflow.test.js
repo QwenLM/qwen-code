@@ -80,6 +80,25 @@ describe('CUA release workflow', () => {
 });
 
 describe('release workflow', () => {
+  it('restores shared ECS workspace ownership before every checkout', () => {
+    const checkoutCount = (workflow.match(/- name: 'Checkout'/g) ?? []).length;
+    const restoreCount = (
+      workflow.match(/- name: 'Restore workspace ownership'/g) ?? []
+    ).length;
+
+    const beforeEachCheckout = workflow
+      .split("- name: 'Checkout'")
+      .slice(0, -1);
+
+    expect(checkoutCount).toBe(5);
+    expect(restoreCount).toBe(checkoutCount);
+    for (const prefix of beforeEachCheckout) {
+      expect(
+        prefix.lastIndexOf("- name: 'Restore workspace ownership'"),
+      ).toBeGreaterThan(prefix.lastIndexOf('steps:'));
+    }
+  });
+
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
     // This gate is the sole protection keeping a nightly/preview/dry-run
     // release from moving the ECS fleet; the triggered update workflow
