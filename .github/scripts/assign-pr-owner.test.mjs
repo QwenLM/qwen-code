@@ -375,6 +375,13 @@ describe('assign-pr-owner: workflow invariants', () => {
       checkout.with['sparse-checkout'],
       /^\.github\/scripts\/assign-pr-owner\.mjs$/m,
     );
+    // The entry script statically imports assign-issue-owner.mjs, and the
+    // bootstrap guard only checks for assign-pr-owner.mjs — dropping this
+    // entry makes node fail on the missing module after the guard passed.
+    assert.match(
+      checkout.with['sparse-checkout'],
+      /^\.github\/scripts\/assign-issue-owner\.mjs$/m,
+    );
     // Nothing from the PR head can execute: the checkout never follows it.
     assert.doesNotMatch(checkout.with.ref, /head\.sha/);
   });
