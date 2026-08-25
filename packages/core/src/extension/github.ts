@@ -1005,24 +1005,24 @@ export async function extractArchiveFile(
   }
   try {
     await extractFile(archivePath, destination, signal, options);
+    signal?.throwIfAborted();
+    await flattenSingleExtensionDirectory(destination, archivePath);
+    signal?.throwIfAborted();
+    if (options.allowContainedSymlinks === true) {
+      await assertDirectorySymlinksAreSafe(destination, signal, {
+        maxExpandedBytes:
+          options.enforceResourceLimits === true
+            ? MAX_ARCHIVE_EXPANDED_BYTES
+            : undefined,
+        excludePath: archivePath,
+      });
+    }
   } catch (error) {
     signal?.throwIfAborted();
     throw new Error(
       'Extension archive could not be extracted. Make sure it is a valid ' +
         `.zip or .tar.gz file. ${getErrorMessage(error)}`,
     );
-  }
-  signal?.throwIfAborted();
-  await flattenSingleExtensionDirectory(destination, archivePath);
-  signal?.throwIfAborted();
-  if (options.allowContainedSymlinks === true) {
-    await assertDirectorySymlinksAreSafe(destination, signal, {
-      maxExpandedBytes:
-        options.enforceResourceLimits === true
-          ? MAX_ARCHIVE_EXPANDED_BYTES
-          : undefined,
-      excludePath: archivePath,
-    });
   }
   signal?.throwIfAborted();
   assertExtractedArchiveContainsExtensionSource(destination);
