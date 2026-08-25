@@ -1028,7 +1028,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const next =
         typeof update === 'function' ? update(connectionRef.current) : update;
       connectionRef.current = next;
-      setConnection(next);
+      setConnection(update);
     },
     [],
   );
@@ -2621,12 +2621,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 activeSession.clientId,
                 eventOptionsRef.current,
                 (update) => {
-                  setConnectionSynchronous((current) => {
-                    if (sessionRef.current !== activeSession) return current;
-                    return typeof update === 'function'
-                      ? update(current)
-                      : update;
-                  });
+                  if (sessionRef.current !== activeSession) return;
+                  setConnectionSynchronous(update);
                 },
               );
               const uiEvents = filterDaemonUiEventsForTranscript(
