@@ -22,6 +22,11 @@ import {
   cleanOrphanedFunctionCalls,
 } from './responses-converter.js';
 import {
+  countReasoningItems,
+  downgradeRejectedReasoningItems,
+  parseReasoningIdRejection,
+} from './responses-reasoning-rejection.js';
+import {
   buildRuntimeFetchOptions,
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
@@ -226,9 +231,72 @@ export class ResponsesPipeline {
     signal?: AbortSignal,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const activeRequest = this.buildRequest(request, userPromptId);
-    const streamState = new ResponsesStreamState();
-    const reader = await this.connect(activeRequest, signal);
-    return this.iterateBody(reader, streamState, signal);
+    const reader = await this.connectWithReasoningReplayRecovery(
+      activeRequest,
+      signal,
+    );
+    // One state per surviving stream: it is created only once a connect has
+    // produced the reader that will actually be iterated.
+    return this.iterateBody(reader, new ResponsesStreamState(), signal);
+  }
+
+  /**
+   * Connect, and if the endpoint explicitly refuses a replayed reasoning item
+   * id, send the same request once more with those items downgraded (issue
+   * #9452).
+   *
+   * The first request always goes out exactly as built. Recovery matters
+   * because the offending ids live in persisted history: without it, every
+   * subsequent send in that session rebuilds the same ids and fails the same
+   * way, so the session is permanently wedged against that endpoint.
+   */
+  private async connectWithReasoningReplayRecovery(
+    apiRequest: ResponsesApiRequest,
+    signal?: AbortSignal,
+  ): Promise<ReadableStreamDefaultReader<Uint8Array>> {
+    let retryRequest: ResponsesApiRequest | undefined;
+    try {
+      return await this.connect(apiRequest, signal);
+    } catch (error) {
+      retryRequest = this.buildReasoningReplayRetry(apiRequest, error);
+      if (!retryRequest) throw error;
+    }
+    // Reached only when the rejection was classified. This connect runs
+    // OUTSIDE the catch above, so it is attempted exactly once and its own
+    // failure propagates unchanged rather than triggering another recovery.
+    return this.connect(retryRequest, signal);
+  }
+
+  /**
+   * The retry request, or undefined when the error is not a reasoning-id
+   * rejection or nothing in this body would change. Builds a new request
+   * object -- the caller's request, the input array, and every item it holds
+   * are left untouched.
+   */
+  private buildReasoningReplayRetry(
+    apiRequest: ResponsesApiRequest,
+    error: unknown,
+  ): ResponsesApiRequest | undefined {
+    if (typeof error !== 'object' || error === null) return undefined;
+    const { status, responseBody } = error as Partial<ResponsesApiError>;
+    if (typeof status !== 'number') return undefined;
+
+    const rejection = parseReasoningIdRejection(status, responseBody);
+    if (!rejection) return undefined;
+
+    const input = downgradeRejectedReasoningItems(apiRequest.input, rejection);
+    if (input === apiRequest.input) return undefined;
+
+    const reasoningItems = countReasoningItems(apiRequest.input);
+    // Metadata only: no id, no encrypted content, no endpoint.
+    debugLogger.debug(
+      'Retrying once with downgraded reasoning replay',
+      `namedIndex=${rejection.namedIndex}`,
+      `maxLengthReported=${rejection.maxLength !== null}`,
+      `reasoningItems=${reasoningItems}`,
+      `downgradedItems=${reasoningItems - countReasoningItems(input)}`,
+    );
+    return { ...apiRequest, input };
   }
 
   async execute(

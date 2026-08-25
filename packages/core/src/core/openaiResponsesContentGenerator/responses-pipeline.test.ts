@@ -1569,4 +1569,463 @@ describe('ResponsesPipeline', () => {
     const merged = mergeStreamResponses([]);
     expect(merged.candidates).toEqual([]);
   });
+
+  // Issue #9452: an already-persisted session replays prior-turn reasoning
+  // items by id. When the ACTIVE endpoint refuses those ids as too long, every
+  // send in that session fails forever -- the history is on disk and every
+  // rebuild produces the same rejected ids. These exercise recovery entirely
+  // through the public pipeline/fetch seam. All ids and encrypted payloads are
+  // synthetic.
+  describe('reasoning id rejection recovery', () => {
+    const LONG_ID_A = `rs_${'a'.repeat(80)}`;
+    const LONG_ID_B = `rs_${'b'.repeat(80)}`;
+    const SHORT_ID = 'rs_short';
+
+    function sig(id: string): string {
+      return JSON.stringify({ id, encrypted_content: `enc-${id}` });
+    }
+
+    // Input items this produces, in order:
+    //   0 message(user)     1 reasoning(LONG_ID_A, summary)
+    //   2 reasoning(SHORT_ID, summary)  3 reasoning(LONG_ID_B, no summary)
+    //   4 message(user)
+    function replayRequest(): GenerateContentParameters {
+      return {
+        model: 'gpt-5',
+        contents: [
+          { role: 'user', parts: [{ text: 'hello' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                thought: true,
+                text: 'first thought',
+                thoughtSignature: sig(LONG_ID_A),
+              },
+              {
+                thought: true,
+                text: 'second thought',
+                thoughtSignature: sig(SHORT_ID),
+              },
+              { thought: true, thoughtSignature: sig(LONG_ID_B) },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'continue' }] },
+        ],
+      };
+    }
+
+    const ORIGINAL_INPUT = [
+      { type: 'message', role: 'user', content: 'hello' },
+      {
+        type: 'reasoning',
+        id: LONG_ID_A,
+        encrypted_content: `enc-${LONG_ID_A}`,
+        summary: [{ type: 'summary_text', text: 'first thought' }],
+      },
+      {
+        type: 'reasoning',
+        id: SHORT_ID,
+        encrypted_content: `enc-${SHORT_ID}`,
+        summary: [{ type: 'summary_text', text: 'second thought' }],
+      },
+      {
+        type: 'reasoning',
+        id: LONG_ID_B,
+        encrypted_content: `enc-${LONG_ID_B}`,
+        summary: [],
+      },
+      { type: 'message', role: 'user', content: 'continue' },
+    ];
+
+    // Only the two over-long ids are downgraded; the short reasoning item is
+    // replayed untouched. The signature-only item has no summary to preserve
+    // and is dropped rather than becoming an empty assistant message.
+    const OVER_LONG_ONLY_INPUT = [
+      { type: 'message', role: 'user', content: 'hello' },
+      { type: 'message', role: 'assistant', content: 'first thought' },
+      {
+        type: 'reasoning',
+        id: SHORT_ID,
+        encrypted_content: `enc-${SHORT_ID}`,
+        summary: [{ type: 'summary_text', text: 'second thought' }],
+      },
+      { type: 'message', role: 'user', content: 'continue' },
+    ];
+
+    const ALL_REASONING_INPUT = [
+      { type: 'message', role: 'user', content: 'hello' },
+      { type: 'message', role: 'assistant', content: 'first thought' },
+      { type: 'message', role: 'assistant', content: 'second thought' },
+      { type: 'message', role: 'user', content: 'continue' },
+    ];
+
+    function errorResponse(status: number, body: string) {
+      return {
+        ok: false,
+        status,
+        headers: { get: () => 'application/json' },
+        text: async () => body,
+      };
+    }
+
+    function okResponse(lines: string[]) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body: sseStream(lines),
+        text: async () => '',
+      };
+    }
+
+    const COMPLETED = sseEvent('response.completed', {
+      response: { id: 'r1', status: 'completed' },
+    });
+
+    /** The shape the OpenAI Responses API returns directly. */
+    function directBody(param: string, message: string): string {
+      return JSON.stringify({
+        error: {
+          message,
+          type: 'invalid_request_error',
+          param,
+          code: 'string_above_max_length',
+        },
+      });
+    }
+
+    /**
+     * The shape a gateway returns: the upstream error JSON is embedded, quoted
+     * and escaped, inside the proxy's own error message -- with a raw control
+     * character spliced in, so `JSON.parse` on the whole body throws.
+     */
+    function proxiedBody(
+      param: string,
+      message: string,
+      rawControlChar: string,
+    ): string {
+      const inner = JSON.stringify({
+        error: {
+          message,
+          type: 'invalid_request_error',
+          param,
+          code: 'string_above_max_length',
+        },
+      });
+      const escaped = inner.replace(/"/g, '\\"');
+      return `{"error":{"message":"litellm.BadRequestError: OpenAIException -${rawControlChar}${escaped}","type":null,"param":null,"code":"400"}}`;
+    }
+
+    const MAX_64_MESSAGE =
+      "Invalid 'input[1].id': string too long. Expected a string with " +
+      'maximum length 64, but got a string with length 83 instead.';
+    const NO_MAX_MESSAGE = "Invalid 'input[1].id': string too long.";
+
+    async function drain(
+      pipeline: ResponsesPipeline,
+      request: GenerateContentParameters,
+    ): Promise<unknown> {
+      try {
+        for await (const _ of pipeline.executeStream(request, 'p1')) {
+          // drain
+        }
+        return undefined;
+      } catch (err) {
+        return err;
+      }
+    }
+
+    function parsedCall(index: number): ResponsesApiRequest {
+      return JSON.parse(
+        fetchMock.mock.calls[index]![1].body,
+      ) as ResponsesApiRequest;
+    }
+
+    /**
+     * The first request must go out exactly as it does today, and the retry
+     * must differ from it in `input` and nothing else.
+     */
+    function expectRetryDiffersOnlyByInput(retryInput: unknown) {
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const first = parsedCall(0);
+      const second = parsedCall(1);
+      expect(first.input).toEqual(ORIGINAL_INPUT);
+      expect(second.input).toEqual(retryInput);
+      expect({ ...second, input: null }).toEqual({ ...first, input: null });
+    }
+
+    // ── RED behaviors ────────────────────────────────────────────────────
+
+    it('downgrades every over-long reasoning id and retries when the endpoint reports a maximum', async () => {
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(400, directBody('input[1].id', MAX_64_MESSAGE)),
+      );
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      expect(await drain(pipeline, replayRequest())).toBeUndefined();
+      expectRetryDiffersOnlyByInput(OVER_LONG_ONLY_INPUT);
+    });
+
+    it('downgrades every replayed reasoning item and retries when no maximum is reported', async () => {
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(400, directBody('input[1].id', NO_MAX_MESSAGE)),
+      );
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      expect(await drain(pipeline, replayRequest())).toBeUndefined();
+      expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
+    });
+
+    it('recovers when the rejection is nested in a proxied message carrying a raw newline', async () => {
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(400, proxiedBody('input[1].id', MAX_64_MESSAGE, '\n')),
+      );
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      expect(await drain(pipeline, replayRequest())).toBeUndefined();
+      expectRetryDiffersOnlyByInput(OVER_LONG_ONLY_INPUT);
+    });
+
+    it('recovers when the rejection is nested in a proxied message carrying a raw tab', async () => {
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(400, proxiedBody('input[1].id', MAX_64_MESSAGE, '\t')),
+      );
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      expect(await drain(pipeline, replayRequest())).toBeUndefined();
+      expectRetryDiffersOnlyByInput(OVER_LONG_ONLY_INPUT);
+    });
+
+    it('treats a maximum reported against a different parameter as absent', async () => {
+      // The message names input[7].id but the rejected param is input[1].id --
+      // trusting 64 here would keep replaying whichever ids happen to be
+      // shorter than a limit that was never stated for this parameter.
+      const foreign =
+        "Invalid 'input[7].id': string too long. Expected a string with " +
+        'maximum length 64, but got a string with length 83 instead.';
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(400, directBody('input[1].id', foreign)),
+      );
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      expect(await drain(pipeline, replayRequest())).toBeUndefined();
+      expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
+    });
+
+    it('treats a maximum reported against ambiguous parameters as absent', async () => {
+      const ambiguous =
+        "Invalid 'input[1].id' and 'input[3].id': strings too long. " +
+        'Expected a string with maximum length 64.';
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(400, directBody('input[1].id', ambiguous)),
+      );
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      expect(await drain(pipeline, replayRequest())).toBeUndefined();
+      expectRetryDiffersOnlyByInput(ALL_REASONING_INPUT);
+    });
+
+    it('retries exactly once and surfaces the second rejection unchanged', async () => {
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(400, directBody('input[1].id', MAX_64_MESSAGE)),
+      );
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(
+          400,
+          directBody('input[1].id', `${MAX_64_MESSAGE} SECOND-ATTEMPT`),
+        ),
+      );
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      const err = await drain(pipeline, replayRequest());
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect((err as Error | undefined)?.message).toContain('SECOND-ATTEMPT');
+      expect((err as { status?: number }).status).toBe(400);
+    });
+
+    it('does not recover a second time when the retry is itself rejected', async () => {
+      // The bound has to be structural, not incidental: after the first
+      // recovery the surviving short reasoning item sits at input[2], so a
+      // rejection naming IT with a smaller maximum is one this classifier
+      // would happily act on. An implementation that recovered from inside
+      // its own retry would send a third request here.
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(400, directBody('input[1].id', MAX_64_MESSAGE)),
+      );
+      fetchMock.mockResolvedValueOnce(
+        errorResponse(
+          400,
+          directBody(
+            'input[2].id',
+            "Invalid 'input[2].id': string too long. Expected a string with " +
+              'maximum length 4, but got a string with length 8 instead.',
+          ),
+        ),
+      );
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      const err = await drain(pipeline, replayRequest());
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect((err as { status?: number }).status).toBe(400);
+      expect((err as Error).message).toContain('input[2].id');
+      expect(parsedCall(1).input).toEqual(OVER_LONG_ONLY_INPUT);
+    });
+
+    // ── Controls: every one of these must NOT retry ──────────────────────
+
+    it('control: sends one request when the endpoint accepts the long ids', async () => {
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      expect(await drain(pipeline, replayRequest())).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(parsedCall(0).input).toEqual(ORIGINAL_INPUT);
+    });
+
+    it.each([
+      [
+        'an unrelated 400',
+        400,
+        JSON.stringify({
+          error: {
+            message: 'Unsupported model',
+            param: 'model',
+            code: 'model_not_found',
+          },
+        }),
+      ],
+      [
+        'a matching body under 500',
+        500,
+        directBody('input[1].id', MAX_64_MESSAGE),
+      ],
+      [
+        'a matching body under 429',
+        429,
+        directBody('input[1].id', MAX_64_MESSAGE),
+      ],
+      ['a malformed body', 400, '<html><body>Bad Gateway</body></html>'],
+      [
+        'a primitive JSON body',
+        400,
+        JSON.stringify('string_above_max_length on input[1].id'),
+      ],
+      [
+        'an array JSON body',
+        400,
+        JSON.stringify([
+          {
+            message: MAX_64_MESSAGE,
+            param: 'input[1].id',
+            code: 'string_above_max_length',
+          },
+        ]),
+      ],
+      [
+        'split code and param across objects',
+        400,
+        JSON.stringify({
+          error: { code: 'string_above_max_length', message: MAX_64_MESSAGE },
+          detail: { param: 'input[1].id' },
+        }),
+      ],
+      [
+        'duplicate relevant keys',
+        400,
+        '{"error":{"code":"string_above_max_length","code":"other","param":"input[1].id","message":"' +
+          MAX_64_MESSAGE +
+          '"}}',
+      ],
+      [
+        'prose-only mention of the rejection',
+        400,
+        JSON.stringify({
+          error: {
+            message: `upstream reported string_above_max_length for input[1].id`,
+            code: '400',
+          },
+        }),
+      ],
+      [
+        'a negative item index',
+        400,
+        directBody('input[-1].id', "Invalid 'input[-1].id': string too long."),
+      ],
+      [
+        'an unsafe item index',
+        400,
+        directBody(
+          'input[99999999999999999999].id',
+          "Invalid 'input[99999999999999999999].id': string too long.",
+        ),
+      ],
+      [
+        'a named item that is not a reasoning item',
+        400,
+        directBody(
+          'input[0].id',
+          "Invalid 'input[0].id': string too long. Expected a string with " +
+            'maximum length 64, but got a string with length 83 instead.',
+        ),
+      ],
+      [
+        'a named reasoning id within the reported maximum',
+        400,
+        directBody(
+          'input[2].id',
+          "Invalid 'input[2].id': string too long. Expected a string with " +
+            'maximum length 64, but got a string with length 8 instead.',
+        ),
+      ],
+    ])('control: does not retry on %s', async (_label, status, body) => {
+      fetchMock.mockResolvedValueOnce(errorResponse(status as number, body));
+      fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      const err = await drain(pipeline, replayRequest());
+      expect(err).toBeInstanceOf(Error);
+      expect((err as { status?: number }).status).toBe(status);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(parsedCall(0).input).toEqual(ORIGINAL_INPUT);
+    });
+  });
 });
