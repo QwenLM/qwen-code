@@ -603,6 +603,7 @@ describe('the log cap', () => {
     });
     rmSync(dir, { recursive: true, force: true });
     expect(r.outcome).toBe('overflowed');
+    expect(r.exitCode).toBeNull(); // a stopped run never carries a verdict
     expect(r.output).toBe(''); // never read — not the 300 MiB (trimmed) tail
   });
 });

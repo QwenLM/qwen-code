@@ -76,7 +76,7 @@ export interface DriveReport {
    * is not a weaker observation of the same thing, it is a different thing.
    */
   observed: boolean;
-  /** The driven script's exit code; null unless the sentinel was reached. */
+  /** The driven script's exit code; null unless `outcome` is `completed`. */
   exitCode: number | null;
   /** Milliseconds spent waiting for readiness — reported even when it arrived. */
   readyAfterMs: number | null;
@@ -770,7 +770,14 @@ export function runDrive(args: DriveArgs): DriveReport {
   return {
     outcome,
     observed: outcome === 'completed',
-    exitCode,
+    // Null unless the run completed (the documented invariant): the poll loop
+    // reads the sentinel every iteration, and the sentinel branch's
+    // hard-ceiling break stops a run whose sentinel DID appear — the very
+    // iteration the log crossed MAX_READ_BYTES. Returning that value beside
+    // the overflowed note contradicts the note, and a caller branching on
+    // `exitCode !== null` as the completion signal would treat a stopped,
+    // unread run as completed. ab-drive's twin masks this the same way.
+    exitCode: outcome === 'completed' ? exitCode : null,
     readyAfterMs,
     droveForMs,
     output: text,

@@ -125,8 +125,15 @@ function hunkBodyEnd(
   let ln = hunk.diffStart; // the `@@` line; the body begins at +1
   while ((oldRem > 0 || newRem > 0) && ln < hunk.diffEnd) {
     ln++;
-    const c = lines[ln - 1]?.[0];
-    if (c === ' ') {
+    const body = lines[ln - 1];
+    const c = body?.[0];
+    // `body === ''`: under `diff.suppressBlankEmpty` git emits a blank context
+    // line as a physically EMPTY record. `parseDiff` counts it as context and
+    // git's own patch engine accepts it, so the body must not end at it — a
+    // truncation there leaves the `@@` header's declared counts unmatched and
+    // `git apply -R --check` fails with `corrupt patch`, misread as a tree or
+    // harness problem.
+    if (c === ' ' || body === '') {
       oldRem--;
       newRem--;
     } else if (c === '-') oldRem--;
@@ -372,24 +379,30 @@ function gitApply(cwd: string, args: string[]): GitApplyResult {
 }
 
 /**
- * Whether `tree` is inside a git work tree. `git apply` itself needs NO
+ * Whether `tree` is inside a git WORK TREE. `git apply` itself needs NO
  * repository, so the status-128 guard on the apply cannot catch a --tree that
  * is a plain directory: a content mismatch there records a fabricated coupling
  * fact, and a content MATCH silently reverse-applies into the wrong directory
- * while the report claims the scratch tree was reverted. Distinguishes the
- * three states so a genuinely non-repo directory refuses up front (exit 2)
+ * while the report claims the scratch tree was reverted. Repo-ness is not
+ * enough either: a bare clone or a `.git` metadata dir answers
+ * `rev-parse --git-dir` fine yet holds no work-tree files, so the apply's
+ * guaranteed refusal there (exit 1, not 128) would land in the conflict
+ * branch and be recorded as a coupling fact about the hunk. Distinguishes the
+ * three states so a genuinely unusable directory refuses up front (exit 2)
  * while a non-existent tree or a missing git binary still falls through to the
  * apply path's spawn-error classification (`could not run git`).
  */
 function gitTreeState(tree: string): 'repo' | 'not-repo' | 'unrunnable' {
-  const r = spawnSync('git', ['rev-parse', '--git-dir'], {
+  const r = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
     cwd: tree,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
     timeout: 60_000,
   });
   if (r.error) return 'unrunnable';
-  return r.status === 0 ? 'repo' : 'not-repo';
+  // `true` only inside a real work tree; a bare clone or a `.git` dir answers
+  // `false` (still exit 0), which refuses here instead of at the apply.
+  return r.status === 0 && r.stdout.trim() === 'true' ? 'repo' : 'not-repo';
 }
 
 export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
@@ -468,7 +481,12 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
         // regex below never matches them and only these markers catch them.
         l.startsWith('new file mode 160000') ||
         l.startsWith('deleted file mode 160000') ||
-        /^index [0-9a-f]+\.\.[0-9a-f]+ 160000$/.test(l),
+        // Loose like the startsWith siblings: no `$` anchor and uppercase
+        // admitted, because an arbitrary --diff can carry trailing whitespace
+        // or uppercase SHAs on the index line. Over-refusing to the exit-2
+        // harness class is the safe direction; admitting the section lets
+        // apply -R exit 0 without moving the pointer — a false applied:true.
+        /^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ 160000/.test(l),
     )
   ) {
     return {
@@ -492,16 +510,18 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   const tree = resolve(args.tree);
   // git apply needs no repository, so a --tree that is a plain (non-repo)
   // directory would either fabricate a coupling fact on a content mismatch or
-  // silently mutate the wrong directory on a match. Refuse it up front as a
-  // harness fact. A non-existent tree or a missing git binary is left to the
-  // apply path's spawn-error classification below, so this changes only the
-  // exists-but-not-a-repo case.
+  // silently mutate the wrong directory on a match — and a bare clone or a
+  // .git dir has no work-tree files to revert in, so its guaranteed refusal
+  // would read as a coupling fact too. Refuse all of it up front as a harness
+  // fact. A non-existent tree or a missing git binary is left to the apply
+  // path's spawn-error classification below, so this changes only the
+  // exists-but-no-work-tree case.
   if (gitTreeState(tree) === 'not-repo') {
     return {
       applied: false,
       hunk: entry,
       harnessFailure: true,
-      note: `--tree ${JSON.stringify(args.tree)} is not inside a git repository (git rev-parse --git-dir failed there) — git apply would otherwise reverse-apply into a non-repo directory silently. Point --tree at the scratch worktree (a real git tree); nothing was changed.`,
+      note: `--tree ${JSON.stringify(args.tree)} is not inside a git repository work tree (git rev-parse --is-inside-work-tree did not answer true there) — a plain directory, a bare clone, or a .git metadata dir has no work-tree files to revert in, and git apply there would mutate the wrong place or refuse in a way that reads as a fact about the hunk. Point --tree at the scratch worktree; nothing was changed.`,
     };
   }
   // mkdtemp, not a pid-keyed name: a predictable path in the shared temp dir

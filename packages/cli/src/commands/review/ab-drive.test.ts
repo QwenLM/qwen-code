@@ -26,6 +26,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -114,6 +115,12 @@ function harness(opts: {
   plantArmRc?: Record<string, number>;
   /** Called when a session starts — the TOCTOU hook. */
   onSession?: (name: string) => void;
+  /**
+   * Arm sessions whose log grows past MAX_READ_BYTES the moment the
+   * completion gate asks has-session — a backgrounded log writer that
+   * outlives the script body.
+   */
+  burstOnCompletion?: string[];
 }) {
   const log: string[][] = [];
   const bashCmds: string[] = [];
@@ -121,6 +128,11 @@ function harness(opts: {
   // window closes when its shell exits, so `has-session` fails afterwards —
   // the second half of the completion gate. A hung arm keeps its session.
   const endedSessions = new Set<string>();
+  // Per-session log paths recovered at new-session time, for options that act
+  // on a session's log after the drive has started. `bursted` keeps the growth
+  // to one per session even though has-session is polled.
+  const logPaths = new Map<string, string>();
+  const bursted = new Set<string>();
   // Is a shared instance currently serving? The shared-readiness probe
   // ('SHPROBE') reflects this. A per-arm instance normally stops serving when
   // its session is killed; `sharedSurvivesTeardown` models a detached daemon
@@ -149,6 +161,18 @@ function harness(opts: {
       // Production targets sessions with tmux's exact-match `=<name>` form; the
       // harness keys on the bare name.
       const target = args[4].replace(/^=/, '');
+      if (
+        (opts.burstOnCompletion ?? []).includes(target) &&
+        !bursted.has(target)
+      ) {
+        // Grow the log (sparse: apparent size only) BEFORE answering, so the
+        // completion branch's post-sentinel ceiling re-check sees it.
+        const logPath = logPaths.get(target);
+        if (logPath !== undefined) {
+          truncateSync(logPath, 300 * 1024 * 1024);
+        }
+        bursted.add(target);
+      }
       if ((opts.vanishedSessions ?? []).includes(target)) return fail();
       // A dead-at-birth shared session has GONE — liveness is the session,
       // not a sentinel file (which the arm's own code could plant).
@@ -199,6 +223,7 @@ function harness(opts: {
             logPath,
             opts.logBySession?.[name] ?? `${name} output\n`,
           );
+          logPaths.set(name, logPath);
         }
       }
       opts.onSession?.(name);
@@ -288,29 +313,36 @@ describe('runAbDrive, harnessed', () => {
     for (const t of targets) expect(t.startsWith('=')).toBe(true);
   });
 
-  it('returns a fail report, not exit 1, when the run directory cannot be created', () => {
-    // An unusable TMPDIR (full, unwritable, gone) is an environment gap like a
-    // failed keeper session: it must return a JSON fail report, not escape
-    // runAbDrive into the handler catch where a non-TypeError throw maps to
-    // exit 1 — the coupling-fact class a verifier records against the diff.
-    const args = baseArgs({}); // arm dirs are created under the REAL TMPDIR
-    const h = harness({ server: args.server });
-    const saved = process.env['TMPDIR'];
-    // A path whose parent exists but whose leaf does not: mkdtemp there throws
-    // ENOENT, and only the run-dir mkdtemp (not the earlier arm validation)
-    // sees the changed TMPDIR.
-    process.env['TMPDIR'] = join(tempDir('ab-gone-'), 'vanished');
-    try {
-      const r = runAbDrive({ ...args, exec: h.exec });
-      expect(r.observed).toBe(false);
-      expect(r.a).toBeNull();
-      expect(r.b).toBeNull();
-      expect(r.note).toContain('run directory');
-    } finally {
-      if (saved === undefined) delete process.env['TMPDIR'];
-      else process.env['TMPDIR'] = saved;
-    }
-  });
+  // POSIX-only: on Windows Node resolves the temp dir from TMP/TEMP/
+  // USERPROFILE and never reads TMPDIR, so this mutation is a no-op there and
+  // the run completes (repo precedent gates TMPDIR mutations the same way,
+  // e.g. pty-host-process.test.ts).
+  it.skipIf(process.platform === 'win32')(
+    'returns a fail report, not exit 1, when the run directory cannot be created',
+    () => {
+      // An unusable TMPDIR (full, unwritable, gone) is an environment gap like a
+      // failed keeper session: it must return a JSON fail report, not escape
+      // runAbDrive into the handler catch where a non-TypeError throw maps to
+      // exit 1 — the coupling-fact class a verifier records against the diff.
+      const args = baseArgs({}); // arm dirs are created under the REAL TMPDIR
+      const h = harness({ server: args.server });
+      const saved = process.env['TMPDIR'];
+      // A path whose parent exists but whose leaf does not: mkdtemp there throws
+      // ENOENT, and only the run-dir mkdtemp (not the earlier arm validation)
+      // sees the changed TMPDIR.
+      process.env['TMPDIR'] = join(tempDir('ab-gone-'), 'vanished');
+      try {
+        const r = runAbDrive({ ...args, exec: h.exec });
+        expect(r.observed).toBe(false);
+        expect(r.a).toBeNull();
+        expect(r.b).toBeNull();
+        expect(r.note).toContain('run directory');
+      } finally {
+        if (saved === undefined) delete process.env['TMPDIR'];
+        else process.env['TMPDIR'] = saved;
+      }
+    },
+  );
 
   it('names the missing arm instead of driving what does not exist', () => {
     const h = harness({ server: 't' });
@@ -620,6 +652,23 @@ describe('runAbDrive, harnessed', () => {
     const ev = h.events();
     expect(ev).toContain('kill:arm-a');
     expect(ev).toContain('new:arm-b');
+    expect(r.b?.outcome).toBe('completed');
+  });
+
+  it('an arm whose log bursts past the read ceiling AT completion ends overflowed with no verdict', () => {
+    // A backgrounded log writer that outlives the script body can push the
+    // log past MAX_READ_BYTES during the very poll that reads the sentinel.
+    // The completion branch must stop unread and report overflowed with a
+    // null exit code — never the sentinel's value beside an overflowed note,
+    // which a caller branching on exitCode !== null would read as completed.
+    const args = baseArgs({});
+    const h = harness({ server: args.server, burstOnCompletion: ['arm-a'] });
+    const r = runAbDrive({ ...args, exec: h.exec });
+    expect(r.a?.outcome).toBe('overflowed');
+    expect(r.a?.exitCode).toBeNull();
+    expect(r.observed).toBe(false);
+    // The burst stops observation of arm a, not the run — arm b is still
+    // driven, as with the timed-out and soft-cap siblings.
     expect(r.b?.outcome).toBe('completed');
   });
 

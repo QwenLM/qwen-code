@@ -895,6 +895,38 @@ describe('runRevertHunk', () => {
     }
   });
 
+  it('refuses a gitlink whose index line carries trailing whitespace or uppercase SHAs', () => {
+    // The predicate's `$` anchor and lowercase-only class admitted both
+    // shapes: the section reached the apply, `git apply -R` exited 0 without
+    // moving the pointer, and applied:true witnessed a revert that never
+    // happened. The check must be as loose as its startsWith siblings —
+    // over-refusing to the exit-2 harness class is the safe direction.
+    for (const index of [
+      'index 1111111aaa..2222222bbb 160000 ', // trailing whitespace
+      'index 1111111AAA..2222222BBB 160000', // uppercase SHAs
+    ]) {
+      const { dir } = twoHunkFixture();
+      const diffPath = join(dir, 'subx.diff');
+      writeFileSync(
+        diffPath,
+        [
+          'diff --git a/sub b/sub',
+          index,
+          '--- a/sub',
+          '+++ b/sub',
+          '@@ -1 +1 @@',
+          '-Subproject commit 1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+          '+Subproject commit 2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+          '',
+        ].join('\n'),
+      );
+      const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'sub:1' });
+      expect(r.applied).toBe(false);
+      expect(r.harnessFailure).toBe(true);
+      expect(r.note).toContain('gitlink/submodule');
+    }
+  });
+
   it('refuses a section mixing rename/copy metadata with a /dev/null side', () => {
     // A contradictory shape git never emits (a real rename/copy has two real
     // paths). Left through, extractHunkPatch's old-side rewrite fires on
@@ -953,6 +985,55 @@ describe('runRevertHunk', () => {
     expect(readFileSync(join(dir, 'f.txt'), 'utf8')).toBe('one\ntwo\nthree\n');
   });
 
+  it('survives a physically empty blank context line (diff.suppressBlankEmpty)', () => {
+    // Under diff.suppressBlankEmpty git emits a blank context line as a
+    // physically EMPTY record, which parseDiff counts as context and git's own
+    // patch engine accepts. A body scan that breaks on the empty record
+    // truncates the hunk before the blank line while the `@@` header keeps its
+    // declared counts — `git apply -R --check` then fails with `corrupt patch`
+    // (exit 128), misattributing an extraction defect to the tree/harness and
+    // making the revert permanently impossible for any such capture.
+    const dir = tempDir('rh-sbe-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    writeFileSync(join(dir, 's.txt'), 'top-old\n\nbottom-old\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 's.txt'), 'top-new\n\nbottom-new\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'pr');
+    const plain = git(dir, 'diff', 'HEAD~1', 'HEAD');
+    const diffText = git(
+      dir,
+      '-c',
+      'diff.suppressBlankEmpty=true',
+      'diff',
+      'HEAD~1',
+      'HEAD',
+    );
+    // Sanity: the capture really carries the suppressed shape — the blank
+    // context line loses its leading space.
+    expect(plain).toContain('\n \n');
+    expect(diffText).not.toBe(plain);
+    const diffPath = join(dir, 'sbe.diff');
+    writeFileSync(diffPath, diffText);
+
+    const hunks = listHunks(diffText);
+    expect(hunks).toHaveLength(1);
+    expect(hunks[0].addedLines).toBe(2);
+    expect(hunks[0].removedLines).toBe(2);
+
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 's.txt:1' });
+    expect(r.harnessFailure).toBeUndefined();
+    expect(r.applied).toBe(true);
+    // The blank line survives the revert intact.
+    expect(readFileSync(join(dir, 's.txt'), 'utf8')).toBe(
+      'top-old\n\nbottom-old\n',
+    );
+  });
+
   it('refuses a CRLF-normalized diff as a harness fact, not a coupling refusal', () => {
     // A capture whose line endings were normalized to CRLF carries a trailing
     // \r on the `@@` header; git apply would refuse the \r\n patch and the
@@ -1003,6 +1084,24 @@ describe('runRevertHunk', () => {
     expect(r.harnessFailure).toBe(true);
     expect(r.conflict).toBeUndefined();
     expect(r.note).toContain('not inside a git repository');
+  });
+
+  it('refuses a bare repo or a .git dir as --tree — repo-ness is not work-tree-ness', () => {
+    // A bare clone and a `.git` metadata dir both answer
+    // `git rev-parse --git-dir` with exit 0, but neither holds work-tree
+    // files: the apply's guaranteed refusal there is exit 1, not 128, so it
+    // would land in the conflict branch and be recorded as a coupling fact
+    // about the hunk — the fabrication the --tree gate exists to prevent.
+    const { dir, diffPath } = twoHunkFixture();
+    const bare = tempDir('rh-bare-');
+    execFileSync('git', ['clone', '-q', '--bare', dir, bare]);
+    for (const tree of [bare, join(dir, '.git')]) {
+      const r = runRevertHunk({ diff: diffPath, tree, hunk: 'f.txt:1' });
+      expect(r.applied).toBe(false);
+      expect(r.harnessFailure).toBe(true);
+      expect(r.conflict).toBeUndefined();
+      expect(r.note).toContain('not inside a git repository');
+    }
   });
 
   it('reverts under apply.whitespace=fix without silently rewriting the restored base', () => {
