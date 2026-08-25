@@ -731,6 +731,11 @@ describe('LEDGER_ID_SCAN', () => {
     expect(scan('chunk 5 (src/big.min.js) — R1-2 at HEAD')).toEqual(['R1-2']);
     expect(scan('R3-2: claim')).toEqual(['R3-2']);
     expect(scan('see R3-2, and (R3-2) again')).toEqual(['R3-2', 'R3-2']);
+    // The end-of-string position the entry shapes reach when the id
+    // CLOSES the line ('cannot verify R2-1', 'still blocking: R1-2',
+    // 'the revert of R1-2') — pinned like the readback's terminator set.
+    expect(scan('chunk 5 — R1-2')).toEqual(['R1-2']);
+    expect(scan('R1-2')).toEqual(['R1-2']);
   });
 
   it('refuses fragments of longer tokens', () => {
@@ -738,6 +743,9 @@ describe('LEDGER_ID_SCAN', () => {
     expect(scan('R1-2x glued right')).toEqual([]);
     expect(scan('R1-2-3 hyphen run')).toEqual([]);
     expect(scan('branch fix/R1-2-thing')).toEqual([]);
+    // The LEFT flank's hyphen rule, pinned apart from the word rule:
+    // an id glued after a hyphen is a longer token's tail.
+    expect(scan('issue-R1-2 hyphen left')).toEqual([]);
   });
 });
 

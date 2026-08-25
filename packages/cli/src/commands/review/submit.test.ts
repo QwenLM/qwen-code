@@ -3870,6 +3870,18 @@ describe('the thread lifecycle', () => {
     runSubmit(authorizedPost({ review }));
 
     expect(resolveCalls()).toHaveLength(2);
+    // One `R<id> fixed by <what>` reply PER resolved thread — resolving
+    // without the note closes a thread with no record of why, so the
+    // pairing must hold at N>1, not only in the single-thread cells
+    // (#9940 review).
+    expect(replyCalls()).toHaveLength(2);
+    expect(replyCalls().map((c) => String(c[2]))).toEqual([
+      expect.stringContaining('/comments/1001/replies'),
+      expect.stringContaining('/comments/1002/replies'),
+    ]);
+    for (const call of replyCalls()) {
+      expect(String(call[0])).toContain('R1-5 fixed by the guard rewrite');
+    }
     expect(stdoutJson()).toMatchObject({ posted: true, threadsResolved: 2 });
   });
 
@@ -4466,6 +4478,54 @@ describe('the thread lifecycle', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
+  it('refuses a deferral entry whose FILE re-voices an id it also rules fixed (#9940 review)', () => {
+    // The deferral line splices `file` verbatim ahead of the title —
+    // the scan reads both fields, or a retired id rides `file` past it.
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+      deferredSuggestions: [
+        {
+          file: 'R1-2',
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'loose review-config pins',
+        },
+      ],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a modelId re-voicing an id the rulings retire (#9940 review)', () => {
+    // Attribution interpolates `modelId` verbatim into the body footer
+    // and every fixed-resolve reply — one write may not retire R1-2
+    // while its own footer asserts it still stands.
+    const review = payload([], {
+      modelId: 'qwen3-max — R1-2 still blocking',
+      fixedFindings: [{ id: 'R1-2', by: 'the rewrite' }],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /contradicts itself/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('a modelId naming a retired id posts under attribution OFF — the field renders nothing (#9940 review)', () => {
+    // The scan polices RENDERED channels: with attribution off neither
+    // the body footer nor the reply footer carries `modelId`, so the
+    // same payload contradicts nothing and must not lose a refusal-free
+    // round to a re-compose.
+    seedThreads([]);
+    const review = payload([], {
+      modelId: 'qwen3-max — R1-2 still blocking',
+      fixedFindings: [{ id: 'R1-2', by: 'the rewrite' }],
+    });
+    runSubmit(authorizedPost({ review }), '0.21.3', { attribution: false });
+    expect(stdoutJson()).toMatchObject({ posted: true });
+  });
+
   it('refuses a fixed ruling naming an id the same pass mints for a fresh comment (#9940 review)', () => {
     // The round-off-by-one the gate polices: the ruling resolves nothing
     // on the PR while this pass stamps R4-1 onto the fresh thread.
@@ -4510,6 +4570,32 @@ describe('the thread lifecycle', () => {
       fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
       cannotTellCriticals: [
         'src/parse.ts:42 — cannot verify the R1-2-3 migration',
+      ],
+    });
+    runSubmit(authorizedPost({ review }));
+    expect(stdoutJson()).toMatchObject({ posted: true });
+  });
+
+  it('an entry mentioning a LIVE id posts — the scan refuses only retired ids (#9940 review)', () => {
+    // The negative control the membership condition needs: Step 6 may
+    // cross-reference a live finding beside a ruling retiring ANOTHER
+    // id. Refusing ANY id mention would cost every such round a
+    // re-compose.
+    seedThreads([]);
+    const review = payload([], {
+      fixedFindings: [{ id: 'R1-2', by: 'the rewrite' }],
+      cannotTellCriticals: ["src/parse.ts:42 — cannot verify R3-4's fix"],
+    });
+    runSubmit(authorizedPost({ review }));
+    expect(stdoutJson()).toMatchObject({ posted: true });
+  });
+
+  it('a `by` mentioning a LIVE id posts — the scan refuses only retired ids (#9940 review)', () => {
+    seedThreads([]);
+    const review = payload([], {
+      fixedFindings: [
+        { id: 'R1-2' },
+        { id: 'R1-3', by: 'supersedes the R3-4 approach' },
       ],
     });
     runSubmit(authorizedPost({ review }));

@@ -275,11 +275,13 @@ export interface ThreadActionPlan {
  *  - only UNRESOLVED threads THIS account opened (a resolved original
  *    stays resolved — replying would not reopen it — and a foreign
  *    thread is never this pipeline's to answer or close);
- *  - a carried finding replies into the OLDEST matching thread (the
- *    original), one reply per thread per round — extra drafts under the
- *    same id (an aggregate's further locations) get no target and stay
- *    inline, one thread per location as the original round posted them.
- *    ONE exception: a `(fix-induced)` root is preferred over an unmarked
+ *  - a carried finding replies into the OLDEST matching thread that
+ *    has no reply this round yet — one reply per thread per round, so
+ *    an id with several live threads (a multiplied lineage) pairs
+ *    further drafts with the REMAINING threads oldest-first, and a
+ *    draft stays inline only once every live thread under the id took
+ *    its reply. ONE exception: a `(fix-induced)` root is preferred
+ *    over an unmarked
  *    one regardless of age. The flow reuses one id across two defects —
  *    the superseded original and the induced hole — and the standing
  *    claim under the id is the LATEST re-report's: once a fix-induced

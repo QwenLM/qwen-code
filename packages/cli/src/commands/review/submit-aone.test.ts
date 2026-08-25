@@ -391,6 +391,38 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderr).toContain('1 fixed ruling(s)');
   });
 
+  it('a carried finding on an Aone target posts inline — no thread read on the wrong platform (#9940 review)', () => {
+    // The thread-read trigger has TWO legs — carried comments as well as
+    // fixed rulings. Both live inside the GitHub arm: an Aone submit
+    // carrying a carried re-post must post it inline, never fire a
+    // GitHub GraphQL read on a host where GitHub is not the platform.
+    const review = writeReview({
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      state: { suggestionsDiscarded: 1, modelId: 'test-model' },
+    });
+    expect(() =>
+      runSubmit(base({ review }), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    expect(req.comments).toEqual([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: expect.stringContaining('R1-2: still stands at HEAD'),
+      },
+    ]);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
   it('an Aone submit never stamps ledger ids into the posted bodies', () => {
     // The stamp exists for the GitHub review-thread graph; the Aone
     // write path has none, so the `!aoneWrite` half of the stamp guard

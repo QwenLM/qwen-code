@@ -662,10 +662,12 @@ function inconsistencies(
    * ledger builder applies; every one-line state entry rendered VERBATIM
    * (the body Criticals, the cannot-tell Criticals, the duplicate-drop
    * account, the uncoverable chunks, the not-reviewed dimensions, the
-   * downgrade reasons, and the deferral titles at any severity), scanned
-   * WHOLE-TOKEN because the prescribed entry shapes put the id mid-line;
-   * and the rulings' own `by` text, which rides verbatim into the posted
-   * reply (#9940 review).
+   * downgrade reasons, and the deferral entries' `file` and `title` at
+   * any severity), scanned WHOLE-TOKEN because the prescribed entry
+   * shapes put the id mid-line; the rulings' own `by` text, which rides
+   * verbatim into the posted reply; and the `modelId` the attribution
+   * footer interpolates — the footer, the marker and the reply render it
+   * only when attribution is on, and so does its scan (#9940 review).
    */
   fixedFindings: FixedFinding[] = [],
   preRerouteComments?: ReviewComment[],
@@ -770,14 +772,37 @@ function inconsistencies(
         ) {
           return;
         }
-        const { title } = entry as { title?: unknown };
+        const { file, title } = entry as { file?: unknown; title?: unknown };
         if (typeof title !== 'string') return;
+        // `file` is model-authored too, and the deferral line splices it
+        // VERBATIM ahead of the title — a retired id rides either field
+        // past a scan that reads one of them (#9940 review).
+        if (typeof file === 'string') {
+          for (const [, id] of file.matchAll(LEDGER_ID_SCAN)) {
+            if (id !== undefined && fixedIds.has(id)) {
+              problems.push(
+                contradiction(`state.deferredSuggestions[${i}].file`, id),
+              );
+            }
+          }
+        }
         for (const [, id] of title.matchAll(LEDGER_ID_SCAN)) {
           if (id !== undefined && fixedIds.has(id)) {
             problems.push(contradiction(`state.deferredSuggestions[${i}]`, id));
           }
         }
       });
+    }
+    // `modelId` rides VERBATIM into the public footer — the body's and
+    // every fixed-resolve reply's — but only while attribution is on;
+    // with it off nothing renders the field, so it contradicts nothing.
+    const modelId = payload.state?.modelId;
+    if (attribution && typeof modelId === 'string') {
+      for (const [, id] of modelId.matchAll(LEDGER_ID_SCAN)) {
+        if (id !== undefined && fixedIds.has(id)) {
+          problems.push(contradiction('state.modelId', id));
+        }
+      }
     }
   }
 

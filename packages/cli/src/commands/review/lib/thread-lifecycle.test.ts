@@ -532,4 +532,29 @@ describe('fetchReviewThreads — the read the whole lifecycle plans from', () =>
     expect(ghMock).toHaveBeenCalledTimes(2);
     expect(ghMock.mock.calls[1]).toContain('after=cur-1');
   });
+
+  it('stops at MAX_THREAD_PAGES against a connection that never ends (#9940 review)', () => {
+    // A stale/echoed endCursor is a known cursor-pagination failure
+    // class: `hasNextPage` stays true forever. The page cap is the only
+    // guard keeping the pre-write read finite — without it the submit
+    // hangs in unbounded synchronous gh calls before posting anything.
+    ghMock.mockReturnValue(
+      page([node({})], { hasNextPage: true, endCursor: 'cur' }),
+    );
+    const threads = fetchReviewThreads('o/r', 1);
+    expect(ghMock).toHaveBeenCalledTimes(30);
+    expect(threads).toHaveLength(30);
+  });
+
+  it('stops after a page whose endCursor is empty — hasNextPage alone cannot fetch (#9940 review)', () => {
+    // `hasNextPage: true` with no usable cursor: re-requesting without
+    // one re-fetches page one, and planThreadActions dedupes replies
+    // but NOT resolves — the break keeps the duplicate pages out.
+    ghMock.mockReturnValue(
+      page([node({})], { hasNextPage: true, endCursor: '' }),
+    );
+    const threads = fetchReviewThreads('o/r', 1);
+    expect(ghMock).toHaveBeenCalledTimes(1);
+    expect(threads).toHaveLength(1);
+  });
 });
