@@ -6197,10 +6197,12 @@ describe('SessionService', () => {
       sessionId: string,
       title: string,
       sessionCwd: string = cwd,
+      state: 'active' | 'archived' = 'active',
     ) => {
       const chatsDir = realPath.join(
         service['storage'].getProjectDir(),
         'chats',
+        ...(state === 'archived' ? ['archive'] : []),
       );
       fs.mkdirSync(chatsDir, { recursive: true });
       const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
@@ -6256,6 +6258,56 @@ describe('SessionService', () => {
       await expect(
         service.getSessionDisplayName('11111111-1111-1111-1111-111111111111'),
       ).resolves.toBe('my-branch(1)');
+    });
+
+    it('also returns titles from archived sessions, so unarchiving cannot surface a duplicate', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'my-branch(2)',
+        cwd,
+        'archived',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('my-branch(');
+
+      expect(new Set(titles)).toEqual(
+        new Set(['my-branch(1)', 'my-branch(2)']),
+      );
+    });
+
+    it('skips archived sessions from other projects (collisions stay project-scoped)', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'shared(1)',
+        cwd,
+        'archived',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'shared(2)',
+        '/some/other/project',
+        'archived',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('shared(');
+      expect(titles).toEqual(['shared(1)']);
+    });
+
+    it('computeUniqueBranchTitle skips a suffix already taken by an archived session', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        cwd,
+        'archived',
+      );
+
+      const title = await computeUniqueBranchTitle('my-branch', service);
+
+      expect(title).toBe('my-branch(2)');
     });
 
     it('returns empty when chats directory does not exist', async () => {
@@ -6343,6 +6395,34 @@ describe('SessionService', () => {
       await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
         '创建 MR 描述生成 Skill(1)',
       );
+    });
+
+    it('uses the picker prompt for an archived session with no custom title', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const archiveDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+        'archive',
+      );
+      fs.mkdirSync(archiveDir, { recursive: true });
+      const file = realPath.join(archiveDir, `${sessionId}.jsonl`);
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'archived-prompt(1)' }] },
+        }) + '\n',
+      );
+
+      const titles =
+        await service.findSessionTitlesByPrefix('archived-prompt(');
+      expect(titles).toEqual(['archived-prompt(1)']);
     });
   });
 
