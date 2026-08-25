@@ -139,7 +139,12 @@ export interface AbDriveArgs {
   server: string;
   out?: string;
   /** Test seam — production shells out for real. */
-  exec?: (cmd: string, args: string[], input?: string) => ExecResult;
+  exec?: (
+    cmd: string,
+    args: string[],
+    input?: string,
+    timeoutMs?: number,
+  ) => ExecResult;
 }
 
 /** The arm's identity, as environment — the ONLY variation between the arms. */
@@ -428,9 +433,15 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     arm: 'a' | 'b',
     cdDir: string,
     envRoot: string,
+    budgetMs = 30_000,
   ): boolean => {
     const cmd = `${envPrefix(arm, envRoot)}cd ${shellQuote(cdDir)} && (${probe})`;
-    return exec('bash', ['-lc', cmd]).status === 0;
+    // Bound one probe by the caller's remaining readiness budget: a hanging
+    // probe must not consume the fixed 30s subprocess timeout when
+    // --ready-timeout is shorter.
+    return (
+      exec('bash', ['-lc', cmd], undefined, Math.max(1, budgetMs)).status === 0
+    );
   };
   const pollReady = (
     probe: string,
@@ -442,7 +453,8 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     const started = Date.now();
     const deadline = started + timeoutS * 1000;
     for (;;) {
-      if (probeOnce(probe, arm, cdDir, envRoot)) return Date.now() - started;
+      if (probeOnce(probe, arm, cdDir, envRoot, deadline - Date.now()))
+        return Date.now() - started;
       if (Date.now() >= deadline) return null;
       waitMs(POLL_MS);
     }
@@ -549,12 +561,17 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
           note = `--shared-cwd ${JSON.stringify(args.sharedCwd)} no longer resolves to the validated directory or is no longer searchable — it vanished, was replaced, or lost its search bit mid-run. Nothing was driven for this arm; a harness fact, not a finding.`;
           return mode === 'once' ? 'stop' : bail('unavailable', null);
         }
-        if (mode === 'per-arm' && arm === 'b' && args.sharedReady) {
-          if (probeOnce(args.sharedReady, arm, sharedCwd, root)) {
-            note = `arm a's shared process outlived its teardown — its readiness probe still passes before arm b's own instance has started, so a previous instance (a daemon that detached from its tmux session, which kill-session cannot reap) is still serving. Per-arm isolation is broken; run the shared script in the FOREGROUND so tmux can kill it, or use --shared-once. Nothing was driven for arm b.`;
-            return bail('unavailable', null);
-          }
-        }
+        // NOTE — a limitation, deliberately not "detected": per-arm mode
+        // assumes the `--shared` script runs in the FOREGROUND, because tmux
+        // `kill-session` reaps only the session's foreground process. A shared
+        // script that daemonizes (setsid/nohup/&) escapes teardown, and its
+        // survival cannot be told from a --shared-ready probe: a file- or
+        // port-based probe passes on state the dead daemon left behind exactly
+        // as it does on a live one (an earlier version inferred survival from
+        // the probe and wrongly refused arm b whenever the readiness state
+        // simply persisted). So per-arm mode does not attempt that inference;
+        // a daemonizing shared script should use --shared-once, where one
+        // instance serves both arms by design.
         const s = start(
           `shared-${arm}`,
           sharedCwd,

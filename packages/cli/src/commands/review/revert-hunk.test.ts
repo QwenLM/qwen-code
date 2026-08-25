@@ -821,6 +821,62 @@ describe('runRevertHunk', () => {
     expect(r.applied).toBe(false);
     expect(r.note).toContain('passed --check but failed to apply');
   });
+
+  it('refuses a gitlink/submodule hunk instead of reporting a false applied:true', () => {
+    // `git apply -R` on a submodule-pointer hunk exits 0 without moving the
+    // submodule, so applied:true would be a witness for a mutation that never
+    // happened. The command must refuse structurally (harnessFailure), and it
+    // decides this from the diff text alone — the `index <sha>..<sha> 160000`
+    // marker — before it ever runs the apply, so the fixture is the authentic
+    // gitlink diff git emits for a bumped pointer, over a throwaway tree the
+    // refusal never touches.
+    const dir = tempDir('rh-gitlink-');
+    const diffPath = join(dir, 'sub.diff');
+    writeFileSync(
+      diffPath,
+      [
+        'diff --git a/sub b/sub',
+        'index 1111111aaa..2222222bbb 160000',
+        '--- a/sub',
+        '+++ b/sub',
+        '@@ -1 +1 @@',
+        '-Subproject commit 1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        '+Subproject commit 2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        '',
+      ].join('\n'),
+    );
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'sub:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('gitlink/submodule');
+  });
+
+  it('reverts under apply.whitespace=fix without silently rewriting the restored base', () => {
+    // A repo whose config sets apply.whitespace=fix would have git strip the
+    // trailing space off the base line as it is re-added under -R, so the
+    // reverted tree would NOT match base byte-for-byte — a half-mutation the
+    // report would still call applied:true. --whitespace=nochange pins it.
+    const dir = tempDir('rh-ws-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    git(dir, 'config', 'apply.whitespace', 'fix');
+    const base = 'alpha\nkeepme \nomega\n'; // note the trailing space on line 2
+    writeFileSync(join(dir, 'w.txt'), base);
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    writeFileSync(join(dir, 'w.txt'), 'alpha\nkeepme\nomega\n'); // space removed
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'pr');
+    const diffPath = join(dir, 'pr.diff');
+    writeFileSync(diffPath, git(dir, 'diff', 'HEAD~1', 'HEAD'));
+
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'w.txt:1' });
+    expect(r.applied).toBe(true);
+    // The restored base must carry the trailing space back verbatim.
+    expect(readFileSync(join(dir, 'w.txt'), 'utf8')).toBe(base);
+  });
 });
 
 describe('the command wiring', () => {

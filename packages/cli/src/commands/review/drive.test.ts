@@ -201,6 +201,16 @@ describe.skipIf(process.platform === 'win32')(
       expect(realExit('exit 0')).toBe(0);
     });
 
+    it('survives a body that ends in exec — the subshell takes the image swap, not the trap', () => {
+      // A verifier script whose last line is `exec <cmd>` replaces the shell
+      // image; without the subshell wrapper the EXIT trap never fires and the
+      // sentinel is never written, so the driver would read a null verdict for
+      // a run that actually finished. The subshell absorbs the exec and the
+      // outer shell's trap still stamps the subshell's real exit code.
+      expect(realExit('exec true')).toBe(0);
+      expect(realExit('exec bash -c "exit 5"')).toBe(5);
+    });
+
     it('keeps the script output on stdout and the verdict in its own file', () => {
       // Two channels on purpose. The log is bounded; the verdict must not be
       // bounded with it, and the next test shows what happens when it is.

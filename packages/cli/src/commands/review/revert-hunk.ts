@@ -359,6 +359,24 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   const entry = listHunks(diffText).find(
     (h) => h.path === sel.path && h.n === sel.n,
   )!;
+  const rawSection = diffText
+    .split('\n')
+    .slice(file.diffStart - 1, file.hunks[0].diffStart - 1);
+  if (
+    rawSection.some(
+      (l) =>
+        l.startsWith('old mode 160000') ||
+        l.startsWith('new mode 160000') ||
+        /^index [0-9a-f]+\.\.[0-9a-f]+ 160000$/.test(l),
+    )
+  ) {
+    return {
+      applied: false,
+      hunk: entry,
+      harnessFailure: true,
+      note: `hunk ${args.hunk} is a gitlink/submodule (mode 160000) change — git apply -R reports success without moving the submodule pointer, so applied:true would be a false witness. Reverting a submodule needs index/submodule semantics this command does not implement; nothing was changed.`,
+    };
+  }
   const unsafe = sectionUnsafeToRevert(diffText, file);
   if (unsafe !== null) {
     return {
@@ -385,7 +403,18 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     writeFileSync(patchPath, patch, 'latin1');
     // `--check` first: a refused revert must leave the tree byte-identical,
     // or the verifier's next probe measures a half-mutation nothing reports.
-    const check = exec(tree, ['apply', '-R', '--check', patchPath]);
+    // --whitespace=nowarn: overrides a repo's apply.whitespace=fix, which would
+    // otherwise silently rewrite the restored bytes (drop a trailing space) as
+    // it re-adds base lines under -R while reporting applied:true — a reverted
+    // tree that no longer matches base. `nowarn` is git apply's disable value
+    // (there is no `nochange`); it neither warns nor fixes.
+    const check = exec(tree, [
+      'apply',
+      '-R',
+      '--whitespace=nowarn',
+      '--check',
+      patchPath,
+    ]);
     if (check.error !== undefined || check.signal !== undefined) {
       return {
         applied: false,
@@ -413,7 +442,7 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
         note: `hunk ${args.hunk} does not revert independently — its context no longer matches the tree. Usually that means it overlaps another hunk's edits (a coupling worth reporting as a fact) or the tree was already mutated at those lines (reset the scratch tree and retry). The tree is unchanged.`,
       };
     }
-    const apply = exec(tree, ['apply', '-R', patchPath]);
+    const apply = exec(tree, ['apply', '-R', '--whitespace=nowarn', patchPath]);
     if (apply.error !== undefined || apply.signal !== undefined) {
       // Same misclassification the --check guard above closes, one call
       // later — with one difference the note must carry: a git killed

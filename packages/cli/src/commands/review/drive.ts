@@ -155,7 +155,12 @@ export interface DriveArgs {
    */
   capture?: string[];
   /** Test seam — production shells out for real. */
-  exec?: (cmd: string, args: string[], input?: string) => ExecResult;
+  exec?: (
+    cmd: string,
+    args: string[],
+    input?: string,
+    timeoutMs?: number,
+  ) => ExecResult;
   /** Test seam — production derives it from `server`. */
   logPath?: string;
 }
@@ -430,11 +435,12 @@ export function spawnExec(
   cmd: string,
   args: string[],
   input?: string,
+  timeoutMs = 30_000,
 ): ExecResult {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
     input,
-    timeout: 30_000,
+    timeout: timeoutMs,
     maxBuffer: 64 * 1024 * 1024,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -476,7 +482,13 @@ export function wrapScript(
   sentinelPath: string,
   sentinel = DRIVE_SENTINEL,
 ): string {
-  return `trap '__qwen_rc=$?; echo "${sentinel} rc=\${__qwen_rc}" > ${shellQuote(sentinelPath)}' EXIT\nset +e\n${script}\n`;
+  // The user body runs in a SUBSHELL so the EXIT trap survives it. A drive
+  // script ending in `exec` (`exec node server.js`, `exec my-tool`) replaces
+  // the shell it runs in; if that were the trap-owning shell the sentinel
+  // would never be written and the arm would time out despite finishing.
+  // `( … )` gives exec a child to replace, and `__qwen_rc=$?` in the trap
+  // records the subshell's own exit code.
+  return `trap '__qwen_rc=$?; echo "${sentinel} rc=\${__qwen_rc}" > ${shellQuote(sentinelPath)}' EXIT\nset +e\n(\n${script}\n)\n`;
 }
 
 /** Parse the sentinel line back out of a capture. Null when it is not there. */
