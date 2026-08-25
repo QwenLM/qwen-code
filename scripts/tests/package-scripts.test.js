@@ -545,6 +545,7 @@ describe('package scripts', () => {
       'packages/cli',
       'packages/channels/base',
       'packages/channels/dingtalk',
+      'packages/channels/dws',
       'packages/channels/feishu',
       'packages/channels/github',
       'packages/channels/qqbot',

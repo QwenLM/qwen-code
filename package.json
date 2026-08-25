@@ -15,10 +15,12 @@
     "packages/channels/feishu",
     "packages/channels/qqbot",
     "packages/channels/github",
+    "packages/channels/dws",
     "packages/channels/gitlab",
     "packages/channels/plugin-example",
     "integrations/external-context",
-    "!packages/desktop-shell"
+    "!packages/desktop-shell",
+    "!packages/live-host"
   ],
   "repository": {
     "type": "git",

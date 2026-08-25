@@ -83,6 +83,17 @@ export interface Ledger {
    * anchors must not disagree about what a clean round is. The findings
    * still ride; only the anchor is withheld.
    *
+   * Withheld is not lost when the graft's guards allow the recovery: a
+   * fail-closed round's marker carries no `sha`, but recovery (`pr-context`)
+   * grafts the anchor forward from the most recent EARLIER own marker that
+   * carries one — the withhold is about the fail-closed round's own range,
+   * while an earlier round's "clean up to sha" stays true, and scoping the
+   * next round `sha..HEAD` re-covers the gap. The graft fires only when the
+   * winning work list is complete, the source is a STRICTLY earlier own
+   * round, and the walk has a known identity; refused, the withhold stands
+   * and later rounds stay full-range until a round re-establishes the chain
+   * (issue #9902).
+   *
    * It also never crosses accounts: `pr-context` strips it from a marker
    * another account posted, so a foreign body can never decide which lines
    * this pipeline stops looking at.

@@ -193,7 +193,6 @@ const SKILL_DESCRIPTION_KEYS: Record<string, string> = {
   bugfix: 'skilldesc.bugfix',
   codegraph: 'skilldesc.codegraph',
   'create-issue': 'skilldesc.createIssue',
-  'desktop-pet': 'skilldesc.desktopPet',
   'docs-audit-and-refresh': 'skilldesc.docsAuditAndRefresh',
   'docs-update-from-diff': 'skilldesc.docsUpdateFromDiff',
   'e2e-testing': 'skilldesc.e2eTesting',
