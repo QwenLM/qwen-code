@@ -8474,6 +8474,11 @@ export class Config {
    * skills, user/project file commands, MCP prompts). Called by the CLI's
    * CommandService after initialisation so that the startup snapshot and
    * per-turn drain can include these in the `<available_skills>` listing.
+   *
+   * Unlike `disabledSkillNamesProvider`, late attachment (after
+   * `Config.initialize()` has warmed the tool registry) is supported:
+   * `SkillTool.validateToolParams` consults this provider live rather than
+   * relying on its construction-time snapshot (issue #9821).
    */
   setModelInvocableCommandsProvider(
     provider: () => ReadonlyArray<{ name: string; description: string }>,
