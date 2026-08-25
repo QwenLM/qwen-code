@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from './config.js';
+import { createProvider } from './providers.js';
 
 describe('extension manifest', () => {
   it('exposes only the retrieval tool', async () => {
@@ -263,18 +264,16 @@ describe('extension manifest', () => {
       const configPath = join(directory, 'config.json');
       await writeFile(configPath, JSON.stringify(substituted));
 
-      await expect(
-        loadConfig({
-          QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
-          MEM0_API_KEY: 'example-key',
-        }),
-      ).resolves.toMatchObject({
-        provider: {
-          type: 'mem0',
-          userId: 'example-user',
-          appId: 'qwen-code',
-        },
+      const loaded = await loadConfig({
+        QWEN_EXTERNAL_CONTEXT_CONFIG: configPath,
+        MEM0_API_KEY: 'example-key',
       });
+      expect(loaded.provider).toMatchObject({
+        type: 'mem0',
+        userId: 'example-user',
+        appId: 'qwen-code',
+      });
+      expect(() => createProvider(loaded.provider)).not.toThrow();
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
