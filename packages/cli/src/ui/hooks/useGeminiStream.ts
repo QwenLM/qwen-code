@@ -75,6 +75,7 @@ import {
   finalizeToolResponses,
   endInteractionSpan,
   getActiveInteractionSpan,
+  renderGoalContinuationPrompt,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -104,7 +105,7 @@ import {
 } from '../utils/markdownUtilities.js';
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
-import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -916,9 +917,20 @@ export const useGeminiStream = (
       async (completedToolCallsFromScheduler) => {
         // This onComplete is called when ALL scheduled tools for a given batch are done.
         if (completedToolCallsFromScheduler.length > 0) {
-          const releaseToolCompletionActivity = isSubmittingQueryRef.current
-            ? retainSubmissionActivity(submissionLeaseGenerationRef.current)
-            : undefined;
+          // The scheduler empties the display list before this callback
+          // (#9420), so once the issuing stream has settled nothing else
+          // keeps streamingState off Idle while the callback runs. A
+          // phantom Idle commit mid-turn would drain queued turns
+          // concurrently with the pending ToolResult continuation, fire
+          // YOLO turn-finished telemetry at the batch boundary, and no-op
+          // Esc cancellation. Re-assert the in-flight flags for the whole
+          // window; the release in finally settles them once the
+          // continuation is done.
+          setSubmissionInFlight(true);
+          setIsResponding(true);
+          const releaseToolCompletionActivity = retainSubmissionActivity(
+            submissionLeaseGenerationRef.current,
+          );
           // Captured before the await: the continuation scheduled inside
           // handleCompletedTools may re-register a reused callId for the
           // NEXT batch, and the cleanup below must not delete that entry.
@@ -940,7 +952,7 @@ export const useGeminiStream = (
               completedToolCallsFromScheduler as TrackedToolCall[],
             );
           } finally {
-            releaseToolCompletionActivity?.();
+            releaseToolCompletionActivity();
             // Entries are only needed until the batch commits; the scheduler
             // clears its display copy right after this callback returns.
             // Delete only entries still pointing at this batch's id: a
@@ -2245,14 +2257,22 @@ export const useGeminiStream = (
       const warningSuffix = eventValue?.warning
         ? `\n⚠️ ${eventValue.warning}`
         : '';
+      // Estimated counts (#9309) get a '~' prefix so the notice doesn't read
+      // as an API-reported figure on a different scale than a later banner.
+      const formatCount = (count?: number, isEstimated?: boolean) =>
+        count === undefined
+          ? 'unknown'
+          : isEstimated
+            ? `~${count}`
+            : String(count);
       return addItem(
         {
           type: 'info',
           text:
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${eventValue?.originalTokenCount ?? 'unknown'} to ` +
-            `${eventValue?.newTokenCount ?? 'unknown'} tokens).` +
+            `${formatCount(eventValue?.originalTokenCount, eventValue?.originalTokenCountIsEstimated)} to ` +
+            `${formatCount(eventValue?.newTokenCount, eventValue?.newTokenCountIsEstimated)} tokens).` +
             warningSuffix,
         },
         Date.now(),
@@ -3557,17 +3577,12 @@ export const useGeminiStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: [
-                      'Continue working on the active Goal.',
-                      'Use get_goal for the authoritative objective and evidence state.',
-                      "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-                      'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-                      'This is a synthetic continuation turn. It contains no new real user input and cannot satisfy an objective condition that requires the user to send, confirm, choose, approve, or provide something.',
-                      'A phrase mentioned in the objective or this prompt is not evidence that the user supplied it.',
-                      ...(queuedGoal.verifierFeedback
-                        ? [`Verifier feedback: ${queuedGoal.verifierFeedback}`]
-                        : []),
-                    ].join('\n'),
+                    queryToSend: renderGoalContinuationPrompt({
+                      goalId: queuedGoal.permit.goalId,
+                      revision: queuedGoal.permit.revision,
+                      objective: queuedGoal.continuationContext,
+                      verifierFeedback: queuedGoal.verifierFeedback,
+                    }),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }

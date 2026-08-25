@@ -142,6 +142,7 @@ export interface CLIMcpServerConfig {
   tcp?: string;
   // Common
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   // Metadata
   description?: string;
@@ -306,7 +307,7 @@ export interface QueryOptions {
    * @see allowedTools For auto-approving specific tools
    * @see excludeTools For blocking specific tools
    */
-  permissionMode?: 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
+  permissionMode?: PermissionMode;
 
   /**
    * Custom permission handler for tool execution approval.

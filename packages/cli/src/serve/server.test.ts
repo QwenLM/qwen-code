@@ -580,6 +580,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_status',
   'session_close',
   'session_archive',
+  'session_storage_conflict_repair',
   'session_metadata',
   'session_organization',
   'session_export',
@@ -3910,6 +3911,22 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', host)
         .set('Accept', 'text/html');
+      expect(api.status).toBe(401);
+    });
+
+    it('serves /mcp-app-sandbox pre-auth while the API stays token-gated', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const sandbox = await request(app)
+        .get('/mcp-app-sandbox')
+        .set('Host', host);
+      expect(sandbox.status).toBe(200);
+      expect(sandbox.text).toContain('ui/notifications/sandbox-proxy-ready');
+      expect(sandbox.headers['content-security-policy']).toContain(
+        "form-action 'none'",
+      );
+      const api = await request(app).get('/capabilities').set('Host', host);
       expect(api.status).toBe(401);
     });
   });
@@ -9094,7 +9111,7 @@ describe('createServeApp', () => {
       const app = createServeApp(
         { ...baseOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, primaryWorkspaceTrusted: true },
       );
 
       const contextRes = await request(app)
@@ -9398,7 +9415,7 @@ describe('createServeApp', () => {
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, primaryWorkspaceTrusted: true },
       );
 
       const res = await request(app)
@@ -9431,7 +9448,7 @@ describe('createServeApp', () => {
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
         undefined,
-        { bridge },
+        { bridge, primaryWorkspaceTrusted: true },
       );
 
       const pauseRes = await request(app)
@@ -9491,6 +9508,85 @@ describe('createServeApp', () => {
         { sessionId: 's-1', taskId: 'task-1', action: 'delete-history' },
         { sessionId: 's-1', taskId: 'deep-review', action: 'run-saved' },
       ]);
+    });
+
+    it('fails the Workflow surfaces closed for an untrusted primary workspace', async () => {
+      const bridge = fakeBridge({
+        sessionSupportedCommandsImpl: async (sessionId) => ({
+          v: 1 as const,
+          sessionId,
+          availableCommands: [
+            {
+              name: 'init',
+              description: 'Initialize',
+              input: null,
+              _meta: { source: 'builtin' },
+            },
+            {
+              name: 'workflows',
+              description: 'Manage workflows',
+              input: null,
+              _meta: { source: 'builtin' },
+            },
+          ],
+          availableSkills: [],
+          workflowsEnabled: true,
+          savedWorkflows: [{ name: 'slow-phases', source: 'project' as const }],
+        }),
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+        controlSessionWorkflowTaskImpl: async () => ({
+          changed: true,
+          status: 'running',
+          taskId: 'wf-1',
+        }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'primary-id',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              trusted: false,
+              bridge,
+            }),
+          ]),
+        },
+      );
+
+      const commandsRes = await request(app)
+        .get('/session/s-1/supported-commands')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      const runSavedRes = await request(app)
+        .post('/session/s-1/tasks/slow-phases/workflow-action')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'run-saved' });
+      const cancelRes = await request(app)
+        .post('/session/s-1/tasks/wf-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ kind: 'workflow' });
+
+      expect(commandsRes.status).toBe(200);
+      expect(commandsRes.body).toMatchObject({
+        workflowsEnabled: false,
+        savedWorkflows: [],
+      });
+      expect(commandsRes.body.availableCommands).toEqual([
+        expect.objectContaining({ name: 'init' }),
+      ]);
+      expect(runSavedRes.status).toBe(200);
+      expect(runSavedRes.body).toEqual({ changed: false });
+      expect(cancelRes.status).toBe(200);
+      expect(cancelRes.body).toEqual({ cancelled: false, reason: 'disabled' });
+      expect(bridge.controlSessionWorkflowTaskCalls).toEqual([]);
+      expect(bridge.cancelSessionTaskCalls).toEqual([]);
     });
 
     it.each([
@@ -25382,6 +25478,7 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({
         archived: [sid],
         alreadyArchived: [],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       });
@@ -25392,6 +25489,51 @@ describe('createServeApp', () => {
       await expect(
         fsp.access(sessionFilePath(sid, 'archived')),
       ).resolves.toBeUndefined();
+    });
+
+    it('requires an explicit boolean to repair active/archive conflicts', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeea';
+      await writeSession(sid);
+      await writeSession(sid, 'archived');
+      const app = createArchiveApp();
+
+      const invalid = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: 'yes' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_request');
+
+      const archived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: true });
+      expect(archived.status).toBe(200);
+      expect(archived.body).toMatchObject({
+        archived: [sid],
+        resolvedConflicts: [sid],
+        errors: [],
+      });
+      await expect(fsp.access(sessionFilePath(sid))).rejects.toThrow();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).resolves.toBeUndefined();
+
+      await writeSession(sid);
+      const unarchived = await request(app)
+        .post('/sessions/unarchive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: true });
+      expect(unarchived.status).toBe(200);
+      expect(unarchived.body).toMatchObject({
+        unarchived: [sid],
+        resolvedConflicts: [sid],
+        errors: [],
+      });
+      await expect(fsp.access(sessionFilePath(sid))).resolves.toBeUndefined();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).rejects.toThrow();
     });
 
     it('invalidates active and archived catalogs across archive, unarchive, and delete', async () => {
@@ -25660,6 +25802,7 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({
         unarchived: [sid],
         alreadyActive: [],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       });
@@ -34347,6 +34490,20 @@ describe('Live conversation runtime lifecycle', () => {
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
+    const getMaintainableLocation = vi
+      .spyOn(SessionService.prototype, 'getMaintainableSessionLocation')
+      .mockImplementation(async function (candidateId) {
+        if (candidateId === 'ordinary-session') {
+          return this.getProjectRoot() === '/work/live-primary'
+            ? 'active'
+            : undefined;
+        }
+        return this.getProjectRoot() === setup.root.canonicalRoot &&
+          candidateId !== 'not-live' &&
+          candidateId !== 'missing-live-session'
+          ? 'active'
+          : undefined;
+      });
     const sessionExists = vi
       .spyOn(SessionService.prototype, 'sessionExistsInAnyState')
       .mockImplementation(async function (candidateId) {
@@ -34457,6 +34614,7 @@ describe('Live conversation runtime lifecycle', () => {
       expect(updateOrganization).toHaveBeenCalledOnce();
     } finally {
       getLocation.mockRestore();
+      getMaintainableLocation.mockRestore();
       sessionExists.mockRestore();
       readMetadata.mockRestore();
       readMetadataIfReadable.mockRestore();

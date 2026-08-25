@@ -27,6 +27,24 @@ import {
 
 const COMPOSER_VIEWPORT_HEIGHTS = [1000, 800, 600] as const;
 
+const qwen38ReasoningConfigOptions = (currentValue = 'xhigh') => [
+  {
+    id: 'reasoning_effort',
+    name: 'Reasoning effort',
+    type: 'select',
+    currentValue,
+    options: [
+      { value: 'none', name: 'Thinking off' },
+      { value: 'low', name: 'Low' },
+      { value: 'medium', name: 'Medium' },
+      { value: 'xhigh', name: 'Extra high' },
+    ],
+    _meta: {
+      'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+    },
+  },
+];
+
 test('loads replayed transcript and connects to fake daemon @smoke', async ({
   page,
 }, testInfo) => {
@@ -205,23 +223,7 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   const scenario = createWebShellDaemonScenario({
     currentModel: 'qwen3.8-max',
     state: {
-      configOptions: [
-        {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          type: 'select',
-          currentValue: 'xhigh',
-          options: [
-            { value: 'none', name: 'Thinking off' },
-            { value: 'low', name: 'Low' },
-            { value: 'medium', name: 'Medium' },
-            { value: 'xhigh', name: 'Extra high' },
-          ],
-          _meta: {
-            'qwenCode/reasoning': { defaultEffort: 'xhigh' },
-          },
-        },
-      ],
+      configOptions: qwen38ReasoningConfigOptions(),
     },
   });
   const daemon = await installScenario(page, scenario, testInfo);
@@ -273,6 +275,265 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   await expect(
     page.locator('[data-web-shell-model-submenu] input[type="search"]'),
   ).toBeVisible();
+});
+
+test('previews qwen3.8-max reasoning before lazy session creation @smoke', async ({
+  page,
+}, testInfo) => {
+  const stableModel = {
+    modelId: 'qwen3.8-max',
+    baseModelId: 'qwen3.8-max',
+    name: 'qwen3.8-max',
+    contextLimit: 131_072,
+    isCurrent: true,
+    isRuntime: false,
+    configOptions: qwen38ReasoningConfigOptions(),
+  };
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.8-max',
+    state: {
+      configOptions: qwen38ReasoningConfigOptions('none'),
+      models: {
+        currentModelId: 'qwen3.8-max',
+        availableModels: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'qwen3.8-max',
+            contextLimit: 131_072,
+          },
+        ],
+      },
+    },
+    providers: {
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'qwen-oauth',
+          current: true,
+          models: [
+            stableModel,
+            {
+              modelId: 'qwen3.8-max-preview',
+              baseModelId: 'qwen3.8-max-preview',
+              name: 'qwen3.8-max-preview',
+              isCurrent: false,
+              isRuntime: false,
+            },
+            {
+              modelId: 'qwen3.8-max-latest',
+              baseModelId: 'qwen3.8-max-latest',
+              name: 'qwen3.8-max-latest',
+              isCurrent: false,
+              isRuntime: false,
+            },
+            {
+              modelId: 'qwen-plus',
+              baseModelId: 'qwen-plus',
+              name: 'qwen-plus',
+              isCurrent: false,
+              isRuntime: false,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await expect(modelButton).toContainText('qwen3.8-max · Extra High');
+  await modelButton.click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  await expect(controls).toBeVisible();
+  await expect(
+    controls.locator('[data-web-shell-thinking-toggle]'),
+  ).toBeChecked();
+  await expect(
+    controls.locator('[data-web-shell-thinking-toggle]'),
+  ).toBeDisabled();
+  await expect(
+    controls.locator('[data-web-shell-effort="low"]'),
+  ).toBeDisabled();
+  await expect(
+    controls.locator('[data-web-shell-effort="medium"]'),
+  ).toBeVisible();
+  await expect(
+    controls.locator('[data-web-shell-effort="xhigh"]'),
+  ).toBeVisible();
+  await page.locator('[data-web-shell-model-submenu-trigger]').click();
+  await page
+    .locator('[data-web-shell-model-submenu]')
+    .getByRole('button', { name: 'qwen3.8-max-preview', exact: true })
+    .click();
+  await expect(modelButton).toContainText('qwen3.8-max-preview');
+  await expect(modelButton).not.toContainText('Extra High');
+
+  await modelButton.click();
+  await expect(page.locator('[data-web-shell-model-reasoning]')).toHaveCount(0);
+  await page
+    .locator('[data-web-shell-toolbar-popover]:visible')
+    .getByRole('button', { name: 'qwen3.8-max-latest', exact: true })
+    .click();
+  await expect(modelButton).toContainText('qwen3.8-max-latest');
+  await expect(modelButton).not.toContainText('Extra High');
+
+  await modelButton.click();
+  await page
+    .locator('[data-web-shell-toolbar-popover]:visible')
+    .getByRole('button', { name: 'qwen-plus', exact: true })
+    .click();
+  await expect(modelButton).toContainText('qwen-plus');
+  await expect(modelButton).not.toContainText('Extra High');
+
+  await modelButton.click();
+  await page
+    .locator('[data-web-shell-toolbar-popover]:visible')
+    .getByRole('button', { name: 'qwen3.8-max', exact: true })
+    .click();
+  await expect(modelButton).toContainText('qwen3.8-max · Extra High');
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === 'POST' && request.path === '/session',
+    ),
+  ).toHaveLength(0);
+
+  await page.keyboard.press('Escape');
+  await fillComposer(page, 'Create the lazy session');
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await expect
+    .poll(
+      () =>
+        daemon.requests.filter(
+          (request) => request.method === 'POST' && request.path === '/session',
+        ).length,
+    )
+    .toBe(1);
+  await expect(modelButton).toContainText('qwen3.8-max · Thinking Off');
+  await modelButton.click();
+  await expect(
+    page.locator('[data-web-shell-thinking-toggle]'),
+  ).not.toBeChecked();
+  await expect(page.locator('[data-web-shell-thinking-toggle]')).toBeEnabled();
+});
+
+test('does not invent welcome reasoning for an older daemon @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.8-max',
+    providers: {
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'qwen-oauth',
+          current: true,
+          models: [
+            {
+              modelId: 'qwen3.8-max',
+              baseModelId: 'qwen3.8-max',
+              name: 'qwen3.8-max',
+              isCurrent: true,
+              isRuntime: false,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await expect(modelButton).toContainText('qwen3.8-max');
+  await expect(modelButton).not.toContainText('Extra High');
+  await modelButton.click();
+  await expect(page.locator('[data-web-shell-model-reasoning]')).toHaveCount(0);
+  expect(
+    daemon.requests.filter(
+      (request) => request.method === 'POST' && request.path === '/session',
+    ),
+  ).toHaveLength(0);
+});
+
+test('does not fall back to welcome preview when live context lacks reasoning @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.8-max',
+    contextDelayMs: 2_000,
+    state: {
+      configOptions: [],
+      models: undefined,
+    },
+    providers: {
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'qwen-oauth',
+          current: true,
+          models: [
+            {
+              modelId: 'qwen3.8-max',
+              baseModelId: 'qwen3.8-max',
+              name: 'qwen3.8-max',
+              isCurrent: true,
+              isRuntime: false,
+              configOptions: qwen38ReasoningConfigOptions(),
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoEmptyMobileWelcomeHarness(page);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await expect(modelButton).toContainText('qwen3.8-max · Extra High');
+  await fillComposer(page, 'Attach a session without reasoning capability');
+  const contextResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      response.request().method() === 'GET' &&
+      /^\/session\/[^/]+\/context\/?$/.test(url.pathname) &&
+      response.ok()
+    );
+  });
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await expect
+    .poll(
+      () =>
+        daemon.requests.filter(
+          (request) => request.method === 'POST' && request.path === '/session',
+        ).length,
+    )
+    .toBe(1);
+  await expect
+    .poll(
+      () =>
+        daemon.requests.some(
+          (request) =>
+            request.method === 'GET' &&
+            /^\/session\/[^/]+\/context\/?$/.test(request.path),
+        ),
+      { timeout: 1_000 },
+    )
+    .toBe(true);
+  await expect(modelButton).not.toContainText('Extra High', { timeout: 1_000 });
+  await contextResponse;
+  await expect(modelButton).toContainText('qwen3.8-max');
+  await expect(modelButton).not.toContainText('Extra High');
+  await expect(modelButton).not.toContainText('Thinking');
+  await modelButton.click();
+  await expect(page.locator('[data-web-shell-model-reasoning]')).toHaveCount(0);
 });
 
 test('toggles reasoning without effort tiers for qwen3.7-plus @smoke', async ({

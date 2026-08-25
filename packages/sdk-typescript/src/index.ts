@@ -2,6 +2,7 @@ export { query } from './query/createQuery.js';
 export { AbortError, isAbortError } from './types/errors.js';
 export { Query } from './query/Query.js';
 export { SdkLogger } from './utils/logger.js';
+export { PERMISSION_MODES } from './types/permission-mode.js';
 
 // Daemon HTTP client (talks to `qwen serve`)
 export {

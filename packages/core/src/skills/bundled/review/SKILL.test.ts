@@ -20,8 +20,22 @@ const skillDir = path.dirname(fileURLToPath(import.meta.url));
 const POINTER_RE = /\(measured; DESIGN\.md — ([^()\n]+(?:\([^()\n]*\))?)\)/g;
 const POINTER_OPEN = '(measured; DESIGN.md — ';
 
-function skillBody(): string {
+// The verdict-gated reference files (#9787): Step 7, Step 8 and the Aone
+// paths live beside the core body and are read on demand. The split moved
+// whole sections verbatim, so every revert guard below governs the full
+// corpus, whichever file the guarded text now lives in.
+const REFERENCE_FILES = ['posting.md', 'persistence.md', 'aone.md'];
+
+function coreBody(): string {
   return fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
+}
+
+function referenceBody(name: string): string {
+  return fs.readFileSync(path.join(skillDir, 'references', name), 'utf8');
+}
+
+function skillBody(): string {
+  return [coreBody(), ...REFERENCE_FILES.map(referenceBody)].join('\n');
 }
 
 function incidentPointers(body: string): string[] {
@@ -90,6 +104,28 @@ describe('bundled review skill', () => {
     // without the manifest's required agents.
     expect(body).toContain(
       '**any side-file `fetch-pr --since` re-run before `repo-context`**',
+    );
+  });
+
+  it('keeps the language-pitfall and wrapper/proxy checks as dedicated high-effort angles', () => {
+    // #9788: both rode inside Agent 1a's line-by-line brief as bullets, and
+    // the walk's rhythm diluted them — a checklist pattern-match and a
+    // structural routing expectation are different attention modes from
+    // judging each line in its context. Folding them back restores the
+    // dilution the split exists to remove.
+    const body = skillBody();
+    // The angles exist as roles of their own, listed among the selectors a
+    // relaunch rebuilds.
+    expect(body).toContain('`1d`');
+    expect(body).toContain('`1e`');
+    // 1e is high-only AND conditional on the plan's own signal — the gate
+    // fails safe (an absent field rosters it), which the skill states.
+    expect(body).toContain(
+      `rostered only when the plan's \`wrapperSignal\` is true`,
+    );
+    // And 1a no longer carries either clause folded into its row.
+    expect(body).not.toContain(
+      `the language's own pitfalls, and wrapper/proxy routing`,
     );
   });
 
@@ -620,6 +656,42 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('keeps the presubmit example on the host rule', () => {
+    // Revert guard: presubmit was the one Step 7 subcommand example
+    // missing the host flag; on an auth-config-only GHE clone a dropped
+    // `--host` routes its platform queries at github.com — the same
+    // failure class the meta pins above guard.
+    const body = skillBody();
+    expect(body).toContain(
+      '[--new-findings .qwen/tmp/qwen-review-{target}-new-findings.json] \\\n  [--host <host>]',
+    );
+  });
+
+  it('pins the publish-assets weave as the last, all-or-nothing step', () => {
+    // Revert guard: `--findings-out` is written only after the push and
+    // the manifest succeed; without the clause the artifact's failure
+    // contract is unstated, and a mid-publish failure reads as a partial
+    // weave or a reason not to re-run.
+    const body = skillBody();
+    expect(body).toContain(
+      'the `--findings-out` rewrite runs only after every file has landed and the manifest is written',
+    );
+    expect(body).toContain(
+      'a run that fails partway through the push is completed by an idempotent re-run',
+    );
+  });
+
+  it('names the deferral channel in the bodyCriticals sources', () => {
+    // Revert guard: compose-review relocates a `Critical` entry written
+    // into `deferredSuggestions` into the body Criticals (a Critical is
+    // never deferred); the bodyCriticals bullet must name that mechanical
+    // relocation beside the two model-written sources.
+    const body = skillBody();
+    expect(body).toContain(
+      'a `Critical` entry placed in `deferredSuggestions` is relocated here, never deferred',
+    );
+  });
+
   it('keeps the lightweight capture on fetch-diff with the plan-diff host note', () => {
     // Revert guard: restoring a prose `gh pr diff > file` here (or dropping
     // the plan-diff --host note) must fail a test, not slip through — the
@@ -856,6 +928,17 @@ describe('bundled review skill', () => {
     expect(body).not.toContain(
       '`pr-context` and `comment-status` have no Aone backing',
     );
+    // The last three skip residues this change removes — the setup-batch
+    // parenthetical, the comment-status guard clause, and the Step 6
+    // no-report clause. The positive assertions above stay green if a
+    // merge resolution or partial revert re-adds any of them, while Aone
+    // runs skip comment-status again; the replacement contract is the
+    // a1-backed report's existence in Step 6's re-check.
+    expect(body).not.toContain('drops out of the batch');
+    expect(body).not.toContain('leaving a two-call batch');
+    expect(body).not.toContain('the command has no backing');
+    expect(body).not.toContain('skips the command with the Step 1 batch');
+    expect(body).toContain('on an Aone target it runs a1-backed');
   });
 
   it('keeps the corrected Aone --comment contract, not merge residue', () => {
@@ -961,5 +1044,128 @@ describe('bundled review skill', () => {
       (m) => m[1],
     );
     expect(new Set(advertised)).toEqual(new Set(declared));
+  });
+
+  it('ships the verdict-gated reference files beside the core body', () => {
+    // The split (#9787) moves whole steps, not rules: the core keeps the
+    // gates and the invariants that bind runs which never load a file, and
+    // each reference owns one conditional territory.
+    for (const name of REFERENCE_FILES) {
+      expect(referenceBody(name).length).toBeGreaterThan(1000);
+    }
+    expect(referenceBody('posting.md')).toContain('# Step 7: Submit PR review');
+    expect(referenceBody('persistence.md')).toContain(
+      '# Step 8: Save review report and cache',
+    );
+    expect(referenceBody('aone.md')).toContain('# Aone Code paths');
+  });
+
+  it('gates every reference file on the verdict in the core body', () => {
+    // A run must learn from the injected core alone WHICH file to read and
+    // when; a gate that moved into the file it gates would be unreadable.
+    const core = coreBody();
+    expect(core).toContain('**Reference files, gated by this verdict.**');
+    // Pin each enumeration prefix together with its load-condition clause
+    // as ONE contiguous substring: checked separately, a rewrite that swaps
+    // two clauses between bullets ships green while a report-only run loads
+    // the wrong file. The gating is the mechanism this split introduces.
+    expect(core).toContain(
+      '`references/posting.md` — Step 7 (authorisation, anchors, presubmit, `submit`, the 422/head-drift recovery, `publish-assets`). Load it when, and only when, posting is live',
+    );
+    expect(core).toContain(
+      '`references/persistence.md` — Step 8 (report, artifact registration, incremental cache). Load it before Step 8 on every run except cross-repo lightweight mode',
+    );
+    expect(core).toContain(
+      '`references/aone.md` — the Aone paths (see the Aone note below). Load it before `match-remote` when the target is Aone',
+    );
+  });
+
+  it('keeps the write prohibition and the posting gates in the core body', () => {
+    // The one-sentence write ban and the PR-only/high-only posting rule must
+    // bind a run that never loads posting.md — the bypass they guard against
+    // does not wait for the gate file.
+    const core = coreBody();
+    expect(core).toContain(
+      '`qwen review submit` is the only write path in this skill',
+    );
+    expect(core).toContain('Posting is a PR-only, high-only action');
+    // The step headings stay in core so every "Step 7" / "Step 8" cross-
+    // reference in the corpus resolves to the pointer that forwards.
+    expect(core).toContain('## Step 7: Submit PR review');
+    expect(core).toContain('## Step 8: Save review report and cache');
+    // The compose-state field list relocated to Step 6 references the
+    // never-in-body rule whose full text moved to posting.md; the entry must
+    // restate the rule's substance so a report-only run (which never loads
+    // posting.md) still sees why a Suggestion must not ride the review body.
+    expect(core).toContain('does not filter review bodies');
+  });
+
+  it('moved the sections whole — no step body duplicated across files', () => {
+    const core = coreBody();
+    const corpus = skillBody();
+    // Distinctive openings of the moved sections: present in exactly one
+    // file of the corpus, and absent from the core. The corpus-wide count
+    // alone would pass a revert that keeps a section in the core, and the
+    // absence-from-core alone passes a copy duplicated BETWEEN the
+    // reference files — an Aone --comment run loads both posting.md and
+    // aone.md, so one run would then obey two potentially divergent
+    // copies of the same step.
+    expect(corpus.match(/\*\*Use the "Create Review" API/g)).toHaveLength(1);
+    expect(corpus.match(/### Report persistence/g)).toHaveLength(1);
+    expect(
+      corpus.match(/run `\/review` \*\*from inside a clone of that repo\*\*/g),
+    ).toHaveLength(1);
+    expect(core).not.toContain(
+      '**Use the "Create Review" API to submit verdict + inline comments',
+    );
+    expect(core).not.toContain('### Report persistence');
+    expect(core).not.toContain(
+      'run `/review` **from inside a clone of that repo**',
+    );
+    // The compose-state field list relocated from Step 7 to Step 6's Verdict
+    // section: one copy in the corpus, in the core.
+    expect(corpus.match(/- `modelId` — for the footer\./g)).toHaveLength(1);
+    expect(core).toContain('- `modelId` — for the footer.');
+  });
+
+  it('pins the minimal arm report_findings override on the unverified level', () => {
+    // Step 6 mandates `report_findings` at the run's RESOLVED effort with
+    // entries copied from the findings artifact, and Step 3M forbids the
+    // artifact. Without its own override — the one Step 3C has — the arm
+    // either skips the call for lack of an artifact or reports at the
+    // resolved effort (high on a PR target): clients render the unverified
+    // marker only for `level: "low"`, so either shape defeats the
+    // labeled-unverified property the parser force-offs and the posting
+    // declines reserve for this arm.
+    const body = coreBody();
+    const start = body.indexOf('## Step 3M');
+    const end = body.indexOf('## Step 4');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = body.slice(start, end);
+    expect(section).toContain('`report_findings`');
+    expect(section).toContain('`level: "low"`');
+    expect(section).toContain('the composed finding list');
+    expect(section).toContain(
+      'would render these unverified findings indistinguishably from a verified high-effort review',
+    );
+  });
+
+  it('keeps template tokens out of the raw-loaded reference files', () => {
+    // BundledSkillLoader interpolates only the core body it injects; the
+    // reference files are read raw via read_file, so a token there reaches
+    // the run unreplaced: a literal `(v{{cliVersion}})` draft footer is
+    // one stripReviewFooter cannot match (the version span excludes
+    // braces), so every posted comment carries the broken token above the
+    // canonical footer, and a `{{model}}` copied into the cache JSON
+    // fails the next round's same-model anchor gate.
+    for (const name of REFERENCE_FILES) {
+      expect(referenceBody(name)).not.toMatch(/\{\{[^}]+\}\}/);
+    }
+    // The reference files' footer templates name YOUR_MODEL_ID, whose
+    // value the loader prepends to the injected core body — but only when
+    // the core body carries a model token; without one the declaration
+    // vanishes and the templates dangle.
+    expect(/{{model}}|YOUR_MODEL_ID/.test(coreBody())).toBe(true);
   });
 });

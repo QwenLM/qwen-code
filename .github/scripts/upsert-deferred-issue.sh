@@ -49,9 +49,10 @@ gh_reason() {
   local r=''
   [[ -n "${GH_ERR}" && -s "${GH_ERR}" ]] &&
     r="$(tr '\r\n\t' '   ' < "${GH_ERR}" | head -c 200)"
-  # `::` neutralized like every other agent/API-derived echo: an API error
-  # body is not trusted to be free of workflow-command syntax.
-  r="$(printf '%s' "${r}" | sed 's/::/;;/g')"
+  # Both workflow-command syntaxes neutralized like every other
+  # agent/API-derived echo: an API error body is not trusted to be free of
+  # them (`##[` parses mid-line too — #9761).
+  r="$(printf '%s' "${r}" | sed -e 's/::/;;/g' -e 's/##\[/##［/g')"
   [[ -n "${r// /}" ]] && printf '%s' "${r}" || printf 'no stderr captured'
 }
 gh_err_reset() { [[ -n "${GH_ERR}" ]] && : > "${GH_ERR}"; }
@@ -67,9 +68,10 @@ OWN_FINDINGS="${WORKDIR}/deferred-findings.json"
 # filters this round's feedback out of every later round, and the next run's
 # workspace reset deletes the file — nothing re-derives them. So each abort
 # says so and dumps what it had, for manual recovery from the run log.
-# `::` is neutralized in the dump: the content is agent-influenced and a
-# raw `::` at line start would be parsed as a workflow command (same reason
-# `<!--` is neutralized at every publish site).
+# Both workflow-command syntaxes are neutralized in the dump: the content is
+# agent-influenced and would otherwise be parsed as a command — `::` at line
+# start AND `##[` even mid-line (measured on #9761). Same reason `<!--` is
+# neutralized at every publish site.
 dump_file() {
   [[ -s "$1" ]] || return 0
   local size
@@ -85,7 +87,7 @@ dump_file() {
   else
     echo "--- $1"
   fi
-  head -c 4000 "$1" | sed 's/::/;;/g'
+  head -c 4000 "$1" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
   echo
 }
 lost() {
