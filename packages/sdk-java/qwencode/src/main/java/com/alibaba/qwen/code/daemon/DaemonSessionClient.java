@@ -709,6 +709,10 @@ public final class DaemonSessionClient implements AutoCloseable {
                                         : new DaemonHttpException(
                                                 "GET /session/:id/events",
                                                 statusCode, body);
+                        // Finish tearing down the SSE stream before the
+                        // caller detaches. Java 11's HttpClient can reset
+                        // the next request if this close is still in flight.
+                        awaitPriorStreamClose(deadline);
                         throw indeterminate("SSE failed with HTTP "
                                 + statusCode, responseFailure);
                     }
