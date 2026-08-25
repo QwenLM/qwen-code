@@ -23,6 +23,7 @@ import {
   alreadyCovered,
   changedFiles,
   matchAreaByPath,
+  matchedAreasByPath,
   skipPrReason,
 } from './assign-pr-owner.mjs';
 
@@ -63,6 +64,55 @@ describe('assign-pr-owner: pure routing', () => {
       { path: 'packages/core/src/goals/goal.ts' },
     ]);
     assert.equal(mixed?.name, 'core-goals');
+  });
+
+  it('routes a probe file under every mapped prefix back to its area', () => {
+    // Fixed probe prefixes, deliberately independent of the policy: a typo'd
+    // prefix in issue-owners.json must fail here instead of silently
+    // rerouting that module's PRs to the generic fallback while the suite
+    // stays green (the earlier tests only pinned core-skills and core-goals).
+    // Probes derived from the policy itself would shift with the typo and
+    // stay green, so the expected prefixes are spelled out.
+    const probes = {
+      core: ['packages/core/'],
+      'core-skills': ['packages/core/src/skills/'],
+      'core-memory': ['packages/core/src/memory/'],
+      'core-goals': ['packages/core/src/goals/'],
+      'core-telemetry': ['packages/core/src/telemetry/'],
+      'core-extension': ['packages/core/src/extension/'],
+      'core-agents': ['packages/core/src/agents/'],
+      'core-config': ['packages/core/src/config/'],
+      'core-runtime': [
+        'packages/core/src/core/',
+        'packages/core/src/services/',
+        'packages/core/src/tools/',
+        'packages/core/src/utils/',
+      ],
+    };
+    const mapped = policy.areas.filter((area) => area.paths?.length);
+    for (const area of mapped) {
+      const prefixes = probes[area.name];
+      assert.ok(prefixes, `area ${area.name} has no probe prefixes`);
+      assert.deepEqual(
+        area.paths,
+        prefixes,
+        `area ${area.name} changed its paths — update the probes`,
+      );
+      for (const prefix of prefixes) {
+        assert.equal(
+          matchedAreasByPath(policy, [
+            { path: `${prefix}routing-probe.ts` },
+          ])[0]?.name,
+          area.name,
+          `probe under ${prefix} does not route to ${area.name}`,
+        );
+      }
+    }
+    // Stale probes for areas that lost their paths list must fail too.
+    assert.deepEqual(
+      new Set(Object.keys(probes)),
+      new Set(mapped.map((area) => area.name)),
+    );
   });
 
   it('never matches outside the mapped prefixes', () => {
