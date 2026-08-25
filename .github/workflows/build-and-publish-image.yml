@@ -172,6 +172,11 @@ jobs:
   # job even though failure() is true — no issue gets filed. A "failed
   # publish, no issue filed" investigation should start here; a scheduled
   # npm-vs-GHCR reconciliation is the remaining backstop for this case.
+  # Second known gap: dedup needs the scope/ci-cd label the create call
+  # applies; if a human removes it, the label-filtered lookup misses the
+  # tracked issue and the next failure files a duplicate. The edit call
+  # cannot repair the label because the edit path is unreachable without
+  # it — same reconciliation backstop as above.
   file-failure-issue:
     needs: ['build-and-push-to-ghcr']
     if: |-

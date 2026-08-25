@@ -183,7 +183,13 @@ describe('build-and-publish-image workflow', () => {
 // `.title` (lookup matches nothing, the script dies, nothing is filed) and
 // when the marker lost its `:${version}` suffix (every later version
 // rewrites the first issue). jq is preinstalled on ubuntu-latest runners.
-describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+// The replay also needs POSIX paths and an extensionless gh stub, which the
+// Windows lane cannot express (backslash RUNNER_TEMP, ';'-separated PATH);
+// it skips there while the YAML suite above still runs.
+const replayable =
+  process.platform !== 'win32' && spawnSync('jq', ['--version']).status === 0;
+
+describe.skipIf(!replayable)(
   'image-build-failure-issue script behavior',
   () => {
     const runScript = ({
@@ -287,6 +293,13 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
       // the silent-failure mode this PR exists to prevent. Only the list
       // call carries this substring.
       expect(result.calls).toContain('--state open');
+      // The lookup side of the dedup contract: the list call filters on the
+      // same label the create call applies. Without the filter the lookup
+      // scans the newest 200 of ALL open issues; an older marker issue can
+      // fall out of that window and the script files a duplicate.
+      expect(result.calls).toContain(
+        'issue list --repo QwenLM/qwen-code --state open --label scope/ci-cd',
+      );
       expect(result.body).toContain('<!-- image-build-failure:1.2.3 -->');
       // The new run is appended to the recorded list, newest first, instead
       // of replacing it — the previous run URL must survive.
@@ -380,6 +393,208 @@ describe.skipIf(spawnSync('jq', ['--version']).status !== 0)(
       expect(result.status).toBe(0);
       expect(result.calls).toContain('gh issue edit 42');
       expect(result.body.match(/actions\/runs\/32580293377/g)).toHaveLength(1);
+    });
+
+    it('caps the recorded runs at the newest ten', () => {
+      // Ten existing runs (newest first, as the script maintains the block)
+      // plus this one must drop the oldest and keep exactly ten.
+      const runs = Array.from(
+        { length: 10 },
+        (_, i) =>
+          `- https://github.com/QwenLM/qwen-code/actions/runs/3258000000${
+            9 - i
+          }`,
+      );
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            body:
+              '<!-- image-build-failure:1.2.3 -->\n' +
+              '\n' +
+              '## Failed runs\n' +
+              '\n' +
+              '<!-- image-build-failure-occurrences -->\n' +
+              runs.join('\n') +
+              '\n',
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      const bullets =
+        result.body.match(
+          /^- https:\/\/github\.com\/QwenLM\/qwen-code\/actions\/runs\/\d+$/gm,
+        ) ?? [];
+      expect(bullets).toHaveLength(10);
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
+      expect(result.body).not.toContain('32580000000');
+      expect(result.body.indexOf('32580293377')).toBeLessThan(
+        result.body.indexOf('32580000009'),
+      );
+    });
+
+    it('emits the run-block heading exactly once after a stranded one', () => {
+      // A human edit deleted the occurrences marker line and every bullet,
+      // leaving the head ending on a stranded '## Failed runs' that the
+      // rebuilt block must absorb, not duplicate.
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            body:
+              '<!-- image-build-failure:1.2.3 -->\n' +
+              '\n' +
+              'The release build job for `1.2.3` failed before the image could be published.\n' +
+              '\n' +
+              '## Failed runs\n',
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.body.match(/## Failed runs/g)).toHaveLength(1);
+      expect(result.body).toContain('<!-- image-build-failure-occurrences -->');
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
+    });
+
+    it('keeps the dedup marker when it survives only outside the head prose', () => {
+      // The marker can sit on a line the split re-emits with the tail; the
+      // rebuilt body must still carry it or the next failure files a
+      // duplicate and orphans the tracked issue.
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            body:
+              'The release build job for `1.2.3` failed before the image could be published.\n' +
+              '\n' +
+              '## Failed runs\n' +
+              '\n' +
+              '<!-- image-build-failure-occurrences -->\n' +
+              '- https://github.com/QwenLM/qwen-code/actions/runs/32580000000 <!-- image-build-failure:1.2.3 -->\n',
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.calls).not.toContain('issue create');
+      expect(result.body).toContain('<!-- image-build-failure:1.2.3 -->');
+      expect(result.body).toContain('The release build job for `1.2.3` failed');
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
+    });
+
+    it('restores the narrative when the body starts at the occurrences marker', () => {
+      // Nothing above the marker: the empty head falls back to the generated
+      // prose, so the narrative is never lost. The pre-existing marker below
+      // the block is re-emitted with the tail, so two copies are expected.
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            body:
+              '<!-- image-build-failure-occurrences -->\n' +
+              '- https://github.com/QwenLM/qwen-code/actions/runs/32580000000\n' +
+              '<!-- image-build-failure:1.2.3 -->\n',
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.body).toContain('The release build job for `1.2.3` failed');
+      expect(result.body).toContain('<!-- image-build-failure:1.2.3 -->');
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580000000',
+      );
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
+    });
+
+    it('restores the narrative when the head normalizes down to nothing', () => {
+      // Only a stranded heading above the marker: the normalization strip
+      // empties the head AFTER the initial readability check, so the prose
+      // fallback must run again after the strip.
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            body:
+              '## Failed runs\n' +
+              '\n' +
+              '<!-- image-build-failure-occurrences -->\n' +
+              '- https://github.com/QwenLM/qwen-code/actions/runs/32580000000\n' +
+              '\n' +
+              '<!-- image-build-failure:1.2.3 -->\n',
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.body).toContain('The release build job for `1.2.3` failed');
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580000000',
+      );
+      expect(result.body).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
+    });
+
+    it('keeps a bullet-shaped annotation out of the recorded runs', () => {
+      const annotation =
+        '- do not republish — the npm package is broken, tracked in #9999.';
+      const firstRun =
+        'https://github.com/QwenLM/qwen-code/actions/runs/32580000000';
+      const secondRun =
+        'https://github.com/QwenLM/qwen-code/actions/runs/32580000001';
+      const result = runScript({
+        eventName: 'workflow_dispatch',
+        inputVersion: '1.2.3',
+        issues: [
+          {
+            number: 42,
+            body:
+              '<!-- image-build-failure:1.2.3 -->\n' +
+              '\n' +
+              '## Failed runs\n' +
+              '\n' +
+              '<!-- image-build-failure-occurrences -->\n' +
+              `- ${firstRun}\n` +
+              `${annotation}\n` +
+              `- ${secondRun}\n`,
+          },
+        ],
+      });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('gh issue edit 42');
+      expect(result.body).toContain(annotation);
+      expect(result.body).toContain(`- ${secondRun}`);
+      // The annotation is human prose, not a recorded run: it must not be
+      // reordered into the machine block or counted against the run cap.
+      const block = result.body.split(
+        '<!-- image-build-failure-occurrences -->',
+      )[1];
+      expect(block).toContain(`- ${firstRun}`);
+      expect(block).toContain(
+        '- https://github.com/QwenLM/qwen-code/actions/runs/32580293377',
+      );
+      expect(block).not.toContain('do not republish');
     });
 
     it('creates a new issue when no open issue carries the version marker', () => {

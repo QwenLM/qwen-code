@@ -50,8 +50,10 @@ existing="$(
 
 # The machine-owned recurrence block: every recorded failed run is a bullet
 # under this marker, newest first. On recurrence ONLY this block is rebuilt —
-# hand-written annotations anywhere else in the body survive verbatim, the
-# same contract main-ci-failure-issue.yml's re-plan relies on.
+# hand-written annotations anywhere else in the body survive verbatim. This is
+# the same merge contract splitOccurrenceBlock()/renderIssueBody() in
+# .github/scripts/ci/main-failure-signature.mjs implements for
+# main-ci-failure-issue.yml; a fix to one must be applied to the other.
 runs_heading='## Failed runs'
 occurrences_marker='<!-- image-build-failure-occurrences -->'
 max_runs=10
@@ -60,6 +62,9 @@ body_file="${RUNNER_TEMP}/image-build-failure.md"
 head_file="${RUNNER_TEMP}/body-head.md"
 runs_file="${RUNNER_TEMP}/body-runs.txt"
 
+# The backticks in these formats are literal markdown, not command
+# substitution, so shellcheck's SC2016 expansion warning is disabled.
+# shellcheck disable=SC2016
 write_prose() {
   printf '%s\n' "${marker_html}"
   printf '\n'
@@ -118,36 +123,29 @@ awk -v marker="${occurrences_marker}" \
     sub(/^[ \t]+/, "", line)
     sub(/[ \t]+$/, "", line)
     if (line == "") next
-    if (line ~ /^- /) { print > runs_f; next }
+    if (line ~ /^- https:\/\/[^ ]+\/actions\/runs\/[0-9]+$/) { print > runs_f; next }
     state = "tail"
   }
   state == "tail" { print > tail_f; next }
 ' "${existing_body}"
 
-if [[ -s "${head_file}" ]]; then
-  # Drop trailing blank lines, and a stranded heading left behind if the
-  # marker line was edited away — the rebuilt block re-emits both.
-  printf '%s\n' "$(cat "${head_file}")" > "${head_file}"
-  if [[ "$(tail -n 1 "${head_file}")" == "${runs_heading}" ]]; then
-    printf '%s\n' "$(head -n -1 "${head_file}")" > "${head_file}"
-    printf '%s\n' "$(cat "${head_file}")" > "${head_file}"
-  fi
-else
-  # Nothing readable to preserve: fall back to the generated prose so the
-  # narrative (and the dedup marker it carries) is never lost.
+# Drop trailing blank lines, and a stranded heading left behind if the
+# occurrences marker line was edited away — the rebuilt block re-emits
+# both. sed, not `head -n -1`: BSD head rejects negative line counts.
+printf '%s\n' "$(cat "${head_file}")" > "${head_file}"
+if [[ "$(tail -n 1 "${head_file}")" == "${runs_heading}" ]]; then
+  printf '%s\n' "$(sed '$d' "${head_file}")" > "${head_file}"
+fi
+# Re-check AFTER the strip, which can itself empty the head: fall back to
+# the generated prose so the narrative (and the dedup marker it carries)
+# is never lost.
+if [[ -z "$(cat "${head_file}")" ]]; then
   write_prose > "${head_file}"
 fi
 
 if [[ -s "${tail_file}" ]]; then
   printf '\n' >> "${head_file}"
   cat "${tail_file}" >> "${head_file}"
-fi
-
-# The dedup lookup matches this marker client-side; if an edit removed it,
-# restore it so the next failure still finds this issue.
-if ! grep -qF -- "${marker_html}" "${head_file}"; then
-  { printf '%s\n\n' "${marker_html}"; cat "${head_file}"; } > "${head_file}.new"
-  mv "${head_file}.new" "${head_file}"
 fi
 
 # Newest first; a re-run of the same run must not add a second line for it.
