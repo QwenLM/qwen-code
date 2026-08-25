@@ -117,8 +117,9 @@ const BASE_VALUE_FLAGS = new Set([
 // Every flag spelling the exact-token scanner is allowed to recognize: the
 // full option/alias surface from the shared top-level definitions (same
 // derivation pattern as VALUE_FLAGS) plus the help/version flags registered
-// inline in the parser builder and the hidden sandbox-session-id option.
-// Anything outside this set can carry flag state the scanner cannot model.
+// inline in the parser builder and the hidden options registered inline in
+// config.ts. Anything outside this set can carry flag state the scanner
+// cannot model.
 const KNOWN_FAST_PATH_FLAGS = new Set(
   TOP_LEVEL_HELP_OPTIONS.flatMap(([option, config]) =>
     optionFlagNames(option, config),
@@ -128,6 +129,11 @@ for (const flag of ['--help', '-h', '--version', '-v']) {
   KNOWN_FAST_PATH_FLAGS.add(flag);
 }
 KNOWN_FAST_PATH_FLAGS.add('--sandbox-session-id');
+// Hidden boolean options registered inline in config.ts; like the sandbox
+// option above they are valid top-level flags the scanner should admit
+// instead of demoting (e.g. `qwen --experimental-acp --help`).
+KNOWN_FAST_PATH_FLAGS.add('--experimental-acp');
+KNOWN_FAST_PATH_FLAGS.add('--experimental-skills');
 
 function isValueToken(arg: string | undefined): arg is string {
   return arg !== undefined && arg !== '--' && !arg.startsWith('-');

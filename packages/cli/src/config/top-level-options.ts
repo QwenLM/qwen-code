@@ -5,10 +5,9 @@
  */
 
 import type { Options } from 'yargs';
-import {
-  APPROVAL_MODE_INFO,
-  APPROVAL_MODES,
-  AuthType,
+import type {
+  ApprovalMode,
+  AuthType as CoreAuthType,
 } from '@qwen-code/qwen-code-core';
 
 /**
@@ -17,6 +16,53 @@ import {
  *
  * These options are valid at the top level, before any subcommand.
  */
+
+// The bootstrap entry evaluates this module in-process on every fast path
+// (`qwen --help`, `qwen mcp`, ...), so it must not import
+// @qwen-code/qwen-code-core at runtime: the core barrel pulls the entire
+// agent runtime into the entry's static import closure (measured +10 MB /
+// ~6x slower fast paths). The literals below mirror core's ApprovalMode
+// and AuthType enums; the `satisfies` checks reject any value core does
+// not declare, and the Record witnesses below reject a member core adds
+// that is missing here, so the copies cannot silently diverge.
+const APPROVAL_MODES = [
+  'plan',
+  'default',
+  'auto-edit',
+  'auto',
+  'yolo',
+] as const satisfies ReadonlyArray<`${ApprovalMode}`>;
+
+// Doubles as the ApprovalMode drift witness: the Record annotation is a
+// compile error if core adds a member missing here or if a key here is
+// not a member core declares.
+const APPROVAL_MODE_DESCRIPTIONS: Record<`${ApprovalMode}`, string> = {
+  plan: 'Analyze only, do not modify files or execute commands',
+  default: 'Require approval for file edits or shell commands',
+  'auto-edit': 'Automatically approve file edits',
+  auto: 'LLM classifier auto-approves safe actions, blocks risky ones',
+  yolo: 'Automatically approve all tools',
+};
+
+const AUTH_TYPE_CHOICES = [
+  'openai',
+  'anthropic',
+  'qwen-oauth',
+  'gemini',
+  'vertex-ai',
+] as const satisfies ReadonlyArray<`${CoreAuthType}`>;
+
+// AuthType drift witness (the choices array's `satisfies` check only
+// rejects values core does not declare, not missing ones): adding a member
+// to core's enum without adding it here is a compile error. Never read at
+// runtime; exported only so noUnusedLocals preserves the witness.
+export const AUTH_TYPE_PARITY_WITNESS: Record<`${CoreAuthType}`, true> = {
+  openai: true,
+  anthropic: true,
+  'qwen-oauth': true,
+  gemini: true,
+  'vertex-ai': true,
+};
 
 /** Usage banner shared by both help builders, kept here with the options. */
 export const TOP_LEVEL_USAGE =
@@ -167,7 +213,7 @@ export const DEFAULT_COMMAND_OPTIONS = {
     type: 'string' as const,
     choices: APPROVAL_MODES,
     description: `Set the approval mode: ${APPROVAL_MODES.map(
-      (mode) => `${mode} (${APPROVAL_MODE_INFO[mode].description})`,
+      (mode) => `${mode} (${APPROVAL_MODE_DESCRIPTIONS[mode]})`,
     ).join(', ')}`,
   },
   acp: {
@@ -358,13 +404,7 @@ export const DEFAULT_COMMAND_OPTIONS = {
   },
   'auth-type': {
     type: 'string' as const,
-    choices: [
-      AuthType.USE_OPENAI,
-      AuthType.USE_ANTHROPIC,
-      AuthType.QWEN_OAUTH,
-      AuthType.USE_GEMINI,
-      AuthType.USE_VERTEX_AI,
-    ] as const,
+    choices: AUTH_TYPE_CHOICES,
     description: 'Authentication type',
   },
 } as const satisfies Record<string, Options>;

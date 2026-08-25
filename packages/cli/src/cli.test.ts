@@ -220,6 +220,18 @@ describe('resolveBootstrapRoute', () => {
     );
   });
 
+  it('keeps hidden boolean flags on the help fast path', () => {
+    // The hidden boolean options registered inline in config.ts are part of
+    // the known-safe grammar, so they must not demote a plain help argv to
+    // the slow path (base served these on the fast path).
+    expect(resolveBootstrapRoute(['--experimental-acp', '--help'])).toBe(
+      'help',
+    );
+    expect(resolveBootstrapRoute(['--experimental-skills', '--help'])).toBe(
+      'help',
+    );
+  });
+
   it("skips version tokens sitting in a value flag's value slot (base parity)", () => {
     // Base's hasFlag skipped the token after every value-taking flag
     // unconditionally, so a `-v`/`--version` in the value slot was never
@@ -1053,6 +1065,18 @@ describe('bootstrap import boundaries', () => {
     expect(source).not.toContain("import './gemini.js'");
     expect(source).not.toContain("import { main } from './gemini.js'");
     expect(source).not.toContain("from './utils/acp-startup-profiler.js'");
+  });
+
+  it('keeps the shared option definitions free of runtime imports', () => {
+    // cli.ts evaluates top-level-options.js in-process on every fast path,
+    // so any runtime import it emits joins the bootstrap entry's static
+    // closure. A value import from @qwen-code/qwen-code-core there was
+    // measured at +10 MB and ~6x slower `qwen --help`/`qwen mcp`; only
+    // erased `import type` statements are allowed in this module.
+    const source = readFileSync('src/config/top-level-options.ts', 'utf8');
+    for (const line of source.match(/^import .*$/gm) ?? []) {
+      expect(line).toMatch(/^import type /);
+    }
   });
 
   it('initializes profilers during bootstrap module evaluation', () => {
