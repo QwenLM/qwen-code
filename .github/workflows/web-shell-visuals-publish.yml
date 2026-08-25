@@ -54,6 +54,11 @@ jobs:
           persist-credentials: false
 
       - name: 'Install ossutil'
+        # Evidence hosting is best-effort: a setup failure must not block the
+        # no-image marker-comment path, which has no external dependency
+        # (mirrors the qwen-triage.yml twins). The upload below stays loud:
+        # with images present it still aborts the publish step.
+        continue-on-error: true
         env:
           OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
           OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
@@ -71,6 +76,7 @@ jobs:
           "$RUNNER_TEMP/ossutil" >/dev/null
 
       - name: 'Configure Aliyun OSS credentials'
+        continue-on-error: true
         env:
           ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
           ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
@@ -106,8 +112,11 @@ jobs:
           # shares the same head commit SHA.
           RUN_HEAD_REPO: '${{ github.event.workflow_run.head_repository.full_name }}'
           RUN_HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+          # The default public URL is derived from the bucket so that
+          # overriding only one of the two vars cannot post comment links
+          # that 404 against (or show stale objects from) the other bucket.
           ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
         run: |-
           set -euo pipefail
 
