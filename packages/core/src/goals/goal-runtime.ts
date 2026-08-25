@@ -103,6 +103,12 @@ export interface GoalTurnHost {
   startGoalTurn(input: {
     permit: GoalTurnPermit;
     continuationContext: string;
+    /**
+     * Set on the first continuation carrying an objective the model has not
+     * been handed before, when it had been handed an earlier one. Hosts pass
+     * it straight to `renderGoalContinuationPrompt`.
+     */
+    objectiveUpdated?: boolean;
     verifierFeedback?: string;
   }): Promise<void>;
   preemptGoalTurn(reason: string): void;
@@ -203,6 +209,17 @@ export function createGoalRuntime(
   let currentTurnKey: string | undefined;
   let queuedTurnKey: string | undefined;
   let continuationQueued = false;
+  /**
+   * The (goalId, revision) pair whose objective the runtime last handed to a
+   * host in a continuation prompt.
+   *
+   * Only continuations count: a user turn carries the user's own text, not
+   * the objective, so it neither announces nor stales one. Held in memory
+   * rather than on the record because the consequence of losing it across a
+   * restart is one missing prompt line -- the objective itself still travels
+   * in the data block on every turn, and `get_goal` stays authoritative.
+   */
+  let announcedObjective: { goalId: string; revision: number } | undefined;
   let currentProposal:
     | {
         proposal: GoalTerminalProposal;
@@ -340,11 +357,27 @@ export function createGoalRuntime(
     currentPermitHost = scheduledHost;
     currentTurnKey = `goal-runtime:${currentPermit.turnId}`;
     const startedPermit = structuredClone(currentPermit);
+    // A different pair than the one last announced means an edit bumped the
+    // revision or a replace minted a new Goal over the old one -- either way
+    // the objective the model was working on is gone. No previous pair means
+    // this is the Goal's first continuation, which supersedes nothing.
+    const previouslyAnnounced = announcedObjective;
+    const objectiveUpdated =
+      previouslyAnnounced !== undefined &&
+      (previouslyAnnounced.goalId !== startedPermit.goalId ||
+        previouslyAnnounced.revision !== startedPermit.revision);
+    announcedObjective = {
+      goalId: startedPermit.goalId,
+      revision: startedPermit.revision,
+    };
     snapshot = { ...snapshot, activity: 'running' };
     broadcast(cause);
     const handleStartFailure = () => {
       void enqueue(async () => {
         if (isCurrentPermit(startedPermit)) {
+          // The prompt never reached a host, so the notice it carried was
+          // not delivered: put the announcement back or the retry drops it.
+          announcedObjective = previouslyAnnounced;
           const nextTurnKey = queuedTurnKey;
           currentPermit = undefined;
           currentPermitHost = undefined;
@@ -381,6 +414,7 @@ export function createGoalRuntime(
       started = scheduledHost.startGoalTurn({
         permit: startedPermit,
         continuationContext,
+        ...(objectiveUpdated ? { objectiveUpdated } : {}),
         ...(verifierFeedback ? { verifierFeedback } : {}),
       });
     } catch {

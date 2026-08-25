@@ -546,6 +546,7 @@ interface AcpGoalTurn {
   controller: AbortController;
   origin: 'runtime' | 'user';
   continuationContext: string;
+  objectiveUpdated?: boolean;
   verifierFeedback?: string;
   modelStarted: boolean;
 }
@@ -2048,6 +2049,9 @@ export class Session implements SessionContext {
             controller: new AbortController(),
             origin: 'runtime',
             continuationContext: input.continuationContext,
+            ...(input.objectiveUpdated
+              ? { objectiveUpdated: input.objectiveUpdated }
+              : {}),
             ...(input.verifierFeedback
               ? { verifierFeedback: input.verifierFeedback }
               : {}),

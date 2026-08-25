@@ -3581,6 +3581,7 @@ export const useGeminiStream = (
                       goalId: queuedGoal.permit.goalId,
                       revision: queuedGoal.permit.revision,
                       objective: queuedGoal.continuationContext,
+                      objectiveUpdated: queuedGoal.objectiveUpdated,
                       verifierFeedback: queuedGoal.verifierFeedback,
                     }),
                     shouldProceed: true,

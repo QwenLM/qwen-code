@@ -4126,4 +4126,120 @@ describe('goal runtime', () => {
     await new Promise((resolve) => setImmediate(resolve));
     expect(runtime.getSnapshot().activity).toBe('idle');
   });
+
+  describe('objective-updated notice', () => {
+    const flagsOf = (host: ReturnType<typeof fakeGoalTurnHost>) =>
+      host.inputs.map((input) => input.objectiveUpdated ?? false);
+
+    it('stays off for a Goal whose objective never changed', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      await runtime.finishTurn(host.started[0]!);
+      await runtime.finishTurn(host.started[1]!);
+
+      // Including the very first continuation: a new Goal supersedes nothing.
+      expect(flagsOf(host)).toEqual([false, false, false]);
+    });
+
+    it('fires once after an edit, then goes quiet again', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      await runtime.finishTurn(host.started[0]!);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: runtime.getSnapshot().goal!.goalId,
+        expectedRevision: 1,
+      });
+      await runtime.finishTurn(host.started.at(-1)!);
+
+      // create, continuation, edit -> notice, next continuation -> quiet.
+      expect(flagsOf(host)).toEqual([false, false, true, false]);
+      expect(host.inputs.at(-2)?.continuationContext).toBe('ship the rest');
+    });
+
+    it('fires after a replace, which supersedes a different Goal entirely', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      await runtime.dispatch({
+        action: 'replace',
+        objective: 'ship something else',
+        expectedGoalId: runtime.getSnapshot().goal!.goalId,
+        expectedRevision: 1,
+      });
+
+      // The new Goal is revision 1 like a fresh create, so the notice cannot
+      // key on the revision alone -- what changed is the identity.
+      expect(runtime.getSnapshot().goal).toMatchObject({ revision: 1 });
+      expect(flagsOf(host)).toEqual([false, true]);
+    });
+
+    it('stays off across pause and resume, which change no objective', async () => {
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await runtime.releaseTurn(`goal-runtime:${host.started[0]!.turnId}`);
+      await runtime.dispatch({
+        action: 'pause',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+
+      expect(flagsOf(host).some(Boolean)).toBe(false);
+    });
+
+    it('redelivers the notice when the host never took the prompt', async () => {
+      const journal = fakeGoalJournal();
+      const failures: Array<Error | undefined> = [];
+      const inputs: Array<Parameters<GoalTurnHost['startGoalTurn']>[0]> = [];
+      const started: GoalTurnPermit[] = [];
+      const host: GoalTurnHost = {
+        async startGoalTurn(input) {
+          const failure = failures.shift();
+          if (failure) throw failure;
+          started.push(structuredClone(input.permit));
+          inputs.push(structuredClone(input));
+        },
+        preemptGoalTurn: vi.fn(),
+      };
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+
+      // The edit's continuation is refused by the host, so the notice it
+      // carried never reached the model. Marking it announced there would
+      // drop it for good.
+      failures.push(new Error('host is not accepting turns'));
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      runtime.bindHost(host);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(inputs.at(-1)?.objectiveUpdated).toBe(true);
+      expect(inputs.at(-1)?.continuationContext).toBe('ship the rest');
+    });
+  });
 });

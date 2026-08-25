@@ -512,7 +512,7 @@ describe('useGeminiStream', () => {
         '<goal_runtime_data>',
         `{"goalId":"${permit.goalId}","revision":${permit.revision},"objective":"${goal.continuationContext}"}`,
         '</goal_runtime_data>',
-        'The objective in that data block is the current one and supersedes any earlier Goal objective in this conversation, including one you already started working on.',
+        'The objective in that data block is the current one and supersedes any other Goal objective text in this conversation.',
         `Verifier feedback: ${goal.verifierFeedback}`,
       ].join('\n'),
       expect.any(AbortSignal),
