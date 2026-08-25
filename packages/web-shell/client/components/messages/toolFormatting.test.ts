@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
   formatToolDisplayName,
+  extractText,
   getAgentCurrentToolHint,
   getToolDescription,
   getToolResultSummary,
@@ -352,6 +353,25 @@ describe('toolFormatting', () => {
         }),
       ),
     ).toBe('3 line(s)');
+  });
+
+  it('formats structured Advisor reviews as readable markdown', () => {
+    expect(
+      extractText(
+        tool({
+          toolName: 'advisor',
+          rawOutput: {
+            type: 'advisor_review',
+            verdict: 'Sound approach.',
+            risks: 'Retry handling is unclear.',
+            missingEvidence: 'No integration result.',
+            recommendation: 'Run the integration test.',
+          },
+        }),
+      ),
+    ).toBe(
+      '## Verdict\nSound approach.\n\n## Risks\nRetry handling is unclear.\n\n## Missing evidence\nNo integration result.\n\n## Recommendation\nRun the integration test.',
+    );
   });
 
   it('keeps long shell commands in full instead of capping at one line', () => {

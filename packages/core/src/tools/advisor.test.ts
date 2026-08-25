@@ -41,6 +41,7 @@ const ADVISOR_FORKED_RESULT = {
 function makeConfig(options: {
   advisorModel?: string;
   advisorMaxUses?: number;
+  fastModel?: string;
   history?: Content[];
 }): Config {
   const history =
@@ -71,6 +72,9 @@ function makeConfig(options: {
 
   return {
     getModel: () => 'executor-model',
+    getFastModel: () => options.fastModel,
+    getContentGeneratorConfig: () => ({ authType: 'openai' }),
+    getAllConfiguredModels: () => [],
     getAdvisorModel: () => options.advisorModel,
     getAdvisorMaxUses: () => options.advisorMaxUses,
     getGeminiClient: () => ({
@@ -451,6 +455,21 @@ describe('AdvisorTool', () => {
     expect(second.error).toBeUndefined();
     expect(third.error).toBeUndefined();
     expect(String(fourth.llmContent)).toContain('code="max_uses_exceeded"');
+  });
+
+  it('uses the resolved model id for the evidence budget', async () => {
+    const tool = new AdvisorTool(
+      makeConfig({ advisorModel: 'fast', fastModel: 'resolved-fast-model' }),
+    );
+
+    await promptIdContext.run('prompt-1', () =>
+      tool.build({}).execute(new AbortController().signal),
+    );
+
+    expect(mockTokenLimit).toHaveBeenCalledWith('resolved-fast-model', 'input');
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'fast' }),
+    );
   });
 
   it('maps invalid Advisor responses to invalid_response', async () => {

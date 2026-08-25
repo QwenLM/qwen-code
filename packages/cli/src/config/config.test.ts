@@ -1366,6 +1366,29 @@ describe('loadCliConfig', () => {
     ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
+  it('should validate the --advisor fast alias against fastModel', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'fast'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        fastModel: 'fast-advisor',
+        security: { auth: { selectedType: 'openai' } },
+        modelProviders: {
+          openai: [
+            {
+              id: 'fast-advisor',
+              apiKey: 'test-key',
+              models: [{ id: 'fast-advisor', fastOnly: true }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('fast');
+  });
+
   it('should disable Advisor for --advisor off without changing max uses', async () => {
     process.argv = ['node', 'script.js', '--advisor', 'off'];
     const argv = await parseArguments();

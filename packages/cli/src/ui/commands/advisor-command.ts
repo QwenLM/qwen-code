@@ -14,6 +14,7 @@ import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 import {
   BTW_MAX_INPUT_LENGTH,
+  buildModelIdContext,
   buildBtwCacheSafeParams,
   runForkedAgent,
   resolveModelId,
@@ -248,7 +249,7 @@ async function setAdvisorModel(
     await config.setAdvisorConfig({
       model: undefined,
       maxUses: settings.merged.advisorMaxUses,
-      modelOverride: true,
+      modelOverride: false,
     });
     return {
       type: 'message',
@@ -259,7 +260,7 @@ async function setAdvisorModel(
 
   const selector = (() => {
     try {
-      return resolveModelId(modelName);
+      return resolveModelId(modelName, buildModelIdContext(config));
     } catch {
       return undefined;
     }
@@ -278,7 +279,7 @@ async function setAdvisorModel(
       : config.getAllConfiguredModels()
   ).filter(
     (model) =>
-      !model.fastOnly &&
+      (modelName === 'fast' || !model.fastOnly) &&
       !model.voiceOnly &&
       !model.visionOnly &&
       !model.imageOnly,
@@ -298,7 +299,7 @@ async function setAdvisorModel(
   await config.setAdvisorConfig({
     model: modelName,
     maxUses: settings.merged.advisorMaxUses,
-    modelOverride: true,
+    modelOverride: false,
   });
   return {
     type: 'message',

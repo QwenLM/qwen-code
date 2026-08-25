@@ -1293,6 +1293,37 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.getTool('advisor')).toBeUndefined();
       expect(toolRegistry.getAllToolNames()).not.toContain('advisor');
     });
+
+    it('does not let a stale rejection clear a replacement load', async () => {
+      let rejectOld!: (error: Error) => void;
+      let resolveNew!: (tool: MockTool) => void;
+      let replacementLoads = 0;
+      const oldPromise = new Promise<MockTool>((_resolve, reject) => {
+        rejectOld = reject;
+      });
+      const newPromise = new Promise<MockTool>((resolve) => {
+        resolveNew = resolve;
+      });
+      const replacement = new MockTool({ name: 'advisor' });
+
+      toolRegistry.registerFactory('advisor', () => oldPromise);
+      const oldLoad = toolRegistry.ensureTool('advisor');
+      toolRegistry.unregisterTool('advisor');
+      toolRegistry.registerFactory('advisor', () => {
+        replacementLoads += 1;
+        return newPromise;
+      });
+      const newLoad = toolRegistry.ensureTool('advisor');
+
+      rejectOld(new Error('stale failure'));
+      await expect(oldLoad).rejects.toThrow('stale failure');
+      const sharedLoad = toolRegistry.ensureTool('advisor');
+      expect(replacementLoads).toBe(1);
+
+      resolveNew(replacement);
+      await expect(newLoad).resolves.toBe(replacement);
+      await expect(sharedLoad).resolves.toBe(replacement);
+    });
   });
 
   describe('warmAll strict mode', () => {

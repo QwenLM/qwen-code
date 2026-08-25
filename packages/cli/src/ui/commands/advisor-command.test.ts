@@ -42,9 +42,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     BTW_MAX_INPUT_LENGTH: 4096,
     runForkedAgent: mockRunForkedAgent,
     buildBtwCacheSafeParams: mockBuildBtwCacheSafeParams,
-    resolveModelId: (value: string | undefined) => {
+    resolveModelId: (
+      value: string | undefined,
+      context?: { fastModel?: string },
+    ) => {
       const raw = value?.trim();
       if (!raw || raw.includes(' ')) throw new Error('invalid selector');
+      if (raw === 'fast') {
+        return context?.fastModel ? { modelId: context.fastModel } : undefined;
+      }
       const [authType, ...rest] = raw.split(':');
       return rest.length > 0
         ? { authType, modelId: rest.join(':') }
@@ -108,6 +114,8 @@ describe('advisorCommand', () => {
       ],
     }),
     getModel: () => 'test-model',
+    getFastModel: () => undefined,
+    getContentGeneratorConfig: () => ({ authType: 'openai' }),
     getAdvisorModel: () => undefined,
     getAllConfiguredModels: () => [
       {
@@ -253,13 +261,39 @@ describe('advisorCommand', () => {
     expect(setAdvisorConfig).toHaveBeenCalledWith({
       model: 'advisor-model',
       maxUses: undefined,
-      modelOverride: true,
+      modelOverride: false,
     });
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
       content: 'Advisor Model: advisor-model',
     });
+  });
+
+  it('validates the fast alias against its resolved model', async () => {
+    mockContext = createMockCommandContext({
+      services: {
+        config: createConfig({
+          getFastModel: () => 'advisor-model',
+          getAllConfiguredModels: () => [
+            { id: 'advisor-model', authType: 'openai', fastOnly: true },
+          ],
+          getAvailableModelsForAuthType: () => [
+            { id: 'advisor-model', authType: 'openai', fastOnly: true },
+          ],
+        }),
+        settings: createSettings(),
+      },
+    });
+
+    const result = await advisorCommand.action!(mockContext, 'fast');
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'advisorModel',
+      'fast',
+    );
+    expect(result).toMatchObject({ messageType: 'info' });
   });
 
   it('returns a message result for /advisor <selector> in ACP mode', async () => {
@@ -276,7 +310,7 @@ describe('advisorCommand', () => {
     expect(setAdvisorConfig).toHaveBeenCalledWith({
       model: 'advisor-model',
       maxUses: undefined,
-      modelOverride: true,
+      modelOverride: false,
     });
     expect(result).toEqual({
       type: 'message',
@@ -296,7 +330,7 @@ describe('advisorCommand', () => {
     expect(setAdvisorConfig).toHaveBeenCalledWith({
       model: undefined,
       maxUses: undefined,
-      modelOverride: true,
+      modelOverride: false,
     });
     expect(result).toEqual({
       type: 'message',
@@ -340,7 +374,7 @@ describe('advisorCommand', () => {
     expect(setAdvisorConfig).toHaveBeenCalledWith({
       model: undefined,
       maxUses: undefined,
-      modelOverride: true,
+      modelOverride: false,
     });
     expect(result).toEqual({
       type: 'message',

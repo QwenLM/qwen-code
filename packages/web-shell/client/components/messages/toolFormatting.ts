@@ -588,6 +588,19 @@ function extractRawOutputText(rawOutput: unknown): string | null {
   if (typeof rawOutput !== 'object') return null;
 
   const raw = rawOutput as Record<string, unknown>;
+  if (raw.type === 'advisor_review') {
+    const fields = [
+      ['Verdict', raw.verdict],
+      ['Risks', raw.risks],
+      ['Missing evidence', raw.missingEvidence],
+      ['Recommendation', raw.recommendation],
+    ] as const;
+    if (fields.every(([, value]) => typeof value === 'string')) {
+      return fields
+        .map(([label, value]) => `## ${label}\n${value}`)
+        .join('\n\n');
+    }
+  }
   if (typeof raw.output === 'string') return raw.output;
   if (typeof raw.stdout === 'string') return raw.stdout;
   if (typeof raw.content === 'string') return raw.content;

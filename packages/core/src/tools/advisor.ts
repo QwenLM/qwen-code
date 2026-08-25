@@ -11,6 +11,7 @@ import type { Config } from '../config/config.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
@@ -432,7 +433,14 @@ class AdvisorToolInvocation extends BaseToolInvocation<
     if (!evidence.ok) {
       return advisorErrorResult(evidence.code, evidence.message);
     }
-    const budgetedEvidence = serializeWithinBudget(model, evidence.bundle);
+    const resolvedModel = resolveModelId(
+      model,
+      buildModelIdContext(this.config),
+    );
+    const budgetedEvidence = serializeWithinBudget(
+      resolvedModel?.modelId ?? model,
+      evidence.bundle,
+    );
     if (!budgetedEvidence.ok) {
       return advisorErrorResult(
         budgetedEvidence.code,

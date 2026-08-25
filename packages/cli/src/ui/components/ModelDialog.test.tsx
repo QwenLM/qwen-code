@@ -775,7 +775,7 @@ describe('<ModelDialog />', () => {
     expect(setAdvisorConfig).toHaveBeenCalledWith({
       model: undefined,
       maxUses: 2,
-      modelOverride: true,
+      modelOverride: false,
     });
     expect(recordSlashCommand).toHaveBeenCalledWith({
       phase: 'result',
@@ -859,7 +859,7 @@ describe('<ModelDialog />', () => {
     expect(setAdvisorConfig).toHaveBeenCalledWith({
       model: 'openai:advisor-model',
       maxUses: 3,
-      modelOverride: true,
+      modelOverride: false,
     });
     expect(recordSlashCommand).toHaveBeenCalledWith({
       phase: 'result',

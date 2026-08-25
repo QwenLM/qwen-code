@@ -46,6 +46,7 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
+  buildModelIdContext,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
@@ -1401,13 +1402,29 @@ function formatUnavailableAdvisorModelMessage(
   );
 }
 
-function validateCliAdvisorModel(config: Config, rawModel: string): void {
+function validateCliAdvisorModel(
+  config: Config,
+  rawModel: string,
+  startupContext: {
+    fastModel?: string;
+    currentModel?: string;
+    currentAuthType?: AuthType;
+  },
+): void {
   const modelName = rawModel.trim();
   if (!modelName || modelName.toLowerCase() === 'off') return;
 
   const selector = (() => {
     try {
-      return resolveModelId(modelName);
+      const runtimeContext = buildModelIdContext(config);
+      return resolveModelId(modelName, {
+        ...runtimeContext,
+        fastModel: runtimeContext.fastModel ?? startupContext.fastModel,
+        currentModel:
+          runtimeContext.currentModel ?? startupContext.currentModel,
+        currentAuthType:
+          runtimeContext.currentAuthType ?? startupContext.currentAuthType,
+      });
     } catch {
       return undefined;
     }
@@ -1418,7 +1435,7 @@ function validateCliAdvisorModel(config: Config, rawModel: string): void {
       : config.getAllConfiguredModels()
   ).filter(
     (model) =>
-      !model.fastOnly &&
+      (modelName === 'fast' || !model.fastOnly) &&
       !model.voiceOnly &&
       !model.visionOnly &&
       !model.imageOnly,
@@ -2530,7 +2547,11 @@ export async function loadCliConfig(
 
   const config = new Config(configParams);
   if (argv.advisor !== undefined) {
-    validateCliAdvisorModel(config, argv.advisor);
+    validateCliAdvisorModel(config, argv.advisor, {
+      fastModel: settings.fastModel,
+      currentModel: resolvedModel,
+      currentAuthType: selectedAuthType,
+    });
   }
 
   if (lspEnabled) {

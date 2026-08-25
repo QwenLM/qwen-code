@@ -283,9 +283,15 @@ The `extra_body` field allows you to add custom parameters to the request body s
 
 #### advisorModel
 
-| Setting        | Type   | Description                                                                                                                                                                                                                                                                                                                             | Default |
-| -------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `advisorModel` | string | Model used by [`/advisor`](../features/commands.md#17-second-opinion-advisor) for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider. | `""`    |
+| Setting        | Type   | Description                                                                                                                                                                                                                                                                                                                                                                            | Default |
+| -------------- | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `advisorModel` | string | Model used by the native Advisor tool and [`/advisor review`](../features/commands.md#17-second-opinion-advisor). Leave empty or set to `off` to disable Advisor; there is no main-model fallback. The reviewer receives filtered executor context and may use another provider. Can also be set with `/advisor <model-id>` or overridden for one session with `--advisor <model-id>`. | `""`    |
+
+#### advisorMaxUses
+
+| Setting          | Type    | Description                                                                                           | Default |
+| ---------------- | ------- | ----------------------------------------------------------------------------------------------------- | ------- |
+| `advisorMaxUses` | integer | Maximum successful native Advisor consultations per user prompt. Must be at least `1` when specified. | unset   |
 
 #### visionModel
 

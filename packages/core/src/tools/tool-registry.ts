@@ -406,7 +406,9 @@ export class ToolRegistry {
         return tool;
       })
       .catch((err: unknown) => {
-        this.inflight.delete(name);
+        if (this.inflight.get(name) === load) {
+          this.inflight.delete(name);
+        }
         throw err;
       });
 

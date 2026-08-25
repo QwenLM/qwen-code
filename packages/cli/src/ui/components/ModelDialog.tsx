@@ -843,7 +843,7 @@ export function ModelDialog({
             await config.setAdvisorConfig({
               model: undefined,
               maxUses: settings.merged.advisorMaxUses,
-              modelOverride: true,
+              modelOverride: false,
             });
           } finally {
             selectionInFlightRef.current = false;
@@ -869,7 +869,7 @@ export function ModelDialog({
           await config.setAdvisorConfig({
             model: advisorModel,
             maxUses: settings.merged.advisorMaxUses,
-            modelOverride: true,
+            modelOverride: false,
           });
         } finally {
           selectionInFlightRef.current = false;

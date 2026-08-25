@@ -1197,7 +1197,9 @@ export class GeminiClient {
       contextFiles: this.config.getUserMemory(),
       appendPrompt: [
         this.config.getAppendSystemPrompt(),
-        this.config.getAdvisorModel?.() ? ADVISOR_EXECUTOR_INSTRUCTION : '',
+        this.config.getToolRegistry().getTool(ToolNames.ADVISOR)
+          ? ADVISOR_EXECUTOR_INSTRUCTION
+          : '',
       ]
         .filter(
           (part): part is string =>

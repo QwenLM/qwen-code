@@ -125,6 +125,7 @@ async function setupRig(baseUrl: string): Promise<TestRig> {
 describe('advisor native tool', () => {
   it('returns a read-only Advisor review to the executor', async () => {
     let mainRequestIndex = 0;
+    let evidenceFile = '';
     server = await startFakeOpenAIServer(({ body }) => {
       if (body['model'] === 'advisor-model') {
         return {
@@ -140,15 +141,25 @@ describe('advisor native tool', () => {
         return { content: '{"selected_memories":[]}' };
       }
       mainRequestIndex += 1;
-      return mainRequestIndex === 1
-        ? {
-            content: 'I will ask for a second opinion.',
-            toolCalls: [fakeToolCall('advisor', {}, 'advisor-call')],
-          }
-        : { content: 'Final answer after Advisor feedback.' };
+      if (mainRequestIndex === 1) {
+        return {
+          content: 'I will inspect the evidence first.',
+          toolCalls: [
+            fakeToolCall('read_file', { file_path: evidenceFile }, 'read-call'),
+          ],
+        };
+      }
+      if (mainRequestIndex === 2) {
+        return {
+          content: 'I found the evidence and will ask for a second opinion.',
+          toolCalls: [fakeToolCall('advisor', {}, 'advisor-call')],
+        };
+      }
+      return { content: 'Final answer after Advisor feedback.' };
     }, fakeServerHostOptions());
 
     rig = await setupRig(server.baseUrl);
+    evidenceFile = rig.createFile('evidence.txt', 'wire-level evidence');
     const output = await rig.run(
       'Review the task and finish.',
       '--auth-type',
@@ -175,14 +186,31 @@ describe('advisor native tool', () => {
       .map((request) => request.body)
       .filter((body) => body['model'] === 'advisor-model');
 
-    expect(mainRequests).toHaveLength(2);
+    expect(mainRequests).toHaveLength(3);
     expect(advisorRequests).toHaveLength(1);
     expect(toolNames(mainRequests[0]!)).toContain('advisor');
     expect(toolNames(advisorRequests[0]!)).toEqual(['respond_in_schema']);
-    expect(allMessageText(advisorRequests[0]!)).toContain(
-      'I will ask for a second opinion.',
+    const advisorText = allMessageText(advisorRequests[0]!);
+    const evidence = JSON.parse(
+      messagesOf(advisorRequests[0]!)
+        .map((message) => textFromContent(message['content']))
+        .find((text) => text.startsWith('{'))!,
+    ) as JsonObject;
+    expect(advisorText).toContain('independent, read-only senior advisor');
+    expect(JSON.stringify(evidence['executorSystemInstruction'])).toContain(
+      'You are Qwen Code',
     );
-    expect(allMessageText(mainRequests[1]!)).toContain('<advisor_feedback>');
+    expect(JSON.stringify(evidence['executorToolDeclarations'])).toContain(
+      'read_file',
+    );
+    expect(JSON.stringify(evidence['transcript'])).toContain('read_file');
+    expect(JSON.stringify(evidence['transcript'])).toContain(
+      'wire-level evidence',
+    );
+    expect(JSON.stringify(evidence['transcript'])).toContain(
+      'I found the evidence and will ask for a second opinion.',
+    );
+    expect(allMessageText(mainRequests[2]!)).toContain('<advisor_feedback>');
     expect(await rig.waitForToolCall('advisor')).toBe(true);
   });
 });
