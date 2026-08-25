@@ -1128,6 +1128,29 @@ describe('bundled review skill', () => {
     expect(core).toContain('- `modelId` — for the footer.');
   });
 
+  it('pins the minimal arm report_findings override on the unverified level', () => {
+    // Step 6 mandates `report_findings` at the run's RESOLVED effort with
+    // entries copied from the findings artifact, and Step 3M forbids the
+    // artifact. Without its own override — the one Step 3C has — the arm
+    // either skips the call for lack of an artifact or reports at the
+    // resolved effort (high on a PR target): clients render the unverified
+    // marker only for `level: "low"`, so either shape defeats the
+    // labeled-unverified property the parser force-offs and the posting
+    // declines reserve for this arm.
+    const body = coreBody();
+    const start = body.indexOf('## Step 3M');
+    const end = body.indexOf('## Step 4');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = body.slice(start, end);
+    expect(section).toContain('`report_findings`');
+    expect(section).toContain('`level: "low"`');
+    expect(section).toContain('the composed finding list');
+    expect(section).toContain(
+      'would render these unverified findings indistinguishably from a verified high-effort review',
+    );
+  });
+
   it('keeps template tokens out of the raw-loaded reference files', () => {
     // BundledSkillLoader interpolates only the core body it injects; the
     // reference files are read raw via read_file, so a token there reaches
