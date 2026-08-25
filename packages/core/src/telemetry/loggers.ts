@@ -136,7 +136,7 @@ import type {
   MemoryRecallDeliveryEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
-import type { UiEvent } from './uiTelemetry.js';
+import type { UiEvent, UiSubagentIdentity } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
 import { apiActivityTracker } from './api-activity-tracker.js';
 import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
@@ -522,9 +522,17 @@ export function logApiError(
   config: Config,
   event: ApiErrorEvent,
   sessionId?: string,
+  uiSubagentIdentity?: UiSubagentIdentity,
 ): void {
   const uiEvent = {
     ...event,
+    ...(uiSubagentIdentity
+      ? {
+          subagent_id: uiSubagentIdentity.id,
+          subagent_type: uiSubagentIdentity.type,
+          subagent_task_name: uiSubagentIdentity.taskName,
+        }
+      : {}),
     'event.name': EVENT_API_ERROR,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
@@ -599,9 +607,17 @@ export function logApiResponse(
   config: Config,
   event: ApiResponseEvent,
   sessionId?: string,
+  uiSubagentIdentity?: UiSubagentIdentity,
 ): void {
   const uiEvent = {
     ...event,
+    ...(uiSubagentIdentity
+      ? {
+          subagent_id: uiSubagentIdentity.id,
+          subagent_type: uiSubagentIdentity.type,
+          subagent_task_name: uiSubagentIdentity.taskName,
+        }
+      : {}),
     'event.name': EVENT_API_RESPONSE,
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;

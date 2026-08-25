@@ -135,6 +135,7 @@ import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { SplitView } from './components/SplitView';
+import { GaugeIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
 import {
   ArtifactPanel,
@@ -2068,6 +2069,7 @@ export function App({
   const titleHeaderItemVisible = chatHeaderItems.includes('title');
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
+  const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
   const rightPanelItems = rightPanel?.items ?? DEFAULT_RIGHT_PANEL_ITEMS;
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
@@ -3574,6 +3576,30 @@ export function App({
         tabs.some((item) => item.id === tab.id)
           ? tabs.map((item) => (item.id === tab.id ? tab : item))
           : [tab, ...tabs],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
+  const openTokenUsagePanel = useCallback(
+    (sourceSessionId: string, sourceSessionActions?: DaemonSessionActions) => {
+      const tab: ArtifactPanelTab = {
+        id: `token-usage:${sourceSessionId}`,
+        kind: 'token_usage',
+        title: t('tokenUsage.title'),
+        sessionId: sourceSessionId,
+        ...(sourceSessionActions
+          ? { sessionActions: sourceSessionActions }
+          : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
       );
       setActiveArtifactPanelTabId(tab.id);
       setArtifactPanelWidth((width) =>
@@ -5375,6 +5401,28 @@ export function App({
     clearSplitSessions();
     openPanel('sessions');
   }, [notifyControlledSplitClose, openPanel]);
+  // Built-in pane action follows the same tokenUsage opt-in as the chat header.
+  // Hosts can override via `renderPaneHeaderActions` to replace or extend it.
+  const defaultPaneHeaderActions = useCallback<PaneHeaderActionsRenderer>(
+    ({ sessionId, sessionActions }) => (
+      <button
+        type="button"
+        className={styles.tokenUsageHeaderButton}
+        aria-label={t('tokenUsage.open')}
+        title={t('tokenUsage.open')}
+        disabled={!sessionActions}
+        onClick={() =>
+          sessionActions && openTokenUsagePanel(sessionId, sessionActions)
+        }
+      >
+        <GaugeIcon size={16} aria-hidden="true" />
+      </button>
+    ),
+    [openTokenUsagePanel, t],
+  );
+  const resolvedPaneHeaderActions =
+    renderPaneHeaderActions ??
+    (tokenUsageHeaderItemVisible ? defaultPaneHeaderActions : undefined);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
   // view with those sessions on load. Consume the param once so a later reload
   // or exit doesn't force the split back on.
@@ -12260,6 +12308,15 @@ export function App({
                         onEnvironmentPanelOpenChange:
                           handleEnvironmentPanelOpenChange,
                         onRightPanelOpenChange: handleRightPanelOpenChange,
+                        ...(tokenUsageHeaderItemVisible && connection.sessionId
+                          ? {
+                              onOpenTokenUsage: () =>
+                                openTokenUsagePanel(
+                                  connection.sessionId!,
+                                  sessionActions,
+                                ),
+                            }
+                          : {}),
                       })}
                     </div>
                   ) : (
@@ -12282,6 +12339,15 @@ export function App({
                       }
                       onToggleRightPanel={() =>
                         handleRightPanelOpenChange(!artifactPanelOpen)
+                      }
+                      onOpenTokenUsage={
+                        tokenUsageHeaderItemVisible && connection.sessionId
+                          ? () =>
+                              openTokenUsagePanel(
+                                connection.sessionId!,
+                                sessionActions,
+                              )
+                          : undefined
                       }
                     />
                   )}
@@ -12774,7 +12840,7 @@ export function App({
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
-                        renderPaneHeaderActions={renderPaneHeaderActions}
+                        renderPaneHeaderActions={resolvedPaneHeaderActions}
                         voiceUserRevision={voiceUserRevision}
                         voiceWorkspaceRevisions={voiceWorkspaceRevisions}
                         voiceWorkspaces={

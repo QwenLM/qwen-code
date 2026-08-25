@@ -22,10 +22,22 @@ import { isInternalPromptId } from '../utils/internalPromptIds.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
-export type UiEvent =
+export interface UiSubagentIdentity {
+  id: string;
+  type: string;
+  taskName?: string;
+}
+
+export type UiEvent = (
   | (ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE })
   | (ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR })
-  | (ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL });
+  | (ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL })
+) &
+  Partial<{
+    subagent_id: string;
+    subagent_type: string;
+    subagent_task_name: string;
+  }>;
 
 export {
   EVENT_API_ERROR,
@@ -107,6 +119,13 @@ export interface ModelMetrics extends ModelMetricsCore {
 export interface SessionMetrics {
   models: Record<string, ModelMetrics>;
   generation?: GenerationMetrics;
+  /**
+   * Per-instance subagent metadata (invocation id → business name + agent
+   * type).
+   */
+  sourceMeta?: Record<string, { name: string; type: string }>;
+  /** Per-instance subagent counters keyed by invocation id. */
+  sourceMetrics?: Record<string, ModelMetricsCore>;
   tools: {
     totalCalls: number;
     totalSuccess: number;
@@ -183,6 +202,43 @@ const createInitialGenerationMetrics = (): GenerationMetrics => ({
   totalGenerationDurationMs: 0,
   totalThroughputOutputTokens: 0,
 });
+
+const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
+  if (event.total_token_count > 0) return event.total_token_count;
+  const input =
+    event.input_token_count > 0
+      ? event.input_token_count
+      : event.cached_content_token_count;
+  const thoughtsIncludedInOutput =
+    event.auth_type === 'openai' || event.auth_type === 'qwen-oauth';
+  return (
+    input +
+    event.output_token_count +
+    (thoughtsIncludedInOutput ? 0 : event.thoughts_token_count)
+  );
+};
+
+const getLegacySubagentId = (
+  event: { prompt_id?: string; subagent_name?: string },
+  sessionId?: string,
+): string | undefined => {
+  if (
+    !sessionId ||
+    !event.subagent_name ||
+    !event.prompt_id ||
+    isInternalPromptId(event.prompt_id)
+  ) {
+    return undefined;
+  }
+
+  const parts = event.prompt_id.split('#');
+  if (parts.length !== 3) return undefined;
+
+  const [promptSessionId, subagentId, round] = parts;
+  return promptSessionId === sessionId && subagentId && /^\d+$/.test(round)
+    ? subagentId
+    : undefined;
+};
 
 const createInitialMetrics = (): SessionMetrics => ({
   models: {},
@@ -268,7 +324,11 @@ export class UiTelemetryService extends EventEmitter {
       if (!this.#sessionMetrics.has(sessionId)) {
         this.#sessionMetrics.set(sessionId, createInitialMetrics());
       }
-      this.#accumulateEvent(this.#sessionMetrics.get(sessionId)!, event);
+      this.#accumulateEvent(
+        this.#sessionMetrics.get(sessionId)!,
+        event,
+        sessionId,
+      );
     }
 
     this.emit('update', {
@@ -460,13 +520,17 @@ export class UiTelemetryService extends EventEmitter {
     }
   }
 
-  #accumulateEvent(metrics: SessionMetrics, event: UiEvent): boolean {
+  #accumulateEvent(
+    metrics: SessionMetrics,
+    event: UiEvent,
+    sessionId?: string,
+  ): boolean {
     switch (event['event.name']) {
       case EVENT_API_RESPONSE:
-        this.#accumulateApiResponse(metrics, event);
+        this.#accumulateApiResponse(metrics, event, sessionId);
         return true;
       case EVENT_API_ERROR:
-        this.#accumulateApiError(metrics, event);
+        this.#accumulateApiError(metrics, event, sessionId);
         return true;
       case EVENT_TOOL_CALL:
         this.#accumulateToolCall(metrics, event);
@@ -479,20 +543,30 @@ export class UiTelemetryService extends EventEmitter {
   #accumulateApiResponse(
     metrics: SessionMetrics,
     event: ApiResponseEvent,
+    sessionId?: string,
   ): void {
     const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
     const sourceMetrics = this.#getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
     );
+    const invocationMetrics = sessionId
+      ? this.#getOrCreateInvocationMetrics(metrics, event, sessionId)
+      : undefined;
+    const buckets = invocationMetrics
+      ? [modelMetrics, sourceMetrics, invocationMetrics]
+      : [modelMetrics, sourceMetrics];
+    const totalTokens = sessionId
+      ? getEventTotalTokenCount(event)
+      : event.total_token_count;
 
-    for (const bucket of [modelMetrics, sourceMetrics]) {
+    for (const bucket of buckets) {
       bucket.api.totalRequests++;
       bucket.api.totalLatencyMs += event.duration_ms;
 
       bucket.tokens.prompt += event.input_token_count;
       bucket.tokens.candidates += event.output_token_count;
-      bucket.tokens.total += event.total_token_count;
+      bucket.tokens.total += totalTokens;
       bucket.tokens.cached += event.cached_content_token_count;
       bucket.tokens.thoughts += event.thoughts_token_count;
     }
@@ -525,18 +599,69 @@ export class UiTelemetryService extends EventEmitter {
     };
   }
 
-  #accumulateApiError(metrics: SessionMetrics, event: ApiErrorEvent): void {
+  #accumulateApiError(
+    metrics: SessionMetrics,
+    event: ApiErrorEvent,
+    sessionId?: string,
+  ): void {
     const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
     const sourceMetrics = this.#getOrCreateSourceMetrics(
       modelMetrics,
       event.subagent_name ?? MAIN_SOURCE,
     );
+    const invocationMetrics = sessionId
+      ? this.#getOrCreateInvocationMetrics(metrics, event, sessionId)
+      : undefined;
+    const buckets = invocationMetrics
+      ? [modelMetrics, sourceMetrics, invocationMetrics]
+      : [modelMetrics, sourceMetrics];
 
-    for (const bucket of [modelMetrics, sourceMetrics]) {
+    for (const bucket of buckets) {
       bucket.api.totalRequests++;
       bucket.api.totalErrors++;
       bucket.api.totalLatencyMs += event.duration_ms;
     }
+  }
+
+  #getOrCreateInvocationMetrics(
+    metrics: SessionMetrics,
+    event: {
+      subagent_name?: string;
+      subagent_type?: string;
+      subagent_id?: string;
+      subagent_task_name?: string;
+      prompt_id?: string;
+    },
+    sessionId?: string,
+  ): ModelMetricsCore | undefined {
+    const id = event.subagent_id ?? getLegacySubagentId(event, sessionId);
+    if (!id) return undefined;
+
+    const legacyType = event.subagent_id
+      ? undefined
+      : id.match(/^(.+)-[0-9a-f]{8}$/i)?.[1];
+    const meta = (metrics.sourceMeta ??= Object.create(null) as Record<
+      string,
+      { name: string; type: string }
+    >);
+    const existingMeta = meta[id];
+    meta[id] = {
+      name:
+        event.subagent_task_name ??
+        existingMeta?.name ??
+        event.subagent_name ??
+        id,
+      type:
+        event.subagent_type ??
+        existingMeta?.type ??
+        legacyType ??
+        event.subagent_name ??
+        '',
+    };
+    const sourceMetrics = (metrics.sourceMetrics ??= Object.create(
+      null,
+    ) as Record<string, ModelMetricsCore>);
+    return (sourceMetrics[id] ??= createInitialModelMetricsCore());
   }
 
   #accumulateToolCall(metrics: SessionMetrics, event: ToolCallEvent): void {

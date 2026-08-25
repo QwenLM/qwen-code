@@ -118,10 +118,14 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
-export type WebShellChatHeaderItem = 'title' | 'environment' | 'rightPanel';
+export type WebShellChatHeaderItem =
+  | 'title'
+  | 'environment'
+  | 'rightPanel'
+  | 'tokenUsage';
 
 export interface WebShellChatHeaderOptions {
-  /** Built-in header actions to show. Defaults to all actions. */
+  /** Built-in header actions to show. Token usage is opt-in. */
   items?: readonly WebShellChatHeaderItem[];
 }
 
@@ -160,6 +164,8 @@ export interface ChatHeaderRenderInfo {
   onEnvironmentPanelOpenChange: (open: boolean) => void;
   /** Opens or closes the right extension panel. */
   onRightPanelOpenChange: (open: boolean) => void;
+  /** Opens token usage for the current session, when available. */
+  onOpenTokenUsage?: () => void;
 }
 
 /**

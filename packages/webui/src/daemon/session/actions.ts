@@ -2088,15 +2088,17 @@ export function createDaemonSessionActions({
     },
 
     async getStats() {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Load stats failed',
-        'load_stats',
-      );
+      const session = sessionRef.current;
+      if (!session) throw new Error('Daemon session is not connected');
       try {
         return await withActionTimeout(session.stats(), 'Load stats timed out');
       } catch (error) {
+        if (
+          error instanceof Error &&
+          error.message === 'Daemon session is not connected'
+        ) {
+          throw error;
+        }
         throw dispatchActionError(
           addNotice,
           'Load stats failed',

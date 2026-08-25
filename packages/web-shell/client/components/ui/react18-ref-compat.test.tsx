@@ -13,6 +13,7 @@ import { DropdownMenuSubTrigger, DropdownMenuTrigger } from './dropdown-menu';
 import { Input } from './input';
 import { PopoverAnchor, PopoverContent, PopoverTrigger } from './popover';
 import { SelectTrigger } from './select';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './tabs';
 
 const FORWARD_REF_TYPE = Symbol.for('react.forward_ref');
 
@@ -35,6 +36,10 @@ describe('React 18 ref compatibility', () => {
     ['DropdownMenuTrigger', DropdownMenuTrigger],
     ['DropdownMenuSubTrigger', DropdownMenuSubTrigger],
     ['SelectTrigger', SelectTrigger],
+    ['Tabs', Tabs],
+    ['TabsContent', TabsContent],
+    ['TabsList', TabsList],
+    ['TabsTrigger', TabsTrigger],
   ])('%s forwards refs', (_name, Component) => {
     expect(Component).toHaveProperty('$$typeof', FORWARD_REF_TYPE);
   });

@@ -164,6 +164,10 @@ export class AgentHeadless {
    * @param toolConfig - Optional configuration for tools available to the subagent.
    * @param eventEmitter - Optional event emitter for streaming events to UI.
    * @param hooks - Optional lifecycle hooks.
+   * @param runtimeView - Optional runtime view override.
+   * @param taskName - Optional business/task name for local per-invocation
+   *   usage labels.
+   * @param subagentId - Optional stable invocation id.
    */
   static async create(
     name: string,
@@ -175,6 +179,8 @@ export class AgentHeadless {
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
+    taskName?: string,
+    subagentId?: string,
   ): Promise<AgentHeadless> {
     const core = new AgentCore(
       name,
@@ -186,6 +192,8 @@ export class AgentHeadless {
       eventEmitter,
       hooks,
       runtimeView,
+      taskName,
+      subagentId,
     );
     return new AgentHeadless(core);
   }

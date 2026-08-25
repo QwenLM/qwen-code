@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { LayoutListIcon, PanelRightIcon } from 'lucide-react';
+import { GaugeIcon, LayoutListIcon, PanelRightIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import styles from './ChatContextHeader.module.css';
 
@@ -11,6 +11,8 @@ interface ChatContextHeaderProps {
   rightPanelAvailable: boolean;
   onToggleEnvironment: () => void;
   onToggleRightPanel: () => void;
+  /** Opens the session token-usage panel; hidden when omitted. */
+  onOpenTokenUsage?: () => void;
 }
 
 export function ChatContextHeader({
@@ -21,6 +23,7 @@ export function ChatContextHeader({
   rightPanelAvailable,
   onToggleEnvironment,
   onToggleRightPanel,
+  onOpenTokenUsage,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
 
@@ -39,6 +42,17 @@ export function ChatContextHeader({
             onClick={onToggleEnvironment}
           >
             <LayoutListIcon />
+          </button>
+        )}
+        {onOpenTokenUsage && (
+          <button
+            type="button"
+            className={styles.action}
+            aria-label={t('tokenUsage.open')}
+            title={t('tokenUsage.open')}
+            onClick={onOpenTokenUsage}
+          >
+            <GaugeIcon />
           </button>
         )}
         {rightPanelAvailable && (

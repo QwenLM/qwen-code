@@ -256,6 +256,30 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  it('does not report a stats error while the session is disconnected', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({ addNotice });
+
+    await expect(actions.getStats()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('does not report a stats error when the session disconnects in flight', async () => {
+    const addNotice = vi.fn();
+    const session = createMockSession('session-a');
+    session.stats.mockRejectedValueOnce(
+      new Error('Daemon session is not connected'),
+    );
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.getStats()).rejects.toThrow(
+      'Daemon session is not connected',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   it('clears the previous Goal before starting a fresh session', async () => {
     const { actions, getConnection } = createActionsHarness({
       connection: {
@@ -2636,6 +2660,7 @@ function createMockSession(
     removePendingPrompt: vi.fn(async () => ({ removed: true })),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
+    stats: vi.fn(),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
     goal: vi.fn(),
     controlGoal: vi.fn(),

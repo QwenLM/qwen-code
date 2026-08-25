@@ -831,6 +831,10 @@ export class SubagentManager {
       runtimeAuthOverrides?: AuthOverrides;
       runConfigOverrides?: Partial<RunConfig>;
       toolConfigOverride?: ToolConfig;
+      /** Business/task name used for local per-invocation usage labels. */
+      taskName?: string;
+      /** Stable id used to keep one invocation grouped across resume. */
+      subagentId?: string;
     },
   ): Promise<{ subagent: AgentHeadless; dispose: () => Promise<void> }> {
     // Track per-spawn cleanup callbacks declared outside the inner
@@ -952,6 +956,8 @@ export class SubagentManager {
           options?.eventEmitter,
           options?.hooks,
           runtimeView,
+          options?.taskName,
+          options?.subagentId,
         );
         return { subagent, dispose: runCleanup };
       } catch (innerError) {

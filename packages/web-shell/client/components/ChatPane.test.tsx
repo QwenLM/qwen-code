@@ -2522,6 +2522,7 @@ describe('ChatPane', () => {
     expect(renderHeaderActions).toHaveBeenCalledWith({
       sessionId: 'sess-1',
       workspaceCwd: '/work/api',
+      sessionActions: daemonActions,
     });
     expect(testid('host-pane-action')?.textContent).toBe('sess-1:/work/api');
     expect(testid('pane-header-actions')).not.toBeNull();
