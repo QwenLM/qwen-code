@@ -22,14 +22,6 @@ const desktopReleaseWorkflow = readFileSync(
   '.github/workflows/desktop-release.yml',
   'utf8',
 );
-const liveHostReleaseWorkflow = readFileSync(
-  '.github/workflows/live-host-release.yml',
-  'utf8',
-);
-const liveHostCiWorkflow = readFileSync(
-  '.github/workflows/live-host.yml',
-  'utf8',
-);
 const liveHostInstaller = readFileSync(
   'packages/cli/src/serve/live/live-host-installer.ts',
   'utf8',
@@ -264,77 +256,24 @@ describe('release workflow', () => {
   });
 });
 
-describe('Live Host release workflow', () => {
-  it('publishes the tested and notarized Live Host installer contract', () => {
+describe('Live Host feed contract', () => {
+  it('keeps the desktop release workflow free of Live Host jobs', () => {
     expect(desktopReleaseWorkflow).not.toContain('live-host:');
-    expect(liveHostReleaseWorkflow).toContain('tag=live-host-v$version');
-    expect(liveHostReleaseWorkflow).toContain(
-      "LIVE_HOST_FEED_TAG: 'live-host-latest'",
-    );
-    expect(liveHostReleaseWorkflow).toContain(
-      "run: 'bun run live-host:typecheck && bun run live-host:test'",
-    );
-    expect(liveHostReleaseWorkflow).toContain(
-      "run: 'bun run live-host:dist:mac:no-publish'",
-    );
-    expect(liveHostReleaseWorkflow).toContain(
-      'codesign --verify --deep --strict',
-    );
-    expect(liveHostReleaseWorkflow).toContain('xcrun stapler validate');
-    expect(liveHostReleaseWorkflow).toContain(
-      'packages/desktop/apps/live-host/release/*.dmg',
-    );
+  });
 
+  it('pins the CLI installer download contract for the frozen feed', () => {
+    // Live Host releases moved to OpenWork with the Electron app; this repo
+    // no longer publishes them, but the CLI serve/live code still installs
+    // from the frozen live-host-latest feed, so pin the installer contract.
     for (const asset of [
       'Qwen-Live-Host-manifest.json',
       'Qwen-Live-Host-arm64.zip',
       'Qwen-Live-Host-x64.zip',
     ]) {
-      expect(liveHostReleaseWorkflow).toContain(`release-assets/${asset}`);
       expect(liveHostInstaller).toContain(asset);
     }
     expect(liveHostInstaller).toContain(
       'https://github.com/QwenLM/qwen-code/releases/download/live-host-latest',
     );
-  });
-
-  it('accepts the repository macOS signing and notarization secrets', () => {
-    for (const secret of [
-      'MAC_CSC_LINK',
-      'MAC_CSC_KEY_PASSWORD',
-      'APPLE_NOTARY_ISSUER_ID',
-      'APPLE_NOTARY_KEY_ID',
-      'APPLE_NOTARY_API_KEY_P8_BASE64',
-      'APPLE_TEAM_ID',
-    ]) {
-      expect(liveHostReleaseWorkflow).toContain(`secrets.${secret}`);
-    }
-    expect(liveHostReleaseWorkflow).toContain(
-      'keychain_password="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 32)}"',
-    );
-    expect(liveHostReleaseWorkflow).toContain(
-      'certificate_data="${certificate_data#*base64,}"',
-    );
-    expect(liveHostReleaseWorkflow).toContain(
-      'printf \'%s\' "$LEGACY_APPLE_API_KEY_P8" | base64 --decode > "$key_path"',
-    );
-    expect(liveHostReleaseWorkflow).toContain('echo "APPLE_API_KEY=$key_path"');
-    expect(liveHostReleaseWorkflow).toContain(
-      'echo "APPLE_API_KEY_ID=$api_key_id"',
-    );
-    expect(liveHostReleaseWorkflow).toContain(
-      'identity_name="${identity#Developer ID Application: }"',
-    );
-    expect(liveHostReleaseWorkflow).toContain('echo "CSC_NAME=$identity_name"');
-    expect(liveHostReleaseWorkflow).not.toContain('echo "CSC_NAME=$identity"');
-  });
-});
-
-describe('Live Host CI workflow', () => {
-  it('replaces partial package signatures before strict verification', () => {
-    expect(liveHostCiWorkflow).toContain(
-      'codesign --force --deep --sign - --entitlements',
-    );
-    expect(liveHostCiWorkflow).not.toContain('if ! /usr/bin/codesign -d');
   });
 });

@@ -47,6 +47,37 @@ export function isolateHostGitConfig(): {
   };
 }
 
+/**
+ * Redirect the review settings the phase gates read away from the operator's
+ * own — the same shape as `isolateHostGitConfig`, for the same reason.
+ *
+ * `review.sandbox` is a setting a maintainer turns on for their OWN reviews,
+ * and the gates then correctly refuse to run anything uncontained. Under
+ * `required` that refusal is the right answer to give a review and the wrong
+ * answer to give a fixture: 101 tests across this directory stop measuring
+ * what they are about and start reporting the operator's preference back at
+ * them. `QWEN_HOME` is the lever because policy is the STRICTEST of settings
+ * and environment, so no environment value can loosen a settings-side opt-in.
+ *
+ * Call in beforeEach and `dispose()` in afterEach.
+ */
+export function isolateOperatorReviewSettings(): {
+  home: string;
+  dispose: () => void;
+} {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-review-home-')));
+  const saved = process.env['QWEN_HOME'];
+  process.env['QWEN_HOME'] = home;
+  return {
+    home,
+    dispose() {
+      if (saved === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = saved;
+      rmSync(home, { recursive: true, force: true });
+    },
+  };
+}
+
 /** Seed the report `parse-args` tees, so the effort fallback has something to read. */
 export function seedParseArgs(dir: string, effort: unknown): void {
   mkdirSync(join(dir, dirname(PARSE_ARGS_REPORT)), { recursive: true });

@@ -51,6 +51,12 @@ env:
   # new helper test can't be added to one path and silently dropped from the
   # other.
   HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
+  # The growth ratchet and its vitest mirror compare each workflow against
+  # the PR's base commit to tell "this PR grew the file" apart from "the
+  # baseline went stale on main" (#9904). Wired once here so every lane
+  # inherits it — the gate step and every `npm run test:ci` step, whatever
+  # it is named — instead of each step hand-wiring a copy.
+  WORKFLOW_SIZE_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}'
 
 jobs:
   classify_pr:
@@ -261,10 +267,13 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
-          # Shallow: nothing here walks git history (the verify guard below checks
-          # head.sha == HEAD, schema/tests touch only the working tree). On the
-          # in-repo ECS runner a full-history clone is the heaviest transfer and
-          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          # Shallow: nothing here walks git history except on demand (the
+          # verify guard below checks head.sha == HEAD; the size gate and its
+          # vitest mirror fetch the PR's base commit at depth 1 when the
+          # baseline went stale; everything else touches only the working
+          # tree). On the in-repo ECS runner a full-history clone is the
+          # heaviest transfer and chokes the squid egress proxy, flaking
+          # checkout. depth 1 is enough.
           fetch-depth: 1
 
       # Guard against a stale checkout (e.g. a caching egress proxy serving an old
@@ -388,10 +397,6 @@ jobs:
       - name: 'Check desktop workspace isolation'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:desktop-isolation'
-
-      - name: 'Check voice guard mirror sync'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:voice-guard-sync'
 
       - name: 'Install linters'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"

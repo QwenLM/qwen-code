@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
+  OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -625,6 +626,22 @@ describe('SettingsSchema', () => {
         { value: 'tree', label: 'Tree' },
         { value: 'flat', label: 'Flat' },
       ]);
+    });
+
+    it('should allow stream-json as an output.format the runtime honors', () => {
+      // The runtime reads `output.format` from settings.json via
+      // `normalizeOutputFormat`, which returns `OutputFormat.STREAM_JSON` for
+      // `"stream-json"` — a documented, first-class CLI output format. The
+      // settings schema drives VS Code validation of `.qwen/settings.json`, so
+      // it must not reject a value the runtime accepts and runs.
+      const format = getSettingsSchema().output?.properties.format;
+
+      expect(format.type).toBe('enum');
+      const values = format.options?.map((o: { value: string }) => o.value);
+      // Pin the options to the full runtime enum, array-derived (order
+      // included) so a removed, added, or reordered core format fails this
+      // test until the schema follows.
+      expect(values).toEqual(Object.values(OutputFormat));
     });
 
     it('should have loadFromIncludeDirectories setting in schema', () => {
