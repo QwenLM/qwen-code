@@ -8530,9 +8530,18 @@ export class Session implements SessionContext {
               // positional user turn (#isUserTextContent passes its text),
               // so it must own a turn-start snapshot like an ordinary prompt
               // — skipping it desyncs the legacy snapshot↔turn zip from this
-              // turn onward. Placed after the loop-tick early returns so a
-              // tick that never sends creates no phantom snapshot.
-              await this.#snapshotTurnStart(promptId);
+              // turn onward. Taken lazily right before the first send that
+              // actually leaves — #sendMessageStreamWithAutoCompression runs
+              // beforeSend only after its abort and session-token-limit
+              // checks — so a turn that never sends (cancelled during
+              // startup, or dropped by the token limit) creates no phantom
+              // snapshot that no positional turn ever owns; a send that is
+              // cancelled AFTER the snapshot still preserves its message via
+              // the null-stream branch, so the snapshot keeps its owning
+              // turn. No file mutations happen between turn start and the
+              // first send (only history compression), so the snapshot
+              // contents are identical to a pre-loop capture.
+              let cronTurnSnapshotTaken = false;
               const toolLoopState = createDaemonToolLoopState('off');
 
               while (nextMessage !== null) {
@@ -8554,9 +8563,33 @@ export class Session implements SessionContext {
                     promptId,
                     nextMessage.parts ?? [],
                     ac.signal,
+                    {
+                      beforeSend: async () => {
+                        if (!cronTurnSnapshotTaken) {
+                          cronTurnSnapshotTaken = true;
+                          await this.#snapshotTurnStart(promptId);
+                        }
+                        return {
+                          kind: 'send',
+                          message: nextMessage?.parts ?? [],
+                        };
+                      },
+                    },
                   );
                 if (!sendResult.responseStream) {
                   this.todoStopGuard.suspend();
+                  // A cancelled send preserves the full message in history,
+                  // so the positional turn materializes after all — give it
+                  // the snapshot the lazy turn-start capture skipped. A
+                  // non-cancelled drop preserves no text-only message, so no
+                  // turn materializes and no snapshot may be created either.
+                  if (
+                    sendResult.stopReason === 'cancelled' &&
+                    !cronTurnSnapshotTaken
+                  ) {
+                    cronTurnSnapshotTaken = true;
+                    await this.#snapshotTurnStart(promptId);
+                  }
                   this.#preserveUnsentMessageHistory(
                     nextMessage,
                     sendResult.stopReason === 'cancelled',
@@ -9219,8 +9252,11 @@ export class Session implements SessionContext {
           // counts as a positional user turn (#isUserTextContent passes its
           // text), so it must own a turn-start snapshot like an ordinary
           // prompt — skipping it desyncs the legacy snapshot↔turn zip from
-          // this turn onward.
-          await this.#snapshotTurnStart(promptId);
+          // this turn onward. Taken lazily right before the first send that
+          // actually leaves (see the cron/loop path for the full rationale):
+          // a turn cancelled during startup or dropped by the session-token
+          // limit never sends and must not leave a phantom snapshot behind.
+          let notificationTurnSnapshotTaken = false;
           const toolLoopState = createDaemonToolLoopState('off');
 
           while (nextMessage !== null) {
@@ -9243,9 +9279,33 @@ export class Session implements SessionContext {
               promptId,
               nextMessage.parts ?? [],
               ac.signal,
+              {
+                beforeSend: async () => {
+                  if (!notificationTurnSnapshotTaken) {
+                    notificationTurnSnapshotTaken = true;
+                    await this.#snapshotTurnStart(promptId);
+                  }
+                  return {
+                    kind: 'send',
+                    message: nextMessage?.parts ?? [],
+                  };
+                },
+              },
             );
             if (!sendResult.responseStream) {
               this.todoStopGuard.suspend();
+              // A cancelled send preserves the full message in history, so
+              // the positional turn materializes after all — give it the
+              // snapshot the lazy turn-start capture skipped. A non-cancelled
+              // drop preserves no text-only message, so no turn materializes
+              // and no snapshot may be created either (see the cron path).
+              if (
+                sendResult.stopReason === 'cancelled' &&
+                !notificationTurnSnapshotTaken
+              ) {
+                notificationTurnSnapshotTaken = true;
+                await this.#snapshotTurnStart(promptId);
+              }
               this.#preserveUnsentMessageHistory(
                 nextMessage,
                 sendResult.stopReason === 'cancelled',

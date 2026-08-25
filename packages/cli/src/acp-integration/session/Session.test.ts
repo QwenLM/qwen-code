@@ -8034,6 +8034,191 @@ describe('Session', () => {
       );
     });
 
+    it('creates no snapshot when a cron turn is dropped by the session token limit', async () => {
+      // R8-12: a tick whose send is dropped by the sessionTokenLimit check
+      // never materializes a positional turn or a recording boundary, so a
+      // pre-send turn-start snapshot would stay a permanent phantom —
+      // snapshots = turns + 1 forever, and the strict legacy pairing gates
+      // fail closed on the divergence until /clear. The snapshot is taken
+      // lazily right before the first send that actually leaves, so a
+      // never-sent tick snapshots nothing.
+      let cronCallback: ((job: { prompt: string }) => void) | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn((callback: (job: { prompt: string }) => void) => {
+          cronCallback = callback;
+        }),
+        stop: vi.fn(),
+        disable: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'root prompt' }],
+      });
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
+
+      // The next send (the cron tick) exceeds the session token limit and is
+      // dropped before it can reach the model.
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockGeminiClient.tryCompressChat.mockResolvedValue({
+        originalTokenCount: 999,
+        newTokenCount: 999,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+
+      cronCallback?.({ prompt: 'scheduled prompt' });
+      // The token-limit breaker (disable) is the observable proof that the
+      // tick ran through the drop path; cronCompletion alone can be observed
+      // null before the drain even starts.
+      await vi.waitFor(() => {
+        expect(scheduler.disable).toHaveBeenCalled();
+      });
+      await vi.waitFor(() => {
+        expect(internals.cronCompletion).toBeNull();
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalledWith(
+        expect.stringMatching(/########cron/),
+      );
+    });
+
+    it('creates no snapshot when a notification turn is dropped by the session token limit', async () => {
+      // R8-12 twin for the background-notification path: a dropped send
+      // materializes neither a positional turn nor a snapshot.
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const internals = session as unknown as {
+        notificationCompletion: Promise<void> | null;
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'root prompt' }],
+      });
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
+
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockGeminiClient.tryCompressChat.mockResolvedValue({
+        originalTokenCount: 999,
+        newTokenCount: 999,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+
+      const backgroundCallback = mockBackgroundTaskRegistry
+        .setNotificationCallback.mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+      backgroundCallback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      // The end-turn notification for the max_tokens drop is the observable
+      // proof that the turn ran through the drop path; notificationCompletion
+      // alone can be observed null before the drain even starts.
+      await vi.waitFor(() => {
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/end_turn',
+          expect.objectContaining({
+            reason: 'max_tokens',
+            source: 'background_notification',
+          }),
+        );
+      });
+      await vi.waitFor(() => {
+        expect(internals.notificationCompletion).toBeNull();
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
+      expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalledWith(
+        expect.stringMatching(/########notification/),
+      );
+    });
+
+    it('keeps the snapshot and the preserved turn aligned when a cron turn is cancelled mid-snapshot', async () => {
+      // R8-11: Stop landing while the turn-start snapshot is in flight used
+      // to leak the snapshot — the loop-top abort check returned without
+      // pushing the user entry, so no positional turn ever owned it. The
+      // snapshot is now taken right before the send actually leaves; a
+      // cancel that lands while it is in flight takes the cancelled
+      // null-stream branch, which preserves the full message AND keeps the
+      // snapshot, so the stores stay aligned instead of diverging forever.
+      let cronCallback: ((job: { prompt: string }) => void) | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn((callback: (job: { prompt: string }) => void) => {
+          cronCallback = callback;
+        }),
+        stop: vi.fn(),
+        disable: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      let releaseSnapshot: (() => void) | undefined;
+      mockFileHistoryService.makeSnapshot
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(
+          () =>
+            new Promise<void>((resolve) => {
+              releaseSnapshot = resolve;
+            }),
+        );
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'root prompt' }],
+      });
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
+
+      cronCallback?.({ prompt: 'scheduled prompt' });
+      await vi.waitFor(() => {
+        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(2);
+      });
+      await session.cancelPendingPrompt();
+      releaseSnapshot?.();
+      await vi.waitFor(() => {
+        expect(internals.cronCompletion).toBeNull();
+      });
+
+      // The cancelled send preserves the full cron message, so the snapshot
+      // taken for it keeps its owning positional turn.
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: 'scheduled prompt' }),
+          ]),
+        }),
+      );
+      expect(mockFileHistoryService.makeSnapshot).toHaveBeenLastCalledWith(
+        expect.stringMatching(/########cron/),
+      );
+    });
+
     it('fires MessageDisplay with cumulative non-thought text and is_final on the ACP prompt path', async () => {
       // Regression: the ACP surface consumes GeminiChat's stream directly
       // (never entering GeminiClient.sendMessageStream), so it must fire the
