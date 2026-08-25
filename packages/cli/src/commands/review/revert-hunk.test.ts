@@ -13,7 +13,7 @@
 // exec seam, because no real git invocation can be made to take them
 // deterministically.
 
-import { describe, it, expect, vi, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import yargs from 'yargs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
@@ -59,6 +59,15 @@ function tempDir(prefix: string): string {
 }
 afterAll(() => {
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+});
+
+// The stdio helpers are `vi.fn()` mocks with no auto-clear (no clearMocks in
+// vitest.config); without this, `toHaveBeenCalledWith` matches across EVERY
+// prior test's calls, and since every message this command emits starts with
+// `revert-hunk:` a stale call makes such an assertion vacuous. Clear per test
+// so each mock assertion sees only its own test's calls.
+beforeEach(() => {
+  vi.clearAllMocks();
 });
 
 function git(cwd: string, ...args: string[]): string {
@@ -906,9 +915,11 @@ describe('the command wiring', () => {
     expect(process.exitCode).toBe(2);
     expect(readFileSync(join(fresh.dir, 'f.txt'), 'utf8')).toBe(before);
     // The outer catch's diagnostic is not silent — deleting the
-    // writeStderrLineSafe there would exit 2 with nothing said.
+    // writeStderrLineSafe there would exit 2 with nothing said. Assert the
+    // OUTER-CATCH message specifically (the directory-out TypeError text),
+    // not the `revert-hunk:` prefix every message shares.
     expect(vi.mocked(writeStderrLineSafe)).toHaveBeenCalledWith(
-      expect.stringContaining('revert-hunk:'),
+      expect.stringContaining('names a directory, not a file'),
     );
     process.exitCode = 0;
   });

@@ -14,7 +14,7 @@
 // gate is a conjunction, and `&&` vs `||` only differ on the asymmetric
 // inputs no symmetric fixture ever produces.
 
-import { describe, it, expect, vi, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import {
@@ -53,6 +53,13 @@ function tempDir(prefix: string): string {
 }
 afterAll(() => {
   for (const d of tmpDirs) rmSync(d, { recursive: true, force: true });
+});
+
+// Clear the stdio-helper mocks per test: they have no auto-clear, so
+// `toHaveBeenCalled` / `.mock.calls.at(-1)` would otherwise read across
+// prior tests' handler calls and pass vacuously.
+beforeEach(() => {
+  vi.clearAllMocks();
 });
 
 const ok = (stdout = ''): ExecResult => ({ status: 0, stdout, stderr: '' });
