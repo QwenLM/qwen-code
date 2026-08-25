@@ -16,12 +16,16 @@ import {
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
 import {
+  InvalidGoalCheckpointError,
+  isGoalCheckpointStalled,
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerifier,
 } from './goal-checkpoint.js';
 import { GoalCheckpointVerifierInputTooLargeError } from './goal-checkpoint-verifier.js';
 import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
+  GOAL_CHECKPOINT_STALL_LIMIT,
+  GOAL_CHECKPOINT_STALLED_REASON,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
@@ -392,6 +396,14 @@ export function createGoalRuntime(
       }
       commitUsageLimitedSettle(limitedSnapshot);
     }).catch(() => undefined);
+  };
+
+  const withCheckpointStalls = (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    checkpointStalls: number,
+  ): NonNullable<GoalSnapshotV2['goal']> => {
+    const { checkpointStalls: _previous, ...rest } = goal;
+    return checkpointStalls > 0 ? { ...rest, checkpointStalls } : rest;
   };
 
   const assertAvailable = () => {
@@ -848,16 +860,36 @@ export function createGoalRuntime(
 
   const finishCheckpointCheck = async (
     attempt: CheckpointAttempt,
+    outcome: 'room' | 'stalled' | 'inconclusive' = 'inconclusive',
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      // Only a check that found room ends a stall streak. A check that
+      // never ran or failed transiently proved nothing about the window;
+      // resetting there would launder the count. An unusable verifier
+      // result while the window overflowed counts like a stalled checkpoint.
+      const checkpointStalls =
+        outcome === 'room'
+          ? 0
+          : outcome === 'stalled'
+            ? (snapshot.goal.checkpointStalls ?? 0) + 1
+            : (snapshot.goal.checkpointStalls ?? 0);
+      if (
+        await settleIfCheckpointStalled(
+          attempt,
+          snapshot.goal,
+          checkpointStalls,
+        )
+      ) {
+        return;
+      }
       const persistedCause =
         nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
       const now = Date.now();
       const checkedSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...snapshot.goal,
+          ...withCheckpointStalls(snapshot.goal, checkpointStalls),
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
         },
@@ -882,6 +914,45 @@ export function createGoalRuntime(
     });
   };
 
+  /** The `usage_limited` settle for a checkpoint attempt; runs on the queue. */
+  const settleCheckpointFailure = async (
+    attempt: CheckpointAttempt,
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    reason: string,
+    limitKind?: GoalLimitKind,
+  ): Promise<void> => {
+    const limitedSnapshot = await journalUsageLimitedSettle(
+      goal,
+      reason,
+      limitKind,
+    );
+    if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+    checkpointAttempt = undefined;
+    // Keep nextVerifierFeedback: a rejection committed before this
+    // checkpoint failure must still reach the resumed continuation.
+    commitUsageLimitedSettle(limitedSnapshot);
+  };
+
+  /**
+   * Stops the Goal once its stall streak reaches the limit, persisting the
+   * streak with the stop so the record explains itself. Returns whether the
+   * attempt was settled.
+   */
+  const settleIfCheckpointStalled = async (
+    attempt: CheckpointAttempt,
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    checkpointStalls: number,
+  ): Promise<boolean> => {
+    if (checkpointStalls < GOAL_CHECKPOINT_STALL_LIMIT) return false;
+    await settleCheckpointFailure(
+      attempt,
+      withCheckpointStalls(goal, checkpointStalls),
+      GOAL_CHECKPOINT_STALLED_REASON,
+      'evidence_catalog',
+    );
+    return true;
+  };
+
   const recordCheckpointFailure = async (
     attempt: CheckpointAttempt,
     reason: string,
@@ -889,33 +960,39 @@ export function createGoalRuntime(
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      const limitedSnapshot = await journalUsageLimitedSettle(
-        snapshot.goal,
-        reason,
-        limitKind,
-      );
-      if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
-      checkpointAttempt = undefined;
-      // Keep nextVerifierFeedback: a rejection committed before this
-      // checkpoint failure must still reach the resumed continuation.
-      commitUsageLimitedSettle(limitedSnapshot);
+      await settleCheckpointFailure(attempt, snapshot.goal, reason, limitKind);
     });
   };
 
   const recordCheckpoint = async (
     attempt: CheckpointAttempt,
     checkpoint: NonNullable<GoalSnapshotV2['goal']>['evidenceCheckpoint'],
+    stalled: boolean,
   ): Promise<void> => {
     if (!checkpoint) return;
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      const checkpointStalls = stalled
+        ? (snapshot.goal.checkpointStalls ?? 0) + 1
+        : 0;
+      // A stopped Goal discards the checkpoint it would have written: a
+      // resumed window restarts from a fresh cursor anyway.
+      if (
+        await settleIfCheckpointStalled(
+          attempt,
+          snapshot.goal,
+          checkpointStalls,
+        )
+      ) {
+        return;
+      }
       const now = Date.now();
       const persistedCause =
         nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
       const checkpointSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
-          ...snapshot.goal,
+          ...withCheckpointStalls(snapshot.goal, checkpointStalls),
           evidenceCursor: { recordId: attempt.recordUuid },
           evidenceCheckpoint: checkpoint,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
@@ -982,7 +1059,7 @@ export function createGoalRuntime(
         return;
       }
       if (!window.shouldCheckpoint) {
-        await finishCheckpointCheck(attempt);
+        await finishCheckpointCheck(attempt, 'room');
         return;
       }
       let checkpoint: GoalEvidenceCheckpoint;
@@ -1017,13 +1094,25 @@ export function createGoalRuntime(
           );
           return;
         }
-        // A transient or malformed checkpoint verification must not abort a
-        // healthy Goal: settle the attempt as bookkeeping so the evidence
-        // stays citable and a later turn retries the checkpoint.
+        if (error instanceof InvalidGoalCheckpointError && window.truncated) {
+          // An unusable result while the window overflows is a compaction
+          // that produced nothing: like a full claim list, it counts toward
+          // the stall limit.
+          await finishCheckpointCheck(attempt, 'stalled');
+          return;
+        }
+        // A transient failure, or an unusable result while the window still
+        // has room, must not abort a healthy Goal: settle the attempt as
+        // bookkeeping so the evidence stays citable and a later turn retries
+        // the checkpoint.
         await finishCheckpointCheck(attempt);
         return;
       }
-      await recordCheckpoint(attempt, checkpoint);
+      await recordCheckpoint(
+        attempt,
+        checkpoint,
+        isGoalCheckpointStalled(window, checkpoint),
+      );
     } catch (error) {
       if (attempt.controller.signal.aborted) return;
       if (
