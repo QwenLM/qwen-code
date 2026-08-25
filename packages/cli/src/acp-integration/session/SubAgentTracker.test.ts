@@ -598,7 +598,8 @@ describe('SubAgentTracker', () => {
           ToolConfirmationOutcome.Cancel,
           {
             answers: undefined,
-            cancelMessage: 'approval_ui_unavailable',
+            cancelMessage:
+              'Permission request was cancelled because the approval UI was unavailable.',
           },
         );
       });

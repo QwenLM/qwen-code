@@ -128,12 +128,29 @@ export function interactionMetaFields(
     : {};
 }
 
-export function permissionCancelMessageFromResponse(
-  response: unknown,
+export function permissionCancelReasonFromResponse(
+  response: RequestPermissionResponse,
 ): string | undefined {
-  const reason = (response as { _meta?: Record<string, unknown> | null })
-    ._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+  const reason = response._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
   return typeof reason === 'string' && reason.length > 0 ? reason : undefined;
+}
+
+export function permissionCancelMessageFromResponse(
+  response: RequestPermissionResponse,
+): string | undefined {
+  const reason = permissionCancelReasonFromResponse(response);
+  switch (reason) {
+    case 'approval_ui_unavailable':
+      return 'Permission request was cancelled because the approval UI was unavailable.';
+    case 'timeout':
+      return 'Permission request timed out before the user answered.';
+    case 'session_closed':
+      return 'Permission request was cancelled because the session closed before the user answered.';
+    case 'agent_cancelled':
+      return 'Permission request was cancelled before the user answered.';
+    default:
+      return reason;
+  }
 }
 
 export function buildPermissionRequestContent(

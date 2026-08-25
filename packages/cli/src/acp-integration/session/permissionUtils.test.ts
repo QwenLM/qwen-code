@@ -6,9 +6,12 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
+  permissionCancelMessageFromResponse,
+  permissionCancelReasonFromResponse,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
@@ -278,6 +281,34 @@ describe('permissionUtils', () => {
         options,
       ),
     ).toThrow('unoffered option');
+  });
+
+  it('maps daemon cancel reason metadata and ignores empty reasons', () => {
+    const cancelledResponse: RequestPermissionResponse = {
+      outcome: { outcome: 'cancelled' },
+      _meta: {
+        'qwen.daemon.permissionCancelReason': 'agent_cancelled',
+      },
+    } as RequestPermissionResponse;
+    const emptyReasonResponse: RequestPermissionResponse = {
+      outcome: { outcome: 'cancelled' },
+      _meta: {
+        'qwen.daemon.permissionCancelReason': '',
+      },
+    } as RequestPermissionResponse;
+
+    expect(permissionCancelReasonFromResponse(cancelledResponse)).toBe(
+      'agent_cancelled',
+    );
+    expect(permissionCancelMessageFromResponse(cancelledResponse)).toBe(
+      'Permission request was cancelled before the user answered.',
+    );
+    expect(permissionCancelReasonFromResponse(emptyReasonResponse)).toBe(
+      undefined,
+    );
+    expect(permissionCancelMessageFromResponse(emptyReasonResponse)).toBe(
+      undefined,
+    );
   });
 
   it('aborts permission requests and ignores late settlement', async () => {

@@ -362,6 +362,7 @@ import {
   interactionMetaFields,
   type PermissionPersistencePolicy,
   permissionCancelMessageFromResponse,
+  permissionCancelReasonFromResponse,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
@@ -2694,13 +2695,17 @@ export class Session implements SessionContext {
         response,
         offeredPermissionOptions,
       );
+      const cancelMessage =
+        outcome === ToolConfirmationOutcome.Cancel
+          ? permissionCancelMessageFromResponse(response)
+          : undefined;
       const resolved = await registry.resolvePendingApproval(
         runId,
         approval.approvalId,
         outcome === ToolConfirmationOutcome.ProceedOnce
           ? outcome
           : ToolConfirmationOutcome.Cancel,
-        undefined,
+        cancelMessage !== undefined ? { cancelMessage } : undefined,
       );
       await this.#finishWorkflowApprovalToolCall(
         approval,
@@ -12236,7 +12241,7 @@ export class Session implements SessionContext {
                   // later load can re-hang the question. A deliberate user
                   // cancel persists, matching live decline handling.
                   const cancelReason =
-                    permissionCancelMessageFromResponse(output);
+                    permissionCancelReasonFromResponse(output);
                   const unattendedRestore =
                     isUnattendedRestorePermissionCancel(cancelReason) &&
                     this.restoringAskUserQuestionCallIds?.has(callId) === true;
