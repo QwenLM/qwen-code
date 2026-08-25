@@ -2091,7 +2091,8 @@ const EN: Messages = {
   'goals.newHint':
     'The goal starts in a new session and runs until its condition holds.',
   'goals.condition': 'Condition',
-  'goals.conditionPlaceholder': 'e.g. all tests pass and the lint is clean',
+  'goals.conditionPlaceholder':
+    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; stop as blocked after 20 turns',
   'goals.cancel': 'Cancel',
   'goals.create': 'Set goal',
   'goals.creating': 'Starting…',
@@ -5033,7 +5034,8 @@ const ZH: Messages = {
   'goals.new': '新建目标',
   'goals.newHint': '目标会在一个新会话中启动，并持续运行直到条件满足。',
   'goals.condition': '条件',
-  'goals.conditionPlaceholder': '例如：所有测试通过且 lint 无告警',
+  'goals.conditionPlaceholder':
+    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；20 轮内未达成则以 blocked 结束',
   'goals.cancel': '取消',
   'goals.create': '设置目标',
   'goals.creating': '正在启动…',
