@@ -58,16 +58,14 @@ import { readPackageUpSync } from 'read-package-up';
 import { CLI_VERSION } from '../../../generated/git-commit.js';
 
 /**
- * The fallback when neither override names an image: the published sandbox
- * image for this CLI line. Pinned by tag rather than digest on purpose — a
- * digest would go stale in a file nobody updates, and the override exists for
- * anyone who needs reproducibility.
- */
-/**
- * Last resort only, and versioned rather than floating: the real default is
- * the CLI's own `config.sandboxImageUri` — see `cliSandboxImage`. This literal
- * exists for the case where the package manifest cannot be found at all (an
- * unusual install layout), so the argv still names something that exists.
+ * Last resort only: the real default is the CLI's own `config.sandboxImageUri`
+ * — see `cliSandboxImage`. This literal covers the case where the package
+ * manifest cannot be found at all (an unusual install layout), so the argv
+ * still names something that exists.
+ *
+ * Versioned rather than floating on `:latest`, and by tag rather than digest —
+ * a digest would go stale in a file nobody updates, and the overrides exist
+ * for anyone who needs reproducibility.
  */
 const DEFAULT_IMAGE = `ghcr.io/qwenlm/qwen-code:${CLI_VERSION}`;
 
@@ -698,16 +696,6 @@ export function containerCommand(
 }
 
 /**
- * The image the reviewed repository's commands run in.
- *
- * Defaults to the CLI's own sandbox image, which already carries a Node
- * toolchain — the same image `qwen --sandbox` uses, so a repository that
- * builds under one builds under the other. `QWEN_REVIEW_SANDBOX_IMAGE`
- * overrides it for a repository whose toolchain needs more (a JDK, a Python,
- * a specific Node major), which is the case this default cannot cover and
- * should not pretend to.
- */
-/**
  * The image `qwen --sandbox` itself runs, read from the package manifest that
  * ships with this CLI (`config.sandboxImageUri`) — the same field
  * `sandboxConfig.ts` reads, so the two cannot drift.
@@ -744,6 +732,20 @@ function cliSandboxImage(): string | undefined {
 
 let manifestImage: string | null | undefined;
 
+/**
+ * The image the reviewed repository's commands run in.
+ *
+ * Defaults to the CLI's own sandbox image, which already carries a Node
+ * toolchain — literally the same image `qwen --sandbox` resolves, read from
+ * the same manifest field, so a repository that builds under one builds under
+ * the other. That sentence was here before `cliSandboxImage` existed, when a
+ * hardcoded name made it false; it is now a description of the code rather
+ * than an intention about it.
+ *
+ * `QWEN_REVIEW_SANDBOX_IMAGE` overrides it for a repository whose toolchain
+ * needs more (a JDK, a Python, a specific Node major), which is the case this
+ * default cannot cover and should not pretend to.
+ */
 export function reviewSandboxImage(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
