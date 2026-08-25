@@ -324,8 +324,11 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
   } catch {
     throw new Error(`${QWEN_DAEMON_URL_ENV} must be a valid URL.`);
   }
-  if (parsed.protocol !== 'http:' || !isLoopbackBind(parsed.hostname)) {
-    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http loopback URL.`);
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+    !isLoopbackBind(parsed.hostname)
+  ) {
+    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL.`);
   }
 }
 
