@@ -250,7 +250,7 @@ describe('SettingsSchema', () => {
       expect(advisorModel.requiresRestart).toBe(false);
       expect(advisorModel.showInDialog).toBe(true);
       expect(advisorModel.description).toContain(
-        'it never falls back to the main model',
+        'manual /advisor review remains available and uses the main model',
       );
     });
 
@@ -261,7 +261,7 @@ describe('SettingsSchema', () => {
       expect(advisorMaxUses.category).toBe('Model');
       expect(advisorMaxUses.default).toBeUndefined();
       expect(advisorMaxUses.requiresRestart).toBe(false);
-      expect(advisorMaxUses.showInDialog).toBe(true);
+      expect(advisorMaxUses.showInDialog).toBe(false);
       expect(advisorMaxUses.minimum).toBe(1);
       expect(validateSettingValue(advisorMaxUses, 0)).toBe(
         'Value must be >= 1',
