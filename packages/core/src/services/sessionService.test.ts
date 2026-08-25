@@ -18,7 +18,10 @@ import {
   vi,
 } from 'vitest';
 import { getProjectHash } from '../utils/paths.js';
-import { readRuntimeStatus } from '../utils/runtimeStatus.js';
+import {
+  readRuntimeStatus,
+  readRuntimeStatusClaims,
+} from '../utils/runtimeStatus.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
@@ -116,6 +119,16 @@ describe('SessionService', () => {
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
     vi.mocked(readRuntimeStatus).mockResolvedValue(null);
+    vi.mocked(readRuntimeStatusClaims).mockImplementation(
+      async (chatsDir, sessionId, options) => {
+        const statusPath = path.join(chatsDir, `${sessionId}.runtime.json`);
+        const status = await readRuntimeStatus(statusPath, options);
+        return {
+          statuses: status ? [status] : [],
+          incomplete: false,
+        };
+      },
+    );
   });
 
   afterEach(() => {
@@ -257,22 +270,29 @@ describe('SessionService', () => {
           ? 'test-project-hash'
           : 'other-project-hash',
       );
-      vi.mocked(readRuntimeStatus).mockResolvedValue({
-        schemaVersion: 1,
-        pid: 123,
-        sessionId: sessionIdA,
-        workDir: '/test/project/root',
-        hostname: 'host',
-        startedAt: 1,
-        qwenVersion: null,
+      vi.mocked(readRuntimeStatusClaims).mockResolvedValue({
+        statuses: [
+          {
+            schemaVersion: 1,
+            pid: 123,
+            sessionId: sessionIdA,
+            workDir: '/test/project/root',
+            hostname: 'host',
+            startedAt: 1,
+            qwenVersion: null,
+          },
+        ],
+        incomplete: false,
       });
       const controller = new AbortController();
 
       await sessionService.listSessions({ signal: controller.signal });
 
-      expect(readRuntimeStatus).toHaveBeenCalledWith(expect.any(String), {
-        signal: controller.signal,
-      });
+      expect(readRuntimeStatusClaims).toHaveBeenCalledWith(
+        expect.any(String),
+        sessionIdA,
+        { signal: controller.signal },
+      );
     });
 
     it('should return empty list when chats directory does not exist', async () => {
@@ -770,14 +790,19 @@ describe('SessionService', () => {
         cwd: '/old/project',
       };
       vi.mocked(jsonl.readLines).mockResolvedValue([migratedRecord]);
-      vi.mocked(readRuntimeStatus).mockResolvedValue({
-        schemaVersion: 1,
-        pid: 123,
-        sessionId: sessionIdA,
-        workDir: '/test/project/root',
-        hostname: 'host',
-        startedAt: 1,
-        qwenVersion: null,
+      vi.mocked(readRuntimeStatusClaims).mockResolvedValue({
+        statuses: [
+          {
+            schemaVersion: 1,
+            pid: 123,
+            sessionId: sessionIdA,
+            workDir: '/test/project/root',
+            hostname: 'host',
+            startedAt: 1,
+            qwenVersion: null,
+          },
+        ],
+        incomplete: false,
       });
       vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
         cwd === '/test/project/root'

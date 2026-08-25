@@ -32,7 +32,7 @@ import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { hasVerifiableInode } from '../utils/file-identity.js';
-import { readRuntimeStatus } from '../utils/runtimeStatus.js';
+import { readRuntimeStatusClaims } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
@@ -599,14 +599,13 @@ export class SessionService {
       }
     }
 
-    const runtimeStatusPath = this.storage.getRuntimeStatusPath(sessionId);
-    const status = signal
-      ? await readRuntimeStatus(runtimeStatusPath, { signal })
-      : await readRuntimeStatus(runtimeStatusPath);
+    const chatsDir = path.join(this.storage.getProjectDir(), 'chats');
+    const { statuses } = signal
+      ? await readRuntimeStatusClaims(chatsDir, sessionId, { signal })
+      : await readRuntimeStatusClaims(chatsDir, sessionId);
     signal?.throwIfAborted();
-    return (
-      status?.sessionId === sessionId &&
-      getProjectHash(status.workDir) === this.projectHash
+    return statuses.some(
+      (status) => getProjectHash(status.workDir) === this.projectHash,
     );
   }
 

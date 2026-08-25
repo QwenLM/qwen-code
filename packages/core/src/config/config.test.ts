@@ -6902,6 +6902,7 @@ describe('Server Config (config.ts)', () => {
       oldChatsDir,
       `${sessionId}.runtime.json`,
     );
+    config.markRuntimeStatusEnabled(oldRuntimeStatusPath);
     const oldWorktreeSessionPath = path.join(
       oldChatsDir,
       `${sessionId}.worktree.json`,
@@ -6968,6 +6969,7 @@ describe('Server Config (config.ts)', () => {
     const oldStorage = new Storage(config.getTargetDir());
     const newStorage = new Storage(newDir);
     const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    config.markRuntimeStatusEnabled(oldRuntimeStatusPath);
     const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
       // Keep the test process in its original directory.
@@ -7139,6 +7141,69 @@ describe('Server Config (config.ts)', () => {
     patchSessionRecordSpy.mockRestore();
   });
 
+  it('does not migrate a foreign canonical claim after a session claim fails', async () => {
+    const config = new Config(baseParams);
+    const oldClaimPath = config.storage.getRuntimeStatusPath(
+      config.getSessionId(),
+    );
+    config.markRuntimeStatusEnabled(oldClaimPath);
+    const releaseSpy = vi
+      .spyOn(runtimeStatus, 'releaseRuntimeStatus')
+      .mockResolvedValue(undefined);
+    const claimSpy = vi
+      .spyOn(runtimeStatus, 'claimRuntimeStatus')
+      .mockRejectedValueOnce(new Error('runtime status unavailable'));
+    const newSessionId = config.startNewSession('replacement-session');
+    await vi.waitFor(() => expect(claimSpy).toHaveBeenCalled());
+
+    const oldStorage = new Storage(config.getTargetDir());
+    const newDir = path.resolve('/path/to/other');
+    const newStorage = new Storage(newDir);
+    const foreignCanonicalPath = oldStorage.getRuntimeStatusPath(newSessionId);
+    const destinationPath = newStorage.getRuntimeStatusPath(newSessionId);
+    claimSpy.mockResolvedValueOnce(destinationPath);
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === newDir || checked === foreignCanonicalPath;
+    });
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(fs.renameSync).not.toHaveBeenCalledWith(
+      foreignCanonicalPath,
+      destinationPath,
+    );
+    expect(claimSpy).toHaveBeenLastCalledWith(destinationPath, {
+      sessionId: newSessionId,
+      workDir: newDir,
+      qwenVersion: null,
+    });
+    releaseSpy.mockRestore();
+    claimSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('retries a runtime claim on the next session switch after a failure', async () => {
+    const config = new Config(baseParams);
+    config.markRuntimeStatusEnabled();
+    const recoveredPath = config.storage.getRuntimeStatusPath('second-session');
+    const claimSpy = vi
+      .spyOn(runtimeStatus, 'claimRuntimeStatus')
+      .mockRejectedValueOnce(new Error('runtime status unavailable'))
+      .mockResolvedValueOnce(recoveredPath);
+
+    config.startNewSession('first-session');
+    await vi.waitFor(() => expect(claimSpy).toHaveBeenCalledTimes(1));
+    config.startNewSession('second-session');
+    await vi.waitFor(() => expect(claimSpy).toHaveBeenCalledTimes(2));
+
+    expect(claimSpy.mock.calls[1]?.[0]).toBe(recoveredPath);
+    claimSpy.mockRestore();
+  });
+
   it('drains a pending session claim before releasing it at shutdown', async () => {
     const config = new Config(baseParams);
     const oldPath = config.storage.getRuntimeStatusPath(config.getSessionId());
@@ -7282,6 +7347,7 @@ describe('Server Config (config.ts)', () => {
       oldChatsDir,
       `${sessionId}.runtime.json`,
     );
+    config.markRuntimeStatusEnabled(oldRuntimeStatusPath);
     const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
     const newRuntimeStatusPath = path.join(
       newChatsDir,
@@ -7337,6 +7403,7 @@ describe('Server Config (config.ts)', () => {
     const oldStorage = new Storage(oldDir);
     const newStorage = new Storage(newDir);
     const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    config.markRuntimeStatusEnabled(oldRuntimeStatusPath);
     const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
     const cleanupError = new Error('cleanup failed');
     const exdevError = Object.assign(new Error('cross device'), {

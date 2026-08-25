@@ -12,6 +12,8 @@ import {
   RUNTIME_STATUS_SCHEMA_VERSION,
   claimRuntimeStatus,
   clearRuntimeStatus,
+  isRuntimeStatusActive,
+  readRuntimeStatusClaims,
   readRuntimeStatus,
   releaseRuntimeStatus,
   writeRuntimeStatus,
@@ -86,6 +88,95 @@ describe('claimRuntimeStatus', () => {
     expect(
       (await readdir(tmpDir)).filter((file) => file.includes('displaced')),
     ).toEqual([]);
+  });
+
+  it('keeps a foreign-host canonical claim and creates a sibling', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/foreign',
+      pid: 2_000_000_000,
+    });
+    const foreign = JSON.parse(await readFile(targetPath(), 'utf8'));
+    foreign.hostname = 'another-machine.example';
+    await writeFile(targetPath(), JSON.stringify(foreign));
+
+    const claimedPath = await claimRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/ours',
+    });
+
+    expect(claimedPath).not.toBe(targetPath());
+    expect((await readRuntimeStatus(targetPath()))?.workDir).toBe('/foreign');
+    expect((await readRuntimeStatus(claimedPath))?.workDir).toBe('/ours');
+  });
+
+  it('does not destroy an unreadable canonical claim', async () => {
+    await writeFile(targetPath(), '{not json');
+
+    const claimedPath = await claimRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/ours',
+    });
+
+    expect(claimedPath).not.toBe(targetPath());
+    expect(await readFile(targetPath(), 'utf8')).toBe('{not json');
+    expect((await readRuntimeStatus(claimedPath))?.workDir).toBe('/ours');
+  });
+});
+
+describe('runtime status claim discovery', () => {
+  it('discovers sibling claims by payload session id', async () => {
+    const claimPath = path.join(tmpDir, 'abc.claim-token.runtime.json');
+    await writeRuntimeStatus(claimPath, {
+      sessionId: 'abc',
+      workDir: '/relocated',
+      pid: process.pid,
+    });
+    await writeRuntimeStatus(
+      path.join(tmpDir, 'other.claim-token.runtime.json'),
+      { sessionId: 'other', workDir: '/other', pid: process.pid },
+    );
+
+    const { statuses, incomplete } = await readRuntimeStatusClaims(
+      tmpDir,
+      'abc',
+    );
+
+    expect(statuses).toHaveLength(1);
+    expect(statuses[0]?.workDir).toBe('/relocated');
+    expect(incomplete).toBe(false);
+  });
+
+  it('treats foreign-host claims as active keep-only evidence', async () => {
+    const claimPath = path.join(tmpDir, 'abc.runtime.json');
+    await writeRuntimeStatus(claimPath, {
+      sessionId: 'abc',
+      workDir: '/remote',
+      pid: 2_000_000_000,
+    });
+    const foreign = JSON.parse(await readFile(claimPath, 'utf8'));
+    foreign.hostname = 'another-machine.example';
+    await writeFile(claimPath, JSON.stringify(foreign));
+
+    const { statuses } = await readRuntimeStatusClaims(tmpDir, 'abc');
+    expect(statuses.some(isRuntimeStatusActive)).toBe(true);
+
+    expect(isRuntimeStatusActive({ ...statuses[0]!, pid: 0 })).toBe(false);
+  });
+
+  it('treats an unreadable sibling as unknown keep-only evidence', async () => {
+    await writeRuntimeStatus(path.join(tmpDir, 'abc.runtime.json'), {
+      sessionId: 'abc',
+      workDir: '/old',
+      pid: 0,
+    });
+    await writeFile(
+      path.join(tmpDir, 'abc.claim-token.runtime.json'),
+      '{not json',
+    );
+
+    const { incomplete } = await readRuntimeStatusClaims(tmpDir, 'abc');
+    expect(incomplete).toBe(true);
   });
 });
 
@@ -395,6 +486,23 @@ describe('releaseRuntimeStatus', () => {
     const after = await readRuntimeStatus(targetPath());
     expect(after?.pid).toBe(4242);
     expect(await readdir(tmpDir)).not.toContain('r.json.releasing');
+  });
+
+  it('does not release another hostname with the same pid', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/foreign',
+      pid: process.pid,
+    });
+    const foreign = JSON.parse(await readFile(targetPath(), 'utf8'));
+    foreign.hostname = 'another-machine.example';
+    await writeFile(targetPath(), JSON.stringify(foreign));
+
+    await releaseRuntimeStatus(targetPath());
+
+    const after = await readRuntimeStatus(targetPath());
+    expect(after?.pid).toBe(process.pid);
+    expect(after?.hostname).toBe('another-machine.example');
   });
 
   it('does not overwrite a sibling claim that lands at the demotion commit', async () => {

@@ -744,6 +744,24 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     );
   };
 
+  const writeRuntimeSidecar = (
+    filePath: string,
+    fields: { pid: number; workDir: string; hostname?: string },
+  ) => {
+    actualFs.writeFileSync(
+      filePath,
+      JSON.stringify({
+        schema_version: 1,
+        pid: fields.pid,
+        session_id: 'session-1',
+        work_dir: fields.workDir,
+        hostname: fields.hostname ?? os.hostname(),
+        started_at: Date.now() / 1000,
+        qwen_version: null,
+      }),
+    );
+  };
+
   /** Ages an entry — directory and every file under it — past the 24 h
    * grace window. Files matter because the sweep gates on the newest
    * file mtime, not the entry dir's own mtime. */
@@ -925,6 +943,21 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     }
   }, 10_000);
 
+  it('reads on when the cleanup lock infrastructure is unavailable', async () => {
+    const resumeStorage = new Storage(goneCwd);
+    const entryName = path.basename(resumeStorage.getProjectDir());
+    writeSession(entryName, goneCwd);
+    actualFs.writeFileSync(
+      path.join(projectsDir, entryName, '.qwen-orphan-since'),
+      '',
+    );
+    actualFs.writeFileSync(path.join(baseDir, 'tmp'), 'not a directory');
+
+    await expect(
+      resumeStorage.runWithProjectDirReadClaim(async () => 'READ_OK'),
+    ).resolves.toBe('READ_OK');
+  });
+
   it('reads on when the marker renewal fails with a permission error (R18-2)', async () => {
     // Renewal is best-effort: a marker left root-owned by a sudo run
     // (or an entry on a read-only remount) makes utimes fail while the
@@ -979,19 +1012,26 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   });
 
   it('treats an EPERM sidecar pid as live (R18-3)', async () => {
-    // pid 1 is root-owned: kill(1, 0) by a non-root sweep fails EPERM,
-    // which the shared liveness helper reads as alive — a false-dead
-    // here would let one uid's sweep delete another's live session out
-    // of a HOME-keyed (not uid-keyed) runtime tree.
     const entry = 'eperm-sidecar-sess';
     writeSession(entry, aliveCwd);
-    actualFs.writeFileSync(
+    writeRuntimeSidecar(
       path.join(projectsDir, entry, 'chats', 'session-1.runtime.json'),
-      JSON.stringify({ pid: 1 }),
+      { pid: 12345, workDir: aliveCwd },
     );
-    expect(Storage.hasLiveSession(path.join(projectsDir, entry), false)).toBe(
-      true,
-    );
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      const error = new Error(
+        'operation not permitted',
+      ) as NodeJS.ErrnoException;
+      error.code = 'EPERM';
+      throw error;
+    });
+    try {
+      expect(Storage.hasLiveSession(path.join(projectsDir, entry), false)).toBe(
+        true,
+      );
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 
   it('keeps fresh entries even when their cwd is gone (grace window)', async () => {
@@ -1056,12 +1096,9 @@ describe('Storage – cleanOrphanProjectDirs', () => {
 
   it('keeps stale entries owned by a live session (runtime sidecar pid)', async () => {
     writeSession('-live-sess', goneCwd);
-    actualFs.writeFileSync(
+    writeRuntimeSidecar(
       path.join(projectsDir, '-live-sess', 'chats', 'session-1.runtime.json'),
-      JSON.stringify({
-        pid: process.pid,
-        work_dir: goneCwd,
-      }),
+      { pid: process.pid, workDir: goneCwd },
     );
     ageEntry('-live-sess');
     // The session is still running: its sidecar was just refreshed.
@@ -1078,17 +1115,38 @@ describe('Storage – cleanOrphanProjectDirs', () => {
 
   it('removes stale entries whose runtime sidecar pid is dead', async () => {
     writeSession('-dead-sess', goneCwd);
-    actualFs.writeFileSync(
+    writeRuntimeSidecar(
       path.join(projectsDir, '-dead-sess', 'chats', 'session-1.runtime.json'),
-      JSON.stringify({
-        pid: DEAD_PID,
-        work_dir: goneCwd,
-      }),
+      { pid: DEAD_PID, workDir: goneCwd },
     );
     ageEntry('-dead-sess');
     await sweepPastMarkerGrace('-dead-sess');
     expect(actualFs.existsSync(path.join(projectsDir, '-dead-sess'))).toBe(
       false,
+    );
+  });
+
+  it('keeps stale entries claimed by another hostname', async () => {
+    writeSession('-foreign-live', goneCwd);
+    writeRuntimeSidecar(
+      path.join(
+        projectsDir,
+        '-foreign-live',
+        'chats',
+        'session-1.runtime.json',
+      ),
+      {
+        pid: DEAD_PID,
+        workDir: goneCwd,
+        hostname: 'another-machine.example',
+      },
+    );
+    ageEntry('-foreign-live');
+
+    await sweepPastMarkerGrace('-foreign-live');
+
+    expect(actualFs.existsSync(path.join(projectsDir, '-foreign-live'))).toBe(
+      true,
     );
   });
 
@@ -1100,10 +1158,10 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     const chats = path.join(entry, 'chats');
     const archive = path.join(chats, 'archive');
     actualFs.mkdirSync(archive, { recursive: true });
-    actualFs.writeFileSync(
-      path.join(chats, 'session-1.runtime.json'),
-      JSON.stringify({ pid: DEAD_PID, work_dir: `${goneCwd}-1` }),
-    );
+    writeRuntimeSidecar(path.join(chats, 'session-1.runtime.json'), {
+      pid: DEAD_PID,
+      workDir: `${goneCwd}-1`,
+    });
     actualFs.writeFileSync(
       path.join(archive, 'session-0.jsonl'),
       JSON.stringify({ cwd: `${goneCwd}-3` }) + '\n',
@@ -1117,10 +1175,10 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     const entry = path.join(projectsDir, '-sidecar-alive');
     const chats = path.join(entry, 'chats');
     actualFs.mkdirSync(chats, { recursive: true });
-    actualFs.writeFileSync(
-      path.join(chats, 'session-1.runtime.json'),
-      JSON.stringify({ pid: DEAD_PID, work_dir: process.cwd() }),
-    );
+    writeRuntimeSidecar(path.join(chats, 'session-1.runtime.json'), {
+      pid: DEAD_PID,
+      workDir: process.cwd(),
+    });
     ageEntry('-sidecar-alive');
     await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(entry)).toBe(true);
@@ -1157,10 +1215,10 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       path.join(chats, 'session-1.jsonl'),
       JSON.stringify({ cwd: survived, type: 'user' }) + '\n',
     );
-    actualFs.writeFileSync(
-      path.join(chats, 'session-1.runtime.json'),
-      JSON.stringify({ pid: process.pid, work_dir: survived }),
-    );
+    writeRuntimeSidecar(path.join(chats, 'session-1.runtime.json'), {
+      pid: process.pid,
+      workDir: survived,
+    });
     ageEntry('-idle-live');
     await sweepPastMarkerGrace('-idle-live');
     expect(actualFs.existsSync(entry)).toBe(true);
@@ -1358,6 +1416,7 @@ describe('Storage – cleanOrphanProjectDirs', () => {
       path.join(entry, 'chats', 'sess-1.runtime.json'),
       '{"work_dir":"/live/proj',
     );
+    expect(Storage.hasLiveSession(entry, false)).toBe(true);
     ageEntry('-torn-sidecar');
     await Storage.cleanOrphanProjectDirs('current');
     expect(actualFs.existsSync(entry)).toBe(true);

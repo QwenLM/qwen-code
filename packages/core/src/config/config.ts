@@ -4410,8 +4410,18 @@ export class Config {
     // the HOME write. The failure domains are independent.
     if (this.runtimeStatusEnabled) {
       this.queueRuntimeStatusWrite(async () => {
+        if (!this.runtimeStatusClaimPath) {
+          this.runtimeStatusClaimPath = await claimRuntimeStatus(
+            this.storage.getRuntimeStatusPath(sessionId),
+            {
+              sessionId,
+              workDir,
+              qwenVersion: this.cliVersion ?? null,
+            },
+          );
+          return;
+        }
         const sidecarPath = this.runtimeStatusClaimPath;
-        if (!sidecarPath) return;
         await writeRuntimeStatus(sidecarPath, {
           sessionId,
           workDir,
@@ -5265,16 +5275,15 @@ export class Config {
   ): Array<{ from: string; to: string }> {
     const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
-    const runtimeFileName = path.basename(
-      this.runtimeStatusClaimPath ??
-        oldStorage.getRuntimeStatusPath(this.sessionId),
-    );
-    return [
+    const fileNames = [
       `${this.sessionId}.jsonl`,
-      runtimeFileName,
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
-    ].map((fileName) => ({
+    ];
+    if (this.runtimeStatusClaimPath) {
+      fileNames.push(path.basename(this.runtimeStatusClaimPath));
+    }
+    return fileNames.map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
     }));

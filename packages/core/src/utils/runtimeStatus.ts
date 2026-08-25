@@ -40,6 +40,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import * as syncFs from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -135,7 +136,14 @@ export async function claimRuntimeStatus(
   }
 
   const existing = await readRuntimeStatus(filePath);
-  if (existing !== null && isPidAlive(existing.pid)) {
+  if (existing === null) {
+    if (await runtimeStatusPathExists(filePath)) {
+      return createSiblingClaim(filePath, payload);
+    }
+    if (await createOnlyRuntimeStatus(filePath, payload)) return filePath;
+    return createSiblingClaim(filePath, payload);
+  }
+  if (isRuntimeStatusActive(existing)) {
     return createSiblingClaim(filePath, payload);
   }
 
@@ -149,7 +157,10 @@ export async function claimRuntimeStatus(
   }
 
   const displaced = await readRuntimeStatus(displacedPath);
-  if (displaced !== null && isPidAlive(displaced.pid)) {
+  if (
+    (displaced === null && (await runtimeStatusPathExists(displacedPath))) ||
+    (displaced !== null && isRuntimeStatusActive(displaced))
+  ) {
     await restoreRuntimeStatus(displacedPath, filePath);
     return createSiblingClaim(filePath, payload);
   }
@@ -211,6 +222,109 @@ export async function readRuntimeStatus(
   }
   options.signal?.throwIfAborted();
 
+  return parseRuntimeStatus(data);
+}
+
+/** Read every runtime claim for `sessionId` in one chats directory. */
+export async function readRuntimeStatusClaims(
+  chatsDir: string,
+  sessionId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<{ statuses: RuntimeStatus[]; incomplete: boolean }> {
+  let entries: syncFs.Dirent[];
+  try {
+    options.signal?.throwIfAborted();
+    entries = await fs.readdir(chatsDir, { withFileTypes: true });
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return { statuses: [], incomplete: false };
+    }
+    return { statuses: [], incomplete: true };
+  }
+
+  const statuses: RuntimeStatus[] = [];
+  let incomplete = false;
+  for (const entry of entries) {
+    options.signal?.throwIfAborted();
+    if (!entry.isFile() || !entry.name.endsWith('.runtime.json')) continue;
+    const claimPath = path.join(chatsDir, entry.name);
+    const status = await readRuntimeStatus(claimPath, options);
+    if (status === null) {
+      incomplete ||= isRuntimeStatusCandidateName(entry.name, sessionId);
+      continue;
+    }
+    if (status.sessionId === sessionId) {
+      statuses.push(status);
+    }
+  }
+  return { statuses, incomplete };
+}
+
+/**
+ * Synchronous cleanup predicate. Any active local claim or foreign-host claim
+ * keeps the entry. `maxAgeMs` is used only by the sweep's early heuristic;
+ * its final destructive gate calls without an age limit.
+ */
+export function hasActiveRuntimeStatusClaimSync(
+  chatsDir: string,
+  maxAgeMs?: number,
+): boolean {
+  let entries: syncFs.Dirent[];
+  try {
+    entries = syncFs.readdirSync(chatsDir, { withFileTypes: true });
+  } catch (error) {
+    return !(isNodeError(error) && error.code === 'ENOENT');
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.runtime.json')) continue;
+    const claimPath = path.join(chatsDir, entry.name);
+    try {
+      if (
+        maxAgeMs !== undefined &&
+        Date.now() - syncFs.statSync(claimPath).mtimeMs > maxAgeMs
+      ) {
+        continue;
+      }
+      const status = parseRuntimeStatus(
+        JSON.parse(syncFs.readFileSync(claimPath, 'utf8')),
+      );
+      if (status === null || isRuntimeStatusActive(status)) return true;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isRuntimeStatusActive(status: RuntimeStatus): boolean {
+  return (
+    status.pid > 0 &&
+    (status.hostname !== os.hostname() || isPidAlive(status.pid))
+  );
+}
+
+function isRuntimeStatusCandidateName(
+  fileName: string,
+  sessionId: string,
+): boolean {
+  if (fileName === `${sessionId}.runtime.json`) return true;
+  return ['claim', 'displaced', 'releasing'].some((kind) =>
+    fileName.startsWith(`${sessionId}.${kind}-`),
+  );
+}
+
+async function runtimeStatusPathExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return false;
+    return true;
+  }
+}
+
+function parseRuntimeStatus(data: unknown): RuntimeStatus | null {
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     return null;
   }
@@ -295,7 +409,11 @@ export async function releaseRuntimeStatus(filePath: string): Promise<void> {
       return; // already gone — nothing to release
     }
     const claim = await readRuntimeStatus(stagingPath);
-    if (claim === null || claim.pid !== process.pid) {
+    if (
+      claim === null ||
+      claim.hostname !== os.hostname() ||
+      claim.pid !== process.pid
+    ) {
       // Not our claim (or unreadable) — put it back exactly as found.
       await restoreRuntimeStatus(stagingPath, filePath);
       return;

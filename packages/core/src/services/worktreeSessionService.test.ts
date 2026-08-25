@@ -18,6 +18,7 @@ import {
 } from './worktreeSessionService.js';
 import { Storage } from '../config/storage.js';
 import {
+  claimRuntimeStatus,
   releaseRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
@@ -202,6 +203,30 @@ describe('isSessionRuntimeActive', () => {
     await expect(
       isSessionRuntimeActive('owner-session', repoRoot),
     ).resolves.toBe(false);
+  });
+
+  it('keeps a session active while only a sibling claim is live', async () => {
+    const repoRoot = path.join(tmpDir, 'repo');
+    Storage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
+    const statusPath = new Storage(repoRoot).getRuntimeStatusPath(
+      'owner-session',
+    );
+    await writeRuntimeStatus(statusPath, {
+      sessionId: 'owner-session',
+      workDir: repoRoot,
+      pid: process.pid,
+    });
+    const siblingPath = await claimRuntimeStatus(statusPath, {
+      sessionId: 'owner-session',
+      workDir: repoRoot,
+      pid: process.pid,
+    });
+    expect(siblingPath).not.toBe(statusPath);
+    await releaseRuntimeStatus(statusPath);
+
+    await expect(
+      isSessionRuntimeActive('owner-session', repoRoot),
+    ).resolves.toBe(true);
   });
 
   it('does not trust repo-contained dead runtime status as proof of inactivity', async () => {

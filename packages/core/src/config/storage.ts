@@ -17,7 +17,7 @@ import {
   isTempDirPath,
 } from '../utils/paths.js';
 import { FatalConfigError, isNodeError } from '../utils/errors.js';
-import { isPidAlive } from '../utils/process-liveness.js';
+import { hasActiveRuntimeStatusClaimSync } from '../utils/runtimeStatus.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -719,7 +719,9 @@ export class Storage {
         await release().catch(() => {});
       }
     }
-    const release = await Storage.acquireProjectDirLock(entryPath, true);
+    const release = await Storage.acquireProjectDirLock(entryPath, true).catch(
+      () => undefined,
+    );
     if (!release) return operation();
     try {
       if (fs.statSync(entryPath).isDirectory() && fs.existsSync(markerPath)) {
@@ -1300,43 +1302,10 @@ export class Storage {
     entryPath: string,
     distrustStaleSidecars = true,
   ): boolean {
-    let dirents: fs.Dirent[];
-    try {
-      dirents = fs.readdirSync(path.join(entryPath, 'chats'), {
-        withFileTypes: true,
-      });
-    } catch {
-      return false;
-    }
-    for (const dirent of dirents) {
-      if (!dirent.name.endsWith('.runtime.json')) continue;
-      const sidecarPath = path.join(entryPath, 'chats', dirent.name);
-      try {
-        // Once the kernel has had a full grace window to recycle the
-        // pid, a matching pid is more likely an unrelated reused one
-        // than the original session — stop trusting it.
-        if (
-          distrustStaleSidecars &&
-          Date.now() - fs.statSync(sidecarPath).mtimeMs >
-            Storage.ORPHAN_STALE_AGE_MS
-        ) {
-          continue;
-        }
-        const parsed = JSON.parse(fs.readFileSync(sidecarPath, 'utf8')) as {
-          pid?: unknown;
-        };
-        if (
-          typeof parsed.pid === 'number' &&
-          Number.isInteger(parsed.pid) &&
-          isPidAlive(parsed.pid)
-        ) {
-          return true;
-        }
-      } catch {
-        // Unreadable sidecar — not proof of liveness.
-      }
-    }
-    return false;
+    return hasActiveRuntimeStatusClaimSync(
+      path.join(entryPath, 'chats'),
+      distrustStaleSidecars ? Storage.ORPHAN_STALE_AGE_MS : undefined,
+    );
   }
 
   /**
