@@ -3559,13 +3559,9 @@ jobs:
                 group_dirs+=('.')
                 group_cmds+=("node --test $(printf '%q' "./$f")")
                 ;;
-              packages/desktop/*|docs-site/*)
-                # Outside the npm-workspace install set (root workspaces
-                # exclude packages/desktop; docs-site is standalone), so the
-                # gate's vitest can never collect them — and desktop's
-                # nested apps each carry a package.json plus a BUILD
-                # vite.config.ts that would otherwise fool the generic
-                # resolver into treating bun-family tests as runnable.
+              docs-site/*)
+                # Outside the npm-workspace install set (docs-site is
+                # standalone), so the gate's vitest can never collect it.
                 add_skip "$f" 'outside the npm-workspace install set (unsupported runner family), skipped'
                 ;;
               *)
@@ -3579,9 +3575,9 @@ jobs:
                 fi
                 pkg="$OWNING_PKG_DIR"
                 if ! has_vitest_config "$pkg"; then
-                  # e.g. packages/desktop runs `bun test` — an unsupported
-                  # runner family stays explicitly out of scope rather than
-                  # being mis-run through vitest.
+                  # A package whose tests use an unsupported runner family
+                  # stays explicitly out of scope rather than being mis-run
+                  # through vitest.
                   add_skip "$f" "owning package ${pkg} has no vitest config (unsupported runner family), skipped"
                   continue
                 fi
