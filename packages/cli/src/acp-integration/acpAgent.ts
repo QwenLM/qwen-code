@@ -230,6 +230,7 @@ import type { CliArgs } from '../config/config.js';
 import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
+  parseApprovalModeValue,
   SessionIdConflictError,
 } from '../config/config.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
@@ -1792,17 +1793,36 @@ function readCoreSettingValues(
 }
 
 /**
- * Folds a raw `tools.approvalMode` settings value into the mode live
- * sessions must converge on: a valid mode passes through unchanged, while a
- * missing or invalid key folds to AUTO — the same default a fresh session
- * derives when the key is absent (see loadCliConfig). Folding (instead of
- * skipping) is what lets a key deletion or corruption reach live sessions on
- * reload rather than pinning a stale privileged mode until daemon restart.
+ * Folds a raw `tools.approvalMode` settings value into the mode
+ * unrestricted live sessions must converge on. Parseable values are
+ * normalized exactly the way boot accepts them (parseApprovalModeValue
+ * trims, lowercases, and maps the legacy `auto_edit`/`autoedit` aliases), so
+ * reload convergence agrees with the settings file for every boot-accepted
+ * spelling. A missing or unparseable key folds to AUTO — the same default
+ * loadCliConfig derives when the key is absent. Restricted (safe/bare)
+ * sessions ignore the file at boot entirely; the reload loop converges them
+ * on DEFAULT separately. Folding (instead of skipping) is what lets a key
+ * deletion or corruption reach live sessions on reload rather than pinning a
+ * stale privileged mode until daemon restart.
  */
 function foldReloadApprovalMode(raw: unknown): ApprovalMode {
-  return typeof raw === 'string' && APPROVAL_MODES.includes(raw as ApprovalMode)
-    ? (raw as ApprovalMode)
-    : ApprovalMode.AUTO;
+  if (typeof raw === 'string') {
+    try {
+      return parseApprovalModeValue(raw);
+    } catch {
+      // Unparseable values fold to the fresh-session default below.
+    }
+  }
+  return ApprovalMode.AUTO;
+}
+
+/**
+ * True when a session's config derives from a restricted mode: safe/bare
+ * sessions ignore `tools.approvalMode` at boot (loadCliConfig pins them to
+ * DEFAULT), so reload must never converge them on a file-derived mode.
+ */
+function isRestrictedApprovalModeConfig(config: Config): boolean {
+  return config.isSafeMode?.() === true || config.getBareMode?.() === true;
 }
 
 export function normalizeCoreSettingValue(
@@ -4251,9 +4271,13 @@ class QwenAgent implements Agent {
     // value: sessions created at boot derive this same value from the same
     // merged settings, and any later divergence is a runtime-only transition
     // (approved plan exit, ACP session/set_mode) the reload must preserve.
-    this.sessionApprovalModeFileValue = foldReloadApprovalMode(
-      this.settings.merged.tools?.approvalMode,
-    );
+    // Restricted daemons (safe/bare) ignore the file at boot and derive
+    // DEFAULT, so the baseline mirrors that instead of the file value.
+    this.sessionApprovalModeFileValue = isRestrictedApprovalModeConfig(
+      this.config,
+    )
+      ? ApprovalMode.DEFAULT
+      : foldReloadApprovalMode(this.settings.merged.tools?.approvalMode);
   }
 
   private runWithPinnedRuntimeBaseDir<T>(
@@ -11523,13 +11547,15 @@ class QwenAgent implements Agent {
           reloadedSessionWorkflow,
         );
 
-        // Fold a missing/invalid key to the fresh-session default (AUTO) so a
-        // key deletion reaches live sessions too, and compare the reloaded
-        // disk value against the daemon-held baseline — not against each
-        // session's live mode. Approval mode has runtime-only writers
-        // (ExitPlanModeTool approved plan exits, ACP session/set_mode, the
-        // sessionApprovalMode ext; core Config.setApprovalMode never
-        // persists), so a live session legitimately diverges from the file
+        // Fold a missing/invalid key to the fresh-session default (AUTO for
+        // unrestricted sessions; restricted sessions converge on DEFAULT per
+        // session below) so a key deletion reaches live sessions too, and
+        // compare the reloaded disk value against the daemon-held baseline —
+        // not against each session's live mode. Approval mode has
+        // runtime-only writers (ExitPlanModeTool approved plan exits, ACP
+        // session/set_mode, the sessionApprovalMode ext; core
+        // Config.setApprovalMode never persists), so a live session
+        // legitimately diverges from the file
         // mid-workflow, and re-applying the disk value whenever it merely
         // differs from the live mode would flip an approved-plan session
         // back into PLAN between turns and destroy its bound revision.
@@ -11610,15 +11636,22 @@ class QwenAgent implements Agent {
             // itself changed since the daemon last converged on it (see the
             // baseline derivation above); the per-session `!== previousMode`
             // guard keeps the apply idempotent for sessions already at the
-            // disk value.
+            // disk value. Restricted sessions ignore the file at boot
+            // (loadCliConfig pins them to DEFAULT), so reload must converge
+            // them on DEFAULT too — pushing the file value (or the AUTO fold
+            // of a missing/corrupted key) into a safe-mode session would
+            // silently strip its approval restriction.
+            const reloadedSessionMode = isRestrictedApprovalModeConfig(config)
+              ? ApprovalMode.DEFAULT
+              : reloadedApprovalMode;
             const previousMode = config.getApprovalMode();
             if (
               approvalModeFileChanged &&
-              reloadedApprovalMode !== previousMode
+              reloadedSessionMode !== previousMode
             ) {
               try {
-                config.setApprovalMode(reloadedApprovalMode);
-                if (reloadedApprovalMode === 'plan') {
+                config.setApprovalMode(reloadedSessionMode);
+                if (reloadedSessionMode === 'plan') {
                   session.clearActiveTodoPlanRevision();
                   session.clearTodoStopGuardTrust();
                 } else if (previousMode === 'plan') {

@@ -854,18 +854,41 @@ vi.mock('../config/loadedSettingsAdapter.js', () => ({
     return settings;
   }),
 }));
-vi.mock('../config/config.js', () => ({
-  loadCliConfig: vi.fn(),
-  buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
-  SessionIdConflictError: class SessionIdConflictError extends Error {
-    sessionId: string;
-    constructor(sessionId: string, message: string) {
-      super(message);
-      this.name = 'SessionIdConflictError';
-      this.sessionId = sessionId;
-    }
-  },
-}));
+vi.mock('../config/config.js', async () => {
+  const { APPROVAL_MODES, ApprovalMode } = await import(
+    '@qwen-code/qwen-code-core'
+  );
+  return {
+    loadCliConfig: vi.fn(),
+    buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
+    // Mirror the real boot parser (trim, lowercase, legacy aliases, lookup
+    // against the live APPROVAL_MODES array) so the reload fold's
+    // boot-equivalence sees the same spelling rules — and the same array a
+    // test splices — as the real module.
+    parseApprovalModeValue: (value: string) => {
+      const normalized = value.trim().toLowerCase();
+      const canonical =
+        normalized === 'auto_edit' || normalized === 'autoedit'
+          ? ApprovalMode.AUTO_EDIT
+          : normalized;
+      const approvalMode = (APPROVAL_MODES as readonly string[]).find(
+        (mode) => mode === canonical,
+      );
+      if (approvalMode === undefined) {
+        throw new Error(`Invalid approval mode: ${value}.`);
+      }
+      return approvalMode;
+    },
+    SessionIdConflictError: class SessionIdConflictError extends Error {
+      sessionId: string;
+      constructor(sessionId: string, message: string) {
+        super(message);
+        this.name = 'SessionIdConflictError';
+        this.sessionId = sessionId;
+      }
+    },
+  };
+});
 vi.mock('../ui/commands/contextCommand.js', () => ({
   collectContextData: vi.fn().mockResolvedValue({
     modelName: 'm',
@@ -22525,6 +22548,345 @@ describe('sessionLanguage multi-session propagation', () => {
     } finally {
       approvalModes.splice(0, approvalModes.length, ...originalApprovalModes);
     }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('converges reload with the boot parser for aliased approval-mode spellings', async () => {
+    // Boot accepts legacy alias spellings (parseApprovalModeValue trims,
+    // lowercases, and maps auto_edit/autoedit to AUTO_EDIT), so reload
+    // convergence must too: a strict canonical fold seeded the baseline with
+    // AUTO for an 'autoedit' file, which hid a genuine autoedit→auto change
+    // from every live session. Deliberately no APPROVAL_MODES splice here —
+    // the fold must stand on the boot parser alone.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'autoedit' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'auto-edit';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-mode-alias'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-mode-alias'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // An unchanged file stays a no-op even though the spelling is an alias.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+
+    // A genuine AUTO_EDIT→AUTO file change reaches the live session.
+    mergedSettings = { tools: { approvalMode: 'auto' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).toHaveBeenCalledWith('auto');
+    expect(approvalMode).toBe('auto');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not treat case-only approval-mode edits as a mode change on reload', async () => {
+    // Boot treats 'Plan' and 'plan' as the same mode (parseApprovalModeValue
+    // lowercases), so a hand edit or dotfile sync that changes only the case
+    // must not snap live sessions out of PLAN and destroy the bound plan
+    // revision: the strict fold mapped 'Plan' to AUTO. No APPROVAL_MODES
+    // splice — the fold must stand on the boot parser alone.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'plan';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-mode-case'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-mode-case'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    mergedSettings = { tools: { approvalMode: 'Plan' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('plan');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps safe-mode sessions pinned to DEFAULT through approval-mode reloads', async () => {
+    // Safe/bare sessions ignore tools.approvalMode at boot (loadCliConfig
+    // pins them to DEFAULT), so reload must never push the file value — or
+    // the AUTO fold of a deleted/corrupted key — into them; the pre-fix fold
+    // flipped a safe-mode session into auto-approval when the key was
+    // deleted after boot.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'default';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-safe-mode'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSafeMode: vi.fn().mockReturnValue(true),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-safe-mode'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig({
+        isSafeMode: vi.fn().mockReturnValue(true),
+        getBareMode: vi.fn().mockReturnValue(false),
+      }) as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // Neither an unchanged file...
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+
+    // ...nor a genuine file flip...
+    mergedSettings = { tools: { approvalMode: 'auto' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+
+    // ...nor a deleted key (which folds to AUTO for unrestricted sessions)
+    // may move the safe-mode session off DEFAULT.
+    mergedSettings = {};
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('default');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps bare-mode sessions pinned to DEFAULT when the approval key appears later', async () => {
+    let mergedSettings: Record<string, unknown> = {};
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'default';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-bare-mode'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(true),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-bare-mode'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig({
+        isSafeMode: vi.fn().mockReturnValue(false),
+        getBareMode: vi.fn().mockReturnValue(true),
+      }) as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    // Boot without the key: a bare session derives DEFAULT anyway.
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // The key appears later (shared settings sync): the bare session stays
+    // DEFAULT instead of adopting the file value.
+    mergedSettings = { tools: { approvalMode: 'plan' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('default');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
