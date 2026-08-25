@@ -129,6 +129,7 @@ interface TurnOutputsProps {
   artifacts: readonly DaemonSessionArtifact[];
   scheduledTasks: readonly TurnOutputScheduledTask[];
   workspaceCwd?: string;
+  artifactSharingEnabled?: boolean;
   onOpenRequest?: (request: TurnOutputOpenRequest) => void;
   onReviewChanges: (
     changes: readonly TurnOutputFileChange[],
@@ -145,6 +146,7 @@ function TurnOutputsComponent({
   artifacts,
   scheduledTasks,
   workspaceCwd,
+  artifactSharingEnabled = true,
   onOpenRequest,
   onReviewChanges,
   onOpenArtifact,
@@ -367,7 +369,9 @@ function TurnOutputsComponent({
               : undefined
           }
           onShare={
-            canShareArtifact(artifact) && workspaceActions
+            artifactSharingEnabled &&
+            canShareArtifact(artifact) &&
+            workspaceActions
               ? () => setSharedArtifact(artifact)
               : undefined
           }
@@ -383,14 +387,16 @@ function TurnOutputsComponent({
         />
       ))}
 
-      {sharedArtifact?.workspacePath && workspaceActions && (
-        <ShareArtifactDialog
-          workspacePath={sharedArtifact.workspacePath}
-          title={sharedArtifact.title}
-          workspaceActions={workspaceActions}
-          onClose={() => setSharedArtifact(null)}
-        />
-      )}
+      {artifactSharingEnabled &&
+        sharedArtifact?.workspacePath &&
+        workspaceActions && (
+          <ShareArtifactDialog
+            workspacePath={sharedArtifact.workspacePath}
+            title={sharedArtifact.title}
+            workspaceActions={workspaceActions}
+            onClose={() => setSharedArtifact(null)}
+          />
+        )}
     </div>
   );
 }

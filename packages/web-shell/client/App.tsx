@@ -6571,6 +6571,10 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'experimental.sessionWorkflow',
     )?.values.effective === true;
+  const artifactSharingEnabled =
+    workspaceSettings.find(
+      (setting) => setting.key === 'artifact.share.enabled',
+    )?.values.effective !== false;
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -12178,6 +12182,7 @@ export function App({
                                       activeTurnStartedAt)
                                 }
                                 workspaceCwd={connection.workspaceCwd || ''}
+                                artifactSharingEnabled={artifactSharingEnabled}
                                 hideSessionTimeline={
                                   effectiveChatWidthMode === 'wide'
                                 }

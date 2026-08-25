@@ -136,6 +136,18 @@ function sessionWorkflowSetting(): DaemonSettingDescriptor {
   };
 }
 
+function artifactSharingSetting(enabled: boolean): DaemonSettingDescriptor {
+  return {
+    key: 'artifact.share.enabled',
+    type: 'boolean',
+    label: 'Artifact sharing',
+    category: 'Artifacts',
+    requiresRestart: false,
+    default: true,
+    values: { effective: enabled },
+  };
+}
+
 const {
   mockCollectSystemInfo,
   mockConnection,
@@ -337,6 +349,7 @@ const {
         onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
+        artifactSharingEnabled?: boolean;
       } | null,
       latestBtwMessageProps: null as {
         question: string;
@@ -733,6 +746,7 @@ vi.mock('./components/MessageList', async () => {
         onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
+        artifactSharingEnabled?: boolean;
         welcomeHeader?: React.ReactNode;
       },
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
@@ -4940,6 +4954,17 @@ describe('App plan todos', () => {
     await flush();
 
     expect(testState.latestTodoPanelOnOpen).not.toBeNull();
+  });
+
+  it('forwards the artifact sharing setting to transcript artifact actions', async () => {
+    testState.settings = [artifactSharingSetting(false)];
+
+    renderApp();
+    await flush();
+
+    expect(testState.latestMessageListProps?.artifactSharingEnabled).toBe(
+      false,
+    );
   });
 });
 

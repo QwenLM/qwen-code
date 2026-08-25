@@ -19,6 +19,7 @@ export type ArtifactWorkspaceActions = Pick<
   | 'updateScheduledTask'
   | 'deleteScheduledTask'
   | 'artifactPublishConfig'
+  | 'setupArtifactProvider'
   | 'publishArtifact'
 >;
 
@@ -196,21 +197,33 @@ export function useArtifactWorkspaceTarget(
         await primaryActions.deleteScheduledTask(id, workspaceId);
         requireScheduledTaskOwner(workspaceId);
       },
-      async artifactPublishConfig() {
+      async artifactPublishConfig(path) {
         const current = requireOwner();
         const result = await (current.primary
-          ? primaryActions.artifactPublishConfig()
+          ? primaryActions.artifactPublishConfig(path)
           : workspace.client
               .workspaceByCwd(current.cwd)
-              .artifactPublishConfig());
+              .artifactPublishConfig(path));
         requireOwner();
         return result;
       },
-      async publishArtifact(req) {
+      async setupArtifactProvider(provider, req, opts) {
         const current = requireOwner();
         const result = await (current.primary
-          ? primaryActions.publishArtifact(req)
-          : workspace.client.workspaceByCwd(current.cwd).publishArtifact(req));
+          ? primaryActions.setupArtifactProvider(provider, req, opts)
+          : workspace.client
+              .workspaceByCwd(current.cwd)
+              .setupArtifactProvider(provider, req, opts?.signal));
+        requireOwner();
+        return result;
+      },
+      async publishArtifact(req, opts) {
+        const current = requireOwner();
+        const result = await (current.primary
+          ? primaryActions.publishArtifact(req, opts)
+          : workspace.client
+              .workspaceByCwd(current.cwd)
+              .publishArtifact(req, opts?.signal));
         requireOwner();
         return result;
       },

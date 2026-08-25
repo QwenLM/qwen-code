@@ -8434,4 +8434,90 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({ groupId: 'group-1' });
     });
   });
+
+  describe('artifact sharing routes', () => {
+    it('uses provider-qualified primary routes', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const setupController = new AbortController();
+      const publishController = new AbortController();
+
+      await client.artifactPublishConfig(
+        undefined,
+        'output/草饲所有人-艺术字.html',
+      );
+      await client.setupArtifactProvider(
+        'cloudflare',
+        { action: 'prepare' },
+        undefined,
+        setupController.signal,
+      );
+      await client.publishArtifact(
+        {
+          path: 'report.html',
+          provider: 'cloudflare',
+          force: true,
+        },
+        undefined,
+        publishController.signal,
+      );
+
+      expect(calls.map(({ method, url }) => [method, url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspace/artifact/publish-config?path=output%2F%E8%8D%89%E9%A5%B2%E6%89%80%E6%9C%89%E4%BA%BA-%E8%89%BA%E6%9C%AF%E5%AD%97.html',
+        ],
+        ['POST', 'http://daemon/workspace/artifact/cloudflare/setup'],
+        ['POST', 'http://daemon/workspace/artifact/publish'],
+      ]);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBeUndefined();
+      expect(calls[1]?.signal).toBe(setupController.signal);
+      expect(calls[2]?.signal).toBe(publishController.signal);
+      expect(JSON.parse(calls[1]!.body!)).toEqual({ action: 'prepare' });
+      expect(JSON.parse(calls[2]!.body!)).toEqual({
+        path: 'report.html',
+        provider: 'cloudflare',
+        force: true,
+      });
+    });
+
+    it('uses provider-qualified selected-workspace routes', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const workspace = client.workspaceByCwd('/tmp/work space');
+      const setupController = new AbortController();
+      const publishController = new AbortController();
+
+      await workspace.artifactPublishConfig('output/report page.html');
+      await workspace.setupArtifactProvider(
+        'vercel',
+        { action: 'connect' },
+        setupController.signal,
+      );
+      await workspace.publishArtifact(
+        {
+          path: 'report.html',
+          provider: 'vercel',
+        },
+        publishController.signal,
+      );
+
+      expect(calls.map(({ method, url }) => [method, url])).toEqual([
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/artifact/publish-config?path=output%2Freport%20page.html',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/artifact/vercel/setup',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/artifact/publish',
+        ],
+      ]);
+      expect(calls[1]?.signal).toBe(setupController.signal);
+      expect(calls[2]?.signal).toBe(publishController.signal);
+    });
+  });
 });

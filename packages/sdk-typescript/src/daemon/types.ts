@@ -1700,51 +1700,105 @@ export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   refusedCount: number;
 }
 
-/** Where the daemon found a usable OSS credential, if anywhere. */
-export type DaemonArtifactCredentialSource =
-  | 'request'
-  | 'memory'
-  | 'settings'
-  | 'env'
-  | 'none';
+export type DaemonArtifactPublishProviderKind =
+  | 'cloudflare'
+  | 'vercel'
+  | 'netlify';
 
-/**
- * The share destination the daemon would use right now. Credentials are
- * never echoed — only where one was found.
- */
+export interface DaemonArtifactPublishProvider {
+  kind: DaemonArtifactPublishProviderKind;
+  configured: boolean;
+  unavailableReason?: string;
+}
+
+export type DaemonArtifactProviderSetupStage =
+  | 'install'
+  | 'authenticate'
+  | 'connect'
+  | 'ready';
+
+export interface DaemonArtifactProviderProject {
+  id: string;
+  name: string;
+  url?: string;
+  accountName?: string;
+}
+
+export interface DaemonArtifactProviderSetupStatus {
+  provider: DaemonArtifactPublishProviderKind;
+  stage: DaemonArtifactProviderSetupStage;
+  cliInstalled: boolean;
+  authenticated: boolean;
+  linked: boolean;
+  configured: boolean;
+  authorizationPending?: boolean;
+  project?: DaemonArtifactProviderProject;
+  accounts?: DaemonArtifactProviderProject[];
+}
+
+/** @deprecated Use DaemonArtifactProviderSetupStage. */
+export type DaemonArtifactNetlifySetupStage = DaemonArtifactProviderSetupStage;
+/** @deprecated Use DaemonArtifactProviderProject. */
+export type DaemonArtifactNetlifySite = DaemonArtifactProviderProject;
+/** @deprecated Use DaemonArtifactProviderSetupStatus. */
+export type DaemonArtifactNetlifySetupStatus =
+  DaemonArtifactProviderSetupStatus;
+
 export interface DaemonArtifactPublishConfig {
   v: 1;
   workspaceCwd: string;
-  publisher: string;
-  endpoint: string;
-  bucket: string;
-  keyPrefix: string;
-  publicBaseUrl: string;
-  credentialsSource: DaemonArtifactCredentialSource;
+  providers: DaemonArtifactPublishProvider[];
+  setups?: Partial<
+    Record<DaemonArtifactPublishProviderKind, DaemonArtifactProviderSetupStatus>
+  >;
+  /** Netlify-only v1 compatibility field. */
+  setup?: DaemonArtifactNetlifySetupStatus;
+  /** Latest deployment state for the requested artifact path, by provider. */
+  publications?: Partial<
+    Record<DaemonArtifactPublishProviderKind, DaemonArtifactPublicationStatus>
+  >;
+}
+
+export interface DaemonArtifactProviderSetupRequest {
+  action: 'prepare' | 'poll' | 'connect';
+  targetId?: string;
+  accountId?: string;
+}
+
+export interface DaemonArtifactProviderSetupResult
+  extends DaemonArtifactPublishConfig {
+  provider: DaemonArtifactPublishProviderKind;
+  setup: DaemonArtifactProviderSetupStatus;
+  authorizationUrl?: string;
+}
+
+/** @deprecated Use DaemonArtifactProviderSetupRequest. */
+export interface DaemonArtifactNetlifySetupRequest
+  extends DaemonArtifactProviderSetupRequest {
+  siteId?: string;
+}
+
+/** @deprecated Use DaemonArtifactProviderSetupResult. */
+export type DaemonArtifactNetlifySetupResult =
+  DaemonArtifactProviderSetupResult;
+
+export interface DaemonArtifactPublicationStatus {
+  provider: DaemonArtifactPublishProviderKind;
+  id: string;
+  url: string;
+  publishedAt: string;
+  /** Whether the published deployment matches the file's current contents. */
+  upToDate: boolean;
 }
 
 export interface DaemonArtifactPublishRequest {
   /** Workspace-relative (or absolute in-workspace) path of the HTML file. */
   path: string;
   title?: string;
-  /**
-   * Destination overrides for this call. Fields left empty fall back to the
-   * remembered target, then to settings.
-   */
-  config?: {
-    endpoint?: string;
-    bucket?: string;
-    keyPrefix?: string;
-    publicBaseUrl?: string;
-    accessKeyId?: string;
-    accessKeySecret?: string;
-  };
-  /**
-   * `'memory'` keeps this call's destination and credentials in the daemon
-   * process only, until it exits. Persisting instead is the caller's job, via
-   * the settings API.
-   */
-  remember?: 'memory';
+  /** A provider already configured in the workspace daemon. */
+  provider: DaemonArtifactPublishProviderKind;
+  /** Create a fresh deployment even when the current contents are published. */
+  force?: boolean;
 }
 
 export interface DaemonArtifactPublishResult {
@@ -1752,13 +1806,12 @@ export interface DaemonArtifactPublishResult {
   workspaceCwd: string;
   id: string;
   url: string;
-  /**
-   * Whether a HEAD on the returned URL succeeded. `null` when the probe could
-   * not complete, which says nothing either way. A `false` here with a
-   * successful upload usually means the bucket blocks public access.
-   */
-  reachable?: boolean | null;
-  reachableStatus?: number;
+  provider: DaemonArtifactPublishProviderKind;
+  publishedAt?: string;
+  /** True when no provider deployment was needed. */
+  reused?: boolean;
+  /** False when publishing succeeded but its reuse record could not be saved. */
+  recorded?: boolean;
 }
 
 export interface DaemonWorkspaceMcpStatus {

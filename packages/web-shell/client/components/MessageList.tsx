@@ -101,6 +101,7 @@ interface MessageListProps {
   welcomeHeader?: ReactNode;
   centerWelcomeHeader?: boolean;
   workspaceCwd?: string;
+  artifactSharingEnabled?: boolean;
   tailContent?: ReactNode;
   tailKey?: string;
   virtualScrollThreshold?: number;
@@ -2642,6 +2643,7 @@ export const MessageList = memo(
       welcomeHeader,
       centerWelcomeHeader = false,
       workspaceCwd,
+      artifactSharingEnabled = true,
       tailContent,
       tailKey = 'tail',
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
@@ -4900,6 +4902,7 @@ export const MessageList = memo(
                 artifacts={displayItem.artifacts}
                 scheduledTasks={displayItem.scheduledTasks}
                 workspaceCwd={workspaceCwd}
+                artifactSharingEnabled={artifactSharingEnabled}
                 onOpenRequest={onTurnOutputOpen}
                 onReviewChanges={onReviewChanges ?? noopTurnOutputAction}
                 onOpenArtifact={onOpenArtifact ?? noopTurnOutputAction}
@@ -5018,6 +5021,7 @@ export const MessageList = memo(
         flashTarget,
         finalAssistantTurnIdByAssistantId,
         workspaceCwd,
+        artifactSharingEnabled,
         showRetryHint,
         onRetryClick,
         failedPromptMessageId,

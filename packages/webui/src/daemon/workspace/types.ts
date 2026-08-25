@@ -7,6 +7,9 @@
 import type { ReactNode } from 'react';
 import type {
   DaemonArtifactPublishConfig,
+  DaemonArtifactPublishProviderKind,
+  DaemonArtifactProviderSetupRequest,
+  DaemonArtifactProviderSetupResult,
   DaemonArtifactPublishRequest,
   DaemonArtifactPublishResult,
   DaemonAgentMutationResult,
@@ -517,13 +520,17 @@ export interface DaemonWorkspaceActions {
   stat(filePath: string): Promise<DaemonFileStat>;
   listDirectory(dirPath: string): Promise<DaemonDirectoryListing>;
 
-  // Artifact sharing. `artifactPublishConfig` reports the destination the
-  // daemon would use and where it found a credential — never the credential
-  // itself. `publishArtifact` uploads one workspace HTML file and answers with
-  // the shareable URL.
-  artifactPublishConfig(): Promise<DaemonArtifactPublishConfig>;
+  // Artifact sharing. The daemon reports provider readiness without exposing
+  // commands or authentication, then publishes one workspace HTML file.
+  artifactPublishConfig(path?: string): Promise<DaemonArtifactPublishConfig>;
+  setupArtifactProvider(
+    provider: DaemonArtifactPublishProviderKind,
+    req: DaemonArtifactProviderSetupRequest,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonArtifactProviderSetupResult>;
   publishArtifact(
     req: DaemonArtifactPublishRequest,
+    opts?: { signal?: AbortSignal },
   ): Promise<DaemonArtifactPublishResult>;
 
   // Scheduled tasks (durable cron). The optional `workspaceId` targets a

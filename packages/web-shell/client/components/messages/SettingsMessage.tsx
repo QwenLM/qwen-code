@@ -12,6 +12,7 @@ import {
   PaletteIcon,
   ServerIcon,
   Settings2Icon,
+  Share2Icon,
   ShieldIcon,
   SlidersHorizontalIcon,
   WrenchIcon,
@@ -286,11 +287,13 @@ function CategoryIcon({ category }: { category: string }) {
             ? BotIcon
             : normalized.includes('daemon')
               ? ServerIcon
-              : normalized.includes('advanced')
-                ? SlidersHorizontalIcon
-                : normalized.includes('experimental')
-                  ? FlaskConicalIcon
-                  : Settings2Icon;
+              : normalized.includes('artifact')
+                ? Share2Icon
+                : normalized.includes('advanced')
+                  ? SlidersHorizontalIcon
+                  : normalized.includes('experimental')
+                    ? FlaskConicalIcon
+                    : Settings2Icon;
   return <Icon data-icon="inline-start" aria-hidden="true" />;
 }
 

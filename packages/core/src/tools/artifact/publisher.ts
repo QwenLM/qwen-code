@@ -50,16 +50,20 @@ export interface PublishedArtifact {
 
 /**
  * Config for the host publisher. The artifact is uploaded by running
- * a user-supplied command; `{file}` (the local HTML path) and `{key}` (the
- * remote object key) are substituted, and `urlTemplate`'s `{key}` yields the
- * shareable URL. Credentials live in the user's command/environment — qwen
- * never stores them.
+ * a user-supplied command. In template mode, `{file}` (the local HTML path)
+ * and `{key}` (the remote object key) are substituted, and `urlTemplate`'s
+ * `{key}` yields the shareable URL. In command-output mode, `{dir}` is the
+ * temporary site directory and the command prints the deployed HTTPS URL.
+ * Credentials live in the user's command/environment — qwen never stores
+ * them.
  */
 export interface ArtifactHostConfig {
   /** Upload command, e.g. `aws s3 cp {file} s3://bkt/{key} --content-type text/html`. */
   uploadCommand: string;
   /** Shareable URL template, e.g. `https://bkt.s3.amazonaws.com/{key}`. */
   urlTemplate: string;
+  /** Read the deployed HTTPS URL from command stdout instead of urlTemplate. */
+  urlFromCommandOutput?: boolean;
   /** Remote key prefix (default `artifacts`). Key = `{prefix}/{id}/index.html`. */
   keyPrefix?: string;
 }

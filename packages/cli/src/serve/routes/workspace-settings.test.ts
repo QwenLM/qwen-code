@@ -114,6 +114,48 @@ describe('POST /workspace/settings', () => {
     );
   });
 
+  it('exposes artifact sharing as enabled by default and persists changes without a restart', async () => {
+    const { app, persistSetting, broadcastSettingsChanged } = makeApp();
+
+    const read = await request(app).get('/workspace/settings');
+    const sharing = read.body.settings.find(
+      (setting: { key?: string }) => setting.key === 'artifact.share.enabled',
+    );
+    expect(sharing).toMatchObject({
+      type: 'boolean',
+      category: 'Artifacts',
+      requiresRestart: false,
+      default: true,
+      values: { effective: true },
+    });
+
+    const write = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'artifact.share.enabled',
+      value: false,
+    });
+
+    expect(write.status).toBe(200);
+    expect(write.body).toMatchObject({
+      key: 'artifact.share.enabled',
+      scope: 'workspace',
+      value: false,
+      requiresRestart: false,
+    });
+    expect(persistSetting).toHaveBeenCalledWith(
+      '/workspace',
+      expect.any(String),
+      'artifact.share.enabled',
+      false,
+    );
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'artifact.share.enabled',
+      false,
+      'workspace',
+      undefined,
+    );
+  });
+
   it('returns 503 without broadcasting when the runtime closes after persist', async () => {
     let generationOpen = true;
     const { app, broadcastSettingsChanged } = makeApp({

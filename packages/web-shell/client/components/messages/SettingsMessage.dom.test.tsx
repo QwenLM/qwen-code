@@ -74,6 +74,19 @@ function liveEnabledSetting(): DaemonSettingDescriptor {
   };
 }
 
+function artifactSharingSetting(): DaemonSettingDescriptor {
+  return {
+    key: 'artifact.share.enabled',
+    type: 'boolean',
+    label: 'Artifact Sharing',
+    category: 'Artifacts',
+    description: 'Artifact sharing setting.',
+    requiresRestart: false,
+    default: true,
+    values: { effective: true },
+  };
+}
+
 function liveSetup(keyConfigured: boolean): UseLiveVoiceSetupResult {
   return {
     supported: true,
@@ -198,6 +211,38 @@ function switchButton(container: HTMLElement): HTMLButtonElement {
 }
 
 describe('SettingsMessage user-scope editing', () => {
+  it('shows the artifact sharing toggle and applies it without a restart', async () => {
+    const setValue = vi.fn(() =>
+      Promise.resolve({
+        key: 'artifact.share.enabled',
+        scope: 'workspace' as const,
+        value: false,
+        requiresRestart: false,
+      }),
+    );
+    const container = renderPanel(
+      makeState([artifactSharingSetting()], setValue),
+    );
+
+    expect(container.textContent).toContain('Artifacts');
+    expect(container.textContent).toContain('Artifact sharing');
+    expect(container.textContent).toContain('Changes apply immediately');
+
+    await act(async () => {
+      switchButton(container).click();
+      await Promise.resolve();
+    });
+
+    expect(setValue).toHaveBeenCalledWith(
+      'workspace',
+      'artifact.share.enabled',
+      false,
+    );
+    expect(container.textContent).not.toContain(
+      'This change requires a restart',
+    );
+  });
+
   it('persists a boolean toggle to the user scope from the User tab', async () => {
     const setValue = vi.fn(
       (scope: 'workspace' | 'user', key: string, value: unknown) =>

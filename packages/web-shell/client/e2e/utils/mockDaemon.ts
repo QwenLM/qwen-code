@@ -68,8 +68,10 @@ export interface WebShellDaemonScenario {
   sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
-  /** Share destination reported by `GET /workspace/artifact/publish-config`. */
+  /** Provider readiness reported by `GET /workspace/artifact/publish-config`. */
   artifactPublishConfig: Record<string, unknown>;
+  /** Result returned by an artifact provider setup route. */
+  artifactProviderSetupResult: Record<string, unknown>;
   /** Result returned by `POST /workspace/artifact/publish`. */
   artifactPublishResult: Record<string, unknown>;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
@@ -380,20 +382,58 @@ export function createWebShellDaemonScenario(
     artifactPublishConfig: overrides.artifactPublishConfig ?? {
       v: 1,
       workspaceCwd,
-      publisher: 'local',
-      endpoint: '',
-      bucket: '',
-      keyPrefix: 'artifacts',
-      publicBaseUrl: '',
-      credentialsSource: 'none',
+      providers: [
+        {
+          kind: 'cloudflare',
+          configured: false,
+          unavailableReason: 'cloudflare_not_configured',
+        },
+        { kind: 'vercel', configured: false },
+        { kind: 'netlify', configured: false },
+      ],
+      setups: {
+        cloudflare: {
+          provider: 'cloudflare',
+          stage: 'install',
+          cliInstalled: false,
+          authenticated: false,
+          linked: false,
+          configured: false,
+        },
+      },
+    },
+    artifactProviderSetupResult: overrides.artifactProviderSetupResult ?? {
+      v: 1,
+      workspaceCwd,
+      provider: 'cloudflare',
+      providers: [{ kind: 'cloudflare', configured: true }],
+      setups: {
+        cloudflare: {
+          provider: 'cloudflare',
+          stage: 'ready',
+          cliInstalled: true,
+          authenticated: true,
+          linked: true,
+          configured: true,
+          project: { id: 'mock-site', name: 'Mock site' },
+        },
+      },
+      setup: {
+        provider: 'cloudflare',
+        stage: 'ready',
+        cliInstalled: true,
+        authenticated: true,
+        linked: true,
+        configured: true,
+        project: { id: 'mock-site', name: 'Mock site' },
+      },
     },
     artifactPublishResult: overrides.artifactPublishResult ?? {
       v: 1,
       workspaceCwd,
       id: 'mock-artifact',
       url: 'https://example.com/artifacts/mock-artifact/index.html',
-      reachable: true,
-      reachableStatus: 200,
+      provider: 'cloudflare',
     },
     workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
@@ -638,6 +678,9 @@ function isDaemonPath(path: string): boolean {
     /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/publish(?:-config)?\/?$/.test(
       path,
     ) ||
+    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/(?:cloudflare|vercel|netlify)\/setup\/?$/.test(
+      path,
+    ) ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
@@ -816,6 +859,14 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'POST' && path === '/workspace/artifact/publish') return true;
+  if (
+    method === 'POST' &&
+    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/(?:cloudflare|vercel|netlify)\/setup\/?$/.test(
+      path,
+    )
+  ) {
+    return true;
+  }
   if (method === 'GET' && /^\/session\/[^/]+\/artifacts\/?$/.test(path)) {
     return true;
   }
@@ -919,6 +970,15 @@ async function handleDaemonRoute(
     )
   ) {
     await json(route, scenario.artifactPublishConfig);
+    return;
+  }
+  if (
+    method === 'POST' &&
+    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/(?:cloudflare|vercel|netlify)\/setup\/?$/.test(
+      path,
+    )
+  ) {
+    await json(route, scenario.artifactProviderSetupResult);
     return;
   }
   if (

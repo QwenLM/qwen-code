@@ -99,6 +99,9 @@ import type {
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
   DaemonArtifactPublishConfig,
+  DaemonArtifactPublishProviderKind,
+  DaemonArtifactProviderSetupRequest,
+  DaemonArtifactProviderSetupResult,
   DaemonArtifactPublishRequest,
   DaemonArtifactPublishResult,
   DaemonWorkspaceMcpInitializeResult,
@@ -3709,29 +3712,57 @@ export class DaemonClient {
     );
   }
 
-  /**
-   * The share destination the daemon would use for the primary workspace.
-   * Never returns credentials, only where one was found.
-   */
+  /** Reports artifact sharing readiness for the primary workspace. */
   async artifactPublishConfig(
     clientId?: string,
+    path?: string,
   ): Promise<DaemonArtifactPublishConfig> {
     return await this.jsonRequest<DaemonArtifactPublishConfig>(
-      '/workspace/artifact/publish-config',
+      `/workspace/artifact/publish-config${
+        path ? `?path=${urlEncode(path)}` : ''
+      }`,
       'GET /workspace/artifact/publish-config',
-      { clientId, mode: 'rest' },
+      { clientId, mode: 'rest', timeoutMs: 0 },
     );
   }
 
-  /** Publishes a workspace HTML file through the configured OSS destination. */
+  async setupArtifactProvider(
+    provider: DaemonArtifactPublishProviderKind,
+    req: DaemonArtifactProviderSetupRequest,
+    clientId?: string,
+    signal?: AbortSignal,
+  ): Promise<DaemonArtifactProviderSetupResult> {
+    return await this.jsonRequest<DaemonArtifactProviderSetupResult>(
+      `/workspace/artifact/${urlEncode(provider)}/setup`,
+      'POST /workspace/artifact/:provider/setup',
+      {
+        method: 'POST',
+        body: req,
+        clientId,
+        signal,
+        mode: 'rest',
+        timeoutMs: 0,
+      },
+    );
+  }
+
+  /** Publishes a workspace HTML file through the selected provider. */
   async publishArtifact(
     req: DaemonArtifactPublishRequest,
     clientId?: string,
+    signal?: AbortSignal,
   ): Promise<DaemonArtifactPublishResult> {
     return await this.jsonRequest<DaemonArtifactPublishResult>(
       '/workspace/artifact/publish',
       'POST /workspace/artifact/publish',
-      { method: 'POST', body: req, clientId, mode: 'rest' },
+      {
+        method: 'POST',
+        body: req,
+        clientId,
+        signal,
+        mode: 'rest',
+        timeoutMs: 0,
+      },
     );
   }
 
@@ -5383,21 +5414,37 @@ export class WorkspaceDaemonClient {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
   }
 
-  artifactPublishConfig(): Promise<DaemonArtifactPublishConfig> {
+  artifactPublishConfig(path?: string): Promise<DaemonArtifactPublishConfig> {
     return this.get(
-      '/artifact/publish-config',
+      `/artifact/publish-config${path ? `?path=${urlEncode(path)}` : ''}`,
       'GET /workspaces/:workspace/artifact/publish-config',
+      undefined,
+      0,
+    );
+  }
+
+  setupArtifactProvider(
+    provider: DaemonArtifactPublishProviderKind,
+    req: DaemonArtifactProviderSetupRequest,
+    signal?: AbortSignal,
+  ): Promise<DaemonArtifactProviderSetupResult> {
+    return this.client.workspaceJsonRequest<DaemonArtifactProviderSetupResult>(
+      this.workspaceSelector,
+      `/artifact/${urlEncode(provider)}/setup`,
+      'POST /workspaces/:workspace/artifact/:provider/setup',
+      { method: 'POST', body: req, signal, mode: 'rest', timeoutMs: 0 },
     );
   }
 
   publishArtifact(
     req: DaemonArtifactPublishRequest,
+    signal?: AbortSignal,
   ): Promise<DaemonArtifactPublishResult> {
     return this.client.workspaceJsonRequest<DaemonArtifactPublishResult>(
       this.workspaceSelector,
       '/artifact/publish',
       'POST /workspaces/:workspace/artifact/publish',
-      { method: 'POST', body: req, mode: 'rest' },
+      { method: 'POST', body: req, signal, mode: 'rest', timeoutMs: 0 },
     );
   }
 
@@ -6588,12 +6635,17 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  private get<T>(path: string, label: string, clientId?: string): Promise<T> {
+  private get<T>(
+    path: string,
+    label: string,
+    clientId?: string,
+    timeoutMs?: number,
+  ): Promise<T> {
     return this.client.workspaceJsonRequest<T>(
       this.workspaceSelector,
       path,
       label,
-      { clientId },
+      { clientId, timeoutMs },
     );
   }
 

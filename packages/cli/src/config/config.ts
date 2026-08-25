@@ -2280,6 +2280,8 @@ export async function loadCliConfig(
       ? {
           uploadCommand: settings.artifact?.host?.uploadCommand ?? '',
           urlTemplate: settings.artifact?.host?.urlTemplate ?? '',
+          urlFromCommandOutput:
+            settings.artifact?.host?.urlFromCommandOutput ?? false,
           keyPrefix: settings.artifact?.host?.keyPrefix,
         }
       : undefined,

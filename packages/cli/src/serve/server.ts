@@ -2038,12 +2038,16 @@ export function createServeApp(
     sendBridgeError,
   });
   registerWorkspaceArtifactPublishRoutes(app, {
-    boundWorkspace: primaryBoundWorkspace,
+    getPrimaryRuntime: () => workspaceRegistry.primary,
     sendBridgeError,
+    mutate,
+    persistSettings: deps.persistSettings,
   });
   registerWorkspaceQualifiedArtifactPublishRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
+    mutate,
+    persistSettings: deps.persistSettings,
   });
   registerWorkspaceGitBranchRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,

@@ -216,12 +216,17 @@ export type {
 export { RecordArtifactTool } from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
 export type {
+  ArtifactHostConfig,
   ArtifactPublisher,
   ArtifactOssConfig,
   PublishArtifactInput,
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
 export { artifactIdFromPath } from './tools/artifact/publisher.js';
+export {
+  HostPublisher,
+  tokenizeCommand,
+} from './tools/artifact/host-publisher.js';
 export {
   OssPublisher,
   ossCredentialsFromEnv,

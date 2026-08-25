@@ -13,6 +13,7 @@ const {
   secondaryStat,
   workspaceByCwd,
   artifactPublishConfig,
+  setupArtifactNetlify,
   publishArtifact,
   setWorkspaceSetting,
 } = vi.hoisted(() => ({
@@ -23,6 +24,7 @@ const {
   secondaryStat: vi.fn(),
   workspaceByCwd: vi.fn(),
   artifactPublishConfig: vi.fn(),
+  setupArtifactNetlify: vi.fn(),
   publishArtifact: vi.fn(),
   setWorkspaceSetting: vi.fn(),
 }));
@@ -32,6 +34,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     readFileBytes,
     stat,
     artifactPublishConfig,
+    setupArtifactNetlify,
+    setupArtifactProvider: setupArtifactNetlify,
     publishArtifact,
     setWorkspaceSetting,
   }),
@@ -40,6 +44,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
       readFileBytes,
       stat,
       artifactPublishConfig,
+      setupArtifactNetlify,
+      setupArtifactProvider: setupArtifactNetlify,
       publishArtifact,
       setWorkspaceSetting,
     },
@@ -92,6 +98,8 @@ beforeEach(() => {
     readWorkspaceFile: secondaryReadWorkspaceFile,
     readWorkspaceFileBytes: secondaryReadFileBytes,
     fileStat: secondaryStat,
+    setupArtifactNetlify,
+    setupArtifactProvider: setupArtifactNetlify,
   });
   Object.defineProperty(URL, 'createObjectURL', {
     configurable: true,
@@ -116,6 +124,7 @@ afterEach(() => {
   secondaryStat.mockReset();
   workspaceByCwd.mockReset();
   artifactPublishConfig.mockReset();
+  setupArtifactNetlify.mockReset();
   publishArtifact.mockReset();
   setWorkspaceSetting.mockReset();
 });
@@ -662,20 +671,23 @@ describe('TurnOutputs artifact downloads', () => {
 
 describe('TurnOutputs artifact sharing', () => {
   afterEach(() => {
-    window.localStorage.clear();
     vi.unstubAllGlobals();
   });
 
-  const renderArtifacts = (artifacts: DaemonSessionArtifact[]) => {
+  const renderArtifacts = (
+    artifacts: DaemonSessionArtifact[],
+    artifactSharingEnabled = true,
+  ) => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
-    act(() => {
+    const render = (enabled: boolean) => {
       root.render(
         <I18nProvider language="en">
           <TurnOutputs
             turnId="turn-1"
             workspaceCwd="/primary"
+            artifactSharingEnabled={enabled}
             changes={[]}
             artifacts={artifacts}
             scheduledTasks={[]}
@@ -685,8 +697,15 @@ describe('TurnOutputs artifact sharing', () => {
           />
         </I18nProvider>,
       );
+    };
+    act(() => {
+      render(artifactSharingEnabled);
     });
-    return { container, root };
+    return {
+      container,
+      root,
+      rerender: (enabled: boolean) => act(() => render(enabled)),
+    };
   };
 
   const shareButtons = (scope: ParentNode) =>
@@ -743,6 +762,46 @@ describe('TurnOutputs artifact sharing', () => {
     act(() => root.unmount());
   });
 
+  it('hides Share when artifact sharing is disabled in Settings', () => {
+    const { container, root } = renderArtifacts(
+      [
+        {
+          id: 'artifact-html',
+          kind: 'html',
+          storage: 'workspace',
+          status: 'available',
+          title: 'report',
+          workspacePath: 'output/report.html',
+        } as DaemonSessionArtifact,
+      ],
+      false,
+    );
+
+    expect(shareButtons(container)).toHaveLength(0);
+    expect(artifactPublishConfig).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
+  it('closes an open Share dialog when artifact sharing is disabled', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [],
+    });
+    const { container, root, rerender } = renderHtmlArtifact();
+
+    await act(async () => shareButtons(container)[0]?.click());
+    expect(document.body.querySelector('[data-share-provider]')).not.toBeNull();
+
+    rerender(false);
+
+    expect(document.body.querySelector('[data-share-provider]')).toBeNull();
+    expect(shareButtons(container)).toHaveLength(0);
+
+    act(() => root.unmount());
+  });
+
   const renderHtmlArtifact = () =>
     renderArtifacts([
       {
@@ -759,17 +818,11 @@ describe('TurnOutputs artifact sharing', () => {
     await act(async () => {
       shareButtons(container)[0]?.click();
     });
-  };
-
-  const setInput = (selector: string, value: string) => {
-    const input = document.body.querySelector<HTMLInputElement>(selector);
-    if (!input) throw new Error(`missing input ${selector}`);
-    const setter = Object.getOwnPropertyDescriptor(
-      HTMLInputElement.prototype,
-      'value',
-    )?.set;
-    setter?.call(input, value);
-    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('[data-share-provider="netlify"]')
+        ?.click();
+    });
   };
 
   const submitShare = async () => {
@@ -781,114 +834,335 @@ describe('TurnOutputs artifact sharing', () => {
     });
   };
 
-  it('publishes through the daemon and shows the returned link', async () => {
+  it('orders providers with Cloudflare selected by default', async () => {
     artifactPublishConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/primary',
-      publisher: 'local',
-      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
-      bucket: 'my-bucket',
-      keyPrefix: 'artifacts',
-      publicBaseUrl: '',
-      credentialsSource: 'env',
+      providers: [
+        { kind: 'cloudflare', configured: false },
+        { kind: 'vercel', configured: false },
+        { kind: 'netlify', configured: false },
+      ],
+    });
+    const { container, root } = renderHtmlArtifact();
+    await act(async () => shareButtons(container)[0]?.click());
+
+    const providers = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-share-provider]',
+      ),
+    );
+    expect(providers.map((button) => button.dataset['shareProvider'])).toEqual([
+      'cloudflare',
+      'vercel',
+      'netlify',
+    ]);
+    expect(providers[0]?.getAttribute('aria-pressed')).toBe('true');
+    expect(providers[1]?.getAttribute('aria-pressed')).toBe('false');
+
+    const details = document.body.querySelector<HTMLDetailsElement>(
+      '[data-share-details]',
+    );
+    expect(details?.open).toBe(false);
+    await act(async () => details?.querySelector('summary')?.click());
+    expect(details?.open).toBe(true);
+    expect(details?.textContent).toContain('Wrangler CLI');
+    expect(details?.textContent).toContain(
+      'Dedicated Cloudflare Pages project',
+    );
+    expect(details?.textContent).toContain(
+      'without changing the current project dependencies',
+    );
+    expect(details?.textContent).toContain(
+      'tokens remain managed by the official CLI',
+    );
+
+    await act(async () => providers[1]?.click());
+    expect(providers[0]?.getAttribute('aria-pressed')).toBe('false');
+    expect(providers[1]?.getAttribute('aria-pressed')).toBe('true');
+    expect(details?.open).toBe(true);
+    expect(details?.textContent).toContain('Vercel CLI');
+    expect(details?.textContent).toContain('Dedicated Vercel project');
+    expect(details?.textContent).toContain(
+      'Vercel project ID, project name, and scope',
+    );
+    expect(artifactPublishConfig).toHaveBeenCalledTimes(1);
+    expect(artifactPublishConfig).toHaveBeenCalledWith('output/report.html');
+
+    act(() => root.unmount());
+  });
+
+  it('publishes through configured Cloudflare by default', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [
+        { kind: 'cloudflare', configured: true },
+        { kind: 'vercel', configured: false },
+        { kind: 'netlify', configured: false },
+      ],
+      setups: {
+        cloudflare: {
+          provider: 'cloudflare',
+          stage: 'ready',
+          cliInstalled: true,
+          authenticated: true,
+          linked: true,
+          configured: true,
+          project: { id: 'pages-project', name: 'Artifact pages' },
+        },
+      },
     });
     publishArtifact.mockResolvedValue({
       v: 1,
       workspaceCwd: '/primary',
       id: 'abc123',
-      url: 'https://my-bucket.oss-cn-hangzhou.aliyuncs.com/artifacts/abc123/index.html',
-      reachable: true,
-      reachableStatus: 200,
+      url: 'https://abc.artifact.pages.dev',
+      provider: 'cloudflare',
+    });
+    const { container, root } = renderHtmlArtifact();
+    await act(async () => shareButtons(container)[0]?.click());
+    expect(
+      document.body.querySelector(
+        '[data-share-provider="cloudflare"] [data-share-provider-ready]',
+      ),
+    ).toBeTruthy();
+    await submitShare();
+
+    expect(publishArtifact).toHaveBeenCalledWith(
+      {
+        path: 'output/report.html',
+        title: 'report',
+        provider: 'cloudflare',
+      },
+      { signal: expect.anything() },
+    );
+    expect(
+      document.body.querySelector<HTMLInputElement>('#share-result-url')?.value,
+    ).toBe('https://abc.artifact.pages.dev');
+    expect(document.body.textContent).toContain('Artifact published');
+    expect(
+      document.body.querySelector<HTMLAnchorElement>(
+        'a[href="https://abc.artifact.pages.dev"]',
+      )?.target,
+    ).toBe('_blank');
+
+    act(() => root.unmount());
+  });
+
+  it('opens an unchanged publication without deploying again', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [{ kind: 'cloudflare', configured: true }],
+      setups: {
+        cloudflare: {
+          provider: 'cloudflare',
+          stage: 'ready',
+          cliInstalled: true,
+          authenticated: true,
+          linked: true,
+          configured: true,
+          project: { id: 'pages-project', name: 'Artifact pages' },
+        },
+      },
+      publications: {
+        cloudflare: {
+          provider: 'cloudflare',
+          id: 'abc123',
+          url: 'https://abc.artifact.pages.dev',
+          publishedAt: '2026-08-25T07:00:00.000Z',
+          upToDate: true,
+        },
+      },
+    });
+    publishArtifact.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      id: 'abc123',
+      url: 'https://new.artifact.pages.dev',
+      provider: 'cloudflare',
+      reused: false,
+      recorded: true,
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await act(async () => shareButtons(container)[0]?.click());
+
+    expect(
+      document.body.querySelector('[data-share-publication-state]')
+        ?.textContent,
+    ).toContain('Current version is published');
+    expect(publishArtifact).not.toHaveBeenCalled();
+    expect(
+      document.body.querySelector<HTMLAnchorElement>(
+        'a[href="https://abc.artifact.pages.dev"]',
+      ),
+    ).not.toBeNull();
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('[data-share-action="republish"]')
+        ?.click();
+    });
+    expect(publishArtifact).toHaveBeenCalledWith(
+      {
+        path: 'output/report.html',
+        title: 'report',
+        provider: 'cloudflare',
+        force: true,
+      },
+      { signal: expect.anything() },
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('labels changed content and publishes a new version', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [{ kind: 'cloudflare', configured: true }],
+      setups: {
+        cloudflare: {
+          provider: 'cloudflare',
+          stage: 'ready',
+          cliInstalled: true,
+          authenticated: true,
+          linked: true,
+          configured: true,
+        },
+      },
+      publications: {
+        cloudflare: {
+          provider: 'cloudflare',
+          id: 'abc123',
+          url: 'https://old.artifact.pages.dev',
+          publishedAt: '2026-08-25T07:00:00.000Z',
+          upToDate: false,
+        },
+      },
+    });
+    publishArtifact.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      id: 'abc123',
+      url: 'https://new.artifact.pages.dev',
+      provider: 'cloudflare',
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await act(async () => shareButtons(container)[0]?.click());
+
+    expect(
+      document.body.querySelector('[data-share-publication-state="stale"]')
+        ?.textContent,
+    ).toContain('New changes are ready');
+    expect(
+      document.body.querySelector<HTMLButtonElement>(
+        '[data-share-action="publish"]',
+      )?.textContent,
+    ).toContain('Publish new version');
+
+    await submitShare();
+    expect(publishArtifact).toHaveBeenCalledWith(
+      {
+        path: 'output/report.html',
+        title: 'report',
+        provider: 'cloudflare',
+      },
+      { signal: expect.anything() },
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('publishes through configured Netlify and shows its link', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [{ kind: 'netlify', configured: true }],
+      setup: {
+        stage: 'ready',
+        cliInstalled: true,
+        authenticated: true,
+        linked: true,
+        configured: true,
+        linkedSite: { id: 'site-id', name: 'Report site' },
+      },
+    });
+    publishArtifact.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      id: 'abc123',
+      url: 'https://preview.example.com/report',
+      provider: 'netlify',
     });
 
     const { container, root } = renderHtmlArtifact();
     await openShareDialog(container);
+    expect(
+      document.body.querySelector('[data-share-netlify-status]')?.textContent,
+    ).toContain('Publish this artifact once');
+    expect(
+      document.body.querySelector('[data-share-storage-note]')?.textContent,
+    ).toContain('Anyone with the link can view it');
+    expect(document.body.querySelector('#share-provider')).toBeNull();
+    expect(document.body.textContent).not.toContain('Aliyun OSS');
     await submitShare();
 
     expect(publishArtifact).toHaveBeenCalledTimes(1);
-    expect(publishArtifact.mock.calls[0][0]).toMatchObject({
+    expect(publishArtifact.mock.calls[0][0]).toEqual({
       path: 'output/report.html',
-      remember: 'memory',
-      config: { endpoint: 'oss-cn-hangzhou.aliyuncs.com', bucket: 'my-bucket' },
+      title: 'report',
+      provider: 'netlify',
     });
-    // Key prefix and public base URL are no longer part of the dialog.
-    expect(publishArtifact.mock.calls[0][0].config).not.toHaveProperty(
-      'keyPrefix',
-    );
-    // Credentials came from the daemon environment, so none are sent.
-    expect(publishArtifact.mock.calls[0][0].config).not.toHaveProperty(
-      'accessKeyId',
-    );
-    // 'memory' must never touch the settings file.
     expect(setWorkspaceSetting).not.toHaveBeenCalled();
     expect(
       document.body.querySelector<HTMLInputElement>('#share-result-url')?.value,
-    ).toBe(
-      'https://my-bucket.oss-cn-hangzhou.aliyuncs.com/artifacts/abc123/index.html',
-    );
+    ).toBe('https://preview.example.com/report');
+
+    act(() => root.unmount());
+  });
+
+  it('keeps credentials out of the Netlify dialog', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [
+        {
+          kind: 'netlify',
+          configured: false,
+          unavailableReason: 'netlify_cli_missing',
+        },
+      ],
+      setup: {
+        stage: 'install',
+        cliInstalled: false,
+        authenticated: false,
+        linked: false,
+        configured: false,
+      },
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+
+    expect(document.body.querySelector('#share-endpoint')).toBeNull();
+    expect(document.body.querySelector('#share-access-key-id')).toBeNull();
+    expect(document.body.querySelector('#share-public-base-url')).toBeNull();
     expect(
-      document.body.querySelector('[data-share-reachability]')?.textContent,
-    ).toContain('publicly reachable');
+      document.body.querySelector('[data-share-storage-note]')?.textContent,
+    ).toContain('securely by Netlify');
+    expect(document.body.textContent).not.toContain('npm install');
+    expect(document.body.textContent).not.toContain('netlify login');
+    expect(document.body.textContent).not.toContain('daemon');
+    expect(document.body.textContent).not.toContain('Auth Token');
 
     act(() => root.unmount());
   });
 
-  it('reports an upload whose link is not publicly reachable', async () => {
-    artifactPublishConfig.mockResolvedValue({
-      v: 1,
-      workspaceCwd: '/primary',
-      publisher: 'local',
-      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
-      bucket: 'my-bucket',
-      keyPrefix: 'artifacts',
-      publicBaseUrl: '',
-      credentialsSource: 'env',
-    });
-    publishArtifact.mockResolvedValue({
-      v: 1,
-      workspaceCwd: '/primary',
-      id: 'abc123',
-      url: 'https://my-bucket.oss-cn-hangzhou.aliyuncs.com/artifacts/abc123/index.html',
-      reachable: false,
-      reachableStatus: 403,
-    });
-
-    const { container, root } = renderHtmlArtifact();
-    await openShareDialog(container);
-    await submitShare();
-
-    const note = document.body.querySelector(
-      '[data-share-reachability]',
-    )?.textContent;
-    expect(note).toContain('403');
-    expect(note).toContain('blocks public access');
-
-    act(() => root.unmount());
-  });
-
-  it('refuses to upload without any credential source', async () => {
-    artifactPublishConfig.mockResolvedValue({
-      v: 1,
-      workspaceCwd: '/primary',
-      publisher: 'local',
-      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
-      bucket: 'my-bucket',
-      keyPrefix: 'artifacts',
-      publicBaseUrl: '',
-      credentialsSource: 'none',
-    });
-
-    const { container, root } = renderHtmlArtifact();
-    await openShareDialog(container);
-    await submitShare();
-
-    expect(publishArtifact).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain('No credentials available');
-
-    act(() => root.unmount());
-  });
-
-  it('sends typed credentials and keeps them out of any settings write', async () => {
+  it('treats the legacy v1 publish shape as not configured', async () => {
     artifactPublishConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/primary',
@@ -898,120 +1172,547 @@ describe('TurnOutputs artifact sharing', () => {
       keyPrefix: 'artifacts',
       publicBaseUrl: '',
       credentialsSource: 'none',
-    });
-    publishArtifact.mockResolvedValue({
-      v: 1,
-      workspaceCwd: '/primary',
-      id: 'abc123',
-      url: 'https://typed-bucket.example.com/artifacts/abc123/index.html',
-      reachable: true,
-      reachableStatus: 200,
-    });
+    } as never);
 
     const { container, root } = renderHtmlArtifact();
     await openShareDialog(container);
 
-    setInput('#share-endpoint', 'oss-cn-beijing.aliyuncs.com');
-    setInput('#share-bucket', 'typed-bucket');
-    setInput('#share-access-key-id', 'ak-id');
-    setInput('#share-access-key-secret', 'ak-secret');
-    await submitShare();
-
-    expect(publishArtifact).toHaveBeenCalledTimes(1);
-    expect(publishArtifact.mock.calls[0][0]).toMatchObject({
-      remember: 'memory',
-      config: {
-        endpoint: 'oss-cn-beijing.aliyuncs.com',
-        bucket: 'typed-bucket',
-        accessKeyId: 'ak-id',
-        accessKeySecret: 'ak-secret',
-      },
-    });
-    // Sharing never writes settings; the daemon holds this for its lifetime.
-    expect(setWorkspaceSetting).not.toHaveBeenCalled();
+    expect(
+      document.body.querySelector('[data-share-netlify-status]')?.textContent,
+    ).toContain('prepare Netlify sharing');
+    expect(
+      document.body.querySelector('[data-share-netlify-action="prepare"]'),
+    ).not.toBeNull();
 
     act(() => root.unmount());
   });
 
-  it('sends the public domain so the link is not the default OSS one', async () => {
+  it('stops publishing in progress and unlocks the dialog', async () => {
     artifactPublishConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/primary',
-      publisher: 'local',
-      endpoint: 'oss-cn-beijing.aliyuncs.com',
-      bucket: 'qqqys',
-      keyPrefix: 'artifacts',
-      publicBaseUrl: '',
-      credentialsSource: 'env',
+      providers: [{ kind: 'netlify', configured: true }],
+      setup: {
+        stage: 'ready',
+        cliInstalled: true,
+        authenticated: true,
+        linked: true,
+        configured: true,
+      },
     });
-    publishArtifact.mockResolvedValue({
+    let publishSignal: AbortSignal | undefined;
+    publishArtifact.mockImplementation(
+      async (_request, options?: { signal?: AbortSignal }) => {
+        publishSignal = options?.signal;
+        await new Promise<never>((_resolve, reject) => {
+          publishSignal?.addEventListener(
+            'abort',
+            () => reject(publishSignal?.reason),
+            { once: true },
+          );
+        });
+      },
+    );
+
+    const { container, root } = renderHtmlArtifact();
+    await openShareDialog(container);
+    await submitShare();
+
+    expect(document.body.querySelector('[data-dialog-close]')).not.toBeNull();
+    const stopButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-share-action="stop"]',
+    );
+    expect(stopButton?.disabled).toBe(false);
+
+    await act(async () => stopButton?.click());
+
+    expect(publishSignal?.aborted).toBe(true);
+    expect(
+      document.body.querySelector<HTMLButtonElement>(
+        '[data-share-action="publish"]',
+      )?.disabled,
+    ).toBe(false);
+
+    act(() => root.unmount());
+  });
+
+  it('guides Netlify setup in order and prevents publishing until ready', async () => {
+    artifactPublishConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/primary',
-      id: 'abc123',
-      url: 'https://cdn.example.com/artifacts/abc123/index.html',
-      reachable: true,
-      reachableStatus: 200,
+      providers: [
+        {
+          kind: 'netlify',
+          configured: false,
+          unavailableReason: 'netlify_cli_missing',
+        },
+      ],
+      setup: {
+        stage: 'install',
+        cliInstalled: false,
+        authenticated: false,
+        linked: false,
+        configured: false,
+      },
     });
 
     const { container, root } = renderHtmlArtifact();
     await openShareDialog(container);
 
-    setInput('#share-public-base-url', 'https://cdn.example.com');
+    const steps = Array.from(
+      document.body.querySelectorAll('[data-share-netlify-step]'),
+    );
+    expect(
+      steps.map((step) => step.getAttribute('data-share-netlify-step')),
+    ).toEqual(['install', 'authenticate', 'connect', 'ready']);
+    expect(steps[0]?.getAttribute('data-state')).toBe('active');
+    expect(steps[1]?.getAttribute('data-state')).toBe('pending');
+    expect(document.body.textContent).not.toContain('npm install');
+    expect(document.body.textContent).not.toContain('netlify deploy');
+    expect(document.body.textContent).not.toContain('Aliyun OSS');
+
+    const publish = document.body.querySelector<HTMLButtonElement>(
+      '[data-share-action="publish"]',
+    );
+    expect(publish?.disabled).toBe(true);
     await submitShare();
 
-    expect(publishArtifact.mock.calls[0][0].config.publicBaseUrl).toBe(
-      'https://cdn.example.com',
+    expect(publishArtifact).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+  });
+
+  it('marks the current setup step as failed and offers a retry', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [
+        {
+          kind: 'netlify',
+          configured: false,
+          unavailableReason: 'netlify_cli_missing',
+        },
+      ],
+      setup: {
+        stage: 'install',
+        cliInstalled: false,
+        authenticated: false,
+        linked: false,
+        configured: false,
+      },
+    });
+    setupArtifactNetlify.mockRejectedValue(new Error('permission denied'));
+    const authWindow = {
+      close: vi.fn(),
+      location: { href: '' },
+      opener: window,
+    };
+    vi.spyOn(window, 'open').mockReturnValue(authWindow as unknown as Window);
+    const { container, root } = renderHtmlArtifact();
+
+    await openShareDialog(container);
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>(
+          '[data-share-netlify-action="prepare"]',
+        )
+        ?.click();
+    });
+
+    expect(
+      document.body
+        .querySelector('[data-share-netlify-step="install"]')
+        ?.getAttribute('data-state'),
+    ).toBe('error');
+    expect(
+      document.body.querySelector('[data-share-netlify-action="prepare"]')
+        ?.textContent,
+    ).toContain('Try again');
+    expect(document.body.textContent).toContain(
+      'Sharing setup could not be completed',
+    );
+    expect(document.body.textContent).not.toContain('permission denied');
+    expect(authWindow.close).toHaveBeenCalled();
+    expect(authWindow.opener).toBeNull();
+
+    act(() => root.unmount());
+  });
+
+  it('prepares Netlify and receives a ready dedicated project in one call', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [
+        {
+          kind: 'netlify',
+          configured: false,
+          unavailableReason: 'netlify_cli_missing',
+        },
+      ],
+      setup: {
+        stage: 'install',
+        cliInstalled: false,
+        authenticated: false,
+        linked: false,
+        configured: false,
+      },
+    });
+    setupArtifactNetlify.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [{ kind: 'netlify', configured: true }],
+      setup: {
+        stage: 'ready',
+        cliInstalled: true,
+        authenticated: true,
+        linked: true,
+        configured: true,
+        linkedSite: { id: 'dedicated-site', name: 'Artifact site' },
+      },
+    });
+    const authWindow = {
+      close: vi.fn(),
+      location: { href: '' },
+      opener: window,
+    };
+    vi.spyOn(window, 'open').mockReturnValue(authWindow as unknown as Window);
+    const { container, root } = renderHtmlArtifact();
+
+    await openShareDialog(container);
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>(
+          '[data-share-netlify-action="prepare"]',
+        )
+        ?.click();
+    });
+
+    expect(setupArtifactNetlify).toHaveBeenCalledTimes(1);
+    expect(setupArtifactNetlify).toHaveBeenCalledWith(
+      'netlify',
+      { action: 'prepare' },
+      { signal: expect.anything() },
+    );
+    expect(authWindow.close).toHaveBeenCalled();
+    expect(authWindow.opener).toBeNull();
+    expect(
+      document.body.querySelector('[data-share-netlify-status]')?.textContent,
+    ).toContain('Publish this artifact once');
+    const publish = document.body.querySelector<HTMLButtonElement>(
+      '[data-share-action="publish"]',
+    );
+    expect(publish?.disabled).toBe(false);
+
+    act(() => root.unmount());
+  });
+
+  it('waits for a click before replacing a linked project with a dedicated target', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [
+        {
+          kind: 'netlify',
+          configured: false,
+          unavailableReason: 'netlify_site_unlinked',
+        },
+      ],
+      setup: {
+        stage: 'connect',
+        cliInstalled: true,
+        authenticated: true,
+        linked: true,
+        configured: false,
+        linkedSite: { id: 'existing-site', name: 'Existing site' },
+      },
+    });
+    setupArtifactNetlify.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [{ kind: 'netlify', configured: true }],
+      setup: {
+        stage: 'ready',
+        cliInstalled: true,
+        authenticated: true,
+        linked: true,
+        configured: true,
+        linkedSite: { id: 'dedicated-site', name: 'Artifact site' },
+      },
+    });
+    const { container, root } = renderHtmlArtifact();
+
+    await openShareDialog(container);
+
+    expect(setupArtifactNetlify).not.toHaveBeenCalled();
+    const connectButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-share-netlify-action="connect"]',
+    );
+    expect(connectButton?.disabled).toBe(false);
+    await act(async () => connectButton?.click());
+    expect(setupArtifactNetlify).toHaveBeenCalledWith(
+      'netlify',
+      { action: 'prepare' },
+      { signal: expect.anything() },
     );
 
     act(() => root.unmount());
   });
 
-  it('prefills the public domain the daemon already resolves', async () => {
+  it('continues setup without reopening authorization when no project exists', async () => {
     artifactPublishConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/primary',
-      publisher: 'local',
-      endpoint: 'oss-cn-beijing.aliyuncs.com',
-      bucket: 'qqqys',
-      keyPrefix: 'artifacts',
-      publicBaseUrl: 'https://cdn.example.com',
-      credentialsSource: 'env',
+      providers: [
+        {
+          kind: 'netlify',
+          configured: false,
+          unavailableReason: 'netlify_site_unlinked',
+        },
+      ],
+      setup: {
+        stage: 'connect',
+        cliInstalled: true,
+        authenticated: true,
+        linked: false,
+        configured: false,
+        sites: [],
+      },
     });
-
+    setupArtifactNetlify.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [{ kind: 'netlify', configured: true }],
+      setup: {
+        stage: 'ready',
+        cliInstalled: true,
+        authenticated: true,
+        linked: true,
+        configured: true,
+        linkedSite: { id: 'created-site', name: 'Created site' },
+      },
+    });
+    const openWindow = vi.spyOn(window, 'open');
     const { container, root } = renderHtmlArtifact();
-    await openShareDialog(container);
 
+    await openShareDialog(container);
+    const continueButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-share-netlify-action="connect"]',
+    );
+    expect(continueButton?.textContent).toContain('Connect project');
+    expect(setupArtifactNetlify).not.toHaveBeenCalled();
+    await act(async () => continueButton?.click());
+
+    expect(setupArtifactNetlify).toHaveBeenCalledWith(
+      'netlify',
+      { action: 'prepare' },
+      { signal: expect.anything() },
+    );
+    expect(openWindow).not.toHaveBeenCalled();
     expect(
-      document.body.querySelector<HTMLInputElement>('#share-public-base-url')
-        ?.value,
-    ).toBe('https://cdn.example.com');
-    expect(
-      document.body.querySelector('[data-share-public-base-url-hint]')
-        ?.textContent,
-    ).toContain('download the page instead of opening it');
+      document.body.querySelector('[data-share-netlify-status]')?.textContent,
+    ).toContain('Publish this artifact once');
 
     act(() => root.unmount());
   });
 
-  it('tells the user the destination is only kept for this run', async () => {
+  it('can reopen an authorization page after the dialog is reopened', async () => {
+    const authorizationUrl =
+      'https://app.netlify.com/authorize?ticket=pending-ticket';
     artifactPublishConfig.mockResolvedValue({
       v: 1,
       workspaceCwd: '/primary',
-      publisher: 'local',
-      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
-      bucket: 'my-bucket',
-      keyPrefix: 'artifacts',
-      publicBaseUrl: '',
-      credentialsSource: 'env',
+      providers: [
+        {
+          kind: 'netlify',
+          configured: false,
+          unavailableReason: 'netlify_auth_required',
+        },
+      ],
+      setup: {
+        stage: 'authenticate',
+        cliInstalled: true,
+        authenticated: false,
+        linked: false,
+        configured: false,
+        authorizationPending: true,
+      },
     });
-
+    setupArtifactNetlify.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [
+        {
+          kind: 'netlify',
+          configured: false,
+          unavailableReason: 'netlify_auth_required',
+        },
+      ],
+      setup: {
+        stage: 'authenticate',
+        cliInstalled: true,
+        authenticated: false,
+        linked: false,
+        configured: false,
+        authorizationPending: true,
+      },
+      authorizationUrl,
+    });
+    const authWindow = {
+      close: vi.fn(),
+      location: { href: '' },
+      opener: window,
+    };
+    vi.spyOn(window, 'open').mockReturnValue(authWindow as unknown as Window);
     const { container, root } = renderHtmlArtifact();
+
     await openShareDialog(container);
 
-    expect(
-      document.body.querySelector('[data-share-storage-note]')?.textContent,
-    ).toContain('forgotten when it exits');
+    const authorizeButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-share-netlify-action="prepare"]',
+    );
+    expect(authorizeButton?.disabled).toBe(false);
+    expect(setupArtifactNetlify).not.toHaveBeenCalled();
+    await act(async () => authorizeButton?.click());
+    expect(setupArtifactNetlify).toHaveBeenCalledWith(
+      'netlify',
+      { action: 'prepare' },
+      { signal: expect.anything() },
+    );
+    expect(authWindow.location.href).toBe(authorizationUrl);
+    expect(authWindow.opener).toBeNull();
 
+    act(() => root.unmount());
+  });
+
+  it('stops a pending provider authorization and unlocks the dialog', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [
+        {
+          kind: 'vercel',
+          configured: false,
+          unavailableReason: 'vercel_auth_required',
+        },
+      ],
+      setups: {
+        vercel: {
+          provider: 'vercel',
+          stage: 'authenticate',
+          cliInstalled: true,
+          authenticated: false,
+          linked: false,
+          configured: false,
+        },
+      },
+    });
+    let setupSignal: AbortSignal | undefined;
+    setupArtifactNetlify.mockImplementation(
+      async (
+        _provider: string,
+        _request: unknown,
+        options?: { signal?: AbortSignal },
+      ) => {
+        setupSignal = options?.signal;
+        await new Promise<never>((_resolve, reject) => {
+          setupSignal?.addEventListener(
+            'abort',
+            () => reject(setupSignal?.reason),
+            { once: true },
+          );
+        });
+      },
+    );
+    const { container, root } = renderHtmlArtifact();
+
+    await openShareDialog(container);
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('[data-share-provider="vercel"]')
+        ?.click();
+    });
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('[data-share-action="prepare"]')
+        ?.click();
+    });
+
+    const stopButton = document.body.querySelector<HTMLButtonElement>(
+      '[data-share-action="stop"]',
+    );
+    expect(stopButton?.disabled).toBe(false);
+    expect(
+      document.body.querySelector<HTMLButtonElement>('[data-dialog-close]')
+        ?.disabled,
+    ).toBe(false);
+
+    await act(async () => stopButton?.click());
+
+    expect(setupSignal?.aborted).toBe(true);
+    expect(
+      document.body.querySelector<HTMLButtonElement>(
+        '[data-share-action="prepare"]',
+      )?.disabled,
+    ).toBe(false);
+
+    act(() => root.unmount());
+  });
+
+  it('never offers account projects as artifact targets', async () => {
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [
+        {
+          kind: 'netlify',
+          configured: false,
+          unavailableReason: 'netlify_site_unlinked',
+        },
+      ],
+      setup: {
+        stage: 'connect',
+        cliInstalled: true,
+        authenticated: true,
+        linked: false,
+        configured: false,
+        sites: [
+          { id: 'site-a', name: 'Site A' },
+          { id: 'site-b', name: 'Site B' },
+        ],
+      },
+    });
+    setupArtifactNetlify.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [{ kind: 'netlify', configured: true }],
+      setup: {
+        stage: 'ready',
+        cliInstalled: true,
+        authenticated: true,
+        linked: true,
+        configured: true,
+        linkedSite: { id: 'dedicated-site', name: 'Artifact site' },
+      },
+    });
+    const { container, root } = renderHtmlArtifact();
+
+    await openShareDialog(container);
+    expect(
+      document.body.querySelector('[data-share-netlify-site-picker]'),
+    ).toBeNull();
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>(
+          '[data-share-netlify-action="connect"]',
+        )
+        ?.click();
+    });
+
+    expect(setupArtifactNetlify).toHaveBeenCalledWith(
+      'netlify',
+      { action: 'prepare' },
+      { signal: expect.anything() },
+    );
     act(() => root.unmount());
   });
 });

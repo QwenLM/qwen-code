@@ -3484,7 +3484,7 @@
           "type": "object",
           "properties": {
             "uploadCommand": {
-              "description": "Command that uploads the artifact, run with execFile (no shell). {file} = local HTML path, {key} = remote object key. e.g. \"aws s3 cp {file} s3://bucket/{key} --content-type text/html\".",
+              "description": "Command run with execFile (no shell). Template mode uses {file} and {key}; command-output mode uses {dir} for the temporary static site directory.",
               "type": "string",
               "default": ""
             },
@@ -3493,10 +3493,110 @@
               "type": "string",
               "default": ""
             },
+            "urlFromCommandOutput": {
+              "description": "Deploy the temporary site directory through uploadCommand and read its public HTTPS URL from stdout. The command must include {dir}; stdout may be a URL or JSON containing url, ssl_url, deploy_url, deploy_ssl_url, or deployUrl.",
+              "type": "boolean",
+              "default": false
+            },
             "keyPrefix": {
               "description": "Remote key prefix; the object key is \"{prefix}/{id}/index.html\".",
               "type": "string",
               "default": "artifacts"
+            }
+          }
+        },
+        "share": {
+          "description": "Daemon-managed targets used by the Web Shell artifact sharing flow.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Show the Share action for workspace HTML artifacts and allow Web Shell publishing through configured hosting providers.",
+              "type": "boolean",
+              "default": true
+            },
+            "publications": {
+              "description": "Latest public deployment metadata used to avoid redeploying unchanged artifacts.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "cloudflare",
+                      "vercel",
+                      "netlify"
+                    ]
+                  },
+                  "targetId": {
+                    "type": "string"
+                  },
+                  "artifactId": {
+                    "type": "string"
+                  },
+                  "contentHash": {
+                    "type": "string"
+                  },
+                  "publishedId": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "publishedAt": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "provider",
+                  "targetId",
+                  "artifactId",
+                  "contentHash",
+                  "publishedId",
+                  "url",
+                  "publishedAt"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "cloudflare": {
+              "type": "object",
+              "properties": {
+                "accountId": {
+                  "type": "string",
+                  "default": ""
+                },
+                "projectName": {
+                  "type": "string",
+                  "default": ""
+                }
+              }
+            },
+            "vercel": {
+              "type": "object",
+              "properties": {
+                "projectId": {
+                  "type": "string",
+                  "default": ""
+                },
+                "projectName": {
+                  "type": "string",
+                  "default": ""
+                },
+                "scope": {
+                  "type": "string",
+                  "default": ""
+                }
+              }
+            },
+            "netlify": {
+              "type": "object",
+              "properties": {
+                "siteId": {
+                  "type": "string",
+                  "default": ""
+                }
+              }
             }
           }
         },

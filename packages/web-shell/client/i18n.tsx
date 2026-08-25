@@ -395,37 +395,106 @@ const EN: Messages = {
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
   'share.action': 'Share',
-  'share.title': 'Share HTML artifact',
-  'share.upload': 'Upload',
-  'share.uploading': 'Uploading…',
-  'share.endpointLabel': 'OSS endpoint',
-  'share.bucketLabel': 'Bucket',
-  'share.accessKeyIdLabel': 'AccessKey ID',
-  'share.accessKeySecretLabel': 'AccessKey Secret',
-  'share.credentialsHint':
-    'Leave both empty to use the credentials in the daemon environment.',
-  'share.credentialsFrom.env':
-    'Using the credentials found in the daemon environment. Fill these in to override them.',
-  'share.credentialsFrom.memory':
-    'Using the credentials entered earlier this run. Fill these in to replace them.',
-  'share.publicBaseUrlLabel': 'Public domain',
-  'share.publicBaseUrlHint':
-    'Leave empty to use the OSS default domain, which makes browsers download the page instead of opening it. Bind a custom domain to the bucket and enter it here for links that open directly.',
-  'share.storageNote':
-    'What you enter here is kept by the running daemon and forgotten when it exits. Nothing is written to disk.',
-  'share.destinationRequired': 'An endpoint and a bucket are required.',
-  'share.credentialsRequired':
-    'No credentials available — enter an AccessKey pair, or set them in the daemon environment.',
+  'share.title': 'Share Artifact',
+  'share.upload': 'Publish',
+  'share.uploading': 'Publishing…',
+  'share.stop': 'Stop',
+  'share.providerLabel': 'Publishing provider',
+  'share.provider.cloudflare': 'Cloudflare',
+  'share.provider.vercel': 'Vercel',
+  'share.provider.netlify': 'Netlify',
+  'share.providerStatus.published': 'Published',
+  'share.providerStatus.updated': 'Changes ready',
+  'share.providerStatus.ready': 'Ready',
+  'share.providerStatus.setup': 'Set up',
+  'share.progress': 'Sharing setup progress',
+  'share.stage.install': 'Prepare',
+  'share.stage.authenticate': 'Authorize',
+  'share.stage.connect': 'Connect',
+  'share.stage.ready': 'Ready',
+  'share.checking': (v) => `Checking ${v?.provider ?? ''} setup…`,
+  'share.ready': (v) => `Ready to publish with ${v?.provider ?? ''}.`,
+  'share.notReady': (v) =>
+    `Finish the ${v?.provider ?? ''} setup before publishing.`,
+  'share.setupWith': (v) => `Set up ${v?.provider ?? ''} sharing`,
+  'share.installStatus': (v) =>
+    `Qwen Code will prepare ${v?.provider ?? ''} sharing for this workspace.`,
+  'share.authorizeStatus': (v) =>
+    `Continue in the browser to authorize ${v?.provider ?? ''}.`,
+  'share.authorizationPending': (v) =>
+    `Finish authorization in the ${v?.provider ?? ''} window. This page will update automatically.`,
+  'share.connectStatus': (v) =>
+    `Qwen Code will create a dedicated ${v?.provider ?? ''} project.`,
+  'share.chooseAccount': (v) =>
+    `Choose the ${v?.provider ?? ''} account for the dedicated project.`,
+  'share.start': (v) => `Set up ${v?.provider ?? ''}`,
+  'share.authorize': (v) => `Authorize ${v?.provider ?? ''}`,
+  'share.connect': 'Connect project',
+  'share.retry': 'Try again',
+  'share.popupBlocked':
+    'Allow pop-ups for this page, then try authorization again.',
+  'share.setupFailed': 'Sharing setup could not be completed. Try again.',
+  'share.errorTitle': 'Sharing needs attention',
+  'share.details.summary': 'Details',
+  'share.details.currentLabel': 'Current',
+  'share.details.cliLabel': 'Tool',
+  'share.details.targetLabel': 'Target',
+  'share.details.savedLabel': 'Saved',
+  'share.details.current.checking':
+    'Checking the local CLI, authorization, and project configuration.',
+  'share.details.current.running': (v) =>
+    `Preparing ${v?.provider ?? 'the provider'}, opening browser authorization when needed, and connecting a dedicated project.`,
+  'share.details.current.authorizing': (v) =>
+    `Waiting for ${v?.provider ?? 'provider'} authorization in the browser.`,
+  'share.details.cli.cloudflare': 'Wrangler CLI',
+  'share.details.cli.vercel': 'Vercel CLI',
+  'share.details.cli.netlify': 'Netlify CLI',
+  'share.details.target.cloudflare': 'Dedicated Cloudflare Pages project',
+  'share.details.target.vercel': 'Dedicated Vercel project',
+  'share.details.target.netlify': 'Dedicated Netlify site',
+  'share.details.targetReady': (v) =>
+    `${v?.type ?? 'Dedicated project'}: ${v?.target ?? ''}`,
+  'share.details.saved.cloudflare':
+    'Cloudflare account ID and Pages project name',
+  'share.details.saved.vercel': 'Vercel project ID, project name, and scope',
+  'share.details.saved.netlify': 'Netlify site ID',
+  'share.details.installNote':
+    'If the CLI is missing, Qwen Code installs it on this machine without changing the current project dependencies.',
+  'share.details.credentialsNote':
+    'Authorization credentials and tokens remain managed by the official CLI and are not written to workspace settings.',
+  'share.storageNote': (v) =>
+    `Authorization is completed securely by ${v?.provider ?? 'the provider'} in your browser.`,
+  'share.publicNote': (v) =>
+    `Publishing uses a public ${v?.provider ?? ''} project. Anyone with the link can view it.`,
+  'share.publication.currentTitle': 'Current version is published',
+  'share.publication.currentDescription':
+    'Nothing has changed since the last publish, so the existing link is still current.',
+  'share.publication.staleTitle': 'New changes are ready',
+  'share.publication.staleDescription':
+    'This artifact changed after its last publish. Publish a new version to update the public link.',
+  'share.publication.firstTitle': 'Ready for first publish',
+  'share.publication.firstDescription':
+    'Publish this artifact once to create a public link you can share.',
+  'share.publication.publishedAt': (v) =>
+    `Published ${v?.time ?? 'previously'}`,
+  'share.publication.republish': 'Publish again',
+  'share.publication.openCurrent': 'Open published version',
+  'share.publication.publishNewVersion': 'Publish new version',
+  'share.publication.publishFirst': 'Publish artifact',
   'share.resultLabel': 'Share link',
-  'share.reachableYes': 'The link is publicly reachable.',
-  'share.reachableNo': (v) =>
-    `Uploaded, but the link is not publicly reachable (HTTP ${v?.status ?? ''}). The bucket most likely blocks public access.`,
-  'share.reachableUnknown':
-    'Uploaded. The link could not be checked from the daemon, so its public visibility is unconfirmed.',
+  'share.successTitle': 'Artifact published',
+  'share.successDescription':
+    'The public link is ready. Anyone with the link can view this artifact.',
+  'share.successReusedTitle': 'Already up to date',
+  'share.successReusedDescription':
+    'The artifact has not changed, so the existing deployment was reused.',
+  'share.historySaveFailedTitle': 'Publication history was not saved',
+  'share.historySaveFailedDescription':
+    'The link works, but Qwen Code may need to publish again next time.',
   'share.copied': 'Copied',
   'share.failed': (v) => `Share failed: ${v?.message ?? ''}`,
   'share.configFailed': (v) =>
-    `Could not load the share destination: ${v?.message ?? ''}`,
+    `Could not check sharing setup: ${v?.message ?? ''}`,
   'artifact.openLink': 'Open link',
   'common.na': 'N/A',
   'common.server': 'Server',
@@ -2986,6 +3055,10 @@ const EN: Messages = {
     `Maximum of ${v?.max ?? 3} fallback models selected; deselect one to choose another.`,
   'settings.corrupted': (v) =>
     `Settings file was corrupted${v?.recovered === 'true' ? ' (recovered from backup)' : ''}`,
+  'settings.category.Artifacts': 'Artifacts',
+  'settings.label.artifact.share.enabled': 'Artifact sharing',
+  'settings.description.artifact.share.enabled':
+    'Show Share on workspace HTML artifacts and allow publishing through Cloudflare, Vercel, or Netlify. Changes apply immediately.',
   'settings.label.ui.chatWidth': 'Chat width',
   'settings.description.ui.chatWidth':
     'Frontend-only chat content width. Stored in this browser.',
@@ -3430,35 +3503,99 @@ const ZH: Messages = {
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
   'share.action': '分享',
-  'share.title': '分享 HTML 产物',
-  'share.upload': '上传',
-  'share.uploading': '正在上传…',
-  'share.endpointLabel': 'OSS Endpoint',
-  'share.bucketLabel': 'Bucket',
-  'share.accessKeyIdLabel': 'AccessKey ID',
-  'share.accessKeySecretLabel': 'AccessKey Secret',
-  'share.credentialsHint': '两项都留空则使用 daemon 环境变量里的凭据。',
-  'share.credentialsFrom.env':
-    '正在使用 daemon 环境变量中的凭据。填写此处可覆盖。',
-  'share.credentialsFrom.memory':
-    '正在使用本次运行中已输入的凭据。填写此处可替换。',
-  'share.publicBaseUrlLabel': '公网访问域名',
-  'share.publicBaseUrlHint':
-    '留空则使用 OSS 默认域名，浏览器会强制下载而不是打开页面。为 Bucket 绑定自定义域名并填在这里，链接才能直接预览。',
-  'share.storageNote':
-    '这里填写的内容仅保留在运行中的 daemon 里，退出即忘，不写入磁盘。',
-  'share.destinationRequired': 'Endpoint 和 Bucket 为必填。',
-  'share.credentialsRequired':
-    '没有可用凭据——请填写 AccessKey，或在 daemon 环境变量中配置。',
+  'share.title': '分享 Artifact',
+  'share.upload': '发布',
+  'share.uploading': '正在发布…',
+  'share.stop': '停止',
+  'share.providerLabel': '发布平台',
+  'share.provider.cloudflare': 'Cloudflare',
+  'share.provider.vercel': 'Vercel',
+  'share.provider.netlify': 'Netlify',
+  'share.providerStatus.published': '已发布',
+  'share.providerStatus.updated': '有更新',
+  'share.providerStatus.ready': '已就绪',
+  'share.providerStatus.setup': '待配置',
+  'share.progress': '分享配置进度',
+  'share.stage.install': '准备',
+  'share.stage.authenticate': '授权',
+  'share.stage.connect': '连接',
+  'share.stage.ready': '可用',
+  'share.checking': (v) => `正在检查 ${v?.provider ?? ''} 配置…`,
+  'share.ready': (v) => `已准备好通过 ${v?.provider ?? ''} 发布。`,
+  'share.notReady': (v) => `请先完成 ${v?.provider ?? ''} 配置再发布。`,
+  'share.setupWith': (v) => `配置 ${v?.provider ?? ''} 分享`,
+  'share.installStatus': (v) =>
+    `Qwen Code 将为当前工作区准备 ${v?.provider ?? ''} 分享。`,
+  'share.authorizeStatus': (v) =>
+    `请继续在浏览器中授权 ${v?.provider ?? ''} 账号。`,
+  'share.authorizationPending': (v) =>
+    `请在 ${v?.provider ?? ''} 窗口完成授权，本页面会自动更新。`,
+  'share.connectStatus': (v) =>
+    `Qwen Code 将自动创建专用的 ${v?.provider ?? ''} 项目。`,
+  'share.chooseAccount': (v) =>
+    `请选择用于创建专用项目的 ${v?.provider ?? ''} 账号。`,
+  'share.start': (v) => `配置 ${v?.provider ?? ''}`,
+  'share.authorize': (v) => `授权 ${v?.provider ?? ''}`,
+  'share.connect': '连接项目',
+  'share.retry': '重试',
+  'share.popupBlocked': '请允许此页面打开新窗口，然后重试授权。',
+  'share.setupFailed': '暂时无法完成分享配置，请重试。',
+  'share.errorTitle': '分享配置需要处理',
+  'share.details.summary': '详细信息',
+  'share.details.currentLabel': '当前动作',
+  'share.details.cliLabel': '使用工具',
+  'share.details.targetLabel': '发布目标',
+  'share.details.savedLabel': '工作区保存',
+  'share.details.current.checking': '正在检查本机 CLI、授权状态和项目配置。',
+  'share.details.current.running': (v) =>
+    `正在准备 ${v?.provider ?? '发布平台'}，需要时会打开浏览器授权，并连接专用项目。`,
+  'share.details.current.authorizing': (v) =>
+    `正在等待浏览器中的 ${v?.provider ?? '平台'} 授权。`,
+  'share.details.cli.cloudflare': 'Wrangler CLI',
+  'share.details.cli.vercel': 'Vercel CLI',
+  'share.details.cli.netlify': 'Netlify CLI',
+  'share.details.target.cloudflare': '专用 Cloudflare Pages 项目',
+  'share.details.target.vercel': '专用 Vercel 项目',
+  'share.details.target.netlify': '专用 Netlify 站点',
+  'share.details.targetReady': (v) =>
+    `${v?.type ?? '专用项目'}：${v?.target ?? ''}`,
+  'share.details.saved.cloudflare': 'Cloudflare 账号标识和 Pages 项目名',
+  'share.details.saved.vercel': 'Vercel 项目标识、项目名和 Scope',
+  'share.details.saved.netlify': 'Netlify Site ID',
+  'share.details.installNote':
+    '如果本机缺少 CLI，Qwen Code 会自动安装，但不会修改当前项目依赖。',
+  'share.details.credentialsNote':
+    '授权凭据和 token 仍由官方 CLI 管理，不会写入工作区设置。',
+  'share.storageNote': (v) =>
+    `授权会由 ${v?.provider ?? '平台'} 在浏览器中安全完成。`,
+  'share.publicNote': (v) =>
+    `发布会使用公开的 ${v?.provider ?? ''} 项目，任何拿到链接的人都可以查看。`,
+  'share.publication.currentTitle': '当前版本已发布',
+  'share.publication.currentDescription':
+    '内容与上次发布一致，可以继续使用现有链接，不会重复创建部署。',
+  'share.publication.staleTitle': '检测到新内容',
+  'share.publication.staleDescription':
+    'Artifact 在上次发布后有修改，发布新版本后公开链接会更新。',
+  'share.publication.firstTitle': '准备首次发布',
+  'share.publication.firstDescription':
+    '首次发布后会生成一个公开链接，拿到链接的人都可以查看。',
+  'share.publication.publishedAt': (v) => `发布于 ${v?.time ?? '此前'}`,
+  'share.publication.republish': '重新发布',
+  'share.publication.openCurrent': '打开已发布版本',
+  'share.publication.publishNewVersion': '发布新版本',
+  'share.publication.publishFirst': '首次发布',
   'share.resultLabel': '分享链接',
-  'share.reachableYes': '链接已可公开访问。',
-  'share.reachableNo': (v) =>
-    `已上传，但链接无法公开访问（HTTP ${v?.status ?? ''}）。多半是 Bucket 开启了阻止公共访问。`,
-  'share.reachableUnknown':
-    '已上传。daemon 无法检测该链接，公开可访问性未确认。',
+  'share.successTitle': 'Artifact 已发布',
+  'share.successDescription': '公开链接已可用，任何拿到链接的人都可以查看。',
+  'share.successReusedTitle': '当前版本已是最新',
+  'share.successReusedDescription':
+    '内容没有变化，已直接复用现有链接，没有创建新的部署。',
+  'share.historySaveFailedTitle': '发布记录未保存',
+  'share.historySaveFailedDescription':
+    '公开链接仍然可用，但下次分享时可能需要重新发布。',
   'share.copied': '已复制',
   'share.failed': (v) => `分享失败：${v?.message ?? ''}`,
-  'share.configFailed': (v) => `无法读取分享目标：${v?.message ?? ''}`,
+  'share.configFailed': (v) => `无法检查分享配置：${v?.message ?? ''}`,
   'artifact.openLink': '打开链接',
   'common.na': '不适用',
   'common.server': '服务器',
@@ -5858,7 +5995,11 @@ const ZH: Messages = {
   'settings.category.Tools': '工具',
   'settings.category.Daemon': '守护进程',
   'settings.category.Experimental': '实验性',
+  'settings.category.Artifacts': 'Artifact',
   'settings.category.Advanced': '高级',
+  'settings.label.artifact.share.enabled': 'Artifact 分享',
+  'settings.description.artifact.share.enabled':
+    '在工作区 HTML Artifact 上显示分享按钮，并允许通过 Cloudflare、Vercel 或 Netlify 发布。修改后立即生效。',
   'settings.label.general.enableAutoUpdate': '启用自动更新',
   'settings.description.general.enableAutoUpdate': '启动时自动检查并安装更新。',
   'settings.label.general.showSessionRecap': '显示会话回顾',

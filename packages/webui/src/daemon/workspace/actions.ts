@@ -615,18 +615,26 @@ export function createDaemonWorkspaceActions({
         'Read file bytes timed out',
       );
     },
-    async artifactPublishConfig() {
+    async artifactPublishConfig(path) {
       const client = requireClient(getClient, 'Share configuration failed');
-      return withActionTimeout(
-        client.artifactPublishConfig(),
-        'Share configuration timed out',
+      // Provider CLI and account checks can require browser-backed network
+      // access, so they use the route's own bounded command timeouts.
+      return client.artifactPublishConfig(undefined, path);
+    },
+    async setupArtifactProvider(provider, req, opts) {
+      const client = requireClient(getClient, `${provider} setup failed`);
+      return client.setupArtifactProvider(
+        provider,
+        req,
+        undefined,
+        opts?.signal,
       );
     },
-    async publishArtifact(req) {
+    async publishArtifact(req, opts) {
       const client = requireClient(getClient, 'Share failed');
-      // No withActionTimeout: an upload plus the reachability probe can
-      // outlast the default action budget on a large page or a slow link.
-      return client.publishArtifact(req);
+      // No withActionTimeout: provider publishing can outlast the default
+      // action budget on a large page or a slow link.
+      return client.publishArtifact(req, undefined, opts?.signal);
     },
 
     async writeFile(req) {

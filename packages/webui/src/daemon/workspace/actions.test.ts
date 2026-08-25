@@ -55,6 +55,55 @@ describe('workspace actions', () => {
     expect(workspaceAcpPreheat).toHaveBeenCalledWith(5_000);
   });
 
+  it('forwards a Unicode artifact path without treating it as a client ID', async () => {
+    const path = '草饲所有人-艺术字.html';
+    const config = { v: 1, workspaceCwd: '/ws', providers: [] };
+    const artifactPublishConfig = vi.fn().mockResolvedValue(config);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ artifactPublishConfig }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.artifactPublishConfig(path)).resolves.toBe(config);
+    expect(artifactPublishConfig).toHaveBeenCalledWith(undefined, path);
+  });
+
+  it('forwards cancellation signals for artifact setup and publishing', async () => {
+    const setupArtifactProvider = vi.fn().mockResolvedValue({});
+    const publishArtifact = vi.fn().mockResolvedValue({});
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ setupArtifactProvider, publishArtifact }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+    const setupController = new AbortController();
+    const publishController = new AbortController();
+
+    await actions.setupArtifactProvider(
+      'vercel',
+      { action: 'prepare' },
+      { signal: setupController.signal },
+    );
+    await actions.publishArtifact(
+      { path: 'report.html', provider: 'vercel' },
+      { signal: publishController.signal },
+    );
+
+    expect(setupArtifactProvider).toHaveBeenCalledWith(
+      'vercel',
+      { action: 'prepare' },
+      undefined,
+      setupController.signal,
+    );
+    expect(publishArtifact).toHaveBeenCalledWith(
+      { path: 'report.html', provider: 'vercel' },
+      undefined,
+      publishController.signal,
+    );
+  });
+
   it('allows the SDK archive timeout to run before the wrapper timeout', async () => {
     vi.useFakeTimers();
     const installExtensionArchive = vi.fn(() => new Promise<never>(() => {}));
