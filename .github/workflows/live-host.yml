@@ -71,7 +71,7 @@ jobs:
           test -x "$app/Contents/MacOS/Qwen Live Host"
           test -f "$app/Contents/Resources/app.asar"
 
-          asar_entries="$(node node_modules/@electron/asar/bin/asar.mjs list "$app/Contents/Resources/app.asar")"
+          asar_entries="$(npx --no-install asar list "$app/Contents/Resources/app.asar")"
           if printf '%s\n' "$asar_entries" | grep -Eiq '(^|/)(native/|.*command[-_]?monitor|.*commandtap)'; then
             echo '::error::Packaged app.asar contains a removed keyboard monitor or native helper.'
             exit 1
@@ -86,7 +86,7 @@ jobs:
           extracted_asar="$(mktemp -d)"
           packaged_entitlements="$(mktemp)"
           trap 'rm -rf "$extracted_asar"; rm -f "$packaged_entitlements"' EXIT
-          node node_modules/@electron/asar/bin/asar.mjs extract "$app/Contents/Resources/app.asar" "$extracted_asar"
+          npx --no-install asar extract "$app/Contents/Resources/app.asar" "$extracted_asar"
           test -d "$extracted_asar/dist"
           if grep -RIEq 'openWebShellWindow|web-shell-security|host\.open_session|inputMonitoring|installUrl|loadURL\(|@modelcontextprotocol|node:child_process' "$extracted_asar/dist"; then
             echo '::error::Packaged app contains a forbidden external backend, process launcher, WebShell window, or Input Monitoring path.'

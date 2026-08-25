@@ -26,6 +26,10 @@ const liveHostInstaller = readFileSync(
   'packages/cli/src/serve/live/live-host-installer.ts',
   'utf8',
 );
+const liveHostCiWorkflow = readFileSync(
+  '.github/workflows/live-host.yml',
+  'utf8',
+);
 const liveHostReleaseWorkflow = readFileSync(
   '.github/workflows/live-host-release.yml',
   'utf8',
@@ -272,6 +276,14 @@ describe('Live Host feed contract', () => {
     );
     expect(liveHostReleaseWorkflow).toContain(
       "run: 'npm run dist:mac:no-publish'",
+    );
+  });
+
+  it('resolves the ASAR verifier through the standalone package', () => {
+    expect(liveHostCiWorkflow).toContain('npx --no-install asar list');
+    expect(liveHostCiWorkflow).toContain('npx --no-install asar extract');
+    expect(liveHostCiWorkflow).not.toContain(
+      'node_modules/@electron/asar/bin/asar.mjs',
     );
   });
 

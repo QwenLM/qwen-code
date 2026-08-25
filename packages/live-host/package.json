@@ -21,6 +21,7 @@
     "ws": "^8.19.0"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@types/node": "^25.0.8",
     "@types/semver": "^7.7.1",
     "@types/ws": "^8.18.1",
