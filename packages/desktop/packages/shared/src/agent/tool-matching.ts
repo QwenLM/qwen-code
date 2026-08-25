@@ -421,8 +421,9 @@ function detectBackgroundEvents(
   // together. The web-shell fallback
   // (packages/web-shell/client/adapters/toolClassification.ts,
   // `isBackgroundSubAgentToolCall`) is a frozen compatibility path covering
-  // only pre-projection data (legacy daemon frames and recorded sessions,
-  // which carry no executionMode) and must NOT be updated on rule changes.
+  // every frame lacking executionMode (including current-core blocked-spawn
+  // result frames; only recordings made before this feature lack the field)
+  // and must NOT be updated on rule changes.
   // The web shell reads `rawOutput.status`; this adapter reads the
   // serialized runtime result.
   const normalizedToolName = entry.name.toLowerCase();

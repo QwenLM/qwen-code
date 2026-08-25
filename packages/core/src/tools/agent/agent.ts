@@ -2698,8 +2698,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // The desktop client does not receive this projection and still
       // replicates the rule (packages/desktop/packages/shared/src/agent/
       // tool-matching.ts, detectBackgroundEvents) — update it if this rule
-      // changes. The web-shell fallback in toolClassification.ts covers only
-      // pre-projection data and must stay frozen at the legacy rule.
+      // changes. The web-shell fallback in toolClassification.ts covers every
+      // frame lacking executionMode (including blocked-spawn result frames and
+      // pre-feature recordings) and must stay frozen at the legacy rule.
       const backgroundRequested =
         isFork && !this.config.isInteractive()
           ? true
