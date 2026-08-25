@@ -111,18 +111,24 @@ function canWrite(repository, login) {
 }
 
 // `gh pr view --json files` caps at 100 entries, so the REST files endpoint
-// pages through every changed file instead.
-function changedFiles(repository, prNumber) {
+// pages through every changed file instead. Each filename is decoded from
+// base64 because changed filenames are attacker-controlled on fork PRs and
+// git accepts newlines in path components: splitting the rendered text on
+// newlines would let a name like "x<LF>packages/core/poc" inject a phantom
+// "packages/core/poc" entry that steers which area owner gets assigned.
+export function changedFiles(repository, prNumber) {
   return gh([
     'api',
     `repos/${repository}/pulls/${prNumber}/files`,
     '--paginate',
     '--jq',
-    '.[].filename',
+    '.[].filename | @base64',
   ])
     .split('\n')
     .filter(Boolean)
-    .map((filename) => ({ path: filename }));
+    .map((line) => ({
+      path: Buffer.from(line, 'base64').toString('utf8'),
+    }));
 }
 
 function main() {

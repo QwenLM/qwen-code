@@ -21,6 +21,7 @@ import { parse } from 'yaml';
 import { loadPolicy } from './assign-issue-owner.mjs';
 import {
   alreadyCovered,
+  changedFiles,
   matchAreaByPath,
   skipPrReason,
 } from './assign-pr-owner.mjs';
@@ -152,6 +153,9 @@ function runAssign(dryRun, options = {}) {
     // the run is in flight.
     prLatestJson = '',
     files = 'packages/core/src/foo.ts',
+    // Raw filename list; overrides `files` when a test needs names a
+    // newline-joined string cannot carry (git allows newlines in paths).
+    fileList,
     zeroLoadOwner = 'DennisYu07',
     // What every collaborator permission lookup answers; 'error' fails the
     // lookup outright instead of answering.
@@ -164,6 +168,7 @@ function runAssign(dryRun, options = {}) {
     editErr = '',
     expectExit = 0,
   } = options;
+  const fileNames = fileList ?? files.split('\n').filter(Boolean);
   const dir = mkdtempSync(join(tmpdir(), 'assign-pr-owner-'));
   tempDirs.push(dir);
   const log = join(dir, 'gh.log');
@@ -182,6 +187,7 @@ case "$*" in
       printf '%s' "$GH_STUB_PR"
     fi
     ;;
+  *"pulls/77/files"*"@base64"*) printf '%s' "$GH_STUB_FILES_B64" ;;
   *"pulls/77/files"*) printf '%s' "$GH_STUB_FILES" ;;
   *"/collaborators/$GH_STUB_DENY_LOGIN/permission"*) printf '%s' "$GH_STUB_DENY_PERM" ;;
   *"/collaborators/"*"/permission"*)
@@ -207,7 +213,14 @@ esac
       GH_STUB_LOG: log,
       GH_STUB_PR: prJson,
       GH_STUB_PR_LATEST: prLatestJson,
-      GH_STUB_FILES: files,
+      // What the legacy text-rendering filter would print: one filename per
+      // line, so an embedded newline forges extra entries.
+      GH_STUB_FILES: fileNames.join('\n'),
+      // What the fixed `| @base64` filter prints: one base64 token per
+      // filename, so an embedded newline stays inside one entry.
+      GH_STUB_FILES_B64: fileNames
+        .map((name) => Buffer.from(name, 'utf8').toString('base64'))
+        .join('\n'),
       GH_STUB_PERMISSION: permission,
       // The stub's deny branch pattern-expands this login; '__none__' can
       // never collide with a real collaborator lookup.
@@ -353,6 +366,64 @@ describe('assign-pr-owner: apply boundary', () => {
       expectExit: 1,
     });
     assert.match(log, /pr edit/);
+  });
+});
+
+describe('assign-pr-owner: untrusted filename decoding', () => {
+  it('keeps a newline inside a changed filename from forging a second path', () => {
+    // Changed filenames are attacker-controlled on fork PRs, and git accepts
+    // newlines in path components. Decoding each filename structurally must
+    // keep "x<LF>packages/core/poc" one entry; splitting the rendered text
+    // on newlines would turn it into a phantom "packages/core/poc" that a
+    // fork author could use to steer which area owner gets assigned.
+    const forged = 'x\npackages/core/poc';
+    const fileNames = [forged, 'packages/core/src/foo.ts'];
+
+    // Decode boundary, probed directly through a stub that renders what the
+    // real files endpoint would for each jq filter.
+    const dir = mkdtempSync(join(tmpdir(), 'assign-pr-owner-'));
+    tempDirs.push(dir);
+    const ghPath = join(dir, 'gh');
+    writeFileSync(
+      ghPath,
+      `#!/bin/sh
+case "$*" in
+  *"pulls/77/files"*"@base64"*) printf '%s' '${fileNames
+    .map((name) => Buffer.from(name, 'utf8').toString('base64'))
+    .join('\n')}' ;;
+  *"pulls/77/files"*) printf '%s' '${fileNames.join('\n')}' ;;
+  *) printf 'unexpected gh call: %s\\n' "$*" >&2; exit 1 ;;
+esac
+`,
+    );
+    chmodSync(ghPath, 0o755);
+    const prevPath = process.env.PATH;
+    process.env.PATH = `${dir}:${prevPath}`;
+    let decoded;
+    try {
+      decoded = changedFiles('QwenLM/qwen-code', 77);
+    } finally {
+      process.env.PATH = prevPath;
+    }
+    // The forged name arrives as exactly one entry, newline intact.
+    assert.deepEqual(decoded, [
+      { path: forged },
+      { path: 'packages/core/src/foo.ts' },
+    ]);
+    // On its own it matches no area prefix...
+    assert.equal(matchAreaByPath(policy, [decoded[0]]), null);
+    // ...while the legit core file still routes the PR to core.
+    assert.equal(matchAreaByPath(policy, decoded)?.name, 'core');
+
+    // End to end: a PR carrying only the forged name is skipped instead of
+    // being routed to core through the phantom split entry...
+    const alone = runAssign(false, { fileList: [forged] });
+    assert.doesNotMatch(alone.log, /pr edit/);
+    assert.match(alone.stdout, /no area path matched/);
+    // ...and adding a legit core file routes to core for that file's sake.
+    const mixed = runAssign(false, { fileList: fileNames });
+    assert.match(mixed.log, /pr edit 77 .*--add-assignee DennisYu07/);
+    assert.match(mixed.stdout, /Area: core/);
   });
 });
 
