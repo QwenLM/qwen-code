@@ -183,6 +183,7 @@ function makeFakeEnv() {
         return { filePath: `/tmp/${to}.jsonl`, copiedCount: 2 };
       }),
     loadSession: async (id: string) => sessionServiceMocks.sessions.get(id),
+    getSessionDisplayName: vi.fn().mockResolvedValue(undefined),
     // Realistic like SessionService.removeSession (deletes the fork JSONL):
     // the branch hook calls it in exactly the failure path these tests
     // drive (forkCreated && !uiSwapped), so the fork must not survive in
@@ -209,6 +210,7 @@ function makeFakeEnv() {
       finalize: vi.fn(),
       flush: vi.fn().mockResolvedValue(undefined),
       rebuildTurnBoundaries: vi.fn(),
+      getCurrentCustomTitle: vi.fn().mockReturnValue(undefined),
     }),
     getSessionService: () => sessionService,
     getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
