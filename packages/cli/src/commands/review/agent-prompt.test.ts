@@ -25,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  realpathSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -1479,7 +1480,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     // is launched, which makes this the one place the pipeline can notice that
     // the tree those agents are about to read is not the commit they think it
     // is. A real git worktree, because `git status` is the oracle.
-    const dir = mkdtempSync(join(tmpdir(), 'ap-residue-'));
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ap-residue-')));
     // Ambient host git config (a global `commit.gpgsign` with no key, a
     // `core.hooksPath` that fails) makes the fixture commit throw and reddens
     // this test for reasons the branch never touched — the incident
@@ -1504,15 +1505,18 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       writeFileSync(join(wt, '__probe__.test.ts'), 'it("x", () => {});');
 
       const plan = join(dir, 'plan.json');
-      writeFileSync(
-        plan,
-        JSON.stringify({
-          ...PLAN,
-          worktreePath: wt,
-          prNumber: '9207',
-          ownerRepo: 'QwenLM/qwen-code',
-        }),
-      );
+      const writePlan = (fields: Record<string, unknown>) =>
+        writeFileSync(
+          plan,
+          JSON.stringify({
+            ...PLAN,
+            worktreePath: wt,
+            prNumber: '9207',
+            ownerRepo: 'QwenLM/qwen-code',
+            ...fields,
+          }),
+        );
+      writePlan({ fetchedSha: git('rev-parse', 'HEAD').trim() });
       (agentPromptCommand.handler as (a: unknown) => void)({
         plan,
         roster: true,
@@ -1533,11 +1537,134 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       expect(readFileSync(briefPath(plan, '1b'), 'utf8')).toContain(
         'And right now it is not clean',
       );
+
+      // The handover is the wiring under test: drop it and the brief degrades
+      // in one of two ways, both refused — a WRONG sha (the forge's own)
+      // reaches the pin and is refused there, a MISSING one fails closed
+      // before the probe runs, because every worktree-mode fetch writes the
+      // field and its absence means the plan was tampered with. Either way
+      // the brief carries the unmeasured sentence, never a clean verdict.
+      const briefOf = (fields: Record<string, unknown>) => {
+        writePlan(fields);
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          roster: true,
+        });
+        return readFileSync(briefPath(plan, '1a'), 'utf8');
+      };
+      const wrongSha = briefOf({ fetchedSha: `deadbeef${'0'.repeat(32)}` });
+      expect(wrongSha).toContain('Whether it is clean could not be measured');
+      expect(wrongSha).toContain('not the fetched PR head');
+      // The framing names a reason, not a failed `git status` — the status
+      // never ran for these refusals, and a triager sent to debug the git
+      // environment would find nothing to fix.
+      expect(wrongSha).toContain('(reason: ');
+      expect(wrongSha).not.toContain('(`git status` failed');
+      const noSha = briefOf({});
+      expect(noSha).toContain('Whether it is clean could not be measured');
+      expect(noSha).toContain('no usable record of the fetched head sha');
+      // The stderr warning the handler prints for the same state carries the
+      // same neutral framing.
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('(reason: '),
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
       gitIsolation.dispose();
     }
   });
+
+  // A SHA-256 repository is the shape the record validators must admit:
+  // fetch-pr writes `git rev-parse` verbatim, and in that repository class
+  // the answer is 64 hex. Git grew the format late, so probe for support and
+  // skip where it is absent rather than fail a host that cannot build the
+  // fixture.
+  const gitSha256Supported = (() => {
+    try {
+      const probe = mkdtempSync(join(tmpdir(), 'qwen-sha256-probe-'));
+      try {
+        execFileSync('git', ['init', '-q', '--object-format=sha256', probe], {
+          stdio: 'pipe',
+        });
+        return true;
+      } finally {
+        rmSync(probe, { recursive: true, force: true });
+      }
+    } catch {
+      return false;
+    }
+  })();
+
+  it.skipIf(!gitSha256Supported)(
+    'pins a SHA-256 review worktree with the plan’s 64-hex record',
+    () => {
+      // A validator matching only 40-hex shas drops the record this
+      // repository class writes: every worktree-mode round then fails
+      // closed as though the plan were tampered with, and the verifier's
+      // scratch-tree command is built without `--fetched-sha`. The 64-hex
+      // record must reach BOTH the residue pin and the welded command.
+      const gitIsolation = isolateHostGitConfig();
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), 'ap-sha256-')));
+      try {
+        const git = (...args: string[]) =>
+          execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+        git('init', '-q', '-b', 'main', '--object-format=sha256');
+        git('config', 'user.email', 't@t.t');
+        git('config', 'user.name', 't');
+        writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');
+        git('add', '-A');
+        git('commit', '-qm', 'head');
+        const sha64 = git('rev-parse', 'HEAD').trim();
+        expect(sha64).toMatch(/^[0-9a-f]{64}$/);
+        const wt = join(dir, '.qwen', 'tmp', 'review-pr-sha256');
+        git('worktree', 'add', '--detach', '-q', wt, 'HEAD');
+        const plan = join(dir, 'plan.json');
+        writeFileSync(
+          plan,
+          JSON.stringify({
+            ...PLAN,
+            worktreePath: wt,
+            prNumber: '256',
+            ownerRepo: 'QwenLM/qwen-code',
+            fetchedSha: sha64,
+          }),
+        );
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          roster: true,
+        });
+
+        // The record reached the residue pin: the tree at the recorded sha
+        // measures clean instead of being refused for a missing record.
+        const brief = readFileSync(briefPath(plan, '1a'), 'utf8');
+        expect(brief).not.toContain(
+          'Whether it is clean could not be measured',
+        );
+        expect(brief).not.toContain('no usable record of the fetched head');
+        // And it reached the scratch-tree command welded into a verifier
+        // shard's brief — shards launch through the single-role path with
+        // their record key, exactly as the orchestrator runs them.
+        const findings = join(dir, 'findings.md');
+        writeFileSync(findings, '- **[Critical]** probe');
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          role: 'verify',
+          findings,
+        });
+        const recorded = readRecordedPrompts(plan);
+        const verifyKey = [...recorded.keys()].find((k) =>
+          k.startsWith('verify--'),
+        );
+        expect(verifyKey).toBeDefined();
+        expect(
+          readFileSync(briefPath(plan, verifyKey ?? ''), 'utf8'),
+        ).toContain(`--fetched-sha ${sha64}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+        gitIsolation.dispose();
+      }
+    },
+  );
 
   it('builds and records the whole 3A roster', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-roster-'));
@@ -1551,12 +1678,16 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       // PLAN has no srcDiffLines and no worktree: a diff-only 3A review, and its
       // `files[]` is absent, so the removed-behaviour audit is owed (an unknown
-      // deletion count is not "no deletions"). Pinned literally: this list IS the
-      // contract, and a drift here is a drift in who reviews.
+      // deletion count is not "no deletions") — and no `wrapperSignal`, so the
+      // wrapper/proxy check is owed too (an absent signal is not "no wrapping
+      // types"). Pinned literally: this list IS the contract, and a drift here
+      // is a drift in who reviews.
       const recorded = readRecordedPrompts(plan);
       expect([...recorded.keys()].sort()).toEqual([
         '1a',
         '1b',
+        '1d',
+        '1e',
         '2',
         '3a',
         '3b',
@@ -1570,7 +1701,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
 
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('11 agents required');
+      expect(printed).toContain('13 agents required');
       // Every recorded prompt appears in the output byte-for-byte: what the
       // orchestrator copies is what the delivery check will look for.
       for (const [, prompt] of recorded) {
@@ -1578,7 +1709,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       }
       // Labelled for the reader, so a Task launch can be named after its block.
       expect(printed).toMatch(
-        /───── agent \d+ of 11 — Agent 1a: Line-by-line correctness ─────/,
+        /───── agent \d+ of 13 — Agent 1a: Line-by-line correctness ─────/,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -2593,6 +2724,8 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     '1a',
     '1b',
     '1c',
+    '1d',
+    '1e',
     '2',
     '3a',
     '3b',
@@ -2640,6 +2773,72 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(brief).toContain(
       'or "N/A" when the fix adds no guard, branch or behaviour a test can pin',
     );
+  });
+
+  it('keeps the language-agnostic falsy-zero shape in the Agent 1a brief', () => {
+    // The #9788 split moved the language-pitfall CHECKLIST and wrapper/proxy
+    // routing out of 1a, but the falsy-zero shape is general correctness, not
+    // a checklist item — and its promoted replacement (Agent 1d) is high-only
+    // and files it under JS/TS alone. Deleting it here leaves medium reviews
+    // — the default for local and file targets — and non-JS highs with no
+    // agent prompted toward `if (x)` where 0 or '' is a valid value.
+    expect(buildRoleBrief(PLAN, '1a')).toContain(
+      "falsy-zero checks (`if (x)` where `0` or `''` is a valid value)",
+    );
+  });
+
+  it('keeps the moved checklists out of the Agent 1a brief', () => {
+    // The other half of the #9788 split: the test above pins what STAYED in
+    // 1a; this one pins what LEFT. A future edit that re-adds either bullet
+    // to 1a's brief — a merge resolution, or a restore aimed at the wrong
+    // role — keeps every suite green while high-effort 1a's walk and Agents
+    // 1d/1e double-flag the same ground, re-diluting the checklist inside
+    // the walk rhythm. SKILL.test.ts negatively pins the SKILL.md digest
+    // row; this pins the brief the agents actually read.
+    const brief = buildRoleBrief(PLAN, '1a');
+    expect(brief).not.toContain('language-pitfall checklist for this diff');
+    expect(brief).not.toContain('**Wrapper/proxy routing.**');
+  });
+
+  it('states the checklist entries with their real semantics', () => {
+    // The Go and Kotlin entries shipped inverted. Range-variable capture is
+    // the PRE-1.22 per-loop footgun — a module targeting Go 1.22+ allocates
+    // the loop variable per iteration, so the capture is safe — and Kotlin
+    // `==` already translates to `equals` (`===` is identity). As first
+    // written, the checklist prompted Agent 1d to report correct Go 1.22 and
+    // Kotlin code as bugs. Pin the corrected wording, per language, so a
+    // re-inversion ships red.
+    const brief = buildRoleBrief(PLAN, '1d');
+    // Go: the capture item is scoped to the vulnerable semantics alone, and
+    // the safe case is bound to the module's `go` directive — what actually
+    // gates per-iteration semantics — not the installed toolchain; an
+    // unbound cue reads as the toolchain version and declares an
+    // old-directive module safe.
+    expect(brief).toContain('only under the pre-1.22 per-loop semantics');
+    expect(brief).toContain("module's `go` directive in go.mod");
+    expect(brief).toContain('not the installed toolchain');
+    expect(brief).toContain('Go 1.22+');
+    expect(brief).toContain(
+      'allocates the loop variable per iteration, so the capture is safe',
+    );
+    expect(brief).not.toContain('per-iteration semantics or below');
+    // JS/TS: the capture item is scoped to `var` — `let`/`const` for-heads
+    // bind per iteration, so an unscoped cue repeats the Go false positive
+    // on the most common loop shape in a TypeScript diff.
+    expect(brief).toContain('a closure capturing a `var` loop variable');
+    expect(brief).toContain('for-heads bind per iteration');
+    // Java and Kotlin are separate entries with opposite equality traps:
+    // Java owes `.equals` where `==` stands; Kotlin's `==` already calls
+    // `equals`, so `===` is the operator owed. Each cue is pinned adjacent
+    // to its entry label — position-free pins shipped green through a
+    // Java/Kotlin phrase swap — and the Java cue keeps its scope limiter,
+    // or 1d pattern-matches any `==`, including comparisons where `==` is
+    // correct.
+    expect(brief).toContain('**Java:** `==` where `.equals` is owed');
+    expect(brief).toContain('(boxed types, `String`)');
+    expect(brief).toContain('**Kotlin:** `===` where `==` is owed');
+    expect(brief).toContain('`===` is identity');
+    expect(brief).not.toContain('**Java/Kotlin:**');
   });
 
   it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
@@ -2761,11 +2960,36 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('A vacuous test is a **Suggestion**');
     expect(p).toContain('report **that behaviour** as the Critical');
     expect(p).not.toContain('is a **Critical**: a green-no-matter-what');
+    // The brief's mutation analysis is reading-based — executed verdicts
+    // belong to Agent 7's efficacy probe — so its mutation claims must be
+    // phrased as hypotheses or carry an explicit not-run witness, never the
+    // execution-grade "verified N/N green" (issue #9901). The rule anchors on
+    // ownership, not on a capability claim: the review-agent tool table is
+    // role-neutral and includes the shell, so "you have no runner" would be
+    // false and must never come back.
+    expect(p).toContain('An unrun mutation is a hypothesis');
+    expect(p).toContain('ships N/N green');
+    expect(p).toContain('verified N/N green');
+    expect(p).toContain('witness: not run —');
+    expect(p).toContain('Executed mutation verdicts belong to Agent 7');
+    expect(p).not.toContain('you have no runner');
     // The test-matrix agent applies Agent 5's rules to the behaviour/test pairing
     // it owns, so its severity must move in lockstep — a revert of just this bullet
     // would let the two agents grade the same inert test differently on one PR.
     expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
       'a **Suggestion** on its own, Critical only when',
+    );
+    // And the witness discipline must move in lockstep too — test-matrix is the
+    // same reading-based mutation analysis, so it carries the same bar on
+    // execution-grade phrasing.
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('witness: not run —');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('ships N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('verified N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
+      'phrase an unrun mutation as a reasoned hypothesis',
+    );
+    expect(buildRoleBrief(PLAN, 'test-matrix')).not.toContain(
+      'you have no runner',
     );
   });
 
@@ -2839,6 +3063,42 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(
       buildRoleBrief(PR_PLAN, 'verify', { key: 'verify; rm -rf /' }),
     ).toContain('--label verify__rm_-rf__');
+    // The plan's fetched sha rides along when the plan carries a usable one:
+    // it is the shared-tree residue check's identity anchor, and without it
+    // the check would refuse every healthy run (#9742). Absent or malformed,
+    // nothing is welded — the record-less refusal is the fail-closed shape.
+    const sha = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+    // Pin the JOINED fragment, not the bare flag: without the continuation
+    // after `--label` the snippet is two statements — the command runs
+    // unpinned and the sha line dies as command-not-found — while
+    // `toContain('--fetched-sha …')` still passes.
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: sha }, 'verify', {
+        key: 'verify--round-2--deadbeef1234',
+      }),
+    ).toContain(
+      `--label verify--round-2--deadbeef1234 \\
+  --fetched-sha ${sha}`,
+    );
+    // A SHA-256 repository records a 64-hex commit; the pipeline's own
+    // shape contract admits both full object-ID lengths, so that record
+    // welds in too — a validator that only matched 40 hex would leave
+    // every SHA-256 review's command unpinned.
+    const sha256 = 'ab'.repeat(32);
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: sha256 }, 'verify', {
+        key: 'verify--round-2--deadbeef1234',
+      }),
+    ).toContain(`--fetched-sha ${sha256}`);
+    // And the sha-less brief must not carry a continuation after the label
+    // either — a dangling one would glue the closing fence onto the command.
+    expect(p).not.toMatch(/--label verify--round-2--deadbeef1234 \\/);
+    expect(p).not.toContain('--fetched-sha');
+    expect(
+      buildRoleBrief({ ...PR_PLAN, fetchedSha: 'not-a-sha' }, 'verify', {
+        key: 'verify--round-2--deadbeef1234',
+      }),
+    ).not.toContain('--fetched-sha');
     // No worktree, no scratch tree — a local or cross-repo review has no
     // pristine sibling to build, and HEAD is not what is under review there.
     expect(buildRoleBrief(PLAN, 'verify')).not.toContain('review scratch-tree');
@@ -3726,6 +3986,8 @@ describe('path rules — they arrive where they belong, and nowhere else', () =>
   it.each([
     '1a',
     '1b',
+    '1d',
+    '1e',
     '2',
     '3a',
     '3b',
@@ -3793,11 +4055,12 @@ describe('lightweight mode — the diff, and nothing else', () => {
     );
   });
 
-  it('stops 1b and 1c asserting what they cannot check', () => {
+  it('stops 1b, 1c and 1e asserting what they cannot check', () => {
     // A precision rule, not a convenience. An agent that cannot grep for a
     // re-establishment and asserts one is missing files a false Critical, and a
-    // false Critical blocks a merge.
-    for (const role of ['1b', '1c'] as const) {
+    // false Critical blocks a merge. 1e's forwarding-completeness walk greps
+    // the wrapper's call sites — a caller outside the diff is the same shape.
+    for (const role of ['1b', '1c', '1e'] as const) {
       const b = buildRoleBrief(LIGHT, role);
       expect(b).toContain('`Confidence: low`');
       expect(b).toContain('must not assert it is missing');

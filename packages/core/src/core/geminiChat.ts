@@ -18,7 +18,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from './genai-compat.js';
-import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
+import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
 import {
   retryWithBackoff,
   isUnattendedMode,
@@ -109,13 +109,13 @@ import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import {
   getCustomSystemPrompt,
   getManualPlanExitSystemReminder,
 } from './prompts.js';
-import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
+import { isRetryableStreamTransportError } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
@@ -470,6 +470,14 @@ interface TryCompressOptions {
   /** Per-request overrides needed to preserve the main request cache prefix. */
   requestGenerationConfig?: GenerateContentConfig;
   /**
+   * Route the enclosing send targets. The entry adoption compares against
+   * this instead of the active route, so an in-send compression never
+   * re-adopts counts the active route retained while the request targets
+   * another one (#9506). Omitted by between-sends callers (manual
+   * `/compress`), which compress the active route's state.
+   */
+  requestRouteKey?: string;
+  /**
    * Delay writing the compression checkpoint until the caller has run any
    * post-compression guards that may roll the in-memory chat state back.
    */
@@ -524,6 +532,14 @@ const TRANSPORT_STREAM_RETRY_CONFIG = {
  * large windows (the output ceiling binds long before the pad matters).
  */
 const ESTIMATE_CLAMP_OVERHEAD_PAD = 20_000;
+
+/**
+ * Cap on how many routes' token counts are retained while their route is
+ * not the one owning the chat's count slots (#9506). Route identities are
+ * bounded by the session's model routes, so this only guards pathological
+ * selector churn; eviction is FIFO.
+ */
+const MAX_RETAINED_ROUTE_COUNTS = 8;
 
 /**
  * Max recovery attempts when the escalated response is also truncated.
@@ -1857,6 +1873,35 @@ export class GeminiChat {
   private lastOutputTokenCount = 0;
 
   /**
+   * Route identity (model + auth type + endpoint; see
+   * Config.getModelRouteIdentity) of the content generator that produced
+   * the counts above. API-reported sizes are wire-specific: one route's
+   * count cannot size another route's serialization (#9454). Undefined
+   * until the first count is recorded.
+   */
+  private tokenCountsRouteKey: string | undefined = undefined;
+
+  /**
+   * Token counts retained for routes other than the one currently owning
+   * the slots above, keyed by route identity (#9506). Crossing routes
+   * retains the current slots here and adopts the target's entry back
+   * instead of destroying the value: API-reported sizes are per-route
+   * state that a later turn on the same route still needs — most
+   * critically the session-token-limit gate, whose keyed read would
+   * otherwise see 0 after any foreign-route touch between turns.
+   * Invariant: never holds an entry for {@link tokenCountsRouteKey}.
+   */
+  private readonly tokenCountsByRouteKey = new Map<
+    string,
+    {
+      promptTokenCount: number;
+      promptTokenCountIsEstimated: boolean;
+      outputTokenCount: number;
+      cachedContentTokenCount: number;
+    }
+  >();
+
+  /**
    * Number of consecutive auto-compaction failures for this chat. The
    * cheap-gate NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3)
    * until a successful compress (forced or not) resets it to 0. Replaces the
@@ -1897,8 +1942,7 @@ export class GeminiChat {
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
   private pendingPartialAssistantRecord:
-    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
-    | null = null;
+    Parameters<ChatRecordingService['recordAssistantTurn']>[0] | null = null;
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
@@ -1967,18 +2011,148 @@ export class GeminiChat {
   }
 
   /**
+   * Identity of the currently active model route. Optional chaining keeps
+   * partial Config test mocks (`{} as Config`) from throwing on count
+   * reads/writes; a missing identity degrades to one stable key, i.e. no
+   * route-change invalidation.
+   */
+  private currentRouteKey(): string {
+    return this.config.getModelRouteIdentity?.() ?? '';
+  }
+
+  /**
+   * Make the single-slot token counters describe the route identified by
+   * `targetRouteKey` (default: the active route). Counts recorded for a
+   * different route must not anchor admission, output clamping, or
+   * compression decisions for this one (`/model` switches rebuild the
+   * content generator but keep this chat instance; #9454).
+   *
+   * The crossing is NON-DESTRUCTIVE (#9506): the current slots are
+   * retained in {@link tokenCountsByRouteKey} under their own route key,
+   * and the target's retained entry — if any — is adopted back into the
+   * slots. Zeroing a foreign count outright let any foreign-route touch
+   * between two turns destroy the value before the session-token-limit
+   * gate (the only yield site of `SessionTokenLimitExceeded`) could read
+   * it back keyed by its request route. With retention, a route with no
+   * counts of its own still falls back to the history-walk estimate
+   * (slots 0), with reactive overflow recovery as the safety net, while a
+   * turn returning to a route that has counts reads the exact
+   * API-reported values.
+   *
+   * Defaults to comparing against the ACTIVE route (lazy reads on the
+   * getters). Send paths pass the route the upcoming request actually
+   * targets so a foreign count cannot anchor that request's decisions even
+   * when the active route owns it — e.g. an exact `\0` route selector, or
+   * a non-exact send whose `model` param overrides the active model.
+   *
+   * The telemetry mirror is display-only state: it is resynchronized here
+   * (adopted or zeroed alongside the slots), so between a `/model` switch
+   * and the next chat touch the UI counters may briefly show the previous
+   * route's counts. Decision paths never read the mirror, only the
+   * route-aware chat getters above.
+   */
+  private adoptTokenCountsForRoute(targetRouteKey?: string): void {
+    if (
+      this.lastPromptTokenCount === 0 &&
+      this.lastOutputTokenCount === 0 &&
+      this.tokenCountsByRouteKey.size === 0
+    ) {
+      return;
+    }
+    // Resolve the active-route default only AFTER the zero-count fast path:
+    // computing a route identity (SHA-256 digest + config lookups) on every
+    // count read while both counts are 0 (and nothing is retained) would
+    // defeat the guard above.
+    targetRouteKey ??= this.currentRouteKey();
+    if (this.tokenCountsRouteKey === targetRouteKey) {
+      return;
+    }
+    const retained = this.tokenCountsByRouteKey.get(targetRouteKey);
+    if (retained) {
+      this.tokenCountsByRouteKey.delete(targetRouteKey);
+      this.retainCurrentTokenCounts();
+      debugLogger.debug(
+        `[token-counts] restoring retained counts for route ${targetRouteKey}`,
+      );
+      this.lastPromptTokenCount = retained.promptTokenCount;
+      this.lastPromptTokenCountIsEstimated =
+        retained.promptTokenCountIsEstimated;
+      this.lastOutputTokenCount = retained.outputTokenCount;
+      this.tokenCountsRouteKey = targetRouteKey;
+      this.telemetryService?.setLastPromptTokenCount(retained.promptTokenCount);
+      this.telemetryService?.setLastCachedContentTokenCount(
+        retained.cachedContentTokenCount,
+      );
+      return;
+    }
+    debugLogger.debug(
+      `[token-counts] route changed; retaining counts recorded for ` +
+        `${this.tokenCountsRouteKey ?? 'unknown'} (now ${targetRouteKey})`,
+    );
+    this.retainCurrentTokenCounts();
+    // Raw assignment on purpose: setLastPromptTokenCount would re-attribute
+    // the zero slot to the ACTIVE route. The slot is attributed to the
+    // TARGET route instead so it can never collide with the just-retained
+    // entry (retained under the evicted slot's key, which differs from the
+    // target) — a colliding key would make the next keyed read for the
+    // retained route early-return the zero slot without consulting the map.
+    this.lastPromptTokenCount = 0;
+    this.lastPromptTokenCountIsEstimated = false;
+    this.lastOutputTokenCount = 0;
+    this.tokenCountsRouteKey = targetRouteKey;
+    // Keep the telemetry mirror in sync, or the UI context counters
+    // and compression banners keep reading the foreign count. The cached
+    // content count belongs to the same foreign route's last response.
+    this.telemetryService?.setLastPromptTokenCount(0);
+    this.telemetryService?.setLastCachedContentTokenCount(0);
+  }
+
+  /**
+   * Save the current slots into {@link tokenCountsByRouteKey} under their
+   * owning route key so a later read keyed back to that route restores the
+   * exact API-reported values. Zero slots carry nothing worth retaining;
+   * the telemetry mirror still holds the owning route's cached-content
+   * count at this point, so it is captured here too.
+   */
+  private retainCurrentTokenCounts(): void {
+    if (
+      this.tokenCountsRouteKey === undefined ||
+      (this.lastPromptTokenCount === 0 && this.lastOutputTokenCount === 0)
+    ) {
+      return;
+    }
+    if (this.tokenCountsByRouteKey.size >= MAX_RETAINED_ROUTE_COUNTS) {
+      const oldestKey = this.tokenCountsByRouteKey.keys().next().value;
+      if (oldestKey !== undefined) {
+        this.tokenCountsByRouteKey.delete(oldestKey);
+      }
+    }
+    this.tokenCountsByRouteKey.set(this.tokenCountsRouteKey, {
+      promptTokenCount: this.lastPromptTokenCount,
+      promptTokenCountIsEstimated: this.lastPromptTokenCountIsEstimated,
+      outputTokenCount: this.lastOutputTokenCount,
+      // Optional chaining keeps partial telemetry test mocks from throwing
+      // (same convention as currentRouteKey's Config lookups).
+      cachedContentTokenCount:
+        this.telemetryService?.getLastCachedContentTokenCount?.() ?? 0,
+    });
+  }
+
+  /**
    * Most recent prompt-token count reported by the model for *this* chat,
    * mirroring the value in {@link UiTelemetryService} for the main session.
    * Subagent chats have no telemetry service wired but still need a per-chat
    * count for compaction decisions, so this is always populated regardless
    * of whether the global telemetry is updated.
    */
-  getLastPromptTokenCount(): number {
+  getLastPromptTokenCount(targetRouteKey?: string): number {
+    this.adoptTokenCountsForRoute(targetRouteKey);
     return this.lastPromptTokenCount;
   }
 
   /** Previous model-response tokens used by the next prompt estimate. */
   getLastOutputTokenCount(): number {
+    this.adoptTokenCountsForRoute();
     return this.lastOutputTokenCount;
   }
 
@@ -2053,9 +2227,16 @@ export class GeminiChat {
     this.lastPromptTokenCount = count;
     this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
+    this.tokenCountsRouteKey = this.currentRouteKey();
+    // A fresh count supersedes anything this route retained while another
+    // route owned the slots. Without the delete this writer alone among the
+    // count writers would leave an entry for tokenCountsRouteKey behind,
+    // breaking the map's documented invariant (#9506).
+    this.tokenCountsByRouteKey.delete(this.tokenCountsRouteKey);
   }
 
   isLastPromptTokenCountEstimated(): boolean {
+    this.adoptTokenCountsForRoute();
     return this.lastPromptTokenCountIsEstimated;
   }
 
@@ -2083,6 +2264,14 @@ export class GeminiChat {
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
+    // Attribute the seeded counts to the active route so a model switch
+    // after resume invalidates them like any API-reported count. (Detecting
+    // a route that already differed at save time requires persisting route
+    // identity in the session transcript; tracked as a follow-up to #9454.)
+    this.tokenCountsRouteKey = this.currentRouteKey();
+    // A fresh seed supersedes any count this route retained while another
+    // route owned the slots (#9506).
+    this.tokenCountsByRouteKey.delete(this.tokenCountsRouteKey);
   }
 
   /**
@@ -2102,6 +2291,11 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    // Counts from a pre-switch route must not anchor compression admission
+    // or sizing for this route (#9454). In-send callers pass the request
+    // route so the adoption never re-adopts the active route's retained
+    // counts mid-send (#9506).
+    this.adoptTokenCountsForRoute(options?.requestRouteKey);
     const originalTokenCountIsEstimated =
       options?.originalTokenCountOverride === undefined &&
       this.promptCountIsEstimateDerived();
@@ -2135,6 +2329,14 @@ export class GeminiChat {
       signal,
     });
 
+    // ChatCompressionService reads the keyless count getters, which adopt
+    // the ACTIVE route — flipping the slots away from the request route
+    // adopted above whenever the two differ (non-exact override sends).
+    // Re-adopt the request route so neither the COMPRESSED stamp below nor
+    // the caller's post-compression sizing anchors on the flipped
+    // attribution (#9506).
+    this.adoptTokenCountsForRoute(options?.requestRouteKey);
+
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
       // ChatCompressionService owns provenance. Keep a conservative fallback
       // for older/custom implementations that omit the field, but preserve an
@@ -2149,10 +2351,35 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      // Compression rewrote the shared history every retained entry sizes,
+      // so ALL retained counts are stale — not just the current route's.
+      // Drop them, or a later keyed read adopts a pre-compression count and
+      // the session-token-limit gate blocks a prompt that fits the
+      // compressed history (#9506).
+      this.tokenCountsByRouteKey.clear();
       this.setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated,
       );
+      // setLastPromptTokenCount re-keyed the fresh count to the ACTIVE
+      // route, but in-send callers compress for the REQUEST route: the
+      // session-token-limit gate reads by that key (client.ts's sole
+      // SessionTokenLimitExceeded yield site), and a request that ends
+      // without a usage report (abort, 400 — the reactive-overflow path
+      // exists for exactly those) never stamps a count of its own. Re-key
+      // the fresh count to the request route, retaining it under the
+      // active key first: the compressed history is shared, so the count
+      // must anchor BOTH routes' next gate reads (#9506).
+      if (
+        options?.requestRouteKey &&
+        this.tokenCountsRouteKey !== options.requestRouteKey
+      ) {
+        this.retainCurrentTokenCounts();
+        this.tokenCountsRouteKey = options.requestRouteKey;
+        // Same invariant as the other count writers: the fresh count
+        // supersedes anything the request route retained.
+        this.tokenCountsByRouteKey.delete(options.requestRouteKey);
+      }
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
@@ -2186,6 +2413,9 @@ export class GeminiChat {
     info: ChatCompressionInfo;
     microcompactMeta?: MicrocompactMeta;
   } {
+    // A pre-switch route's count must not anchor fast-compression sizing
+    // for the active route (#9454).
+    this.adoptTokenCountsForRoute();
     // Use the same estimator on both sides so the NOOP gate compares
     // apples to apples. The API-authoritative lastPromptTokenCount is
     // then adjusted by the estimated delta — never replaced wholesale.
@@ -2256,6 +2486,11 @@ export class GeminiChat {
     this.setHistory(newHistory);
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
+    this.tokenCountsRouteKey = this.currentRouteKey();
+    // Fast compression rewrote the shared history every retained entry
+    // sizes, so ALL retained counts are stale — the other routes' entries
+    // describe the same pre-compression history (#9506).
+    this.tokenCountsByRouteKey.clear();
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
 
@@ -2335,6 +2570,23 @@ export class GeminiChat {
     if (exactRoute) {
       model = exactRoute.model;
     }
+    // Both arms are one call: for a non-exact send `exactRoute` is
+    // undefined, and `resolvedModelIdentity`'s second parameter defaults to
+    // `getContentGeneratorConfig()` — including when passed an explicit
+    // undefined. Keeping a single call site means a future change to how
+    // the request route is identified cannot drift between the arms.
+    const requestRouteKey = this.config.getModelRouteIdentity(
+      model,
+      exactRoute?.contentGeneratorConfig,
+    );
+    // Counts recorded for a route other than this request's target must not
+    // anchor its admission/clamp/compression decisions (#9454). Comparing
+    // against the REQUEST route — resolved above — keeps an exact `\0`
+    // route's decisions off the active route's counts, and a differing
+    // `model` param gets its own identity instead of borrowing the active
+    // route's. The crossing retains the current counts under their own
+    // route key so a later turn back on that route restores them (#9506).
+    this.adoptTokenCountsForRoute(requestRouteKey);
     const requestModalities =
       exactRoute?.contentGeneratorConfig.modalities ??
       this.config.getEffectiveInputModalities();
@@ -2485,6 +2737,28 @@ export class GeminiChat {
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
       const lastPromptTokenCountWasEstimatedBeforeHardRescue =
         this.lastPromptTokenCountIsEstimated;
+      // The rescue's COMPRESSED stamp zeroes lastOutputTokenCount (via
+      // setLastPromptTokenCount), so the rollback below must restore the
+      // output half of the resurrected count pair alongside the prompt
+      // half, or the next turn's additive prompt estimate under-counts by
+      // the last response's size (#9506).
+      const lastOutputTokenCountBeforeHardRescue = this.lastOutputTokenCount;
+      // tryCompress re-stamps tokenCountsRouteKey to the ACTIVE route (via
+      // setLastPromptTokenCount on the success path) even though this send
+      // targets the REQUEST route — and hard-rescue only fires for
+      // non-exact sends, whose request key can differ from the active one.
+      // Capture the key so the rollback below restores the resurrected
+      // count's original route attribution along with the count itself.
+      const tokenCountsRouteKeyBeforeHardRescue = this.tokenCountsRouteKey;
+      // Snapshot the retention map too: the rescue's compression consumes
+      // retained entries mid-flight (ChatCompressionService's keyless getter
+      // reads adopt the active route, deleting-and-consuming its entry) and
+      // a successful compression clears the map outright. Without the
+      // snapshot the rollback would restore the slots but not the map,
+      // leaving the resurrected route's count nowhere (#9506).
+      const retainedTokenCountsBeforeHardRescue = new Map(
+        this.tokenCountsByRouteKey,
+      );
       const hardRescueFailureCountBeforeHardRescue =
         this.hardRescueFailureCount;
       if (shouldForceFromHard) {
@@ -2512,6 +2786,7 @@ export class GeminiChat {
             pendingUserMessage: userContent,
             precomputedEffectiveTokens: effectiveTokens,
             requestGenerationConfig: params.config,
+            requestRouteKey,
             deferChatCompressionRecord: shouldForceFromHard,
             // Hard-rescue is force=true to bypass the cheap-gate breaker
             // but it remains a semantically AUTOMATIC trigger. Tag the
@@ -2561,6 +2836,21 @@ export class GeminiChat {
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
+          this.lastOutputTokenCount = lastOutputTokenCountBeforeHardRescue;
+          this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
+          // Restore the retention map alongside the slots: the rescue's
+          // compression consumed/cleared entries mid-flight, and without
+          // the restore the resurrected route's count would survive
+          // nowhere — its next gate read would pass with 0 (#9506). The
+          // snapshot predates the rescue, so it already satisfies the
+          // invariant (no entry for the resurrected slot key).
+          this.tokenCountsByRouteKey.clear();
+          for (const [
+            retainedRouteKey,
+            retainedCounts,
+          ] of retainedTokenCountsBeforeHardRescue) {
+            this.tokenCountsByRouteKey.set(retainedRouteKey, retainedCounts);
+          }
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
           );
@@ -2747,6 +3037,24 @@ export class GeminiChat {
         let protocolTagLeakRetryCount = 0;
         const totalInvalidStreamRetryCount = () =>
           transientInvalidStreamRetryCount + protocolTagLeakRetryCount;
+        // The armed attempt can be rescheduled by a competing retry path
+        // (rate limit, transport replay/continuation, reactive compression)
+        // before its outcome is known; the rescheduled attempt is still the
+        // last one the exhausted invalid-stream budget allows, so keep the
+        // one-shot quiet-completion acceptance armed for it (#9026).
+        const rearmQuietAcceptanceIfBudgetSpent = () => {
+          // Keyed to the transient bucket only: quiet completions surface
+          // as NO_TOOL_RESULT_PROGRESS (a transient type), so only a spent
+          // transient budget entitles the next attempt to acceptance. A
+          // tag-leak-only exhaustion must not arm — a quiet ending still
+          // has its full retry-first budget ahead of it (#7039).
+          if (
+            transientInvalidStreamRetryCount >=
+            INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
+          ) {
+            acceptQuietToolResultCompletionOnNextAttempt = true;
+          }
+        };
         let transportStreamRetryCount = 0;
         // Continuation recovery for mid-stream socket closes (issue #7832).
         // `transportContinuationText` accumulates every plain-text chunk this
@@ -2880,6 +3188,7 @@ export class GeminiChat {
           transportAttemptText = '';
         };
 
+        let acceptQuietToolResultCompletionOnNextAttempt = false;
         for (;;) {
           transportAttemptText = '';
           let streamYieldedChunk = false;
@@ -2908,12 +3217,16 @@ export class GeminiChat {
               yield { type: StreamEventType.RETRY };
             }
 
+            const acceptQuietToolResultCompletion =
+              acceptQuietToolResultCompletionOnNextAttempt;
+            acceptQuietToolResultCompletionOnNextAttempt = false;
             const stream = await self.makeApiCallAndProcessStream(
               model,
               buildAttemptContents(),
               params,
               prompt_id,
               requestOverrides,
+              requestRouteKey,
               turnGoalContext,
               // Captured by value, so the attempt records exactly the prefix
               // `buildAttemptContents()` just asked the model to resume from,
@@ -2921,6 +3234,7 @@ export class GeminiChat {
               transportContinuationPrefix.length > 0
                 ? transportContinuationPrefix
                 : undefined,
+              acceptQuietToolResultCompletion,
             );
 
             lastFinishReason = undefined;
@@ -3046,6 +3360,7 @@ export class GeminiChat {
                   },
                 };
                 await delayPromise;
+                rearmQuietAcceptanceIfBudgetSpent();
                 continue;
               }
 
@@ -3066,14 +3381,8 @@ export class GeminiChat {
             // output — and thinking models can spend minutes in that
             // phase, exactly when gateways close long-lived SSE
             // connections (#7832).
-            const isRetryableStreamTransportError =
-              classification.kind === 'transport' &&
-              classification.transportCode !== undefined &&
-              RETRYABLE_STREAM_TRANSPORT_CODES.has(
-                classification.transportCode,
-              );
             if (
-              isRetryableStreamTransportError &&
+              isRetryableStreamTransportError(classification) &&
               !streamYieldedContentChunk &&
               // `streamYieldedContentChunk` is per-attempt, so on its own it
               // cannot tell "nothing has been delivered" from "this attempt
@@ -3112,6 +3421,7 @@ export class GeminiChat {
               resetTransportContinuation();
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;
+              rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
             // Continuation recovery (issue #7832). Once answer text has been
@@ -3134,7 +3444,7 @@ export class GeminiChat {
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
             const canContinueAfterTransportCut =
-              isRetryableStreamTransportError &&
+              isRetryableStreamTransportError(classification) &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
@@ -3169,9 +3479,10 @@ export class GeminiChat {
               yield { type: StreamEventType.RETRY, isContinuation: true };
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;
+              rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
-            if (isRetryableStreamTransportError) {
+            if (isRetryableStreamTransportError(classification)) {
               // Reached only when neither branch above fired: content was
               // already delivered so replaying would duplicate it, or the
               // replay budget is exhausted, or continuation is unavailable
@@ -3213,6 +3524,7 @@ export class GeminiChat {
                       originalTokenCountOverride: reactiveOriginalTokenCount,
                       precomputedEffectiveTokens: reactiveOriginalTokenCount,
                       requestGenerationConfig: params.config,
+                      requestRouteKey,
                       trigger: 'auto',
                     },
                   );
@@ -3270,6 +3582,7 @@ export class GeminiChat {
                     // the delivered text.
                     resetTransportContinuation();
                     suppressNextRetryEvent = true;
+                    rearmQuietAcceptanceIfBudgetSpent();
                     continue;
                   }
 
@@ -3319,7 +3632,9 @@ export class GeminiChat {
 
             if (
               error instanceof InvalidStreamError &&
-              error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' &&
+              (error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' ||
+                (error.type === 'NO_RESPONSE_TEXT' &&
+                  lastFinishReason === FinishReason.MAX_TOKENS)) &&
               !maxTokensEscalated &&
               !hasUserMaxTokensOverride &&
               shouldEscalateMaxOutputTokens
@@ -3351,6 +3666,13 @@ export class GeminiChat {
               } else {
                 transientInvalidStreamRetryCount = nextInvalidStreamRetryCount;
               }
+              // The armed attempt itself can fail with an invalid-stream
+              // error and be rescheduled here; rearm so the acceptance is
+              // not lost across error types (a tag-leak retry scheduled
+              // after the transient budget is spent must still land armed).
+              // Transient-keyed, so a tag-leak-only exhaustion never arms
+              // prematurely (#9026, #7039 retry-first).
+              rearmQuietAcceptanceIfBudgetSpent();
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
                 nextInvalidStreamRetryCount;
@@ -3437,16 +3759,23 @@ export class GeminiChat {
         ): AsyncGenerator<InvalidStreamRetryEvent> {
           let transientRetryCount = 0;
           let protocolTagLeakRetryCount = 0;
+          let acceptQuietToolResultCompletionOnNextAttempt = false;
           for (;;) {
             const attemptState = buildAttempt();
             try {
+              const acceptQuietToolResultCompletion =
+                acceptQuietToolResultCompletionOnNextAttempt;
+              acceptQuietToolResultCompletionOnNextAttempt = false;
               const stream = await self.makeApiCallAndProcessStream(
                 model,
                 attemptState.requestContents,
                 attemptState.params,
                 prompt_id,
                 requestOverrides,
+                requestRouteKey,
                 turnGoalContext,
+                undefined,
+                acceptQuietToolResultCompletion,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -3473,6 +3802,16 @@ export class GeminiChat {
                 protocolTagLeakRetryCount = nextContinuationRetryCount;
               } else {
                 transientRetryCount = nextContinuationRetryCount;
+              }
+              // Same arming rule as the main send loop (#9026): keyed to
+              // the transient bucket only (quiet completions surface as a
+              // transient-type error), so a tag-leak-only exhaustion does
+              // not arm prematurely (#7039 retry-first).
+              if (
+                transientRetryCount >=
+                INVALID_STREAM_RETRY_CONFIG.transientMaxRetries
+              ) {
+                acceptQuietToolResultCompletionOnNextAttempt = true;
               }
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -3857,6 +4196,14 @@ export class GeminiChat {
                       currentUserContent,
                       fallbackModalities ?? {},
                     );
+                  // Stamp the fallback-served counts under the REQUEST route
+                  // key: a fallback serves on behalf of the same session
+                  // request (the session model never changes), and the
+                  // session-token-limit gate in Client reads the count keyed
+                  // by the request route. Attributing the count to the
+                  // fallback's own route would make every later gate read
+                  // invalidate it, silently disabling the limit for any
+                  // session ever served through fallback (#9454).
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
                     fallbackRequestContents,
@@ -3865,6 +4212,7 @@ export class GeminiChat {
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
+                    requestRouteKey,
                     turnGoalContext,
                   )) {
                     const emittedUserVisibleOutput =
@@ -4019,8 +4367,10 @@ export class GeminiChat {
       retryAuthType?: string;
       retryErrorCodes?: readonly number[];
     },
+    routeKey = this.currentRouteKey(),
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    acceptQuietToolResultCompletion = false,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -4100,8 +4450,10 @@ export class GeminiChat {
     return this.processStreamResponse(
       model,
       rejectDegradedPlaceholderResponse(streamResponse),
+      routeKey,
       goalContext,
       transportContinuationPrefix,
+      acceptQuietToolResultCompletion,
     );
   }
 
@@ -4113,6 +4465,7 @@ export class GeminiChat {
     contentGenerator: ContentGenerator,
     retryAuthType?: string,
     retryErrorCodes?: readonly number[],
+    routeKey?: string,
     goalContext?: GoalTurnPermit,
   ): AsyncGenerator<StreamEvent> {
     const stream = await this.makeApiCallAndProcessStream(
@@ -4121,6 +4474,7 @@ export class GeminiChat {
       params,
       prompt_id,
       { contentGenerator, retryAuthType, retryErrorCodes },
+      routeKey,
       goalContext,
     );
 
@@ -4614,8 +4968,10 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
+    routeKey: string,
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: string,
+    acceptQuietToolResultCompletion = false,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -4820,6 +5176,17 @@ export class GeminiChat {
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
+            // Retain whatever route's counts currently occupy the slots
+            // before overwriting them: a foreign-keyed slot holds another
+            // route's state that its next keyed read still needs — mid-send
+            // compression can leave the slots keyed to the active route
+            // even though this report comes from the request route (#9506).
+            if (
+              this.tokenCountsRouteKey !== undefined &&
+              this.tokenCountsRouteKey !== routeKey
+            ) {
+              this.retainCurrentTokenCounts();
+            }
             this.lastPromptTokenCount = lastPromptTokenCount;
             this.lastPromptTokenCountIsEstimated = false;
             this.lastOutputTokenCount = hasUsablePromptTokenCount
@@ -4830,17 +5197,23 @@ export class GeminiChat {
                   thoughtsTokenCount,
                 })
               : 0;
+            // Attribute these counts to the route that reported them so a
+            // later model switch invalidates them (#9454).
+            this.tokenCountsRouteKey = routeKey;
+            // A fresh API report supersedes anything retained for this
+            // route while another route owned the slots (#9506).
+            this.tokenCountsByRouteKey.delete(routeKey);
             // Mirror to the global telemetry only when wired — subagents
             // pass `telemetryService=undefined` to keep their context usage
             // out of the main session's UI counters.
             this.telemetryService?.setLastPromptTokenCount(
               lastPromptTokenCount,
             );
-          }
-          if (cachedContentTokenCount && this.telemetryService) {
-            this.telemetryService.setLastCachedContentTokenCount(
-              cachedContentTokenCount,
-            );
+            if (cachedContentTokenCount && this.telemetryService) {
+              this.telemetryService.setLastCachedContentTokenCount(
+                cachedContentTokenCount,
+              );
+            }
           }
         }
 
@@ -5019,12 +5392,17 @@ export class GeminiChat {
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
     // 2. There's a finish reason AND we have non-empty response text or thought text
     //
-    // Thought-only responses remain valid for ordinary user turns. After a tool
-    // result, they do not advance the agent without text or another tool call.
+    // Thought-only responses remain valid for ordinary user turns. After a
+    // tool result, they do not advance the agent without text or another
+    // tool call, so they retry (#7039) — and once that retry budget is
+    // exhausted the quiet completion is accepted rather than failing the
+    // run (#9026): some model families legitimately end turns silently
+    // after a tool result.
     const hasAnyContent = contentText || thoughtText;
     const lacksVisibleToolResultProgress =
       isToolResultContinuation &&
       (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+    let acceptedQuietToolResultCompletion = false;
     if (
       streamError === null &&
       !hasToolCall &&
@@ -5037,17 +5415,44 @@ export class GeminiChat {
         );
       }
       if (lacksVisibleToolResultProgress) {
+        const truncatedAtMaxTokens =
+          deferredFinishReason === FinishReason.MAX_TOKENS;
+        // Only STOP is a complete, non-truncated, non-blocked quiet turn end.
+        // Unknown converter fall-through values such as
+        // FINISH_REASON_UNSPECIFIED must fail closed instead of being accepted
+        // as an empty model turn.
+        const unsupportedQuietFinishReason =
+          deferredFinishReason !== FinishReason.STOP;
+        if (
+          truncatedAtMaxTokens ||
+          unsupportedQuietFinishReason ||
+          !acceptQuietToolResultCompletion
+        ) {
+          throw new InvalidStreamError(
+            'Model stream ended after a tool result without visible progress.',
+            truncatedAtMaxTokens
+              ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
+              : 'NO_TOOL_RESULT_PROGRESS',
+          );
+        }
+        // Retry budget exhausted and the model still ends the turn quietly
+        // with a valid finish reason (#9026). Accept it as completion.
+        // When the attempt produced nothing at all, the canonical
+        // placeholder is appended to `acceptedTurnParts` below — the
+        // single source for both the JSONL record and the history push,
+        // keeping user/model alternation well-formed for the next request
+        // while transcript and history agree.
+        acceptedQuietToolResultCompletion = true;
+        debugLogger.warn(
+          'Accepting quiet post-tool-result completion after retry budget ' +
+            'exhaustion (#9026)',
+        );
+      } else {
         throw new InvalidStreamError(
-          'Model stream ended after a tool result without visible progress.',
-          deferredFinishReason === FinishReason.MAX_TOKENS
-            ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
-            : 'NO_TOOL_RESULT_PROGRESS',
+          'Model stream ended with empty response text.',
+          'NO_RESPONSE_TEXT',
         );
       }
-      throw new InvalidStreamError(
-        'Model stream ended with empty response text.',
-        'NO_RESPONSE_TEXT',
-      );
     }
 
     if (recoveredChunk) {
@@ -5122,28 +5527,48 @@ export class GeminiChat {
         .join('')
         .trim();
     }
+    // The exact parts the accepted turn will carry into `this.history.push`
+    // below — computed once, before the JSONL record, so an accepted quiet
+    // completion records exactly what history keeps (including non-text
+    // parts like inlineData, which have no slot in the text/toolCall
+    // assembly and would otherwise desync transcript from history on
+    // `--resume`).
+    const acceptedTurnParts: Part[] = [
+      ...(thoughtContentPart ? [thoughtContentPart] : []),
+      ...consolidatedHistoryParts,
+    ];
+    if (acceptedQuietToolResultCompletion && acceptedTurnParts.length === 0) {
+      acceptedTurnParts.push({ text: GEMINI_EMPTY_CONTENT_PLACEHOLDER });
+    }
     if (
       willPersistToHistory &&
-      (thoughtContentPart || contentText || hasToolCall || usageMetadata)
+      (acceptedQuietToolResultCompletion ||
+        thoughtContentPart ||
+        contentText ||
+        hasToolCall ||
+        usageMetadata)
     ) {
       const contextWindowSize =
         this.config.getContentGeneratorConfig()?.contextWindowSize;
       const recordArgs = {
         model,
-        message: [
-          ...(thoughtContentPart ? [thoughtContentPart] : []),
-          ...(contentText ? [{ text: contentText }] : []),
-          ...(hasToolCall
-            ? contentParts
-                .map(redactStructuredOutputArgsForRecording)
-                .filter(
-                  (
-                    p,
-                  ): p is { functionCall: NonNullable<Part['functionCall']> } =>
-                    p !== null,
-                )
-            : []),
-        ],
+        message: acceptedQuietToolResultCompletion
+          ? acceptedTurnParts
+          : [
+              ...(thoughtContentPart ? [thoughtContentPart] : []),
+              ...(contentText ? [{ text: contentText }] : []),
+              ...(hasToolCall
+                ? contentParts
+                    .map(redactStructuredOutputArgsForRecording)
+                    .filter(
+                      (
+                        p,
+                      ): p is {
+                        functionCall: NonNullable<Part['functionCall']>;
+                      } => p !== null,
+                    )
+                : []),
+            ],
         tokens: coercedUsage
           ? { ...usageMetadata, ...coercedUsage }
           : usageMetadata,
@@ -5231,10 +5656,7 @@ export class GeminiChat {
 
     this.history.push({
       role: 'model',
-      parts: [
-        ...(thoughtContentPart ? [thoughtContentPart] : []),
-        ...consolidatedHistoryParts,
-      ],
+      parts: acceptedTurnParts,
     });
     if (deferredFinishReason) {
       yield {

@@ -296,8 +296,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     })),
     dispose: vi.fn(),
   })),
-  APPROVAL_MODE_INFO: {},
-  APPROVAL_MODES: [],
+  APPROVAL_MODE_INFO: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).APPROVAL_MODE_INFO,
+  APPROVAL_MODES: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).APPROVAL_MODES,
   applyReasoningEffort: (
     config: {
       setReasoningEffort(effort: string | undefined): void;
@@ -731,6 +735,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       this.reason = reason;
     }
   },
+  sessionIdContext: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).sessionIdContext,
 }));
 
 const { mockHistoryReplay } = vi.hoisted(() => ({
@@ -885,6 +892,8 @@ vi.mock('./session/Session.js', () => {
   SessionMock.prototype.collectActiveWorkHolds = () => [];
   return {
     Session: SessionMock,
+    // Awaited by every session creation before the session is published.
+    registerCreateSubSessionTool: vi.fn().mockResolvedValue(undefined),
     buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
       availableCommands: [],
       availableSkills: [],
@@ -931,14 +940,11 @@ import {
   toSseServer,
   toHttpServer,
   normalizeCoreSettingValue,
-  extractFilesFromTarGz,
-  fetchAllowedGitHub,
   createWorkspaceMcpBudget,
   deliverClientMcpMessage,
   selectVisibleHistoryRecords,
   createManagedExternalToolGuard,
 } from './acpAgent.js';
-import { gzipSync } from 'node:zlib';
 import type { Config, GoalSnapshotV2 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
@@ -979,6 +985,7 @@ import {
   GoalPersistenceUnavailableError,
   GoalConflictError,
   GoalInvalidTransitionError,
+  sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import {
@@ -1002,7 +1009,11 @@ import {
 import { loadCliConfig, SessionIdConflictError } from '../config/config.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
 import { AcpFileSystemService } from './service/filesystem.js';
-import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import {
+  Session,
+  buildAvailableCommandsSnapshot,
+  registerCreateSubSessionTool,
+} from './session/Session.js';
 import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
@@ -1301,8 +1312,7 @@ describe('runAcpAgent shutdown cleanup', () => {
       message: { jsonrpc: '2.0', id: null, result: {} },
     });
 
-    expect(initializeTelemetry).toHaveBeenCalledOnce();
-    expect(initializeTelemetry).toHaveBeenCalledWith(mockConfig);
+    expect(initializeTelemetry).toHaveBeenCalledExactlyOnceWith(mockConfig);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -1369,8 +1379,9 @@ describe('runAcpAgent shutdown cleanup', () => {
     });
 
     await flushImmediate();
-    expect(mockPreloadContentGenerator).toHaveBeenCalledOnce();
-    expect(mockPreloadContentGenerator).toHaveBeenCalledWith(generator);
+    expect(mockPreloadContentGenerator).toHaveBeenCalledExactlyOnceWith(
+      generator,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -3521,19 +3532,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const attributes = Object.fromEntries(
       mockSessionStartSpan.setAttribute.mock.calls,
     );
-    for (const stage of [
-      'settings_load',
-      'config_setup',
-      'auth',
-      'file_system_setup',
-      'session_register',
-      'response_build',
-    ]) {
-      expect(attributes[`qwen-code.daemon.session_start.${stage}_ms`]).toEqual(
-        expect.any(Number),
-      );
-    }
-    expect(attributes['session.id']).toBe('test-session-id');
+    expect(attributes).toEqual(
+      expect.objectContaining({
+        'qwen-code.daemon.session_start.settings_load_ms': expect.any(Number),
+        'qwen-code.daemon.session_start.config_setup_ms': expect.any(Number),
+        'qwen-code.daemon.session_start.auth_ms': expect.any(Number),
+        'qwen-code.daemon.session_start.file_system_setup_ms':
+          expect.any(Number),
+        'qwen-code.daemon.session_start.session_register_ms':
+          expect.any(Number),
+        'qwen-code.daemon.session_start.response_build_ms': expect.any(Number),
+        'session.id': 'test-session-id',
+      }),
+    );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       innerConfig,
       expect.any(Object),
@@ -4347,6 +4358,63 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await running.agent.newSession({ cwd: '/tmp', mcpServers: [] });
     return { ...running, sessionId };
   }
+
+  it('declares create_sub_session on the session it creates', async () => {
+    const innerConfig = await setupSessionMocks('session-sub-session-tool');
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // This session's registry was built by `config.initialize()`, before the
+    // Session wired the sub-session spawner, so the core-side gate in
+    // `createToolRegistry` cannot cover it — the daemon declares it here or
+    // nowhere.
+    expect(vi.mocked(registerCreateSubSessionTool).mock.calls[0]?.[0]).toBe(
+      innerConfig as unknown as Config,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('awaits create_sub_session registration before the new session is served', async () => {
+    // The registration is awaited inside session creation, not fire-and-
+    // forgotten: once `newSession` responds, the client can send its first
+    // prompt immediately, and that turn's declarations are computed from the
+    // registry as it stands — the tool must already be declared by then.
+    const innerConfig = await setupSessionMocks(
+      'session-sub-session-tool-await',
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    let resolveRegistration!: () => void;
+    const registration = new Promise<void>((resolve) => {
+      resolveRegistration = resolve;
+    });
+    vi.mocked(registerCreateSubSessionTool).mockReturnValueOnce(registration);
+
+    let settled = false;
+    const sessionPromise = agent
+      .newSession({ cwd: '/tmp', mcpServers: [] })
+      .then((result) => {
+        settled = true;
+        return result;
+      });
+
+    await vi.waitFor(() =>
+      expect(registerCreateSubSessionTool).toHaveBeenCalledWith(
+        innerConfig as unknown as Config,
+      ),
+    );
+    expect(settled).toBe(false);
+
+    resolveRegistration();
+    await sessionPromise;
+    expect(settled).toBe(true);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it('treats an idle session cancellation as a no-op', async () => {
     await setupSessionMocks('session-idle-cancel');
@@ -7915,7 +7983,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       workspaceCwd: '/tmp',
       state: {
         models: { currentModelId: 'm(api-key)', availableModels: [] },
-        modes: { currentModeId: 'default', availableModes: [] },
+        modes: {
+          currentModeId: 'default',
+          availableModes: APPROVAL_MODES.map((id) => ({ id })),
+        },
       },
     });
     expect(supportedCommands).toEqual({
@@ -15215,6 +15286,298 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 // recording service's in-memory `currentCustomTitle` stale, and the next
 // re-anchor (every 32KB) or finalize() silently reverted the rename by
 // re-emitting the cached old title at EOF.
+describe('QwenAgent sessionIdContext binding', () => {
+  let capturedAgentFactory:
+    | ((conn: { closed: Promise<void> }) => {
+        initialize: (args: Record<string, unknown>) => Promise<unknown>;
+        extMethod: (
+          method: string,
+          params: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+        setSessionMode: (
+          args: Record<string, unknown>,
+        ) => Promise<Record<string, unknown> | void>;
+        unstable_setSessionModel: (
+          args: Record<string, unknown>,
+        ) => Promise<Record<string, unknown> | void>;
+        setSessionConfigOption: (
+          args: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+        cancel: (args: { sessionId: string }) => Promise<void>;
+      })
+    | undefined;
+
+  let mockConfig: Config;
+  const mockArgv = {} as CliArgs;
+  const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConnectionState.reset();
+    capturedAgentFactory = undefined;
+
+    vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
+      capturedAgentFactory = factory as typeof capturedAgentFactory;
+      return {
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      } as unknown as InstanceType<typeof AgentSideConnection>;
+    });
+
+    mockConfig = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getWorkspaceContext: vi.fn().mockReturnValue({}),
+      getDebugMode: vi.fn().mockReturnValue(false),
+      getSessionId: vi.fn().mockReturnValue(sessionId),
+    } as unknown as Config;
+  });
+
+  async function bootAgent() {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      { merged: { mcpServers: {} } } as LoadedSettings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    return { agent, agentPromise };
+  }
+
+  function makeSession(
+    overrides: {
+      sessionId?: string;
+      configSessionId?: string;
+      setMode?: ReturnType<typeof vi.fn>;
+      setModel?: ReturnType<typeof vi.fn>;
+      cancelPendingPrompt?: ReturnType<typeof vi.fn>;
+      releaseTodoStopGuardQueuedPromptWait?: ReturnType<typeof vi.fn>;
+    } = {},
+  ) {
+    const id = overrides.sessionId ?? sessionId;
+    const configSessionId = overrides.configSessionId ?? id;
+    return {
+      getId: () => id,
+      getConfig: () => ({
+        ...mockConfig,
+        getSessionId: vi.fn().mockReturnValue(configSessionId),
+      }),
+      setMode: overrides.setMode ?? vi.fn().mockResolvedValue(undefined),
+      setModel: overrides.setModel ?? vi.fn().mockResolvedValue(undefined),
+      cancelPendingPrompt:
+        overrides.cancelPendingPrompt ?? vi.fn().mockResolvedValue(undefined),
+      releaseTodoStopGuardQueuedPromptWait:
+        overrides.releaseTodoStopGuardQueuedPromptWait ??
+        vi.fn().mockReturnValue(true),
+    };
+  }
+
+  it('binds Config session id spelling in extMethod, not normalized Session id', async () => {
+    const upperSessionId = '550E8400-E29B-41D4-A716-446655440000';
+    const lowerSessionId = upperSessionId.toLowerCase();
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      lowerSessionId,
+      makeSession({
+        sessionId: lowerSessionId,
+        configSessionId: upperSessionId,
+      }),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await expect(
+      agent.extMethod('qwen/control/session/unknown-method', {
+        sessionId: upperSessionId,
+      }),
+    ).rejects.toThrow();
+
+    expect(runSpy).toHaveBeenCalledWith(upperSessionId, expect.any(Function));
+    expect(runSpy).not.toHaveBeenCalledWith(
+      lowerSessionId,
+      expect.any(Function),
+    );
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sessionIdContext for PROMPT_CANCEL_METHOD', async () => {
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession(),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await agent.extMethod(PROMPT_CANCEL_METHOD, { sessionId });
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sessionIdContext for TODO_STOP_GUARD_QUEUE_RELEASE_METHOD', async () => {
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession(),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await agent.extMethod(TODO_STOP_GUARD_QUEUE_RELEASE_METHOD, {
+      sessionId,
+      promptId: 'prompt-1',
+    });
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sessionIdContext for qwen/status/session methods', async () => {
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession(),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    // The status handler itself needs a fuller Config than this mock carries;
+    // the binding under test happens before dispatch, so a handler error is
+    // fine here.
+    await agent
+      .extMethod(SERVE_STATUS_EXT_METHODS.sessionContext, {
+        sessionId,
+      })
+      .catch(() => {});
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sessionIdContext for qwen/session/ legacy methods', async () => {
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession(),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await expect(
+      agent.extMethod('qwen/session/unknown-method', { sessionId }),
+    ).rejects.toThrow();
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not bind sessionIdContext for global methods even if sessionId is supplied', async () => {
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession(),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, { sessionId });
+
+    expect(runSpy).not.toHaveBeenCalled();
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sessionIdContext for direct setSessionMode', async () => {
+    const setMode = vi.fn().mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession({ setMode }),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await agent.setSessionMode({ sessionId, modeId: 'yolo' });
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+    expect(setMode).toHaveBeenCalledWith({ sessionId, modeId: 'yolo' });
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sessionIdContext for direct unstable_setSessionModel', async () => {
+    const setModel = vi.fn().mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession({ setModel }),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await agent.unstable_setSessionModel({ sessionId, modelId: 'claude-opus' });
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+    expect(setModel).toHaveBeenCalledWith({
+      sessionId,
+      modelId: 'claude-opus',
+    });
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('binds sessionIdContext for direct cancel', async () => {
+    const cancelPendingPrompt = vi.fn().mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    (agent as unknown as { sessions: Map<string, unknown> }).sessions.set(
+      sessionId,
+      makeSession({ cancelPendingPrompt }),
+    );
+    const runSpy = vi.spyOn(sessionIdContext, 'run');
+
+    await agent.cancel({ sessionId });
+
+    expect(runSpy).toHaveBeenCalledWith(sessionId, expect.any(Function));
+    expect(cancelPendingPrompt).toHaveBeenCalled();
+
+    runSpy.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+});
+
 describe('QwenAgent extMethod renameSession routing', () => {
   type AgentSideConnectionLike = { closed: Promise<void> };
   type AgentLike = {
@@ -17335,31 +17698,36 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       const attributes = Object.fromEntries(
         mockSessionStartSpan.setAttribute.mock.calls,
       );
-      for (const stage of [
-        'settings_load',
-        'existence_check',
-        'config_setup',
-        'restore_session_model',
-        'auth',
-        'file_system_setup',
-        'session_register',
-        'runtime_initialize',
-        'response_build',
-        'post_replay_services',
-      ]) {
-        expect(
-          attributes[`qwen-code.daemon.session_restore.${stage}_ms`],
-        ).toEqual(expect.any(Number));
-      }
-      if (action === 'load') {
-        expect(
-          attributes['qwen-code.daemon.session_restore.history_replay_ms'],
-        ).toEqual(expect.any(Number));
-      } else {
-        expect(
-          attributes['qwen-code.daemon.session_restore.history_replay_ms'],
-        ).toBeUndefined();
-      }
+      const historyReplayValue =
+        attributes['qwen-code.daemon.session_restore.history_replay_ms'];
+      expect(
+        action === 'load'
+          ? typeof historyReplayValue === 'number'
+          : historyReplayValue === undefined,
+      ).toBe(true);
+      expect(attributes).toEqual(
+        expect.objectContaining({
+          'qwen-code.daemon.session_restore.settings_load_ms':
+            expect.any(Number),
+          'qwen-code.daemon.session_restore.existence_check_ms':
+            expect.any(Number),
+          'qwen-code.daemon.session_restore.config_setup_ms':
+            expect.any(Number),
+          'qwen-code.daemon.session_restore.restore_session_model_ms':
+            expect.any(Number),
+          'qwen-code.daemon.session_restore.auth_ms': expect.any(Number),
+          'qwen-code.daemon.session_restore.file_system_setup_ms':
+            expect.any(Number),
+          'qwen-code.daemon.session_restore.session_register_ms':
+            expect.any(Number),
+          'qwen-code.daemon.session_restore.runtime_initialize_ms':
+            expect.any(Number),
+          'qwen-code.daemon.session_restore.response_build_ms':
+            expect.any(Number),
+          'qwen-code.daemon.session_restore.post_replay_services_ms':
+            expect.any(Number),
+        }),
+      );
       // Mirror of the live-path test's `existence_check_ms` absence check.
       // Hoisting `live_restore` out of its `if (liveSession)` guard would make
       // cold loads report a stage that implies a live session existed,
@@ -18068,8 +18436,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     const updates = response._meta?.['qwen.session.loadReplay']?.updates;
     expect(updates).toEqual([{ ...replayUpdate, timestamp: 4242 }, goalUpdate]);
-    expect(mockRenderPreparedGoalUpdate).toHaveBeenCalledOnce();
-    expect(mockRenderPreparedGoalUpdate).toHaveBeenCalledWith(
+    expect(mockRenderPreparedGoalUpdate).toHaveBeenCalledExactlyOnceWith(
       expect.any(Function),
       expect.objectContaining({ replayedRecords: messages }),
     );
@@ -20758,149 +21125,6 @@ describe('normalizeCoreSettingValue', () => {
     expect(result).toContain('Chinese');
     expect(result).toContain('SYSTEM');
     expect(result.split('\n')).toHaveLength(1);
-  });
-});
-
-describe('extractFilesFromTarGz', () => {
-  // Minimal tar (ustar) entry builder — only the fields the parser reads.
-  function tarEntry(name: string, content: string): Buffer {
-    const header = Buffer.alloc(512);
-    header.write(name, 0, 'utf8'); // name @ 0 (100 bytes)
-    const size = Buffer.byteLength(content);
-    header.write(`${size.toString(8).padStart(11, '0')}\0`, 124, 'utf8'); // size @ 124 (octal)
-    header.write('0', 156, 'utf8'); // typeflag '0' = regular file
-    const data = Buffer.alloc(Math.ceil(size / 512) * 512);
-    data.write(content, 0, 'utf8');
-    return Buffer.concat([header, data]);
-  }
-
-  function makeTarGz(name: string, content: string): Uint8Array {
-    const tar = Buffer.concat([tarEntry(name, content), Buffer.alloc(1024)]); // + end blocks
-    return new Uint8Array(gzipSync(tar));
-  }
-
-  it('extracts files under the requested directory (stripping the archive root)', async () => {
-    const archive = makeTarGz('repo-main/skills/SKILL.md', 'hello skill');
-    const files = await extractFilesFromTarGz(archive, 'skills');
-    expect(files).toHaveLength(1);
-    expect(files[0]!.relativePath).toBe('SKILL.md');
-    expect(Buffer.from(files[0]!.content).toString('utf8')).toBe('hello skill');
-  });
-
-  it('rejects an archive whose compressed size exceeds the limit', async () => {
-    await expect(
-      extractFilesFromTarGz(new Uint8Array(64), 'skills', {
-        maxCompressedBytes: 16,
-      }),
-    ).rejects.toThrowError(/exceeds the maximum allowed size/);
-  });
-
-  it('rejects an archive that fails to decompress', async () => {
-    await expect(
-      extractFilesFromTarGz(new Uint8Array([1, 2, 3, 4, 5]), 'skills'),
-    ).rejects.toThrowError(/Failed to decompress skill archive/);
-  });
-
-  it('rejects an archive whose decompressed size exceeds the limit', async () => {
-    const archive = makeTarGz('repo-main/skills/SKILL.md', 'x'.repeat(2048));
-    await expect(
-      extractFilesFromTarGz(archive, 'skills', {
-        maxDecompressedBytes: 16,
-      }),
-    ).rejects.toThrowError(/Decompressed skill archive exceeds/);
-  });
-});
-
-describe('fetchAllowedGitHub', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  function fakeResponse(status: number, location?: string) {
-    return {
-      status,
-      ok: status >= 200 && status < 300,
-      headers: {
-        get: (key: string) =>
-          key.toLowerCase() === 'location' && location ? location : null,
-      },
-    };
-  }
-
-  it('returns the response directly when there is no redirect', async () => {
-    const res = fakeResponse(200);
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res));
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/a/b/main/SKILL.md'),
-    ).resolves.toBe(res);
-  });
-
-  it('follows a redirect to an allowed GitHub CDN host', async () => {
-    const final = fakeResponse(200);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        fakeResponse(302, 'https://objects.githubusercontent.com/x'),
-      )
-      .mockResolvedValueOnce(final);
-    vi.stubGlobal('fetch', fetchMock);
-    await expect(
-      fetchAllowedGitHub('https://codeload.github.com/a/b/tar.gz/main'),
-    ).resolves.toBe(final);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('rejects a redirect to a disallowed host', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(fakeResponse(302, 'https://evil.com/x')),
-    );
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/a/b/main/SKILL.md'),
-    ).rejects.toThrow(/disallowed host/);
-  });
-
-  it('rejects a non-https redirect target', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          fakeResponse(302, 'http://raw.githubusercontent.com/x'),
-        ),
-    );
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/a/b/main/SKILL.md'),
-    ).rejects.toThrow(/disallowed host/);
-  });
-
-  it('rejects when the redirect limit is exceeded', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          fakeResponse(302, 'https://raw.githubusercontent.com/loop'),
-        ),
-    );
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/a', {}, 2),
-    ).rejects.toThrow(/maximum number of redirects/);
-  });
-
-  it('resolves a relative Location against the current URL', async () => {
-    const final = fakeResponse(200);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(fakeResponse(302, '/a/b/SKILL.md'))
-      .mockResolvedValueOnce(final);
-    vi.stubGlobal('fetch', fetchMock);
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/start'),
-    ).resolves.toBe(final);
-    expect(fetchMock.mock.calls[1]![0]).toBe(
-      'https://raw.githubusercontent.com/a/b/SKILL.md',
-    );
   });
 });
 

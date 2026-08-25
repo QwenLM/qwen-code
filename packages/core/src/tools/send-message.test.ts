@@ -26,7 +26,6 @@ function makeTeamConfig(opts?: {
   teamManager?: {
     sendMessage: (...args: unknown[]) => Promise<void>;
     broadcast: (...args: unknown[]) => Promise<void>;
-    requestShutdown?: (...args: unknown[]) => Promise<void>;
     getTeamFile?: () => {
       leadAgentId: string;
       members: Array<{ name: string; agentId: string }>;
@@ -147,62 +146,50 @@ describe('SendMessageTool — team mode', () => {
     expect(result.llmContent).toContain('No active team');
   });
 
-  it('routes shutdown_request via requestShutdown', async () => {
-    const requestShutdown = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: {
-          sendMessage: vi.fn(),
-          broadcast: vi.fn(),
-          requestShutdown,
-        },
-      }),
-    );
-
-    const invocation = tool.build({
-      to: 'bob',
-      message: 'Please shut down.',
-      type: 'shutdown_request',
-    });
-    const result = await invocation.execute(new AbortController().signal);
-    expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('Shutdown');
-    expect(result.llmContent).toContain('bob');
-    expect(requestShutdown).toHaveBeenCalledWith('bob');
+  // #9276: the tool used to carry an optional single-value enum
+  // `type: ['shutdown_request']` described as "structured message type for
+  // control flow". Models filled it while writing an ordinary report, the
+  // call was rejected leader-only, and the report content was discarded.
+  // The fix is that the field no longer exists — assert the *absence*, since
+  // a reworded description would still leave the state representable.
+  it('exposes no control discriminator on the schema', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
+    const schema = tool.schema.parametersJsonSchema as {
+      properties: Record<string, unknown>;
+    };
+    expect(Object.keys(schema.properties)).not.toContain('type');
+    expect(JSON.stringify(schema)).not.toContain('shutdown_request');
   });
 
-  it('rejects shutdown_request from a teammate (leader-only)', async () => {
-    // A teammate calling shutdown_request would impersonate the
-    // leader, since requestShutdown writes the mailbox entry with
-    // `from: LEADER_NAME` and arms shutdown_approved tracking.
-    const requestShutdown = vi.fn().mockResolvedValue(undefined);
+  it("delivers a teammate's ordinary message to the leader", async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
       makeTeamConfig({
-        teamManager: {
-          sendMessage: vi.fn(),
-          broadcast: vi.fn(),
-          requestShutdown,
-        },
+        teamManager: { sendMessage, broadcast: vi.fn() },
       }),
     );
 
     const invocation = tool.build({
-      to: 'bob',
-      message: 'Please shut down.',
-      type: 'shutdown_request',
+      to: 'leader',
+      message: 'Task completed and verified',
     });
     const result = await runWithTeammateIdentity(
       {
-        agentName: 'attacker',
+        agentName: 'worker',
         teamName: 'team',
-        agentId: 'attacker@team',
+        agentId: 'worker@team',
         isTeamLead: false,
       },
       () => invocation.execute(new AbortController().signal),
     );
-    expect(result.error).toBeDefined();
-    expect(result.llmContent).toContain('Only the team leader');
-    expect(requestShutdown).not.toHaveBeenCalled();
+
+    expect(result.error).toBeUndefined();
+    expect(sendMessage).toHaveBeenCalledWith(
+      'leader',
+      'Task completed and verified',
+      'worker',
+      undefined,
+    );
   });
 
   it('blocks plan-required teammates before leader approval', async () => {
@@ -319,24 +306,6 @@ describe('SendMessageTool — peer-session mode', () => {
     });
   });
 
-  it('does not send structured team controls to a peer', async () => {
-    const tool = new SendMessageTool(
-      makeTeamConfig({ crossSessionMessagingEnabled: true }),
-    );
-
-    const result = await tool.validateBuildAndExecute(
-      {
-        to: 'worker-ab',
-        message: 'shut down',
-        type: 'shutdown_request',
-      },
-      new AbortController().signal,
-    );
-
-    expect(result.error).toBeDefined();
-    expect(sendToPeerMock).not.toHaveBeenCalled();
-  });
-
   it('does not reinterpret an explicit peer address when messaging is off', async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     const tool = new SendMessageTool(
@@ -367,42 +336,6 @@ describe('SendMessageTool — peer-session mode', () => {
       'Cross-session messaging is unavailable',
     );
     expect(sendMessage).not.toHaveBeenCalled();
-  });
-
-  it('does not reinterpret a peer control as a teammate control', async () => {
-    const requestShutdown = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: {
-          sendMessage: vi.fn(),
-          broadcast: vi.fn(),
-          requestShutdown,
-          getTeamFile: () => ({
-            leadAgentId: 'leader@team',
-            members: [
-              {
-                name: PEER_ADDRESS.replace(':', '-'),
-                agentId: 'peer-alias@team',
-              },
-            ],
-          }),
-        },
-      }),
-    );
-
-    const result = await tool.validateBuildAndExecute(
-      {
-        to: PEER_ADDRESS,
-        message: 'shut down',
-        type: 'shutdown_request',
-      },
-      new AbortController().signal,
-    );
-
-    expect(result.error).toBeDefined();
-    expect(result.llmContent).toContain('cannot be sent');
-    expect(requestShutdown).not.toHaveBeenCalled();
-    expect(sendToPeerMock).not.toHaveBeenCalled();
   });
 
   it('asks for a ref instead of guessing an ambiguous session', async () => {

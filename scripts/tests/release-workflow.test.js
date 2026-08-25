@@ -11,6 +11,13 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const cuaReleaseWorkflow = readFileSync(
+  '.github/workflows/cd-cua-driver.yml',
+  'utf8',
+);
+const nodeReplPackage = JSON.parse(
+  readFileSync('packages/node-repl/package.json', 'utf8'),
+);
 const desktopReleaseWorkflow = readFileSync(
   '.github/workflows/desktop-release.yml',
   'utf8',
@@ -27,6 +34,46 @@ const liveHostInstaller = readFileSync(
   'packages/cli/src/serve/live/live-host-installer.ts',
   'utf8',
 );
+
+describe('CUA release workflow', () => {
+  it('keeps the Node REPL package independently versioned', () => {
+    expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
+    expect(nodeReplPackage.version).toBe('0.1.0');
+    expect(cuaReleaseWorkflow).toContain(
+      "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
+    );
+    expect(cuaReleaseWorkflow).not.toContain(
+      'NODE_REPL_VERSION does not match release version',
+    );
+  });
+
+  it('dry-runs and clean-installs the packed Node REPL MCP server', () => {
+    expect(cuaReleaseWorkflow).toMatch(
+      /verify-node-repl-package:[\s\S]*?npm ci --ignore-scripts[\s\S]*?npm run typecheck[\s\S]*?npm test[\s\S]*?npm run smoke:mcp[\s\S]*?npm run smoke:lifecycle[\s\S]*?node packages\/node-repl\/scripts\/verify-package\.mjs[\s\S]*?node-repl-mcp-npm-\$\{\{[\s\S]*?node_repl_version/,
+    );
+  });
+
+  it('publishes the verified Node REPL tarball immutably with provenance', () => {
+    expect(cuaReleaseWorkflow).toMatch(
+      /publish-node-repl:[\s\S]*?needs: \['validate-version', 'verify-node-repl-package', 'release'\][\s\S]*?npm view "@qwen-code\/node-repl-mcp@\$\{VERSION\}" dist\.integrity[\s\S]*?npm publish "\$TARBALL" --provenance --access public --tag "\$NPM_TAG"[\s\S]*?Verify npm registry integrity/,
+    );
+    expect(cuaReleaseWorkflow).toContain(
+      "needs: ['release', 'publish-sdk', 'publish-node-repl']",
+    );
+  });
+
+  it('bootstraps only Node REPL without replacing an existing CUA release', () => {
+    expect(cuaReleaseWorkflow).toMatch(
+      /node_repl_only:[\s\S]*?type: 'boolean'[\s\S]*?default: false/,
+    );
+    expect(cuaReleaseWorkflow).toMatch(
+      /publish-node-repl:[\s\S]*?needs\.release\.result == 'success'[\s\S]*?inputs\.node_repl_only == true[\s\S]*?inputs\.dry_run == false/,
+    );
+    expect(cuaReleaseWorkflow).toContain(
+      'A production dispatch must run from protected main',
+    );
+  });
+});
 
 describe('release workflow', () => {
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
