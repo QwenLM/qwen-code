@@ -108,10 +108,14 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     vi.resetModules();
     vi.doMock('node:fs', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs')>();
-      return {
+      // The helper uses a DEFAULT import of node:fs, so the `default`
+      // property must carry the stubbed constants too (`...actual` alone
+      // would keep the real default binding with the real O_NOFOLLOW).
+      const modified = {
         ...actual,
         constants: { ...actual.constants, O_NOFOLLOW: undefined },
       };
+      return { ...modified, default: modified };
     });
     const mockedFs = await import('node:fs');
     const { openNoFollow: openFallback, openSyncNoFollow: openSyncFallback } =
@@ -172,7 +176,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
       vi.resetModules();
       vi.doMock('node:fs', async (importOriginal) => {
         const actual = await importOriginal<typeof import('node:fs')>();
-        return {
+        const modified = {
           ...actual,
           constants: { ...actual.constants, O_NOFOLLOW: undefined },
           fstatSync: ((fd: number) => {
@@ -184,6 +188,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
             );
           }) as typeof actual.fstatSync,
         };
+        return { ...modified, default: modified };
       });
 
       try {
@@ -210,7 +215,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     vi.resetModules();
     vi.doMock('node:fs', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs')>();
-      return {
+      const modified = {
         ...actual,
         constants: { ...actual.constants, O_NOFOLLOW: undefined },
         lstatSync: ((p: string) => {
@@ -222,6 +227,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
           );
         }) as typeof actual.lstatSync,
       };
+      return { ...modified, default: modified };
     });
 
     try {

@@ -32,9 +32,15 @@
  * Every refusal is reported as an error with `code: 'ELOOP'` — the same
  * code POSIX `O_NOFOLLOW` produces — so existing `ELOOP` handling in
  * callers applies to the fallback path unchanged.
+ *
+ * `node:fs` is bound through the DEFAULT import (not a namespace import)
+ * so suites that spy the fs object — the way `sessionService.rename.test.ts`
+ * spies `openSync`/`readSync` for its fabricated session paths — intercept
+ * this helper's calls too: vitest hands namespace imports their own copy of
+ * an externalized CJS module, which escapes those spies (#8227).
  */
 
-import * as fs from 'node:fs';
+import fs from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 
 import { hasVerifiableInode } from './file-identity.js';
