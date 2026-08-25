@@ -10,7 +10,8 @@
 // that contains it. The assignee is the area's least loaded eligible
 // owner, rotated by PR number on ties — the same load metric and rotation as
 // issue assignment. Push access is re-verified against the live collaborator
-// API before the write, and the run no-ops once any mapped owner is already
+// API before the write, coverage is re-checked against the live PR
+// immediately before it, and the run no-ops once any mapped owner is already
 // an assignee or has reviewed, so repeated pushes never stack assignments.
 import { appendFileSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
@@ -200,6 +201,33 @@ function main() {
       `Area: ${area.name}`,
       `Assignment: dry-run — would assign @${assignee} (${loadByOwner.get(assignee)} open)`,
     ]);
+    return;
+  }
+
+  // Between the opening snapshot and this write sit up to ~30 sequential API
+  // calls (permission and load per candidate), and during that window a
+  // human or a concurrent run may already have put a mapped owner on the PR
+  // or closed it. Re-check the live PR immediately before mutating,
+  // mirroring the sibling issue script's pre-write re-fetch, so a covered PR
+  // is never assigned twice.
+  const latestPr = JSON.parse(
+    gh([
+      'pr',
+      'view',
+      String(prNumber),
+      '--repo',
+      repository,
+      '--json',
+      'state,isDraft,author,assignees,latestReviews',
+    ]),
+  );
+  const latestSkip = skipPrReason(latestPr);
+  if (latestSkip) {
+    record([`Assignment: skipped — ${latestSkip}`]);
+    return;
+  }
+  if (alreadyCovered(policy, latestPr)) {
+    record(['Assignment: skipped — a mapped owner is already on the PR']);
     return;
   }
 

@@ -147,6 +147,10 @@ describe('assign-pr-owner: pure routing', () => {
 function runAssign(dryRun, options = {}) {
   const {
     prJson = JSON.stringify(corePr),
+    // When set, the second `pr view` (the pre-write re-fetch) sees this PR
+    // state instead of prJson, so a test can simulate the PR changing while
+    // the run is in flight.
+    prLatestJson = '',
     files = 'packages/core/src/foo.ts',
     zeroLoadOwner = 'DennisYu07',
     editExit = 0,
@@ -162,7 +166,15 @@ function runAssign(dryRun, options = {}) {
     `#!/bin/sh
 printf '%s\\n' "$*" >> "$GH_STUB_LOG"
 case "$*" in
-  "pr view 77 "*) printf '%s' "$GH_STUB_PR" ;;
+  "pr view 77 "*)
+    # The log line for this call is already appended, so the first view
+    # counts 1 and the pre-write re-fetch counts 2.
+    if [ -n "$GH_STUB_PR_LATEST" ] && [ "$(grep -c 'pr view' "$GH_STUB_LOG")" -gt 1 ]; then
+      printf '%s' "$GH_STUB_PR_LATEST"
+    else
+      printf '%s' "$GH_STUB_PR"
+    fi
+    ;;
   *"pulls/77/files"*) printf '%s' "$GH_STUB_FILES" ;;
   *"/collaborators/"*"/permission"*) printf '%s' 'write' ;;
   *"--assignee ${zeroLoadOwner}"*"--json number"*) printf '%s' '0' ;;
@@ -180,6 +192,7 @@ esac
       PATH: `${dir}:${process.env.PATH}`,
       GH_STUB_LOG: log,
       GH_STUB_PR: prJson,
+      GH_STUB_PR_LATEST: prLatestJson,
       GH_STUB_FILES: files,
       GH_STUB_EDIT_EXIT: String(editExit),
       GH_STUB_EDIT_ERR: editErr,
@@ -233,6 +246,29 @@ describe('assign-pr-owner: apply boundary', () => {
     });
     assert.doesNotMatch(log, /pr edit/);
     assert.match(stdout, /no area path matched/);
+  });
+
+  it('re-checks coverage against the live PR immediately before the write', () => {
+    // Up to ~30 sequential API calls sit between the opening snapshot and
+    // the write; a mapped owner landing on the PR in that window must stop
+    // the assignment instead of stacking a second one.
+    const owner = policy.areas[0].owners[0];
+    const { log, stdout } = runAssign(false, {
+      prLatestJson: JSON.stringify({
+        ...corePr,
+        assignees: [{ login: owner }],
+      }),
+    });
+    assert.doesNotMatch(log, /pr edit/);
+    assert.match(stdout, /already on the PR/);
+  });
+
+  it('skips the write when the PR closes mid-run', () => {
+    const { log, stdout } = runAssign(false, {
+      prLatestJson: JSON.stringify({ ...corePr, state: 'MERGED' }),
+    });
+    assert.doesNotMatch(log, /pr edit/);
+    assert.match(stdout, /skipped — PR is not open/);
   });
 
   it('falls back to the coarser area when the module owner authored the PR', () => {
