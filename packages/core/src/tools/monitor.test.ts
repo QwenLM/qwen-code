@@ -143,6 +143,22 @@ vi.mock('../utils/shellAstParser.js', async (importOriginal) => ({
   extractCommandRules: mockExtractCommandRules,
 }));
 
+// `debugLogger.warn` writes nothing without an active debug-log session, so a
+// console spy cannot see it. The logger is replaced instead, which is also the
+// only way to assert on what the message carries.
+const mockDebugWarn = vi.hoisted(() => vi.fn());
+const mockDebugLog = vi.hoisted(() => vi.fn());
+vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/debugLogger.js')>()),
+  createDebugLogger: () => ({
+    isEnabled: () => true,
+    debug: mockDebugLog,
+    info: vi.fn(),
+    warn: mockDebugWarn,
+    error: vi.fn(),
+  }),
+}));
+
 import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
 import type { Config } from '../config/config.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
@@ -510,6 +526,75 @@ describe('MonitorTool', () => {
       // Sub-command should still be in confirmation scope (not dropped)
       expect(details.permissionRules).toBeDefined();
       expect(details.permissionRules!.length).toBeGreaterThan(0);
+    });
+
+    it('never reaches the classifier once a sub-command has planted state', async () => {
+      // The reason the failure log carries no `plants`/`statePlanted` values:
+      // `!statePlanted && !plants && (await isShellCommandReadOnly…)`
+      // short-circuits, so the classifier — and therefore its catch — is only
+      // ever reached while both flags are false. Reporting them there would
+      // print two constants. Pinned so that if the short-circuit is ever
+      // reordered, the claim in the comment fails instead of quietly rotting.
+      mockIsShellCommandReadOnlyAST.mockReset();
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+
+      const planted = createInvocation({
+        command: 'cd /tmp && tail -f app.log && tail -f other.log',
+      });
+      await planted.getConfirmationDetails(new AbortController().signal);
+
+      // `cd` itself short-circuits on `!plants`, and every later segment
+      // short-circuits on `!statePlanted`, so the classifier is not consulted
+      // once — there is no path on which its catch sees a true flag.
+      expect(mockIsShellCommandReadOnlyAST).not.toHaveBeenCalled();
+
+      // Control, so the assertion above cannot pass merely because the
+      // classifier is never called for this command shape at all.
+      const unplanted = createInvocation({
+        command: 'tail -f app.log && tail -f other.log',
+      });
+      await unplanted.getConfirmationDetails(new AbortController().signal);
+
+      expect(
+        mockIsShellCommandReadOnlyAST.mock.calls.map((call) => call[0]),
+      ).toEqual(['tail -f app.log', 'tail -f other.log']);
+      mockIsShellCommandReadOnlyAST.mockReset();
+    });
+
+    it('names the planter that widened the confirmation scope', async () => {
+      mockDebugLog.mockClear();
+      mockIsShellCommandReadOnlyAST.mockReset();
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(true);
+
+      const invocation = createInvocation({
+        command: 'cd /tmp && tail -f app.log',
+      });
+      await invocation.getConfirmationDetails(new AbortController().signal);
+
+      const planterLogs = mockDebugLog.mock.calls.filter((call) =>
+        String(call[0]).includes('plants state'),
+      );
+      expect(planterLogs).toHaveLength(1);
+      expect(planterLogs[0]![1]).toBe('cd /tmp');
+      mockIsShellCommandReadOnlyAST.mockReset();
+    });
+
+    it('logs no planter line when nothing plants state', async () => {
+      mockDebugLog.mockClear();
+      mockIsShellCommandReadOnlyAST.mockReset();
+      mockIsShellCommandReadOnlyAST.mockResolvedValue(false);
+
+      const invocation = createInvocation({
+        command: 'tail -f app.log && tail -f other.log',
+      });
+      await invocation.getConfirmationDetails(new AbortController().signal);
+
+      expect(
+        mockDebugLog.mock.calls.filter((call) =>
+          String(call[0]).includes('plants state'),
+        ),
+      ).toHaveLength(0);
+      mockIsShellCommandReadOnlyAST.mockReset();
     });
   });
 

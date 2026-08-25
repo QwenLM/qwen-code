@@ -238,12 +238,28 @@ class MonitorToolInvocation extends BaseToolInvocation<
       } catch (e) {
         // Conservative fallback: if AST analysis fails, keep the sub-command
         // in the confirmation scope instead of accidentally dropping it.
+        // Deliberately does NOT carry `plants`/`statePlanted`: the `&&` above
+        // short-circuits, so the classifier is only ever reached when both are
+        // already false. Logging them here would print two constants. The
+        // planter transition is logged below, where the value actually varies.
         debugLogger.warn(
           'AST read-only check failed for monitor sub-command, falling back to ask:',
           e,
         );
       }
 
+      // Logged on the transition only, and only here: this is the one place
+      // where the answer to "why does this dialog list more sub-commands than
+      // I expected" is not already visible. Everything after this segment
+      // stays in scope because of it, so the segment that caused it is worth
+      // naming. `debugLogger` no-ops without an active session, so the cost
+      // outside a debug run is a boolean test.
+      if (plants && !statePlanted) {
+        debugLogger.debug(
+          'monitor sub-command plants state; later sub-commands stay in the confirmation scope:',
+          sub,
+        );
+      }
       statePlanted ||= plants;
 
       if (isReadOnly) {
