@@ -472,9 +472,16 @@ describe('WorkspaceRegistrationStore', () => {
         }),
       },
     }));
-    vi.doMock('@qwen-code/qwen-code-core', () => ({
-      atomicWriteFile: vi.fn().mockRejectedValue(writeError),
-    }));
+    // Keep the real barrel exports (the store now reads through
+    // `openNoFollow` from core) and only stub the write path under test.
+    vi.doMock('@qwen-code/qwen-code-core', async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+      return {
+        ...actual,
+        atomicWriteFile: vi.fn().mockRejectedValue(writeError),
+      };
+    });
     try {
       const storeModule = await import('./workspace-registration-store.js');
       const store = new storeModule.WorkspaceRegistrationStore(

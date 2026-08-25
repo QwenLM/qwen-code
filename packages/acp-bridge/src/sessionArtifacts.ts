@@ -5,7 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, promises as fs, type Stats } from 'node:fs';
+import { promises as fs, type Stats } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -17,6 +17,7 @@ import {
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
   metadataBudgetBytes,
+  openNoFollow,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   pathHasSkippedDirectoryComponent,
   stableSessionArtifactId,
@@ -3108,10 +3109,10 @@ async function getWorkspaceStatus(
       return { status: 'missing', escaped: true };
     }
     const preOpenStat = await fs.lstat(realPath);
-    const handle = await fs.open(
-      realPath,
-      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
-    );
+    // Where O_NOFOLLOW does not exist (Windows) the helper compensates
+    // with an lstat/open/fstat identity check instead of collapsing to a
+    // plain open that follows symlinks (#8227).
+    const handle = await openNoFollow(realPath);
     try {
       const stat = await handle.stat();
       if (!isSameFile(preOpenStat, stat)) {

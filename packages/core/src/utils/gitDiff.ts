@@ -5,19 +5,12 @@
  */
 
 import { execFile } from 'node:child_process';
-// Namespace import (vs `import { constants }`) so vitest tests that
-// `vi.mock('node:fs', ...)` without supplying every named export don't
-// blow up in strict-mock mode just because they transitively load this
-// file via `@qwen-code/qwen-code-core`. The `constants?.X ?? 0` accesses
-// below absorb a missing `constants` field by falling through to plain
-// `O_RDONLY` (= 0 on POSIX) — harmless in mock environments where no
-// real `open()` ever runs.
-import * as nodeFs from 'node:fs';
-import { access, lstat, open, readFile, stat } from 'node:fs/promises';
+import { access, lstat, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
 import { findGitRoot, readFirstLineNoFollow } from './gitUtils.js';
+import { openNoFollow } from './no-follow-open.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
 export type GitDiffHunk = Hunk;
@@ -90,25 +83,6 @@ const UNTRACKED_READ_CAP_BYTES = MAX_DIFF_SIZE_BYTES;
 const UNTRACKED_READ_CHUNK_BYTES = 64 * 1024;
 /** Scan the first N bytes for NUL to detect binary files (matches git's heuristic). */
 const BINARY_SNIFF_BYTES = 8 * 1024;
-/** Memoized open flags for line counting. `O_NOFOLLOW` closes the TOCTOU
- *  window between the `lstat` symlink check and `open` — if the path is
- *  replaced with a symlink in that gap, `open` rejects with `ELOOP` instead
- *  of silently dereferencing it. Falls back to plain `O_RDONLY` on platforms
- *  that don't expose the flag (Windows constants omit `O_NOFOLLOW`).
- *
- *  Computed lazily on first call (rather than at module load) so test files
- *  that `vi.mock('node:fs', ...)` without supplying `constants` can still
- *  load this module transitively via `@qwen-code/qwen-code-core` without
- *  vitest's strict-mock proxy throwing on the property access. Tests that
- *  do not actually exercise `countUntrackedLines` never trigger the lookup. */
-let untrackedOpenFlagsCache: number | undefined;
-function getUntrackedOpenFlags(): number {
-  if (untrackedOpenFlagsCache === undefined) {
-    untrackedOpenFlagsCache =
-      (nodeFs.constants?.O_RDONLY ?? 0) | (nodeFs.constants?.O_NOFOLLOW ?? 0);
-  }
-  return untrackedOpenFlagsCache;
-}
 
 /**
  * Fetch numstat-based git diff stats (files changed, lines added/removed) and
@@ -449,7 +423,10 @@ async function synthesizeUntrackedHunk(
   }
   let fh;
   try {
-    fh = await open(absPath, getUntrackedOpenFlags());
+    // O_NOFOLLOW closes the TOCTOU window between the lstat above and the
+    // open — where the flag does not exist (Windows) the helper compensates
+    // with an identity re-check (#8227).
+    fh = await openNoFollow(absPath);
   } catch {
     return null;
   }
@@ -968,7 +945,10 @@ async function countUntrackedLines(
   }
   let fh;
   try {
-    fh = await open(absPath, getUntrackedOpenFlags());
+    // O_NOFOLLOW closes the TOCTOU window between the lstat above and the
+    // open — where the flag does not exist (Windows) the helper compensates
+    // with an identity re-check (#8227).
+    fh = await openNoFollow(absPath);
   } catch {
     // ELOOP from O_NOFOLLOW (path raced into a symlink between lstat and
     // open) and any other open error all collapse to a binary row so the

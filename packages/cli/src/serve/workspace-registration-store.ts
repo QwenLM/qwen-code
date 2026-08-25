@@ -5,11 +5,11 @@
  */
 
 import { createHash } from 'node:crypto';
-import { constants } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
+import { openNoFollow } from '@qwen-code/qwen-code-core';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { getGlobalQwenDirLite } from '../config/storage-paths-lite.js';
 import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
@@ -355,10 +355,10 @@ export class WorkspaceRegistrationStore {
     }
     let file: Awaited<ReturnType<typeof fs.open>>;
     try {
-      file = await fs.open(
-        this.filePath,
-        (constants.O_RDONLY ?? 0) | (constants.O_NOFOLLOW ?? 0),
-      );
+      // Where O_NOFOLLOW does not exist (Windows) the helper compensates
+      // with an lstat/open/fstat identity check instead of collapsing to a
+      // plain open that follows symlinks (#8227).
+      file = await openNoFollow(this.filePath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return emptySnapshot(this.primaryWorkspace);
