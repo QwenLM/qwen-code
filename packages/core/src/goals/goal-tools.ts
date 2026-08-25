@@ -246,6 +246,7 @@ class UpdateGoalInvocation extends BaseToolInvocation<
     ) {
       throw staleGoalTurnError();
     }
+    let autoCitedCurrentDeliveredOutput: string[] = [];
     const evidenceEntries = view.evidenceCatalog?.entries;
     if (evidenceEntries) {
       const normalizedEvidenceRefs = this.params.evidenceRefs.map((reference) =>
@@ -273,38 +274,38 @@ class UpdateGoalInvocation extends BaseToolInvocation<
         };
       }
       const citedEvidenceRefs = new Set(normalizedEvidenceRefs);
-      const uncitedCurrentDeliveredOutput = evidenceEntries
-        .filter(
-          (entry) =>
-            entry.proofKind === 'delivered_output' &&
-            entry.turnId === permit.turnId &&
-            !citedEvidenceRefs.has(entry.uuid),
-        )
-        .map((entry) => entry.uuid);
-      if (
-        this.params.status === 'complete' &&
-        uncitedCurrentDeliveredOutput.length > 0
-      ) {
-        return {
-          llmContent: JSON.stringify({
-            proposalRecorded: false,
-            readyForVerification: false,
-            goalLifecycleChanged: false,
-            uncitedCurrentDeliveredOutput,
-            error:
-              'The completion proposal omitted delivered output from the current Goal turn. Call get_goal after delivering the final output, then retry update_goal with the returned evidenceCatalog UUIDs.',
-          }),
-          returnDisplay:
-            'Goal proposal was not recorded because the current delivered output was not cited. Read the current Goal and retry.',
-        };
-      }
+      // The verifier judges a completion against this turn's delivered output,
+      // so it has to be cited. Asking the model to cite it cannot converge:
+      // assistant output is `delivered_output` stamped with this same turn, so
+      // every attempt to comply — reading the catalog, then calling back —
+      // emits text that becomes another uncited entry, and the required set
+      // grows by one per retry. Refusing produced runs that proposed
+      // completion until a human paused them.
+      //
+      // Nothing about the list needs the model's judgment: it is exactly the
+      // entries computed here. Fold them in instead of demanding they be
+      // repeated back. Both sets are drawn from the same catalog and are
+      // disjoint by construction, so the union cannot exceed
+      // GOAL_EVIDENCE_REFERENCE_LIMIT, which is that catalog's own entry cap.
+      autoCitedCurrentDeliveredOutput =
+        this.params.status === 'complete'
+          ? evidenceEntries
+              .filter(
+                (entry) =>
+                  entry.proofKind === 'delivered_output' &&
+                  entry.turnId === permit.turnId &&
+                  !citedEvidenceRefs.has(entry.uuid),
+              )
+              .map((entry) => entry.uuid)
+          : [];
     }
     const proposal: GoalTerminalProposal = {
       status: this.params.status,
       reason: this.params.reason.trim(),
-      evidenceRefs: this.params.evidenceRefs.map((reference) =>
-        reference.trim(),
-      ),
+      evidenceRefs: [
+        ...this.params.evidenceRefs.map((reference) => reference.trim()),
+        ...autoCitedCurrentDeliveredOutput,
+      ],
       ...(this.params.blockerKind
         ? { blockerKind: this.params.blockerKind }
         : {}),
@@ -320,6 +321,12 @@ class UpdateGoalInvocation extends BaseToolInvocation<
       proposalRecorded: receipt.recorded,
       readyForVerification: receipt.readyForVerification,
       goalLifecycleChanged: false,
+      // Reported so the proposal the verifier sees is not a surprise, and so a
+      // model that wants to cite this turn's output explicitly can see it was
+      // already covered rather than calling back to add it.
+      ...(autoCitedCurrentDeliveredOutput.length > 0
+        ? { autoCitedCurrentDeliveredOutput }
+        : {}),
       nextAction: receipt.readyForVerification
         ? 'End this turn without user-facing text. Do not claim the Goal is complete or blocked. The Goal status card will report the independent verification result.'
         : 'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and exact same reason text across three consecutive Goal turns, with current evidence cited on each turn.',

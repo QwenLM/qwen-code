@@ -548,6 +548,23 @@ describe('GetGoalTool', () => {
 });
 
 describe('UpdateGoalTool', () => {
+  const activeSnapshot = () => ({
+    v: 2 as const,
+    activity: 'running' as const,
+    goal: {
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: 'Deliver the result',
+      status: 'active' as const,
+      evidenceCursor: { recordId: 'goal-created' },
+      turnCount: 3,
+      activeTimeMs: 100,
+      tokensUsed: 0,
+      createdAt: 1,
+      updatedAt: 2,
+    },
+  });
+
   it('exposes the exact evidence and non-terminal response contract', () => {
     const tool = new UpdateGoalTool(makeConfig({}));
     const schema = tool.schema.parametersJsonSchema as {
@@ -670,8 +687,11 @@ describe('UpdateGoalTool', () => {
     expect(recordTerminalProposal).not.toHaveBeenCalled();
   });
 
-  it('rejects completion that omits current delivered output', async () => {
-    const recordTerminalProposal = vi.fn();
+  it("cites this turn's delivered output for a completion that omitted it", async () => {
+    const recordTerminalProposal = vi.fn(() => ({
+      recorded: true,
+      readyForVerification: true,
+    }));
     const getGoalForWorker = vi.fn().mockResolvedValue({
       goalId: permit.goalId,
       revision: permit.revision,
@@ -730,15 +750,151 @@ describe('UpdateGoalTool', () => {
 
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(JSON.parse(String(result.llmContent))).toEqual({
-      proposalRecorded: false,
-      readyForVerification: false,
-      goalLifecycleChanged: false,
-      uncitedCurrentDeliveredOutput: ['letter-x'],
-      error:
-        'The completion proposal omitted delivered output from the current Goal turn. Call get_goal after delivering the final output, then retry update_goal with the returned evidenceCatalog UUIDs.',
+    // Refusing here could not converge: complying emits assistant text, which
+    // is delivered_output stamped with this same turn, so the required set
+    // grew by one per retry until a human stopped the Goal.
+    expect(recordTerminalProposal).toHaveBeenCalledWith(
+      permit,
+      expect.objectContaining({
+        status: 'complete',
+        evidenceRefs: ['tool-result-1', 'letter-x'],
+      }),
+    );
+    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+      proposalRecorded: true,
+      readyForVerification: true,
+      autoCitedCurrentDeliveredOutput: ['letter-x'],
     });
-    expect(recordTerminalProposal).not.toHaveBeenCalled();
+  });
+
+  it('does not duplicate output the completion already cited', async () => {
+    // validateGoalEvidenceReferences rejects a duplicated ref outright, so the
+    // fold has to be a union rather than an append.
+    const recordTerminalProposal = vi.fn(() => ({
+      recorded: true,
+      readyForVerification: true,
+    }));
+    const tool = new UpdateGoalTool(
+      makeConfig({
+        getGoalForWorker: vi.fn().mockResolvedValue({
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'Deliver the result',
+          evidenceCursor: { recordId: 'goal-created' },
+          evidenceCatalog: {
+            entries: [
+              {
+                uuid: 'letter-x',
+                provenance: 'assistant_output',
+                turnId: permit.turnId,
+                preview: 'X',
+                proofKind: 'delivered_output',
+              },
+              {
+                uuid: 'letter-y',
+                provenance: 'assistant_output',
+                turnId: permit.turnId,
+                preview: 'Y',
+                proofKind: 'delivered_output',
+              },
+              {
+                uuid: 'current-external-fact',
+                provenance: 'tool_result',
+                turnId: permit.turnId,
+                preview: 'permission denied',
+                proofKind: 'external_fact',
+              },
+              {
+                uuid: 'prior-delivered-output',
+                provenance: 'assistant_output',
+                turnId: 'prior-turn',
+                preview: 'Earlier output',
+                proofKind: 'delivered_output',
+              },
+            ],
+            lineageTurnIds: ['prior-turn', permit.turnId],
+          },
+        }),
+        getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+        recordTerminalProposal,
+      }),
+    );
+    const invocation = goalTurnContext.run(permit, () =>
+      tool.build({
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['letter-x'],
+      }),
+    );
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(recordTerminalProposal).toHaveBeenCalledWith(
+      permit,
+      expect.objectContaining({ evidenceRefs: ['letter-x', 'letter-y'] }),
+    );
+    expect(recordTerminalProposal).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+      autoCitedCurrentDeliveredOutput: ['letter-y'],
+    });
+  });
+
+  it('leaves a blocked proposal to cite whatever it chose', async () => {
+    // The gate only ever guarded completion: a blocker is judged on the
+    // blocker, not on what the turn happened to deliver.
+    const recordTerminalProposal = vi.fn(() => ({
+      recorded: true,
+      readyForVerification: false,
+    }));
+    const tool = new UpdateGoalTool(
+      makeConfig({
+        getGoalForWorker: vi.fn().mockResolvedValue({
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'Deliver the result',
+          evidenceCursor: { recordId: 'goal-created' },
+          evidenceCatalog: {
+            entries: [
+              {
+                uuid: 'tool-result-1',
+                provenance: 'tool_result',
+                turnId: permit.turnId,
+                preview: 'permission denied',
+                proofKind: 'external_fact',
+              },
+              {
+                uuid: 'letter-x',
+                provenance: 'assistant_output',
+                turnId: permit.turnId,
+                preview: 'X',
+                proofKind: 'delivered_output',
+              },
+            ],
+            lineageTurnIds: [permit.turnId],
+          },
+        }),
+        getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+        recordTerminalProposal,
+      }),
+    );
+    const invocation = goalTurnContext.run(permit, () =>
+      tool.build({
+        status: 'blocked',
+        reason: 'The credential store is unreadable',
+        evidenceRefs: ['tool-result-1'],
+        blockerKind: 'external',
+      }),
+    );
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(recordTerminalProposal).toHaveBeenCalledWith(
+      permit,
+      expect.objectContaining({ evidenceRefs: ['tool-result-1'] }),
+    );
+    expect(JSON.parse(String(result.llmContent))).not.toHaveProperty(
+      'autoCitedCurrentDeliveredOutput',
+    );
   });
 
   it('queues truncated completion for boundary classification', async () => {
