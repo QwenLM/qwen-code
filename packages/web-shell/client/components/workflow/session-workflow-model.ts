@@ -5,6 +5,7 @@ import type {
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { isSubAgentToolCall } from '../../adapters/toolClassification';
 import {
+  getActiveAgents,
   getPlanNodeState,
   nestedAgentToolsForTool,
   nestedTasksForTool,
@@ -111,9 +112,11 @@ export function buildSessionWorkflowProjection(
   );
   const agents = linkedAgentTasks(tools, tasks);
   const attentionTodos = todos.filter((todo) => states.get(todo.id)?.attention);
-  const activeAgents = agents.filter(
-    (task) => task.status === 'running' || task.status === 'paused',
-  );
+  // The overview strip's exact tally (live tasks plus the transcript
+  // fallback for in-flight tool calls with no live daemon task), so the
+  // inspector summary and the strip report the same "Active agents" count
+  // for the same session instead of live-only vs fallback divergence.
+  const activeAgents = getActiveAgents(tools, tasks);
   const completedCount = todos.filter(
     (todo) => todo.status === 'completed',
   ).length;

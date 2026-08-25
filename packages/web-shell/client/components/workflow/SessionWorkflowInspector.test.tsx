@@ -104,4 +104,47 @@ describe('SessionWorkflowInspector', () => {
     act(() => root.unmount());
     container.remove();
   });
+
+  // R11-2: same input as the overview strip's transcript-only case — one
+  // in_progress Agent tool call, no live daemon tasks. The strip reports
+  // "Active agents: 1" via the executionStatus fallback; the summary here
+  // must not contradict it with a live-only count of 0.
+  it('counts transcript-only agents the same as the overview strip', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const todos: TodoItem[] = [
+      { id: 'build', content: 'Build', status: 'in_progress' },
+    ];
+    const tools: ACPToolCall[] = [
+      {
+        callId: 'build-agent',
+        toolName: 'Agent',
+        title: 'Build Agent',
+        status: 'in_progress',
+        args: { todo_id: 'build' },
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={todos}
+            tools={tools}
+            tasks={[]}
+            artifacts={[]}
+            onSelectedTodoIdChange={vi.fn()}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain('1 active Agent');
+
+    act(() => root.unmount());
+    container.remove();
+  });
 });

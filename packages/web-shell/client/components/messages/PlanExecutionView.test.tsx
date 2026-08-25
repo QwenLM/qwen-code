@@ -7,6 +7,7 @@ import type { DaemonSessionAgentTaskStatus } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 import {
+  getActiveAgents,
   getAttentionAgentTool,
   getPlanNodeState,
   layerPlanTodos,
@@ -549,6 +550,9 @@ describe('PlanExecutionView', () => {
     // Before the fix every one of these required a live daemon task entry
     // and the strip rendered 0 while the build node badge showed Running.
     expect(container.textContent).toContain('3Active agents');
+    // R11-2: the workflow inspector summary counts this same helper output,
+    // so it must tally exactly what the strip renders for this input.
+    expect(getActiveAgents([rootTool, pausedTool], [])).toHaveLength(3);
 
     act(() => root.unmount());
     container.remove();

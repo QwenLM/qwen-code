@@ -307,6 +307,76 @@ export function getAttentionAgentStatuses(
   return attentionAgentStatuses(tool, createTaskExecutionIndex(tasks));
 }
 
+function transcriptAgentTask(
+  tool: ACPToolCall,
+  status: string,
+  depth?: number,
+): DaemonSessionAgentTaskStatus {
+  return {
+    kind: 'agent',
+    id: `tool:${tool.callId}`,
+    label: tool.title || String(tool.args?.description ?? 'Agent'),
+    description:
+      typeof tool.args?.description === 'string' ? tool.args.description : '',
+    status: status === 'paused' ? 'paused' : 'running',
+    startTime: 0,
+    runtimeMs: 0,
+    isBackgrounded: false,
+    toolUseId: tool.callId,
+    ...(depth === undefined ? {} : { depth }),
+  };
+}
+
+function activeAgentEntry(
+  tool: ACPToolCall,
+  taskIndex: TaskExecutionIndex,
+  depth?: number,
+): DaemonSessionAgentTaskStatus | undefined {
+  const status = executionStatus(tool, taskIndex);
+  if (!isAgentExecutionActive(status)) return undefined;
+  const liveTask = taskForTool(tool, taskIndex);
+  if (liveTask) return liveTask;
+  return transcriptAgentTask(tool, status, depth);
+}
+
+/**
+ * One entry per agent the overview strip reports as active, and the single
+ * source the workflow inspector summary counts: the live daemon task when
+ * one exists, otherwise a transcript-derived stand-in for an in-flight tool
+ * call with no live task (the replay shape). The walk mirrors the node
+ * badges (executionStatus), so the strip, the badges, and the inspector can
+ * never contradict each other. An agent observed through BOTH a live task
+ * and a persisted transcript tool counts once (dedup by toolUseId).
+ */
+export function getActiveAgents(
+  tools: readonly ACPToolCall[],
+  tasks: readonly DaemonSessionTaskStatus[],
+): DaemonSessionAgentTaskStatus[] {
+  const taskIndex = createTaskExecutionIndex(tasks);
+  const active: DaemonSessionAgentTaskStatus[] = [];
+  for (const tool of tools) {
+    const root = activeAgentEntry(tool, taskIndex);
+    if (root) active.push(root);
+    const nestedLiveTasks = nestedTasksFromIndex(tool, taskIndex);
+    for (const { task } of nestedLiveTasks) {
+      if (task.status === 'running' || task.status === 'paused') {
+        active.push(task);
+      }
+    }
+    const liveNestedToolUseIds = new Set(
+      nestedLiveTasks
+        .map(({ task }) => task.toolUseId)
+        .filter((toolUseId): toolUseId is string => toolUseId !== undefined),
+    );
+    for (const { tool: nestedTool, depth } of nestedAgentToolsForTool(tool)) {
+      if (liveNestedToolUseIds.has(nestedTool.callId)) continue;
+      const nested = activeAgentEntry(nestedTool, taskIndex, depth);
+      if (nested) active.push(nested);
+    }
+  }
+  return active;
+}
+
 function getPlanNodeStateFromIndex(
   todo: TodoItem,
   todosById: ReadonlyMap<string, TodoItem>,
@@ -495,31 +565,13 @@ export function PlanExecutionView({
   // persisted/transcript status. Counting only live tasks contradicted the
   // badges on a replayed transcript of an interrupted session — the node
   // rendered Running off an in_progress tool call while this strip reported
-  // "Active agents: 0" because no live daemon task existed.
-  const activeAgentCount = tools.reduce((count, tool) => {
-    let total = isAgentExecutionActive(executionStatus(tool, taskIndex))
-      ? 1
-      : 0;
-    const nestedLiveTasks = nestedTasksFromIndex(tool, taskIndex);
-    total += nestedLiveTasks.filter(
-      ({ task }) => task.status === 'running' || task.status === 'paused',
-    ).length;
-    // Nested transcript agents the live index does not already cover (the
-    // replay shape has no live tasks at all). Dedup by toolUseId so a nested
-    // agent present in BOTH surfaces counts once.
-    const liveNestedToolUseIds = new Set(
-      nestedLiveTasks
-        .map(({ task }) => task.toolUseId)
-        .filter((toolUseId): toolUseId is string => toolUseId !== undefined),
-    );
-    for (const { tool: nestedTool } of nestedAgentToolsForTool(tool)) {
-      if (liveNestedToolUseIds.has(nestedTool.callId)) continue;
-      if (isAgentExecutionActive(executionStatus(nestedTool, taskIndex))) {
-        total += 1;
-      }
-    }
-    return count + total;
-  }, 0);
+  // "Active agents: 0" because no live daemon task existed. The workflow
+  // inspector summary counts the very same helper output, so the two
+  // surfaces can never contradict each other.
+  const activeAgentCount = useMemo(
+    () => getActiveAgents(tools, tasks).length,
+    [tools, tasks],
+  );
   const attentionCount = [...statesByTodo.values()].filter(
     (state) => state.attention,
   ).length;
