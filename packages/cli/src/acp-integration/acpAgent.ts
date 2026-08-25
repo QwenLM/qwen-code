@@ -3176,8 +3176,15 @@ interface ActivePromptCall {
 }
 
 function isOwnerOnlyDirectory(stats: Stats): boolean {
-  if (process.platform === 'win32') return false;
   if (stats.isSymbolicLink() || !stats.isDirectory()) return false;
+  if (process.platform === 'win32') {
+    // Node's fs.Stats exposes no ownership or permission bits on Windows, so
+    // the POSIX mode/uid check has no equivalent here. Containment then rests
+    // on the structural checks around this predicate — symlink rejection and
+    // dev/ino identity across the realpath round trip — the same trade-off
+    // serve/live/discovery.ts already makes on this platform.
+    return true;
+  }
   if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
     return false;
   }
