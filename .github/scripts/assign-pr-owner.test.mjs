@@ -113,6 +113,9 @@ describe('assign-pr-owner: pure routing', () => {
     assert.ok(
       skipPrReason({ ...corePr, author: { login: 'dependabot[bot]' } }),
     );
+    // A deleted account exports as "author": null — skip with a reason,
+    // never throw on the null dereference.
+    assert.ok(skipPrReason({ ...corePr, author: null }));
   });
 
   it('treats a mapped assignee or reviewer as covered', () => {
@@ -262,6 +265,18 @@ describe('assign-pr-owner: apply boundary', () => {
     });
     assert.doesNotMatch(log, /--add-assignee DennisYu07\b/);
     assert.match(stdout, /assigned @/);
+  });
+
+  it('skips gracefully when the PR author account was deleted', () => {
+    // `gh pr view --json author` exports `"author": null` for deleted
+    // accounts. Every later trigger (synchronize/reopened/ready_for_review/
+    // manual) must skip with a clean exit instead of throwing on the null
+    // dereference, which would run the assignment check red on every push.
+    const { log, stdout } = runAssign(false, {
+      prJson: JSON.stringify({ ...corePr, author: null }),
+    });
+    assert.doesNotMatch(log, /pr edit/);
+    assert.match(stdout, /skipped — PR author account was deleted/);
   });
 
   it('no-ops once a mapped owner is already on the PR', () => {

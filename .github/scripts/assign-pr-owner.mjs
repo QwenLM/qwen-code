@@ -49,7 +49,12 @@ function record(lines) {
 export function skipPrReason(pr) {
   if (pr.state !== 'OPEN') return 'PR is not open';
   if (pr.isDraft) return 'PR is a draft';
-  if (BOT_LOGIN.test(pr.author.login)) return 'authored by a bot';
+  // `gh pr view --json author` exports `"author": null` once the account is
+  // deleted; skip gracefully like the other skip reasons instead of throwing
+  // on the null dereference and failing the check on every later trigger.
+  const authorLogin = pr.author?.login;
+  if (!authorLogin) return 'PR author account was deleted';
+  if (BOT_LOGIN.test(authorLogin)) return 'authored by a bot';
   return null;
 }
 
@@ -174,13 +179,15 @@ function main() {
   // Never assign the PR author to their own work. When a module's owner
   // cannot take the PR (they authored it, or lost push access), fall back
   // to the next coarser matching area instead of leaving the PR unassigned.
+  // The null guard mirrors skipPrReason's: a deleted account exports as
+  // `"author": null` and can exclude no one.
+  const authorLogin = (pr.author?.login ?? '').toLowerCase();
   let area;
   let eligible;
   for (area of matched) {
     eligible = area.owners.filter(
       (owner) =>
-        owner.toLowerCase() !== pr.author.login.toLowerCase() &&
-        canWrite(repository, owner),
+        owner.toLowerCase() !== authorLogin && canWrite(repository, owner),
     );
     if (eligible.length > 0) break;
   }
