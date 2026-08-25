@@ -720,7 +720,7 @@ Resolve the maintainer deterministically — never eyeball it. `$QWEN_MAINTAINER
 ```bash
 MAINTAINER="${QWEN_MAINTAINER_HANDLE:-}"
 if [ -z "$MAINTAINER" ]; then
-  MAINTAINER=$(node --input-type=module <<'EOF' 2>/dev/null
+  MAINTAINER=$(REPO="${REPO:-}" PR_NUMBER="${PR_NUMBER:-}" node --input-type=module <<'EOF' 2>/dev/null
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { loadPolicy, matchArea, pickOwner } from './.github/scripts/assign-issue-owner.mjs';
@@ -731,8 +731,12 @@ const gh = (args) => {
   return r.stdout.trim();
 };
 
-const repo = process.env.REPO;
-const prNumber = process.env.PR_NUMBER;
+// No lane exports REPO: the triage agent step exports REPOSITORY and Actions
+// always provides GITHUB_REPOSITORY, so fall through the skill's documented
+// resolve chain. The number arrives as PR_NUMBER or ISSUE_NUMBER depending
+// on the lane. Empty/unset values fall through the || chain.
+const repo = process.env.REPO || process.env.REPOSITORY || process.env.GITHUB_REPOSITORY;
+const prNumber = process.env.PR_NUMBER || process.env.ISSUE_NUMBER;
 const pr = JSON.parse(gh(['pr', 'view', prNumber, '--repo', repo, '--json', 'author,labels']));
 const policy = loadPolicy(readFileSync('.github/issue-owners.json', 'utf8'));
 const area = matchArea(policy, pr);
@@ -767,11 +771,14 @@ fi
 if [ -z "$MAINTAINER" ]; then
   # Last resort: the most recent human reviewer, if any. latestReviews is
   # not recency-sorted and bot accounts submit formal reviews here, so
+  # drop null authors first (a deleted account exports as "author": null,
+  # and one null login piped into endswith() aborts the whole filter,
+  # emptying the mention even when a live human reviewer exists), then
   # filter the bot-suffix logins and order by submittedAt before taking
   # the last — otherwise a defer escalation @mentions a bot and notifies
   # nobody.
   MAINTAINER=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json latestReviews \
-    --jq '[.latestReviews[] | select((.author.login | (endswith("[bot]") or endswith("-bot"))) | not)] | sort_by(.submittedAt) | last | .author.login // empty')
+    --jq '[.latestReviews[] | select(.author.login != null) | select((.author.login | (endswith("[bot]") or endswith("-bot"))) | not)] | sort_by(.submittedAt) | last | .author.login // empty')
 fi
 if [ -n "$MAINTAINER" ]; then
   # Put the PR in their Assigned filter — a stronger signal than the mention
@@ -780,7 +787,7 @@ if [ -n "$MAINTAINER" ]; then
 fi
 ```
 
-The heredoc reads `REPO` and `PR_NUMBER` from the environment and resolves its relative import against the repository root, so run it from the workspace root like every other step here. If nothing resolves — no handle set, no area label on the PR, no eligible owner, no human reviewer — post the comment without an @mention rather than guessing a login.
+The heredoc resolves the repository as `REPO` → `REPOSITORY` → `GITHUB_REPOSITORY` and the PR number as `PR_NUMBER` → `ISSUE_NUMBER` (first set wins; the invocation line above passes the session's shell variables through, because an unexported variable never reaches the node child process and `2>/dev/null` would swallow the failure), and it resolves its relative import against the repository root, so run it from the workspace root like every other step here. If nothing resolves — no handle set, no area label on the PR, no eligible owner, no human reviewer — post the comment without an @mention rather than guessing a login.
 
 ```bash
 gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @<MAINTAINER> — <reason>. Needs a human call on this one."
