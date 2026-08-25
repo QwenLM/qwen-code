@@ -113,9 +113,6 @@ interface FakeConfigState {
   approvalMode?: ApprovalMode;
   bareMode?: boolean;
   safeMode?: boolean;
-  advisorModel?: string;
-  advisorModelOverride?: boolean;
-  advisorMaxUses?: number;
 }
 
 function makeFakeConfig(cwd: string, state: FakeConfigState) {
@@ -129,17 +126,6 @@ function makeFakeConfig(cwd: string, state: FakeConfigState) {
   const setPendingMcpServers = vi.fn((v: string[] | undefined) => {
     state.gating.pending = v;
   });
-  const setAdvisorConfig = vi.fn(
-    async (v: {
-      model: string | undefined;
-      maxUses: number | undefined;
-      modelOverride?: boolean;
-    }) => {
-      state.advisorModel = v.model;
-      state.advisorModelOverride = v.modelOverride === true;
-      state.advisorMaxUses = v.maxUses;
-    },
-  );
   const config = {
     getApprovalMode: () => state.approvalMode ?? ApprovalMode.DEFAULT,
     getBareMode: () => state.bareMode ?? false,
@@ -151,10 +137,6 @@ function makeFakeConfig(cwd: string, state: FakeConfigState) {
     // lists and passes them to reinitializeMcpServers.
     getMcpServers: () => state.settingsMcp,
     getMcpGating: () => state.gating,
-    getAdvisorModel: () => state.advisorModel,
-    getAdvisorMaxUses: () => state.advisorMaxUses,
-    hasAdvisorModelOverride: () => state.advisorModelOverride === true,
-    setAdvisorConfig,
     // Default: no startup --allowed-mcp-server-names flag (settings fully win).
     // Individual tests override via state.bootAllowed.
     getCliAllowedMcpServerNames: () => state.bootAllowed,
@@ -169,7 +151,6 @@ function makeFakeConfig(cwd: string, state: FakeConfigState) {
     setExcludedMcpServers,
     setAllowedMcpServers,
     setPendingMcpServers,
-    setAdvisorConfig,
   };
 }
 
@@ -219,82 +200,6 @@ describe('registerMcpHotReload', () => {
     expect(watcher.addChangeListener).toHaveBeenCalledOnce();
     dispose();
     expect(unsubscribe).toHaveBeenCalledOnce();
-  });
-
-  it('syncs Advisor model from settings when no session override exists', async () => {
-    const fc = makeFakeConfig(cwd, { settingsMcp: {}, gating: {} });
-    registerMcpHotReload(watcher, settings, fc.config, undefined);
-
-    merged.advisorModel = ' advisor-model ';
-    merged.advisorMaxUses = 2;
-    await listener([]);
-
-    expect(fc.setAdvisorConfig).toHaveBeenCalledWith({
-      model: 'advisor-model',
-      maxUses: 2,
-      modelOverride: false,
-    });
-  });
-
-  it('ignores a non-string Advisor model without blocking MCP reload', async () => {
-    const fc = makeFakeConfig(cwd, { settingsMcp: {}, gating: {} });
-    registerMcpHotReload(watcher, settings, fc.config, undefined);
-
-    (merged as Record<string, unknown>)['advisorModel'] = 123;
-    merged.mcpServers = { a: { command: 'a' } };
-    await listener([]);
-
-    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({
-      a: { command: 'a' },
-    });
-  });
-
-  it('surfaces an Advisor reload error without blocking MCP reload', async () => {
-    const fc = makeFakeConfig(cwd, {
-      settingsMcp: {},
-      gating: {},
-      advisorModel: 'old-advisor',
-    });
-    fc.setAdvisorConfig.mockRejectedValueOnce(new Error('advisor reload boom'));
-    registerMcpHotReload(watcher, settings, fc.config, undefined);
-
-    const spy = vi.fn();
-    appEvents.on(AppEvent.LogError, spy);
-    try {
-      merged.advisorModel = 'new-advisor';
-      merged.mcpServers = { a: { command: 'a' } };
-      await listener([]);
-
-      expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({
-        a: { command: 'a' },
-      });
-      expect(spy).toHaveBeenCalledWith(
-        expect.stringMatching(/Failed to reload Advisor settings/),
-      );
-    } finally {
-      appEvents.off(AppEvent.LogError, spy);
-    }
-  });
-
-  it('preserves session Advisor model override while refreshing max uses', async () => {
-    const fc = makeFakeConfig(cwd, {
-      settingsMcp: {},
-      gating: {},
-      advisorModel: 'cli-advisor',
-      advisorModelOverride: true,
-      advisorMaxUses: 1,
-    });
-    registerMcpHotReload(watcher, settings, fc.config, undefined);
-
-    merged.advisorModel = 'settings-advisor';
-    merged.advisorMaxUses = 3;
-    await listener([]);
-
-    expect(fc.setAdvisorConfig).toHaveBeenCalledWith({
-      model: 'cli-advisor',
-      maxUses: 3,
-      modelOverride: true,
-    });
   });
 
   it('reconciles with the assembled map (incl. top-tier) on an mcpServers change', async () => {

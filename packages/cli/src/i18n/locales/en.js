@@ -2531,10 +2531,15 @@ export default {
     'Ask a quick side question without affecting the main conversation',
   'Get a second opinion on the current conversation from a reviewer model':
     'Get a second opinion on the current conversation from a reviewer model',
-  'Configure the native Advisor model, or run /advisor review for a manual second opinion':
-    'Configure the native Advisor model, or run /advisor review for a manual second opinion',
-  'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.':
-    'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.',
+  'Configure the Advisor model': 'Configure the Advisor model',
+  'Disable Advisor': 'Disable Advisor',
+  'Select Advisor Model': 'Select Advisor Model',
+  'Advisor disabled': 'Advisor disabled',
+  'Advisor set to {{model}}': 'Advisor set to {{model}}',
+  'Selected Advisor model is unavailable.':
+    'Selected Advisor model is unavailable.',
+  'Advisor configuration is unavailable.':
+    'Advisor configuration is unavailable.',
   'Consulting advisor...': 'Consulting advisor...',
   'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
   'No conversation context available for /advisor':

@@ -60,7 +60,6 @@ export interface UIActions {
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
     imageModelMode?: boolean;
-    persistScope?: 'workspace' | 'user';
   }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;

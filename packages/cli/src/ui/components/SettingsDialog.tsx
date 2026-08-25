@@ -937,12 +937,6 @@ export function SettingsDialog({
             }
             return;
           }
-          if (currentItem?.value === 'advisorModel') {
-            if (name === 'return') {
-              onSelect('advisorModel', selectedScope);
-            }
-            return;
-          }
           if (currentItem?.value === 'visionModel') {
             if (name === 'return') {
               onSelect('visionModel', selectedScope);
@@ -964,7 +958,6 @@ export function SettingsDialog({
             currentItem?.value === 'ui.theme' ||
             currentItem?.value === 'general.preferredEditor' ||
             currentItem?.value === 'fastModel' ||
-            currentItem?.value === 'advisorModel' ||
             currentItem?.value === 'visionModel'
           ) {
             onSelect(currentItem.value, selectedScope);
@@ -1270,7 +1263,6 @@ export function SettingsDialog({
                 item.value === 'ui.theme' ||
                 item.value === 'general.preferredEditor' ||
                 item.value === 'fastModel' ||
-                item.value === 'advisorModel' ||
                 item.value === 'visionModel';
 
               // For numbers/strings, get the actual current value from pending settings

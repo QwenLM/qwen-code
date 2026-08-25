@@ -155,7 +155,6 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     isMemoryDialogOpen: false,
     isModelDialogOpen: false,
     isFastModelMode: false,
-    isAdvisorModelMode: false,
     isTrustDialogOpen: false,
     activeArenaDialog: null,
     isPermissionsDialogOpen: false,

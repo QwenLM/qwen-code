@@ -1308,31 +1308,29 @@ describe('loadCliConfig', () => {
     expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
   });
 
-  it('should use advisorModel from settings when --advisor is absent', async () => {
+  it('uses advisorModel from settings when --advisor is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
     const config = await loadCliConfig(
-      { advisorModel: ' advisor-model ', advisorMaxUses: 2 },
+      {
+        advisorModel: ' advisor-model ',
+        modelProviders: {
+          openai: [
+            {
+              id: 'advisor-model',
+              apiKey: 'test-key',
+              models: [{ id: 'advisor-model' }],
+            },
+          ],
+        },
+      },
       argv,
     );
 
     expect(config.getAdvisorModel()).toBe('advisor-model');
-    expect(config.hasAdvisorModelOverride()).toBe(false);
-    expect(config.getAdvisorMaxUses()).toBe(2);
   });
 
-  it('should ignore a non-string advisorModel setting', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const config = await loadCliConfig(
-      { advisorModel: 123 as unknown as string },
-      argv,
-    );
-
-    expect(config.getAdvisorModel()).toBeUndefined();
-  });
-
-  it('should prefer --advisor over advisorModel settings for the session', async () => {
+  it('lets --advisor override the persisted model for one session', async () => {
     process.argv = ['node', 'script.js', '--advisor', 'cli-advisor'];
     const argv = await parseArguments();
     const config = await loadCliConfig(
@@ -1352,87 +1350,26 @@ describe('loadCliConfig', () => {
     );
 
     expect(config.getAdvisorModel()).toBe('cli-advisor');
-    expect(config.hasAdvisorModelOverride()).toBe(true);
   });
 
-  it('should reject unavailable --advisor models', async () => {
-    process.argv = ['node', 'script.js', '--advisor', 'missing-advisor'];
-    const argv = await parseArguments();
-
-    await expect(
-      loadCliConfig(
-        {
-          modelProviders: {
-            openai: [
-              {
-                id: 'available-advisor',
-                apiKey: 'test-key',
-                models: [{ id: 'available-advisor' }],
-              },
-            ],
-          },
-        },
-        argv,
-      ),
-    ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
-  });
-
-  it('should reject a vision-only --advisor model', async () => {
-    process.argv = ['node', 'script.js', '--advisor', 'vision-only'];
-    const argv = await parseArguments();
-
-    await expect(
-      loadCliConfig(
-        {
-          modelProviders: {
-            openai: [
-              {
-                id: 'vision-only',
-                apiKey: 'test-key',
-                visionOnly: true,
-              },
-            ],
-          },
-        },
-        argv,
-      ),
-    ).rejects.toThrow("Advisor model 'vision-only' is not configured.");
-  });
-
-  it('should validate the --advisor fast alias against fastModel', async () => {
-    process.argv = ['node', 'script.js', '--advisor', 'fast'];
-    const argv = await parseArguments();
-    const config = await loadCliConfig(
-      {
-        fastModel: 'fast-advisor',
-        security: { auth: { selectedType: 'openai' } },
-        modelProviders: {
-          openai: [
-            {
-              id: 'fast-advisor',
-              apiKey: 'test-key',
-              models: [{ id: 'fast-advisor', fastOnly: true }],
-            },
-          ],
-        },
-      },
-      argv,
-    );
-
-    expect(config.getAdvisorModel()).toBe('fast');
-  });
-
-  it('should disable Advisor for --advisor off without changing max uses', async () => {
+  it('lets --advisor off disable a persisted model for one session', async () => {
     process.argv = ['node', 'script.js', '--advisor', 'off'];
     const argv = await parseArguments();
     const config = await loadCliConfig(
-      { advisorModel: 'settings-advisor', advisorMaxUses: 1 },
+      { advisorModel: 'settings-advisor' },
       argv,
     );
 
     expect(config.getAdvisorModel()).toBeUndefined();
-    expect(config.hasAdvisorModelOverride()).toBe(true);
-    expect(config.getAdvisorMaxUses()).toBe(1);
+  });
+
+  it('rejects an unavailable persisted Advisor model', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await expect(
+      loadCliConfig({ advisorModel: 'missing-advisor' }, argv),
+    ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
   });
 
   it('should use settings fallback models when the CLI flag is absent', async () => {

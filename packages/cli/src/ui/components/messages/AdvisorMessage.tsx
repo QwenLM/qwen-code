@@ -6,7 +6,6 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
-import type { AdvisorReviewDisplay } from '@qwen-code/qwen-code-core';
 import { Colors } from '../../colors.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
@@ -20,54 +19,8 @@ export interface AdvisorDisplayProps {
   containerWidth?: number;
 }
 
-export interface AdvisorReviewCardProps {
-  review: AdvisorReviewDisplay;
-  containerWidth: number;
-}
-
 // border(1)*2 + paddingX(1)*2 = 4
 const ADVISOR_SELF_CHROME = 4;
-
-const ADVISOR_REVIEW_SECTIONS: ReadonlyArray<{
-  title: string;
-  field: keyof Omit<AdvisorReviewDisplay, 'type'>;
-}> = [
-  { title: 'Verdict', field: 'verdict' },
-  { title: 'Risks', field: 'risks' },
-  { title: 'Missing evidence', field: 'missingEvidence' },
-  { title: 'Recommendation', field: 'recommendation' },
-];
-
-export const AdvisorReviewCard: React.FC<AdvisorReviewCardProps> = ({
-  review,
-  containerWidth,
-}) => {
-  const contentWidth = Math.max(2, containerWidth - ADVISOR_SELF_CHROME);
-
-  return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      borderColor={Colors.AccentCyan}
-      paddingX={1}
-      width="100%"
-    >
-      <Text color={Colors.AccentCyan} bold>
-        Advisor feedback
-      </Text>
-      {ADVISOR_REVIEW_SECTIONS.map(({ title, field }) => (
-        <Box key={field} flexDirection="column" marginTop={1}>
-          <Text bold>{title}</Text>
-          <MarkdownDisplay
-            text={review[field]}
-            isPending={false}
-            contentWidth={contentWidth}
-          />
-        </Box>
-      ))}
-    </Box>
-  );
-};
 
 const AdvisorMessageInternal: React.FC<AdvisorDisplayProps> = ({
   text,

@@ -2066,10 +2066,13 @@ export default {
     '在不影響主對話的情況下快速提問旁支問題',
   'Get a second opinion on the current conversation from a reviewer model':
     '讓審查模型對目前對話給出第二意見',
-  'Configure the native Advisor model, or run /advisor review for a manual second opinion':
-    '設定原生 Advisor 模型，或執行 /advisor review 取得手動觸發的第二意見',
-  'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.':
-    'Advisor 已在專案設定中設定，該設定會覆蓋要求的全域設定。請使用 --project，或先移除專案設定。',
+  'Configure the Advisor model': '設定 Advisor 模型',
+  'Disable Advisor': '停用 Advisor',
+  'Select Advisor Model': '選擇 Advisor 模型',
+  'Advisor disabled': 'Advisor 已停用',
+  'Advisor set to {{model}}': 'Advisor 已設定為 {{model}}',
+  'Selected Advisor model is unavailable.': '所選 Advisor 模型無法使用。',
+  'Advisor configuration is unavailable.': 'Advisor 設定無法使用。',
   'Consulting advisor...': '正在諮詢審查模型...',
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':

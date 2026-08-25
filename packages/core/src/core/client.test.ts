@@ -2774,25 +2774,6 @@ describe('Gemini Client (client.ts)', () => {
       expect(recorded).toBeTruthy();
       expect(instruction).toBe(`${recorded}\n\nGit snapshot A`);
     });
-
-    it('includes Advisor instruction only when Advisor is registered', () => {
-      vi.mocked(getCoreSystemPrompt).mockReturnValue('core base prompt');
-      vi.mocked(getRecentGitStatus).mockReturnValue('');
-      const registry = client['config'].getToolRegistry();
-
-      vi.mocked(registry.getTool).mockReturnValue(undefined);
-      const withoutAdvisor = (
-        client as unknown as { getMainSessionSystemInstruction: () => string }
-      ).getMainSessionSystemInstruction();
-      expect(withoutAdvisor).not.toContain('# Advisor Tool');
-
-      vi.mocked(registry.getTool).mockReturnValue({} as never);
-      const withAdvisor = (
-        client as unknown as { getMainSessionSystemInstruction: () => string }
-      ).getMainSessionSystemInstruction();
-      expect(withAdvisor).toContain('# Advisor Tool');
-      expect(withAdvisor).toContain("Call 'advisor' by itself");
-    });
   });
 
   describe('resetChat', () => {

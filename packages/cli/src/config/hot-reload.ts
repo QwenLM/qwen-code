@@ -23,12 +23,6 @@ import { appEvents, AppEvent } from '../utils/events.js';
 
 const debugLogger = createDebugLogger('MCP_HOT_RELOAD');
 
-function normalizeAdvisorModel(model: unknown): string | undefined {
-  const trimmed = typeof model === 'string' ? model.trim() : undefined;
-  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
-  return trimmed;
-}
-
 /**
  * The three connection-admission lists discovery consults to decide whether a
  * given MCP server may connect. Distinct from the `mcpServers` config map:
@@ -144,35 +138,6 @@ export function registerMcpHotReload(
         .join(', ')}`,
     );
     const cwd = config.getTargetDir();
-    try {
-      const keepSessionAdvisorModel =
-        config.hasAdvisorModelOverride?.() === true;
-      const nextAdvisorModel = keepSessionAdvisorModel
-        ? config.getAdvisorModel?.()
-        : normalizeAdvisorModel(settings.merged.advisorModel);
-      const nextAdvisorMaxUses = settings.merged.advisorMaxUses;
-      if (
-        config.getAdvisorModel?.() !== nextAdvisorModel ||
-        config.getAdvisorMaxUses?.() !== nextAdvisorMaxUses
-      ) {
-        await config.setAdvisorConfig?.({
-          model: nextAdvisorModel,
-          maxUses: nextAdvisorMaxUses,
-          modelOverride: keepSessionAdvisorModel,
-        });
-      }
-    } catch (err) {
-      debugLogger.error(
-        `Advisor settings reload failed: ${
-          err instanceof Error ? (err.stack ?? err.message) : String(err)
-        }`,
-      );
-      appEvents.emit(
-        AppEvent.LogError,
-        'Failed to reload Advisor settings; existing Advisor state may be unchanged. Run with --debug for details.',
-      );
-    }
-
     // Rebuild exactly the way Config boot did — including top-tier
     // (CLI / session-injected) servers layered above settings + `.mcp.json`.
     // Bare/safe mode: mirror loadCliConfig's own guard (config.ts) — a live

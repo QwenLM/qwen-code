@@ -5640,13 +5640,6 @@ describe('useGeminiStream', () => {
   });
 
   it('commits streamed text before scheduling a tool continuation', async () => {
-    const toolRequest = {
-      callId: 'advisor-call',
-      name: 'advisor',
-      args: {},
-      isClientInitiated: false,
-      prompt_id: 'prompt-advisor',
-    };
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
@@ -5655,13 +5648,18 @@ describe('useGeminiStream', () => {
         };
         yield {
           type: ServerGeminiEventType.ToolCallRequest,
-          value: toolRequest,
+          value: {
+            callId: 'advisor-call',
+            name: 'advisor',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-advisor',
+          },
         };
       })(),
     );
 
     const { result } = renderTestHook();
-
     await act(async () => {
       await result.current.submitQuery('review this change');
     });
@@ -5671,12 +5669,9 @@ describe('useGeminiStream', () => {
         item.type === 'gemini' &&
         item.text === 'I will ask the advisor before continuing.',
     );
-    const scheduleOrder = mockScheduleToolCalls.mock.invocationCallOrder[0];
-
     expect(textCommitIndex).toBeGreaterThanOrEqual(0);
-    expect(scheduleOrder).toBeDefined();
     expect(mockAddItem.mock.invocationCallOrder[textCommitIndex]).toBeLessThan(
-      scheduleOrder!,
+      mockScheduleToolCalls.mock.invocationCallOrder[0]!,
     );
   });
 

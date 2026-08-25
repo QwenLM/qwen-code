@@ -36,18 +36,6 @@ describe('useModelCommand', () => {
     expect(result.current.isFastModelMode).toBe(false);
   });
 
-  it('should open the model dialog in advisor model mode', () => {
-    const { result } = renderHook(() => useModelCommand());
-
-    act(() => {
-      result.current.openModelDialog({ advisorModelMode: true });
-    });
-
-    expect(result.current.isModelDialogOpen).toBe(true);
-    expect(result.current.isAdvisorModelMode).toBe(true);
-    expect(result.current.isFastModelMode).toBe(false);
-  });
-
   it('should open the model dialog in vision model mode and suppress fast mode', () => {
     const { result } = renderHook(() => useModelCommand());
 
@@ -71,7 +59,6 @@ describe('useModelCommand', () => {
     act(() => {
       result.current.openModelDialog({
         imageModelMode: true,
-        advisorModelMode: true,
         voiceModelMode: true,
         visionModelMode: true,
         fastModelMode: true,
@@ -80,7 +67,6 @@ describe('useModelCommand', () => {
 
     expect(result.current.isImageModelMode).toBe(true);
     expect(result.current.isVisionModelMode).toBe(false);
-    expect(result.current.isAdvisorModelMode).toBe(false);
     expect(result.current.isVoiceModelMode).toBe(false);
     expect(result.current.isFastModelMode).toBe(false);
   });
@@ -101,7 +87,6 @@ describe('useModelCommand', () => {
     });
     expect(result.current.isModelDialogOpen).toBe(false);
     expect(result.current.isVoiceModelMode).toBe(false);
-    expect(result.current.isAdvisorModelMode).toBe(false);
   });
 
   it('should reset isVisionModelMode on close', () => {

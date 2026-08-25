@@ -199,9 +199,7 @@ export class ToolRegistry {
   private factories: Map<string, ToolFactory> = new Map();
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
   // same name share one promise instead of running the factory multiple times.
-  private inflight: Map<string, Promise<AnyDeclarativeTool | undefined>> =
-    new Map();
-  private registrationVersions: Map<string, number> = new Map();
+  private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
   // Deferred tools that ToolSearch has loaded this session. Once revealed, a
   // tool's schema is included in subsequent function-declaration lists even
   // though it would normally be hidden.
@@ -245,12 +243,6 @@ export class ToolRegistry {
     const byName = aName.localeCompare(bName);
     if (byName !== 0) return byName;
     return a.displayName.localeCompare(b.displayName);
-  }
-
-  private bumpRegistrationVersion(name: string): number {
-    const next = (this.registrationVersions.get(name) ?? 0) + 1;
-    this.registrationVersions.set(name, next);
-    return next;
   }
 
   /**
@@ -339,9 +331,6 @@ export class ToolRegistry {
       );
       return;
     }
-    this.bumpRegistrationVersion(tool.name);
-    this.factories.delete(tool.name);
-    this.inflight.delete(tool.name);
     this.tools.set(tool.name, tool);
   }
 
@@ -356,18 +345,11 @@ export class ToolRegistry {
       );
       return;
     }
-    this.bumpRegistrationVersion(name);
-    this.tools.delete(name);
-    this.inflight.delete(name);
     this.factories.set(name, factory);
   }
 
   unregisterTool(name: string): void {
-    this.bumpRegistrationVersion(name);
     this.tools.delete(name);
-    this.factories.delete(name);
-    this.inflight.delete(name);
-    this.revealedDeferred.delete(name);
   }
 
   /**
@@ -390,25 +372,16 @@ export class ToolRegistry {
 
     const factory = this.factories.get(name);
     if (!factory) return undefined;
-    const version = this.registrationVersions.get(name) ?? 0;
 
     const load = factory()
       .then((tool) => {
-        if (
-          this.factories.get(name) !== factory ||
-          this.registrationVersions.get(name) !== version
-        ) {
-          return undefined;
-        }
         this.tools.set(name, tool);
         this.factories.delete(name);
         this.inflight.delete(name);
         return tool;
       })
       .catch((err: unknown) => {
-        if (this.inflight.get(name) === load) {
-          this.inflight.delete(name);
-        }
+        this.inflight.delete(name);
         throw err;
       });
 

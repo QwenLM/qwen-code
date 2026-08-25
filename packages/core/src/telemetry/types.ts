@@ -25,11 +25,6 @@ import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { SkillTool } from '../tools/skill.js';
 import type { AgentTool } from '../tools/agent/agent.js';
 import type { ToolErrorType } from '../tools/tool-error.js';
-import { getGenAiUsageProvenance } from './gen-ai-usage.js';
-import {
-  mapAdvisorApiError,
-  type AdvisorErrorCode,
-} from '../tools/advisor-error.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -311,9 +306,6 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
    * request originates from the main conversation.
    */
   subagent_name?: string;
-  advisor_parent_prompt_id?: string;
-  advisor_consultation_ordinal?: number;
-  advisor_error_code?: AdvisorErrorCode;
 
   constructor(opts: {
     responseId?: string;
@@ -337,16 +329,6 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
     this.error_type = opts.errorType;
     this.status_code = opts.statusCode;
     this.subagent_name = opts.subagentName;
-    const advisorUsage = parseAdvisorPromptId(opts.promptId);
-    this.advisor_parent_prompt_id = advisorUsage?.parentPromptId;
-    this.advisor_consultation_ordinal = advisorUsage?.consultationOrdinal;
-    this.advisor_error_code = advisorUsage
-      ? mapAdvisorApiError({
-          statusCode: opts.statusCode,
-          errorMessage: opts.errorMessage,
-          errorType: opts.errorType,
-        })
-      : undefined;
   }
 }
 
@@ -387,7 +369,6 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   input_token_count: number;
   output_token_count: number;
   cached_content_token_count: number;
-  cache_creation_input_token_count?: number;
   thoughts_token_count: number;
   total_token_count: number;
   response_text?: string;
@@ -400,8 +381,6 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
    * request originates from the main conversation.
    */
   subagent_name?: string;
-  advisor_parent_prompt_id?: string;
-  advisor_consultation_ordinal?: number;
 
   constructor(
     response_id: string,
@@ -423,8 +402,6 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.input_token_count = usage_data?.promptTokenCount ?? 0;
     this.output_token_count = usage_data?.candidatesTokenCount ?? 0;
     this.cached_content_token_count = usage_data?.cachedContentTokenCount ?? 0;
-    this.cache_creation_input_token_count =
-      getGenAiUsageProvenance(usage_data)?.cacheCreationInputTokens;
     this.thoughts_token_count = usage_data?.thoughtsTokenCount ?? 0;
     this.total_token_count = usage_data?.totalTokenCount ?? 0;
     this.response_text = response_text;
@@ -432,28 +409,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.auth_type = auth_type;
     this.subagent_name = subagent_name;
     this.ttft_ms = ttft_ms;
-    const advisorUsage = parseAdvisorPromptId(prompt_id);
-    this.advisor_parent_prompt_id = advisorUsage?.parentPromptId;
-    this.advisor_consultation_ordinal = advisorUsage?.consultationOrdinal;
   }
-}
-
-function parseAdvisorPromptId(
-  promptId: string,
-): { parentPromptId: string; consultationOrdinal: number } | undefined {
-  const prefix = 'side-query:advisor:';
-  if (!promptId.startsWith(prefix)) return undefined;
-
-  const lastColon = promptId.lastIndexOf(':');
-  if (lastColon <= prefix.length) return undefined;
-
-  const ordinal = Number(promptId.slice(lastColon + 1));
-  if (!Number.isSafeInteger(ordinal) || ordinal <= 0) return undefined;
-
-  const parentPromptId = promptId.slice(prefix.length, lastColon);
-  return parentPromptId
-    ? { parentPromptId, consultationOrdinal: ordinal }
-    : undefined;
 }
 
 export class FlashFallbackEvent implements BaseTelemetryEvent {

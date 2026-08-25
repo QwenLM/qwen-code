@@ -2192,6 +2192,8 @@ export async function loadCliConfig(
     bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
+  const advisorModel =
+    bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
   const configParams: ConfigParameters = {
     sessionId,
@@ -2458,9 +2460,7 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
-    advisorModel: resolveAdvisorModel(argv, settings),
-    advisorModelOverride: argv.advisor !== undefined,
-    advisorMaxUses: settings.advisorMaxUses,
+    advisorModel,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
@@ -2530,8 +2530,8 @@ export async function loadCliConfig(
   };
 
   const config = new Config(configParams);
-  if (argv.advisor !== undefined) {
-    validateCliAdvisorModel(config, argv.advisor, {
+  if (advisorModel) {
+    validateCliAdvisorModel(config, advisorModel, {
       fastModel: settings.fastModel,
       currentModel: resolvedModel,
       currentAuthType: selectedAuthType,

@@ -644,14 +644,9 @@
       "default": ""
     },
     "advisorModel": {
-      "description": "Model selector for the native Advisor tool. Leave empty or set \"off\" to disable the native tool; manual /advisor review remains available and uses the main model unless an Advisor model is configured. Enabling Advisor sends the active conversation evidence to that model, even when it uses another provider.",
+      "description": "Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.",
       "type": "string",
       "default": ""
-    },
-    "advisorMaxUses": {
-      "description": "Optional maximum Advisor consultations per user prompt. Leave unset for unlimited; when set, the value must be a positive integer.",
-      "type": "integer",
-      "minimum": 1
     },
     "visionModel": {
       "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",

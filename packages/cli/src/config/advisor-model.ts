@@ -18,6 +18,7 @@ interface AdvisorModelContext {
 }
 
 interface AdvisorModelCandidate {
+  isRuntimeModel?: boolean;
   fastOnly?: boolean;
   voiceOnly?: boolean;
   visionOnly?: boolean;
@@ -29,6 +30,7 @@ export function isAdvisorModelEligible(
   allowFastOnly = false,
 ): boolean {
   return (
+    !model.isRuntimeModel &&
     (allowFastOnly || !model.fastOnly) &&
     !model.voiceOnly &&
     !model.visionOnly &&

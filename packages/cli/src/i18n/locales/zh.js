@@ -2245,10 +2245,13 @@ export default {
     '在不影响主对话的情况下快速问一个旁支问题',
   'Get a second opinion on the current conversation from a reviewer model':
     '让审查模型对当前对话给出第二意见',
-  'Configure the native Advisor model, or run /advisor review for a manual second opinion':
-    '配置原生 Advisor 模型，或运行 /advisor review 获取手动触发的第二意见',
-  'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.':
-    'Advisor 已在项目设置中配置，该设置会覆盖请求的全局设置。请使用 --project，或先移除项目设置。',
+  'Configure the Advisor model': '配置 Advisor 模型',
+  'Disable Advisor': '禁用 Advisor',
+  'Select Advisor Model': '选择 Advisor 模型',
+  'Advisor disabled': 'Advisor 已禁用',
+  'Advisor set to {{model}}': 'Advisor 已设置为 {{model}}',
+  'Selected Advisor model is unavailable.': '所选 Advisor 模型不可用。',
+  'Advisor configuration is unavailable.': 'Advisor 配置不可用。',
   'Consulting advisor...': '正在咨询审查模型...',
   'Advisor review failed: {{error}}': '审查失败：{{error}}',
   'No conversation context available for /advisor':

@@ -11,11 +11,10 @@
  *
  *   WITH cacheSafeParams  → GeminiChat single-turn, shares parent prompt
  *                            cache (systemInstruction + history). Tools are
- *                            stripped by default (NO_TOOLS); pass
- *                            preserveTools: true to keep the parent's tools
- *                            prefix for Anthropic prompt-cache hits. jsonSchema
- *                            adds only the internal respond_in_schema
- *                            formatter.
+ *                            stripped by default (NO_TOOLS) to prevent
+ *                            function calls; pass preserveTools: true to
+ *                            keep the parent's tools prefix for Anthropic
+ *                            prompt-cache hits.
  *                            Use for: /btw, suggestions, pipelined suggestions.
  *
  *   WITHOUT cacheSafeParams → AgentHeadless multi-turn, full tool access,
@@ -23,9 +22,7 @@
  *                              Use for: memory extract, dream consolidation.
  *
  * Tool-deny for forked queries is enforced at the per-request level (NO_TOOLS)
- * unless the caller opts out via preserveTools to share the cache prefix. A
- * jsonSchema request may add the internal respond_in_schema formatter, but not
- * parent session tools.
+ * unless the caller opts out via preserveTools to share the cache prefix.
  *
  * Callers (extractScheduler, dreamScheduler) own concurrency control.
  * runSideQuery() remains a separate primitive for structured-JSON calls that
@@ -34,12 +31,9 @@
 
 import type {
   Content,
-  FunctionDeclaration,
   GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
   Part,
-  Schema,
-  Tool,
 } from '@google/genai';
 import {
   runWithRuntimeContentGenerator,
@@ -72,30 +66,6 @@ import { getFunctionResponseParts } from '../services/compactionInputSlimming.js
 import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 const debugLogger = createDebugLogger('FORKED_AGENT');
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function parseLooseJsonObject(text: string): Record<string, unknown> | null {
-  let value = text.trim();
-  if (value.startsWith('```')) {
-    value = value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
-  }
-  const firstStructuredChar = value.search(/[[{]/);
-  if (firstStructuredChar !== -1 && value[firstStructuredChar] === '[') {
-    return null;
-  }
-  const first = value.indexOf('{');
-  const last = value.lastIndexOf('}');
-  if (first === -1 || last <= first) return null;
-  try {
-    const parsed: unknown = JSON.parse(value.slice(first, last + 1));
-    return isObject(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // CacheSafeParams — shared prompt-cache slot
@@ -227,23 +197,14 @@ export function clearCacheSafeParams(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Per-request config that strips parent tools. Applied by default in the cache
- * path; skipped when preserveTools is true (to share the Anthropic prompt-cache
- * prefix).
+ * Per-request config that strips tools so the model never produces function
+ * calls. Applied by default in the cache path; skipped when preserveTools
+ * is true (to share the Anthropic prompt-cache prefix).
  */
 const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
   GenerateContentConfig,
   'tools'
 >;
-
-function createJsonResponseTools(schema: Record<string, unknown>): Tool[] {
-  const functionDeclaration: FunctionDeclaration = {
-    name: 'respond_in_schema',
-    description: 'Provide the response in provided schema',
-    parameters: schema as Schema,
-  };
-  return [{ functionDeclarations: [functionDeclaration] }];
-}
 
 /**
  * Create an isolated GeminiChat that shares the main conversation's
@@ -285,15 +246,11 @@ async function buildForkedModelRuntime(
   base: Config,
   contentGeneratorOwner: Config,
   modelSelector: string,
-  opts?: { failClosed?: boolean },
 ): Promise<ForkedModelRuntime> {
   const resolvedModel = resolveModelId(
     modelSelector,
     buildModelIdContext(base),
   );
-  if (!resolvedModel && opts?.failClosed) {
-    throw new Error(`Model selector "${modelSelector}" could not be resolved.`);
-  }
   // When the selector cannot resolve (e.g. `fast` with no fast model
   // configured, or `inherit` on a config without a current model), fall back
   // to the parent session model instead of passing the raw selector string
@@ -420,8 +377,6 @@ export interface CachePathParams {
   model?: string;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
-  /** Prompt id used for logging/telemetry correlation. */
-  promptId?: string;
   /** Do not route the query through configured model fallbacks. */
   disableModelFallbacks?: boolean;
   /**
@@ -563,9 +518,7 @@ export async function runForkedAgent(
       config,
       config,
       modelSelector,
-      { failClosed: disableModelFallbacks },
     );
-    const promptId = params.promptId ?? 'forked_query';
 
     return runWithForkedModelRuntime(modelRuntime, async (model) => {
       const chat = createForkedChat(config, cacheSafeParams);
@@ -575,7 +528,6 @@ export async function runForkedAgent(
         : { ...NO_TOOLS };
       if (abortSignal) requestConfig.abortSignal = abortSignal;
       if (jsonSchema) {
-        requestConfig.tools = createJsonResponseTools(jsonSchema);
         requestConfig.responseMimeType = 'application/json';
         requestConfig.responseJsonSchema = jsonSchema;
       }
@@ -585,10 +537,14 @@ export async function runForkedAgent(
         config: requestConfig,
       };
       const stream = disableModelFallbacks
-        ? await chat.sendMessageStream(model, sendParams, promptId, undefined, {
-            disableModelFallbacks: true,
-          })
-        : await chat.sendMessageStream(model, sendParams, promptId);
+        ? await chat.sendMessageStream(
+            model,
+            sendParams,
+            'forked_query',
+            undefined,
+            { disableModelFallbacks: true },
+          )
+        : await chat.sendMessageStream(model, sendParams, 'forked_query');
 
       let fullText = '';
       let usage: ForkedQueryResult['usage'] = {
@@ -596,18 +552,11 @@ export async function runForkedAgent(
         outputTokens: 0,
         cacheHitTokens: 0,
       };
-      let jsonResult: Record<string, unknown> | undefined;
 
       for await (const event of stream) {
         if (event.type !== StreamEventType.CHUNK) continue;
         const response = event.value;
         const parts = response.candidates?.[0]?.content?.parts ?? [];
-        const functionCall = parts.find(
-          (part) => part.functionCall?.name === 'respond_in_schema',
-        )?.functionCall;
-        if (functionCall?.args && isObject(functionCall.args)) {
-          jsonResult = functionCall.args;
-        }
 
         // Defensive: when preserveTools is true the model could produce
         // functionCall parts instead of text. Log and discard them.
@@ -631,8 +580,13 @@ export async function runForkedAgent(
       }
 
       const trimmed = fullText.trim() || null;
-      if (!jsonResult && jsonSchema && trimmed) {
-        jsonResult = parseLooseJsonObject(trimmed) ?? undefined;
+      let jsonResult: Record<string, unknown> | undefined;
+      if (jsonSchema && trimmed) {
+        try {
+          jsonResult = JSON.parse(trimmed) as Record<string, unknown>;
+        } catch {
+          // non-JSON response despite schema constraint — treat as text
+        }
       }
 
       return { text: trimmed, jsonResult, usage, model };

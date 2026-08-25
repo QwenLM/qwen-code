@@ -219,32 +219,26 @@ The `/btw` command allows you to ask quick side questions without interrupting o
 
 ### 1.7 Second Opinion (`/advisor`)
 
-Advisor gives the main model access to an independent, read-only reviewer. The reviewer receives the executor's system instruction, available tool definitions, and conversation evidence, but cannot execute tools itself.
+The `/advisor` command runs an independent, read-only review of the conversation so far and returns a structured second opinion — without performing the task or interrupting the main conversation.
 
-| Command                         | Description                                        |
-| ------------------------------- | -------------------------------------------------- |
-| `/advisor`                      | Open the configured-model picker                   |
-| `/advisor <model-id>`           | Enable Advisor with a configured model             |
-| `/advisor off`                  | Disable Advisor                                    |
-| `/advisor status`               | Show the effective Advisor model                   |
-| `/advisor review [focus]`       | Run a manual review, optionally focused on a topic |
-| `/advisor --project <model-id>` | Save the selection for the current project         |
-| `/advisor --global <model-id>`  | Save the selection globally                        |
+| Command            | Description                            |
+| ------------------ | -------------------------------------- |
+| `/advisor`         | Review the conversation above          |
+| `/advisor <focus>` | Focus the review on a specific concern |
 
 **How It Works:**
 
-- When enabled, the main model may call the `advisor` tool for a second opinion and then continues its own response using the returned review.
-- `/advisor review [focus]` invokes the same configured reviewer manually without adding the review to the main model's turn.
-- Reviews use a forked agent with no tools and return four structured sections: **Verdict**, **Risks**, **Missing evidence**, and **Recommendation**.
-- Evidence can include the executor system instruction, tool declarations, prior conversation turns, and tool results. Sensitive fields and hidden reasoning are removed, and oversized evidence is truncated to the reviewer model's budget.
-- Selecting a model from another provider sends this evidence to that provider. The UI identifies the resolved reviewer model and provider route.
-- An empty value or `off` disables the native Advisor tool. `/advisor review` remains available and uses the main model unless an Advisor model is configured.
-- Advisor requests do not use configured model fallbacks.
+- The review is sent as a separate, single-turn API call with recent conversation context (up to the last 40 messages)
+- The reviewer model **cannot execute tools** — tools are stripped at the request level (the same mechanism as `/btw`), so the review never writes code or runs commands; every claim must be grounded in the visible transcript
+- The main conversation is **not** interrupted; the review is shown only to you
+- The review is rendered as a boxed markdown block with four fixed sections — **Verdict**, **Risks**, **Missing evidence**, and **Recommendation** — under an `/advisor · <model>` header that names the resolved reviewer model
+- Unlike `/btw`, which is fire-and-forget and leaves the session usable, `/advisor` blocks input until the review returns; over a full context window with a strong reviewer this can take tens of seconds
+- By default the main model is used; set [`advisorModel`](../configuration/settings.md#advisormodel) to route the review to a different (typically stronger) model — the recent transcript is sent to that model even when it uses another provider
 
 **Example:**
 
 ```
-> /advisor review is my fix for the null check actually correct?
+> /advisor is my fix for the null check actually correct?
 
   Consulting advisor...
 
@@ -269,13 +263,22 @@ Advisor gives the main model access to an independent, read-only reviewer. The r
   ╰──────────────────────────────────────────────────────╯
 ```
 
+The review renders in a bordered box whose header names the resolved reviewer model. An unknown `advisorModel` is not validated up front — if the provider rejects it, `/advisor` reports the failure, so check the model name; only unresolvable alias selectors (e.g. `fast` with no fast model configured) fall back to the main model. Advisor requests do not use configured model fallbacks.
+
+**Supported Execution Modes:**
+
+| Mode                 | Behavior                                            |
+| -------------------- | --------------------------------------------------- |
+| Interactive          | Renders the four-section review in the conversation |
+| ACP (Agent Protocol) | Returns the review as a message result              |
+
 > [!tip]
 >
-> Use `/advisor review` for an explicit second opinion before committing to a direction. Configure `advisorModel` to let the main model consult Advisor on its own.
+> Use `/advisor` for a second opinion before committing to a direction — it is especially useful for catching flawed assumptions, unverified claims, or risky next steps. Configure `advisorModel` to get the review from a different model than the one driving the main conversation.
 
 > [!note]
 >
-> `--advisor <model-id>` enables a session-only override. `/advisor <model-id>` persists the selection in settings.
+> `advisorModel` is set in settings only; unlike `fastModel` and `visionModel`, it has no `/model` flag counterpart yet.
 
 ### 1.8 Session Recap (`/recap`)
 

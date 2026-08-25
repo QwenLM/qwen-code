@@ -30,16 +30,14 @@ import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSel
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import {
-  getPersistScopeForModelSelection,
-  resolvePersistScopeForKey,
-} from '../../config/modelProvidersScope.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
 } from '../voice/voice-model.js';
 import type { HistoryItemWithoutId } from '../types.js';
+import { isAdvisorModelEligible } from '../../config/advisor-model.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -167,24 +165,6 @@ function resolvePersistScope(
   if (persistScope === 'workspace') return SettingScope.Workspace;
   if (persistScope === 'user') return SettingScope.User;
   return getPersistScopeForModelSelection(settings);
-}
-
-function resolveAdvisorPersistScope(
-  settings: ReturnType<typeof useSettings>,
-  persistScope: 'workspace' | 'user' | undefined,
-): { scope: SettingScope; shadowingScope?: SettingScope } {
-  const requestedScope =
-    persistScope === 'workspace'
-      ? SettingScope.Workspace
-      : persistScope === 'user'
-        ? SettingScope.User
-        : undefined;
-  return resolvePersistScopeForKey(
-    settings,
-    'advisorModel',
-    requestedScope,
-    resolvePersistScope(settings, undefined),
-  );
 }
 
 function persistModelSelection(
@@ -339,9 +319,10 @@ export function ModelDialog({
     const allModels = config ? config.getAllConfiguredModels() : [];
 
     // Separate runtime models from registry models
-    const runtimeModels = isImageModelMode
-      ? []
-      : allModels.filter((m) => m.isRuntimeModel);
+    const runtimeModels =
+      isImageModelMode || isAdvisorModelMode
+        ? []
+        : allModels.filter((m) => m.isRuntimeModel);
     const registryModels = allModels.filter((m) => {
       const imageModelSelector = encodeVisionModelSelector(
         buildModelSelectionKey(m.authType, m.id, m.baseUrl),
@@ -357,7 +338,8 @@ export function ModelDialog({
         isSelectableImageModel &&
         (isFastModelMode || !m.fastOnly) &&
         (isVoiceModelMode || !m.voiceOnly) &&
-        (isVisionModelMode || isImageModelMode || !m.visionOnly)
+        (isVisionModelMode || isImageModelMode || !m.visionOnly) &&
+        (!isAdvisorModelMode || isAdvisorModelEligible(m))
       );
     });
 
@@ -416,13 +398,14 @@ export function ModelDialog({
     authType,
     config,
     isFastModelMode,
+    isAdvisorModelMode,
     isImageModelMode,
     isVoiceModelMode,
     isVisionModelMode,
   ]);
 
   const MODEL_OPTIONS = useMemo(() => {
-    const modelOptions = availableModelEntries.map(
+    const options = availableModelEntries.map(
       ({ authType: t2, model, isRuntime, snapshotId }) => {
         const value =
           isRuntime && snapshotId
@@ -483,12 +466,12 @@ export function ModelDialog({
           {
             value: ADVISOR_OFF_OPTION,
             title: <Text bold>{t('Off')}</Text>,
-            description: t('Disable the native Advisor tool'),
+            description: t('Disable Advisor'),
             key: ADVISOR_OFF_OPTION,
           },
-          ...modelOptions,
+          ...options,
         ]
-      : modelOptions;
+      : options;
   }, [availableModelEntries, isAdvisorModelMode]);
   const modelOptionRowHeight = MODEL_OPTIONS.some(
     ({ description }) =>
@@ -521,10 +504,10 @@ export function ModelDialog({
 
   // In fast model mode, default to the currently configured fast model
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
-  const persistedAdvisorModelSetting = settings?.merged?.advisorModel;
-  const advisorModelSetting = config?.hasAdvisorModelOverride?.()
-    ? config.getAdvisorModel()
-    : persistedAdvisorModelSetting;
+  const advisorModelSetting =
+    typeof config?.getAdvisorModel === 'function'
+      ? config.getAdvisorModel()
+      : undefined;
   const voiceModelSetting = settings?.merged?.voiceModel as string | undefined;
   const visionModelSetting = settings?.merged?.visionModel as
     | string
@@ -541,14 +524,10 @@ export function ModelDialog({
     }
   }, [fastModelSetting, isFastModelMode]);
   const parsedAdvisorModelSetting = useMemo(() => {
-    if (!isAdvisorModelMode || !config) return undefined;
-    const raw =
-      typeof advisorModelSetting === 'string'
-        ? advisorModelSetting.trim()
-        : undefined;
-    if (!raw || raw.toLowerCase() === 'off') return undefined;
+    if (!isAdvisorModelMode || !config || !advisorModelSetting)
+      return undefined;
     try {
-      return resolveModelId(raw, buildModelIdContext(config));
+      return resolveModelId(advisorModelSetting, buildModelIdContext(config));
     } catch {
       return undefined;
     }
@@ -717,17 +696,17 @@ export function ModelDialog({
                   preferredImageModelEntry.model.id,
                   preferredImageModelEntry.model.baseUrl,
                 )
-              : preferredFastModelEntry
+              : preferredAdvisorModelEntry
                 ? buildModelSelectionKey(
-                    preferredFastModelEntry.authType,
-                    preferredFastModelEntry.model.id,
-                    preferredFastModelEntry.model.baseUrl,
+                    preferredAdvisorModelEntry.authType,
+                    preferredAdvisorModelEntry.model.id,
+                    preferredAdvisorModelEntry.model.baseUrl,
                   )
-                : preferredAdvisorModelEntry
+                : preferredFastModelEntry
                   ? buildModelSelectionKey(
-                      preferredAdvisorModelEntry.authType,
-                      preferredAdvisorModelEntry.model.id,
-                      preferredAdvisorModelEntry.model.baseUrl,
+                      preferredFastModelEntry.authType,
+                      preferredFastModelEntry.model.id,
+                      preferredFastModelEntry.model.baseUrl,
                     )
                   : authType
                     ? buildModelSelectionKey(
@@ -815,11 +794,6 @@ export function ModelDialog({
       },
     );
   }, [highlightedValue, preferredKey, availableModelEntries]);
-  const showAdvisorEgressWarning =
-    isAdvisorModelMode &&
-    highlightedEntry !== undefined &&
-    (highlightedEntry.authType !== authType ||
-      (highlightedEntry.model.baseUrl ?? '') !== (currentBaseUrl ?? ''));
 
   const handleSelect = useCallback(
     async (selected: string) => {
@@ -840,52 +814,21 @@ export function ModelDialog({
           setErrorMessage(t('Configuration not available.'));
           return;
         }
-        if (persistScope === 'workspace' && !settings.isTrusted) {
-          setErrorMessage(
-            t('Workspace is untrusted; run /trust first or use --global.'),
-          );
-          return;
-        }
-
-        const { scope, shadowingScope } = resolveAdvisorPersistScope(
-          settings,
-          persistScope,
-        );
-        if (shadowingScope !== undefined) {
-          setErrorMessage(
-            t(
-              'Advisor is configured in project settings, which override the requested global setting. Use --project or remove the project setting first.',
-            ),
-          );
-          return;
-        }
-        const scopeSuffix =
-          persistScope === undefined
-            ? ''
-            : scope === SettingScope.Workspace
-              ? t(' (this project)')
-              : t(' (global)');
-
         if (selected === ADVISOR_OFF_OPTION) {
-          settings.setValue(scope, 'advisorModel', '');
+          settings.setValue(SettingScope.User, 'advisorModel', '');
           selectionInFlightRef.current = true;
           try {
-            await config.setAdvisorConfig({
-              model: undefined,
-              maxUses: settings.merged.advisorMaxUses,
-              modelOverride: false,
-            });
+            await config.setAdvisorModel(undefined);
           } finally {
             selectionInFlightRef.current = false;
           }
           reportAuxiliaryModelSelection({
             type: 'success',
-            text: `${t('Advisor disabled')}${scopeSuffix}`,
+            text: t('Advisor disabled'),
           });
           onClose();
           return;
         }
-
         if (!selectedEntry) {
           setErrorMessage(t('Selected Advisor model is unavailable.'));
           return;
@@ -893,20 +836,16 @@ export function ModelDialog({
 
         hydrateApiKeyEnvFromSettings(settings, selectedEntry.model.envKey);
         const advisorModel = encodeAuxModelSelector(selected);
-        settings.setValue(scope, 'advisorModel', advisorModel);
+        settings.setValue(SettingScope.User, 'advisorModel', advisorModel);
         selectionInFlightRef.current = true;
         try {
-          await config.setAdvisorConfig({
-            model: advisorModel,
-            maxUses: settings.merged.advisorMaxUses,
-            modelOverride: false,
-          });
+          await config.setAdvisorModel(advisorModel);
         } finally {
           selectionInFlightRef.current = false;
         }
         reportAuxiliaryModelSelection({
           type: 'success',
-          text: `${t('Advisor Model')}: ${advisorModel}${scopeSuffix}`,
+          text: t('Advisor set to {{model}}', { model: advisorModel }),
         });
         onClose();
         return;
@@ -1307,16 +1246,6 @@ export function ModelDialog({
                 </Text>
               </Box>
             )}
-          {showAdvisorEgressWarning && (
-            <Box marginTop={1}>
-              <Text color={theme.status.warning}>
-                ⚠{' '}
-                {t(
-                  'Advisor sends the active conversation evidence to this provider.',
-                )}
-              </Text>
-            </Box>
-          )}
           <DetailRow
             label={t('Modality')}
             value={formatModalities(highlightedEntry.model.modalities)}

@@ -12,19 +12,16 @@ import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { AuthType } from '../core/contentGenerator.js';
 import { Storage } from '../config/storage.js';
 import { makeFakeConfig } from '../test-utils/config.js';
-import { ApiErrorEvent, ApiResponseEvent } from '../telemetry/types.js';
-import { setGenAiUsageProvenance } from '../telemetry/gen-ai-usage.js';
+import { ApiResponseEvent } from '../telemetry/types.js';
 import { setDebugLogSession } from '../utils/debugLogger.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import {
   __overrideNowForTesting,
   apiResponseEventToTokenUsageRecord,
-  apiErrorEventToTokenUsageRecord,
   exportTokenUsageSummary,
   formatTokenUsageSummaryAsCsv,
   getTokenUsageFilePath,
   queryTokenUsage,
-  recordTokenUsageFromApiError,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
   resetTokenUsageFailureLogging,
@@ -131,92 +128,6 @@ describe('tokenUsageService', () => {
     expect(record).not.toHaveProperty('responseId');
     expect(record).not.toHaveProperty('projectRoot');
     expect(record).not.toHaveProperty('response_text');
-  });
-
-  it('maps Advisor parent prompt id and consultation ordinal', () => {
-    const config = makeFakeConfig({
-      sessionId: 'session-1',
-      targetDir: path.join(tempDir, 'project'),
-    });
-    const event = createEvent(
-      'advisor-model',
-      'side-query:advisor:prompt-parent:2',
-      {
-        promptTokenCount: 10,
-        candidatesTokenCount: 20,
-        totalTokenCount: 30,
-      },
-      { subagentName: 'advisor' },
-    );
-
-    const record = apiResponseEventToTokenUsageRecord(config, event);
-
-    expect(record).toMatchObject({
-      source: 'advisor',
-      advisorParentPromptId: 'prompt-parent',
-      advisorConsultationOrdinal: 2,
-    });
-  });
-
-  it('maps provider-reported cache creation tokens', () => {
-    const config = makeFakeConfig({
-      sessionId: 'session-1',
-      targetDir: path.join(tempDir, 'project'),
-    });
-    const usageData: GenerateContentResponseUsageMetadata = {
-      promptTokenCount: 10,
-      candidatesTokenCount: 20,
-      totalTokenCount: 30,
-    };
-    setGenAiUsageProvenance(usageData, {
-      cacheCreationInputTokens: 7,
-    });
-    const event = createEvent(
-      'advisor-model',
-      'side-query:advisor:p:1',
-      usageData,
-      {
-        subagentName: 'advisor',
-      },
-    );
-
-    const record = apiResponseEventToTokenUsageRecord(config, event);
-
-    expect(record).toMatchObject({
-      source: 'advisor',
-      cacheCreationTokens: 7,
-    });
-  });
-
-  it('maps Advisor API errors to failure usage records', () => {
-    const config = makeFakeConfig({
-      sessionId: 'session-1',
-      targetDir: path.join(tempDir, 'project'),
-    });
-    const event = new ApiErrorEvent({
-      model: 'advisor-model',
-      durationMs: 250,
-      promptId: 'side-query:advisor:prompt-parent:3',
-      authType: AuthType.USE_GEMINI,
-      errorMessage: 'provider rate limited',
-      statusCode: 429,
-      subagentName: 'advisor',
-    });
-    event['event.timestamp'] = '2026-05-25T10:00:00.000Z';
-
-    const record = apiErrorEventToTokenUsageRecord(config, event);
-
-    expect(record).toMatchObject({
-      source: 'advisor',
-      inputTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-      requestStatus: 'failure',
-      errorCode: 'too_many_requests',
-      apiDurationMs: 250,
-      advisorParentPromptId: 'prompt-parent',
-      advisorConsultationOrdinal: 3,
-    });
   });
 
   it('uses current local date when API timestamps are missing or invalid', () => {
@@ -627,38 +538,6 @@ describe('tokenUsageService', () => {
 
     expect(summary.totals.totalTokens).toBe(37);
     expect(summary.totals.cachedTokens).toBe(5);
-  });
-
-  it('persists Advisor API failures in usage summaries', async () => {
-    const config = makeFakeConfig({
-      sessionId: 'session-1',
-      targetDir: path.join(tempDir, 'project'),
-    });
-
-    await recordTokenUsageFromApiError(
-      config,
-      new ApiErrorEvent({
-        model: 'advisor-model',
-        durationMs: 250,
-        promptId: 'side-query:advisor:prompt-parent:1',
-        authType: AuthType.USE_GEMINI,
-        errorMessage: 'provider auth failed',
-        statusCode: 401,
-        subagentName: 'advisor',
-      }),
-    );
-
-    const summary = await queryTokenUsage({
-      period: 'day',
-      value: '2026-05-25',
-    });
-
-    expect(summary.totals.requests).toBe(1);
-    expect(summary.totals.totalTokens).toBe(0);
-    expect(summary.totals.apiDurationMs).toBe(250);
-    expect(summary.bySource).toEqual([
-      expect.objectContaining({ key: 'advisor', requests: 1 }),
-    ]);
   });
 
   it('uses cached tokens as fallback input when prompt tokens are missing', async () => {

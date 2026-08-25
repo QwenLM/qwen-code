@@ -325,14 +325,6 @@ function normalizeAdvisorModel(model: string | undefined): string | undefined {
   return trimmed;
 }
 
-function normalizeAdvisorMaxUses(
-  value: number | undefined,
-): number | undefined {
-  return value !== undefined && Number.isInteger(value) && value > 0
-    ? value
-    : undefined;
-}
-
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -1374,16 +1366,6 @@ export interface ConfigParameters {
    */
   advisorModel?: string;
   /**
-   * True when advisorModel comes from a session-only source such as --advisor.
-   * Settings hot reload preserves the model while still refreshing max uses.
-   */
-  advisorModelOverride?: boolean;
-  /**
-   * Optional max Advisor consultations per top-level prompt. Unset means
-   * unlimited. Values must be positive integers.
-   */
-  advisorMaxUses?: number;
-  /**
    * Built-in WebSearch tool settings (`tools.webSearch` / ENABLE_WEB_SEARCH +
    * WEB_SEARCH_MODEL env overrides). The tool registers only when `enabled`
    * is true and `model` resolves to a DashScope-compatible modelProviders
@@ -2274,8 +2256,6 @@ export class Config {
   private readonly memoryAgentMaxTurns: number | undefined;
   private fastModel?: string;
   private advisorModel?: string;
-  private advisorModelOverride = false;
-  private advisorMaxUses?: number;
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   private visionModel?: string;
@@ -2752,8 +2732,6 @@ export class Config {
         : undefined;
     this.fastModel = params.fastModel || undefined;
     this.advisorModel = normalizeAdvisorModel(params.advisorModel);
-    this.advisorModelOverride = params.advisorModelOverride === true;
-    this.advisorMaxUses = normalizeAdvisorMaxUses(params.advisorMaxUses);
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     this.compactionModel = params.compactionModel || undefined;
@@ -4630,29 +4608,14 @@ export class Config {
     return this.advisorModel;
   }
 
-  getAdvisorMaxUses(): number | undefined {
-    return this.advisorMaxUses;
-  }
-
-  hasAdvisorModelOverride(): boolean {
-    return this.advisorModelOverride;
-  }
-
-  async setAdvisorConfig(options: {
-    model: string | undefined;
-    maxUses: number | undefined;
-    modelOverride?: boolean;
-  }): Promise<void> {
-    this.advisorModel = normalizeAdvisorModel(options.model);
-    this.advisorModelOverride = options.modelOverride === true;
-    this.advisorMaxUses = normalizeAdvisorMaxUses(options.maxUses);
+  async setAdvisorModel(model: string | undefined): Promise<void> {
+    this.advisorModel = normalizeAdvisorModel(model);
     if (!this.initialized || !this.toolRegistry) {
       return;
     }
 
     await this.syncAdvisorToolRegistration(this.toolRegistry);
     await this.geminiClient?.setTools();
-    await this.geminiClient?.refreshSystemInstruction?.();
   }
 
   /**
@@ -8756,7 +8719,12 @@ export class Config {
     options?: { forSubAgent?: boolean },
   ): Promise<void> {
     registry.unregisterTool(ToolNames.ADVISOR);
-    if (!this.getAdvisorModel() || this.getBareMode() || options?.forSubAgent) {
+    if (
+      !this.getAdvisorModel() ||
+      this.getBareMode() ||
+      this.isSafeMode() ||
+      options?.forSubAgent
+    ) {
       return;
     }
 
@@ -8774,10 +8742,8 @@ export class Config {
     }
     if (!enabled) return;
 
-    registry.registerFactory(ToolNames.ADVISOR, async () => {
-      const { AdvisorTool } = await import('../tools/advisor.js');
-      return new AdvisorTool(this);
-    });
+    const { AdvisorTool } = await import('../tools/advisor.js');
+    registry.registerTool(new AdvisorTool(this));
   }
 
   async createToolRegistry(

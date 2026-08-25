@@ -795,10 +795,24 @@ export type ToolResultDisplay =
 
 export interface AdvisorReviewDisplay {
   type: 'advisor_review';
+  model?: string;
   verdict: string;
   risks: string;
   missingEvidence: string;
   recommendation: string;
+}
+
+export function formatAdvisorReview(review: AdvisorReviewDisplay): string {
+  return [
+    '## Verdict',
+    review.verdict.trim(),
+    '## Risks',
+    review.risks.trim(),
+    '## Missing evidence',
+    review.missingEvidence.trim(),
+    '## Recommendation',
+    review.recommendation.trim(),
+  ].join('\n\n');
 }
 
 export function isAdvisorReviewDisplay(

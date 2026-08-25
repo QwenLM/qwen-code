@@ -851,7 +851,7 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
   });
 
-  it('renders structured Advisor feedback instead of stringified JSON', () => {
+  it('renders structured Advisor feedback instead of JSON', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage
         {...baseProps}
@@ -869,12 +869,12 @@ describe('<ToolMessage />', () => {
     );
 
     const output = lastFrame();
-    expect(output).toContain('Advisor feedback');
+    expect(output).toContain('/advisor');
+    expect(output).toContain('Consult Advisor');
     expect(output).toContain('Verdict');
     expect(output).toContain('Risks');
     expect(output).toContain('Missing evidence');
     expect(output).toContain('Recommendation');
-    expect(output).toContain('MockMarkdown:Check the edge case.');
     expect(output).not.toContain('"advisor_review"');
   });
 

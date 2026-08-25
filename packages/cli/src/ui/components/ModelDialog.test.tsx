@@ -52,17 +52,12 @@ const renderComponent = (
   };
   const combinedProps = { ...defaultProps, ...props };
 
-  const user = settingsValue?.user ?? { settings: {} };
-  const workspace = settingsValue?.workspace ?? { settings: {} };
   const mockSettings = {
     isTrusted: true,
+    user: { settings: {} },
+    workspace: { settings: {} },
+    setValue: vi.fn(),
     ...(settingsValue ?? {}),
-    user,
-    workspace,
-    setValue: settingsValue?.setValue ?? vi.fn(),
-    forScope: vi.fn((scope: SettingScope) =>
-      scope === SettingScope.Workspace ? workspace : user,
-    ),
   } as unknown as LoadedSettings;
 
   const recordSlashCommand = vi.fn();
@@ -86,7 +81,7 @@ const renderComponent = (
     })),
     getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
     getAdvisorModel: vi.fn(() => undefined),
-    hasAdvisorModelOverride: vi.fn(() => false),
+    setAdvisorModel: vi.fn().mockResolvedValue(undefined),
     getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
 
     // --- Functions used by ClearcutLogger ---
@@ -160,6 +155,52 @@ describe('<ModelDialog />', () => {
       `${AuthType.QWEN_OAUTH}::${DEFAULT_QWEN_MODEL}`,
     );
     expect(props.showNumbers).toBe(true);
+  });
+
+  it('lists Off and persists an Advisor model without switching the executor', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const switchModel = vi.fn();
+    const { mockSettings, props } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'executor-model'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'advisor-model',
+            label: 'Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'vision-only',
+            label: 'Vision Only',
+            authType: AuthType.USE_OPENAI,
+            visionOnly: true,
+          },
+        ]),
+        setAdvisorModel,
+        switchModel,
+      },
+      { merged: {} },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::advisor-model`,
+    ]);
+    await select.onSelect(`${AuthType.USE_OPENAI}::advisor-model`);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      `${AuthType.USE_OPENAI}:advisor-model`,
+    );
+    expect(setAdvisorModel).toHaveBeenCalledWith(
+      `${AuthType.USE_OPENAI}:advisor-model`,
+    );
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalled();
   });
 
   it('caps visible model options to the available dialog height', () => {
@@ -741,261 +782,6 @@ describe('<ModelDialog />', () => {
       ],
     });
     expect(props.onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('shows Off and disables Advisor in advisor model mode', async () => {
-    const setAdvisorConfig = vi.fn().mockResolvedValue(undefined);
-    const { props, mockSettings, recordSlashCommand } = renderComponent(
-      { isAdvisorModelMode: true },
-      {
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getModel: vi.fn(() => 'gpt-4'),
-        getAllConfiguredModels: vi.fn(() => [
-          {
-            id: 'advisor-model',
-            label: 'advisor-model',
-            authType: AuthType.USE_OPENAI,
-          },
-        ]),
-        setAdvisorConfig,
-      } as unknown as Partial<Config>,
-      {
-        merged: { advisorMaxUses: 2 },
-      } as unknown as Partial<LoadedSettings>,
-    );
-
-    const selectProps = mockedSelect.mock.calls[0][0];
-    expect(selectProps.items[0].value).toBe('$advisor-off');
-
-    await selectProps.onSelect('$advisor-off');
-
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      SettingScope.User,
-      'advisorModel',
-      '',
-    );
-    expect(setAdvisorConfig).toHaveBeenCalledWith({
-      model: undefined,
-      maxUses: 2,
-      modelOverride: false,
-    });
-    expect(recordSlashCommand).toHaveBeenCalledWith({
-      phase: 'result',
-      rawCommand: '/advisor',
-      outputHistoryItems: [{ type: 'success', text: 'Advisor disabled' }],
-    });
-    expect(props.onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('rejects an Advisor selection shadowed by project settings', async () => {
-    const setAdvisorConfig = vi.fn().mockResolvedValue(undefined);
-    const { container, mockSettings, recordSlashCommand } = renderComponent(
-      { isAdvisorModelMode: true, persistScope: 'user' },
-      {
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getModel: vi.fn(() => 'gpt-4'),
-        getAllConfiguredModels: vi.fn(() => []),
-        setAdvisorConfig,
-      } as unknown as Partial<Config>,
-      {
-        merged: { advisorModel: 'workspace-advisor' },
-        workspace: {
-          settings: { advisorModel: 'workspace-advisor' },
-        },
-      } as unknown as Partial<LoadedSettings>,
-    );
-
-    await act(async () => {
-      await mockedSelect.mock.calls[0][0].onSelect('$advisor-off');
-    });
-
-    expect(mockSettings.setValue).not.toHaveBeenCalled();
-    expect(recordSlashCommand).not.toHaveBeenCalled();
-    expect(container.textContent).toContain('project settings');
-  });
-
-  it('persists Advisor selection in the scope that owns advisorModel', async () => {
-    const setAdvisorConfig = vi.fn().mockResolvedValue(undefined);
-    const { mockSettings } = renderComponent(
-      { isAdvisorModelMode: true },
-      {
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getModel: vi.fn(() => 'gpt-4'),
-        getAllConfiguredModels: vi.fn(() => [
-          {
-            id: 'advisor-model',
-            label: 'advisor-model',
-            authType: AuthType.USE_OPENAI,
-          },
-        ]),
-        setAdvisorConfig,
-      } as unknown as Partial<Config>,
-      {
-        merged: { advisorModel: 'workspace-advisor' },
-        workspace: {
-          settings: { advisorModel: 'workspace-advisor' },
-        },
-      } as unknown as Partial<LoadedSettings>,
-    );
-
-    await act(async () => {
-      await mockedSelect.mock.calls[0][0].onSelect(
-        mockedSelect.mock.calls[0][0].items[1].value,
-      );
-    });
-
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      SettingScope.Workspace,
-      'advisorModel',
-      'openai:advisor-model',
-    );
-  });
-
-  it('rejects project Advisor selection in an untrusted workspace', async () => {
-    const { container, mockSettings } = renderComponent(
-      { isAdvisorModelMode: true, persistScope: 'workspace' },
-      undefined,
-      { isTrusted: false } as unknown as Partial<LoadedSettings>,
-    );
-
-    await act(async () => {
-      await mockedSelect.mock.calls[0][0].onSelect('$advisor-off');
-    });
-
-    expect(mockSettings.setValue).not.toHaveBeenCalled();
-    expect(container.textContent).toContain('Workspace is untrusted');
-  });
-
-  it('highlights a session-only Advisor model override', () => {
-    renderComponent({ isAdvisorModelMode: true }, {
-      getAdvisorModel: vi.fn(() => 'openai:advisor-model'),
-      hasAdvisorModelOverride: vi.fn(() => true),
-      getContentGeneratorConfig: vi.fn(() => ({
-        authType: AuthType.USE_OPENAI,
-        model: 'gpt-4',
-      })),
-      getAllConfiguredModels: vi.fn(() => [
-        {
-          id: 'advisor-model',
-          label: 'advisor-model',
-          authType: AuthType.USE_OPENAI,
-        },
-      ]),
-    } as unknown as Partial<Config>);
-
-    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(1);
-  });
-
-  it('renders with a non-string persisted Advisor setting', () => {
-    expect(() =>
-      renderComponent({ isAdvisorModelMode: true }, undefined, {
-        merged: { advisorModel: false },
-      } as unknown as Partial<LoadedSettings>),
-    ).not.toThrow();
-    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(0);
-  });
-
-  it('stores Advisor model selector without switching models', async () => {
-    const switchModel = vi.fn();
-    const setAdvisorConfig = vi.fn().mockResolvedValue(undefined);
-    const { props, mockSettings, recordSlashCommand } = renderComponent(
-      { isAdvisorModelMode: true },
-      {
-        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-        getModel: vi.fn(() => 'gpt-4'),
-        switchModel,
-        getAllConfiguredModels: vi.fn(() => [
-          {
-            id: 'advisor-model',
-            label: 'advisor-model',
-            authType: AuthType.USE_OPENAI,
-            envKey: 'OPENAI_API_KEY',
-          },
-          {
-            id: 'gpt-4',
-            label: 'gpt-4',
-            authType: AuthType.USE_OPENAI,
-          },
-        ]),
-        setAdvisorConfig,
-      } as unknown as Partial<Config>,
-      {
-        merged: { advisorMaxUses: 3 },
-      } as unknown as Partial<LoadedSettings>,
-    );
-
-    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
-    await childOnSelect(`${AuthType.USE_OPENAI}::advisor-model`);
-
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      SettingScope.User,
-      'advisorModel',
-      'openai:advisor-model',
-    );
-    expect(setAdvisorConfig).toHaveBeenCalledWith({
-      model: 'openai:advisor-model',
-      maxUses: 3,
-      modelOverride: false,
-    });
-    expect(recordSlashCommand).toHaveBeenCalledWith({
-      phase: 'result',
-      rawCommand: '/advisor',
-      outputHistoryItems: [
-        { type: 'success', text: 'Advisor Model: openai:advisor-model' },
-      ],
-    });
-    expect(switchModel).not.toHaveBeenCalled();
-    expect(props.onClose).toHaveBeenCalledTimes(1);
-  });
-
-  it('warns when Advisor model selection sends evidence to another provider', () => {
-    const { container } = renderComponent(
-      { isAdvisorModelMode: true },
-      {
-        getAuthType: vi.fn(() => AuthType.QWEN_OAUTH),
-        getAllConfiguredModels: vi.fn(() => [
-          {
-            id: 'advisor-model',
-            label: 'advisor-model',
-            authType: AuthType.USE_OPENAI,
-          },
-        ]),
-      } as unknown as Partial<Config>,
-      {
-        merged: { advisorModel: 'openai:advisor-model' },
-      } as unknown as Partial<LoadedSettings>,
-    );
-
-    expect(container.textContent).toContain(
-      'Advisor sends the active conversation evidence to this provider.',
-    );
-  });
-
-  it('excludes auxiliary-only models from Advisor model mode', () => {
-    renderComponent({ isAdvisorModelMode: true }, {
-      getAuthType: vi.fn(() => AuthType.USE_OPENAI),
-      getModel: vi.fn(() => 'gpt-4'),
-      getAllConfiguredModels: vi.fn(() => [
-        {
-          id: 'advisor-model',
-          label: 'advisor-model',
-          authType: AuthType.USE_OPENAI,
-        },
-        {
-          id: 'fast-only',
-          label: 'fast-only',
-          authType: AuthType.USE_OPENAI,
-          fastOnly: true,
-        },
-      ]),
-    } as unknown as Partial<Config>);
-
-    const values = mockedSelect.mock.calls[0][0].items.map(
-      (item) => item.value,
-    );
-    expect(values).toContain('$advisor-off');
-    expect(values).toContain(`${AuthType.USE_OPENAI}::advisor-model`);
-    expect(values).not.toContain(`${AuthType.USE_OPENAI}::fast-only`);
   });
 
   it('stores authType-qualified selectors in vision model mode without switching models', async () => {

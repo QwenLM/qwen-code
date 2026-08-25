@@ -1223,10 +1223,7 @@ export const useSlashCommandProcessor = (
                       });
                       return { type: 'handled' };
                     case 'advisor-model':
-                      actions.openModelDialog({
-                        advisorModelMode: true,
-                        persistScope: result.persistScope,
-                      });
+                      actions.openModelDialog({ advisorModelMode: true });
                       return { type: 'handled' };
                     case 'voice-model':
                       actions.openModelDialog({

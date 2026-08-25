@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from '../../adapters/types';
 import {
+  extractRawOutputText,
   formatToolDisplayName,
-  extractText,
   getAgentCurrentToolHint,
   getToolDescription,
   getToolResultSummary,
@@ -355,44 +355,22 @@ describe('toolFormatting', () => {
     ).toBe('3 line(s)');
   });
 
-  it('formats structured Advisor reviews as readable markdown', () => {
-    const advisorTool = tool({
+  it('formats structured Advisor output as readable markdown', () => {
+    const advisor = tool({
       toolName: 'advisor',
-      content: [
-        {
-          type: 'content',
-          content: {
-            type: 'text',
-            text: '<advisor_feedback>\nLLM-facing content\n</advisor_feedback>',
-          },
-        },
-      ],
       rawOutput: {
         type: 'advisor_review',
-        verdict: 'Sound approach.\n\n## Caveats\nBe careful.',
+        verdict: 'Sound approach.',
         risks: 'Retry handling is unclear.',
         missingEvidence: 'No integration result.',
         recommendation: 'Run the integration test.',
       },
     });
-    expect(extractText(advisorTool)).toBe(
-      '<advisor_feedback>\nLLM-facing content\n</advisor_feedback>',
-    );
-    expect(getToolResultSummary(advisorTool)).toBe(
-      'Sound approach. ## Caveats Be careful.',
-    );
-  });
 
-  it('summarizes failed Advisor output with the generic fallback', () => {
-    expect(
-      getToolResultSummary(
-        tool({
-          toolName: 'advisor',
-          status: 'failed',
-          rawOutput: 'Advisor consultation failed: model refused the request.',
-        }),
-      ),
-    ).toBe('Advisor consultation failed: model refused the request.');
+    expect(extractRawOutputText(advisor.rawOutput)).toContain(
+      '## Verdict\nSound approach.',
+    );
+    expect(getToolResultSummary(advisor)).toBe('Sound approach.');
   });
 
   it('keeps long shell commands in full instead of capping at one line', () => {

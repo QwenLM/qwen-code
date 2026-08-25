@@ -161,6 +161,14 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
 
+    it('unregisters an eager tool', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'eager' }));
+
+      toolRegistry.unregisterTool('eager');
+
+      expect(toolRegistry.getTool('eager')).toBeUndefined();
+    });
+
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
       // The synthetic `structured_output` tool registers via
       // `registerFactory` (lazy). Without this guard, an MCP server
@@ -1483,54 +1491,6 @@ describe('ToolRegistry', () => {
       const result = await toolRegistry.ensureTool('retry-tool');
       expect(result).toBe(tool);
       expect(callCount).toBe(2);
-    });
-
-    it('does not cache an inflight factory result after unregisterTool', async () => {
-      let resolveFactory!: (tool: MockTool) => void;
-      const factoryPromise = new Promise<MockTool>((resolve) => {
-        resolveFactory = resolve;
-      });
-      const tool = new MockTool({ name: 'advisor' });
-
-      toolRegistry.registerFactory('advisor', () => factoryPromise);
-      const ensurePromise = toolRegistry.ensureTool('advisor');
-      toolRegistry.unregisterTool('advisor');
-      resolveFactory(tool);
-
-      await expect(ensurePromise).resolves.toBeUndefined();
-      expect(toolRegistry.getTool('advisor')).toBeUndefined();
-      expect(toolRegistry.getAllToolNames()).not.toContain('advisor');
-    });
-
-    it('does not let a stale rejection clear a replacement load', async () => {
-      let rejectOld!: (error: Error) => void;
-      let resolveNew!: (tool: MockTool) => void;
-      let replacementLoads = 0;
-      const oldPromise = new Promise<MockTool>((_resolve, reject) => {
-        rejectOld = reject;
-      });
-      const newPromise = new Promise<MockTool>((resolve) => {
-        resolveNew = resolve;
-      });
-      const replacement = new MockTool({ name: 'advisor' });
-
-      toolRegistry.registerFactory('advisor', () => oldPromise);
-      const oldLoad = toolRegistry.ensureTool('advisor');
-      toolRegistry.unregisterTool('advisor');
-      toolRegistry.registerFactory('advisor', () => {
-        replacementLoads += 1;
-        return newPromise;
-      });
-      const newLoad = toolRegistry.ensureTool('advisor');
-
-      rejectOld(new Error('stale failure'));
-      await expect(oldLoad).rejects.toThrow('stale failure');
-      const sharedLoad = toolRegistry.ensureTool('advisor');
-      expect(replacementLoads).toBe(1);
-
-      resolveNew(replacement);
-      await expect(newLoad).resolves.toBe(replacement);
-      await expect(sharedLoad).resolves.toBe(replacement);
     });
   });
 

@@ -139,10 +139,7 @@ import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
 import { apiActivityTracker } from './api-activity-tracker.js';
-import {
-  recordTokenUsageFromApiErrorBestEffort,
-  recordTokenUsageFromApiResponseBestEffort,
-} from '../services/tokenUsageService.js';
+import { recordTokenUsageFromApiResponseBestEffort } from '../services/tokenUsageService.js';
 import { isChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -150,18 +147,6 @@ import { emitSessionEnd, emitSessionStart } from './session-events.js';
 
 const shouldLogUserPrompts = (config: Config): boolean =>
   config.getTelemetryLogPromptsEnabled();
-
-function shouldRecordTokenUsageForApiResponse(
-  event: ApiResponseEvent,
-): boolean {
-  return (
-    !isInternalPromptId(event.prompt_id) || event.subagent_name === 'advisor'
-  );
-}
-
-function shouldRecordTokenUsageForApiError(event: ApiErrorEvent): boolean {
-  return event.subagent_name === 'advisor' && !!event.advisor_parent_prompt_id;
-}
 
 function getCommonAttributes(config: Config): LogAttributes {
   return {
@@ -547,11 +532,6 @@ export function logApiError(
   // Feed the daemon-status model-API-health charts: one model API error per
   // failed attempt, drained per live model round by the ACP MessageEmitter.
   apiActivityTracker.recordError();
-  if (shouldRecordTokenUsageForApiError(event)) {
-    if (config.getUsageStatisticsEnabled()) {
-      recordTokenUsageFromApiErrorBestEffort(config, event);
-    }
-  }
   if (!isInternalPromptId(event.prompt_id)) {
     recordUiTelemetryEventToChat(config, uiEvent);
   }
@@ -626,12 +606,10 @@ export function logApiResponse(
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent, config.getSessionId());
-  if (shouldRecordTokenUsageForApiResponse(event)) {
+  if (!isInternalPromptId(event.prompt_id)) {
     if (config.getUsageStatisticsEnabled()) {
       recordTokenUsageFromApiResponseBestEffort(config, event);
     }
-  }
-  if (!isInternalPromptId(event.prompt_id)) {
     recordUiTelemetryEventToChat(config, uiEvent);
   }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);

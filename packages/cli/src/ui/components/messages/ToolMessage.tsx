@@ -29,6 +29,7 @@ import type {
   TerminalImageDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
+  formatAdvisorReview,
   formatVisionBridgeNoticeDisplay,
   isAdvisorReviewDisplay,
   isTerminalImageDisplay,
@@ -63,7 +64,7 @@ import {
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { TerminalImage } from '../TerminalImage.js';
 import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
-import { AdvisorReviewCard } from './AdvisorMessage.js';
+import { AdvisorMessage } from './AdvisorMessage.js';
 
 // Names that resolve to the agent tool: the canonical name plus whatever
 // legacy request aliases core's migration map declares (e.g. 'task').
@@ -983,8 +984,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               />
             )}
             {effectiveDisplayRenderer.type === 'advisor' && (
-              <AdvisorReviewCard
-                review={effectiveDisplayRenderer.data}
+              <AdvisorMessage
+                text={formatAdvisorReview(effectiveDisplayRenderer.data)}
+                model={effectiveDisplayRenderer.data.model ?? description}
                 containerWidth={innerWidth}
               />
             )}
