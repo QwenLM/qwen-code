@@ -68,6 +68,18 @@ async function createMinimalConfig(): Promise<Config> {
   );
   const mcpServers = await getMcpServersFromConfig();
 
+  // Mirror the real session's allow/exclude gates (see loadCliConfig in
+  // config.ts, which reads the same settings.mcp source): without them this
+  // throwaway Config still reaches servers the user excluded in settings
+  // (`mcp.excluded`) or kept off the `mcp.allowed` list — connections a
+  // normal session would never attempt.
+  const allowedMcpServers = settings.merged.mcp?.allowed
+    ? new Set(settings.merged.mcp.allowed.filter(Boolean))
+    : undefined;
+  const excludedMcpServers = settings.merged.mcp?.excluded
+    ? new Set(settings.merged.mcp.excluded.filter(Boolean))
+    : undefined;
+
   const config = new Config({
     sessionId: 'mcp-reconnect',
     targetDir: cwd,
@@ -78,6 +90,12 @@ async function createMinimalConfig(): Promise<Config> {
     pendingMcpServers: getPendingGatedMcpServers(mcpServers, cwd),
     fileDiscoveryService: fileService,
     mcpServerCommand: settings.merged.mcp?.serverCommand,
+    allowedMcpServers: allowedMcpServers
+      ? Array.from(allowedMcpServers)
+      : undefined,
+    excludedMcpServers: excludedMcpServers
+      ? Array.from(excludedMcpServers)
+      : undefined,
     // Mirror a real session's trust gate: discovery skips MCP servers in an
     // untrusted workspace, so the throwaway Config must carry the same trust
     // state. Without it `isTrustedFolder()` defaults to true here, the

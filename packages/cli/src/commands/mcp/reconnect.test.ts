@@ -685,4 +685,106 @@ describe('mcp reconnect command', () => {
       );
     });
   });
+
+  describe('allow/exclude gates in the throwaway config (issue #9944)', () => {
+    // The real session wires `mcp.allowed` / `mcp.excluded` from settings
+    // into Config (loadCliConfig); without the same wiring here the command
+    // would still reach a server the user disabled, or one kept off the
+    // allow-list — connections a normal session would never attempt.
+    it('passes the settings excluded list so excluded servers stay skipped', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+          mcp: {
+            excluded: ['test-server'],
+          },
+        },
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(MockedConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          excludedMcpServers: ['test-server'],
+        }),
+      );
+    });
+
+    it('passes the settings allowed list so the allow-list is respected', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+          mcp: {
+            allowed: ['other-server'],
+          },
+        },
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(MockedConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          allowedMcpServers: ['other-server'],
+        }),
+      );
+    });
+
+    it('filters empty entries from both gates like the real session wiring', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+          mcp: {
+            allowed: ['kept', ''],
+            excluded: ['dropped', '', 'dropped'],
+          },
+        },
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(MockedConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          allowedMcpServers: ['kept'],
+          excludedMcpServers: ['dropped'],
+        }),
+      );
+    });
+
+    it('leaves both gates undefined when settings has no mcp lists', async () => {
+      mockedLoadSettings.mockReturnValue({
+        merged: {
+          mcpServers: {
+            'test-server': { command: '/path/to/server' },
+          },
+        },
+      });
+
+      const handler = reconnectCommand.handler as (
+        argv: Record<string, unknown>,
+      ) => Promise<void>;
+      await handler({ 'server-name': 'test-server', all: false });
+
+      expect(MockedConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          allowedMcpServers: undefined,
+          excludedMcpServers: undefined,
+        }),
+      );
+    });
+  });
 });
