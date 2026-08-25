@@ -116,7 +116,7 @@ import {
   getCustomSystemPrompt,
   getManualPlanExitSystemReminder,
 } from './prompts.js';
-import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
+import { isRetryableStreamTransportError } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
   getFunctionCallFingerprint,
@@ -150,11 +150,15 @@ function hasCandidateOutput(response: GenerateContentResponse): boolean {
 /**
  * True when the chunk carries model output beyond ephemeral reasoning:
  * any candidate part without the `thought` flag (text, functionCall,
- * inlineData, …). Thought parts stream reasoning that is never recorded
- * as the assistant's final response in history, so replaying a request
- * that has produced only thought parts cannot duplicate user-visible
- * output — the distinction the transport stream retry gate relies on
- * (#7832).
+ * inlineData, …). What makes a replay after thinking-only output safe
+ * is NOT that thought parts stay out of history — the successful
+ * attempt's thoughts are recorded there. It is that a failed attempt
+ * that produced only thought parts persists nothing: error-path
+ * persistence requires a delivered functionCall, which the replay
+ * gate excludes. `popPendingPartialAssistantTurn()` before the retry
+ * is defense in depth — it has nothing to pop on this path today, but
+ * keeps the replay safe if that persistence policy ever widens. The
+ * transport stream retry gate relies on this distinction (#7832).
  */
 function hasNonThoughtCandidateParts(
   response: GenerateContentResponse,
@@ -1945,7 +1949,8 @@ export class GeminiChat {
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
   private pendingPartialAssistantRecord:
-    Parameters<ChatRecordingService['recordAssistantTurn']>[0] | null = null;
+    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+    | null = null;
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
@@ -3378,21 +3383,17 @@ export class GeminiChat {
             }
 
             // Replay only curated socket-level failures before any
-            // user-visible content has reached callers. Thinking-only
-            // output does not block the replay: thought parts are
-            // ephemeral (never recorded as the assistant's response in
-            // history), so retrying after them cannot duplicate visible
-            // output — and thinking models can spend minutes in that
-            // phase, exactly when gateways close long-lived SSE
-            // connections (#7832).
-            const isRetryableStreamTransportError =
-              classification.kind === 'transport' &&
-              classification.transportCode !== undefined &&
-              RETRYABLE_STREAM_TRANSPORT_CODES.has(
-                classification.transportCode,
-              );
+            // content (non-thought output) has reached callers.
+            // Thinking-only output does not block the replay: such an
+            // attempt persists nothing (error-path persistence
+            // requires a delivered functionCall, which this gate
+            // excludes), and the partial turn is popped wholesale
+            // below as defense in depth — so nothing the caller saw
+            // from that attempt can appear twice. Thinking models can
+            // spend minutes in that phase, exactly when gateways
+            // close long-lived SSE connections (#7832).
             if (
-              isRetryableStreamTransportError &&
+              isRetryableStreamTransportError(classification) &&
               !streamYieldedContentChunk &&
               // `streamYieldedContentChunk` is per-attempt, so on its own it
               // cannot tell "nothing has been delivered" from "this attempt
@@ -3454,7 +3455,7 @@ export class GeminiChat {
             // MAX_TOKENS recovery loop enforces via its `hasFunctionCall`
             // check), and the scheduler's repair path already covers it.
             const canContinueAfterTransportCut =
-              isRetryableStreamTransportError &&
+              isRetryableStreamTransportError(classification) &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
               transportContinuationCount <
@@ -3492,7 +3493,7 @@ export class GeminiChat {
               rearmQuietAcceptanceIfBudgetSpent();
               continue;
             }
-            if (isRetryableStreamTransportError) {
+            if (isRetryableStreamTransportError(classification)) {
               // Reached only when neither branch above fired: content was
               // already delivered so replaying would duplicate it, or the
               // replay budget is exhausted, or continuation is unavailable
@@ -3642,7 +3643,9 @@ export class GeminiChat {
 
             if (
               error instanceof InvalidStreamError &&
-              error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' &&
+              (error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' ||
+                (error.type === 'NO_RESPONSE_TEXT' &&
+                  lastFinishReason === FinishReason.MAX_TOKENS)) &&
               !maxTokensEscalated &&
               !hasUserMaxTokensOverride &&
               shouldEscalateMaxOutputTokens

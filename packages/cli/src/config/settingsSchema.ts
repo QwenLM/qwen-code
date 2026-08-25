@@ -25,6 +25,7 @@ import {
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
@@ -726,6 +727,21 @@ const SETTINGS_SCHEMA = {
           'Append the attribution footer naming the model and CLI version (e.g. "_— qwen3-coder via Qwen Code /review (v0.21.2)_") to review bodies and inline comments posted to GitHub. Disable to post reviews without VISIBLE AI attribution: no footer, and no "**[Critical]**"/"**[Suggestion]**" severity markers on posted comments and body lists. Unattributed posts stay identifiable in the raw source: each posted comment carries an invisible severity marker ("<!-- qwen-review critical -->") and the review body carries a ledger marker ("<!-- qwen-review-ledger ... -->") — anything reading comment bodies (GitHub API automation, the workflows this setting couples to) still recognizes a /review artifact, and presubmit duplicate detection recognizes the reviewing account\'s earlier posts by the severity marker, though unattributed posts from other accounts escape it. Another consequence: qwen-autofix\'s Critical-only mode (engaged after round 5, or earlier when a counting window\'s diff-growth budget trips) no longer recognizes the posted findings as Critical and defers them. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot set review policy for its reviewers.',
         showInDialog: true,
       },
+      sandbox: {
+        type: 'enum',
+        label: 'Sandbox the reviewed code: review',
+        category: 'General',
+        requiresRestart: false,
+        default: 'off',
+        description:
+          'Run the REVIEWED repository\'s own commands — `npm ci` with its install scripts, the build, the test suite, and every mutation probe — inside a container instead of directly as you. A review executes the code it is reviewing, and today those commands inherit the review process\'s whole environment (on CI that includes the model and GitHub credentials). "auto" uses a container when docker or podman answers and runs directly when neither does; "required" refuses to run them unsandboxed, which makes the evidence that depends on execution (build/test findings, mutation verdicts, `Source: [probe]`) unavailable for that run rather than ending the review; "off" is today\'s behaviour and stays the default, because containerising a build by surprise changes what native modules compile against. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot switch off the containment that exists to contain it.',
+        showInDialog: true,
+        options: [
+          { value: 'off', label: 'Off (run the reviewed code directly)' },
+          { value: 'auto', label: 'Auto (container when one is available)' },
+          { value: 'required', label: 'Required (never run it unsandboxed)' },
+        ],
+      },
       effort: {
         type: 'enum',
         label: 'Default effort: review',
@@ -804,11 +820,22 @@ const SETTINGS_SCHEMA = {
         category: 'General',
         requiresRestart: false,
         default: 'text',
-        description: 'The format of the CLI output.',
+        description:
+          'The format of the CLI output. With `stream-json`, runs started ' +
+          'with a prompt behave as non-interactive (headless), matching ' +
+          '`--output-format stream-json`. Flags validated at argv parse ' +
+          'time (`--include-partial-messages`, `--input-format ' +
+          'stream-json`) still require the explicit `--output-format ' +
+          'stream-json` flag.',
         showInDialog: false,
+        // The values are the runtime's `OutputFormat` enum members, and the
+        // settingsSchema test pins these options against
+        // `Object.values(OutputFormat)`, so a format added in core fails
+        // that test until this list and the regenerated JSON follow.
         options: [
-          { value: 'text', label: 'Text' },
-          { value: 'json', label: 'JSON' },
+          { value: OutputFormat.TEXT, label: 'Text' },
+          { value: OutputFormat.JSON, label: 'JSON' },
+          { value: OutputFormat.STREAM_JSON, label: 'Stream JSON' },
         ],
       },
       showTimestamps: {
@@ -2906,7 +2933,8 @@ const SETTINGS_SCHEMA = {
           '`consensus` = N-of-M voters must agree. Default N=floor(M/2)+1, ' +
           'which means UNANIMITY for M=2 (quorum=2, both must agree) and ' +
           'supermajority for larger even M (M=4 → quorum=3; M=6 → quorum=4). ' +
-          'For M=2 specifically, split votes resolve only via permissionTimeoutMs. ' +
+          'For M=2 specifically, split votes resolve only via the configured ' +
+          'permission timeout, voter cancellation, or session cancellation. ' +
           '`local-only` = only loopback clients can RESOLVE; remote clients ' +
           'can still ABORT a pending permission via the cancel sentinel ' +
           '({outcome:"cancelled"}) — cancel stays cross-policy for ' +

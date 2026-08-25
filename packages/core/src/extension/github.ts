@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SimpleGit } from 'simple-git';
 import { getErrorMessage } from '../utils/errors.js';
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
@@ -43,6 +42,7 @@ import {
   resolveStoredGitCredential,
   type GitCredential,
 } from './extension-git-credentials.js';
+import { createExtensionGitClient } from './extension-git-client.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 const SUPPORTED_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'] as const;
@@ -214,40 +214,12 @@ function createPinnedGitConfig(curlResolve: string): string[] {
   ];
 }
 
-function restrictGitEnvironment(
-  git: SimpleGit,
-  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
-  authentication?: { source: string; credential: GitCredential },
-): SimpleGit {
-  if (networkPolicy !== 'public' && !authentication) return git;
-  const environment: Record<string, string> = {
-    GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: os.devNull,
-  };
-  for (const key of [
-    'PATH',
-    'Path',
-    'SystemRoot',
-    'SYSTEMROOT',
-    'WINDIR',
-    'TEMP',
-    'TMP',
-    'TMPDIR',
-  ]) {
-    const value = process.env[key];
-    if (value !== undefined) environment[key] = value;
+function resolveGitRef(ref: string | undefined): string {
+  const resolvedRef = ref || 'HEAD';
+  if (resolvedRef.startsWith('-')) {
+    throw new Error('Git refs must not start with "-".');
   }
-  if (authentication) {
-    const value = Buffer.from(
-      `${authentication.credential.username}:${authentication.credential.password}`,
-      'utf8',
-    ).toString('base64');
-    environment['GIT_CONFIG_COUNT'] = '1';
-    environment['GIT_CONFIG_KEY_0'] =
-      `http.${authentication.source}.extraHeader`;
-    environment['GIT_CONFIG_VALUE_0'] = `Authorization: Basic ${value}`;
-  }
-  return git.env(environment);
+  return resolvedRef;
 }
 
 /**
@@ -266,6 +238,7 @@ export async function cloneFromGit(
     ? 'credentialed HTTPS Git source'
     : redactUrlCredentials(installMetadata.source);
   try {
+    const refToFetch = resolveGitRef(installMetadata.ref);
     const { simpleGit } = await loadSimpleGit();
     let networkConfig: string[] = [];
     if (installMetadata.networkPolicy === 'public') {
@@ -284,24 +257,15 @@ export async function cloneFromGit(
     }
     const effectiveCredential =
       credential ?? getGitHubCredential(installMetadata.source);
-    const git = restrictGitEnvironment(
-      simpleGit(destination, {
-        ...(signal ? { abort: signal } : {}),
-        ...(networkConfig.length > 0
-          ? {
-              config: networkConfig,
-              unsafe: {
-                allowUnsafeConfigPaths: true,
-                allowUnsafeProtocolOverride: true,
-              },
-            }
-          : {}),
-      }),
-      installMetadata.networkPolicy,
-      effectiveCredential
+    const git = createExtensionGitClient(simpleGit, {
+      baseDir: destination,
+      signal,
+      networkPolicy: installMetadata.networkPolicy,
+      networkConfig,
+      authentication: effectiveCredential
         ? { source: installMetadata.source, credential: effectiveCredential }
         : undefined,
-    );
+    });
     signal?.throwIfAborted();
     // On Windows, symlinks require elevated privileges by default, so we
     // disable them to avoid "Permission denied" errors during checkout.
@@ -318,8 +282,6 @@ export async function cloneFromGit(
     if (remotes.length === 0) {
       throw new Error(`Unable to find any remotes for repo ${redactedSource}`);
     }
-
-    const refToFetch = installMetadata.ref || 'HEAD';
 
     const remoteUrl = remotes[0].refs.fetch;
     if (!remoteUrl) {
@@ -713,6 +675,7 @@ export async function checkForExtensionUpdate(
   }
   try {
     if (installMetadata.type === 'git') {
+      const refToCheck = resolveGitRef(installMetadata.ref);
       const storedCredential =
         installMetadata.credentialPersistence === 'stored'
           ? (await resolveStoredGitCredential(extension.path)).credential
@@ -727,7 +690,7 @@ export async function checkForExtensionUpdate(
         const remoteSha = await resolvePublicGitHubCommitSha(
           owner,
           repo,
-          installMetadata.ref || 'HEAD',
+          refToCheck,
           signal,
         );
         return remoteSha === installMetadata.gitCommit
@@ -787,25 +750,15 @@ export async function checkForExtensionUpdate(
       signal?.throwIfAborted();
       const effectiveCredential =
         storedCredential ?? getGitHubCredential(remoteUrl);
-      const git = restrictGitEnvironment(
-        simpleGit(extension.path, {
-          ...(signal ? { abort: signal } : {}),
-          ...(networkConfig.length > 0
-            ? {
-                config: networkConfig,
-                unsafe: {
-                  allowUnsafeConfigPaths: true,
-                  allowUnsafeProtocolOverride: true,
-                },
-              }
-            : {}),
-        }),
-        installMetadata.networkPolicy,
-        effectiveCredential
+      const git = createExtensionGitClient(simpleGit, {
+        baseDir: extension.path,
+        signal,
+        networkPolicy: installMetadata.networkPolicy,
+        networkConfig,
+        authentication: effectiveCredential
           ? { source: remoteUrl, credential: effectiveCredential }
           : undefined,
-      );
-      const refToCheck = installMetadata.ref || 'HEAD';
+      });
       const refPatterns = installMetadata.ref
         ? [refToCheck, `${refToCheck}^{}`]
         : [refToCheck];
