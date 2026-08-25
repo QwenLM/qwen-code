@@ -41,7 +41,10 @@ on:
 jobs:
   prepare:
     name: 'Prepare Release Metadata'
-    runs-on: 'ubuntu-latest'
+    # Route to the ECS self-hosted pool like the review/CI lanes; the
+    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
+    # ubuntu-latest fallback without a code change.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
@@ -145,7 +148,10 @@ jobs:
 
   quality:
     name: 'Quality Checks'
-    runs-on: 'ubuntu-latest'
+    # Route to the ECS self-hosted pool like the review/CI lanes; the
+    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
+    # ubuntu-latest fallback without a code change.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -207,7 +213,10 @@ jobs:
 
   integration_none:
     name: 'Integration Tests (No Sandbox)'
-    runs-on: 'ubuntu-latest'
+    # Route to the ECS self-hosted pool like the review/CI lanes; the
+    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
+    # ubuntu-latest fallback without a code change.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -258,7 +267,10 @@ jobs:
 
   integration_docker:
     name: 'Integration Tests (Docker)'
-    runs-on: 'ubuntu-latest'
+    # Route to the ECS self-hosted pool like the review/CI lanes; the
+    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
+    # ubuntu-latest fallback without a code change.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     needs: 'prepare'
     if: |-
       ${{ github.event.inputs.force_skip_tests != 'true' }}
@@ -327,7 +339,10 @@ jobs:
 
   publish:
     name: 'Publish Release'
-    runs-on: 'ubuntu-latest'
+    # Route to the ECS self-hosted pool like the review/CI lanes; the
+    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
+    # ubuntu-latest fallback without a code change.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     needs:
       - 'prepare'
       - 'quality'
@@ -747,7 +762,10 @@ jobs:
 
   notify_failure:
     name: 'Notify Release Failure'
-    runs-on: 'ubuntu-latest'
+    # Route to the ECS self-hosted pool like the review/CI lanes; the
+    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
+    # ubuntu-latest fallback without a code change.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     needs:
       - 'prepare'
       - 'quality'
