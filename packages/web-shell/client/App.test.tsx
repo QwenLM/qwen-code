@@ -5668,7 +5668,7 @@ describe('App session workflow', () => {
     expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
     expect(
       container.querySelector('[data-testid="workflow-inspector"]'),
-    ).toBeNull();
+    ).not.toBeNull();
     expect(
       container.querySelector('[data-testid="approval-overlay"]'),
     ).not.toBeNull();

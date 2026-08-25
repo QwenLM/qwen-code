@@ -7179,8 +7179,9 @@ export function App({
   }, [logicalSessionKey]);
   useEffect(() => {
     if (
-      (sessionWorkflowEnabled && !approvalOverlayActive) ||
-      (!sessionWorkflowSettingsResolved && !approvalOverlayActive) ||
+      approvalOverlayActive ||
+      sessionWorkflowEnabled ||
+      !sessionWorkflowSettingsResolved ||
       !artifactPanelTabs.some((tab) => tab.kind === 'workflow')
     ) {
       return;
