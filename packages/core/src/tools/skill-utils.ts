@@ -81,6 +81,8 @@ export interface CollectedAvailableSkills {
   pendingConditionalSkillNames: Set<string>;
   /** Model-invocable commands, deduped against file-based skill names. */
   modelInvocableCommands: ReadonlyArray<{ name: string; description: string }>;
+  /** File-based skills hidden from model invocation. */
+  hiddenSkillNames?: Set<string>;
   /** Normalized entries, ready for `renderAvailableSkillsBlock`. */
   entries: AvailableSkillEntry[];
 }
@@ -175,6 +177,9 @@ async function collectAvailableSkillEntriesUncached(
       skillManager.isSkillActive(s) &&
       !isDisabled(s.name),
   );
+  const hiddenSkillNames = new Set(
+    allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
+  );
 
   // Track still-pending conditional skills so validation can emit a distinct
   // "gated by paths:" hint. Disabled conditional skills are excluded — no point
@@ -227,6 +232,7 @@ async function collectAvailableSkillEntriesUncached(
     availableSkills,
     pendingConditionalSkillNames,
     modelInvocableCommands,
+    hiddenSkillNames,
     entries,
   };
 }
