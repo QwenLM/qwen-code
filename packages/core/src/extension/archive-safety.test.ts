@@ -55,7 +55,12 @@ vi.mock('node:fs', async (importOriginal) => {
 // crafted headers are enough to exercise the entry-count and expanded-size
 // limits without writing gigabytes of data or hundreds of thousands of
 // files to disk.
-function createTarFileHeader(name: string, size: number): Buffer {
+function createTarFileHeader(
+  name: string,
+  size: number,
+  type = '0',
+  linkPath?: string,
+): Buffer {
   const header = Buffer.alloc(512);
   header.write(name, 0, 100, 'utf8');
   header.write('0000644\0', 100, 8); // mode
@@ -64,7 +69,8 @@ function createTarFileHeader(name: string, size: number): Buffer {
   header.write(`${size.toString(8).padStart(11, '0')}\0`, 124, 12);
   header.write('14763423360\0', 136, 12); // mtime
   header.write('        ', 148, 8); // checksum placeholder (spaces)
-  header.write('0', 156, 1); // typeflag: regular file
+  header.write(type, 156, 1);
+  if (linkPath) header.write(linkPath, 157, 100, 'utf8');
   header.write('ustar\0', 257, 6);
   header.write('00', 263, 2);
   let checksum = 0;
@@ -273,6 +279,8 @@ describe('assertTarArchiveLinksAreSafe', () => {
   // hostile entry is refused before anything is written to disk.
   describe('contained symlinks', () => {
     const allowLinks = { allowContainedSymlinks: true } as const;
+    const symlinkHeader = (name: string, linkPath: string) =>
+      createTarFileHeader(name, 0, '2', linkPath);
 
     it.runIf(process.platform !== 'win32')(
       'accepts a root-level symlink to a sibling file',
@@ -315,6 +323,106 @@ describe('assertTarArchiveLinksAreSafe', () => {
         ).rejects.toThrow('unsupported link entry');
       },
     );
+
+    it('rejects a symlink whose normalized target is exactly the archive parent', async () => {
+      const archive = path.join(root, 'parent.tar');
+      await writeCraftedTar(archive, [symlinkHeader('escape', '..')]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
+
+    it('rejects a backslash-separated traversal target', async () => {
+      const archive = path.join(root, 'backslash.tar');
+      await writeCraftedTar(archive, [
+        symlinkHeader('escape', '..\\..\\outside'),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
+
+    it('rejects a symlink with an absolute entry path', async () => {
+      const archive = path.join(root, 'absolute-entry.tar');
+      await writeCraftedTar(archive, [
+        symlinkHeader('/absolute-link', 'target'),
+        createTarFileHeader('target', 0),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
+
+    it('rejects a symlink resolving to its own directory', async () => {
+      const archive = path.join(root, 'self-cycle.tar');
+      await writeCraftedTar(archive, [symlinkHeader('self', '.')]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
+
+    it('rejects a symlink resolving to an ancestor directory', async () => {
+      const archive = path.join(root, 'ancestor-cycle.tar');
+      await writeCraftedTar(archive, [symlinkHeader('sub/loop', '..')]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
+
+    it('rejects link chains and dangling or directory targets', async () => {
+      const archive = path.join(root, 'indirect-targets.tar');
+      await writeCraftedTar(archive, [
+        createTarFileHeader('target', 0),
+        symlinkHeader('first', 'target'),
+        symlinkHeader('second', 'first'),
+        symlinkHeader('dangling', 'missing'),
+        createTarFileHeader('directory/', 0, '5'),
+        symlinkHeader('directory-link', 'directory'),
+        symlinkHeader('path-link', 'target'),
+        createTarFileHeader('path-link/child', 0),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('4 unsupported link entries');
+    });
+
+    it('counts materialized symlink targets toward the expanded-size limit', async () => {
+      const archive = path.join(root, 'materialized-size.tar');
+      const targetSize = Math.floor(MAX_ARCHIVE_EXPANDED_BYTES / 2) + 1;
+      await writeCraftedTar(archive, [
+        symlinkHeader('copy', 'target'),
+        createTarFileHeader('target', targetSize),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, {
+          ...resourceLimits,
+          ...allowLinks,
+        }),
+      ).rejects.toThrow(
+        `Tar archive expands beyond ${MAX_ARCHIVE_EXPANDED_BYTES} bytes.`,
+      );
+    });
+
+    it('counts accepted symlinks toward the link-entry limit', async () => {
+      const archive = path.join(root, 'accepted-link-limit.tar');
+      await writeCraftedTar(archive, [
+        ...Array.from({ length: 101 }, (_, index) =>
+          symlinkHeader(`link-${index}`, 'target'),
+        ),
+        createTarFileHeader('target', 0),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('more than 100 link entries');
+    });
 
     it.runIf(process.platform !== 'win32')(
       'rejects a symlink with an absolute target',

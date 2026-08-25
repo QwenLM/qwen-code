@@ -1139,11 +1139,15 @@ describe('git extension helpers', () => {
           path.join(archiveRoot, EXTENSIONS_CONFIG_FILENAME),
           JSON.stringify({ name: 'archive-extension', version: '1.0.0' }),
         );
-        // Resolves above the archive root, so it is refused before extraction.
-        await fs.symlink('../../etc/hosts', path.join(archiveRoot, 'escape'));
+        // This is contained before flattening because `pwn` is an archive
+        // entry, but moving the link out of the wrapper would make `../pwn`
+        // escape the destination. The post-flatten check must reject it.
+        await fs.writeFile(path.join(sourceDir, 'pwn'), 'planted content\n');
+        await fs.symlink('../pwn', path.join(archiveRoot, 'escape'));
         const archivePath = path.join(tempDir, 'source.tar.gz');
         await tar.c({ gzip: true, file: archivePath, cwd: sourceDir }, [
           'repo-archive',
+          'pwn',
         ]);
         const archive = await fs.readFile(archivePath);
         mockHttpsResponses(
@@ -3920,6 +3924,35 @@ describe('git extension helpers', () => {
         expect(await fs.readlink(path.join(extractionDest, 'AGENTS.md'))).toBe(
           'CLAUDE.md',
         );
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'fails when a contained symlink cannot be extracted',
+      async () => {
+        const stage = path.join(tempDir, 'strict-symlink-stage');
+        const extractionDest = path.join(tempDir, 'strict-symlink-dest');
+        await fs.mkdir(stage);
+        await fs.mkdir(path.join(extractionDest, 'AGENTS.md'), {
+          recursive: true,
+        });
+        await fs.writeFile(
+          path.join(extractionDest, 'AGENTS.md', 'blocking-file'),
+          'block replacement\n',
+        );
+        await fs.writeFile(path.join(stage, 'CLAUDE.md'), '# guide\n');
+        await fs.symlink('CLAUDE.md', path.join(stage, 'AGENTS.md'));
+        const archivePath = path.join(tempDir, 'strict-symlink.tar.gz');
+        await tar.c({ gzip: true, cwd: stage, file: archivePath }, [
+          'CLAUDE.md',
+          'AGENTS.md',
+        ]);
+
+        await expect(
+          extractFile(archivePath, extractionDest, undefined, {
+            allowContainedSymlinks: true,
+          }),
+        ).rejects.toThrow();
       },
     );
 
