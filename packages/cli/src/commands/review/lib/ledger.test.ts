@@ -22,6 +22,7 @@ import {
   LEDGER_MAX_ROUND,
   LEDGER_MAX_VOLUME,
   LEDGER_MAX_ID,
+  LEDGER_MAX_CLOSED,
   LEDGER_ID_SHAPE,
   isLedgerFinding,
   type Ledger,
@@ -707,6 +708,92 @@ describe('LEDGER_ID_READBACK', () => {
   ];
   it.each(cases)('reads %j as %j', (line, expected) => {
     expect(LEDGER_ID_READBACK.exec(line)?.[1] ?? null).toBe(expected);
+  });
+});
+
+// The closure list the divergence sentinel (#9905) rides on the marker:
+// validated and capped on both ends like the findings, but with no
+// `dropped` counterpart — closures certify nothing, so a truncated history
+// has no completeness claim to protect.
+describe('ledger marker — the closure list (#9905)', () => {
+  it('round-trips the closures through serialize and parse', () => {
+    const marker = serializeLedger({
+      ...LEDGER,
+      closed: [
+        { r: 2, id: 'R1-1', f: 'src/a.ts' },
+        { r: 1, id: 'R1-2', f: 'src/c.ts' },
+      ],
+    });
+    const back = parseLedger(`body\n\n${marker}`)!;
+    expect(back.closed).toEqual([
+      { r: 2, id: 'R1-1', f: 'src/a.ts' },
+      { r: 1, id: 'R1-2', f: 'src/c.ts' },
+    ]);
+    expect(back.dropped).toBeUndefined();
+    expect(back.findings).toHaveLength(2);
+  });
+
+  it('omits the field entirely when there are no closures', () => {
+    const back = parseLedger(serializeLedger(LEDGER))!;
+    expect(back.closed).toBeUndefined();
+    expect(JSON.stringify(back)).not.toContain('closed');
+  });
+
+  it('drops malformed entries and a closure claiming a FUTURE round', () => {
+    // Same squat rule as the findings: the marker's round is the newest
+    // state it can describe, so a closure past it is not one.
+    const back = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":2,"findings":[],' +
+        '"closed":[{"r":2,"id":"R1-1","f":"a.ts"},{"r":3,"id":"R3-1","f":"b.ts"},' +
+        '{"r":1},{"r":"2","id":"R1-2","f":"c.ts"},null]} -->',
+    )!;
+    expect(back.closed).toEqual([{ r: 2, id: 'R1-1', f: 'a.ts' }]);
+  });
+
+  it('binds the count cap on read, keeping the NEWEST entries', () => {
+    const closed = Array.from({ length: LEDGER_MAX_CLOSED + 10 }, (_, i) => ({
+      r: 2,
+      id: `R1-${i}`,
+      f: 'a.ts',
+    }));
+    const back = parseLedger(serializeLedger({ ...LEDGER, closed }))!;
+    expect(back.closed).toHaveLength(LEDGER_MAX_CLOSED);
+    expect(back.closed![0]!.id).toBe('R1-10');
+  });
+
+  it('sheds closures BEFORE the anchor pair, and never sets `dropped` for them', () => {
+    // The cascade order is the priority order: advisory history goes before
+    // the anchor (a full re-review) and the work list (a ruling owed). A
+    // marker that paid a finding — or its anchor — for a divergence hint
+    // would invert the module's priorities, and `dropped` over a trimmed
+    // hint would withhold the anchor over advisory data.
+    const wide: Ledger = {
+      v: 1,
+      round: 9,
+      // Sized so the findings ALONE nearly fill the byte budget: the
+      // closures overflow it, so the shed order is observable — the
+      // closures go, the anchor and the work list stay.
+      findings: Array.from({ length: 21 }, (_, i) => ({
+        id: `R9-${i}`,
+        sev: 'C' as const,
+        file: 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE),
+        line: 99999,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      })),
+      closed: Array.from({ length: LEDGER_MAX_CLOSED }, (_, i) => ({
+        r: 9,
+        id: `R8-${i}-${'y'.repeat(LEDGER_MAX_TITLE)}`,
+        f: 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE),
+      })),
+      sha: 'deadbeef00112233',
+    };
+    const marker = serializeLedger(wide);
+    expect(marker.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    const back = parseLedger(`body\n\n${marker}`)!;
+    expect(back.closed ?? []).toHaveLength(0);
+    expect(back.sha).toBe('deadbeef00112233');
+    expect(back.findings).toHaveLength(21);
+    expect(back.dropped).toBeUndefined();
   });
 });
 

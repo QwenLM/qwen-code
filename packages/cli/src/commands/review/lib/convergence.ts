@@ -33,6 +33,7 @@ import {
   LEDGER_MAX_FILE,
   LEDGER_MAX_ROUND,
   isStandInName,
+  type LedgerClosure,
   type LedgerFinding,
 } from './ledger.js';
 import { mdField } from './md-field.js';
@@ -96,6 +97,27 @@ export interface DraftedFinding {
   fixInduced?: boolean;
 }
 
+/**
+ * One subsystem whose Criticals keep regrowing (#9905): a file that closed
+ * a Critical in EACH of the last two rounds — the previous marker's minted
+ * closures and this round's — while posting a fresh Critical on it now.
+ * That is the patch-and-regress shape: each fix grew the next Critical in
+ * the same mechanism, which is a claim about the MECHANISM, not about any
+ * one finding.
+ */
+export interface SuccessorChain {
+  /** The subsystem, named by the file every generation landed on. */
+  file: string;
+  /**
+   * The closure ids of each of the two rounds, oldest first —
+   * `[round N-1's, round N's]`. `newIds` is the chain's final generation
+   * but is NOT in this array; the renderer appends it.
+   */
+  generations: string[][];
+  /** The fresh Critical ids this round posts on the file. */
+  newIds: string[];
+}
+
 /** What the previous round left behind, and how far it can be trusted. */
 export interface PrevRound {
   /** Inline comments the previous round posted, when it recorded the number. */
@@ -152,6 +174,13 @@ export interface PrevRound {
    * withholds on a missing fetched sha and on a model-identity drift.
    */
   anchored?: boolean;
+  /**
+   * The Criticals that round closed — the closures its marker minted (each
+   * carries `r === round`). Absent on every marker written before the field
+   * existed, which reads as "no closures recorded" and silences the
+   * successor-chain signal: thin history stays silent rather than guesses.
+   */
+  closed?: readonly LedgerClosure[];
 }
 
 export interface ConvergenceDiagnosis {
@@ -171,6 +200,13 @@ export interface ConvergenceDiagnosis {
   prevFresh?: number;
   /** Files that carried findings before and carry more now. */
   clusters: RecurrenceCluster[];
+  /**
+   * Subsystems whose Criticals keep regrowing (#9905) — the sharper form of
+   * a recurrence cluster: not "the file sees findings again" but "the last
+   * two rounds each CLOSED a Critical here and this round posts another",
+   * the patch-and-regress chain where each fix grows the next Critical.
+   */
+  successorChains: SuccessorChain[];
   /** True when this round's volume did not fall below the previous round's. */
   volumeNotShrinking: boolean;
   /** Carried through from `PrevRound` so the rendering can disclose them. */
@@ -244,11 +280,13 @@ export type CriticalFloorKind =
  *   spend the code set's only real property — that a code means a fact was
  *   observed — on a constant.
  *
- * That is the whole menu: eleven codes in the design, four emitted here,
- * seven named above.
+ * That is the whole menu: eleven codes in the design, five emitted here
+ * (`successor-chain` joined the four below with #9905 — its measurement is
+ * the closure lineage the marker now records), seven named above.
  */
 export const RECOMMENDATION_CODES = [
   'root-cause-triage',
+  'successor-chain',
   'land-and-defer',
   'batch-fixes',
   'stem-surface',
@@ -437,6 +475,23 @@ export function diagnoseConvergence(input: {
    * previous work list this round does not re-post was fixed.
    */
   openCriticals?: number;
+  /**
+   * The closures THIS round mints — the previous work list's Criticals this
+   * round does not re-post — computed by the caller from the same built
+   * ledger the marker stamps, so the marker's `closed` field and this
+   * signal can never disagree about what closed when. Empty whenever the
+   * previous work list is incomplete: a vanished id in a truncated list
+   * may be the budget, not a ruling, so a partial list mints nothing.
+   */
+  closuresThisRound?: readonly LedgerClosure[];
+  /**
+   * This round's findings AS THE BUILT LEDGER stamps them. The successor
+   * chain reads its new side from here — the built ids, post readback and
+   * admission — rather than from the drafts, so the note's `R<round>-<n>`
+   * references are the ones the posted review and the next round's work
+   * list actually use.
+   */
+  thisRoundFindings?: readonly LedgerFinding[];
 }): ConvergenceDiagnosis | null {
   const priorByFile = new Map<string, Set<number>>();
   for (const f of input.prev.findings) {
@@ -548,6 +603,58 @@ export function diagnoseConvergence(input: {
       (a.file < b.file ? -1 : a.file > b.file ? 1 : 0),
   );
 
+  // The successor chain (#9905): a file that CLOSED a Critical in each of
+  // the last two rounds — this round's minted set (`r === round`) and the
+  // previous marker's (`r === round - 1`) — while this round posts a FRESH
+  // Critical on it. The cluster signal above says "the file sees findings
+  // again"; this says "the fix closed one and the mechanism grew another",
+  // twice in a row — the #9659 rebound shape, where every finding was
+  // individually correct and the subsystem was diverging. Joined by file,
+  // deterministically, like the cluster.
+  const successorChains: SuccessorChain[] = [];
+  const closedNow = input.closuresThisRound ?? [];
+  const closedPrev = input.prev.closed ?? [];
+  const thisRoundFindings = input.thisRoundFindings ?? [];
+  if (
+    input.round >= 2 &&
+    closedNow.length > 0 &&
+    closedPrev.length > 0 &&
+    thisRoundFindings.length > 0
+  ) {
+    const freshCriticalsByFile = new Map<string, string[]>();
+    for (const f of thisRoundFindings) {
+      if (f.sev !== 'C') continue;
+      // The stand-in rule the cluster join applies: a pathless or body-only
+      // Critical names no subsystem. `k` is respected the same way — the
+      // built ledger flags a REAL path that happens to spell like one.
+      if (isStandInName(f.file) && f.k !== 1) continue;
+      // The built id's round IS the first-reported round: a fresh finding
+      // was stamped this round, a carried one keeps its original id.
+      if (birthRound(f.id) !== input.round) continue;
+      const ids = freshCriticalsByFile.get(f.file);
+      if (ids) ids.push(f.id);
+      else freshCriticalsByFile.set(f.file, [f.id]);
+    }
+    for (const [file, newIds] of freshCriticalsByFile) {
+      const generations: string[][] = [];
+      for (const [closures, r] of [
+        [closedPrev, input.round - 1],
+        [closedNow, input.round],
+      ] as const) {
+        const idsAt = closures
+          .filter((c) => c.f === file && c.r === r)
+          .map((c) => c.id);
+        if (idsAt.length === 0) {
+          generations.length = 0;
+          break;
+        }
+        generations.push(idsAt);
+      }
+      if (generations.length === 0) continue;
+      successorChains.push({ file, generations, newIds });
+    }
+  }
+
   // A round that produced NO fresh finding is the observation a convergence
   // trend most wants, not a symptom: zero new work is where a settling loop
   // lands, and `0 >= 0` would otherwise narrate "the volume is not falling"
@@ -589,7 +696,12 @@ export function diagnoseConvergence(input: {
     fresh.length > 0 &&
     fresh.length >= input.prev.fresh;
 
-  if (clusters.length === 0 && !volumeNotShrinking) return null;
+  if (
+    clusters.length === 0 &&
+    !volumeNotShrinking &&
+    successorChains.length === 0
+  )
+    return null;
 
   return {
     ...(input.openCriticals === undefined
@@ -603,6 +715,7 @@ export function diagnoseConvergence(input: {
       : { prevPosted: input.prev.posted }),
     ...(input.prev.fresh === undefined ? {} : { prevFresh: input.prev.fresh }),
     clusters,
+    successorChains,
     volumeNotShrinking,
     truncatedEvidence: input.prev.truncated === true,
     foreignEvidence: input.prev.foreign === true,
@@ -623,6 +736,28 @@ export function diagnoseConvergence(input: {
  * different rounds. Derived, the paragraph a human reads and the codes a
  * caller wires cannot disagree, because there is only one of them.
  */
+/**
+ * The per-generation id bound for a rendered chain, so a round that closed
+ * a whole family on the file cannot grow the paragraph unboundedly.
+ */
+const MAX_CHAIN_IDS_PER_GENERATION = 6;
+
+/**
+ * The chain as the paragraph and the recommendation's basis render it —
+ * `R9-1 → R10-2/R10-3 → R11-4`, oldest generation first, the new ids last.
+ * ONE renderer for both, so the prose and the machine-readable half cannot
+ * disagree about the lineage they name.
+ */
+export function renderSuccessorChain(c: SuccessorChain): string {
+  const renderGeneration = (ids: string[]): string => {
+    const shown = ids.slice(0, MAX_CHAIN_IDS_PER_GENERATION).join('/');
+    return ids.length > MAX_CHAIN_IDS_PER_GENERATION
+      ? `${shown} … (+${ids.length - MAX_CHAIN_IDS_PER_GENERATION})`
+      : shown;
+  };
+  return [...c.generations, c.newIds].map(renderGeneration).join(' → ');
+}
+
 export function recommendationsFor(d: ConvergenceDiagnosis): Recommendation[] {
   const out: Recommendation[] = [];
   if (d.clusters.length > 0) {
@@ -630,6 +765,17 @@ export function recommendationsFor(d: ConvergenceDiagnosis): Recommendation[] {
     out.push({
       code: 'root-cause-triage',
       basis: `${d.clusters.length} file(s) carried findings in earlier rounds and carry new ones now: ${shown.join(', ')}${d.clusters.length > shown.length ? ', …' : ''}`,
+    });
+  }
+  if (d.successorChains.length > 0) {
+    const shown = d.successorChains
+      .slice(0, MAX_RENDERED_CLUSTERS)
+      .map((c) => `${c.file} (${renderSuccessorChain(c)})`);
+    out.push({
+      code: 'successor-chain',
+      basis:
+        `${d.successorChains.length} subsystem(s) closed a Critical in each of the last two rounds and post a new one now: ` +
+        `${shown.join(', ')}${d.successorChains.length > shown.length ? ', …' : ''}`,
     });
   }
   if (d.volumeNotShrinking) {
@@ -761,6 +907,27 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // recurrence and a flat trend together.
   const reasonsEn: string[] = [];
   const reasonsZh: string[] = [];
+  if (d.successorChains.length > 0) {
+    // The sharpest shape, named first: not "the file sees findings again"
+    // but "the last two rounds each CLOSED a Critical here and this round
+    // posts another" — the chain is named in full because the ids are the
+    // evidence the author acts on. `mdField` on every segment: the file is
+    // PR-controlled and the ids arrive over the marker.
+    const shown = d.successorChains.slice(0, MAX_RENDERED_CLUSTERS);
+    const more = d.successorChains.length - shown.length;
+    const chainsEn = shown
+      .map((c) => `${mdField(c.file)} (${mdField(renderSuccessorChain(c))})`)
+      .join('; ');
+    const chainsZh = shown
+      .map((c) => `${mdField(c.file)}(${mdField(renderSuccessorChain(c))})`)
+      .join('；');
+    reasonsEn.push(
+      `⚠️ Divergence: the same subsystem closed a Critical in each of the last two rounds and posts a new one now — ${chainsEn}${more > 0 ? `; and ${more} more` : ''}.`,
+    );
+    reasonsZh.push(
+      `⚠️ 发散：同一子系统在过去两轮各有一个 Critical 被关闭，而本轮又出现了新的 Critical——${chainsZh}${more > 0 ? `；另有 ${more} 个` : ''}。`,
+    );
+  }
   if (d.clusters.length > 0) {
     reasonsEn.push(
       `Findings keep coming back to the same files: ${clusterEn}${more > 0 ? `, and ${more} more file(s)` : ''}.`,
@@ -876,6 +1043,8 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
 
   const clusterAdviceEn = `A cluster that keeps producing siblings usually means the fixes are treating instances of a shared root cause — triaging that cause before the next round, or splitting an independent cluster into its own pull request, tends to end the loop faster than fixing them one at a time.`;
   const clusterAdviceZh = `一个不断再生兄弟发现的簇，通常意味着逐条修复只在处理同一根因的实例——先定位并处理该根因，或把独立的簇拆成单独的 PR，通常比逐条修复更快结束循环。`;
+  const chainAdviceEn = `A mechanism whose fix grows the next Critical is diverging, not converging — consider removing or redesigning that mechanism rather than patching it again.`;
+  const chainAdviceZh = `每次修复都长出下一个 Critical 的机制是在发散而非收敛——建议移除或重新设计该机制，而不是继续打补丁。`;
   const landEn = `No Critical finding is open on this round, so merging and moving the remaining Suggestion threads to a follow-up issue is available as an ending — a merged pull request cannot diverge further.`;
   const landZh = `本轮没有未决的 Critical，因此"合入后把剩余 Suggestion 线程转到后续 issue"是一个可选的结束方式——已合入的 PR 不会继续发散。`;
 
@@ -884,6 +1053,7 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // describe different rounds — and this module's whole claim is that its
   // advice is matched to what it measured.
   const adviceEn = [
+    has('successor-chain') ? chainAdviceEn : null,
     has('root-cause-triage') ? clusterAdviceEn : null,
     has('batch-fixes') ? floorEn : null,
     has('land-and-defer') ? landEn : null,
@@ -891,6 +1061,7 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
     .filter(Boolean)
     .join(' ');
   const adviceZh = [
+    has('successor-chain') ? chainAdviceZh : null,
     has('root-cause-triage') ? clusterAdviceZh : null,
     has('batch-fixes') ? floorZh : null,
     has('land-and-defer') ? landZh : null,

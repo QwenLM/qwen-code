@@ -13049,6 +13049,88 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('already resolve to a critical posting floor');
     expect(r.body).not.toContain('--severity-floor critical');
   });
+
+  // The successor chain (#9905) through the path GitHub receives: the side
+  // file carries the previous round's minted closures, this round closes
+  // another same-file Critical and posts a fresh one — the note names the
+  // subsystem and the chain on the body, and the marker carries this
+  // round's closures forward.
+  it('emits the divergence note on the #9659 rebound shape, and carries the closures forward', () => {
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+      ],
+      closed: [{ r: 10, id: 'R9-1', f: 'src/mechanism.ts' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.body).toContain('⚠️ Divergence:');
+    expect(r.body).toContain('`src/mechanism.ts`');
+    expect(r.body).toContain('`R9-1 → R10-2 → R11-1`');
+    expect(r.body).toContain('removing or redesigning that mechanism');
+    expect((r.recommendations ?? []).map((x) => x.code)).toContain(
+      'successor-chain',
+    );
+    // Advisory only: the verdict and its caps are untouched, and the
+    // marker carries both closure generations for the next round's check —
+    // this round's own mint only, no carry-forward of the older one.
+    expect(r.cappedBy.every((c) => !c.includes('divergence'))).toBe(true);
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it('stays silent on the first rebound — one closure generation is normal', () => {
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.body).not.toContain('⚠️ Divergence:');
+    // …but the closure IS recorded, so the next rebound can see it.
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it('mints no closures over a truncated previous list', () => {
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+      ],
+      dropped: 2,
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.body).not.toContain('⚠️ Divergence:');
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
 });
 
 describe('the convergence census and the non-convergence finding', () => {

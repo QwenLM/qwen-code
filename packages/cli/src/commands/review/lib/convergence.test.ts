@@ -654,6 +654,215 @@ describe('diagnoseConvergence — the trigger table', () => {
   });
 });
 
+// The successor chain (#9905): the sharper form of recurrence — not "the
+// file sees findings again" but "each of the last two rounds CLOSED a
+// Critical here and this round posts another". The truth table pins both
+// the #9659 rebound shape that must fire and every near-miss that must
+// stay silent.
+describe('diagnoseConvergence — the successor chain (#9905)', () => {
+  /** A Critical the ledger carries. */
+  const c = (id: string, file: string): LedgerFinding => ({
+    id,
+    sev: 'C',
+    file,
+    title: 't',
+  });
+  const closedAt = (r: number, id: string, file: string) => ({
+    r,
+    id,
+    f: file,
+  });
+
+  it('fires on the #9659 rebound shape — closed in each of the last two rounds, fresh Critical now', () => {
+    // Round 11 of the measured chain: R9-1 closed at r=10, R10-2 closes
+    // now (r=11), and the round posts a fresh R11-4 on the same file.
+    const r = diagnoseConvergence({
+      round: 11,
+      posted: 1,
+      prev: {
+        findings: [c('R10-2', 'src/mechanism.ts')],
+        closed: [closedAt(10, 'R9-1', 'src/mechanism.ts')],
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(11, 'R10-2', 'src/mechanism.ts')],
+      thisRoundFindings: [c('R11-4', 'src/mechanism.ts')],
+    })!;
+    expect(r.successorChains).toEqual([
+      {
+        file: 'src/mechanism.ts',
+        generations: [['R9-1'], ['R10-2']],
+        newIds: ['R11-4'],
+      },
+    ]);
+    expect(recommendationsFor(r).map((x) => x.code)).toContain(
+      'successor-chain',
+    );
+    expect(
+      recommendationsFor(r).find((x) => x.code === 'successor-chain')?.basis,
+    ).toContain('R9-1 → R10-2 → R11-4');
+  });
+
+  it('renders the note naming the subsystem, the chain, and the advice', () => {
+    const r = diagnoseConvergence({
+      round: 11,
+      posted: 1,
+      prev: {
+        findings: [c('R10-2', 'src/mechanism.ts')],
+        closed: [closedAt(10, 'R9-1', 'src/mechanism.ts')],
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(11, 'R10-2', 'src/mechanism.ts')],
+      thisRoundFindings: [c('R11-4', 'src/mechanism.ts')],
+    })!;
+    const text = renderConvergenceDiagnosis(r);
+    expect(text.en).toContain('⚠️ Divergence:');
+    expect(text.en).toContain('`src/mechanism.ts`');
+    expect(text.en).toContain('`R9-1 → R10-2 → R11-4`');
+    expect(text.en).toContain('removing or redesigning that mechanism');
+    expect(text.zh).toContain('⚠️ 发散：');
+    expect(text.zh).toContain('而不是继续打补丁');
+  });
+
+  it('stays silent with only ONE round of closures on the file', () => {
+    // The first successor generation: R1-1 closes now, R2-1 lands —
+    // locally normal, and the sentinel says nothing until it repeats.
+    expect(
+      diagnoseConvergence({
+        round: 2,
+        posted: 1,
+        prev: { findings: [c('R1-1', 'src/a.ts')] },
+        drafts: [],
+        closuresThisRound: [closedAt(2, 'R1-1', 'src/a.ts')],
+        thisRoundFindings: [c('R2-1', 'src/a.ts')],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent when the closures are on a DIFFERENT file', () => {
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [c('R3-1', 'src/b.ts')],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent when the same-file finding is CARRIED, not new', () => {
+    // A still-standing Critical keeps its original id; the chain needs a
+    // FRESH one — otherwise the note would fire every round over a file
+    // whose Critical nobody ever fixes.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [c('R1-9', 'src/a.ts')],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent on the stand-ins — they name no subsystem', () => {
+    for (const pseudo of ['(body)', '(unknown)']) {
+      expect(
+        diagnoseConvergence({
+          round: 3,
+          posted: 1,
+          prev: {
+            findings: [c('R2-1', pseudo)],
+            closed: [closedAt(2, 'R1-1', pseudo)],
+          },
+          drafts: [],
+          closuresThisRound: [closedAt(3, 'R2-1', pseudo)],
+          thisRoundFindings: [c('R3-1', pseudo)],
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it('respects the k flag — a REAL file spelled like a stand-in still clusters', () => {
+    const real: LedgerFinding = { ...c('R3-1', '(body)'), k: 1 };
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 1,
+      prev: {
+        findings: [c('R2-1', '(body)')],
+        closed: [closedAt(2, 'R1-1', '(body)')],
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(3, 'R2-1', '(body)')],
+      thisRoundFindings: [real],
+    })!;
+    expect(r.successorChains).toHaveLength(1);
+  });
+
+  it('stays silent when the fresh finding is a Suggestion', () => {
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [f('R3-1', 'src/a.ts')],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent on a truncated previous list — no closures were minted', () => {
+    // The mint rule's downstream face: with a partial work list the caller
+    // mints nothing, and the carried history alone can never complete a
+    // chain (the check needs BOTH generations).
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+          truncated: true,
+        },
+        drafts: [],
+        closuresThisRound: [],
+        thisRoundFindings: [c('R3-1', 'src/a.ts')],
+      }),
+    ).toBeNull();
+  });
+
+  it('names every fresh Critical of the diverging file in one chain', () => {
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 2,
+      prev: {
+        findings: [c('R2-1', 'src/a.ts')],
+        closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+      thisRoundFindings: [c('R3-1', 'src/a.ts'), c('R3-2', 'src/a.ts')],
+    })!;
+    expect(r.successorChains).toHaveLength(1);
+    expect(r.successorChains[0]!.newIds).toEqual(['R3-1', 'R3-2']);
+    expect(
+      recommendationsFor(r).find((x) => x.code === 'successor-chain')?.basis,
+    ).toContain('R1-1 → R2-1 → R3-1/R3-2');
+  });
+});
+
 describe('recommendationsFor — measurement to advice, no constants', () => {
   const base: ConvergenceDiagnosis = {
     round: 6,
@@ -662,6 +871,7 @@ describe('recommendationsFor — measurement to advice, no constants', () => {
     prevPosted: 4,
     prevFresh: 2,
     clusters: [{ file: 'src/a.ts', priorRounds: [3, 5], thisRound: 2 }],
+    successorChains: [],
     volumeNotShrinking: true,
     truncatedEvidence: false,
     foreignEvidence: false,
@@ -805,6 +1015,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     prevPosted: 4,
     prevFresh: 2,
     clusters: [{ file: 'src/a.ts', priorRounds: [3, 5], thisRound: 2 }],
+    successorChains: [],
     volumeNotShrinking: true,
     truncatedEvidence: false,
     foreignEvidence: false,
@@ -958,6 +1169,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       posted: 3,
       fresh: 3,
       clusters: [],
+      successorChains: [],
       volumeNotShrinking: false,
       truncatedEvidence: true,
       foreignEvidence: true,
@@ -971,6 +1183,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       posted: 3,
       fresh: 3,
       clusters: [],
+      successorChains: [],
       volumeNotShrinking: false,
       truncatedEvidence: false,
       foreignEvidence: true,
@@ -1089,6 +1302,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       posted: 3,
       fresh: 3,
       clusters: base.clusters,
+      successorChains: [],
       volumeNotShrinking: false,
       truncatedEvidence: false,
       foreignEvidence: false,

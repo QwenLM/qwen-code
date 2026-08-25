@@ -57,10 +57,39 @@ export interface LedgerFinding {
   title: string;
 }
 
+/**
+ * One Critical that LEFT the work list at round `r`: open in round `r-1`'s
+ * marker, absent from round `r`'s. Compact field names (`r`/`f`) on the same
+ * body-bytes discipline as the findings.
+ */
+export interface LedgerClosure {
+  /** The round whose marker the finding is absent from. */
+  r: number;
+  /** The closed finding's id — its ORIGINAL round's id, e.g. `R9-1`. */
+  id: string;
+  /** The closed finding's file. */
+  f: string;
+}
+
 export interface Ledger {
   v: 1;
   round: number;
   findings: LedgerFinding[];
+  /**
+   * The Criticals that LEFT the work list at THIS marker's round — open in
+   * the previous round's marker, absent from this one. The divergence
+   * sentinel (#9905) reads them: `fixed` and `superseded` both read as
+   * closure, a positional diff cannot tell them apart, and the advisory
+   * note does not need it to.
+   *
+   * This round's own minted set only — NO carry-forward: the sentinel's
+   * K=2 check reads closures at round N (minted while composing) and N-1
+   * (read back off this field), so older entries are dead bytes. Absent on
+   * every ledger written before the field existed, which reads as "no
+   * closures recorded" and silences the sentinel — the honest posture on
+   * thin history.
+   */
+  closed?: LedgerClosure[];
   /**
    * How many findings the size cap dropped, when it dropped any. Absent means
    * the list is complete — which is the claim the next round acts on, so the
@@ -368,6 +397,13 @@ export const LEDGER_MAX_MODEL = 64;
  */
 export const LEDGER_MAX_ID = 24;
 /**
+ * The closure list's bound. One round's closures are bounded by the previous
+ * work list's size (`LEDGER_MAX_FINDINGS`), so fifty covers every mintable
+ * round; the cap exists for the hand-edited marker, which is bound by no
+ * mint. The byte cap below still binds the whole marker either way.
+ */
+export const LEDGER_MAX_CLOSED = 50;
+/**
  * The highest round a marker may claim.
  *
  * The round is not decoration: `compose-review` stamps this round's findings
@@ -483,6 +519,7 @@ export function serializeLedger(ledger: Ledger): string {
     dropped: number,
     anchor: boolean,
     volume: 'both' | 'posted' | 'none',
+    closures: boolean,
   ): string => {
     const payload: Ledger = {
       v: 1,
@@ -491,6 +528,22 @@ export function serializeLedger(ledger: Ledger): string {
       round: roundOut,
       findings,
     };
+    // The closure list rides with the findings but is NOT one of them: it
+    // feeds an advisory note, so the byte budget sheds it ahead of the
+    // anchor pair and the work list (see the cascade below), and shedding
+    // it never sets `dropped` — closures certify no range, so there is no
+    // completeness claim to protect. Newest-kept, like the findings.
+    if (closures) {
+      const closedOut = (ledger.closed ?? [])
+        .filter((c) => isLedgerClosure(c, roundOut))
+        .slice(-LEDGER_MAX_CLOSED)
+        .map((c) => ({
+          r: c.r,
+          id: c.id.slice(0, LEDGER_MAX_ID),
+          f: c.f.slice(0, LEDGER_MAX_FILE),
+        }));
+      if (closedOut.length > 0) payload.closed = closedOut;
+    }
     // The volume telemetry rides OUTSIDE the truncation rule that governs the
     // anchor — it qualifies no range, so a partial work list says nothing
     // about it — but it is the FIRST thing the byte budget sheds (see the
@@ -568,7 +621,7 @@ export function serializeLedger(ledger: Ledger): string {
   // 51 findings in, 24 kept, and it said 26 missing.
   const total = ledger.findings.length;
   let kept = capped.length;
-  let marker = render(capped, total - kept, true, 'both');
+  let marker = render(capped, total - kept, true, 'both', true);
   if (marker.length > LEDGER_MAX_BYTES) {
     // Between "both volumes" and "no volume" there is a rung worth having:
     // the CARRIED value goes first, this round's own count second. The
@@ -577,7 +630,7 @@ export function serializeLedger(ledger: Ledger): string {
     // and stamps as its own `prevPosted` — so shedding them as one unit
     // dropped a count that still fitted, and broke the chain a round
     // earlier than the budget required.
-    marker = render(capped, total - kept, true, 'posted');
+    marker = render(capped, total - kept, true, 'posted', true);
   }
   if (marker.length > LEDGER_MAX_BYTES) {
     // The VOLUME sheds first — it is the only thing here that decides
@@ -588,7 +641,13 @@ export function serializeLedger(ledger: Ledger): string {
     // marker that fit WITH its anchor over the cap and make the re-render
     // pay with the anchor instead — trading a full-diff re-review for a
     // trend line.
-    marker = render(capped, total - kept, true, 'none');
+    marker = render(capped, total - kept, true, 'none', true);
+  }
+  if (marker.length > LEDGER_MAX_BYTES) {
+    // The closure list sheds next: it feeds the sentinel's advisory note,
+    // and losing it costs one round of lineage, while everything below it
+    // — the anchor, the work list — is a claim the next round acts on.
+    marker = render(capped, total - kept, true, 'none', false);
   }
   if (marker.length > LEDGER_MAX_BYTES) {
     // Shed the anchor PAIR before any finding: `dropped` withholds the pair
@@ -597,11 +656,11 @@ export function serializeLedger(ledger: Ledger): string {
     // first keeps the whole work list — recovery degrades to the full diff,
     // which the findings survive — and findings start going only when the
     // anchorless form still exceeds the cap.
-    marker = render(capped, total - kept, false, 'none');
+    marker = render(capped, total - kept, false, 'none', false);
   }
   while (marker.length > LEDGER_MAX_BYTES && kept > 0) {
     kept--;
-    marker = render(capped.slice(0, kept), total - kept, false, 'none');
+    marker = render(capped.slice(0, kept), total - kept, false, 'none', false);
   }
   return marker;
 }
@@ -663,6 +722,31 @@ export function isLedgerFinding(
     typeof c.file === 'string' &&
     typeof c.title === 'string' &&
     (c.line === undefined || Number.isInteger(c.line))
+  );
+}
+
+/**
+ * Is this a closure entry this pipeline would admit, against the round the
+ * marker claims? The same two rules as the findings, minus the fields a
+ * closure does not carry: the caps bind on read as on write, and a closure
+ * claiming a round past the marker's own is a squat — the marker's round IS
+ * the newest state it can describe.
+ */
+export function isLedgerClosure(
+  c: unknown,
+  markerRound: number,
+): c is LedgerClosure {
+  const e = c as LedgerClosure | null | undefined;
+  return (
+    !!e &&
+    typeof e === 'object' &&
+    Number.isInteger(e.r) &&
+    e.r >= 1 &&
+    e.r <= markerRound &&
+    typeof e.id === 'string' &&
+    e.id.length <= LEDGER_MAX_ID &&
+    typeof e.f === 'string' &&
+    e.f.length <= LEDGER_MAX_FILE
   );
 }
 
@@ -819,10 +903,18 @@ export function parseLedger(body: string | undefined): Ledger | null {
       freshRaw !== undefined && posted !== undefined && freshRaw <= posted
         ? freshRaw
         : undefined;
+    // The closure history, validated like the findings: the caps and the
+    // round bind on read as on write. No `dropped` counterpart — closures
+    // certify nothing, so a truncated history has no completeness claim to
+    // protect, and the sentinel reads absence as silence either way.
+    const closed = (Array.isArray(raw.closed) ? raw.closed : [])
+      .filter((c): c is LedgerClosure => isLedgerClosure(c, raw.round))
+      .slice(-LEDGER_MAX_CLOSED);
     return {
       v: 1,
       round: raw.round,
       findings,
+      ...(closed.length > 0 ? { closed } : {}),
       ...(dropped ? { dropped } : {}),
       ...(sha ? { sha } : {}),
       ...(model ? { model } : {}),
