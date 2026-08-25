@@ -237,15 +237,15 @@ describe('extension manifest', () => {
       },
     });
   });
-  it('keeps the open-source Mem0 example loadable after placeholder substitution', async () => {
-    const config = await readJson('../examples/mem0-oss.json');
+  it('keeps the PolarDB Mem0 example loadable after placeholder substitution', async () => {
+    const config = await readJson('../examples/polardb-mem0.json');
 
     expect(config).toEqual({
       version: 1,
       timeoutMs: 5000,
       provider: {
-        type: 'mem0',
-        baseUrl: 'https://<your-mem0-endpoint>',
+        type: 'polardb-mem0',
+        baseUrl: 'https://<your-polardb-mem0-endpoint>',
         apiKeyEnv: 'MEM0_API_KEY',
         userId: '<your-user-id>',
         agentId: 'qwen-code',
@@ -254,7 +254,7 @@ describe('extension manifest', () => {
 
     const substituted = JSON.parse(
       JSON.stringify(config)
-        .replaceAll('<your-mem0-endpoint>', 'mem0.example.internal')
+        .replaceAll('<your-polardb-mem0-endpoint>', 'mem0.example.internal')
         .replaceAll('<your-user-id>', 'example-user'),
     );
     const directory = await mkdtemp(
@@ -269,7 +269,7 @@ describe('extension manifest', () => {
         MEM0_API_KEY: 'example-key',
       });
       expect(loaded.provider).toMatchObject({
-        type: 'mem0',
+        type: 'polardb-mem0',
         userId: 'example-user',
         agentId: 'qwen-code',
       });

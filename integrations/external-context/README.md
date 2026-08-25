@@ -12,11 +12,10 @@ three managed deployment variants:
 - **Auto-recall:** version 2 configuration and an administrator-installed
   `UserPromptSubmit` Hook, with no external-context MCP server.
 
-The built-in adapters support Mem0 Platform V3 search, the open-source Mem0
-REST protocol (self-hosted servers and managed services such as Aliyun
-PolarDB Mem0), and a small Generic HTTP Search V1 contract for existing
-knowledge or RAG services. Only the Mem0 providers have an optional write
-path. There is no generic ingestion protocol, personal memory,
+The built-in adapters support Mem0 Platform V3 search, the Aliyun PolarDB
+Mem0 management API, and a small Generic HTTP Search V1 contract for existing
+knowledge or RAG services. Only the Mem0 providers have an optional write path.
+There is no generic ingestion protocol, personal memory,
 trusted user identity, per-document ACL, or tamper-resistant audit.
 
 Provider teams that need a separately owned and released integration should
@@ -37,8 +36,8 @@ query. In the Mem0 write variant, it can additionally provide only the exact
 content to store. In the auto-recall profile, the query is derived only from
 Qwen's optional `submitted_prompt` provenance, captured before model-bound
 expansions.
-Provider type, endpoint, credential, Mem0 `app_id`, and all other corpus
-selectors are fixed before either process starts.
+Provider type, endpoint, credential, Mem0 `app_id`, `user_id`, `agent_id`, and
+all other corpus selectors are fixed before either process starts.
 
 The actual corpus-isolation boundary is the provider-side credential, project,
 index, or corpus. A Mem0 `app_id` or any other client-supplied filter is
@@ -379,17 +378,15 @@ it disabled when search must have no semantic provider-side state change.
 Provider audit or access logs may still be retained. See
 [Mem0 Memory Decay](https://docs.mem0.ai/platform/features/memory-decay).
 
-## Mem0 (open-source protocol)
+## PolarDB Mem0
 
-The `mem0` provider type targets services that expose the open-source Mem0
-REST API, such as a self-hosted mem0 server or Aliyun PolarDB Mem0. Search
-calls `POST {baseUrl}/v2/memories/search` with the configured `user_id` under
-`filters` and the optional `agent_id` as a top-level field; writes call `POST
-{baseUrl}/v1/memories`
-with one exact user message and `infer: false`. Both paths are fixed by the
-open-source Mem0 protocol; the `baseUrl` (scheme, host, and port only) is the
-operator's switch for choosing the vendor — moving from one managed mem0
-service to another is a config change, not a code change.
+The `polardb-mem0` provider type targets Aliyun PolarDB memory management
+endpoints. Search calls `POST {baseUrl}/v2/memories/search` with the configured
+`user_id` under `filters` and the optional `agent_id` as a top-level field;
+writes call `POST {baseUrl}/v1/memories` with one exact user message and
+`infer: false`. These paths and `Authorization: Token` authentication are the
+PolarDB Mem0 API contract. They do not implement the stock self-hosted Mem0
+REST server contract, which uses different paths and authentication.
 
 These services commonly expose plain HTTP on an IP whitelist. Because the
 credential travels in cleartext on HTTP, keep `allowInsecureHttp` off unless
@@ -401,7 +398,7 @@ explicitly.
 
 `userId` selects the tenant whose memories are read and written. It is fixed
 in the configuration and is never supplied by the model. See
-`examples/mem0-oss.json` for a complete configuration. That example is
+`examples/polardb-mem0.json` for a complete configuration. That example is
 read-only as shipped: `context_remember` is registered only when the v1
 configuration carries `"write": { "enabled": true }`, and enabling it should
 reuse the managed write-confirmation Hook and permissions from the Mem0 write
@@ -414,8 +411,8 @@ search quality and provenance. For writes, first run the repository's
 interactive fake-Mem0 test harness, then progress through an isolated temporary
 Mem0 Project, one trusted repository, and a small team. The shipped Mem0
 Platform configuration always targets Mem0 Platform, and only the test harness
-injects a local endpoint; a `mem0` (open-source) configuration instead points
-at whatever endpoint the operator sets — plain HTTP included when
+injects a local endpoint; a `polardb-mem0` configuration instead points at the
+PolarDB endpoint the operator sets — plain HTTP included when
 `allowInsecureHttp` is on — so treat that endpoint and its network whitelist
 as the access boundary and validate search against it read-only before
 enabling writes. Enable auto-recall only after the administrator accepts

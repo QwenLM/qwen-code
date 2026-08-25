@@ -79,9 +79,9 @@ describe('loadConfig', () => {
     });
   });
 
-  describe('mem0 OSS provider', () => {
+  describe('PolarDB Mem0 provider', () => {
     const provider = {
-      type: 'mem0',
+      type: 'polardb-mem0',
       baseUrl: 'https://mem0.example.com:8443',
       apiKeyEnv: 'MEM0_API_KEY',
       userId: 'fixed-user',
@@ -99,7 +99,7 @@ describe('loadConfig', () => {
       ).resolves.toMatchObject({
         version: 1,
         provider: {
-          type: 'mem0',
+          type: 'polardb-mem0',
           baseUrl: 'https://mem0.example.com:8443',
           apiKey: 'secret-value',
           userId: 'fixed-user',
@@ -107,7 +107,7 @@ describe('loadConfig', () => {
       });
     });
 
-    it('enables writes for a v1 mem0 provider', async () => {
+    it('enables writes for a v1 PolarDB Mem0 provider', async () => {
       const fixture = await createFixture();
       await writeConfig(fixture, {
         version: 1,
@@ -123,7 +123,7 @@ describe('loadConfig', () => {
       ).resolves.toMatchObject({
         version: 1,
         write: { enabled: true },
-        provider: { type: 'mem0' },
+        provider: { type: 'polardb-mem0' },
       });
     });
 
@@ -144,16 +144,16 @@ describe('loadConfig', () => {
           MEM0_API_KEY: 'secret-value',
         }),
       ).resolves.toMatchObject({
-        provider: { type: 'mem0', allowInsecureHttp: true },
+        provider: { type: 'polardb-mem0', allowInsecureHttp: true },
       });
     });
 
-    it('rejects a mem0 provider without userId', async () => {
+    it('rejects a PolarDB Mem0 provider without userId', async () => {
       const fixture = await createFixture();
       await writeConfig(fixture, {
         version: 1,
         provider: {
-          type: 'mem0',
+          type: 'polardb-mem0',
           baseUrl: 'https://mem0.example.com:8443',
           apiKeyEnv: 'MEM0_API_KEY',
         },

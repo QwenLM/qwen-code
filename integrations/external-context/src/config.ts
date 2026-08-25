@@ -10,8 +10,8 @@ import { z } from 'zod';
 import type {
   ExternalContextConfig,
   GenericHttpProviderConfig,
-  Mem0OssProviderConfig,
   Mem0ProviderConfig,
+  PolarDbMem0ProviderConfig,
 } from './types.js';
 
 const MAX_CONFIG_BYTES = 64 * 1024;
@@ -27,7 +27,7 @@ const providerSchema = z.discriminatedUnion('type', [
     .strict(),
   z
     .object({
-      type: z.literal('mem0'),
+      type: z.literal('polardb-mem0'),
       baseUrl: z.string().url(),
       apiKeyEnv: z.string().regex(ENV_NAME),
       userId: z.string().trim().min(1).max(256),
@@ -126,7 +126,7 @@ export async function loadConfig(
     if (
       result.data.write !== undefined &&
       result.data.provider.type !== 'mem0-platform-v3' &&
-      result.data.provider.type !== 'mem0'
+      result.data.provider.type !== 'polardb-mem0'
     ) {
       throw new ConfigurationError(
         'External context memory writes require a Mem0 provider.',
@@ -158,10 +158,10 @@ export async function loadConfig(
 function resolveProvider(
   provider: z.infer<typeof providerSchema>,
   env: NodeJS.ProcessEnv,
-): Mem0ProviderConfig | Mem0OssProviderConfig | GenericHttpProviderConfig {
+): Mem0ProviderConfig | PolarDbMem0ProviderConfig | GenericHttpProviderConfig {
   switch (provider.type) {
     case 'mem0-platform-v3':
-    case 'mem0': {
+    case 'polardb-mem0': {
       const apiKey = readCredential(env, provider.apiKeyEnv);
       return { ...provider, apiKey };
     }

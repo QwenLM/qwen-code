@@ -230,7 +230,7 @@ function isWithin(root: string, candidate: string): boolean {
 function providerCredential(config: ProviderConfig): string {
   switch (config.type) {
     case 'mem0-platform-v3':
-    case 'mem0':
+    case 'polardb-mem0':
       return config.apiKey;
     case 'generic-http-search-v1':
       return config.token;

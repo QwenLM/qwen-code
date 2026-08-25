@@ -61,7 +61,7 @@ export interface AutoRecallConfig {
 
 export type ProviderConfig =
   | Mem0ProviderConfig
-  | Mem0OssProviderConfig
+  | PolarDbMem0ProviderConfig
   | GenericHttpProviderConfig;
 
 export interface Mem0ProviderConfig {
@@ -71,8 +71,8 @@ export interface Mem0ProviderConfig {
   appId: string;
 }
 
-export interface Mem0OssProviderConfig {
-  type: 'mem0';
+export interface PolarDbMem0ProviderConfig {
+  type: 'polardb-mem0';
   baseUrl: string;
   apiKeyEnv: string;
   apiKey: string;

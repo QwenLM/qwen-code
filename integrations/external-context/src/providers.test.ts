@@ -15,8 +15,8 @@ import { renderExternalContext } from './context.js';
 import {
   createMemoryWriter,
   GenericHttpSearchV1Adapter,
-  Mem0OssAdapter,
   Mem0PlatformV3Adapter,
+  PolarDbMem0Adapter,
 } from './providers.js';
 
 const closeServers: Array<() => Promise<void>> = [];
@@ -594,38 +594,38 @@ describe('Mem0PlatformV3Adapter', () => {
   });
 });
 
-describe('Mem0OssAdapter', () => {
+describe('PolarDbMem0Adapter', () => {
   const memoryId = '123e4567-e89b-12d3-a456-426614174000';
 
-  it('creates a writer for the mem0 provider type', () => {
+  it('creates a writer for the PolarDB Mem0 provider type', () => {
     expect(
       createMemoryWriter({
-        type: 'mem0',
+        type: 'polardb-mem0',
         baseUrl: 'https://mem0.example.com',
         apiKeyEnv: 'MEM0_API_KEY',
         apiKey: 'project-key',
         userId: 'fixed-user',
       }),
-    ).toBeInstanceOf(Mem0OssAdapter);
+    ).toBeInstanceOf(PolarDbMem0Adapter);
   });
 
   it('requires HTTPS or loopback HTTP unless explicitly allowed', () => {
     const config = {
-      type: 'mem0' as const,
+      type: 'polardb-mem0' as const,
       baseUrl: 'http://192.0.2.1:8080',
       apiKeyEnv: 'MEM0_API_KEY',
       apiKey: 'project-key',
       userId: 'fixed-user',
     };
-    expect(() => new Mem0OssAdapter(config)).toThrow(
+    expect(() => new PolarDbMem0Adapter(config)).toThrow(
       'Provider URL must use HTTPS or loopback HTTP; set "allowInsecureHttp": true',
     );
     expect(
-      () => new Mem0OssAdapter({ ...config, allowInsecureHttp: true }),
+      () => new PolarDbMem0Adapter({ ...config, allowInsecureHttp: true }),
     ).not.toThrow();
     expect(
       () =>
-        new Mem0OssAdapter({
+        new PolarDbMem0Adapter({
           ...config,
           baseUrl: 'http://key@192.0.2.1:8080',
           allowInsecureHttp: true,
@@ -633,7 +633,7 @@ describe('Mem0OssAdapter', () => {
     ).toThrow('Provider URL must not contain credentials');
   });
 
-  it('binds user_id and agent_id into the fixed OSS search request', async () => {
+  it('binds user_id and agent_id into the PolarDB search request', async () => {
     let requestBody: unknown;
     let requestPath: string | undefined;
     let authorization: string | undefined;
@@ -645,7 +645,7 @@ describe('Mem0OssAdapter', () => {
         results: [{ id: 'memory-1', memory: 'repository policy', score: 0.9 }],
       });
     });
-    const adapter = ossAdapter(baseUrl, 'fixed-repository');
+    const adapter = polarDbAdapter(baseUrl, 'fixed-repository');
 
     const items = await adapter.search({
       query: 'deployment',
@@ -673,7 +673,7 @@ describe('Mem0OssAdapter', () => {
       json(response, { results: [] });
     });
 
-    await ossAdapter(baseUrl).search({
+    await polarDbAdapter(baseUrl).search({
       query: 'deployment',
       limit: 3,
       signal: AbortSignal.timeout(1000),
@@ -701,7 +701,7 @@ describe('Mem0OssAdapter', () => {
     });
 
     await expect(
-      ossAdapter(baseUrl, 'fixed-repository').remember({
+      polarDbAdapter(baseUrl, 'fixed-repository').remember({
         content,
         signal: AbortSignal.timeout(1000),
       }),
@@ -736,13 +736,13 @@ describe('Mem0OssAdapter', () => {
     [{ results: [] }, { status: 'unknown' }],
     [{}, { status: 'unknown' }],
     [[], { status: 'unknown' }],
-  ])('maps OSS Mem0 write response %#', async (responseBody, expected) => {
+  ])('maps PolarDB Mem0 write response %#', async (responseBody, expected) => {
     const baseUrl = await startServer((_request, response) => {
       json(response, responseBody);
     });
 
     await expect(
-      ossAdapter(baseUrl).remember({
+      polarDbAdapter(baseUrl).remember({
         content: 'repository policy',
         signal: AbortSignal.timeout(1000),
       }),
@@ -760,7 +760,7 @@ describe('Mem0OssAdapter', () => {
       });
 
       await expect(
-        ossAdapter(baseUrl).remember({
+        polarDbAdapter(baseUrl).remember({
           content: 'repository policy',
           signal: AbortSignal.timeout(1000),
         }),
@@ -780,7 +780,7 @@ describe('Mem0OssAdapter', () => {
       });
 
       await expect(
-        ossAdapter(baseUrl).remember({
+        polarDbAdapter(baseUrl).remember({
           content: 'repository policy',
           signal: AbortSignal.timeout(1000),
         }),
@@ -791,7 +791,7 @@ describe('Mem0OssAdapter', () => {
 
   it('returns unknown when the write fails before any HTTP response', async () => {
     await expect(
-      ossAdapter('http://127.0.0.1:1').remember({
+      polarDbAdapter('http://127.0.0.1:1').remember({
         content: 'repository policy',
         signal: AbortSignal.timeout(1000),
       }),
@@ -799,9 +799,9 @@ describe('Mem0OssAdapter', () => {
   });
 });
 
-function ossAdapter(baseUrl: string, agentId?: string) {
-  return new Mem0OssAdapter({
-    type: 'mem0',
+function polarDbAdapter(baseUrl: string, agentId?: string) {
+  return new PolarDbMem0Adapter({
+    type: 'polardb-mem0',
     baseUrl,
     apiKeyEnv: 'MEM0_API_KEY',
     apiKey: 'project-key',

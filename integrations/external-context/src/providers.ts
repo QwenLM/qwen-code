@@ -15,8 +15,8 @@ import type {
   ExternalContextProvider,
   ExternalMemoryWriter,
   GenericHttpProviderConfig,
-  Mem0OssProviderConfig,
   Mem0ProviderConfig,
+  PolarDbMem0ProviderConfig,
   ProviderConfig,
   RememberResult,
 } from './types.js';
@@ -33,8 +33,8 @@ export function createProvider(
   switch (config.type) {
     case 'mem0-platform-v3':
       return new Mem0PlatformV3Adapter(config);
-    case 'mem0':
-      return new Mem0OssAdapter(config);
+    case 'polardb-mem0':
+      return new PolarDbMem0Adapter(config);
     case 'generic-http-search-v1':
       return new GenericHttpSearchV1Adapter(config);
     // no default
@@ -47,8 +47,8 @@ export function createMemoryWriter(
   switch (config.type) {
     case 'mem0-platform-v3':
       return new Mem0PlatformV3Adapter(config);
-    case 'mem0':
-      return new Mem0OssAdapter(config);
+    case 'polardb-mem0':
+      return new PolarDbMem0Adapter(config);
     case 'generic-http-search-v1':
       return undefined;
     // no default
@@ -175,12 +175,12 @@ function parseOperationId(value: unknown): string | undefined {
     : undefined;
 }
 
-export class Mem0OssAdapter
+export class PolarDbMem0Adapter
   implements ExternalContextProvider, ExternalMemoryWriter
 {
   private readonly baseUrl: URL;
 
-  constructor(private readonly config: Mem0OssProviderConfig) {
+  constructor(private readonly config: PolarDbMem0ProviderConfig) {
     this.baseUrl = validateConfiguredBaseUrl(config.baseUrl, {
       allowInsecureHttp: config.allowInsecureHttp,
       allowInsecureHttpHint: true,
@@ -232,11 +232,11 @@ export class Mem0OssAdapter
     } catch (error) {
       return classifyWriteRejection(error);
     }
-    return parseOssRememberResult(response);
+    return parsePolarDbRememberResult(response);
   }
 }
 
-function parseOssRememberResult(response: unknown): RememberResult {
+function parsePolarDbRememberResult(response: unknown): RememberResult {
   const items: readonly unknown[] = Array.isArray(response)
     ? response
     : isRecord(response)
