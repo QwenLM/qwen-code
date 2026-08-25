@@ -629,7 +629,7 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     // remedy that cannot lift the refusal while the record ALSO fails to
     // bind this write. Lead with the binding refusal there: a non-PR record
     // falls through to the target-shape wording, and a PR record naming
-    // another number or repo leads with the binding mismatch — the
+    // another number, repo, or host leads with the binding mismatch — the
     // topology refusal still fires, correctly, once the binding stops
     // being a blocker.
     const fileTarget = authFor('src/foo.ts --topology minimal --comment');
@@ -643,6 +643,14 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(wrongPr.why).toContain('targets #123');
     expect(wrongPr.why).not.toContain('`--topology minimal`');
 
+    const wrongHost = authFor(
+      'https://ghe.corp.example/o/r/pull/123 --topology minimal --comment',
+    );
+    expect(wrongHost.ok).toBe(false);
+    expect(wrongHost.why).toContain('authorise ghe.corp.example');
+    expect(wrongHost.why).toContain('targets github.com');
+    expect(wrongHost.why).not.toContain('`--topology minimal`');
+
     const wrongRepo = authFor(
       'https://github.com/x/y/pull/123 --topology minimal --comment',
     );
@@ -650,6 +658,21 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(wrongRepo.why).toContain('authorise x/y');
     expect(wrongRepo.why).toContain('targets o/r');
     expect(wrongRepo.why).not.toContain('`--topology minimal`');
+  });
+
+  it('the fast path honours the user ask even under minimal (documented layering)', () => {
+    // posting.md documents the slow/fast contrast this PR's topology refusal
+    // makes observable on the identical record: the slow path refuses
+    // ("…ran with \`--topology minimal\`…"), while the \`--user-authorized\`
+    // fast path never consults the topology — the skill's Step 7 rule, not
+    // the gate, is the layer that catches a minimal run whose decline was
+    // missed. Pin the fast side here (the slow side is pinned above), so a
+    // drift in either direction reddens instead of silently rewriting the
+    // documented layering.
+    const auth = authFor('123 --topology minimal --comment', {
+      userAuthorized: true,
+    });
+    expect(auth.ok).toBe(true);
   });
 
   it('a missing args file names the missing invocation, not a missing flag, when the setting authorises', () => {
@@ -1585,6 +1608,26 @@ describe('the posting gate', () => {
     );
     expect(advice()).not.toContain('Re-run with `--comment`');
     expect(advice()).toContain('invoked naming it');
+    writeStderrSpy.mockClear();
+
+    // A minimal-topology run: the record bound this target on every axis,
+    // so the binding arm's "Nothing recorded" preamble is false for it and
+    // its remedies misdirect — "a review invoked naming it" re-refuses
+    // while the topology stands, and \`--user-authorized\` mechanically
+    // posts what the topology bars. The advice restates the refusal's own
+    // remedy and nothing else.
+    runSubmit(
+      args({
+        skillArgs: file(
+          'advice-minimal.txt',
+          '6771 --topology minimal --comment',
+        ),
+      }),
+    );
+    expect(advice()).toContain('posts nothing at any effort');
+    expect(advice()).toContain('without `--topology minimal`');
+    expect(advice()).not.toContain('Nothing recorded authorises binding');
+    expect(advice()).not.toContain('--user-authorized');
     writeStderrSpy.mockClear();
 
     // Nothing recorded at all, with the setting authorising: the refusal

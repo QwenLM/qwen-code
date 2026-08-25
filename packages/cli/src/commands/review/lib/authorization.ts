@@ -437,9 +437,11 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
   }
 
   if (!verdict.comment.effective) {
-    // Minimal, and bound to this write on every axis above — the parser
-    // forced effective false, so the topology is now the sole blocker, and
-    // its remedy lifts the refusal.
+    // Minimal, and bound to this write on every axis above. When a comment
+    // source was recorded, the parser forced effective false, so the
+    // topology is the sole blocker and its remedy lifts the refusal; when
+    // none was, the topology is still the blocker to name — even a typed
+    // --comment would not lift the refusal while minimal stands.
     return {
       ok: false,
       why:
