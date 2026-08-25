@@ -5281,6 +5281,11 @@ describe('App global shortcuts', () => {
     // The toggle is gone, but the key must stay inert: without the global
     // preventDefault the browser's Open File dialog fires on Ctrl+O.
     expect(event.defaultPrevented).toBe(true);
+    expect(settingsSetValue).not.toHaveBeenCalledWith(
+      'workspace',
+      'ui.compactMode',
+      expect.anything(),
+    );
   });
 });
 

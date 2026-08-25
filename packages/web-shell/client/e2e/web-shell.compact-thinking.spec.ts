@@ -4,25 +4,13 @@ import {
   createWebShellDaemonScenario,
   installMockDaemon,
   replayCompleteEvent,
+  thoughtTextEvent,
+  toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
-  type DaemonEvent,
   type MockDaemonController,
   type WebShellDaemonScenario,
 } from './utils/mockDaemon';
-
-function thoughtTextEvent(text: string): DaemonEvent {
-  return {
-    v: 1,
-    type: 'session_update',
-    data: {
-      update: {
-        sessionUpdate: 'agent_thought_chunk',
-        content: { type: 'text', text },
-      },
-    },
-  };
-}
 
 test('compact view keeps the thinking block visible while streaming', async ({
   page,
@@ -61,38 +49,26 @@ test('compact view merges an agent group and a following tool into one summary r
   // grep group only collapse into one aggregate summary row when the
   // app-level CompactModeContext stays on — flipping that provider to false
   // renders two standalone groups and this assertion fails.
-  const toolCallEvent = (
-    id: number,
-    toolCallId: string,
-    toolName: string,
-    rawInput: Record<string, unknown>,
-  ): DaemonEvent => ({
-    id,
-    v: 1,
-    type: 'session_update',
-    data: {
-      update: {
-        sessionUpdate: 'tool_call',
-        toolCallId,
-        toolName,
-        title: toolName,
-        kind: 'other',
-        status: 'completed',
-        rawInput,
-      },
-    },
-  });
-
   const scenario = createWebShellDaemonScenario({
     events: [
       userTextEvent('Audit the schema and grep the logs.', { id: 1 }),
-      toolCallEvent(2, 'call-agent-audit', 'Agent', {
-        description: 'Audit the schema drift between services',
-        run_in_background: true,
-      }),
-      toolCallEvent(3, 'call-grep-logs', 'grep_search', {
-        pattern: 'compact',
-      }),
+      toolCallEvent(
+        'call-agent-audit',
+        'Agent',
+        {
+          description: 'Audit the schema drift between services',
+          run_in_background: true,
+        },
+        { id: 2 },
+      ),
+      toolCallEvent(
+        'call-grep-logs',
+        'grep_search',
+        { pattern: 'compact' },
+        {
+          id: 3,
+        },
+      ),
       turnCompleteEvent('prompt-compact-merge', { id: 4 }),
     ],
   });
