@@ -367,9 +367,10 @@ function setFakeHome(home: string): () => void {
   };
 }
 
-// Helper to create async generator with chunks (avoids memory leak)
+// Helper to create async generator with chunks (avoids memory leak).
+// COMPRESSED events carry `info` instead of `value`.
 function createStreamWithChunks(
-  chunks: Array<{ type: unknown; value: unknown }>,
+  chunks: Array<{ type: unknown; value?: unknown; info?: unknown }>,
 ) {
   return (async function* () {
     for (const chunk of chunks) {
@@ -12135,6 +12136,97 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
+      it('does not drop a returning route send on a stale count after in-send compression rewrote the history (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        // Prompt 1 on route A: an API-reported over-limit count (101) lands
+        // in the session's route-scoped cache.
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              },
+            ]),
+          )
+          // Prompt 2 on route B trips an in-send compression inside
+          // GeminiChat.sendMessageStream (hard-tier rescue / reactive
+          // overflow). GeminiChat clears its own keyed counts when it
+          // surfaces the COMPRESSED event; the session's fallback cache
+          // must be invalidated at the same point, or route A's stale
+          // pre-compression count survives the rewrite.
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.COMPRESSED,
+                info: {
+                  originalTokenCount: 101,
+                  newTokenCount: 40,
+                  compressionStatus: core.CompressionStatus.COMPRESSED,
+                },
+              },
+            ]),
+          )
+          // Prompt 3 back on route A: an empty stream.
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'first' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Switch to route B on the same chat instance; its send compresses
+        // in-send.
+        routeIdentity = 'route-b';
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 50,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'second' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        // Back to route A while compression fails (rate limited): the gate
+        // falls back to the cache, which must no longer hold route A's
+        // stale pre-compression count (101 > 100) — the shared history was
+        // rewritten to 40 tokens by route B's in-send compression, so the
+        // send must go out.
+        routeIdentity = 'route-a';
+        mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
+          new Error('compression rate limited'),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'third' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      });
+
       it('does not drop a send using another route token count (#9529)', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         let routeIdentity = 'route-a';
@@ -12620,7 +12712,7 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
       });
 
-      it('falls back to the previous prompt token count when compressed token info is zero', async () => {
+      it('does not gate on the pre-compression count when compressed token info is zero', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         mockGeminiClient.tryCompressChat
           .mockResolvedValueOnce({
@@ -12641,14 +12733,19 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'first' }],
           }),
         ).resolves.toEqual({ stopReason: 'end_turn' });
+        // The second send arrives with a successful COMPRESSED whose fresh
+        // count is unknown (0). The compression just rewrote the shared
+        // history, so the previously recorded count (101) measures
+        // destroyed history and must not drop the send — mirroring
+        // GeminiChat, which clears its keyed counts on COMPRESSED (#9529).
         await expect(
           session.prompt({
             sessionId: 'test-session-id',
             prompt: [{ type: 'text', text: 'second' }],
           }),
-        ).resolves.toEqual({ stopReason: 'max_tokens' });
+        ).resolves.toEqual({ stopReason: 'end_turn' });
 
-        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
       it('records prompt token count instead of total token count for later session-limit checks', async () => {

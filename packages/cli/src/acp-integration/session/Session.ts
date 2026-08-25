@@ -5272,6 +5272,15 @@ export class Session implements SessionContext {
                         );
                         functionCalls.length = 0;
                       }
+                      if (resp.type === StreamEventType.COMPRESSED) {
+                        // In-send compression rewrote the shared history;
+                        // invalidate every retained route count (the
+                        // pre-send hook never sees this path).
+                        this.#recordCompressionTokenCount(
+                          resp.info,
+                          requestRouteKey,
+                        );
+                      }
                     }
                   } catch (error) {
                     streamFailed = true;
@@ -6301,6 +6310,12 @@ export class Session implements SessionContext {
             );
             functionCalls.length = 0;
           }
+          if (response.type === StreamEventType.COMPRESSED) {
+            // In-send compression rewrote the shared history; invalidate
+            // every retained route count (the pre-send hook never sees
+            // this path).
+            this.#recordCompressionTokenCount(response.info, requestRouteKey);
+          }
         }
       } catch (error) {
         streamFailed = true;
@@ -6769,7 +6784,6 @@ export class Session implements SessionContext {
           abortSignal,
         );
         compressionInfo = compressed;
-        this.#recordCompressionTokenCount(compressed);
         compressionFailed = isCompressionFailureStatus(
           compressed.compressionStatus,
         );
@@ -6818,7 +6832,14 @@ export class Session implements SessionContext {
       options.modelOverride ??
       this.config.getModel();
     const requestRouteKey = await this.#requestRouteKeyForModel(model);
-    this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
+    // Recorded with the resolved request route key: a COMPRESSED result
+    // must invalidate every retained route count, not just the active
+    // route's (see #invalidateRouteTokenCountsForCompression).
+    if (compressionInfo) {
+      this.#recordCompressionTokenCount(compressionInfo, requestRouteKey);
+    } else {
+      this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
+    }
 
     const sessionTokenLimit = this.config.getSessionTokenLimit();
     if (sessionTokenLimit > 0) {
@@ -7082,13 +7103,51 @@ export class Session implements SessionContext {
     };
   }
 
-  #recordCompressionTokenCount(info: ChatCompressionInfo): void {
-    const routeKey = this.#currentRouteKey();
-    this.#syncPromptTokenCountWithCurrentChat(routeKey);
+  #recordCompressionTokenCount(
+    info: ChatCompressionInfo,
+    requestRouteKey: string,
+  ): void {
+    if (info.compressionStatus === CompressionStatus.COMPRESSED) {
+      this.#invalidateRouteTokenCountsForCompression(info, requestRouteKey);
+      return;
+    }
+    this.#syncPromptTokenCountWithCurrentChat(requestRouteKey);
     const tokenCount = this.#extractCompressionTokenCount(info);
     if (tokenCount !== null && tokenCount > 0) {
-      this.#setLastPromptTokenCount(routeKey, tokenCount);
+      this.#setLastPromptTokenCount(requestRouteKey, tokenCount);
     }
+  }
+
+  /**
+   * Compression rewrote the shared history, so EVERY retained route-keyed
+   * count is stale — not just the request route's. Drop them all and
+   * re-record the fresh post-compression count under the request route,
+   * retaining it under the active route too when the two differ (the
+   * compressed history is shared, so the count anchors both routes' next
+   * gate reads). Mirrors GeminiChat clearing its keyed counts in the
+   * COMPRESSED branch of tryCompress; without this, in-send compressions
+   * (GeminiChat.sendMessageStream's hard-tier rescue and reactive-overflow
+   * paths, surfaced as StreamEventType.COMPRESSED) would leave this cache
+   * holding pre-compression sizes and the gate would drop a returning
+   * route's send that fits the compressed history (#9529).
+   */
+  #invalidateRouteTokenCountsForCompression(
+    info: ChatCompressionInfo,
+    requestRouteKey: string,
+  ): void {
+    this.lastPromptTokenCountsByRouteKey.clear();
+    const tokenCount = this.#extractCompressionTokenCount(info);
+    if (tokenCount !== null && tokenCount > 0) {
+      this.#setLastPromptTokenCount(requestRouteKey, tokenCount);
+      const activeRouteKey = this.#currentRouteKey();
+      if (activeRouteKey !== requestRouteKey) {
+        this.lastPromptTokenCountsByRouteKey.set(activeRouteKey, tokenCount);
+      }
+    } else {
+      this.lastPromptTokenCount = 0;
+      this.lastPromptTokenCountRouteKey = requestRouteKey;
+    }
+    this.lastPromptTokenCountChat = this.#getCurrentChat();
   }
 
   #recordPromptTokenCount(
@@ -7957,6 +8016,7 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                const requestRouteKey = sendResult.requestRouteKey;
                 const channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
                   | undefined =
@@ -8047,6 +8107,15 @@ export class Session implements SessionContext {
                         `cron/loop tick ${resp.type}`,
                       );
                       functionCalls.length = 0;
+                    }
+                    if (resp.type === StreamEventType.COMPRESSED) {
+                      // In-send compression rewrote the shared history;
+                      // invalidate every retained route count (the
+                      // pre-send hook never sees this path).
+                      this.#recordCompressionTokenCount(
+                        resp.info,
+                        requestRouteKey,
+                      );
                     }
                   }
                 } catch (error) {
@@ -8641,6 +8710,7 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            const requestRouteKey = sendResult.requestRouteKey;
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -8700,6 +8770,12 @@ export class Session implements SessionContext {
                     `background notification ${resp.type}`,
                   );
                   functionCalls.length = 0;
+                }
+                if (resp.type === StreamEventType.COMPRESSED) {
+                  // In-send compression rewrote the shared history;
+                  // invalidate every retained route count (the pre-send
+                  // hook never sees this path).
+                  this.#recordCompressionTokenCount(resp.info, requestRouteKey);
                 }
               }
             } catch (error) {
