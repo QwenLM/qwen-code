@@ -35,7 +35,11 @@ import {
   splitDiffIntoHunks,
   testEfficacyCommand,
 } from './test-efficacy.js';
-import { gitConfigPath, isolateHostGitConfig } from './lib/test-utils.js';
+import {
+  gitConfigPath,
+  isolateHostGitConfig,
+  isolateOperatorReviewSettings,
+} from './lib/test-utils.js';
 
 type Handler = (args: {
   report: string;
@@ -49,6 +53,7 @@ const runHandler = testEfficacyCommand.handler as unknown as Handler;
 let repo: string;
 let outside: string;
 let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+let reviewSettingsIsolation: ReturnType<typeof isolateOperatorReviewSettings>;
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
@@ -165,6 +170,10 @@ process.stdout.write(JSON.stringify({
 }
 
 beforeEach(() => {
+  // The operator's own `review.sandbox` reaches the phase gate here too — see
+  // isolateOperatorReviewSettings; 19 of this file's tests report their
+  // refusal instead of their measurement without it.
+  reviewSettingsIsolation = isolateOperatorReviewSettings();
   repo = mkdtempSync(join(tmpdir(), 'efficacy-iso-'));
   outside = mkdtempSync(join(tmpdir(), 'efficacy-outside-'));
   // Isolate the fixtures from the user's git environment (shared helper —
@@ -247,6 +256,7 @@ afterEach(() => {
   rmSync(repo, { recursive: true, force: true });
   rmSync(outside, { recursive: true, force: true });
   gitIsolation.dispose();
+  reviewSettingsIsolation?.dispose();
 });
 
 describe('fixture git-config isolation', () => {

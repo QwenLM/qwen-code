@@ -74,6 +74,21 @@ import { probeWorktreePath } from './lib/paths.js';
 // stale-sweep-then-remove step (its rationale lives there, with the helper), and
 // `exposeDependencies` followed it when `scratch-tree` needed the same
 // dependency farm for the verifier's own probe tree.
+import { shellQuotePath } from './lib/shell-quote.js';
+import {
+  boxedRunLeftContainer,
+  containerCommand,
+  containerName,
+  containerPathFor,
+  killContainer,
+  mountRootFor,
+  refuseUnsandboxedPhase,
+  reviewSandboxImage,
+  runtimeIsRootless,
+  runtimeClientEnv,
+  sandboxVerdict,
+  type ContainerRuntime,
+} from './lib/sandboxed-exec.js';
 import {
   discardWorktree,
   exposeDependencies,
@@ -1677,6 +1692,45 @@ function probeTreeIdentityRefusal(
  * repository out into the tree, which is the hazard the residue probe's
  * identity gate exists for. Refusing is the only answer that is neither.
  */
+/**
+ * The container argv for one probe-suite run, or null to spawn it directly.
+ *
+ * Same three null cases as `build-test`'s: policy off, no runtime under
+ * `auto`, or a tree that is not under a review temp dir (a `/review` of a
+ * local checkout, where there is no `.qwen/tmp` layout to mount).
+ */
+function probeContainer(
+  command: string,
+  probeTree: string,
+): {
+  file: string;
+  args: string[];
+  name: string;
+  runtime: ContainerRuntime;
+} | null {
+  const verdict = sandboxVerdict();
+  if (verdict.kind !== 'container') return null;
+  const tmpDir = mountRootFor(probeTree);
+  if (tmpDir === null) return null;
+  // Canonical, matching the mount — see the twin in `build-test.ts`.
+  const workdir = containerPathFor(probeTree);
+  if (workdir === null) return null;
+  const name = containerName();
+  return {
+    ...containerCommand(command, {
+      cwd: workdir,
+      tmpDir,
+      kind: 'test',
+      name,
+      runtime: verdict.runtime,
+      rootless: runtimeIsRootless(verdict.runtime),
+      image: reviewSandboxImage(),
+    }),
+    name,
+    runtime: verdict.runtime,
+  };
+}
+
 function restoreProbeTreeTracked(
   probeTree: string,
   creationSha?: string,
@@ -1870,13 +1924,102 @@ export function runProbeSuite(
   // own test code: a suite that plants or replaces a module in `node_modules`
   // would otherwise decide every later run's verdict. Re-linking costs about a
   // second per run against the budget's minutes.
-  const exposed = exposeDependencies(probeTree, dependencyRoot, {
+  // The farm's link TARGETS must be spelled the way the mount is. The mount and
+  // `--workdir` are canonical (`mountRootFor` realpaths), while
+  // `exposeDependencies` builds targets from the argument it is given — so
+  // under a symlinked ancestor (macOS `/tmp` → `/private/tmp` is the everyday
+  // one) every link dangles INSIDE the container, and the phase reports "every
+  // file was red or collected nothing": a wiring failure published as a
+  // statement about the PR's own suite. Canonicalise what crosses the
+  // boundary, and only there — the direct path keeps the caller's spelling.
+  let farmRoot = dependencyRoot;
+  if (sandboxVerdict().kind === 'container') {
+    try {
+      farmRoot = realpathSync(dependencyRoot);
+    } catch {
+      // Unresolvable: the farm below reports what it could not link.
+    }
+  }
+  const exposed = exposeDependencies(probeTree, farmRoot, {
     rebuild: true,
   });
   // Registered BEFORE the spawn below: while spawnSync blocks, the parent
   // must not be killable by a teardown signal, or the detached runner is
   // orphaned with its deadline enforcer (see installRunnerTeardownHook).
   installRunnerTeardownHook();
+  // The reviewed repository's own suite, run once per baseline / control /
+  // mutant / hunk probe / revert — the second of the two places a review
+  // executes the code it is reviewing (#9556). Sandboxed it is a container
+  // per run, offline, with an env allowlist instead of this process's own;
+  // unsandboxed it is the direct spawn this has always been, and the caller
+  // has already disclosed that.
+  // `node` off the IMAGE's PATH, not `process.execPath`: the host's interpreter
+  // path (`/usr/bin/node` here, `/opt/hostedtoolcache/…` on a GitHub runner) is
+  // neither mounted nor present in the image, so baking it in exits 127 and
+  // maps every probe — baseline, control, each mutant, each hunk, the revert —
+  // to inconclusive, blaming the runner's output for a wiring error. The vitest
+  // bin path DOES resolve, because it lives under the mounted temp dir.
+  const suite = `node ${shellQuotePath(
+    findVitestBin(dependencyRoot),
+  )} run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
+  const boxed = probeContainer(suite, probeTree);
+  if (boxed) {
+    const r = spawnSync(boxed.file, boxed.args, {
+      cwd: probeTree,
+      encoding: 'utf8',
+      timeout,
+      // SIGKILL, not the default SIGTERM, and only on the boxed branch.
+      // `spawnSync` sends its `killSignal` at the deadline and then WAITS for
+      // the child to exit — so an attached runtime client that forwards the
+      // signal and keeps waiting on a workload whose own trap ignores it
+      // never returns, and the `killContainer` below is never reached. That
+      // is what made the round-4 machinery unreachable rather than wrong.
+      // SIGKILL cannot be ignored, so the client dies, the call returns, and
+      // the container is then reaped BY NAME at the daemon — which is where
+      // the deadline had to be enforced all along.
+      killSignal: 'SIGKILL',
+      maxBuffer: 64 * 1024 * 1024,
+      // The RUNTIME CLIENT's environment, minus the daemon-selecting
+      // variables a repository could have shipped in its own `.env` — the
+      // container's own environment is the allowlist in `containerEnv`.
+      env: runtimeClientEnv(),
+    });
+    // `r.error` is set — and `r.status` is null — when the process never ran
+    // (vitest entry missing or unresolvable) or was killed (the timeout above
+    // fires SIGTERM). Ignoring it reports those as "the runner produced no
+    // parseable JSON", which
+    // blames the runner's output for a run that produced none.
+    // `r.error` first, as before: when both are set — ENOBUFS on a run that was
+    // also killed — the error names the actual failure and the signal only says
+    // it did not finish. Reversing them buried `ENOBUFS` under "killed by
+    // SIGTERM", which is a less useful sentence about the same event. The reason
+    // tag is derived from the whole result either way, so it does not depend on
+    // which message wins.
+    if (boxedRunLeftContainer(r.status)) {
+      // The deadline killed the CLIENT; the container outlives it — `--rm` fires
+      // only on a self-exit. Reach the daemon before reporting, or a
+      // TERM-ignoring suite keeps this mount writable past the end of the review.
+      killContainer(boxed.runtime, boxed.name);
+    }
+    if (r.error)
+      throw new ProbeRunFailure(r.error.message, runnerFailureReason(r));
+    if (r.signal) {
+      throw new ProbeRunFailure(
+        `runner killed by ${r.signal}${r.signal === 'SIGTERM' ? ` (probe timed out after ${Math.round(timeout / 1000)}s)` : ''}`,
+        runnerFailureReason(r),
+      );
+    }
+    return {
+      perFile: classifyProbeRun(
+        r.status ?? 1,
+        `${r.stdout ?? ''}`,
+        probes,
+        `${r.stderr ?? ''}`,
+      ),
+      ms: now() - started,
+      exposed,
+    };
+  }
   // The verdict channel lives in one fresh directory per run, OUTSIDE the
   // probe tree: the suite runs with write access to everything the reviewer
   // can reach, but it has to find the name first, and it already authors
@@ -2725,7 +2868,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
   };
 
-  if (probes.length > 0 && revert.length > 0) {
+  // BEFORE the probe tree is even created. Every run this phase makes executes
+  // the reviewed repository's suite, so under `review.sandbox: required` with no
+  // container runtime the honest outcome is no efficacy evidence — not evidence
+  // bought by running that suite unsandboxed. Refusing here rather than at the
+  // spawn keeps the report's vocabulary intact: the phase produced nothing, and
+  // says why, instead of a run of probes each blaming the runner.
+  // The probe tree this phase WOULD build, named before it exists — the gate
+  // has to answer before anything is created, and `probeWorktreePath` is a
+  // pure path function.
+  const sandboxRefusal = refuseUnsandboxedPhase(probeWorktreePath(worktree));
+  if (sandboxRefusal) {
+    noteMutants(
+      `mutation probes did not run: ${sandboxRefusal}. Every probe executes ` +
+        `the reviewed repository's own test suite, which is what the policy ` +
+        `forbids unsandboxed — read the absence as unmeasured, not as covered.`,
+    );
+  } else if (probes.length > 0 && revert.length > 0) {
     // The probe reverts the PR's source to base and runs the tests against it —
     // in its OWN disposable worktree, checked out at the PR head and discarded
     // wholesale when the probe finishes. The shared worktree the other review
