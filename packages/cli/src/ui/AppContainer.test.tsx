@@ -49,9 +49,11 @@ import { renderHook } from '@testing-library/react';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
+  countActiveScheduledTasks,
   dedupeNewestFirst,
   getSpeculativeToolResult,
   getNextRenderMode,
+  getScheduledTasksStartupWarning,
   isInputActiveForState,
   isRenderModeToggleKey,
   mergeStartupWarnings,
@@ -443,6 +445,10 @@ describe('AppContainer State Management', () => {
 
     // Mock Config
     mockConfig = makeFakeConfig();
+    // Most AppContainer tests do not exercise cron startup. Keep the new
+    // durable-task file read out of their lifecycle and opt in explicitly in
+    // the scheduled-task tests below.
+    vi.spyOn(mockConfig, 'isCronEnabled').mockReturnValue(false);
 
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
@@ -460,6 +466,7 @@ describe('AppContainer State Management', () => {
     // Mock SubagentManager to prevent errors during AgentTool initialization
     const mockSubagentManager: Partial<SubagentManager> = {
       listSubagents: vi.fn().mockResolvedValue([]),
+      getAvailableModelGrades: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
       createSubagent: vi.fn(),
@@ -837,6 +844,118 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('announces active scheduled tasks after startup', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getWarnings').mockReturnValue([]);
+      vi.mocked(mockConfig.isCronEnabled).mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
+        size: 2,
+      } as ReturnType<Config['getCronScheduler']>);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(addItem).toHaveBeenCalledWith(
+          {
+            type: MessageType.WARNING,
+            text: '2 active scheduled tasks. Run /loop list to inspect.',
+          },
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('formats the startup notice for active scheduled tasks', () => {
+      expect(getScheduledTasksStartupWarning(2)).toBe(
+        '2 active scheduled tasks. Run /loop list to inspect.',
+      );
+    });
+
+    it('does not announce scheduled tasks when none are active', () => {
+      expect(getScheduledTasksStartupWarning(0)).toBeNull();
+    });
+
+    it('uses singular wording for one active scheduled task', () => {
+      expect(getScheduledTasksStartupWarning(1)).toBe(
+        '1 active scheduled task. Run /loop list to inspect.',
+      );
+    });
+
+    it('does not announce scheduled tasks when cron is disabled', async () => {
+      const addItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [],
+        addItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'isCronEnabled').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
+        size: 2,
+      } as ReturnType<Config['getCronScheduler']>);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(mockConfig.initialize).toHaveBeenCalled();
+      });
+      expect(addItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: expect.stringContaining('active scheduled'),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('counts only enabled scheduled tasks with valid cron expressions', () => {
+      const task = {
+        id: 'active',
+        cron: '0 9 * * *',
+        prompt: 'check status',
+        recurring: true,
+        createdAt: 1,
+        lastFiredAt: null,
+      };
+      expect(
+        countActiveScheduledTasks([
+          task,
+          { ...task, id: 'disabled', enabled: false },
+          { ...task, id: 'invalid', cron: 'not a cron expression' },
+          {
+            ...task,
+            id: 'legacy-condition',
+            condition: 'only if CI is green',
+          } as typeof task,
+        ]),
+      ).toBe(1);
     });
   });
 
@@ -5132,6 +5251,64 @@ describe('AppContainer State Management', () => {
           .slice(0, -1)
           .every((item) => item.display?.suppressOnRestore === true),
       ).toBe(true);
+    });
+
+    it('announces active scheduled tasks after restoring resumed history', async () => {
+      const calls: string[] = [];
+      const historyManager = {
+        history: [] as HistoryItem[],
+        addItem: vi.fn((item: HistoryItemWithoutId) => {
+          calls.push(`add:${item.text}`);
+        }),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(() => {
+          calls.push('load');
+        }),
+        truncateToItem: vi.fn(),
+      };
+      mockedUseHistory.mockReturnValue(historyManager);
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.mocked(mockConfig.isCronEnabled).mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getCronScheduler').mockReturnValue({
+        size: 1,
+      } as ReturnType<Config['getCronScheduler']>);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: null,
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockResolvedValue([]);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => {
+        expect(historyManager.addItem).toHaveBeenCalledWith(
+          {
+            type: MessageType.WARNING,
+            text: '1 active scheduled task. Run /loop list to inspect.',
+          },
+          expect.any(Number),
+        );
+      });
+      expect(calls.indexOf('load')).toBeLessThan(
+        calls.indexOf(
+          'add:1 active scheduled task. Run /loop list to inspect.',
+        ),
+      );
     });
 
     it('does not remeasure footer height for sticky todo status-only updates', async () => {

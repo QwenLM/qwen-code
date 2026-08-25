@@ -46,6 +46,9 @@ import {
   ShellExecutionService,
   Storage,
   createInstructionsLoadedCallback,
+  parseCron,
+  readCronTasks,
+  taskHasLegacyCondition,
   SessionEndReason,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -600,6 +603,28 @@ export function mergeStartupWarnings(
   return [...new Set([...currentWarnings, ...nextWarnings])];
 }
 
+export function getScheduledTasksStartupWarning(
+  activeTaskCount: number,
+): string | null {
+  if (activeTaskCount < 1) return null;
+  const taskLabel = activeTaskCount === 1 ? 'task' : 'tasks';
+  return `${activeTaskCount} active scheduled ${taskLabel}. Run /loop list to inspect.`;
+}
+
+export function countActiveScheduledTasks(
+  tasks: Awaited<ReturnType<typeof readCronTasks>>,
+): number {
+  return tasks.filter((task) => {
+    if (task.enabled === false || taskHasLegacyCondition(task)) return false;
+    try {
+      parseCron(task.cron);
+      return true;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
 /**
  * Whether the skill-review dialog should auto-open. Exported for tests.
  *
@@ -948,6 +973,22 @@ export const AppContainer = (props: AppContainerProps) => {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       await waitForGoalRuntime(config);
+      let activeScheduledTaskCount = 0;
+      if (config.isCronEnabled()) {
+        activeScheduledTaskCount = config.getCronScheduler()?.size ?? 0;
+        try {
+          const durableTasks = await readCronTasks(config.getProjectRoot());
+          activeScheduledTaskCount = Math.max(
+            activeScheduledTaskCount,
+            countActiveScheduledTasks(durableTasks),
+          );
+        } catch (error) {
+          debugLogger.warn(`Failed to read scheduled tasks at startup: ${error}`);
+        }
+      }
+      const scheduledTasksWarning = getScheduledTasksStartupWarning(
+        activeScheduledTaskCount,
+      );
       setStartupWarnings((currentWarnings) =>
         mergeStartupWarnings(currentWarnings, config.getWarnings()),
       );
@@ -1065,6 +1106,19 @@ export const AppContainer = (props: AppContainerProps) => {
             console.debug('worktree session restore failed:', error);
           }
         }
+      }
+
+      // Add this after resume restoration because loadHistory replaces the
+      // current transcript. The notice should be visible in both fresh and
+      // resumed sessions whenever durable scheduling is enabled.
+      if (scheduledTasksWarning) {
+        historyManager.addItem(
+          {
+            type: MessageType.WARNING,
+            text: scheduledTasksWarning,
+          },
+          Date.now(),
+        );
       }
     })();
 
