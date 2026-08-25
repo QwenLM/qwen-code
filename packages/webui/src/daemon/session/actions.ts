@@ -195,7 +195,9 @@ export interface CreateDaemonSessionActionsArgs {
       'approvalMode' | 'sourceType' | 'worktree' | 'branch'
     >,
   ) => Promise<DaemonSessionClient>;
-  refreshWorkspaceProviders?: () => Promise<DaemonWorkspaceProvidersStatus>;
+  refreshWorkspaceProviders?: (
+    workspaceCwd: string,
+  ) => Promise<DaemonWorkspaceProvidersStatus>;
   getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
@@ -1117,7 +1119,7 @@ export function createDaemonSessionActions({
         );
         let providers: DaemonWorkspaceProvidersStatus | undefined;
         try {
-          providers = await refreshWorkspaceProviders?.();
+          providers = await refreshWorkspaceProviders?.(session.workspaceCwd);
         } catch {
           // The session mutation succeeded; a provider preview refresh is
           // best-effort and must not turn it into a failed action.

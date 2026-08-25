@@ -82,6 +82,10 @@ interface MockSession {
   removeMidTurnMessage: (messageId: string) => Promise<{ removed: boolean }>;
   cancel: () => Promise<void>;
   setModel: (modelId: string) => Promise<{ modelId: string }>;
+  setConfigOption: (
+    configId: string,
+    value: string,
+  ) => Promise<{ configOptions: unknown[] }>;
   heartbeat: () => Promise<{ ok: boolean }>;
   shellCommand: (command: string, signal?: AbortSignal) => Promise<unknown>;
   goal: () => Promise<GoalStateResponse>;
@@ -140,7 +144,9 @@ interface MockClient {
   workspaceAcpStatus: () => Promise<unknown>;
   workspaceAcpPreheat: () => Promise<unknown>;
   workspaceGit: () => Promise<unknown>;
-  workspaceByCwd: (workspaceCwd: string) => Pick<MockClient, 'workspaceGit'>;
+  workspaceByCwd: (
+    workspaceCwd: string,
+  ) => Pick<MockClient, 'workspaceGit' | 'workspaceProviders'>;
   workspaceTools: () => Promise<unknown>;
   setWorkspaceToolEnabled: () => Promise<unknown>;
   workspaceMemory: () => Promise<unknown>;
@@ -183,6 +189,7 @@ const sdkMocks = vi.hoisted(() => {
   const sessions: MockSession[] = [];
   const capabilities = vi.fn();
   const workspaceProviders = vi.fn();
+  const qualifiedWorkspaceProviders = vi.fn();
   const listWorkspaceSessions = vi.fn();
   const closeSession = vi.fn();
   const setSessionApprovalMode = vi.fn();
@@ -193,7 +200,10 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceAcpStatus = vi.fn();
   const workspaceAcpPreheat = vi.fn();
   const workspaceGit = vi.fn();
-  const workspaceByCwd = vi.fn((_workspaceCwd: string) => ({ workspaceGit }));
+  const workspaceByCwd = vi.fn((_workspaceCwd: string) => ({
+    workspaceGit,
+    workspaceProviders: qualifiedWorkspaceProviders,
+  }));
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -279,6 +289,7 @@ const sdkMocks = vi.hoisted(() => {
     sessions,
     capabilities,
     workspaceProviders,
+    qualifiedWorkspaceProviders,
     workspaceSkills,
     workspaceAcpStatus,
     workspaceAcpPreheat,
@@ -301,6 +312,13 @@ const sdkMocks = vi.hoisted(() => {
       });
       workspaceProviders.mockReset();
       workspaceProviders.mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/mock-workspace',
+        initialized: true,
+        providers: [],
+      });
+      qualifiedWorkspaceProviders.mockReset();
+      qualifiedWorkspaceProviders.mockResolvedValue({
         v: 1,
         workspaceCwd: '/mock-workspace',
         initialized: true,
@@ -351,6 +369,7 @@ const sdkMocks = vi.hoisted(() => {
       workspaceByCwd.mockReset();
       workspaceByCwd.mockImplementation((_workspaceCwd: string) => ({
         workspaceGit,
+        workspaceProviders: qualifiedWorkspaceProviders,
       }));
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
@@ -727,6 +746,67 @@ describe('DaemonSessionProvider', () => {
         { value: 'xhigh', name: 'xhigh' },
       ],
     });
+  });
+
+  it('refreshes persisted reasoning preview from the active session workspace', async () => {
+    sdkMocks.qualifiedWorkspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview('medium', '/secondary-workspace'),
+    );
+    const session = createMockSession({
+      sessionId: 'secondary-session',
+      workspaceCwd: '/secondary-workspace',
+      context: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'secondary-session',
+        workspaceCwd: '/secondary-workspace',
+        state: {
+          configOptions: reasoningConfigOptions('xhigh'),
+          models: {
+            currentModelId: 'qwen3.8-max',
+            availableModels: [
+              {
+                modelId: 'qwen3.8-max',
+                baseModelId: 'qwen3.8-max',
+                name: 'Qwen 3.8 Max',
+                contextLimit: 131_072,
+              },
+            ],
+          },
+        },
+      })),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'secondary-session',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    const primaryProviderReads = sdkMocks.workspaceProviders.mock.calls.length;
+
+    await act(async () => {
+      await actions?.setReasoningEffort('medium');
+    });
+
+    expect(sdkMocks.workspaceByCwd).toHaveBeenCalledWith(
+      '/secondary-workspace',
+    );
+    expect(sdkMocks.qualifiedWorkspaceProviders).toHaveBeenCalledOnce();
+    expect(sdkMocks.workspaceProviders).toHaveBeenCalledTimes(
+      primaryProviderReads,
+    );
+    expect(connection?.providers?.workspaceCwd).toBe('/secondary-workspace');
+    expect(connection?.reasoning?.effort).toBe('medium');
   });
 
   it('populates git branch from the active session workspace', async () => {
@@ -15128,10 +15208,13 @@ function reasoningConfigOptions(currentValue: string): unknown[] {
   ];
 }
 
-function workspaceProvidersWithReasoningPreview() {
+function workspaceProvidersWithReasoningPreview(
+  currentValue = 'xhigh',
+  workspaceCwd = '/mock-workspace',
+) {
   return {
     v: 1,
-    workspaceCwd: '/mock-workspace',
+    workspaceCwd,
     initialized: true,
     current: { modelId: 'qwen3.8-max' },
     providers: [
@@ -15147,7 +15230,7 @@ function workspaceProvidersWithReasoningPreview() {
             name: 'Qwen 3.8 Max',
             isCurrent: true,
             isRuntime: false,
-            configOptions: reasoningConfigOptions('xhigh'),
+            configOptions: reasoningConfigOptions(currentValue),
           },
         ],
       },
@@ -15216,6 +15299,11 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       opts.setModel ??
       vi.fn(async (modelId: string) => ({
         modelId,
+      })),
+    setConfigOption:
+      opts.setConfigOption ??
+      vi.fn(async () => ({
+        configOptions: reasoningConfigOptions('medium'),
       })),
     heartbeat: opts.heartbeat ?? vi.fn(async () => ({ ok: true })),
     shellCommand: opts.shellCommand ?? vi.fn(async () => undefined),

@@ -2402,7 +2402,11 @@ describe('createDaemonSessionActions', () => {
   });
 
   it('refreshes the persisted reasoning preview before the session is cleared', async () => {
-    const source = createMockSession('session-a', 'client-a');
+    const source = createMockSession(
+      'session-a',
+      'client-a',
+      '/secondary-workspace',
+    );
     const configOptions = [
       {
         id: 'reasoning_effort',
@@ -2474,6 +2478,9 @@ describe('createDaemonSessionActions', () => {
       source.sessionId,
     );
     expect(refreshWorkspaceProviders).toHaveBeenCalledOnce();
+    expect(refreshWorkspaceProviders).toHaveBeenCalledWith(
+      '/secondary-workspace',
+    );
     expect(cleared.models?.[0]?.reasoningPreview?.effort).toBe('medium');
   });
 
@@ -2741,10 +2748,11 @@ function createActionsHarness(
 function createMockSession(
   sessionId: string,
   clientId = `client-${sessionId}`,
+  workspaceCwd = '/workspace',
 ) {
   return {
     sessionId,
-    workspaceCwd: '/workspace',
+    workspaceCwd,
     clientId,
     client: {
       createOrAttachSession: vi.fn(),

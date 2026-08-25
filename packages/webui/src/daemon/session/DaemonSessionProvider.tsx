@@ -3579,14 +3579,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             requestClientId,
           );
         },
-        refreshWorkspaceProviders: () => {
+        refreshWorkspaceProviders: (workspaceCwd) => {
           const client =
             workspaceClientRef.current ??
             new DaemonClient({
               baseUrl: resolvedBaseUrl!,
               token: resolvedToken,
             });
-          return client.workspaceProviders();
+          return client.workspaceByCwd(workspaceCwd).workspaceProviders();
         },
         getConnection: () => connectionRef.current,
         addNotice,
