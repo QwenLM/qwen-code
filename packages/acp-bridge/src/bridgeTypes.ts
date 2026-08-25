@@ -252,6 +252,8 @@ export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
 export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+export const CHANNEL_LIVENESS_META_KEY = 'qwen.daemon.channelLiveness';
+export const CHANNEL_LIVENESS_VERSION = 1 as const;
 export const ACTIVE_WORK_HEARTBEAT_META_KEY = 'qwen.daemon.activeWorkHeartbeat';
 export const ACTIVE_WORK_HEARTBEAT_VERSION = 1 as const;
 /** Reporting cadence the daemon asks for; the child may choose another value
