@@ -181,6 +181,49 @@ describe('modelConfigUtils', () => {
       } as Settings;
     }
 
+    it.each([
+      {
+        configured: 'none',
+        expected: false,
+      },
+      {
+        configured: 'ultra',
+        expected: { effort: 'ultra' },
+      },
+      {
+        configured: 'minimal',
+        expected: { effort: 'minimal' },
+      },
+      {
+        configured: 'Vendor.Custom-EFFORT',
+        expected: { effort: 'Vendor.Custom-EFFORT' },
+      },
+      {
+        configured: '   ',
+        expected: undefined,
+      },
+    ])(
+      'loads the open reasoning effort setting "$configured"',
+      ({ configured, expected }) => {
+        vi.mocked(resolveModelConfig).mockReturnValue({
+          config: { model: '' },
+          sources: {},
+          warnings: [],
+        });
+
+        const result = resolveCliGenerationConfig({
+          argv: {},
+          settings: makeMockSettings({
+            model: { name: 'qwen3.8-max', reasoningEffort: configured },
+          }),
+          selectedAuthType: AuthType.USE_OPENAI,
+        });
+
+        expect(result.generationConfig.reasoning).toEqual(expected);
+        expect(result.warnings).toEqual([]);
+      },
+    );
+
     it('should resolve config from argv with highest precedence', () => {
       const argv = {
         model: 'argv-model',

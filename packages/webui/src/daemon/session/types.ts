@@ -117,7 +117,12 @@ export interface DaemonConnectionState {
 export interface DaemonReasoningControls {
   enabled: boolean;
   effort: string;
-  efforts: string[];
+  efforts: DaemonReasoningEffortOption[];
+}
+
+export interface DaemonReasoningEffortOption {
+  value: string;
+  name: string;
 }
 
 export interface DaemonTokenUsage {

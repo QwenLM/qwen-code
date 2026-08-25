@@ -78,6 +78,25 @@ const turnComplete: DaemonEvent = {
 };
 
 describe('mapReasoningControls', () => {
+  it('preserves model-specific effort values and display names', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'ultra',
+          options: [
+            { value: 'none', name: 'Thinking Off' },
+            { value: 'ultra', name: 'Ultra' },
+          ],
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'ultra',
+      efforts: [{ value: 'ultra', name: 'Ultra' }],
+    });
+  });
+
   it('maps toggle-only reasoning without exposing an effort list', () => {
     expect(
       mapReasoningControls([
@@ -121,7 +140,11 @@ describe('mapProviderStatus reasoning preview', () => {
     expect(result.models[0]?.reasoningPreview).toEqual({
       enabled: true,
       effort: 'xhigh',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
     });
   });
 

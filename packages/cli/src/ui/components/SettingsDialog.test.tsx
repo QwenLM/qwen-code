@@ -1348,6 +1348,86 @@ describe('SettingsDialog', () => {
     });
   });
 
+  describe('Reasoning Effort', () => {
+    const focusReasoningEffort = async (stdin: {
+      write: (data: string) => void;
+    }) => {
+      act(() => stdin.write(TerminalKeys.UP_ARROW as string));
+      await wait();
+      for (const character of 'reasoning effort') {
+        act(() => stdin.write(character));
+        await wait();
+      }
+      act(() => stdin.write(TerminalKeys.DOWN_ARROW as string));
+      await wait();
+    };
+
+    it.each(['ultra', 'Ultra', 'MINIMAL', 'vendor.Custom'])(
+      'saves the open string value %s verbatim',
+      async (effort) => {
+        vi.mocked(saveModifiedSettings).mockClear();
+        const settings = createMockSettings();
+        const { stdin, lastFrame, unmount } = render(
+          <KeypressProvider kittyProtocolEnabled={false}>
+            <SettingsDialog settings={settings} onSelect={() => {}} />
+          </KeypressProvider>,
+        );
+
+        await focusReasoningEffort(stdin);
+        act(() => stdin.write(TerminalKeys.ENTER as string));
+        await wait();
+        for (const character of effort) {
+          act(() => stdin.write(character));
+          await wait();
+        }
+
+        expect(lastFrame()).toContain(effort);
+
+        act(() => stdin.write(TerminalKeys.ENTER as string));
+        await waitFor(() => {
+          expect(saveModifiedSettings).toHaveBeenCalledWith(
+            new Set(['model.reasoningEffort']),
+            { model: { reasoningEffort: effort } },
+            settings,
+            SettingScope.User,
+          );
+        });
+
+        unmount();
+      },
+    );
+
+    it('deletes the setting when the text input contains only whitespace', async () => {
+      vi.mocked(saveModifiedSettings).mockClear();
+      const settings = createMockSettings({
+        model: { reasoningEffort: 'ultra' },
+      });
+      const { stdin, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={() => {}} />
+        </KeypressProvider>,
+      );
+
+      await focusReasoningEffort(stdin);
+      act(() => stdin.write(TerminalKeys.ENTER as string));
+      await wait();
+      act(() => stdin.write('   '));
+      await wait();
+      act(() => stdin.write(TerminalKeys.ENTER as string));
+
+      await waitFor(() => {
+        expect(saveModifiedSettings).toHaveBeenCalledWith(
+          new Set(['model.reasoningEffort']),
+          {},
+          settings,
+          SettingScope.User,
+        );
+      });
+
+      unmount();
+    });
+  });
+
   describe('Config Tabs and Search', () => {
     it('renders the tab bar with all three tabs and a search box', () => {
       const settings = createMockSettings();

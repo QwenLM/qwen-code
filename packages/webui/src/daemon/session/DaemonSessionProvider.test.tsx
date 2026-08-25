@@ -582,7 +582,11 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.models?.[0]?.reasoningPreview).toEqual({
       enabled: true,
       effort: 'xhigh',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
     });
 
     const providerActions = requireActions(actions);
@@ -606,7 +610,11 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.reasoning).toEqual({
       enabled: true,
       effort: 'medium',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
     });
   });
 
@@ -713,7 +721,11 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.models?.[0]?.reasoningPreview).toEqual({
       enabled: true,
       effort: 'xhigh',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
     });
   });
 
@@ -9425,7 +9437,11 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.models?.[0]?.reasoningPreview).toEqual({
       enabled: true,
       effort: 'xhigh',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
     });
   });
 
@@ -10809,7 +10825,11 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.models?.[0]?.reasoningPreview).toEqual({
       enabled: true,
       effort: 'xhigh',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
     });
     await act(async () => {
       await expect(providerActions.cancel()).rejects.toThrow(
@@ -10858,7 +10878,11 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.models?.[0]?.reasoningPreview).toEqual({
       enabled: true,
       effort: 'xhigh',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
     });
   });
 
@@ -12457,7 +12481,11 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.models?.[0]?.reasoningPreview).toEqual({
       enabled: true,
       effort: 'xhigh',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
     });
   });
 

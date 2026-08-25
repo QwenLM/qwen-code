@@ -141,6 +141,10 @@ export interface FakeAgentOpts {
     p: ResumeSessionRequest,
     self: FakeAgent,
   ) => Promise<ResumeSessionResponse> | ResumeSessionResponse;
+  setSessionConfigOptionImpl?: (
+    p: SetSessionConfigOptionRequest,
+    self: FakeAgent,
+  ) => Promise<SetSessionConfigOptionResponse> | SetSessionConfigOptionResponse;
   extMethodImpl?: (
     method: string,
     params: Record<string, unknown>,
@@ -155,6 +159,7 @@ export class FakeAgent implements Agent {
   resumeSessionCalls: ResumeSessionRequest[] = [];
   promptCalls: PromptRequest[] = [];
   cancelCalls: CancelNotification[] = [];
+  setSessionConfigOptionCalls: SetSessionConfigOptionRequest[] = [];
   extMethodCalls: Array<{ method: string; params: Record<string, unknown> }> =
     [];
   constructor(private readonly opts: FakeAgentOpts = {}) {}
@@ -229,8 +234,12 @@ export class FakeAgent implements Agent {
     throw new Error('not implemented in test fake');
   }
   async setSessionConfigOption(
-    _p: SetSessionConfigOptionRequest,
+    p: SetSessionConfigOptionRequest,
   ): Promise<SetSessionConfigOptionResponse> {
+    this.setSessionConfigOptionCalls.push(p);
+    if (this.opts.setSessionConfigOptionImpl) {
+      return this.opts.setSessionConfigOptionImpl(p, this);
+    }
     throw new Error('not implemented in test fake');
   }
   async extMethod(

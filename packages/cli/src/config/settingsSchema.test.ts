@@ -319,6 +319,18 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('accepts model-specific reasoning effort strings', () => {
+      const reasoningEffort =
+        getSettingsSchema().model.properties.reasoningEffort;
+
+      expect(reasoningEffort).toMatchObject({
+        type: 'string',
+        default: undefined,
+        requiresRestart: false,
+      });
+      expect(reasoningEffort).not.toHaveProperty('options');
+    });
+
     it('should define telemetry sensitiveSpanAttributeMaxLength as a positive integer', () => {
       const telemetrySchema = getSettingsSchema().telemetry.jsonSchemaOverride;
       expect(

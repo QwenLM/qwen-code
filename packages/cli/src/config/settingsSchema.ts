@@ -1569,21 +1569,14 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       reasoningEffort: {
-        type: 'enum',
+        type: 'string',
         label: 'Reasoning Effort',
         category: 'Model',
         requiresRestart: false,
         default: undefined as string | undefined,
         description:
-          'How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at "high"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default.',
+          'How hard reasoning-capable models think. Values are model-specific; use "none" to disable reasoning and leave unset to use the model/provider default.',
         showInDialog: true,
-        options: [
-          { value: 'low', label: 'Low' },
-          { value: 'medium', label: 'Medium' },
-          { value: 'high', label: 'High' },
-          { value: 'xhigh', label: 'Extra High' },
-          { value: 'max', label: 'Max' },
-        ],
       },
       maxSessionTurns: {
         type: 'integer',

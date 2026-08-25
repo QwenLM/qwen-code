@@ -500,12 +500,14 @@ export function SettingsDialog({
       if (key === 'general.outputLanguage') {
         const trimmed = editBuffer.trim();
         parsed = trimmed === '' ? 'auto' : trimmed;
+      } else if (key === 'model.reasoningEffort') {
+        parsed = editBuffer.trim() === '' ? undefined : editBuffer;
       } else {
         parsed = editBuffer;
       }
     }
 
-    if (definition) {
+    if (definition && parsed !== undefined) {
       const validationError = validateSettingValue(definition, parsed);
       if (validationError) {
         setEditingKey(null);

@@ -14,8 +14,8 @@ import {
 } from '../../tokenLimits.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
 import {
-  REASONING_EFFORT_TIERS,
   clampReasoningEffort,
+  isBuiltInReasoningEffort,
 } from '../../reasoning-effort.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 
@@ -165,14 +165,11 @@ export class DefaultOpenAICompatibleProvider
     const loose = request as unknown as Record<string, unknown>;
     const reasoning = loose['reasoning'] as { effort?: unknown } | undefined;
     const effort = reasoning?.effort;
-    if (
-      typeof effort !== 'string' ||
-      !REASONING_EFFORT_TIERS.includes(effort as ReasoningEffort)
-    ) {
+    if (!isBuiltInReasoningEffort(effort)) {
       return request;
     }
     const clamped = clampReasoningEffort(
-      effort as ReasoningEffort,
+      effort,
       this.supportedReasoningEffortsFor(
         (loose['model'] as string | undefined) ??
           this.contentGeneratorConfig.model,

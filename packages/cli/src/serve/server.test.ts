@@ -19328,9 +19328,42 @@ describe('createServeApp', () => {
             sessionId: 'session-A',
             configId: 'reasoning_effort',
             value: 'medium',
+            _meta: { 'qwenCode/persistReasoningEffort': true },
           },
         },
       ]);
+    });
+
+    it('marks default as a persisted setting deletion', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ configId: 'reasoning_effort', value: 'default' });
+
+      expect(res.status).toBe(200);
+      expect(bridge.setConfigOptionCalls[0]?.req).toMatchObject({
+        value: 'default',
+        _meta: { 'qwenCode/persistReasoningEffort': true },
+      });
+    });
+
+    it('rejects config options other than reasoning effort', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/config-option')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ configId: 'mode', value: 'plan' });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: '`configId` must be reasoning_effort',
+      });
+      expect(bridge.setConfigOptionCalls).toEqual([]);
     });
   });
 

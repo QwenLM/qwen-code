@@ -16,7 +16,11 @@ describe('model configuration manifest', () => {
     expect(getModelConfiguration('qwen3.8-max')).toEqual({
       reasoning: {
         thinking: true,
-        efforts: ['low', 'medium', 'xhigh'],
+        efforts: [
+          { value: 'low', name: 'Low' },
+          { value: 'medium', name: 'Medium' },
+          { value: 'xhigh', name: 'Extra High' },
+        ],
         defaultEffort: 'xhigh',
       },
     });
@@ -28,6 +32,7 @@ describe('model configuration manifest', () => {
       currentValue: 'xhigh',
       options: [
         { value: 'none' },
+        { value: 'default', name: 'Default' },
         { value: 'low' },
         { value: 'medium' },
         { value: 'xhigh' },
@@ -54,6 +59,87 @@ describe('model configuration manifest', () => {
     expect(buildModelReasoningConfigPreview('qwen3.8-max')).toEqual([
       buildModelReasoningConfigOption('qwen3.8-max'),
     ]);
+  });
+
+  it('projects the loaded reasoning effort in workspace preview', () => {
+    expect(
+      buildModelReasoningConfigPreview('qwen3.8-max', {
+        enabled: true,
+        effort: 'medium',
+      }),
+    ).toMatchObject([{ currentValue: 'medium' }]);
+  });
+
+  it('projects disabled reasoning in workspace preview', () => {
+    expect(
+      buildModelReasoningConfigPreview('qwen3.8-max', {
+        enabled: false,
+        effort: 'medium',
+      }),
+    ).toMatchObject([{ currentValue: 'none' }]);
+  });
+
+  it('keeps an opaque configured effort visible in workspace preview', () => {
+    expect(
+      buildModelReasoningConfigPreview('qwen3.8-max', {
+        enabled: true,
+        effort: 'vendor.ultra',
+      }),
+    ).toMatchObject([
+      {
+        currentValue: 'vendor.ultra',
+        options: expect.arrayContaining([
+          expect.objectContaining({
+            value: 'vendor.ultra',
+            name: 'vendor.ultra',
+          }),
+        ]),
+      },
+    ]);
+  });
+
+  it('shows a literal default effort without duplicating the ACP clear option', () => {
+    const option = buildModelReasoningConfigOption('qwen3.8-max', {
+      enabled: true,
+      effort: 'default',
+    });
+
+    expect(option?.currentValue).toBe('default');
+    expect(
+      option?.options.filter(
+        (candidate) =>
+          'value' in candidate && candidate.value === 'default',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('preserves model-specific effort values and display names', () => {
+    const reasoning = getModelConfiguration('qwen3.8-max')?.reasoning;
+    if (!reasoning || reasoning.toggleOnly) {
+      throw new Error('Expected tiered qwen3.8-max reasoning configuration');
+    }
+    const mutable = reasoning as unknown as {
+      efforts: Array<{ value: string; name: string }>;
+    };
+    mutable.efforts.push({ value: 'ultra', name: 'Ultra thinking' });
+    try {
+      expect(
+        buildModelReasoningConfigOption('qwen3.8-max', {
+          enabled: true,
+          effort: 'ultra',
+        }),
+      ).toMatchObject({
+        currentValue: 'ultra',
+        options: expect.arrayContaining([
+          expect.objectContaining({
+            value: 'ultra',
+            name: 'Ultra thinking',
+          }),
+        ]),
+      });
+    } finally {
+      mutable.efforts.pop();
+    }
   });
 
   it.each([

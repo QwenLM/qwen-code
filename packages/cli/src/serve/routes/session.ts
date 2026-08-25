@@ -129,6 +129,7 @@ import {
 } from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
+import { PERSIST_REASONING_EFFORT_META_KEY } from '../../acp-integration/model-configuration.js';
 import {
   formatGenerationSse,
   GENERATION_HEARTBEAT_MS,
@@ -6440,7 +6441,12 @@ export function registerSessionRoutes(
         }
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
-          { sessionId, configId, value },
+          {
+            sessionId,
+            configId,
+            value,
+            _meta: { [PERSIST_REASONING_EFFORT_META_KEY]: true },
+          },
         );
         res.status(200).json(response);
       },

@@ -1778,6 +1778,56 @@ describe('AnthropicContentGenerator', () => {
       );
     });
 
+    it.each([
+      {
+        label: 'Anthropic',
+        model: 'claude-opus-4-8',
+        baseUrl: 'https://api.anthropic.com',
+      },
+      {
+        label: 'DeepSeek anthropic-compatible',
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+      },
+    ])(
+      'passes a provider-specific effort through on $label',
+      async ({ model, baseUrl }) => {
+        const { AnthropicContentGenerator } = await importGenerator();
+        anthropicState.createImpl.mockResolvedValue({
+          id: 'anthropic-1',
+          model,
+          content: [{ type: 'text', text: 'hi' }],
+        });
+
+        const generator = new AnthropicContentGenerator(
+          {
+            model,
+            apiKey: 'test-key',
+            baseUrl,
+            timeout: 10_000,
+            maxRetries: 2,
+            samplingParams: { max_tokens: 500 },
+            schemaCompliance: 'auto',
+            reasoning: { effort: 'vendor.ultra' },
+          },
+          mockConfig,
+        );
+
+        await generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters);
+
+        const [anthropicRequest] =
+          anthropicState.lastCreateArgs as AnthropicCreateArgs;
+        expect(anthropicRequest).toEqual(
+          expect.objectContaining({
+            output_config: { effort: 'vendor.ultra' },
+          }),
+        );
+      },
+    );
+
     // Claude 4.8+ deprecated the `temperature` sampling parameter — the
     // server responds with a 400 when it is sent. Verify the generator
     // omits it for 4.8+ and keeps it for older models.

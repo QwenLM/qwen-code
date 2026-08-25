@@ -18,7 +18,6 @@ import type {
   InputModalities,
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
-import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
@@ -1216,6 +1215,10 @@ export interface ConfigParameters {
   ideMode?: boolean;
   authType?: AuthType;
   generationConfig?: Partial<ContentGeneratorConfig>;
+  /** Explicit global/session preference; undefined uses the model default. */
+  reasoningPreference?: ReasoningPreference;
+  /** Model/provider reasoning before the global preference was overlaid. */
+  reasoningDefault?: ContentGeneratorConfig['reasoning'];
   /** Exact initial model registry baseUrl; null selects an implicit route. */
   initialModelRegistryBaseUrl?: string | null;
   /**
@@ -1760,6 +1763,16 @@ export type ReasoningEffortOverride = {
   field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
 };
 
+export type ReasoningPreference = false | string;
+
+function cloneReasoning(
+  reasoning: ContentGeneratorConfig['reasoning'],
+): ContentGeneratorConfig['reasoning'] {
+  return reasoning && typeof reasoning === 'object'
+    ? { ...reasoning }
+    : reasoning;
+}
+
 class SessionWriterShutdownError extends SessionWriterUnavailableError {}
 
 function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
@@ -2230,6 +2243,7 @@ export class Config {
   private visionModel?: string;
   private compactionModel?: string;
   private imageModel?: string;
+  private reasoningPreference: ReasoningPreference | undefined;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
@@ -2571,15 +2585,20 @@ export class Config {
     // Prefer params.authType over generationConfig.authType because:
     // - params.authType preserves undefined (user hasn't selected yet)
     // - generationConfig.authType may have a default value from resolvers
+    this.reasoningPreference = params.reasoningPreference;
+    const generationConfig: Partial<ContentGeneratorConfig> = {
+      model: params.model,
+      ...(params.generationConfig || {}),
+      baseUrl: params.generationConfig?.baseUrl,
+    };
+    if ('reasoningDefault' in params) {
+      generationConfig.reasoning = params.reasoningDefault;
+    }
     this.modelsConfig = new ModelsConfig({
       initialAuthType: params.authType ?? params.generationConfig?.authType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
-      generationConfig: {
-        model: params.model,
-        ...(params.generationConfig || {}),
-        baseUrl: params.generationConfig?.baseUrl,
-      },
+      generationConfig,
       generationConfigSources: params.generationConfigSources,
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
       onModelChange: this.handleModelChange.bind(this),
@@ -3863,20 +3882,6 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
-    // The global reasoning effort (settings.model.reasoningEffort, seeded into
-    // the generation config by the CLI) is NOT a provider field, but
-    // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
-    // MODEL_GENERATION_CONFIG_FIELDS entry — including `reasoning` — with the
-    // provider preset's value (undefined for reasoning). Capture the effort
-    // before the sync wipes it and re-apply it after the config is rebuilt, so
-    // /effort survives an auth refresh, including the initial one at startup.
-    // `reasoning` is `false | { effort?, ... } | undefined`; the truthy check
-    // already excludes both `false` and `undefined`.
-    const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
-    const priorReasoningEffort = priorReasoning
-      ? priorReasoning.effort
-      : undefined;
-
     // Sync modelsConfig state for this auth refresh
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
@@ -3907,10 +3912,9 @@ export class Config {
     // fires — and the resolved model can differ from the pre-auth one.
     this.publishModelEnv();
 
-    // Re-apply the user's reasoning effort that the provider sync above wiped.
-    if (priorReasoningEffort) {
-      this.setReasoningEffort(priorReasoningEffort);
-    }
+    // The model config remains the baseline; overlay only the explicit global
+    // or session preference after the provider has rebuilt it.
+    this.applyReasoningPreference();
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
@@ -4670,13 +4674,18 @@ export class Config {
    * config. Returns undefined when thinking is disabled (`reasoning: false`) or
    * no tier is set (the model/provider default applies).
    */
-  getReasoningEffort(): ReasoningEffort | undefined {
+  getReasoningEffort(): string | undefined {
     const reasoning = this.getContentGeneratorConfig()?.reasoning;
     // `!reasoning` already covers both `false` and `undefined` (both falsy).
     if (!reasoning) {
       return undefined;
     }
     return reasoning.effort;
+  }
+
+  /** The explicit global/session preference, excluding model defaults. */
+  getReasoningPreference(): ReasoningPreference | undefined {
+    return this.reasoningPreference;
   }
 
   /**
@@ -4740,43 +4749,63 @@ export class Config {
    * Update the reasoning-effort tier at runtime (e.g. `/effort high`). The
    * request pipeline reads `reasoning.effort` per request, so mutating the live
    * config in place takes effect on the next turn without an auth refresh.
-   * Provider adapters clamp the tier to what the active model supports. Pass
-   * undefined to clear the override and fall back to the model/provider default.
+   * Provider adapters clamp built-in tiers to what the active model supports
+   * and interpret provider-specific strings locally. Pass undefined to clear
+   * the override and fall back to the model/provider default.
    *
-   * No-op when thinking is explicitly disabled (`reasoning: false`) so effort
-   * cannot silently re-enable it.
+   * No-op when the explicit preference disables thinking so `/effort` cannot
+   * silently re-enable it.
    */
-  setReasoningEffort(effort: ReasoningEffort | undefined): void {
-    const applyEffort = (
-      cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
-    ): void => {
-      if (!cfg || cfg.reasoning === false) {
-        return;
-      }
-      const next: { effort?: ReasoningEffort; budget_tokens?: number } = {
-        ...(cfg.reasoning ?? {}),
-      };
-      if (effort) {
-        next.effort = effort;
-      } else {
-        delete next.effort;
-      }
-      // Clearing the last key (e.g. setReasoningEffort(undefined) with no
-      // sibling budget_tokens) collapses `reasoning` back to undefined rather
-      // than leaving an empty `{}` — an empty object is truthy, so downstream
-      // `if (cfg.reasoning)` checks would treat reasoning as active and the
-      // pipeline would emit `reasoning: {}` as wire noise.
-      cfg.reasoning = Object.keys(next).length > 0 ? next : undefined;
-    };
-    // The main session and a runtime (sub-agent) content generator may hold
-    // distinct config objects; update whichever the request path reads.
-    applyEffort(this.contentGeneratorConfig);
+  setReasoningEffort(effort: string | undefined): void {
+    if (!effort) {
+      this.reasoningPreference = undefined;
+      this.restoreReasoningDefault();
+      return;
+    }
+    if (this.reasoningPreference === false) {
+      return;
+    }
+    this.reasoningPreference = effort;
+    this.applyReasoningPreference();
+  }
+
+  disableReasoning(): void {
+    this.reasoningPreference = false;
+    this.applyReasoningPreference();
+  }
+
+  private forEachReasoningConfig(
+    callback: (cfg: {
+      reasoning?: ContentGeneratorConfig['reasoning'];
+    }) => void,
+  ): void {
+    if (this.contentGeneratorConfig) {
+      callback(this.contentGeneratorConfig);
+    }
     const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;
     if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
-      applyEffort(runtimeCfg);
+      callback(runtimeCfg);
     }
-    // Keep the rebuildable source in sync so a later refreshAuth keeps the tier.
-    applyEffort(this.modelsConfig?.getGenerationConfig());
+  }
+
+  private restoreReasoningDefault(): void {
+    const reasoning = this.modelsConfig.getGenerationConfig().reasoning;
+    this.forEachReasoningConfig((cfg) => {
+      cfg.reasoning = cloneReasoning(reasoning);
+    });
+  }
+
+  private applyReasoningPreference(): void {
+    const preference = this.reasoningPreference;
+    if (preference === undefined) {
+      return;
+    }
+    this.forEachReasoningConfig((cfg) => {
+      cfg.reasoning =
+        preference === false
+          ? false
+          : { ...(cfg.reasoning || {}), effort: preference };
+    });
   }
 
   /**
@@ -4939,13 +4968,6 @@ export class Config {
       return;
     }
 
-    // Reasoning effort is a global, model-independent preference (set via
-    // /effort). Capture it before the rebuild and re-apply after, so switching
-    // models never silently drops the user's chosen effort — neither the
-    // hot-update path (which copies a fixed field set, not `reasoning`) nor the
-    // full refresh path (which rebuilds the config from scratch).
-    const priorReasoningEffort = this.getReasoningEffort();
-
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
     // reasoning_content to be preserved across turns.
@@ -4970,13 +4992,9 @@ export class Config {
       );
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
-      // Deliberately does NOT copy `reasoning`: it is a global, model-independent
-      // preference captured in `priorReasoningEffort` above and re-applied via
-      // setReasoningEffort() below. Do not add `reasoning` here — that would
-      // overwrite the live tier with the new model's default and make the
-      // restore a no-op.
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
+      this.contentGeneratorConfig.reasoning = cloneReasoning(config.reasoning);
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
       this.contentGeneratorConfig.enableCacheControl =
         config.enableCacheControl;
@@ -5032,26 +5050,12 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
-      if (priorReasoningEffort) {
-        this.setReasoningEffort(priorReasoningEffort);
-      }
+      this.applyReasoningPreference();
       resetPreloadedContentGenerator(this.contentGenerator);
       return;
     }
 
-    // Full refresh path. `refreshAuth` re-applies the reasoning effort it
-    // captures, but on a model *switch* that capture is already stale: the
-    // preceding switchModel() ran applyResolvedModelDefaults(), which overwrote
-    // modelsConfig's `reasoning` with the new model's preset (undefined for most
-    // models), BEFORE this callback fires. So refreshAuth reads `undefined` and
-    // cannot restore the tier. Re-apply here from `priorReasoningEffort`, which
-    // we captured off the still-intact live contentGeneratorConfig above. This is
-    // a no-op when the new model disables thinking (`reasoning: false`), since
-    // setReasoningEffort() skips that case and never silently re-enables it.
     await this.refreshAuth(authType);
-    if (priorReasoningEffort) {
-      this.setReasoningEffort(priorReasoningEffort);
-    }
   }
 
   /**

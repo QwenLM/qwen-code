@@ -27,6 +27,15 @@ export const REASONING_EFFORT_TIERS: readonly ReasoningEffort[] = [
   'max',
 ] as const;
 
+export function isBuiltInReasoningEffort(
+  value: unknown,
+): value is ReasoningEffort {
+  return (
+    typeof value === 'string' &&
+    REASONING_EFFORT_TIERS.some((tier) => tier === value)
+  );
+}
+
 /**
  * Numeric strength used when clamping a requested tier down to what a model
  * supports. Gaps are intentional so future intermediate tiers (e.g. a

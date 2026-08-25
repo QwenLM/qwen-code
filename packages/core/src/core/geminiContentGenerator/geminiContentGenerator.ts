@@ -161,11 +161,14 @@ export class GeminiContentGenerator implements ContentGenerator {
     }
 
     if (reasoning) {
-      // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH — there
-      // is no xhigh/max, so the extra-strong tiers are capped at HIGH. An unset
-      // effort stays UNSPECIFIED so the model picks its own default.
+      // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH. The
+      // provider-specific `minimal` value maps directly; built-in xhigh/max are
+      // capped at HIGH. An unset effort lets the model pick its own default.
       let thinkingLevel: ThinkingLevel;
       switch (reasoning.effort) {
+        case 'minimal':
+          thinkingLevel = 'MINIMAL' as ThinkingLevel;
+          break;
         case 'low':
           thinkingLevel = 'LOW' as ThinkingLevel;
           break;
@@ -192,17 +195,10 @@ export class GeminiContentGenerator implements ContentGenerator {
           // No effort set — let the model pick its own default.
           thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;
           break;
-        default: {
-          // Exhaustiveness guard: every ReasoningEffort tier (and undefined) is
-          // handled above, so this is unreachable. Adding a new tier without a
-          // matching case makes this a TypeScript compile error rather than a
-          // silent fall-through to UNSPECIFIED. (A `default` is required here by
-          // the eslint default-case rule.)
-          const _exhaustive: never = reasoning.effort;
-          void _exhaustive;
-          thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;
-          break;
-        }
+        default:
+          throw new Error(
+            `Unsupported Gemini reasoning effort: ${JSON.stringify(reasoning.effort)}`,
+          );
       }
 
       return {

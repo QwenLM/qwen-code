@@ -3579,6 +3579,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             requestClientId,
           );
         },
+        refreshWorkspaceProviders: () => {
+          const client =
+            workspaceClientRef.current ??
+            new DaemonClient({
+              baseUrl: resolvedBaseUrl!,
+              token: resolvedToken,
+            });
+          return client.workspaceProviders();
+        },
         getConnection: () => connectionRef.current,
         addNotice,
         setConnection,

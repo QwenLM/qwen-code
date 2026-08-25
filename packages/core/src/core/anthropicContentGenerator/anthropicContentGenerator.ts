@@ -20,6 +20,7 @@ import type {
 } from '../contentGenerator.js';
 import {
   clampReasoningEffort,
+  isBuiltInReasoningEffort,
   type ReasoningEffort,
 } from '../reasoning-effort.js';
 type Message = Anthropic.Message;
@@ -287,9 +288,10 @@ type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
   thinking?: AnthropicThinkingParam;
   // Anthropic beta feature: output_config.effort (requires beta header
   // effort-2025-11-24), not yet represented in the official SDK types we depend
-  // on. Accepts the full ladder; xhigh/max are gated per model via
-  // anthropicSupportedEffortTiers + clampReasoningEffort.
-  output_config?: { effort: ReasoningEffort };
+  // on. Built-in tiers are gated per model via
+  // anthropicSupportedEffortTiers + clampReasoningEffort; provider-specific
+  // strings pass through verbatim.
+  output_config?: { effort: string };
 };
 
 export class AnthropicContentGenerator implements ContentGenerator {
@@ -684,10 +686,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     request: GenerateContentParameters,
   ): Promise<MessageCreateParamsWithThinking> {
     const sampling = this.buildSamplingParameters(request);
-    // Normalize reasoning.effort once per request (clamps DeepSeek-only
-    // 'max' to 'high' for stricter Anthropic backends and logs the
-    // downgrade once). Both the thinking budget ladder and output_config
-    // consume the result so the wire shape stays internally consistent.
+    // Resolve reasoning.effort once per request. Built-in tiers are clamped to
+    // the active endpoint's declared ladder; provider-specific strings remain
+    // verbatim. Both thinking and output_config consume the same result.
     const effectiveEffort = this.resolveEffectiveEffort(request);
     const thinking = this.buildThinkingConfig(request, effectiveEffort);
     const outputConfig = this.buildOutputConfig(request, effectiveEffort);
@@ -905,7 +906,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
    */
   private resolveEffectiveEffort(
     request: GenerateContentParameters,
-  ): ReasoningEffort | undefined {
+  ): string | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
     }
@@ -916,6 +917,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const effort = reasoning.effort;
     if (effort === undefined) {
       return undefined;
+    }
+    if (!isBuiltInReasoningEffort(effort)) {
+      return effort;
     }
     if (isDeepSeekAnthropicHostname(this.contentGeneratorConfig)) {
       // DeepSeek's anthropic-compatible output_config.effort accepts only
@@ -1012,7 +1016,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private buildThinkingConfig(
     request: GenerateContentParameters,
-    effectiveEffort: ReasoningEffort | undefined,
+    effectiveEffort: string | undefined,
   ): AnthropicThinkingParam | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
@@ -1113,14 +1117,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private buildOutputConfig(
     request: GenerateContentParameters,
-    effectiveEffort: ReasoningEffort | undefined,
-  ): { effort: ReasoningEffort } | undefined {
+    effectiveEffort: string | undefined,
+  ): { effort: string } | undefined {
     // resolveEffectiveEffort already returns undefined when:
     //   - per-request includeThoughts is false (side queries)
     //   - reasoning is disabled or unset
     //   - the user didn't set an effort
-    // and clamps the tier to what the current model supports. Just consume the
-    // value here.
+    // Built-in tiers have already been clamped; provider-specific values are
+    // unchanged. Just consume the value here.
     if (effectiveEffort === undefined) return undefined;
     return { effort: effectiveEffort };
   }

@@ -22211,6 +22211,104 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('setSessionConfigOption', () => {
+    it('broadcasts a persisted reasoning value after the ACP update succeeds', async () => {
+      const handle = makeChannel({
+        setSessionConfigOptionImpl: () => ({ configOptions: [] }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      await bridge.setSessionConfigOption(session.sessionId, {
+        sessionId: 'spoofed',
+        configId: 'reasoning_effort',
+        value: 'ultra',
+        _meta: { 'qwenCode/persistReasoningEffort': true },
+      });
+
+      expect(handle.agent.setSessionConfigOptionCalls).toEqual([
+        {
+          sessionId: session.sessionId,
+          configId: 'reasoning_effort',
+          value: 'ultra',
+          _meta: { 'qwenCode/persistReasoningEffort': true },
+        },
+      ]);
+      const next = await iter[Symbol.asyncIterator]().next();
+      expect(next.value).toMatchObject({
+        type: 'settings_changed',
+        data: { key: 'model.reasoningEffort', value: 'ultra' },
+      });
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('broadcasts a cleared persisted reasoning value as null', async () => {
+      const handle = makeChannel({
+        setSessionConfigOptionImpl: () => ({ configOptions: [] }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.setSessionConfigOption(session.sessionId, {
+        sessionId: session.sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+        _meta: { 'qwenCode/persistReasoningEffort': true },
+      });
+
+      expect(
+        bridge
+          .getSessionReplaySnapshot(session.sessionId)
+          ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+      ).toContainEqual(
+        expect.objectContaining({
+          data: { key: 'model.reasoningEffort', value: null },
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it('does not broadcast session-only or failed reasoning updates', async () => {
+      let shouldFail = false;
+      const handle = makeChannel({
+        setSessionConfigOptionImpl: () => {
+          if (shouldFail) throw new Error('settings write failed');
+          return { configOptions: [] };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.setSessionConfigOption(session.sessionId, {
+        sessionId: session.sessionId,
+        configId: 'reasoning_effort',
+        value: 'medium',
+      });
+      shouldFail = true;
+      await expect(
+        bridge.setSessionConfigOption(session.sessionId, {
+          sessionId: session.sessionId,
+          configId: 'reasoning_effort',
+          value: 'ultra',
+          _meta: { 'qwenCode/persistReasoningEffort': true },
+        }),
+      ).rejects.toThrow();
+
+      expect(
+        bridge
+          .getSessionReplaySnapshot(session.sessionId)
+          ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+      ).toEqual([]);
+      await bridge.shutdown();
+    });
+  });
+
   describe('setSessionModel', () => {
     /** Set up a channel where the agent records setSessionModel calls. */
     async function setup(response: Record<string, unknown> = {}) {

@@ -1099,17 +1099,17 @@ function ModelReasoningControls({
           </div>
           {reasoning.efforts.map((effort) => (
             <button
-              key={effort}
+              key={effort.value}
               type="button"
               className={styles.reasoningEffortRow}
-              aria-pressed={reasoning.effort === effort}
-              data-web-shell-effort={effort}
+              aria-pressed={reasoning.effort === effort.value}
+              data-web-shell-effort={effort.value}
               disabled={!reasoning.enabled || busy || !onSelect}
-              onClick={() => void select(effort)}
+              onClick={() => void select(effort.value)}
             >
-              <span>{t(`reasoning.effort.${effort}`)}</span>
+              <span>{effort.name}</span>
               <span className={styles.dropdownItemCheck}>
-                {reasoning.effort === effort ? <CheckIcon /> : null}
+                {reasoning.effort === effort.value ? <CheckIcon /> : null}
               </span>
             </button>
           ))}
@@ -2316,7 +2316,8 @@ export const ChatEditor = memo(
     const showReasoningOptions = Boolean(reasoning);
     const reasoningEffortLabel = reasoning
       ? reasoning.efforts.length > 0
-        ? t(`reasoning.effort.${reasoning.effort}`)
+        ? (reasoning.efforts.find((option) => option.value === reasoning.effort)
+            ?.name ?? reasoning.effort)
         : t('reasoning.thinking')
       : '';
     const modelChipLabel = showReasoningOptions

@@ -4358,6 +4358,89 @@ describe('Session', () => {
     });
   });
 
+  describe('persistReasoningEffort', () => {
+    it('writes opaque effort values to the model selection scope', () => {
+      session.persistReasoningEffort('ultra');
+
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningEffort',
+        'ultra',
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+    });
+
+    it('deletes blank effort values instead of persisting them', () => {
+      session.persistReasoningEffort('   ');
+
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningEffort',
+        undefined,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+    });
+
+    it('uses the workspace model scope when it owns modelProviders', () => {
+      (mockSettings as unknown as { isTrusted: boolean }).isTrusted = true;
+      mockSettings.workspace.settings = { modelProviders: {} };
+
+      session.persistReasoningEffort('none');
+
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'model.reasoningEffort',
+        'none',
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+    });
+
+    it('writes through the LoadedSettings owned by each Session', () => {
+      const otherSetValue = vi.fn();
+      const otherSettings = {
+        ...mockSettings,
+        setValue: otherSetValue,
+      } as unknown as LoadedSettings;
+      const otherSession = new Session(
+        'other-session-id',
+        mockConfig,
+        mockClient,
+        otherSettings,
+      );
+
+      session.persistReasoningEffort('medium');
+      otherSession.persistReasoningEffort('Vendor.Custom-EFFORT');
+
+      expect(mockSettings.setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningEffort',
+        'medium',
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+      expect(otherSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'model.reasoningEffort',
+        'Vendor.Custom-EFFORT',
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+    });
+
+    it('reports that live reasoning remains active after a write failure', () => {
+      vi.mocked(mockSettings.setValue).mockImplementationOnce(() => {
+        throw new Error('disk full');
+      });
+
+      expect(() => session.persistReasoningEffort('medium')).toThrow(
+        'Reasoning effort is active for the current session, but the default could not be saved: disk full',
+      );
+    });
+  });
+
   describe('sendAvailableCommandsUpdate', () => {
     it('sends available_commands_update from getAvailableCommands()', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([

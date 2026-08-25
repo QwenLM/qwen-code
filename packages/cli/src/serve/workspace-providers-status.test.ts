@@ -277,7 +277,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
       security: { auth: { selectedType: 'openai' } },
-      model: { name: 'qwen3.8-max' },
+      model: { name: 'qwen3.8-max', reasoningEffort: 'medium' },
       modelProviders: {
         openai: [
           { id: 'qwen3.8-max', name: 'Qwen 3.8 Max' },
@@ -295,9 +295,10 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(stable?.configOptions).toMatchObject([
       {
         id: 'reasoning_effort',
-        currentValue: 'xhigh',
+        currentValue: 'medium',
         options: [
           { value: 'none' },
+          { value: 'default' },
           { value: 'low' },
           { value: 'medium' },
           { value: 'xhigh' },
@@ -309,6 +310,101 @@ describe('createWorkspaceProvidersStatusProvider', () => {
         .filter((model) => model !== stable)
         .every((model) => model.configOptions === undefined),
     ).toBe(true);
+  });
+
+  it('projects disabled reasoning from persisted settings', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
+      modelProviders: {
+        openai: [{ id: 'qwen3.8-max', name: 'Qwen 3.8 Max' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const stable = result.providers
+      .flatMap((entry) => entry.models)
+      .find((model) => model.baseModelId === 'qwen3.8-max');
+
+    expect(stable?.configOptions).toMatchObject([
+      { id: 'reasoning_effort', currentValue: 'none' },
+    ]);
+  });
+
+  it('uses the target model provider reasoning default when no global effort is configured', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'thinking-off-model' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'thinking-off-model',
+            name: 'Thinking Off Model',
+            generationConfig: { reasoning: false },
+          },
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            generationConfig: { reasoning: false },
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const stable = result.providers
+      .flatMap((entry) => entry.models)
+      .find((model) => model.baseModelId === 'qwen3.8-max');
+
+    expect(stable?.configOptions).toMatchObject([
+      { id: 'reasoning_effort', currentValue: 'none' },
+    ]);
+  });
+
+  it('preserves a target model provider custom reasoning default in the preview', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            generationConfig: {
+              reasoning: { effort: 'provider.Ultra' },
+            },
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const stable = result.providers
+      .flatMap((entry) => entry.models)
+      .find((model) => model.baseModelId === 'qwen3.8-max');
+
+    const reasoningOption = stable?.configOptions?.[0] as
+      | {
+          id?: string;
+          currentValue?: string;
+          options?: Array<{ value: string; name: string }>;
+        }
+      | undefined;
+    expect(reasoningOption).toMatchObject({
+      id: 'reasoning_effort',
+      currentValue: 'provider.Ultra',
+    });
+    expect(reasoningOption?.options).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: 'provider.Ultra',
+          name: 'provider.Ultra',
+        }),
+      ]),
+    );
   });
 
   it('does not project reasoning preview onto opaque route models', async () => {

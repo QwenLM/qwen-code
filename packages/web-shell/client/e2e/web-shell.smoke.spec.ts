@@ -35,9 +35,10 @@ const qwen38ReasoningConfigOptions = (currentValue = 'xhigh') => [
     currentValue,
     options: [
       { value: 'none', name: 'Thinking off' },
+      { value: 'default', name: 'Default' },
       { value: 'low', name: 'Low' },
       { value: 'medium', name: 'Medium' },
-      { value: 'xhigh', name: 'Extra high' },
+      { value: 'xhigh', name: 'Extra High' },
     ],
     _meta: {
       'qwenCode/reasoning': { defaultEffort: 'xhigh' },
@@ -234,10 +235,12 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   const modelButton = page.locator('[data-web-shell-model-button]');
   const modelSubmenu = page.locator('[data-web-shell-model-submenu-trigger]');
   const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  const modelDefault = controls.locator('[data-web-shell-effort="default"]');
   const medium = controls.locator('[data-web-shell-effort="medium"]');
   const xhigh = controls.locator('[data-web-shell-effort="xhigh"]');
   await expect(controls).toBeVisible();
   await expect(modelSubmenu).toBeVisible();
+  await expect(modelDefault).toBeVisible();
   await expect(modelButton).toContainText('Extra High');
   await expect(thinking).toBeChecked();
   await expect(xhigh).toHaveAttribute('aria-pressed', 'true');
@@ -270,11 +273,55 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   await expect(thinking).toBeChecked();
   await expect(modelButton).toContainText('Medium');
 
+  await modelDefault.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(4);
+  expect(requestBodyRecord(daemon.configOptionRequests()[3]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'default',
+  });
+
   await modelSubmenu.click();
   await expect(page.locator('[data-web-shell-model-submenu]')).toBeVisible();
   await expect(
     page.locator('[data-web-shell-model-submenu] input[type="search"]'),
   ).toBeVisible();
+});
+
+test('preserves a model-specific reasoning effort value and name @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'claude-ultra',
+    state: {
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'medium',
+          options: [
+            { value: 'none', name: 'Thinking Off' },
+            { value: 'medium', name: 'Medium' },
+            { value: 'ultra', name: 'Vendor Ultra' },
+          ],
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await modelButton.click();
+  const ultra = page.locator('[data-web-shell-effort="ultra"]');
+  await expect(ultra).toContainText('Vendor Ultra');
+  await ultra.click();
+
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({ configId: 'reasoning_effort', value: 'ultra' });
+  await expect(modelButton).toContainText('Vendor Ultra');
 });
 
 test('previews qwen3.8-max reasoning before lazy session creation @smoke', async ({

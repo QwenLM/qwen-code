@@ -95,7 +95,6 @@ import {
   normalizeSnapshotPayload,
   startEventLoopLagMonitor,
   refreshMemoryInstruction,
-  applyReasoningEffort,
   REASONING_EFFORT_TIERS,
   addDaemonRequestAttribute,
   extractDaemonTraceContext,
@@ -264,9 +263,11 @@ import {
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   getModelConfiguration,
+  PERSIST_REASONING_EFFORT_META_KEY,
   REASONING_EFFORT_DEFAULT,
   REASONING_EFFORT_NAMES,
   REASONING_EFFORT_NONE,
+  resolveReasoningPreviewState,
   type ModelReasoningConfiguration,
 } from './model-configuration.js';
 import {
@@ -5328,59 +5329,48 @@ class QwenAgent implements Agent {
           break;
         }
         case 'reasoning_effort': {
-          const modelReasoning = this.getModelReasoningConfiguration(
-            session.getConfig(),
-          );
-          if (modelReasoning) {
-            const effortValues = modelReasoning.toggleOnly
-              ? undefined
-              : modelReasoning.efforts;
-            const selected =
-              value === REASONING_EFFORT_NONE
+          const persistReasoningEffort =
+            params._meta?.[PERSIST_REASONING_EFFORT_META_KEY] === true;
+          const config = session.getConfig();
+          const generation = config.getContentGeneratorConfig();
+          const canDisableReasoning = generation.thinkingMandatory !== true;
+          const selected: string | undefined =
+            value === REASONING_EFFORT_NONE
+              ? canDisableReasoning
                 ? REASONING_EFFORT_NONE
-                : modelReasoning.toggleOnly
-                  ? value === REASONING_EFFORT_DEFAULT
-                    ? REASONING_EFFORT_DEFAULT
-                    : undefined
-                  : effortValues?.find((effort) => effort === value);
-            if (!selected) {
-              const choices = [
-                REASONING_EFFORT_NONE,
-                ...(effortValues ?? [REASONING_EFFORT_DEFAULT]),
-              ];
-              throw RequestError.invalidParams(
-                undefined,
-                `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
-              );
-            }
-            const generation = session.getConfig().getContentGeneratorConfig();
-            if (selected === REASONING_EFFORT_NONE) {
-              generation.reasoning = false;
-            } else if (selected === REASONING_EFFORT_DEFAULT) {
-              generation.reasoning = undefined;
-            } else {
-              const current = generation.reasoning;
-              generation.reasoning = {
-                ...(current || {}),
-                effort: selected,
-              };
-            }
-            break;
-          }
-          const effort =
-            value === REASONING_EFFORT_DEFAULT
-              ? undefined
-              : REASONING_EFFORT_TIERS.find((tier) => tier === value);
-          if (value !== REASONING_EFFORT_DEFAULT && effort === undefined) {
+                : undefined
+              : value === REASONING_EFFORT_DEFAULT
+                ? REASONING_EFFORT_DEFAULT
+                : value.trim()
+                  ? value
+                  : undefined;
+          if (!selected) {
             throw RequestError.invalidParams(
               undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+              value === REASONING_EFFORT_NONE
+                ? 'Reasoning cannot be disabled for this model'
+                : 'Reasoning effort cannot be blank',
             );
           }
-          if (!applyReasoningEffort(session.getConfig(), effort)) {
-            throw RequestError.invalidParams(
-              undefined,
-              'Reasoning effort cannot be applied while thinking is disabled',
+          if (selected === REASONING_EFFORT_NONE) {
+            config.disableReasoning();
+          } else {
+            const effort =
+              selected === REASONING_EFFORT_DEFAULT ? undefined : selected;
+            if (effort && config.getReasoningPreference() === false) {
+              config.setReasoningEffort(undefined);
+            }
+            config.setReasoningEffort(effort);
+            if (effort && config.getReasoningEffort() !== effort) {
+              throw RequestError.invalidParams(
+                undefined,
+                'Reasoning effort cannot be applied while thinking is disabled',
+              );
+            }
+          }
+          if (persistReasoningEffort) {
+            session.persistReasoningEffort(
+              selected === REASONING_EFFORT_DEFAULT ? undefined : selected,
             );
           }
           break;
@@ -6603,6 +6593,7 @@ class QwenAgent implements Agent {
               : config.getCurrentModelRegistryBaseUrl?.(),
           )
         : undefined;
+      const reasoningPreference = config.getReasoningPreference?.();
       const providers = new Map<string, ServeWorkspaceProviderStatus>();
 
       for (const option of modelOptions) {
@@ -6622,10 +6613,21 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
+        const reasoningDefault = config.getResolvedModelConfig?.(
+          model.authType,
+          model.id,
+          model.registryBaseUrl,
+        )?.generationConfig.reasoning;
         const configOptions =
           model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
             ? undefined
-            : buildModelReasoningConfigPreview(model.id);
+            : buildModelReasoningConfigPreview(
+                model.id,
+                resolveReasoningPreviewState(
+                  reasoningPreference,
+                  reasoningDefault,
+                ),
+              );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -12417,6 +12419,14 @@ class QwenAgent implements Agent {
 
     const modelReasoning = this.getModelReasoningConfiguration(config);
     const currentModelEffort = config.getReasoningEffort?.();
+    const canDisableReasoning =
+      config.getContentGeneratorConfig().thinkingMandatory !== true;
+    const genericCustomEffort =
+      currentModelEffort &&
+      currentModelEffort !== REASONING_EFFORT_DEFAULT &&
+      !REASONING_EFFORT_TIERS.some((effort) => effort === currentModelEffort)
+        ? currentModelEffort
+        : undefined;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
       ? buildModelReasoningConfigOption(rawCurrentModelId, {
           enabled: config.getContentGeneratorConfig().reasoning !== false,
@@ -12428,8 +12438,20 @@ class QwenAgent implements Agent {
       description: 'How hard reasoning-capable models should think',
       category: 'thought_level',
       type: 'select' as const,
-      currentValue: currentModelEffort ?? REASONING_EFFORT_DEFAULT,
+      currentValue:
+        config.getContentGeneratorConfig().reasoning === false
+          ? REASONING_EFFORT_NONE
+          : (currentModelEffort ?? REASONING_EFFORT_DEFAULT),
       options: [
+        ...(canDisableReasoning
+          ? [
+              {
+                value: REASONING_EFFORT_NONE,
+                name: 'Thinking off',
+                description: 'Disable thinking for this session',
+              },
+            ]
+          : []),
         {
           value: REASONING_EFFORT_DEFAULT,
           name: 'Default',
@@ -12441,6 +12463,15 @@ class QwenAgent implements Agent {
           description:
             'Providers map or clamp the requested tier for the active model',
         })),
+        ...(genericCustomEffort
+          ? [
+              {
+                value: genericCustomEffort,
+                name: genericCustomEffort,
+                description: 'Use the configured model-specific effort',
+              },
+            ]
+          : []),
       ],
     };
 
@@ -12460,9 +12491,9 @@ class QwenAgent implements Agent {
     const reasoning = getModelConfiguration(config.getModel())?.reasoning;
     const currentEffort = config.getReasoningEffort?.();
     return reasoning?.thinking &&
-      (reasoning.toggleOnly ||
-        !currentEffort ||
-        reasoning.efforts.includes(currentEffort))
+      (!currentEffort ||
+        (!reasoning.toggleOnly &&
+          reasoning.efforts.some((effort) => effort.value === currentEffort)))
       ? reasoning
       : undefined;
   }

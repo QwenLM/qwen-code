@@ -9,8 +9,6 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
-  normalizeReasoningEffort,
-  REASONING_EFFORT_TIERS,
   resolveModelConfig,
   resolveProviderProtocol,
   type ModelConfigSourcesInput,
@@ -191,6 +189,10 @@ export interface ResolvedCliGenerationConfig {
   baseUrl: string;
   /** The full generation config to pass to core Config */
   generationConfig: Partial<ContentGeneratorConfig>;
+  /** Explicit global preference, separate from the model/provider default. */
+  reasoningPreference?: false | string;
+  /** Model/provider reasoning before applying the global preference. */
+  reasoningDefault?: ContentGeneratorConfig['reasoning'];
   /** Exact selected modelProviders baseUrl; null selects an implicit route. */
   registryBaseUrl?: string | null;
   /** Source attribution for each resolved field */
@@ -421,25 +423,24 @@ export function resolveCliGenerationConfig(
     enableOpenAILogging,
     openAILoggingDir,
   };
+  const reasoningDefault = generationConfig.reasoning;
 
-  // Apply the global reasoning-effort preference (settings.model.reasoningEffort,
-  // set via /effort) onto the unified reasoning config. Skip when thinking is
-  // explicitly disabled (reasoning === false) so effort never silently
-  // re-enables it; provider adapters clamp the tier to the active model.
+  // Apply the global reasoning-effort preference onto the unified reasoning
+  // config. Effort values are model-defined, so preserve non-blank strings.
   const rawReasoningEffort = settings.model?.reasoningEffort;
-  const reasoningEffort = normalizeReasoningEffort(rawReasoningEffort);
-  // A configured-but-unrecognized value (e.g. a "hihg" typo in settings.json)
-  // normalizes to undefined and is silently skipped below. Surface it as a
-  // warning so the user isn't left wondering why /effort had no effect.
-  const invalidReasoningEffortWarning =
-    rawReasoningEffort && !reasoningEffort
-      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
-      : undefined;
-  if (reasoningEffort && generationConfig.reasoning !== false) {
+  let reasoningPreference: false | string | undefined;
+  if (rawReasoningEffort === 'none') {
+    reasoningPreference = false;
+    generationConfig.reasoning = false;
+  } else if (
+    typeof rawReasoningEffort === 'string' &&
+    rawReasoningEffort.trim()
+  ) {
+    reasoningPreference = rawReasoningEffort;
     generationConfig.reasoning = {
-      ...(generationConfig.reasoning ?? {}),
-      effort: reasoningEffort,
-    };
+      ...(generationConfig.reasoning || {}),
+      effort: rawReasoningEffort,
+    } as ContentGeneratorConfig['reasoning'];
   }
 
   return {
@@ -447,13 +448,14 @@ export function resolveCliGenerationConfig(
     apiKey: resolved.config.apiKey || '',
     baseUrl: resolved.config.baseUrl || '',
     generationConfig,
+    reasoningPreference,
+    reasoningDefault,
     ...(modelProvider
       ? { registryBaseUrl: modelProvider.baseUrl ?? null }
       : {}),
     sources: resolved.sources,
     warnings: [
       ...resolved.warnings,
-      ...(invalidReasoningEffortWarning ? [invalidReasoningEffortWarning] : []),
       ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]

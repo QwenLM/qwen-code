@@ -9000,6 +9000,26 @@ export class Session implements SessionContext {
       });
   }
 
+  persistReasoningEffort(value: string | undefined): void {
+    const persistedValue = value?.trim() ? value : undefined;
+    const persistScope = getPersistScopeForModelSelection(this.settings);
+    try {
+      this.settings.setValue(
+        persistScope,
+        'model.reasoningEffort',
+        persistedValue,
+        undefined,
+        { throwOnWriteFailure: true },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw RequestError.internalError(
+        { errorKind: 'reasoning_effort_persistence_failed' },
+        `Reasoning effort is active for the current session, but the default could not be saved: ${message}`,
+      );
+    }
+  }
+
   /**
    * Sets the model for the current session.
    * Validates the model ID and switches the model via Config.

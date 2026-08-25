@@ -28,7 +28,6 @@ import {
 } from '../models/modelConfigErrors.js';
 import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
 import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
-import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
  * Interface abstracting the core content generation functionality.
@@ -132,9 +131,9 @@ export type ContentGeneratorConfig = {
   reasoning?:
     | false
     | {
-        // Unified reasoning-effort ladder (see core/reasoning-effort.ts).
-        // Providers accept different subsets and use different wire fields;
-        // each provider adapter maps + clamps this tier onto the active model:
+        // The built-in picker exposes the unified five-tier ladder from
+        // core/reasoning-effort.ts. Provider-specific values also pass through
+        // this runtime boundary and are interpreted by the active adapter:
         //   - 'xhigh'/'max' are extra-strong tiers (DeepSeek `reasoning_effort`,
         //     Anthropic `output_config.effort` on Opus 4.7+, OpenAI `xhigh`).
         //   - Generic OpenAI-compatible endpoints and the DashScope
@@ -146,7 +145,7 @@ export type ContentGeneratorConfig = {
         //     debugLogger.warn, when the baseURL doesn't look like a
         //     DeepSeek-compatible endpoint, so configs targeting DeepSeek don't
         //     400 when the same auth profile is reused against api.anthropic.com.
-        effort?: ReasoningEffort;
+        effort?: string;
         budget_tokens?: number;
       };
   proxy?: string | undefined;

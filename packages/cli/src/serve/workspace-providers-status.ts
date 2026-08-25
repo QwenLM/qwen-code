@@ -33,7 +33,10 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
-import { buildModelReasoningConfigPreview } from '../acp-integration/model-configuration.js';
+import {
+  buildModelReasoningConfigPreview,
+  resolveReasoningPreviewState,
+} from '../acp-integration/model-configuration.js';
 import { snapshotProcessEnv } from './env-snapshot.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
@@ -126,6 +129,13 @@ function buildWorkspaceProvidersStatus(
     const modelOptions = buildAcpModelOptions(
       modelsConfig.getAllConfiguredModels(),
     );
+    const reasoningEffort = settings.model?.reasoningEffort;
+    const reasoningPreference =
+      reasoningEffort === 'none'
+        ? false
+        : typeof reasoningEffort === 'string' && reasoningEffort.trim()
+          ? reasoningEffort
+          : undefined;
     const currentAcpModelId = hasCurrentModel
       ? getCurrentAcpModelId(
           modelOptions,
@@ -163,9 +173,17 @@ function buildWorkspaceProvidersStatus(
 
       const isCurrent =
         currentAuth === model.authType && currentAcpModelId === modelId;
+      const reasoningDefault = modelsConfig.getResolvedModel(
+        model.authType,
+        model.id,
+        model.registryBaseUrl,
+      )?.generationConfig.reasoning;
       const configOptions = modelId.startsWith(ACP_ROUTE_ID_PREFIX)
         ? undefined
-        : buildModelReasoningConfigPreview(model.id);
+        : buildModelReasoningConfigPreview(
+            model.id,
+            resolveReasoningPreviewState(reasoningPreference, reasoningDefault),
+          );
       const providerModel: ServeWorkspaceProviderModel = {
         modelId,
         baseModelId: parseAcpBaseModelId(effectiveModelId),

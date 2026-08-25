@@ -145,17 +145,20 @@ export function mapReasoningControls(
     .find((item) => getString(item, 'id') === 'reasoning_effort');
   const rawOptions = option?.['options'];
   if (!option || !Array.isArray(rawOptions)) return undefined;
-  const values = rawOptions.flatMap((item) => {
-    const value = getString(getRecord(item), 'value');
-    return value ? [value] : [];
+  const options = rawOptions.flatMap((item) => {
+    const record = getRecord(item);
+    const value = getString(record, 'value');
+    return value ? [{ value, name: getString(record, 'name') ?? value }] : [];
   });
+  const values = options.map((item) => item.value);
   if (!values.includes('none')) return undefined;
   const currentValue = getString(option, 'currentValue');
   if (!currentValue || !values.includes(currentValue)) return undefined;
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
-  const selectableValues = values.filter((value) => value !== 'none');
-  if (selectableValues.length === 0) return undefined;
+  const efforts = options.filter((item) => item.value !== 'none');
+  const selectableValues = efforts.map((item) => item.value);
+  if (efforts.length === 0) return undefined;
   if (reasoningMeta?.['toggleOnly'] === true) {
     return {
       enabled: currentValue !== 'none',
@@ -163,13 +166,12 @@ export function mapReasoningControls(
       efforts: [],
     };
   }
-  const efforts = selectableValues;
   const defaultEffort = getString(reasoningMeta, 'defaultEffort');
   const effort =
     [currentValue, fallbackEffort, defaultEffort].find(
       (value): value is string =>
-        typeof value === 'string' && efforts.includes(value),
-    ) ?? efforts[0]!;
+        typeof value === 'string' && selectableValues.includes(value),
+    ) ?? efforts[0]!.value;
   return { enabled: currentValue !== 'none', effort, efforts };
 }
 

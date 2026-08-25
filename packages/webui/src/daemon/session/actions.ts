@@ -24,6 +24,7 @@ import type {
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
+  DaemonWorkspaceProvidersStatus,
   GoalControlRequest,
   GoalSnapshotV2,
   DaemonBranchSessionResult,
@@ -102,6 +103,22 @@ function imageAttachmentName(mimeType: string): string {
   return `image.${extension === 'jpg' ? 'jpeg' : extension || 'img'}`;
 }
 
+function isReasoningEffortPersistenceFailure(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError)) return false;
+  const body =
+    typeof error.body === 'object' && error.body !== null
+      ? (error.body as Record<string, unknown>)
+      : undefined;
+  const data =
+    typeof body?.['data'] === 'object' && body['data'] !== null
+      ? (body['data'] as Record<string, unknown>)
+      : undefined;
+  return data?.['errorKind'] === 'reasoning_effort_persistence_failed';
+}
+
+const REASONING_EFFORT_PERSISTENCE_FAILURE_MESSAGE =
+  'The current session was updated, but the default value was not saved';
+
 function promptFilesForTranscript(
   files: ReturnType<typeof normalizePromptFiles>,
   fileReferences: ReadonlyArray<DaemonSessionAttachmentReference | undefined>,
@@ -178,6 +195,7 @@ export interface CreateDaemonSessionActionsArgs {
       'approvalMode' | 'sourceType' | 'worktree' | 'branch'
     >,
   ) => Promise<DaemonSessionClient>;
+  refreshWorkspaceProviders?: () => Promise<DaemonWorkspaceProvidersStatus>;
   getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
@@ -255,6 +273,7 @@ export function createDaemonSessionActions({
   passiveAssistantDoneTimerRef,
   getCreateSessionRequest,
   createDetachedSession,
+  refreshWorkspaceProviders,
   getConnection,
   hasSessionActivePrompt,
   resetCurrentSessionActivePrompt,
@@ -1096,6 +1115,13 @@ export function createDaemonSessionActions({
           ),
           'Set reasoning effort timed out',
         );
+        let providers: DaemonWorkspaceProvidersStatus | undefined;
+        try {
+          providers = await refreshWorkspaceProviders?.();
+        } catch {
+          // The session mutation succeeded; a provider preview refresh is
+          // best-effort and must not turn it into a failed action.
+        }
         const current = getConnection();
         if (
           sessionRef.current === session &&
@@ -1115,6 +1141,7 @@ export function createDaemonSessionActions({
             const configOptions = result.configOptions;
             return {
               ...current,
+              ...(providers ? { providers } : {}),
               reasoning: mapReasoningControls(
                 configOptions,
                 current.reasoning?.effort,
@@ -1129,10 +1156,52 @@ export function createDaemonSessionActions({
           });
         }
       } catch (error) {
+        const persistenceFailure = isReasoningEffortPersistenceFailure(error);
+        if (persistenceFailure && sessionRef.current === session) {
+          try {
+            const context = await withActionTimeout(
+              session.context(),
+              'Refresh reasoning state timed out',
+            );
+            if (Array.isArray(context.state.configOptions)) {
+              const current = getConnection();
+              if (
+                sessionRef.current === session &&
+                sourceModelGeneration === modelMutationGeneration &&
+                current.currentModel === sourceModel &&
+                actionToken > appliedReasoningActionToken
+              ) {
+                appliedReasoningActionToken = actionToken;
+                setConnection((current) => {
+                  if (
+                    sessionRef.current !== session ||
+                    sourceModelGeneration !== modelMutationGeneration ||
+                    current.currentModel !== sourceModel
+                  ) {
+                    return current;
+                  }
+                  return {
+                    ...current,
+                    context,
+                    reasoning: mapSessionContextReasoning(
+                      context,
+                      current.reasoning?.effort,
+                    ),
+                  };
+                });
+              }
+            }
+          } catch {
+            // Preserve the original persistence error when the best-effort
+            // live-state refresh is unavailable.
+          }
+        }
         throw dispatchActionError(
           noticeForSession(session),
           'Set reasoning effort failed',
-          error,
+          persistenceFailure
+            ? new Error(REASONING_EFFORT_PERSISTENCE_FAILURE_MESSAGE)
+            : error,
           'set_reasoning_effort',
         );
       }

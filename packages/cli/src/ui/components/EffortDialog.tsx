@@ -21,7 +21,7 @@ interface EffortDialogProps {
   onSelect: (effort: ReasoningEffort | undefined) => void;
 
   /** The currently active effort, used to pre-select the list. */
-  currentEffort?: ReasoningEffort;
+  currentEffort?: string;
 }
 
 const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
@@ -47,7 +47,10 @@ export function EffortDialog({
   // which would mislead the user into thinking 'high' is their current setting
   // when in fact the model/provider default applies.
   const initialIndex = currentEffort
-    ? Math.max(0, REASONING_EFFORT_TIERS.indexOf(currentEffort))
+    ? Math.max(
+        0,
+        REASONING_EFFORT_TIERS.findIndex((tier) => tier === currentEffort),
+      )
     : 0;
 
   const handleSelect = useCallback(

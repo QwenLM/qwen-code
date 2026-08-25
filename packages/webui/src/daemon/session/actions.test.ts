@@ -148,7 +148,11 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next.models?.[0]?.reasoningPreview).toEqual({
       enabled: true,
       effort: 'xhigh',
-      efforts: ['low', 'medium', 'xhigh'],
+      efforts: [
+        { value: 'low', name: 'low' },
+        { value: 'medium', name: 'medium' },
+        { value: 'xhigh', name: 'xhigh' },
+      ],
     });
   });
 
@@ -2397,6 +2401,146 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('refreshes the persisted reasoning preview before the session is cleared', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const configOptions = [
+      {
+        id: 'reasoning_effort',
+        name: 'Reasoning effort',
+        type: 'select',
+        currentValue: 'medium',
+        options: [
+          { value: 'none', name: 'Thinking off' },
+          { value: 'medium', name: 'Medium' },
+          { value: 'xhigh', name: 'Extra High' },
+        ],
+      },
+    ];
+    const providers = {
+      v: 1 as const,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      current: { modelId: 'qwen3.8-max' },
+      providers: [
+        {
+          kind: 'model_provider' as const,
+          status: 'ok' as const,
+          authType: 'qwen-oauth',
+          current: true,
+          models: [
+            {
+              modelId: 'qwen3.8-max',
+              baseModelId: 'qwen3.8-max',
+              name: 'Qwen 3.8 Max',
+              isCurrent: true,
+              isRuntime: false,
+              configOptions,
+            },
+          ],
+        },
+      ],
+    };
+    source.setConfigOption.mockResolvedValueOnce({ configOptions });
+    const refreshWorkspaceProviders = vi.fn().mockResolvedValue(providers);
+    const { actions, getConnection } = createActionsHarness({
+      session: source,
+      refreshWorkspaceProviders,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: source.sessionId,
+        clientId: source.clientId,
+        currentModel: 'qwen3.8-max',
+        providers: {
+          ...providers,
+          providers: providers.providers.map((provider) => ({
+            ...provider,
+            models: provider.models.map((model) => ({
+              ...model,
+              configOptions: configOptions.map((option) => ({
+                ...option,
+                currentValue: 'xhigh',
+              })),
+            })),
+          })),
+        },
+      },
+    });
+
+    await actions.setReasoningEffort('medium');
+
+    const cleared = getConnectionAfterSessionClear(
+      getConnection(),
+      source.sessionId,
+    );
+    expect(refreshWorkspaceProviders).toHaveBeenCalledOnce();
+    expect(cleared.models?.[0]?.reasoningPreview?.effort).toBe('medium');
+  });
+
+  it('refreshes live reasoning after the default settings write fails', async () => {
+    const source = createMockSession('session-a', 'client-a');
+    const efforts = [
+      { value: 'medium', name: 'Medium' },
+      { value: 'xhigh', name: 'Extra High' },
+    ];
+    const configOptions = [
+      {
+        id: 'reasoning_effort',
+        name: 'Reasoning effort',
+        type: 'select',
+        currentValue: 'xhigh',
+        options: [{ value: 'none', name: 'Thinking off' }, ...efforts],
+      },
+    ];
+    const liveContext = {
+      ...contextStatus(source.sessionId),
+      state: { configOptions },
+    };
+    source.setConfigOption.mockRejectedValueOnce(
+      new DaemonHttpError(
+        500,
+        {
+          data: { errorKind: 'reasoning_effort_persistence_failed' },
+        },
+        'Internal error',
+      ),
+    );
+    source.context.mockResolvedValueOnce(liveContext);
+    const addNotice = vi.fn();
+    const { actions, getConnection } = createActionsHarness({
+      session: source,
+      addNotice,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: source.sessionId,
+        clientId: source.clientId,
+        currentModel: 'qwen3.8-max',
+        context: {
+          ...contextStatus(source.sessionId),
+          state: {},
+        },
+        reasoning: { enabled: true, effort: 'medium', efforts },
+      },
+    });
+
+    await expect(actions.setReasoningEffort('xhigh')).rejects.toThrow(
+      'The current session was updated, but the default value was not saved',
+    );
+
+    expect(source.context).toHaveBeenCalledOnce();
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message:
+          'Set reasoning effort failed: The current session was updated, but the default value was not saved',
+      }),
+    );
+    expect(getConnection()).toMatchObject({
+      context: liveContext,
+      reasoning: { enabled: true, effort: 'xhigh', efforts },
+    });
+  });
+
   it('does not apply a late approval mode to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
@@ -2514,6 +2658,7 @@ function createActionsHarness(
     createDetachedSession?: ReturnType<typeof vi.fn>;
     manualSessionClearRef?: { current: boolean };
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
+    refreshWorkspaceProviders?: ReturnType<typeof vi.fn>;
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
@@ -2564,6 +2709,7 @@ function createActionsHarness(
             'detached-session',
           ) as unknown as DaemonSessionClient,
       )) as () => Promise<DaemonSessionClient>,
+    refreshWorkspaceProviders: opts.refreshWorkspaceProviders,
     getConnection: () => connection,
     hasSessionActivePrompt: () => false,
     resetCurrentSessionActivePrompt: vi.fn(),
@@ -2617,6 +2763,11 @@ function createMockSession(
     cancel: vi.fn(async () => undefined),
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
+    setConfigOption: vi.fn<DaemonSessionClient['setConfigOption']>(
+      async () => ({
+        configOptions: [],
+      }),
+    ),
     setModel: vi.fn(async () => ({})),
     uploadAttachment: vi.fn(
       async (data: Blob, name: string, mimeType: string) => ({

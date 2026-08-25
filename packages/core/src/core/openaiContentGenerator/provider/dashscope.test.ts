@@ -697,6 +697,22 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result['enable_thinking']).toBe(true);
     });
 
+    it('rejects a provider-specific effort on a toggle-only qwen model', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          reasoning: { effort: 'vendor.ultra' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      expect(() =>
+        generator.buildRequest({ ...baseRequest }, 'test-prompt-id'),
+      ).toThrow(
+        'Unsupported reasoning effort "vendor.ultra" for toggle-only Qwen model "qwen-max"',
+      );
+    });
+
     describe.each(['qwen3.8-max', 'qwen3.8-max-preview'])(
       '%s reasoning effort',
       (model) => {
@@ -719,6 +735,33 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
             const result = generator.buildRequest(
               requestWithReasoning,
+              'test-prompt-id',
+            ) as unknown as Record<string, unknown>;
+
+            expect(result['reasoning_effort']).toBe(effort);
+            expect(result['enable_thinking']).toBeUndefined();
+            expect(result['reasoning']).toBeUndefined();
+          },
+        );
+
+        it.each(['minimal', 'ultra', 'vendor.custom'])(
+          'passes provider-specific value %s through verbatim',
+          (effort) => {
+            const generator = new DashScopeOpenAICompatibleProvider(
+              {
+                ...mockContentGeneratorConfig,
+                model,
+                reasoning: { effort },
+              } as ContentGeneratorConfig,
+              mockCliConfig,
+            );
+
+            const result = generator.buildRequest(
+              {
+                ...baseRequest,
+                model,
+                reasoning: { effort },
+              } as unknown as Parameters<typeof generator.buildRequest>[0],
               'test-prompt-id',
             ) as unknown as Record<string, unknown>;
 

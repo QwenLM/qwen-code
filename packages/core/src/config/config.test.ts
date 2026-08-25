@@ -5246,6 +5246,8 @@ describe('Server Config (config.ts)', () => {
       const config = new Config({
         ...baseParams,
         generationConfig: { reasoning: { effort: 'max' } },
+        reasoningPreference: 'max',
+        reasoningDefault: undefined,
       });
       const authType = AuthType.USE_GEMINI;
 
@@ -5267,6 +5269,265 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('preserves disabled reasoning across an auth refresh that wipes it', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: false },
+        reasoningPreference: false,
+        reasoningDefault: undefined,
+      });
+      const authType = AuthType.USE_GEMINI;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+    });
+
+    it('round-trips an arbitrary reasoning effort through the public config API', async () => {
+      const config = new Config(baseParams);
+      const authType = AuthType.USE_GEMINI;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+      config.setReasoningEffort('vendor.ultra');
+
+      expect(config.getReasoningEffort()).toBe('vendor.ultra');
+    });
+
+    it('clears an explicit preference back to the current model default', async () => {
+      const authType = AuthType.USE_OPENAI;
+      const config = new Config({
+        ...baseParams,
+        authType,
+        model: 'custom-model',
+        generationConfig: {
+          apiKey: 'test-key',
+          baseUrl: 'https://custom.example.com/v1',
+          reasoning: { effort: 'provider.default' },
+        },
+      });
+
+      await config.refreshAuth(authType);
+      config.setReasoningEffort('session.ultra');
+      expect(config.getReasoningPreference()).toBe('session.ultra');
+      expect(config.getReasoningEffort()).toBe('session.ultra');
+
+      config.setReasoningEffort(undefined);
+
+      expect(config.getReasoningPreference()).toBeUndefined();
+      expect(config.getReasoningEffort()).toBe('provider.default');
+    });
+
+    it('tracks explicit reasoning disable separately from the model default', async () => {
+      const authType = AuthType.USE_OPENAI;
+      const config = new Config({
+        ...baseParams,
+        authType,
+        model: 'custom-model',
+        generationConfig: {
+          apiKey: 'test-key',
+          baseUrl: 'https://custom.example.com/v1',
+          reasoning: { effort: 'provider.default' },
+        },
+      });
+
+      await config.refreshAuth(authType);
+      config.disableReasoning();
+      expect(config.getReasoningPreference()).toBe(false);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+
+      config.setReasoningEffort(undefined);
+
+      expect(config.getReasoningPreference()).toBeUndefined();
+      expect(config.getReasoningEffort()).toBe('provider.default');
+    });
+
+    it('uses the target model reasoning default when no global override is configured', async () => {
+      const authType = AuthType.USE_OPENAI;
+      const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      const config = new Config({
+        ...baseParams,
+        authType,
+        model: 'model-a',
+        generationConfig: { reasoning: false },
+        modelProvidersConfig: {
+          [authType]: [
+            {
+              id: 'model-a',
+              baseUrl,
+              generationConfig: { reasoning: false },
+            },
+            {
+              id: 'model-b',
+              baseUrl,
+              generationConfig: {
+                reasoning: { effort: 'provider.ultra' },
+              },
+            },
+          ],
+        },
+      });
+
+      await config.refreshAuth(authType);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+
+      await config.switchModel(authType, 'model-b');
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'provider.ultra',
+      });
+    });
+
+    it('preserves an arbitrary reasoning effort across an auth refresh', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'vendor.ultra' } },
+        reasoningPreference: 'vendor.ultra',
+        reasoningDefault: undefined,
+      });
+      const authType = AuthType.USE_GEMINI;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getReasoningEffort()).toBe('vendor.ultra');
+    });
+
+    it.each([
+      {
+        label: 'an arbitrary effort',
+        reasoning: { effort: 'vendor.ultra' } as const,
+      },
+      { label: 'disabled reasoning', reasoning: false as const },
+    ])('preserves $label across a hot model switch', async ({ reasoning }) => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning },
+        reasoningPreference: reasoning === false ? false : reasoning.effort,
+        reasoningDefault: undefined,
+      });
+      const authType = AuthType.QWEN_OAUTH;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+
+      const modelsConfig = (
+        config as unknown as {
+          modelsConfig: {
+            getGenerationConfig(): {
+              reasoning?: ContentGeneratorConfig['reasoning'];
+            };
+          };
+        }
+      ).modelsConfig;
+      delete modelsConfig.getGenerationConfig().reasoning;
+
+      await (
+        config as unknown as {
+          handleModelChange: (
+            authType: AuthType,
+            requiresRefresh: boolean,
+          ) => Promise<void>;
+        }
+      ).handleModelChange(authType, false);
+
+      expect(config.getContentGeneratorConfig().reasoning).toEqual(reasoning);
+      expect(modelsConfig.getGenerationConfig().reasoning).toBeUndefined();
+    });
+
+    it.each([
+      {
+        label: 'an arbitrary effort',
+        reasoning: { effort: 'vendor.ultra' } as const,
+      },
+      { label: 'disabled reasoning', reasoning: false as const },
+    ])(
+      'preserves $label across a full-refresh model switch',
+      async ({ reasoning }) => {
+        const config = new Config({
+          ...baseParams,
+          generationConfig: { reasoning },
+          reasoningPreference: reasoning === false ? false : reasoning.effort,
+          reasoningDefault: undefined,
+        });
+        const authType = AuthType.USE_GEMINI;
+
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            apiKey: 'test-key',
+            model: 'gemini-a',
+            authType,
+          } as ContentGeneratorConfig,
+          sources: {},
+        });
+        await config.refreshAuth(authType);
+
+        const genConfig = (
+          config as unknown as {
+            modelsConfig: {
+              getGenerationConfig(): {
+                reasoning?: ContentGeneratorConfig['reasoning'];
+              };
+            };
+          }
+        ).modelsConfig.getGenerationConfig();
+        delete genConfig.reasoning;
+
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            apiKey: 'test-key',
+            model: 'gemini-b',
+            authType,
+          } as ContentGeneratorConfig,
+          sources: {},
+        });
+
+        await (
+          config as unknown as {
+            handleModelChange: (
+              authType: AuthType,
+              requiresRefresh: boolean,
+            ) => Promise<void>;
+          }
+        ).handleModelChange(authType, true);
+
+        expect(config.getContentGeneratorConfig().reasoning).toEqual(reasoning);
+        expect(genConfig.reasoning).toBeUndefined();
+      },
+    );
+
     it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {
       // Regression for the model-switch path: switchModel() runs
       // applyResolvedModelDefaults() (which overwrites modelsConfig's
@@ -5278,6 +5539,8 @@ describe('Server Config (config.ts)', () => {
       const config = new Config({
         ...baseParams,
         generationConfig: { reasoning: { effort: 'high' } },
+        reasoningPreference: 'high',
+        reasoningDefault: undefined,
       });
       const authType = AuthType.USE_GEMINI;
 

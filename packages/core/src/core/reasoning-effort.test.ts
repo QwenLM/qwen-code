@@ -10,6 +10,7 @@ import {
   REASONING_EFFORT_TIERS,
   applyReasoningEffort,
   clampReasoningEffort,
+  isBuiltInReasoningEffort,
   normalizeReasoningEffort,
   type ReasoningEffort,
 } from './reasoning-effort.js';
@@ -23,6 +24,19 @@ describe('REASONING_EFFORT_TIERS', () => {
       'xhigh',
       'max',
     ]);
+  });
+});
+
+describe('isBuiltInReasoningEffort', () => {
+  it('accepts only the five tiers exposed by the built-in picker', () => {
+    for (const tier of REASONING_EFFORT_TIERS) {
+      expect(isBuiltInReasoningEffort(tier)).toBe(true);
+    }
+    expect(isBuiltInReasoningEffort('minimal')).toBe(false);
+    expect(isBuiltInReasoningEffort('ultra')).toBe(false);
+    expect(isBuiltInReasoningEffort('vendor.custom')).toBe(false);
+    expect(isBuiltInReasoningEffort('none')).toBe(false);
+    expect(isBuiltInReasoningEffort(undefined)).toBe(false);
   });
 });
 

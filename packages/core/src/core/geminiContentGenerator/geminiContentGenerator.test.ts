@@ -356,6 +356,52 @@ describe('GeminiContentGenerator', () => {
     );
   });
 
+  it("maps provider-specific reasoning effort 'minimal' to MINIMAL", async () => {
+    const generatorWithMinimal = new GeminiContentGenerator(
+      { apiKey: 'test' },
+      {
+        model: 'gemini-2.5-pro',
+        reasoning: { effort: 'minimal' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    );
+
+    await generatorWithMinimal.generateContent(
+      { model: 'gemini-2.5-pro', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: 'MINIMAL',
+          },
+        }),
+      }),
+    );
+  });
+
+  it('rejects an unsupported provider-specific reasoning effort', async () => {
+    const generatorWithUnknown = new GeminiContentGenerator(
+      { apiKey: 'test' },
+      {
+        model: 'gemini-2.5-pro',
+        reasoning: { effort: 'vendor.ultra' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    );
+
+    await expect(
+      generatorWithUnknown.generateContent(
+        { model: 'gemini-2.5-pro', contents: [] },
+        'prompt-id',
+      ),
+    ).rejects.toThrow('Unsupported Gemini reasoning effort: "vendor.ultra"');
+    expect(mockGoogleGenAI.models.generateContent).not.toHaveBeenCalled();
+  });
+
   it('should strip displayName from inlineData and fileData before sending to API', async () => {
     const request = {
       model: 'gemini-1.5-flash',

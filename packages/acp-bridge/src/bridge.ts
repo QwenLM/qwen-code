@@ -10863,7 +10863,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         () => undefined,
         () => undefined,
       );
-      return (await work) as SetSessionConfigOptionResponse;
+      const response = (await work) as SetSessionConfigOptionResponse;
+      if (
+        req.configId === 'reasoning_effort' &&
+        req._meta?.['qwenCode/persistReasoningEffort'] === true
+      ) {
+        broadcastWorkspaceEvent({
+          type: 'settings_changed',
+          data: {
+            key: 'model.reasoningEffort',
+            value: req.value === 'default' ? null : req.value,
+          },
+        });
+      }
+      return response;
     },
 
     async setSessionLanguage(sessionId, params, context) {

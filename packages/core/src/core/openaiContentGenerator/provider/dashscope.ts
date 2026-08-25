@@ -22,7 +22,10 @@ import {
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import { clampReasoningEffort } from '../../reasoning-effort.js';
+import {
+  clampReasoningEffort,
+  isBuiltInReasoningEffort,
+} from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
@@ -549,6 +552,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return { reasoning_effort: this.clampTieredEffort(reasoning.effort) };
     }
     if (isQwenFamilyWireModel(wireModel)) {
+      if (!isBuiltInReasoningEffort(reasoning.effort)) {
+        throw new Error(
+          `Unsupported reasoning effort ${JSON.stringify(reasoning.effort)} for toggle-only Qwen model ${JSON.stringify(wireModel)}`,
+        );
+      }
       return { enable_thinking: true };
     }
     return {};
@@ -563,7 +571,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * `extra_body` / `samplingParams` `reasoning_effort` is a documented
    * verbatim override and is merged after this, so it still ships unchanged.
    */
-  private clampTieredEffort(effort: ReasoningEffort): ReasoningEffort {
+  private clampTieredEffort(effort: string): string {
+    if (!isBuiltInReasoningEffort(effort)) {
+      return effort;
+    }
     const clamped = clampReasoningEffort(effort, DASHSCOPE_TIERED_EFFORTS);
     if (clamped !== effort && !this.effortClampWarned) {
       debugLogger.warn(
