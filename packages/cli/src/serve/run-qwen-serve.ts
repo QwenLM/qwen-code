@@ -4908,6 +4908,13 @@ async function runQwenServeImpl(
     // `mcp_register`). Inert unless `opts.clientMcpOverWs` is on.
     const clientMcpSenderRegistry = new ClientMcpSenderRegistry();
     const runtimeBridges: AcpSessionBridge[] = [];
+    const publishGlobalWorkspaceEvent = (
+      event: Omit<BridgeEvent, 'id' | 'v'>,
+    ): void => {
+      for (const runtimeBridge of runtimeBridges) {
+        runtimeBridge.publishWorkspaceEvent(event);
+      }
+    };
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(
       {
         maxTotalSessions: opts.maxTotalSessions,
@@ -5206,6 +5213,7 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        publishGlobalWorkspaceEvent,
         sessionAttachmentsRoot: sessionAttachmentsRoot(
           boundWorkspace,
           primarySessionRuntimeBaseDir,
@@ -5653,6 +5661,7 @@ async function runQwenServeImpl(
         ),
       });
       const secondaryBridge = runtime.createAcpSessionBridge({
+        publishGlobalWorkspaceEvent,
         sessionAttachmentsRoot: sessionAttachmentsRoot(
           workspaceInput.cwd,
           secondaryEnv.sessionRuntimeBaseDir,
@@ -6225,6 +6234,7 @@ async function runQwenServeImpl(
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
         wsBridge = runtime.createAcpSessionBridge({
+          publishGlobalWorkspaceEvent,
           sessionAttachmentsRoot: sessionAttachmentsRoot(
             cwd,
             wsEnv.sessionRuntimeBaseDir,

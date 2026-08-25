@@ -18,6 +18,7 @@ vi.mock('../../i18n/index.js', () => ({
 describe('effortCommand', () => {
   let setReasoningEffort: ReturnType<typeof vi.fn>;
   let getReasoningEffort: ReturnType<typeof vi.fn>;
+  let getReasoningPreference: ReturnType<typeof vi.fn>;
   let setValue: ReturnType<typeof vi.fn>;
   let context: CommandContext;
 
@@ -29,11 +30,13 @@ describe('effortCommand', () => {
       currentEffort = effort;
     });
     getReasoningEffort = vi.fn(() => currentEffort);
+    getReasoningPreference = vi.fn();
     setValue = vi.fn();
     context = createMockCommandContext({
       services: {
         config: {
           getReasoningEffort,
+          getReasoningPreference,
           setReasoningEffort,
           getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
         } as unknown as Config,
@@ -51,6 +54,23 @@ describe('effortCommand', () => {
     const res = await effortCommand.action!(context, '');
     expect(res).toMatchObject({ type: 'dialog', dialog: 'effort' });
     expect(setReasoningEffort).not.toHaveBeenCalled();
+  });
+
+  it('reports explicit disabled reasoning separately from an unset effort', async () => {
+    getReasoningPreference.mockReturnValue(false);
+    const nonInteractive = { ...context, executionMode: 'non_interactive' };
+
+    const res = await effortCommand.action!(
+      nonInteractive as typeof context,
+      '',
+    );
+
+    expect((res as { content: string }).content).toContain(
+      'Thinking is disabled.',
+    );
+    expect((res as { content: string }).content).not.toContain(
+      'using the model/provider default',
+    );
   });
 
   it('lists tiers when called with no args non-interactively', async () => {

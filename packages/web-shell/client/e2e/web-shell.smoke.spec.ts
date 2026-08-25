@@ -279,6 +279,8 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
     configId: 'reasoning_effort',
     value: 'default',
   });
+  await expect(modelDefault).toHaveAttribute('aria-pressed', 'true');
+  await expect(modelButton).toContainText('Default');
 
   await modelSubmenu.click();
   await expect(page.locator('[data-web-shell-model-submenu]')).toBeVisible();

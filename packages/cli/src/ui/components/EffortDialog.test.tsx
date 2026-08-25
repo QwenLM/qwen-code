@@ -34,7 +34,7 @@ describe('EffortDialog', () => {
     expect(frame).toContain('Use Enter to select, Esc to cancel');
   });
 
-  it('shows the "no effort configured" hint when currentEffort is unset', () => {
+  it('shows the "no effort configured" hint when the preference is unset', () => {
     const { lastFrame } = renderWithProviders(
       <EffortDialog onSelect={vi.fn()} />,
     );
@@ -44,12 +44,22 @@ describe('EffortDialog', () => {
     );
   });
 
-  it('hides the "no effort configured" hint when currentEffort is set', () => {
+  it('hides the "no effort configured" hint when a preference is set', () => {
     const { lastFrame } = renderWithProviders(
-      <EffortDialog onSelect={vi.fn()} currentEffort="high" />,
+      <EffortDialog onSelect={vi.fn()} currentPreference="high" />,
     );
 
     expect(lastFrame() ?? '').not.toContain('No effort configured');
+  });
+
+  it('distinguishes disabled thinking from an unset preference', () => {
+    const { lastFrame } = renderWithProviders(
+      <EffortDialog onSelect={vi.fn()} currentPreference={false} />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('Thinking is disabled.');
+    expect(frame).not.toContain('No effort configured');
   });
 
   it('registers an active Escape handler that cancels with undefined', () => {

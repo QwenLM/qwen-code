@@ -256,6 +256,7 @@ import {
 } from '../extension-skills.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
+import { REASONING_EFFORT_PERSISTENCE_ERROR_KIND } from '@qwen-code/sdk/daemon';
 import type {
   AvailableCommand,
   ContentBlock,
@@ -273,7 +274,10 @@ import type {
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import { deleteNestedPropertySafe } from '../../config/settingsUtils.js';
+import {
+  deleteNestedPropertySafe,
+  settingExistsInScope,
+} from '../../config/settingsUtils.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
@@ -9019,19 +9023,43 @@ export class Session implements SessionContext {
       getPersistScopeForModelSelection(this.settings) === SettingScope.Workspace
         ? SettingScope.Workspace
         : SettingScope.User;
-    try {
-      this.settings.setValue(
-        persistScope,
+    const settingsFile =
+      persistScope === SettingScope.Workspace
+        ? this.settings.workspace
+        : this.settings.user;
+    if (
+      persistedValue !== undefined &&
+      this.settings.merged.model?.reasoningEffort !== persistedValue &&
+      (settingExistsInScope(
         'model.reasoningEffort',
-        persistedValue,
-        undefined,
-        { throwOnWriteFailure: true },
+        this.settings.system.settings,
+      ) ||
+        (persistScope === SettingScope.User &&
+          this.settings.isTrusted &&
+          settingExistsInScope(
+            'model.reasoningEffort',
+            this.settings.workspace.settings,
+          )))
+    ) {
+      throw RequestError.internalError(
+        { errorKind: REASONING_EFFORT_PERSISTENCE_ERROR_KIND },
+        'Reasoning effort is active for the current session, but the default could not be saved: the selected value is shadowed by a higher-precedence setting',
       );
+    }
+    try {
+      if (
+        persistedValue !== undefined ||
+        settingExistsInScope('model.reasoningEffort', settingsFile.settings)
+      ) {
+        this.settings.setValue(
+          persistScope,
+          'model.reasoningEffort',
+          persistedValue,
+          undefined,
+          { throwOnWriteFailure: true },
+        );
+      }
       if (persistedValue === undefined) {
-        const settingsFile =
-          persistScope === SettingScope.Workspace
-            ? this.settings.workspace
-            : this.settings.user;
         deleteNestedPropertySafe(
           settingsFile.settings as Record<string, unknown>,
           'model.reasoningEffort',
@@ -9045,7 +9073,7 @@ export class Session implements SessionContext {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw RequestError.internalError(
-        { errorKind: 'reasoning_effort_persistence_failed' },
+        { errorKind: REASONING_EFFORT_PERSISTENCE_ERROR_KIND },
         `Reasoning effort is active for the current session, but the default could not be saved: ${message}`,
       );
     }

@@ -18,6 +18,7 @@ export * from './bridgeTypes.js';
 export * from './session-source.js';
 export * from './bridgeOptions.js';
 export * from './prompt-ledger.js';
+export * from './reasoning-persistence.js';
 export * from './session-restore-timeout.js';
 export * from './replayWindowLimits.js';
 export * from './spawnChannel.js';

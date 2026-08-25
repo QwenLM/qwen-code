@@ -129,7 +129,7 @@ import {
 } from '../skill-details-redaction.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
-import { PERSIST_REASONING_EFFORT_META_KEY } from '../../acp-integration/model-configuration.js';
+import { PERSIST_REASONING_EFFORT_META_KEY } from '@qwen-code/acp-bridge/reasoningPersistence';
 import {
   formatGenerationSse,
   GENERATION_HEARTBEAT_MS,

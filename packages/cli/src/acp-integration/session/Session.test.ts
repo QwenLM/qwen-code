@@ -54,6 +54,7 @@ import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import { REASONING_EFFORT_PERSISTENCE_ERROR_KIND } from '@qwen-code/sdk/daemon';
 import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../live/capture-screen-context.js';
 import { SPEAK_TO_USER_TOOL_NAME } from '../live/live-speak-to-user.js';
 import {
@@ -879,6 +880,7 @@ describe('Session', () => {
     mockSettings = {
       merged: {},
       isTrusted: false,
+      system: { settings: {}, originalSettings: {} },
       user: { settings: {}, originalSettings: {} },
       workspace: { settings: {}, originalSettings: {} },
       setValue: vi.fn(),
@@ -4372,6 +4374,13 @@ describe('Session', () => {
     });
 
     it('deletes blank effort values instead of persisting them', () => {
+      mockSettings.user.settings = {
+        model: { reasoningEffort: 'medium' },
+      };
+      mockSettings.user.originalSettings = structuredClone(
+        mockSettings.user.settings,
+      );
+
       session.persistReasoningEffort('   ');
 
       expect(mockSettings.setValue).toHaveBeenCalledWith(
@@ -4381,6 +4390,59 @@ describe('Session', () => {
         undefined,
         { throwOnWriteFailure: true },
       );
+    });
+
+    it('does not create a settings file when clearing an absent effort', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-reasoning-settings-'),
+      );
+      const userPath = path.join(tempDir, 'missing-user.json');
+      const loadedSettings = new LoadedSettings(
+        {
+          path: path.join(tempDir, 'system.json'),
+          settings: {},
+          originalSettings: {},
+          rawJson: '{}',
+        },
+        {
+          path: path.join(tempDir, 'system-defaults.json'),
+          settings: {},
+          originalSettings: {},
+          rawJson: '{}',
+        },
+        {
+          path: userPath,
+          settings: {},
+          originalSettings: {},
+        },
+        {
+          path: path.join(tempDir, 'workspace.json'),
+          settings: {},
+          originalSettings: {},
+          rawJson: '{}',
+        },
+        false,
+        new Set(),
+      );
+      const unloadedSession = new Session(
+        'absent-reasoning-session',
+        mockConfig,
+        mockClient,
+        loadedSettings,
+      );
+
+      try {
+        expect(unloadedSession.persistReasoningEffort(undefined)).toEqual({
+          scope: SettingScope.User,
+          effectiveValue: undefined,
+        });
+        expect(loadedSettings.user.settings).toEqual({});
+        await expect(fs.stat(userPath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
     });
 
     it('uses the workspace model scope when it owns modelProviders', () => {
@@ -4396,6 +4458,48 @@ describe('Session', () => {
         undefined,
         { throwOnWriteFailure: true },
       );
+    });
+
+    it.each([
+      {
+        name: 'trusted workspace over a user target',
+        configure: () => {
+          (mockSettings as unknown as { isTrusted: boolean }).isTrusted = true;
+          mockSettings.workspace.settings = {
+            model: { reasoningEffort: 'low' },
+          };
+        },
+      },
+      {
+        name: 'system settings over a workspace target',
+        configure: () => {
+          (mockSettings as unknown as { isTrusted: boolean }).isTrusted = true;
+          mockSettings.workspace.settings = { modelProviders: {} };
+          mockSettings.system.settings = {
+            model: { reasoningEffort: 'low' },
+          };
+        },
+      },
+    ])('rejects $name before writing the target scope', ({ configure }) => {
+      configure();
+      (mockSettings as unknown as { merged: Record<string, unknown> }).merged =
+        { model: { reasoningEffort: 'low' } };
+
+      let thrown: unknown;
+      try {
+        session.persistReasoningEffort('high');
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toMatchObject({
+        code: -32603,
+        data: { errorKind: REASONING_EFFORT_PERSISTENCE_ERROR_KIND },
+        message: expect.stringContaining(
+          'shadowed by a higher-precedence setting',
+        ),
+      });
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
     });
 
     it('returns the inherited effective value after clearing a workspace override', async () => {

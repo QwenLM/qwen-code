@@ -145,6 +145,10 @@ import {
   PROTOCOL_VERSION,
 } from '@agentclientprotocol/sdk';
 import { isNotCurrentlyGeneratingCancelError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  PERSIST_REASONING_EFFORT_META_KEY,
+  REASONING_EFFORT_PERSISTENCE_META_KEY,
+} from '@qwen-code/acp-bridge/reasoningPersistence';
 import type { Content } from '@google/genai';
 import type {
   Agent,
@@ -263,7 +267,6 @@ import {
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   getModelConfiguration,
-  PERSIST_REASONING_EFFORT_META_KEY,
   REASONING_EFFORT_DEFAULT,
   REASONING_EFFORT_NAMES,
   REASONING_EFFORT_NONE,
@@ -5429,7 +5432,7 @@ class QwenAgent implements Agent {
               }
             }
             responseMeta = {
-              'qwenCode/reasoningEffortPersistence': {
+              [REASONING_EFFORT_PERSISTENCE_META_KEY]: {
                 scope:
                   persistence.scope === SettingScope.Workspace
                     ? 'workspace'

@@ -127,6 +127,10 @@ import {
   SESSION_SOURCE_META_KEY,
 } from './session-source.js';
 import {
+  PERSIST_REASONING_EFFORT_META_KEY,
+  REASONING_EFFORT_PERSISTENCE_META_KEY,
+} from './reasoning-persistence.js';
+import {
   ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM,
   ACTIVE_WORK_CLOSE_TIMEOUT_MS,
   ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
@@ -10849,43 +10853,57 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
       const normalized: SetSessionConfigOptionRequest = { ...req, sessionId };
       const transportClosed = getTransportClosedReject(entry);
-      const work = entry.modelChangeQueue.then(() =>
-        Promise.race([
-          withTimeout(
-            entry.connection.setSessionConfigOption(normalized),
-            initTimeoutMs,
-            'setSessionConfigOption',
-          ),
+      const work = entry.modelChangeQueue.then(() => {
+        const operation = entry.connection
+          .setSessionConfigOption(normalized)
+          .then((response) => {
+            if (
+              req.configId === 'reasoning_effort' &&
+              req._meta?.[PERSIST_REASONING_EFFORT_META_KEY] === true
+            ) {
+              const persistence =
+                response._meta?.[REASONING_EFFORT_PERSISTENCE_META_KEY];
+              const scope =
+                typeof persistence === 'object' && persistence !== null
+                  ? (persistence as Record<string, unknown>)['scope']
+                  : undefined;
+              if (scope === 'user' || scope === 'workspace') {
+                const event = {
+                  type: 'settings_changed',
+                  data: {
+                    key: 'model.reasoningEffort',
+                    value: req.value === 'default' ? null : req.value,
+                    scope,
+                  },
+                } as const;
+                if (
+                  scope === 'user' &&
+                  opts.publishGlobalWorkspaceEvent !== undefined
+                ) {
+                  try {
+                    opts.publishGlobalWorkspaceEvent(event);
+                  } catch (err) {
+                    writeStderrLine(
+                      `qwen serve: global settings_changed broadcast failed: ${err instanceof Error ? err.message : String(err)}`,
+                    );
+                  }
+                } else {
+                  broadcastWorkspaceEvent(event);
+                }
+              }
+            }
+            return response;
+          });
+        return Promise.race([
+          withTimeout(operation, initTimeoutMs, 'setSessionConfigOption'),
           transportClosed,
-        ]),
-      );
+        ]);
+      });
       entry.modelChangeQueue = work.then(
         () => undefined,
         () => undefined,
       );
-      const response = (await work) as SetSessionConfigOptionResponse;
-      if (
-        req.configId === 'reasoning_effort' &&
-        req._meta?.['qwenCode/persistReasoningEffort'] === true
-      ) {
-        const persistence =
-          response._meta?.['qwenCode/reasoningEffortPersistence'];
-        const scope =
-          typeof persistence === 'object' && persistence !== null
-            ? (persistence as Record<string, unknown>)['scope']
-            : undefined;
-        if (scope === 'user' || scope === 'workspace') {
-          broadcastWorkspaceEvent({
-            type: 'settings_changed',
-            data: {
-              key: 'model.reasoningEffort',
-              value: req.value === 'default' ? null : req.value,
-              scope,
-            },
-          });
-        }
-      }
-      return response;
+      return (await work) as SetSessionConfigOptionResponse;
     },
 
     async setSessionLanguage(sessionId, params, context) {

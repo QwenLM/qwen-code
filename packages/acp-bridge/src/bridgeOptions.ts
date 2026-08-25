@@ -17,6 +17,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { MAX_SUB_SESSION_PROMPT_CHARS } from '@qwen-code/qwen-code-core/subSessionConstants';
 import type { ChannelFactory } from './channel.js';
+import type { BridgeEvent } from './eventBus.js';
 import type { PermissionPolicy } from './permission.js';
 import type { PermissionAuditPublisher } from './permissionMediator.js';
 import type { ServePreflightCell, ServeWorkspaceEnvStatus } from './status.js';
@@ -214,6 +215,13 @@ export interface BridgeTelemetry {
  * strictly-required field. See per-field JSDoc for caller contract.
  */
 export interface BridgeOptions {
+  /**
+   * Process-wide event fan-out supplied by multi-workspace daemon hosts.
+   * The bridge uses this only for user-scoped settings, whose persisted value
+   * is shared by every workspace. Embedded and single-workspace callers may
+   * omit it and retain bridge-local delivery.
+   */
+  publishGlobalWorkspaceEvent?: (event: Omit<BridgeEvent, 'id' | 'v'>) => void;
   /**
    * Runtime-owned directory for persistent session attachment bytes. Daemon
    * callers provide a workspace-scoped directory under the Qwen runtime temp

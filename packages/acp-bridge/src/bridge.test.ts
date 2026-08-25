@@ -47,6 +47,10 @@ import {
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 import { SESSION_SOURCE_META_KEY } from './session-source.js';
 import {
+  PERSIST_REASONING_EFFORT_META_KEY,
+  REASONING_EFFORT_PERSISTENCE_META_KEY,
+} from './reasoning-persistence.js';
+import {
   classifyTurnErrorKind,
   extractErrorMessage,
   extractErrorCode,
@@ -22217,7 +22221,7 @@ describe('createAcpSessionBridge', () => {
         setSessionConfigOptionImpl: () => ({
           configOptions: [],
           _meta: {
-            'qwenCode/reasoningEffortPersistence': { scope: 'user' },
+            [REASONING_EFFORT_PERSISTENCE_META_KEY]: { scope: 'user' },
           },
         }),
       });
@@ -22232,7 +22236,7 @@ describe('createAcpSessionBridge', () => {
         sessionId: 'spoofed',
         configId: 'reasoning_effort',
         value: 'ultra',
-        _meta: { 'qwenCode/persistReasoningEffort': true },
+        _meta: { [PERSIST_REASONING_EFFORT_META_KEY]: true },
       });
 
       expect(handle.agent.setSessionConfigOptionCalls).toEqual([
@@ -22240,7 +22244,7 @@ describe('createAcpSessionBridge', () => {
           sessionId: session.sessionId,
           configId: 'reasoning_effort',
           value: 'ultra',
-          _meta: { 'qwenCode/persistReasoningEffort': true },
+          _meta: { [PERSIST_REASONING_EFFORT_META_KEY]: true },
         },
       ]);
       const next = await iter[Symbol.asyncIterator]().next();
@@ -22257,12 +22261,52 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('uses daemon-wide fan-out for user-scoped persistence', async () => {
+      const publishGlobalWorkspaceEvent = vi.fn();
+      const handle = makeChannel({
+        setSessionConfigOptionImpl: () => ({
+          configOptions: [],
+          _meta: {
+            [REASONING_EFFORT_PERSISTENCE_META_KEY]: { scope: 'user' },
+          },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        publishGlobalWorkspaceEvent,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.setSessionConfigOption(session.sessionId, {
+        sessionId: session.sessionId,
+        configId: 'reasoning_effort',
+        value: 'medium',
+        _meta: { [PERSIST_REASONING_EFFORT_META_KEY]: true },
+      });
+
+      expect(publishGlobalWorkspaceEvent).toHaveBeenCalledOnce();
+      expect(publishGlobalWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          key: 'model.reasoningEffort',
+          value: 'medium',
+          scope: 'user',
+        },
+      });
+      expect(
+        bridge
+          .getSessionReplaySnapshot(session.sessionId)
+          ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+      ).toEqual([]);
+      await bridge.shutdown();
+    });
+
     it('broadcasts a cleared persisted reasoning value as null', async () => {
       const handle = makeChannel({
         setSessionConfigOptionImpl: () => ({
           configOptions: [],
           _meta: {
-            'qwenCode/reasoningEffortPersistence': { scope: 'workspace' },
+            [REASONING_EFFORT_PERSISTENCE_META_KEY]: { scope: 'workspace' },
           },
         }),
       });
@@ -22273,7 +22317,7 @@ describe('createAcpSessionBridge', () => {
         sessionId: session.sessionId,
         configId: 'reasoning_effort',
         value: 'default',
-        _meta: { 'qwenCode/persistReasoningEffort': true },
+        _meta: { [PERSIST_REASONING_EFFORT_META_KEY]: true },
       });
 
       expect(
@@ -22314,7 +22358,7 @@ describe('createAcpSessionBridge', () => {
           sessionId: session.sessionId,
           configId: 'reasoning_effort',
           value: 'ultra',
-          _meta: { 'qwenCode/persistReasoningEffort': true },
+          _meta: { [PERSIST_REASONING_EFFORT_META_KEY]: true },
         }),
       ).rejects.toThrow();
 
@@ -22323,6 +22367,59 @@ describe('createAcpSessionBridge', () => {
           .getSessionReplaySnapshot(session.sessionId)
           ?.liveJournal.filter((event) => event.type === 'settings_changed'),
       ).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('broadcasts once when persistence succeeds after the caller times out', async () => {
+      const persistence = deferred<{
+        configOptions: [];
+        _meta: Record<string, unknown>;
+      }>();
+      const handle = makeChannel({
+        setSessionConfigOptionImpl: () => persistence.promise,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 20,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.setSessionConfigOption(session.sessionId, {
+          sessionId: session.sessionId,
+          configId: 'reasoning_effort',
+          value: 'ultra',
+          _meta: { [PERSIST_REASONING_EFFORT_META_KEY]: true },
+        }),
+      ).rejects.toBeInstanceOf(BridgeTimeoutError);
+      expect(
+        bridge
+          .getSessionReplaySnapshot(session.sessionId)
+          ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+      ).toEqual([]);
+
+      persistence.resolve({
+        configOptions: [],
+        _meta: {
+          [REASONING_EFFORT_PERSISTENCE_META_KEY]: { scope: 'user' },
+        },
+      });
+      await persistence.promise;
+      await vi.waitFor(() =>
+        expect(
+          bridge
+            .getSessionReplaySnapshot(session.sessionId)
+            ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+        ).toEqual([
+          expect.objectContaining({
+            data: {
+              key: 'model.reasoningEffort',
+              value: 'ultra',
+              scope: 'user',
+            },
+          }),
+        ]),
+      );
       await bridge.shutdown();
     });
   });

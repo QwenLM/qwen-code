@@ -36,6 +36,7 @@ import type {
 import {
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  REASONING_EFFORT_PERSISTENCE_ERROR_KIND,
   isDaemonTurnError,
   isStaleBranchPointError,
   type PromptResult,
@@ -113,11 +114,18 @@ function isReasoningEffortPersistenceFailure(error: unknown): boolean {
     typeof body?.['data'] === 'object' && body['data'] !== null
       ? (body['data'] as Record<string, unknown>)
       : undefined;
-  return data?.['errorKind'] === 'reasoning_effort_persistence_failed';
+  return data?.['errorKind'] === REASONING_EFFORT_PERSISTENCE_ERROR_KIND;
 }
 
 const REASONING_EFFORT_PERSISTENCE_FAILURE_MESSAGE =
   'The current session was updated, but the default value was not saved';
+
+function createReasoningEffortPersistenceFailure(error: unknown): Error {
+  return Object.assign(
+    new Error(REASONING_EFFORT_PERSISTENCE_FAILURE_MESSAGE),
+    { cause: error },
+  );
+}
 
 function isReasoningEffortConfirmed(
   value: string,
@@ -1222,7 +1230,7 @@ export function createDaemonSessionActions({
           noticeForSession(session),
           'Set reasoning effort failed',
           persistenceFailure
-            ? new Error(REASONING_EFFORT_PERSISTENCE_FAILURE_MESSAGE)
+            ? createReasoningEffortPersistenceFailure(error)
             : error,
           'set_reasoning_effort',
         );

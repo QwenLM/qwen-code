@@ -55,8 +55,6 @@ const MODEL_CONFIGURATIONS: Readonly<
 
 export const REASONING_EFFORT_DEFAULT = 'default';
 export const REASONING_EFFORT_NONE = 'none';
-export const PERSIST_REASONING_EFFORT_META_KEY =
-  'qwenCode/persistReasoningEffort';
 
 export const REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
   low: 'Low',

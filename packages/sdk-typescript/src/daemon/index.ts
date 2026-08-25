@@ -210,6 +210,7 @@ export type {
 export {
   DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
+  REASONING_EFFORT_PERSISTENCE_ERROR_KIND,
   DaemonCapabilityMissingError,
   isDaemonContentHash,
   requireWorkspaceCwd,

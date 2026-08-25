@@ -4075,7 +4075,7 @@ describe('runQwenServe telemetry validation', () => {
     }
   });
 
-  it('uses the daemon-wide policy and limits when constructing workspace bridges', async () => {
+  it('uses daemon-wide policy, limits, and user-settings fan-out for workspace bridges', async () => {
     mockCreateSpawnChannelFactoryOptions.length = 0;
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     const primary = path.join(tmpDir, 'primary');
@@ -4175,6 +4175,23 @@ describe('runQwenServe telemetry validation', () => {
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
       });
+      const settingsChangedEvent = {
+        type: 'settings_changed' as const,
+        data: {
+          key: 'model.reasoningEffort',
+          value: 'medium',
+          scope: 'user',
+        },
+      };
+      createBridge.mock.calls[0]?.[0].publishGlobalWorkspaceEvent?.(
+        settingsChangedEvent,
+      );
+      expect(primaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+        settingsChangedEvent,
+      );
+      expect(secondaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+        settingsChangedEvent,
+      );
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );

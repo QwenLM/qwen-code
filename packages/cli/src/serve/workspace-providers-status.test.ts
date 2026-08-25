@@ -332,6 +332,30 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ]);
   });
 
+  it('does not project reasoning controls for thinking-mandatory models', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'qwen3.8-max', reasoningEffort: 'none' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            generationConfig: { thinkingMandatory: true },
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const stable = result.providers
+      .flatMap((entry) => entry.models)
+      .find((model) => model.baseModelId === 'qwen3.8-max');
+
+    expect(stable?.configOptions).toBeUndefined();
+  });
+
   it('uses the target model provider reasoning default when no global effort is configured', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

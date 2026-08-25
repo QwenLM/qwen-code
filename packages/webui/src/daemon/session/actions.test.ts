@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  REASONING_EFFORT_PERSISTENCE_ERROR_KIND,
   type DaemonCapabilities,
   type DaemonSessionClient,
   type GoalSnapshotV2,
@@ -2507,7 +2508,7 @@ describe('createDaemonSessionActions', () => {
       new DaemonHttpError(
         500,
         {
-          data: { errorKind: 'reasoning_effort_persistence_failed' },
+          data: { errorKind: REASONING_EFFORT_PERSISTENCE_ERROR_KIND },
         },
         'Internal error',
       ),
@@ -2552,7 +2553,7 @@ describe('createDaemonSessionActions', () => {
       new DaemonHttpError(
         500,
         {
-          data: { errorKind: 'reasoning_effort_persistence_failed' },
+          data: { errorKind: REASONING_EFFORT_PERSISTENCE_ERROR_KIND },
         },
         'Internal error',
       ),
@@ -2581,9 +2582,11 @@ describe('createDaemonSessionActions', () => {
       },
     });
 
-    await expect(actions.setReasoningEffort('xhigh')).rejects.toThrow(
-      'The current session was updated, but the default value was not saved',
-    );
+    await expect(actions.setReasoningEffort('xhigh')).rejects.toMatchObject({
+      message:
+        'The current session was updated, but the default value was not saved',
+      cause: expect.any(DaemonHttpError),
+    });
   });
 
   it('applies a reasoning effort only when the daemon confirms it', async () => {

@@ -71,6 +71,10 @@
       "types": "./dist/prompt-ledger.d.ts",
       "import": "./dist/prompt-ledger.js"
     },
+    "./reasoningPersistence": {
+      "types": "./dist/reasoning-persistence.d.ts",
+      "import": "./dist/reasoning-persistence.js"
+    },
     "./sessionRestoreTimeout": {
       "types": "./dist/session-restore-timeout.d.ts",
       "import": "./dist/session-restore-timeout.js"

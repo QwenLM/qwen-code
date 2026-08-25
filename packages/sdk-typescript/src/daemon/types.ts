@@ -1639,6 +1639,10 @@ export type DaemonStatus =
   | 'not_started'
   | 'unknown';
 
+/** Stable HTTP error kind for a live effort update whose default was not saved. */
+export const REASONING_EFFORT_PERSISTENCE_ERROR_KIND =
+  'reasoning_effort_persistence_failed' as const;
+
 /**
  * Closed taxonomy of structured error categories surfaced on diagnostic
  * status cells (workspace preflight, env, MCP guardrails). SDK consumers

@@ -5335,7 +5335,7 @@ describe('Server Config (config.ts)', () => {
       expect(config.getReasoningEffort()).toBe('provider.default');
     });
 
-    it('tracks explicit reasoning disable separately from the model default', async () => {
+    it('keeps explicit reasoning disabled until the preference is cleared', async () => {
       const authType = AuthType.USE_OPENAI;
       const config = new Config({
         ...baseParams,
@@ -5350,6 +5350,11 @@ describe('Server Config (config.ts)', () => {
 
       await config.refreshAuth(authType);
       config.disableReasoning();
+      expect(config.getReasoningPreference()).toBe(false);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+
+      config.setReasoningEffort('high');
+
       expect(config.getReasoningPreference()).toBe(false);
       expect(config.getContentGeneratorConfig().reasoning).toBe(false);
 
@@ -5393,6 +5398,43 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig().reasoning).toEqual({
         effort: 'provider.ultra',
       });
+    });
+
+    it('clears an override back to the new model default after switching models', async () => {
+      const authType = AuthType.USE_OPENAI;
+      const baseUrl = 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+      const config = new Config({
+        ...baseParams,
+        authType,
+        model: 'model-a',
+        generationConfig: { reasoning: false },
+        modelProvidersConfig: {
+          [authType]: [
+            {
+              id: 'model-a',
+              baseUrl,
+              generationConfig: { reasoning: false },
+            },
+            {
+              id: 'model-b',
+              baseUrl,
+              generationConfig: {
+                reasoning: { effort: 'provider.ultra' },
+              },
+            },
+          ],
+        },
+      });
+
+      await config.refreshAuth(authType);
+      config.setReasoningEffort('session.ultra');
+      await config.switchModel(authType, 'model-b');
+      expect(config.getReasoningEffort()).toBe('session.ultra');
+
+      config.setReasoningEffort(undefined);
+
+      expect(config.getReasoningPreference()).toBeUndefined();
+      expect(config.getReasoningEffort()).toBe('provider.ultra');
     });
 
     it('preserves an arbitrary reasoning effort across an auth refresh', async () => {
@@ -5529,13 +5571,8 @@ describe('Server Config (config.ts)', () => {
     );
 
     it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {
-      // Regression for the model-switch path: switchModel() runs
-      // applyResolvedModelDefaults() (which overwrites modelsConfig's
-      // `reasoning` with the new model's preset) BEFORE onModelChange ->
-      // handleModelChange fires. So by the time the full-refresh path calls
-      // refreshAuth, refreshAuth's own capture reads undefined and cannot
-      // restore the tier. handleModelChange must re-apply it from the live
-      // contentGeneratorConfig captured before the rebuild.
+      // A full refresh rebuilds the content-generator config after the model
+      // switch. The explicit preference must be re-applied after that rebuild.
       const config = new Config({
         ...baseParams,
         generationConfig: { reasoning: { effort: 'high' } },

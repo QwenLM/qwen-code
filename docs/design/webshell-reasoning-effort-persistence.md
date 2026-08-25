@@ -14,13 +14,13 @@ WebShell currently applies a reasoning effort selection only to the active ACP s
 
 There is no global normalization, ordering, allowlist, or fallback for persisted values. The existing five built-in effort tiers remain available to `/effort` and provider adapters that explicitly implement that scale. Provider adapters may translate built-in tiers for their own wire protocol, but must pass an unknown value through or reject it explicitly rather than silently changing it.
 
-ACP uses `default` only as an instruction to remove `model.reasoningEffort`; it is never persisted. After clearing the selected scope, the live session adopts the resulting merged value, including an inherited opaque string from a lower-precedence scope.
+ACP uses `default` only as an interaction instruction to remove `model.reasoningEffort`; that ACP path never writes the sentinel. The open setting does not reserve `default` globally, so a value authored directly in settings remains an opaque provider value. After clearing the selected scope, the live session adopts the resulting merged value, including an inherited opaque string from a lower-precedence scope.
 
 ## Persistence boundary
 
 The WebShell daemon route marks its ACP `reasoning_effort` update as persistent. The ACP agent applies the selection to the live session first, then writes through the `Session` instance's own loaded settings using the same scope selection as model persistence. Direct ACP calls without the private marker remain session-only.
 
-After a successful persisted update, the bridge broadcasts `settings_changed` for `model.reasoningEffort` with the actual user or workspace scope that was written. This refreshes retained workspace provider state and the no-session welcome preview without creating an empty session.
+After a successful persisted update, the bridge broadcasts `settings_changed` for `model.reasoningEffort` with the actual user or workspace scope that was written. User-scope changes fan out across every live workspace bridge in the daemon; workspace-scope changes stay on their owning bridge. This refreshes retained workspace provider state and the no-session welcome preview without creating an empty session.
 
 If the settings write fails, the live session remains updated and the request reports that the current session changed but the default was not saved. No settings-change event is broadcast.
 

@@ -185,26 +185,31 @@ describe('modelConfigUtils', () => {
       {
         configured: 'none',
         expected: false,
+        expectedPreference: false,
       },
       {
         configured: 'ultra',
         expected: { effort: 'ultra' },
+        expectedPreference: 'ultra',
       },
       {
         configured: 'minimal',
         expected: { effort: 'minimal' },
+        expectedPreference: 'minimal',
       },
       {
         configured: 'Vendor.Custom-EFFORT',
         expected: { effort: 'Vendor.Custom-EFFORT' },
+        expectedPreference: 'Vendor.Custom-EFFORT',
       },
       {
         configured: '   ',
         expected: undefined,
+        expectedPreference: undefined,
       },
     ])(
       'loads the open reasoning effort setting "$configured"',
-      ({ configured, expected }) => {
+      ({ configured, expected, expectedPreference }) => {
         vi.mocked(resolveModelConfig).mockReturnValue({
           config: { model: '' },
           sources: {},
@@ -220,9 +225,51 @@ describe('modelConfigUtils', () => {
         });
 
         expect(result.generationConfig.reasoning).toEqual(expected);
+        expect(result.reasoningPreference).toBe(expectedPreference);
+        expect(result.reasoningDefault).toBeUndefined();
         expect(result.warnings).toEqual([]);
       },
     );
+
+    it('keeps a resolved disabled default separate from an unset preference', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: '', reasoning: false },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({ model: { name: 'qwen3.8-max' } }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toBe(false);
+      expect(result.reasoningPreference).toBeUndefined();
+      expect(result.reasoningDefault).toBe(false);
+    });
+
+    it('applies an explicit opaque preference over a disabled model default', () => {
+      vi.mocked(resolveModelConfig).mockReturnValue({
+        config: { model: '', reasoning: false },
+        sources: {},
+        warnings: [],
+      });
+
+      const result = resolveCliGenerationConfig({
+        argv: {},
+        settings: makeMockSettings({
+          model: { name: 'qwen3.8-max', reasoningEffort: 'Vendor.Ultra' },
+        }),
+        selectedAuthType: AuthType.USE_OPENAI,
+      });
+
+      expect(result.generationConfig.reasoning).toEqual({
+        effort: 'Vendor.Ultra',
+      });
+      expect(result.reasoningPreference).toBe('Vendor.Ultra');
+      expect(result.reasoningDefault).toBe(false);
+    });
 
     it('should resolve config from argv with highest precedence', () => {
       const argv = {

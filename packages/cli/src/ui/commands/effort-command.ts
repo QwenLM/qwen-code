@@ -62,18 +62,25 @@ export const effortCommand: SlashCommand = {
         return { type: 'dialog', dialog: 'effort' };
       }
       const current = config.getReasoningEffort();
+      const preference = config.getReasoningPreference();
       return {
         type: 'message',
         messageType: 'info',
-        content: current
-          ? t(
-              'Current reasoning effort: {{current}}\nAvailable: {{tiers}}\nUse "/effort <tier>" to change it.',
-              { current, tiers: TIER_LIST },
-            )
-          : t(
-              'Reasoning effort: not set (using the model/provider default).\nAvailable: {{tiers}}\nUse "/effort <tier>" to set it.',
-              { tiers: TIER_LIST },
-            ),
+        content:
+          preference === false
+            ? t(
+                'Thinking is disabled.\nAvailable: {{tiers}}\nUse "/effort <tier>" to set a future default.',
+                { tiers: TIER_LIST },
+              )
+            : current
+              ? t(
+                  'Current reasoning effort: {{current}}\nAvailable: {{tiers}}\nUse "/effort <tier>" to change it.',
+                  { current, tiers: TIER_LIST },
+                )
+              : t(
+                  'Reasoning effort: not set (using the model/provider default).\nAvailable: {{tiers}}\nUse "/effort <tier>" to set it.',
+                  { tiers: TIER_LIST },
+                ),
       };
     }
 
