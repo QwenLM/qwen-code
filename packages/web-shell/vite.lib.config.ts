@@ -172,7 +172,7 @@ export default defineConfig({
         'shiki',
         'mermaid',
         'katex',
-        /^katex\//,
+        /^katex\/(?!dist\/katex\.min\.css$)/,
         'codemirror',
         /^@codemirror\//,
       ],

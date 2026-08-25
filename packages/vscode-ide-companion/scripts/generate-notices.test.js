@@ -10,11 +10,11 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   collectDependencies,
-  fallbackLicenseText,
   findLicenseFile,
-  findSupplementalNoticeFiles,
-  isMissingLicenseText,
-  normalizeLicenseText,
+  findNoticeFile,
+  findSupplementaryLicenseFiles,
+  getFallbackLicenseText,
+  normalizeRepositoryUrl,
 } from './generate-notices.js';
 
 describe('findLicenseFile', () => {
@@ -96,67 +96,179 @@ describe('collectDependencies', () => {
   });
 });
 
-describe('license fallbacks and supplemental notices', () => {
+describe('normalizeRepositoryUrl', () => {
+  it('returns object-form repository urls unchanged', () => {
+    expect(
+      normalizeRepositoryUrl({
+        type: 'git',
+        url: 'git+https://github.com/nodejs/undici.git',
+      }),
+    ).toBe('git+https://github.com/nodejs/undici.git');
+  });
+
+  it('accepts string-form repository urls', () => {
+    expect(
+      normalizeRepositoryUrl(
+        'https://github.com/theKashey/react-remove-scroll-bar',
+      ),
+    ).toBe('https://github.com/theKashey/react-remove-scroll-bar');
+  });
+
+  it('expands bare GitHub shorthand strings', () => {
+    expect(normalizeRepositoryUrl('yargs/cliui')).toBe(
+      'https://github.com/yargs/cliui',
+    );
+  });
+
+  it('expands github:-prefixed shorthand strings', () => {
+    expect(
+      normalizeRepositoryUrl('github:anthropics/anthropic-sdk-typescript'),
+    ).toBe('https://github.com/anthropics/anthropic-sdk-typescript');
+  });
+
+  it('normalizes git://, git+https:// and scp-style string urls', () => {
+    expect(
+      normalizeRepositoryUrl('git://github.com/komagata/eastasianwidth.git'),
+    ).toBe('https://github.com/komagata/eastasianwidth.git');
+    expect(
+      normalizeRepositoryUrl('git+https://github.com/jsdom/tr46.git'),
+    ).toBe('https://github.com/jsdom/tr46.git');
+    expect(
+      normalizeRepositoryUrl('git@github.com:kwsites/file-exists.git'),
+    ).toBe('https://github.com/kwsites/file-exists.git');
+  });
+
+  it('returns undefined for absent or empty repository values', () => {
+    expect(normalizeRepositoryUrl(undefined)).toBeUndefined();
+    expect(normalizeRepositoryUrl({})).toBeUndefined();
+    expect(normalizeRepositoryUrl('   ')).toBeUndefined();
+  });
+});
+
+describe('findNoticeFile', () => {
   let packageDir;
 
+  beforeEach(async () => {
+    packageDir = await fs.mkdtemp(path.join(os.tmpdir(), 'notices-test-'));
+  });
+
   afterEach(async () => {
-    if (packageDir) {
-      await fs.rm(packageDir, { recursive: true, force: true });
-      packageDir = undefined;
-    }
+    await fs.rm(packageDir, { recursive: true, force: true });
   });
 
-  it('uses package metadata for MIT dependencies without a license file', () => {
-    expect(
-      fallbackLicenseText({
-        name: 'example',
-        license: 'MIT',
-        author: 'Example Author',
-      }),
-    ).toContain('Copyright (c) Example Author');
-    expect(
-      fallbackLicenseText({ name: 'example', license: 'Apache-2.0' }),
-    ).toBeUndefined();
-    expect(
-      fallbackLicenseText({
-        name: 'undici-types',
-        version: '5.26.5',
-        license: 'MIT',
-      }),
-    ).toContain('Copyright (c) Matteo Collina and Undici contributors');
-    expect(
-      fallbackLicenseText({
-        name: 'undici-types',
-        version: '6.0.0',
-        license: 'MIT',
-      }),
-    ).toBeUndefined();
+  it('resolves a mixed-case NOTICE file', async () => {
+    await fs.writeFile(path.join(packageDir, 'Notice'), 'Apache ECharts');
+
+    const resolved = await findNoticeFile(packageDir);
+
+    expect(resolved).toBe(path.join(packageDir, 'Notice'));
   });
 
-  it('rejects empty and sentinel-prefixed license text', () => {
-    expect(isMissingLicenseText('')).toBe(true);
-    expect(isMissingLicenseText('   \n')).toBe(true);
-    expect(isMissingLicenseText('License text not found.\n\nNOTICE')).toBe(
-      true,
-    );
-    expect(isMissingLicenseText('MIT License')).toBe(false);
-    expect(isMissingLicenseText('MIT License\n\nNOTICE')).toBe(false);
-    expect(normalizeLicenseText('   \n')).toBe('License text not found.');
-  });
-
-  it('collects NOTICE and Apache secondary license files', async () => {
-    packageDir = await fs.mkdtemp(path.join(os.tmpdir(), 'notices-'));
-    await fs.mkdir(path.join(packageDir, 'licenses'));
+  it('prefers NOTICE over NOTICE.txt', async () => {
     await fs.writeFile(path.join(packageDir, 'NOTICE'), 'notice');
+    await fs.writeFile(path.join(packageDir, 'NOTICE.txt'), 'notice.txt');
+
+    const resolved = await findNoticeFile(packageDir);
+
+    expect(resolved).toBe(path.join(packageDir, 'NOTICE'));
+  });
+
+  it('returns undefined when no NOTICE file exists', async () => {
+    const resolved = await findNoticeFile(packageDir);
+
+    expect(resolved).toBeUndefined();
+  });
+});
+
+describe('findSupplementaryLicenseFiles', () => {
+  let packageDir;
+
+  beforeEach(async () => {
+    packageDir = await fs.mkdtemp(path.join(os.tmpdir(), 'notices-test-'));
+  });
+
+  afterEach(async () => {
+    await fs.rm(packageDir, { recursive: true, force: true });
+  });
+
+  it('lists files in the licenses directory sorted', async () => {
+    await fs.mkdir(path.join(packageDir, 'licenses'));
+    await fs.writeFile(path.join(packageDir, 'licenses', 'LICENSE-d3'), 'BSD');
+    await fs.writeFile(path.join(packageDir, 'licenses', 'LICENSE-abc'), 'MIT');
+
+    const resolved = await findSupplementaryLicenseFiles(packageDir);
+
+    expect(resolved).toEqual([
+      path.join(packageDir, 'licenses', 'LICENSE-abc'),
+      path.join(packageDir, 'licenses', 'LICENSE-d3'),
+    ]);
+  });
+
+  it('ignores the uppercase REUSE-style LICENSES directory', async () => {
+    await fs.mkdir(path.join(packageDir, 'LICENSES'));
     await fs.writeFile(
-      path.join(packageDir, 'licenses', 'LICENSE-secondary'),
-      'secondary',
+      path.join(packageDir, 'LICENSES', 'Apache-2.0.txt'),
+      'Apache-2.0',
     );
 
-    expect(
-      (await findSupplementalNoticeFiles(packageDir, 'Apache-2.0')).map(
-        (entry) => path.relative(packageDir, entry).split(path.sep).join('/'),
-      ),
-    ).toEqual(['NOTICE', 'licenses/LICENSE-secondary']);
+    const resolved = await findSupplementaryLicenseFiles(packageDir);
+
+    expect(resolved).toEqual([]);
+  });
+
+  it('returns an empty list when the package has no licenses directory', async () => {
+    const resolved = await findSupplementaryLicenseFiles(packageDir);
+
+    expect(resolved).toEqual([]);
+  });
+});
+
+describe('getFallbackLicenseText', () => {
+  it('returns standard MIT text with the copyright holder from a string author', () => {
+    const text = getFallbackLicenseText('MIT', 'Wilson Page');
+
+    expect(text).toContain('Standard MIT license text');
+    expect(text).toContain('Copyright (c) Wilson Page');
+    expect(text).toContain('Permission is hereby granted, free of charge');
+  });
+
+  // MIT requires the permission notice to be included verbatim; the
+  // fallback body must carry the canonical disclaimer wording so every
+  // regenerated NOTICES.txt entry matches the other MIT entries.
+  it('emits the canonical MIT disclaimer wording verbatim', () => {
+    const text = getFallbackLicenseText('MIT', undefined);
+
+    expect(text).toContain(
+      'OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE',
+    );
+    expect(text).not.toContain('THE USE OF OTHER DEALINGS');
+  });
+
+  it('reads the author name from object-form authors', () => {
+    const text = getFallbackLicenseText('MIT', { name: 'Junyoung Choi' });
+
+    expect(text).toContain('Copyright (c) Junyoung Choi');
+  });
+
+  it('strips the trailing homepage from npm author strings', () => {
+    const text = getFallbackLicenseText(
+      'MIT',
+      'Junyoung Choi <fluke8259@gmail.com> (https://rokt33r.github.io)',
+    );
+
+    expect(text).toContain('Copyright (c) Junyoung Choi <fluke8259@gmail.com>');
+    expect(text).not.toContain('rokt33r.github.io');
+  });
+
+  it('omits the copyright line when no author is declared', () => {
+    const text = getFallbackLicenseText('MIT', undefined);
+
+    expect(text).toContain('Permission is hereby granted, free of charge');
+    expect(text).not.toContain('Copyright (c)');
+  });
+
+  it('returns undefined for non-MIT declarations', () => {
+    expect(getFallbackLicenseText('Apache-2.0', 'Some Author')).toBeUndefined();
+    expect(getFallbackLicenseText(undefined, 'Some Author')).toBeUndefined();
   });
 });

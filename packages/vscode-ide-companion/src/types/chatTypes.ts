@@ -70,7 +70,6 @@ export interface UsageStatsPayload {
 }
 
 export interface QwenAgentCallbacks {
-  onTranscriptUpdate?: (notification: SessionNotification) => void;
   onMessage?: (message: ChatMessage) => void;
   onStreamChunk?: (chunk: string) => void;
   onThoughtChunk?: (chunk: string) => void;
@@ -98,6 +97,11 @@ export interface QwenAgentCallbacks {
   onAvailableModels?: (models: ModelInfo[]) => void;
   onDisconnected?: (code: number | null, signal: string | null) => void;
   onSlashCommandNotification?: (event: SlashCommandNotification) => void;
+  /**
+   * Raw ACP session/update notification, forwarded verbatim for consumers
+   * that reduce the transcript themselves (e.g. the WebShell transcript UI).
+   */
+  onTranscriptUpdate?: (notification: SessionNotification) => void;
 }
 
 export interface ToolCallUpdate {

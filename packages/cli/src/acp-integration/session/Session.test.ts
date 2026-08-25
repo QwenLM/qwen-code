@@ -200,17 +200,6 @@ function chatRecord(overrides: Record<string, unknown>): ChatRecord {
   } as ChatRecord;
 }
 
-function expectedLiveTranscriptMeta(
-  extra: Record<string, unknown> = {},
-): Record<string, unknown> {
-  return {
-    ...extra,
-    qwenTranscript: {
-      segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
-    },
-  };
-}
-
 describe('computeInitialTurnFromHistory', () => {
   it('uses the largest numeric prompt id suffix for the current session', () => {
     expect(
@@ -1009,33 +998,6 @@ describe('Session', () => {
       .mocked(mockClient.sessionUpdate)
       .mock.calls.at(-1)?.[0]?.update;
     expect(replayDelivered).toBe(replayUpdate);
-  });
-
-  it('stamps live ACP text deltas with one prompt-scoped segment identity', async () => {
-    await core.promptIdContext.run('test-session-id########1', async () => {
-      await session.sendUpdate({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'first ' },
-      });
-      await session.sendUpdate({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'second' },
-      });
-    });
-
-    const updates = vi
-      .mocked(mockClient.sessionUpdate)
-      .mock.calls.map(([params]) => params.update);
-    const segmentIds = updates.map(
-      (update) =>
-        (
-          update._meta as
-            | { qwenTranscript?: { segmentId?: string } }
-            | undefined
-        )?.qwenTranscript?.segmentId,
-    );
-    expect(segmentIds[0]).toMatch(/^live:[0-9a-f]{32}$/);
-    expect(segmentIds[1]).toBe(segmentIds[0]);
   });
 
   describe('active work holds', () => {
@@ -2052,13 +2014,10 @@ describe('Session', () => {
       update: {
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: '你好' },
-        _meta: expect.objectContaining({
+        _meta: {
           source: 'realtime_voice',
           qwenDiscreteMessage: true,
-          qwenTranscript: {
-            segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
-          },
-        }),
+        },
       },
     });
     expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
@@ -2066,32 +2025,12 @@ describe('Session', () => {
       update: {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: '你好！' },
-        _meta: expect.objectContaining({
+        _meta: {
           source: 'realtime_voice',
           qwenDiscreteMessage: true,
-          qwenTranscript: {
-            segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
-          },
-        }),
+        },
       },
     });
-    const realtimeSegmentIds = vi
-      .mocked(mockClient.sessionUpdate)
-      .mock.calls.map(([notification]) => notification.update)
-      .filter(
-        (update) =>
-          (update._meta as { source?: string } | undefined)?.source ===
-          'realtime_voice',
-      )
-      .map(
-        (update) =>
-          (
-            update._meta as {
-              qwenTranscript?: { segmentId?: string };
-            }
-          ).qwenTranscript?.segmentId,
-      );
-    expect(new Set(realtimeSegmentIds)).toHaveLength(2);
   });
 
   it('rejects a conflicting tool at the reserved Live Appshot name', async () => {
@@ -6724,19 +6663,16 @@ describe('Session', () => {
             type: 'text',
             text: 'Background agent "worker" completed.',
           },
-          _meta: expect.objectContaining({
+          _meta: {
             source: 'background_notification',
             qwenDiscreteMessage: true,
-            qwenTranscript: {
-              segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
-            },
             backgroundTask: {
               taskId: 'agent-1',
               status: 'completed',
               kind: 'agent',
               toolUseId: 'tool-1',
             },
-          }),
+          },
         },
       });
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
@@ -6744,38 +6680,18 @@ describe('Session', () => {
         update: {
           sessionUpdate: 'agent_message_chunk',
           content: { type: 'text', text: 'I saw the background result.' },
-          _meta: expect.objectContaining({
+          _meta: {
             source: 'background_notification_response',
             qwenDiscreteMessage: true,
-            qwenTranscript: {
-              segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
-            },
             backgroundTask: {
               taskId: 'agent-1',
               status: 'completed',
               kind: 'agent',
               toolUseId: 'tool-1',
             },
-          }),
+          },
         },
       });
-      const backgroundSegmentIds = vi
-        .mocked(mockClient.sessionUpdate)
-        .mock.calls.map(([notification]) => notification.update)
-        .filter((update) =>
-          String(
-            (update._meta as { source?: string } | undefined)?.source,
-          ).startsWith('background_notification'),
-        )
-        .map(
-          (update) =>
-            (
-              update._meta as {
-                qwenTranscript?: { segmentId?: string };
-              }
-            ).qwenTranscript?.segmentId,
-        );
-      expect(new Set(backgroundSegmentIds)).toHaveLength(2);
       expect(mockClient.extNotification).toHaveBeenCalledWith(
         '_qwencode/end_turn',
         {
@@ -8186,19 +8102,16 @@ describe('Session', () => {
             type: 'text',
             text: 'Background shell "npm test" completed.',
           },
-          _meta: expect.objectContaining({
+          _meta: {
             source: 'background_notification',
             qwenDiscreteMessage: true,
-            qwenTranscript: {
-              segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
-            },
             backgroundTask: {
               taskId: 'shell-1',
               status: 'completed',
               kind: 'shell',
               toolUseId: undefined,
             },
-          }),
+          },
         },
       });
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
@@ -8209,38 +8122,18 @@ describe('Session', () => {
             type: 'text',
             text: 'The shell finished successfully.',
           },
-          _meta: expect.objectContaining({
+          _meta: {
             source: 'background_notification_response',
             qwenDiscreteMessage: true,
-            qwenTranscript: {
-              segmentId: expect.stringMatching(/^live:[0-9a-f]{32}$/),
-            },
             backgroundTask: {
               taskId: 'shell-1',
               status: 'completed',
               kind: 'shell',
               toolUseId: undefined,
             },
-          }),
+          },
         },
       });
-      const backgroundSegmentIds = vi
-        .mocked(mockClient.sessionUpdate)
-        .mock.calls.map(([notification]) => notification.update)
-        .filter((update) =>
-          String(
-            (update._meta as { source?: string } | undefined)?.source,
-          ).startsWith('background_notification'),
-        )
-        .map(
-          (update) =>
-            (
-              update._meta as {
-                qwenTranscript?: { segmentId?: string };
-              }
-            ).qwenTranscript?.segmentId,
-        );
-      expect(new Set(backgroundSegmentIds)).toHaveLength(2);
     });
 
     it('continues ACP prompt ids after replaying resumed history', async () => {
@@ -11995,7 +11888,6 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -12026,12 +11918,42 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
                 'IMPORTANT: This conversation accumulated enough tool screenshots to trigger compaction for qwen3-code-plus. ' +
                 'A compressed context will be sent for future messages (compressed from: 1200 to 450 tokens).',
+            },
+          },
+        });
+      });
+
+      it('marks estimated compression counts in the ACP notice (#9309)', async () => {
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 26600,
+          newTokenCount: 14500,
+          originalTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: false,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'IMPORTANT: This conversation approached the input token limit for qwen3-code-plus. ' +
+                'A compressed context will be sent for future messages (compressed from: ~26600 to 14500 tokens).',
             },
           },
         });
@@ -12136,7 +12058,6 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -12412,7 +12333,6 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -12425,7 +12345,6 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -14515,7 +14434,6 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -14734,7 +14652,6 @@ describe('Session', () => {
           sessionId: 'test-session-id',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            _meta: expectedLiveTranscriptMeta(),
             content: {
               type: 'text',
               text:
@@ -17851,7 +17768,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Already compressed.' },
-            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
+            _meta: { source: 'slash_command' },
           },
         });
         expect(
@@ -17895,7 +17812,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Review complete.' },
-            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
+            _meta: { source: 'slash_command' },
           },
         });
         expect(finishedSpy).toHaveBeenCalledTimes(1);
@@ -17951,7 +17868,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Side answer.' },
-            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
+            _meta: { source: 'slash_command' },
           },
         });
       });
@@ -18101,7 +18018,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Compressing context...' },
-            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
+            _meta: { source: 'slash_command' },
           },
         });
         expect(mockClient.sessionUpdate).toHaveBeenNthCalledWith(2, {
@@ -18109,7 +18026,7 @@ describe('Session', () => {
           update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Context compressed.' },
-            _meta: expectedLiveTranscriptMeta({ source: 'slash_command' }),
+            _meta: { source: 'slash_command' },
           },
         });
       });
@@ -18702,7 +18619,17 @@ describe('Session', () => {
               }),
               expect.objectContaining({
                 text: expect.stringContaining(
-                  'Runtime continuation context: check weather',
+                  '<goal_runtime_data>\n{"goalId":"goal-1","revision":1,"objective":"check weather"}\n</goal_runtime_data>',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'contains no new real user input',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'not evidence that the user supplied it',
                 ),
               }),
               expect.objectContaining({
@@ -23273,7 +23200,6 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
-              _meta: expectedLiveTranscriptMeta(),
               content: {
                 type: 'text',
                 text: 'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
@@ -23322,7 +23248,6 @@ describe('Session', () => {
             sessionId: 'test-session-id',
             update: {
               sessionUpdate: 'agent_message_chunk',
-              _meta: expectedLiveTranscriptMeta(),
               content: {
                 type: 'text',
                 text: 'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',

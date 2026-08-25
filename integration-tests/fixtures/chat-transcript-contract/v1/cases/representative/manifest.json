@@ -22,7 +22,7 @@
     "expected-model.json": "5c8469615014fadea69fbc047d791add611e077e59f398932bfa4777e4940e67",
     "expected-render-items.json": "d51acc8a0b6282898fec49f1870c0e78c901af5136b9866da3da874722d1db7b",
     "expected-export.json": "23521fd1203ffa6d47b0a93ac3de6481302fc9271e9150e77496ed42abdc063c",
-    "expected-gate.json": "c2dd63edab1c9cb0ee5b198f5f28be8a3c8e3ff8d934e26a173c7359e621927d",
+    "expected-gate.json": "d87b72e7995d2d96dbf77948d443f493b81a1737c9246414fd1b16167ae2440f",
     "expected-network.json": "ee14c9469e2f80f1262a23ca8452bc41abb9ce43a625176c1b428608c503ad11"
   }
 }

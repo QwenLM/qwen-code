@@ -13,15 +13,15 @@ const projectRoot = path.resolve(
 );
 const packagePath = path.join(projectRoot, 'packages', 'vscode-ide-companion');
 const noticeFilePath = path.join(packagePath, 'NOTICES.txt');
-const curatedCopyrightHolders = new Map([
-  ['undici-types@5.26.5', 'Matteo Collina and Undici contributors'],
-  ['@xterm/headless@5.5.0', 'Microsoft Corporation'],
-  ['@simple-git/args-pathspec@1.0.3', 'Steve King'],
-  ['@simple-git/argv-parser@1.1.1', 'Steve King'],
-]);
-const missingLicenseText = 'License text not found.';
 
-const mitTerms = `Permission is hereby granted, free of charge, to any person obtaining a copy
+/**
+ * Standard MIT license text used when a package declares MIT but ships no
+ * license file (some packages keep the text only in their README). The
+ * copyright holder line is taken from package.json metadata when available.
+ */
+const MIT_FALLBACK_TEXT = `MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
 to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
@@ -39,50 +39,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.`;
 
-function authorName(author) {
-  if (typeof author === 'string') return author;
-  if (author && typeof author.name === 'string') return author.name;
-  return undefined;
-}
-
-export function fallbackLicenseText(packageJson) {
-  if (packageJson.license !== 'MIT') return undefined;
-  const holder =
-    authorName(packageJson.author) ??
-    curatedCopyrightHolders.get(`${packageJson.name}@${packageJson.version}`);
-  if (!holder) return undefined;
-  return `MIT License\n\nCopyright (c) ${holder}\n\n${mitTerms}`;
-}
-
-export function isMissingLicenseText(value) {
-  const normalized = typeof value === 'string' ? value.trim() : '';
-  return !normalized || normalized.startsWith(missingLicenseText);
-}
-
-export function normalizeLicenseText(value) {
-  return typeof value === 'string' && value.trim() ? value : missingLicenseText;
-}
-
-export async function findSupplementalNoticeFiles(packageDir, license) {
-  const files = [];
-  const rootEntries = await fs.readdir(packageDir, { withFileTypes: true });
-  for (const entry of rootEntries) {
-    if (entry.isFile() && /^notice(?:\.(?:md|txt))?$/i.test(entry.name)) {
-      files.push(path.join(packageDir, entry.name));
-    }
-  }
-  if (license === 'Apache-2.0') {
-    const licensesDir = path.join(packageDir, 'licenses');
-    const licenseEntries = await fs
-      .readdir(licensesDir, { withFileTypes: true })
-      .catch(() => []);
-    for (const entry of licenseEntries) {
-      if (entry.isFile()) files.push(path.join(licensesDir, entry.name));
-    }
-  }
-  return files.sort();
-}
-
 /**
  * Read license information for a dependency from its on-disk location.
  *
@@ -92,7 +48,7 @@ export async function findSupplementalNoticeFiles(packageDir, license) {
  * @returns {Promise<{name: string, version: string, repository: string, license: string}>}
  */
 async function getDependencyLicense(depName, depVersion, resolvedKey) {
-  let licenseContent = missingLicenseText;
+  let licenseContent = 'License text not found.';
   let repositoryUrl = 'No repository found';
 
   // Derive the on-disk path directly from the lockfile key
@@ -109,7 +65,8 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
     );
     const depPackageJson = JSON.parse(depPackageJsonContent);
 
-    repositoryUrl = depPackageJson.repository?.url || repositoryUrl;
+    repositoryUrl =
+      normalizeRepositoryUrl(depPackageJson.repository) || repositoryUrl;
 
     const packageDir = path.dirname(depPackageJsonPath);
     const licenseFile = await findLicenseFile(
@@ -119,33 +76,63 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
 
     if (licenseFile) {
       try {
-        const content = await fs.readFile(licenseFile, 'utf-8');
-        licenseContent = normalizeLicenseText(content);
+        licenseContent = await fs.readFile(licenseFile, 'utf-8');
       } catch (e) {
         console.warn(
           `Warning: Failed to read license file for ${depName}: ${e.message}`,
         );
       }
     } else {
-      const fallback = fallbackLicenseText(depPackageJson);
-      if (fallback) {
-        licenseContent = fallback;
+      const fallbackLicense = getFallbackLicenseText(
+        depPackageJson.license,
+        depPackageJson.author,
+      );
+      if (fallbackLicense) {
+        licenseContent = fallbackLicense;
       } else {
         console.warn(`Warning: Could not find license file for ${depName}`);
       }
     }
 
-    const supplementalFiles = await findSupplementalNoticeFiles(
+    // Some packages keep additional license texts outside the top level:
+    // a `licenses/` directory (e.g. echarts ships licenses/LICENSE-d3 for
+    // its embedded d3-derived files, referenced from its Apache LICENSE)
+    // and an Apache-style NOTICE file (required by Apache-2.0 §4(d)).
+    // Append both so the notices they accompany are actually shipped.
+    const extraSections = [];
+    for (const supplementaryFile of await findSupplementaryLicenseFiles(
       packageDir,
-      depPackageJson.license,
-    );
-    for (const supplementalFile of supplementalFiles) {
-      const supplemental = await fs.readFile(supplementalFile, 'utf8');
-      const label = path
-        .relative(packageDir, supplementalFile)
-        .split(path.sep)
-        .join('/');
-      licenseContent += `\n\n----- ${label} -----\n\n${supplemental}`;
+    )) {
+      try {
+        const content = await fs.readFile(supplementaryFile, 'utf-8');
+        const relativeName = path
+          .relative(packageDir, supplementaryFile)
+          .split(path.sep)
+          .join('/');
+        extraSections.push(`--- ${relativeName} ---\n\n${content.trim()}`);
+      } catch (e) {
+        console.warn(
+          `Warning: Failed to read supplementary license file for ${depName}: ${e.message}`,
+        );
+      }
+    }
+
+    const noticeFile = await findNoticeFile(packageDir);
+    if (noticeFile) {
+      try {
+        const noticeContent = (await fs.readFile(noticeFile, 'utf-8')).trim();
+        if (noticeContent) {
+          extraSections.push(`--- NOTICE ---\n\n${noticeContent}`);
+        }
+      } catch (e) {
+        console.warn(
+          `Warning: Failed to read NOTICE file for ${depName}: ${e.message}`,
+        );
+      }
+    }
+
+    if (extraSections.length > 0) {
+      licenseContent = `${licenseContent.replace(/\s+$/, '')}\n\n${extraSections.join('\n\n')}`;
     }
   } catch (e) {
     console.warn(
@@ -162,11 +149,30 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
 }
 
 /**
- * Resolve a dependency's license file case-insensitively. The default macOS
- * filesystem is case-insensitive while Linux (CI) is case-sensitive, so a
- * fixed-case candidate list finds a `License` file on macOS but misses it on
- * Linux, making the generated notices platform-dependent. Scan the directory
- * and compare lowercased names so the result is identical on both.
+ * Scan a directory and map lowercased entry names to the actual entry name.
+ * The default macOS filesystem is case-insensitive while Linux (CI) is
+ * case-sensitive, so a fixed-case candidate list finds a `License` file on
+ * macOS but misses it on Linux, making the generated notices
+ * platform-dependent. Comparing lowercased names gives the same result on
+ * both.
+ *
+ * @param {string} dir - Directory to scan
+ * @returns {Promise<Map<string, string>>} Lowercased name -> actual name
+ */
+async function entriesByLowerName(dir) {
+  const dirEntries = await fs.readdir(dir).catch(() => []);
+  const map = new Map();
+  for (const entry of dirEntries) {
+    const lower = entry.toLowerCase();
+    if (!map.has(lower)) {
+      map.set(lower, entry);
+    }
+  }
+  return map;
+}
+
+/**
+ * Resolve a dependency's license file case-insensitively.
  *
  * @param {string} packageDir - Directory containing the dependency's package.json
  * @param {string} [licenseFileHint] - License file name declared in package.json, if any
@@ -187,22 +193,143 @@ export async function findLicenseFile(packageDir, licenseFileHint) {
     .filter(Boolean)
     .map((candidate) => candidate.toLowerCase());
 
-  const dirEntries = await fs.readdir(packageDir).catch(() => []);
-  const entriesByLowerName = new Map();
-  for (const entry of dirEntries) {
-    const lower = entry.toLowerCase();
-    if (!entriesByLowerName.has(lower)) {
-      entriesByLowerName.set(lower, entry);
-    }
-  }
+  const entries = await entriesByLowerName(packageDir);
 
   for (const candidate of candidates) {
-    const match = entriesByLowerName.get(candidate);
+    const match = entries.get(candidate);
     if (match) {
       return path.join(packageDir, match);
     }
   }
   return undefined;
+}
+
+/**
+ * Resolve a dependency's NOTICE file case-insensitively. Apache-2.0 §4(d)
+ * requires redistribution to retain NOTICE attributions when the work ships
+ * a NOTICE file.
+ *
+ * @param {string} packageDir - Directory containing the dependency's package.json
+ * @returns {Promise<string | undefined>} Absolute path to the NOTICE file, or undefined
+ */
+export async function findNoticeFile(packageDir) {
+  const candidates = ['notice', 'notice.txt', 'notice.md'];
+  const entries = await entriesByLowerName(packageDir);
+
+  for (const candidate of candidates) {
+    const match = entries.get(candidate);
+    if (match) {
+      const matchPath = path.join(packageDir, match);
+      const stat = await fs.stat(matchPath).catch(() => undefined);
+      if (stat?.isFile()) {
+        return matchPath;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
+ * List supplementary license files kept in a package's top-level `licenses/`
+ * directory (sorted for deterministic output). These are referenced from the
+ * package's main license text (e.g. echarts' Apache LICENSE points at
+ * licenses/LICENSE-d3 for its embedded d3-derived files) but were previously
+ * never shipped with the notices. The match is exact-case on purpose: the
+ * uppercase `LICENSES/` directory is the unrelated REUSE convention of
+ * SPDX-keyed standard texts, which the package's own license entry already
+ * covers.
+ *
+ * @param {string} packageDir - Directory containing the dependency's package.json
+ * @returns {Promise<string[]>} Absolute paths of the supplementary license files
+ */
+export async function findSupplementaryLicenseFiles(packageDir) {
+  const dirEntries = await fs.readdir(packageDir).catch(() => []);
+  if (!dirEntries.includes('licenses')) {
+    return [];
+  }
+  const licensesDir = path.join(packageDir, 'licenses');
+  const dirStat = await fs.stat(licensesDir).catch(() => undefined);
+  if (!dirStat?.isDirectory()) {
+    return [];
+  }
+
+  const filePaths = [];
+  const files = (await fs.readdir(licensesDir).catch(() => []))
+    .slice()
+    .sort((a, b) => a.localeCompare(b));
+  for (const file of files) {
+    const filePath = path.join(licensesDir, file);
+    const fileStat = await fs.stat(filePath).catch(() => undefined);
+    if (fileStat?.isFile()) {
+      filePaths.push(filePath);
+    }
+  }
+  return filePaths;
+}
+
+/**
+ * Normalize the package.json `repository` field to a display URL.
+ *
+ * Object-form values are returned unchanged (preserving the historical
+ * output). String-form values — which npm allows as a full URL, a
+ * `github:user/repo` shortcut, or a bare `user/repo` GitHub shorthand — are
+ * expanded to an https URL so they are not dropped as "No repository found".
+ *
+ * @param {string | {url?: string} | undefined} repository - The `repository` field from package.json
+ * @returns {string | undefined} A display URL, or undefined when absent
+ */
+export function normalizeRepositoryUrl(repository) {
+  if (typeof repository !== 'string') {
+    return repository?.url;
+  }
+
+  let value = repository.trim();
+  if (!value) {
+    return undefined;
+  }
+
+  if (value.startsWith('git+') && /^git\+https?:/.test(value)) {
+    value = value.slice('git+'.length);
+  }
+  if (value.startsWith('github:')) {
+    return `https://github.com/${value.slice('github:'.length)}`;
+  }
+  const scpMatch = value.match(/^git@([^:]+):(.+)$/);
+  if (scpMatch) {
+    return `https://${scpMatch[1]}/${scpMatch[2]}`;
+  }
+  if (value.startsWith('git://')) {
+    return `https://${value.slice('git://'.length)}`;
+  }
+  if (/^[\w.-]+\/[\w.-]+$/.test(value)) {
+    return `https://github.com/${value}`;
+  }
+  return value;
+}
+
+/**
+ * Produce fallback license text for packages that declare a known SPDX
+ * license but ship no license file. Currently only MIT is covered, as it is
+ * the only such declaration in the dependency graph.
+ *
+ * @param {unknown} license - The `license` field from package.json
+ * @param {unknown} author - The `author` field from package.json
+ * @returns {string | undefined} Fallback text, or undefined when no fallback applies
+ */
+export function getFallbackLicenseText(license, author) {
+  if (typeof license !== 'string' || license.trim().toUpperCase() !== 'MIT') {
+    return undefined;
+  }
+  const authorName =
+    typeof author === 'string' && author.trim()
+      ? // npm author strings may carry a trailing homepage in parentheses
+        // ("Name <email> (url)"), which does not belong in a copyright line.
+        author.trim().replace(/\s*\([^)]*\)$/, '')
+      : typeof author?.name === 'string' && author.name.trim()
+        ? author.name.trim()
+        : undefined;
+  const copyrightLine = authorName ? `Copyright (c) ${authorName}\n\n` : '';
+  return `Standard MIT license text (package declares MIT but ships no license file; copyright holder from package.json metadata).\n\n${copyrightLine}${MIT_FALLBACK_TEXT}`;
 }
 
 /**
@@ -244,6 +371,7 @@ function resolveInLockfile(packageName, packages, resolveFrom) {
  * @param {object} packageLock - Parsed package-lock.json
  * @param {Map<string, {version: string, resolvedKey: string}>} dependenciesMap - Accumulated results
  * @param {string} resolveFrom - Lockfile key prefix to resolve from (e.g. "packages/vscode-ide-companion")
+ * @param {Set<string>} visitedKeys - Lockfile keys already traversed
  */
 export function collectDependencies(
   packageName,
@@ -352,14 +480,6 @@ async function main() {
     );
 
     const dependencyLicenses = await Promise.all(licensePromises);
-    const missingLicenses = dependencyLicenses
-      .filter((dependency) => isMissingLicenseText(dependency.license))
-      .map((dependency) => `${dependency.name}@${dependency.version}`);
-    if (missingLicenses.length > 0) {
-      throw new Error(
-        `License text missing for: ${missingLicenses.join(', ')}`,
-      );
-    }
 
     let noticeText =
       'This file contains third-party software notices and license terms.\n\n';

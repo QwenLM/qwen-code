@@ -15,6 +15,8 @@ import {
   loadUsageHistoryWithLive,
   persistSessionUsage,
   persistUsageBeforeTranscriptDeletion,
+  prepareUsageBeforeTranscriptDeletion,
+  commitUsageBeforeTranscriptDeletion,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
@@ -905,6 +907,24 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
       false,
     );
     const lines = fs.readFileSync(usagePath(), 'utf-8').trim().split('\n');
+    expect(lines).toHaveLength(1);
+  });
+
+  it('does not append stale salvage after authoritative usage is persisted', async () => {
+    const sessionId = 'sess-salvage-race';
+    const filePath = plantTranscript(sessionId, true);
+    const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+    expect(prepared).not.toBeNull();
+    persistSessionUsage({
+      sessionId,
+      project: '/salvage/project',
+      startTime: new Date('2026-07-01T00:00:00Z'),
+      endTime: new Date('2026-07-01T00:01:00Z'),
+      metrics: makeMetrics(),
+    });
+
+    expect(commitUsageBeforeTranscriptDeletion(prepared!)).toBe(false);
+    const lines = fs.readFileSync(usagePath(), 'utf8').trim().split('\n');
     expect(lines).toHaveLength(1);
   });
 

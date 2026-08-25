@@ -1,6 +1,6 @@
 {
   "overall": "fail",
-  "selectedVscodePath": "acp",
+  "selectedVscodePath": null,
   "candidates": {
     "directDaemon": {
       "status": "pass",
@@ -16,6 +16,6 @@
     }
   },
   "blockers": [
-    "VS Code scope/generation/reconnect, host-action parity, VSIX, and packaged artifact gates remain pending"
+    "VS Code product path selection, live timeline migration, host-action parity, VSIX, and packaged artifact gates move to MR2B"
   ]
 }

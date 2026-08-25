@@ -197,7 +197,19 @@ export interface ConvergenceDiagnosis {
 }
 
 /** How a round's posting floor came to be `critical`. */
-export type CriticalFloorKind = 'explicit' | 'auto-resolved';
+export type CriticalFloorKind =
+  | 'explicit'
+  | 'auto-resolved'
+  /**
+   * `auto` engaged EARLY, before the round-6 schedule, because the
+   * first-time-finding rate had not fallen for the streak's bar of
+   * consecutive rounds (#9903) — the trigger acting on the `stem-surface`
+   * advice this module already prints instead of only printing it. A kind
+   * of its own, not folded into `auto-resolved`, because the round owes its
+   * reader the reason the posture changed ahead of schedule: the deferral
+   * header and the "already" wording below name the trigger off it.
+   */
+  | 'auto-signaled';
 
 /**
  * The closed set of handling recommendations this module can match.
@@ -837,10 +849,12 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   const alreadyEn: Record<CriticalFloorKind, string> = {
     explicit: `this PR's reviews are already at \`--severity-floor critical\``,
     'auto-resolved': `this PR's reviews already resolve to a critical posting floor`,
+    'auto-signaled': `this PR's reviews already engage the critical posting floor — it resolved early, ahead of the round-6 schedule, because the first-time-finding rate has not fallen for consecutive rounds`,
   };
   const alreadyZh: Record<CriticalFloorKind, string> = {
     explicit: `本 PR 的评审已处于 \`--severity-floor critical\``,
     'auto-resolved': `本 PR 的评审已解析为 critical 发布下限`,
+    'auto-signaled': `本 PR 的评审已处于 critical 发布下限——因首次发现速率连续多轮未下降，已先于第 6 轮的既定计划提前生效`,
   };
   // The floor rung rides the batching sentence when it was MATCHED — the
   // same condition, read off the set rather than re-derived from the flag.

@@ -44,21 +44,23 @@ export class WebViewContent {
     // Escape URI for HTML to prevent potential injection attacks
     const safeExtensionUri = escapeHtml(extensionUriForWebview.toString());
     const safeScriptUri = escapeHtml(scriptUri.toString());
-    const useWebShellTranscript = vscode.workspace
-      .getConfiguration('qwen-code')
-      .get<boolean>('experimental.webShellTranscript', false);
+
+    // The WebShell transcript bundles Shiki, whose Oniguruma engine compiles
+    // WASM at runtime, and self-contained KaTeX fonts as data URLs, so the CSP
+    // grants both wasm-unsafe-eval and data: fonts.
+    const csp = `default-src 'none'; img-src ${webview.cspSource} data:; font-src data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; script-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
   <title>Qwen Code</title>
 </head>
-<body data-extension-uri="${safeExtensionUri}" data-web-shell-transcript="${useWebShellTranscript ? 'enabled' : 'disabled'}">
+<body data-extension-uri="${safeExtensionUri}">
   <div id="root"></div>
-  <script src="${safeScriptUri}"></script>
+  <script type="module" src="${safeScriptUri}"></script>
 </body>
 </html>`;
   }

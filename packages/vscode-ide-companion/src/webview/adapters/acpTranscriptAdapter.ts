@@ -1,148 +1,104 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Thin adapter that bridges ACP session/update notifications into the shared
+ * SDK daemon transcript reducer. The ACP `SessionNotification` payload is
+ * structurally identical to the daemon `session_update` envelope, so no
+ * per-field projection is needed: wrap the notification once, then let
+ * `normalizeDaemonEvent` + `reduceDaemonTranscriptEvents` do the work.
+ */
+import type { SessionNotification } from '@agentclientprotocol/sdk';
 import {
-  createDaemonTranscriptState,
   normalizeDaemonEvent,
   reduceDaemonTranscriptEvents,
-  type DaemonEvent,
-  type DaemonTranscriptBlock,
-  type DaemonTranscriptState,
 } from '@qwen-code/sdk/daemon';
+import type { DaemonEvent, DaemonTranscriptState } from '@qwen-code/sdk/daemon';
+import { splitMessageContentForImages } from '../../utils/imageSupport.js';
 
-export interface AcpTranscriptAdapterState {
-  readonly transcript: DaemonTranscriptState;
-  readonly blocks: readonly DaemonTranscriptBlock[];
-  readonly compatible: boolean;
-}
-
-export function createAcpTranscriptAdapterState(): AcpTranscriptAdapterState {
-  const transcript = createDaemonTranscriptState({
-    now: 0,
-    maxBlocks: Number.MAX_SAFE_INTEGER,
-  });
-  return { transcript, blocks: transcript.blocks, compatible: true };
-}
-
-export function reduceAcpTranscriptUpdate(
-  state: AcpTranscriptAdapterState,
-  update: unknown,
-  scopeKey: string,
-  now = Date.now(),
-): AcpTranscriptAdapterState {
+/** Reduce one ACP notification into the transcript state. */
+export function reduceSessionNotification(
+  state: DaemonTranscriptState,
+  notification: SessionNotification,
+): DaemonTranscriptState {
   const event: DaemonEvent = {
     v: 1,
     type: 'session_update',
-    data: { update },
+    data: notification,
   };
-  let truncated = false;
-  const transcript = reduceDaemonTranscriptEvents(
-    state.transcript,
-    normalizeDaemonEvent(event),
-    {
-      now,
-      maxBlocks: Number.MAX_SAFE_INTEGER,
-      onTruncation: () => {
-        truncated = true;
-      },
-    },
-  );
-  const projected = projectStableTranscriptBlockIds(
-    transcript.blocks,
-    scopeKey,
-  );
-  return {
-    transcript,
-    blocks: projected.blocks,
-    compatible: state.compatible && !truncated && projected.compatible,
-  };
+  return reduceDaemonTranscriptEvents(state, normalizeDaemonEvent(event));
 }
 
-export function adaptAcpTranscriptUpdates(
-  updates: readonly unknown[],
-  scopeKey: string,
-): AcpTranscriptAdapterState {
-  return updates.reduce<AcpTranscriptAdapterState>(
-    (state, update) => reduceAcpTranscriptUpdate(state, update, scopeKey, 0),
-    createAcpTranscriptAdapterState(),
-  );
+/** Minimal shape of cached history rows (ChatMessage) delivered offline. */
+export interface CachedTranscriptMessage {
+  role?: string;
+  content?: string;
 }
 
-export function projectStableTranscriptBlockIds(
-  blocks: readonly DaemonTranscriptBlock[],
-  scopeKey: string,
-): {
-  readonly blocks: readonly DaemonTranscriptBlock[];
-  readonly compatible: boolean;
-} {
-  const stableIdByRuntimeId = new Map<string, string>();
-  const seen = new Set<string>();
-  let compatible = true;
-  for (const block of blocks) {
-    const sourceIdentity = getBlockIdentity(block);
-    if (!sourceIdentity) {
-      compatible = false;
-      continue;
-    }
-    const id = `${block.kind}-${hashIdentity([
-      scopeKey,
-      block.kind,
-      ...sourceIdentity,
-    ])}`;
-    if (seen.has(id)) compatible = false;
-    seen.add(id);
-    stableIdByRuntimeId.set(block.id, id);
+/**
+ * Anti-merge marker the shared transcript reducer honors: `canMergeTextDelta`
+ * refuses to fold a chunk carrying it into the active block. Cached history
+ * rows are discrete messages, but `readJsonlMessages` reconstructs runs of
+ * consecutive same-role rows per turn (Tool Result / telemetry / Plan rows);
+ * seeded as bare chunks they would merge into one plain-concatenated block,
+ * unlike live replays where each row arrives stamped.
+ */
+const CACHED_ROW_META = { qwenDiscreteMessage: true } as const;
+
+/**
+ * Convert one cached ChatMessage-shaped history row into the ACP
+ * session/update notification the shared reducer already understands.
+ * Returns `null` for rows without renderable text so offline restores and
+ * load-failure fallbacks render the same timeline as live replays.
+ */
+export function cachedMessageToNotification(
+  message: CachedTranscriptMessage,
+  sessionId: string,
+): SessionNotification | null {
+  if (
+    typeof message?.content !== 'string' ||
+    message.content.trim().length === 0
+  ) {
+    return null;
   }
-  return {
-    compatible,
-    blocks: blocks.map((block) => {
-      const id = stableIdByRuntimeId.get(block.id) ?? block.id;
-      if (block.kind !== 'tool' || !block.parentBlockId) {
-        return id === block.id ? block : { ...block, id };
-      }
+  const text =
+    message.role === 'user'
+      ? splitMessageContentForImages(message.content).text
+      : message.content;
+  if (text.trim().length === 0) {
+    return null;
+  }
+  const content = { type: 'text' as const, text };
+  switch (message.role) {
+    case 'user':
       return {
-        ...block,
-        id,
-        parentBlockId:
-          stableIdByRuntimeId.get(block.parentBlockId) ?? block.parentBlockId,
+        sessionId,
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content,
+          _meta: CACHED_ROW_META,
+        },
       };
-    }),
-  };
-}
-
-function getBlockIdentity(
-  block: DaemonTranscriptBlock,
-): readonly string[] | undefined {
-  if (block.kind === 'tool') return ['toolCallId', block.toolCallId];
-  if (block.kind === 'permission') return ['requestId', block.requestId];
-  if (
-    block.kind === 'user' &&
-    block.sourceRecordIds &&
-    block.sourceRecordIds.length > 0
-  ) {
-    return ['sourceRecordIds', ...block.sourceRecordIds];
+    case 'assistant':
+      return {
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content,
+          _meta: CACHED_ROW_META,
+        },
+      };
+    case 'thinking':
+      return {
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_thought_chunk',
+          content,
+          _meta: CACHED_ROW_META,
+        },
+      };
+    default:
+      return null;
   }
-  if (block.segmentId) return ['segmentId', block.segmentId];
-  if (
-    block.kind === 'user' ||
-    block.kind === 'assistant' ||
-    block.kind === 'thought'
-  ) {
-    return undefined;
-  }
-  return block.eventId === undefined
-    ? undefined
-    : ['eventId', String(block.eventId)];
-}
-
-function hashIdentity(parts: readonly string[]): string {
-  const value = parts.join('\u0000');
-  let first = 0x811c9dc5;
-  let second = 0x9e3779b9;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    first = Math.imul(first ^ code, 0x01000193);
-    second = Math.imul(second ^ code, 0x85ebca6b);
-    second ^= second >>> 13;
-  }
-  return `${(first >>> 0).toString(16).padStart(8, '0')}${(second >>> 0)
-    .toString(16)
-    .padStart(8, '0')}`;
 }
