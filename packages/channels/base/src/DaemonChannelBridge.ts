@@ -170,15 +170,20 @@ function channelImageName(mimeType: string, index = 0): string | undefined {
 
 function decodeChannelImage(
   data: string,
+  oversizedReason: string,
 ): { bytes: Buffer } | { skip: string } {
-  // Valid base64 decodes to at most this many bytes (padding shrinks it
-  // further), so an oversized image is rejected on length alone instead of
-  // allocating a buffer the size check would discard.
+  // Valid base64 decodes to at most this many bytes, so an oversized image
+  // is rejected on length alone instead of allocating a buffer the size
+  // check would discard. Padding is subtracted only when the input length
+  // completes a quantum: Node's decoder ignores a stray trailing '=' on
+  // malformed input, and counting it would undercount the decoded size.
   let estimatedBytes = Math.floor((data.length * 3) / 4);
-  if (data.endsWith('==')) estimatedBytes -= 2;
-  else if (data.endsWith('=')) estimatedBytes -= 1;
+  if (data.length % 4 === 0) {
+    if (data.endsWith('==')) estimatedBytes -= 2;
+    else if (data.endsWith('=')) estimatedBytes -= 1;
+  }
   if (estimatedBytes > CHANNEL_IMAGE_MAX_UPLOAD_BYTES) {
-    return { skip: 'above the daemon attachment size limit' };
+    return { skip: oversizedReason };
   }
   const bytes = Buffer.from(data, 'base64');
   if (bytes.byteLength === 0) {
@@ -513,7 +518,10 @@ export class DaemonChannelBridge
                 );
                 return undefined;
               }
-              const decoded = decodeChannelImage(image.data);
+              const decoded = decodeChannelImage(
+                image.data,
+                'above the daemon attachment size limit',
+              );
               if ('skip' in decoded) {
                 process.stderr.write(
                   `[DaemonChannelBridge] skipped channel image ${decoded.skip} ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,
@@ -553,7 +561,10 @@ export class DaemonChannelBridge
         // Daemons without `session_attachments` take images inline.
         let inlineBase64Bytes = 0;
         for (const image of images) {
-          const decoded = decodeChannelImage(image.data);
+          const decoded = decodeChannelImage(
+            image.data,
+            'above the inline image budget',
+          );
           if ('skip' in decoded) {
             process.stderr.write(
               `[DaemonChannelBridge] skipped channel image ${decoded.skip} ${sanitizeLogText(image.mimeType, 128)} for session ${sanitizeLogText(sessionId, 128)}\n`,

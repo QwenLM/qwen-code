@@ -2450,6 +2450,55 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('skips malformed-padded channel images that decode past the size limit', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.uploadAttachment.mockRejectedValue(
+      new Error('daemon 413: Request body too large (max 8 MiB)'),
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionAttachments: true,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    // Node's lenient base64 decoder ignores trailing padding that does not
+    // complete a quantum, so both inputs decode to the 8 MiB limit plus one
+    // byte even though a padding-counting length estimate stays at the limit.
+    const malformedOnePad = 'A'.repeat(11184812) + '=';
+    const malformedTwoPad = 'A'.repeat(11184812) + '==';
+    let skippedWarning = '';
+    try {
+      await bridge.prompt('session-1', 'describe', {
+        images: [
+          { data: malformedOnePad, mimeType: 'image/png' },
+          { data: malformedTwoPad, mimeType: 'image/jpeg' },
+        ],
+      });
+      skippedWarning = stderr.mock.calls.join('');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(session.uploadAttachment).not.toHaveBeenCalled();
+    expect(skippedWarning).toContain('above the daemon attachment size limit');
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'describe' }],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
   it('keeps prompt images inline when the daemon lacks session attachments', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -2527,6 +2576,48 @@ describe('DaemonChannelBridge', () => {
       type: 'text',
       text: 'describe',
     });
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('names the inline budget when skipping oversized inline channel images', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    // A daemon without session_attachments has no attachment store, so the
+    // skip line must name the inline budget, not the store's size limit.
+    const oversized = Buffer.alloc(8 * 1024 * 1024 + 1, 1).toString('base64');
+    let skippedWarning = '';
+    try {
+      await bridge.prompt('session-1', 'describe', {
+        images: [{ data: oversized, mimeType: 'image/jpeg' }],
+      });
+      skippedWarning = stderr.mock.calls.join('');
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(skippedWarning).toContain('above the inline image budget');
+    expect(skippedWarning).not.toContain(
+      'above the daemon attachment size limit',
+    );
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'describe' }],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+      },
+      expect.any(AbortSignal),
+    );
 
     events.close();
     bridge.stop();
