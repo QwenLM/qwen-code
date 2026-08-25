@@ -4,7 +4,6 @@ description: Turn a fuzzy intention into a /goal objective the Goal verifier can
 argument-hint: '[intent, or an existing goal to tighten]'
 allowedTools:
   - get_goal
-  - ask_user_question
   - read_file
   - glob
   - grep_search

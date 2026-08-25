@@ -8,6 +8,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  buildPermissionCheckContext,
+  evaluatePermissionRules,
+} from '../../../core/permission-helpers.js';
+import { PermissionManager } from '../../../permissions/permission-manager.js';
+import { applySkillAllowedTools } from '../../../tools/skill-utils.js';
 import { parseSkillContent } from '../../skill-load.js';
 
 function loadGoalDraftSkill() {
@@ -21,13 +27,12 @@ function loadGoalDraftSkill() {
 }
 
 describe('bundled goal-draft skill', () => {
-  it('auto-approves only the non-mutating tools: Goal read, workspace reads, and questions', () => {
+  it('auto-approves only the non-mutating tools: Goal read and workspace reads', () => {
     const { config } = loadGoalDraftSkill();
 
     expect(config.name).toBe('goal-draft');
     expect(config.allowedTools).toEqual([
       'get_goal',
-      'ask_user_question',
       'read_file',
       'glob',
       'grep_search',
@@ -41,6 +46,31 @@ describe('bundled goal-draft skill', () => {
     expect(config.allowedTools).not.toContain('write_file');
     expect(config.allowedTools).not.toContain('edit');
     expect(config.allowedTools).not.toContain('update_goal');
+    // ask_user_question must stay ungranted: a session-wide allow rule
+    // overrides its 'ask' default and the scheduler then runs it without
+    // showing the dialog, fabricating a declined-answer result (see the
+    // grant test below).
+    expect(config.allowedTools).not.toContain('ask_user_question');
+  });
+
+  it('keeps ask_user_question behind its dialog after the allowedTools grant', async () => {
+    const { config } = loadGoalDraftSkill();
+
+    // BundledSkillLoader applies the frontmatter grant as session-wide
+    // allow rules. If ask_user_question were granted, that rule would
+    // override the tool's interactive 'ask' default and it would execute
+    // with no dialog, returning "User declined to answer" as success.
+    const pm = new PermissionManager({
+      getPermissionsAllow: () => undefined,
+      getPermissionsAsk: () => undefined,
+      getPermissionsDeny: () => undefined,
+    });
+    applySkillAllowedTools(pm, config.allowedTools);
+
+    const ctx = buildPermissionCheckContext('ask_user_question', {}, '');
+    await expect(
+      evaluatePermissionRules(pm, 'ask', ctx),
+    ).resolves.toMatchObject({ finalPermission: 'ask' });
   });
 
   it('stays model-invocable and user-invocable so both `/goal-draft` and "define a goal" reach it', () => {
@@ -103,6 +133,16 @@ describe('bundled goal-draft skill', () => {
   it('fixes the objective contract labels and keeps the hand-off on one line', () => {
     const { body } = loadGoalDraftSkill();
 
+    // Pin the labels where the drafter copies them from — the ```text
+    // template — not just anywhere in the body, where the Weak→strong
+    // table repeats five of the six labels.
+    const templateStart = body.indexOf('```text');
+    const templateEnd = body.indexOf('\n```', templateStart);
+    expect(templateStart).toBeGreaterThanOrEqual(0);
+    expect(templateEnd).toBeGreaterThan(templateStart);
+    const template = body.slice(templateStart, templateEnd);
+
+    let previous = -1;
     for (const label of [
       'Outcome:',
       'Done when:',
@@ -111,7 +151,9 @@ describe('bundled goal-draft skill', () => {
       'On block:',
       'Context:',
     ]) {
-      expect(body).toContain(label);
+      const position = template.indexOf(label);
+      expect(position).toBeGreaterThan(previous);
+      previous = position;
     }
     // parseGoalCommand joins whitespace-separated tokens with single
     // spaces, so a multi-line objective would be flattened anyway.
@@ -129,14 +171,20 @@ describe('bundled goal-draft skill', () => {
     expect(body).toContain('No "after the user confirms/approves"');
     expect(body).toContain('Exactly one Outcome.');
     expect(body).toContain('Irreversible actions (push, delete, publish)');
-    expect(body).toContain(
+    // The stop instruction is pinned as the very last line so the final
+    // thing the model reads is "do not start".
+    expect(body.trimEnd().split('\n').pop()).toBe(
       'Do not run /goal yourself. Do not begin the task. Stop and wait for the user.',
     );
     // The "do not do the work" instruction is stated up front as well as at
     // the end, because skipping straight to implementation is the most
     // common failure mode of spec-writing skills.
-    expect(
-      body.indexOf('You are NOT doing the work the goal describes.'),
-    ).toBeLessThan(body.indexOf('## Step 0'));
+    const upFront = body.indexOf(
+      'You are NOT doing the work the goal describes.',
+    );
+    const step0 = body.indexOf('## Step 0');
+    expect(upFront).toBeGreaterThanOrEqual(0);
+    expect(step0).toBeGreaterThanOrEqual(0);
+    expect(upFront).toBeLessThan(step0);
   });
 });

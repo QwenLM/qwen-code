@@ -55,4 +55,4 @@ Keep it to one objective and roughly under 1,200 characters. `/goal set` and `/g
 
 Pass an existing objective to tighten it: `/goal-draft all tests pass and the lint is clean`.
 
-The skill is instructed to be read-only, and only its non-mutating tools are auto-approved (`get_goal`, `ask_user_question`, `read_file`, `glob`, `grep_search`). Like other bundled skills, a project or personal skill named `goal-draft` overrides it, and `skills.disabled` can turn it off. See [Skills](./skills.md) for how bundled skills are discovered.
+The skill is instructed to be read-only, and only its non-mutating tools are auto-approved (`get_goal`, `read_file`, `glob`, `grep_search`). `ask_user_question` is deliberately not auto-approved, so its question dialog is shown before the skill drafts from your answers. Like other bundled skills, a project or personal skill named `goal-draft` overrides it, and `skills.disabled` can turn it off. See [Skills](./skills.md) for how bundled skills are discovered.

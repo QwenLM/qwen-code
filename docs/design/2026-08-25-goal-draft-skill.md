@@ -12,7 +12,7 @@ What differs for an autonomous loop versus a PRD: the stop condition must be mac
 
 ## Design
 
-A bundled skill at `packages/core/src/skills/bundled/goal-draft/SKILL.md`, registered like every bundled skill as `/goal-draft` (model-invocable too). It is instructed to be read-only and auto-approves only the non-mutating tools (`get_goal`, `ask_user_question`, `read_file`, `glob`, `grep_search`); `allowedTools` is an additive grant, so the read-only discipline is enforced by the skill's prose. It never runs the checks, never edits, and cannot call `/goal` (built-in commands are not model-invocable by design).
+A bundled skill at `packages/core/src/skills/bundled/goal-draft/SKILL.md`, registered like every bundled skill as `/goal-draft` (model-invocable too). It is instructed to be read-only and auto-approves only the non-mutating tools (`get_goal`, `read_file`, `glob`, `grep_search`); `allowedTools` is an additive grant, so the read-only discipline is enforced by the skill's prose. `ask_user_question` is deliberately not granted: an allow rule for it would override the tool's `'ask'` default session-wide and run it without the question dialog, fabricating a declined-answer result. It never runs the checks, never edits, and cannot call `/goal` (built-in commands are not model-invocable by design).
 
 Steps:
 
@@ -40,5 +40,5 @@ The objective is handed over on one line because `parseGoalCommand` splits on wh
 
 ## Verification
 
-- `packages/core`: `bundled-skills.integration.test.ts` parses the new SKILL.md; `goal-draft/SKILL.test.ts` (7 tests); `tsc --noEmit` clean; eslint clean.
+- `packages/core`: `bundled-skills.integration.test.ts` parses the new SKILL.md; `goal-draft/SKILL.test.ts` (8 tests); `tsc --noEmit` clean; eslint clean.
 - Built CLI run headless in a throwaway project with a `test` and `coverage` script: `/goal-draft make the auth tests pass and raise coverage` produced a six-part objective citing the real `node --test test/` and `c8 …` scripts, two `[ASSUMPTION]` notes, and a `/goal set …` line; the project tree was untouched. `/goal-draft clean up the auth module` turned "clean" into an explicit, assumption-tagged observable definition (tests pass, exports referenced, diff confined to `src/auth`) and invited the user to redefine it.
