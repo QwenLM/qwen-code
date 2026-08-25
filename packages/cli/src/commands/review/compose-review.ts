@@ -27,6 +27,7 @@ import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
+import { readStopSidecarFields } from './lib/stop-sidecar.js';
 import {
   coverageFromTranscripts,
   verificationGaps,
@@ -783,9 +784,17 @@ export interface ComposeReviewInput {
    * model-written state — the same seam every other `planPath` reader in
    * this module trusts — so under a `review run` parent (which publishes a
    * run id) a second read binds the grant: the stop sidecar the same
-   * capture wrote must carry this run's stamp, exactly the fence `run.ts`
-   * applies to the same decision. A stale or forged plan matches the shape
-   * but never the stamp.
+   * capture wrote must be present and carry this run's stamp, exactly the
+   * fence `run.ts` applies to the same decision. The honest residual,
+   * stated rather than papered over: the run id is readable from the child
+   * session's own environment, and both files the gate reads are
+   * model-writable, so within a child session this fence defends against a
+   * STALE stop plan or sidecar left behind by an earlier round — not
+   * against a determined forger — the same child-artifact trust `review
+   * run` already accepts for the composed verdict itself. What it does
+   * close decisively is the POSTED path: `submit` strips this flag, because
+   * a PR round is never a decided stop and a posted verdict that carries
+   * the exemption is a full round laundering itself past the floors.
    */
   stopReRule?: boolean;
   /**
@@ -1437,34 +1446,45 @@ function planCarriesDecidedStop(planPath: string | undefined): boolean {
  * the parent published, and the exemption `stopReRule` grants is read
  * against that stamp — a shape match on a file the state points at is what
  * a stale stop plan left behind by an earlier round matches just as well.
- * No published id (an interactive round no `review run` gate reads) → no
- * fence to match, the plan-shape check stands alone. Published id but no
- * sidecar stamped with it → refused.
+ * No sidecar at all → refused: every legitimate stop round's capture wrote
+ * one, in an interactive round too. Published id but no sidecar stamped
+ * with it → refused. No published id (an interactive round no `review run`
+ * gate reads) → the sidecar's PRESENCE is the fence; there is no stamp to
+ * match. The honest residual, documented on `stopReRule`: the run id is
+ * readable from the child's own environment, so within the child session
+ * the fence defends against STALE artifacts, not a determined forger — the
+ * same child-artifact trust `review run` accepts for the composed verdict
+ * itself.
  */
-function stopSidecarFenced(env: NodeJS.ProcessEnv | undefined): boolean {
+function stopSidecarFence(env: NodeJS.ProcessEnv | undefined): {
+  granted: boolean;
+  refusal: 'no-sidecar' | 'no-matching-stamp' | null;
+} {
   const runId = (env ?? process.env)['QWEN_REVIEW_RUN_ID'];
-  if (typeof runId !== 'string' || runId === '') return true;
+  const hasRunId = typeof runId === 'string' && runId !== '';
   let names: string[];
   try {
     names = readdirSync(REVIEW_TMP_DIR);
   } catch {
-    return false;
+    return { granted: false, refusal: 'no-sidecar' };
   }
+  let sawFamily = false;
   for (const name of names) {
     // `stopNameFor`'s shape: `qwen-review-<target-stem>-stop.json`. The
     // target class is not knowable here, so match the family and let the
     // stamp decide.
     if (!/^qwen-review-.*-stop\.json$/.test(name)) continue;
-    try {
-      const stop = JSON.parse(
-        readFileSync(join(REVIEW_TMP_DIR, name), 'utf8'),
-      ) as { runId?: unknown };
-      if (stop.runId === runId) return true;
-    } catch {
-      continue;
+    sawFamily = true;
+    if (!hasRunId) return { granted: true, refusal: null };
+    const stop = readStopSidecarFields(join(REVIEW_TMP_DIR, name));
+    if (stop !== null && stop.runId === runId) {
+      return { granted: true, refusal: null };
     }
   }
-  return false;
+  return {
+    granted: false,
+    refusal: sawFamily ? 'no-matching-stamp' : 'no-sidecar',
+  };
 }
 
 export function composeReview(
@@ -2476,11 +2496,28 @@ function composeReviewBody(
   // and — under a `review run` parent, which publishes a run id — the
   // runId-fenced stop sidecar the same capture wrote, the fence run.ts
   // applies to the same decision. A claim that fails either read gets the
-  // regular floors, never a bypass.
-  const stopReRule =
-    toBool(input.stopReRule, 'stopReRule') &&
-    planCarriesDecidedStop(input.planPath) &&
-    stopSidecarFenced(input.env);
+  // regular floors, never a bypass — and is told WHY on stderr, because a
+  // decided stop capped out of its exemption is otherwise indistinguishable
+  // from a round that genuinely lacks verification, and the cap name points
+  // the operator at verifier transcripts a stop round by construction never
+  // has instead of at the refused fence.
+  const claimsStop = toBool(input.stopReRule, 'stopReRule');
+  const planSaysStop = planCarriesDecidedStop(input.planPath);
+  // Lazy: the fence reads `.qwen/tmp`, and the common path (no stop claim)
+  // owes no such read.
+  const fence = claimsStop && planSaysStop ? stopSidecarFence(input.env) : null;
+  const stopReRule = claimsStop && planSaysStop && (fence?.granted ?? false);
+  if (claimsStop && !stopReRule) {
+    const why = !planSaysStop
+      ? 'the plan carries no `nothingToReview` decision'
+      : fence?.refusal === 'no-sidecar'
+        ? 'no stop sidecar exists in .qwen/tmp'
+        : "no stop sidecar is stamped with this run's id";
+    writeStderrLine(
+      `compose-review: \`stopReRule: true\` claimed but not honoured — ${why}; ` +
+        'the regular evidence floors apply.',
+    );
+  }
   // A Critical marker in the deferral channel is RELOCATED, never fatal and
   // never deferred: it counts toward `C`, the event blocks, and the round
   // posts (a throw would lose the whole round — the round-5 doctrine). The
@@ -3101,11 +3138,20 @@ function composeReviewBody(
   // excluded it. The path is a caller-written input like `planPath`; the
   // check fails CLOSED when it does not read, and fails OPEN when it is
   // omitted — a medium review runs no Step 5 and has no findings file.
+  //
+  // A decided-stop re-rule is exempt, the same exemption the coverage and
+  // verification floors above get: the stop round ran no reverse audit, so
+  // the only `findingsPath` a faithful stop state can carry is a PREVIOUS
+  // round's cumulative file — and that file's surviving `— [unverified]`
+  // tags (which persist by design) or a since-cleaned-up path would cap the
+  // re-rule's verdict on evidence the stop round never owed and can never
+  // produce. The exemption's own contract names this: no reverse-audit
+  // evidence "exist[s] or CAN exist" on a stop round.
   let findingsUnverifiedAtCompose = false;
   let findingsFileUnreadable = false;
   let unverifiedTagCount = 0;
   const findingsPath: unknown = input.findingsPath;
-  if (findingsPath !== undefined && findingsPath !== null) {
+  if (!stopReRule && findingsPath !== undefined && findingsPath !== null) {
     if (typeof findingsPath !== 'string' || findingsPath.trim() === '') {
       throw new TypeError(
         `compose-review: findingsPath must be a non-empty string, got ${JSON.stringify(findingsPath)}`,

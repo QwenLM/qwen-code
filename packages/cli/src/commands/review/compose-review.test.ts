@@ -13439,12 +13439,34 @@ describe('composeReview — the decided-stop re-rule (stopReRule, #9908)', () =>
   // transcripts exist. `stopReRule` tells compose-review the verdict is the
   // orchestrator's re-rule of the open ledger — the agent-transcript floors
   // cannot be satisfied on such a round and must not cap it. The skip is
-  // granted on the plan's own field, never on the state's say-so.
+  // granted on the plan's own field plus the capture's stop sidecar, never
+  // on the state's say-so.
   let dir: string;
+  let prevCwd: string;
+  let prevRunId: string | undefined;
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'compose-stop-rerule-'));
+    // Hermetic cwd: the stop sidecar rides the cwd-relative `REVIEW_TMP_DIR`
+    // (`.qwen/tmp`), so resolve it inside the per-test temp dir — a stray
+    // sidecar left in the checkout's real `.qwen/tmp` must not flip these
+    // tests, and a read-only runner cwd must not fail them with EROFS.
+    prevCwd = process.cwd();
+    process.chdir(dir);
+    // Isolate the fence's ambient input: the no-`env`-seam tests below fall
+    // back to `process.env['QWEN_REVIEW_RUN_ID']`, and `review run` sets
+    // that variable on the whole child session it spawns — so a run of this
+    // suite inside a dogfooding `qwen review run` session must not go red
+    // for a reason unrelated to the code under test (the same snapshot
+    // pattern capture-local.incremental.test.ts uses for this variable).
+    prevRunId = process.env['QWEN_REVIEW_RUN_ID'];
+    delete process.env['QWEN_REVIEW_RUN_ID'];
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => {
+    process.chdir(prevCwd);
+    if (prevRunId === undefined) delete process.env['QWEN_REVIEW_RUN_ID'];
+    else process.env['QWEN_REVIEW_RUN_ID'] = prevRunId;
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   function stopPlan(reason: string): string {
     const p = join(dir, 'qwen-review-local-plan.json');
@@ -13459,9 +13481,27 @@ describe('composeReview — the decided-stop re-rule (stopReRule, #9908)', () =>
     return p;
   }
 
+  // The capture's stop sidecar, under the hermetic `REVIEW_TMP_DIR`. Every
+  // legitimate decided stop writes one — interactively too — so the happy
+  // paths materialise it (unstamped when no run id is published); omit it to
+  // model a round the capture never decided.
+  const SIDECAR = join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json');
+  function writeSidecar(runId?: string): void {
+    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+    writeFileSync(
+      SIDECAR,
+      JSON.stringify(
+        runId === undefined
+          ? { reason: 'clean-tree' }
+          : { reason: 'clean-tree', runId },
+      ),
+    );
+  }
+
   it.each(['clean-tree', 'unchanged-since-last-round', 'scope-emptied'])(
     'a still-standing Critical under %s requests changes with no caps',
     (reason) => {
+      writeSidecar();
       const r = composeReview({
         planPath: stopPlan(reason),
         stopReRule: true,
@@ -13475,6 +13515,7 @@ describe('composeReview — the decided-stop re-rule (stopReRule, #9908)', () =>
   );
 
   it('a re-rule that finds nothing standing approves without caps', () => {
+    writeSidecar();
     const r = composeReview({
       planPath: stopPlan('clean-tree'),
       stopReRule: true,
@@ -13566,19 +13607,9 @@ describe('composeReview — the decided-stop re-rule (stopReRule, #9908)', () =>
 
   // Under a `review run` parent a run id is published, and the grant binds
   // to the runId-fenced stop sidecar — the fence run.ts applies to the same
-  // decision. The sidecar rides REVIEW_TMP_DIR (cwd-relative), not the
-  // per-test temp dir.
-  const SIDECAR = join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json');
+  // decision. `fenceEnv` is passed through the `env` seam; the ambient
+  // variable is isolated in beforeEach.
   const fenceEnv = { QWEN_REVIEW_RUN_ID: 'run-1' };
-
-  function writeSidecar(runId: string): void {
-    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-    writeFileSync(SIDECAR, JSON.stringify({ reason: 'clean-tree', runId }));
-  }
-
-  afterEach(() => {
-    rmSync(SIDECAR, { force: true });
-  });
 
   it('a sidecar stamped by this run grants the skip', () => {
     writeSidecar('run-1');
@@ -13588,6 +13619,18 @@ describe('composeReview — the decided-stop re-rule (stopReRule, #9908)', () =>
       bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
       modelId: MODEL,
       env: fenceEnv,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toEqual([]);
+  });
+
+  it('an unstamped sidecar grants the skip when no run id is published (interactive)', () => {
+    writeSidecar();
+    const r = composeReview({
+      planPath: stopPlan('clean-tree'),
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      modelId: MODEL,
     });
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.cappedBy).toEqual([]);
@@ -13614,6 +13657,18 @@ describe('composeReview — the decided-stop re-rule (stopReRule, #9908)', () =>
       bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
       modelId: MODEL,
       env: fenceEnv,
+    });
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('no sidecar at all carries no provenance, even with no published run id', () => {
+    const r = composeReview({
+      planPath: stopPlan('clean-tree'),
+      stopReRule: true,
+      bodyCriticals: ['R1-1 hardcoded credentials (app.js:1) — still stands'],
+      modelId: MODEL,
     });
     expect(r.baseEvent).toBe('REQUEST_CHANGES');
     expect(r.event).toBe('COMMENT');

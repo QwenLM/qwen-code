@@ -39,6 +39,7 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, REVIEWS_DIR, repoRelativeOf } from './lib/paths.js';
+import { readStopSidecarFields } from './lib/stop-sidecar.js';
 import { safeTarget } from '../../utils/paths.js';
 import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
@@ -81,6 +82,17 @@ export interface RunReviewResult {
   downgradedFrom: string | null;
   remediation: string[];
   composedPath: string | null;
+  /**
+   * The decided-stop reason the capture stamped this run (`clean-tree`,
+   * `unchanged-since-last-round`, `scope-emptied`), or null when the round
+   * was not a decided stop. Carried so a caller can tell a decided stop from
+   * a verdict round: `completed: true, event: null` is byte-identical for a
+   * legitimate clean stop and for a stop whose ledger held open findings but
+   * whose re-rule verdict never composed — this field is the signal that
+   * separates them, so a gate can alert on "stop present + no composed
+   * artifact" rather than reading both as a silent pass.
+   */
+  stopReason: string | null;
   /**
    * The exact `.qwen/tmp` filename this run's target class pins — named in
    * the result so a completed-but-uncaptured review (a naming drift between
@@ -227,17 +239,11 @@ interface StopVerdict {
  * unreadable or not JSON: no claim either way.
  */
 function readStopSidecar(path: string, runId: string): StopVerdict | null {
-  try {
-    const stop = JSON.parse(readFileSync(path, 'utf8')) as {
-      reason?: unknown;
-      runId?: unknown;
-    };
-    if (stop.runId !== runId) return null;
-    if (typeof stop.reason !== 'string' || stop.reason === '') return null;
-    return { reason: stop.reason };
-  } catch {
-    return null;
-  }
+  const stop = readStopSidecarFields(path);
+  if (stop === null) return null;
+  if (stop.runId !== runId) return null;
+  if (typeof stop.reason !== 'string' || stop.reason === '') return null;
+  return { reason: stop.reason };
 }
 
 /**
@@ -766,6 +772,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     downgradedFrom: composed?.downgradedFrom ?? null,
     remediation: composed?.remediation ?? [],
     composedPath: composedPath ? resolve(composedPath) : null,
+    stopReason: stop?.reason ?? null,
     expectedComposedName: composedNameFor(targetClass),
     reportPath: reportPath ? resolve(reportPath) : null,
     childExitCode,

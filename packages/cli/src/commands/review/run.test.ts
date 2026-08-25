@@ -1297,6 +1297,7 @@ describe('review run (handler)', () => {
     const result = JSON.parse(outs.join(''));
     expect(result.completed).toBe(true);
     expect(result.event).toBeNull();
+    expect(result.stopReason).toBe('clean-tree');
     expect(process.exitCode).toBe(0);
   });
 
@@ -1341,6 +1342,7 @@ describe('review run (handler)', () => {
     const result = JSON.parse(outs.join(''));
     expect(result.completed).toBe(true);
     expect(result.event).toBe('REQUEST_CHANGES');
+    expect(result.stopReason).toBe('clean-tree');
     expect(process.exitCode).toBe(3);
   });
 });
