@@ -50,6 +50,7 @@ describe('discoverProviderModels', () => {
           { id: 'new-model' },
           { id: 'known-a' },
           { id: 'new-model' },
+          { id: ' padded-model ' },
           { id: 'qwen2-audio-instruct' },
           { id: 'qwen-vl-ocr-latest' },
           { id: 'wan2.7-t2v-plus' },
@@ -61,6 +62,7 @@ describe('discoverProviderModels', () => {
       { id: 'known-a', contextWindowSize: 1000 },
       { id: 'known-b', enableThinking: true },
       { id: 'new-model' },
+      { id: 'padded-model' },
       { id: 'qwen2-audio-instruct' },
       { id: 'qwen-vl-ocr-latest' },
       { id: 'wan2.7-t2v-plus' },
@@ -84,6 +86,7 @@ describe('discoverProviderModels', () => {
     { data: ['model-a'] },
     { data: [{ id: '' }] },
     { data: [] },
+    { data: [{ id: 'model-a' }, null] },
     { models: [{ id: 'model-a' }] },
   ])('rejects a non-standard or empty listing: %j', async (body) => {
     fetchWithPolicyMock.mockResolvedValue(response(body));
@@ -129,6 +132,22 @@ describe('discoverProviderModels', () => {
 
     await expect(discoverProviderModels(options)).resolves.toEqual([
       { id: 'qwen3.7-plus' },
+    ]);
+  });
+
+  it('skips ids with unassigned or private-use code points', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        data: [
+          { id: 'unassigned\u2065point' },
+          { id: 'private\ue000use' },
+          { id: 'good-model' },
+        ],
+      }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'good-model' },
     ]);
   });
 

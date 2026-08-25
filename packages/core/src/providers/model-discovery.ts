@@ -11,9 +11,9 @@ const DISCOVERY_TIMEOUT_MS = 5000;
 const DISCOVERY_MAX_BYTES = 1024 * 1024;
 const MAX_MODEL_ID_LENGTH = 256;
 // The wizard joins ids with commas and renders them raw, so a served id with
-// a comma, control byte, or invisible format character would split into bogus
-// models or poison the TUI.
-const UNSAFE_MODEL_ID_CHARS = /[,\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+// a comma or a code point in the Unicode C (other) category would split into
+// bogus models or poison the TUI.
+const UNSAFE_MODEL_ID_CHARS = /[,\p{C}\p{Zl}\p{Zp}]/u;
 
 interface DiscoverProviderModelsOptions {
   baseUrl: string;
