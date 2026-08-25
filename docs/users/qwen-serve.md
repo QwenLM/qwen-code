@@ -396,6 +396,8 @@ Notes:
 - **Both flags or neither** — boot fails if only one is given (a cert with no key can't start an HTTPS listener).
 - **TLS is orthogonal to auth** — HTTPS encrypts the transport; the bearer token still gates every API route. Non-loopback binds require a token with or without TLS.
 - **Scope is TLS termination only** — no auto-generation, no ACME / Let's Encrypt. This is a LAN / dev convenience; for internet-facing deployments terminate TLS at a reverse proxy (see the threat model below).
+- **Channel workers dial the daemon back over `https://`** — so they need to trust the serving certificate too. A self-signed cert (or a fullchain that carries its own root) needs nothing: the daemon injects it into each worker's `NODE_EXTRA_CA_CERTS`. The mkcert flow above is **CA-issued**, so the leaf alone cannot anchor the chain — export `NODE_EXTRA_CA_CERTS="$(mkcert -CAROOT)/rootCA.pem"` in the daemon's launch environment before starting with `--channel`. An operator-set value is _merged_ with the daemon cert, not replaced. Without it the daemon boots green while every channel worker restart-loops on `UNABLE_TO_VERIFY_LEAF_SIGNATURE`; the daemon log names the gap at boot.
+- **Rotating `--tls-cert` in place needs a daemon restart** — the daemon serves the bytes it read at boot, so until it restarts, respawned workers can load newer contents than the daemon presents and their handshakes fail.
 
 ## CLI flags
 
