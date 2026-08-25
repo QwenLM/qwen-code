@@ -500,6 +500,7 @@ export function updateSessionPrStates(
 export function moveSessionPrSidecar(
   sourcePath: string,
   destinationPath: string,
+  assertCanMutate?: () => void,
 ): Promise<void> {
   // Lock order is path-sorted so an opposite-direction move of the same
   // pair can never deadlock the file locks. The queue entry serializes with
@@ -517,6 +518,7 @@ export function moveSessionPrSidecar(
       if (!existsSync(sourcePath)) return;
       await fs.mkdir(path.dirname(destinationPath), { recursive: true });
       if (!existsSync(destinationPath)) {
+        assertCanMutate?.();
         await fs.rename(sourcePath, destinationPath);
         return;
       }
@@ -525,8 +527,15 @@ export function moveSessionPrSidecar(
         (await readSessionPrs(sourcePath)) ?? [],
       );
       if (merged.length > 0) {
-        await writeSessionPrs(destinationPath, merged);
+        if (assertCanMutate) {
+          await writeSessionPrs(destinationPath, merged, {
+            assertCanCommit: assertCanMutate,
+          });
+        } else {
+          await writeSessionPrs(destinationPath, merged);
+        }
       }
+      assertCanMutate?.();
       await fs.unlink(sourcePath);
     }),
   );
