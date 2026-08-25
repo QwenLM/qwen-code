@@ -649,19 +649,6 @@ function buildCliParser(rawArgv: string[]): Argv {
       description:
         'Enable chat recording to disk. If false, chat history is not saved and --continue/--resume will not work.',
     })
-    .option('background', {
-      alias: 'bg',
-      type: 'boolean',
-      nargs: 0,
-      description: 'Start a new Agent View background session',
-    })
-    .option('continue', {
-      alias: 'c',
-      type: 'boolean',
-      nargs: 0,
-      description: 'Resume the most recent session for the current project.',
-      default: false,
-    })
     .command('$0 [query..]', 'Launch Qwen Code CLI', (yargsInstance: Argv) =>
       yargsInstance
         .positional('query', {
@@ -870,6 +857,20 @@ function buildCliParser(rawArgv: string[]): Argv {
           description:
             'File path for receiving remote input commands (bidirectional sync). ' +
             'An external process writes JSONL commands; the TUI watches and processes them.',
+        })
+        .option('background', {
+          alias: 'bg',
+          type: 'boolean',
+          nargs: 0,
+          description: 'Start a new Agent View background session',
+        })
+        .option('continue', {
+          alias: 'c',
+          type: 'boolean',
+          nargs: 0,
+          description:
+            'Resume the most recent session for the current project.',
+          default: false,
         })
         .option('resume', {
           alias: 'r',
@@ -1151,16 +1152,6 @@ export async function parseArguments(): Promise<CliArgs> {
 
   const yargsInstance = buildCliParser(rawArgv);
   yargsInstance.command(agentsCommand);
-  yargsInstance.middleware((argv) => {
-    if (
-      argv._.length > 0 &&
-      (argv['background'] === true || argv['continue'] === true)
-    ) {
-      throw new Error(
-        '`--bg/--background` and `--continue/-c` cannot be combined with a CLI subcommand. Place `--` before prompt text that matches a command name.',
-      );
-    }
-  });
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json

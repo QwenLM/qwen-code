@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
@@ -687,8 +688,6 @@ describe('parseArguments', () => {
   it.each([
     ['--bg', 'serve'],
     ['--background', 'update'],
-    ['--continue', 'update'],
-    ['-c', 'update'],
   ])(
     'rejects %s with the %s subcommand before its handler runs',
     async (flag, command) => {
@@ -709,6 +708,21 @@ describe('parseArguments', () => {
     },
   );
 
+  it('rejects a default-command option after a subcommand', async () => {
+    process.argv = ['node', 'script.js', 'update', '-c'];
+    mockUpdateHandler.mockClear();
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow();
+      expect(mockUpdateHandler).not.toHaveBeenCalled();
+    } finally {
+      mockExit.mockRestore();
+    }
+  });
+
   it('allows a --bg prompt matching a subcommand after the separator', async () => {
     process.argv = ['node', 'script.js', '--bg', '--', 'serve'];
     const originalIsTTY = process.stdin.isTTY;
@@ -723,28 +737,59 @@ describe('parseArguments', () => {
     }
   });
 
-  it.each(['--continue', '-c'])(
-    'rejects %s before an agents command instead of treating agents as a prompt',
-    async (flag) => {
+  it('keeps command-looking text after --continue in the default command', async () => {
+    process.argv = ['node', 'script.js', '--continue', 'agents', 'attach'];
+
+    const argv = await parseArguments();
+
+    expect(argv.continue).toBe(true);
+    expect(argv.query).toBe('agents attach');
+    expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      ['-c', 'echo ok'],
+      ['-c', 'echo ok'],
+    ],
+    [['--bg'], ['--bg']],
+    [['--background'], ['--background']],
+  ])(
+    'does not consume MCP server arguments %j as Agent View options',
+    async (serverArgs, expectedArgs) => {
       process.argv = [
         'node',
         'script.js',
-        flag,
-        'agents',
-        'attach',
-        'session-1',
+        'mcp',
+        'add',
+        'shell',
+        'sh',
+        ...serverArgs,
       ];
+      const writeFileSync = vi.mocked(fs.writeFileSync);
+      writeFileSync.mockClear();
+      const renameSync = vi
+        .spyOn(fs, 'renameSync')
+        .mockImplementation(() => {});
       const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
         throw new Error('process.exit called');
       });
 
       try {
-        await expect(parseArguments()).rejects.toThrow(
-          'cannot be combined with a CLI subcommand',
-        );
-        expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+        await expect(parseArguments()).rejects.toThrow('process.exit called');
+        expect(mockExit).toHaveBeenCalledWith(0);
+
+        const settingsWrite = writeFileSync.mock.calls.at(-1);
+        const writtenSettings = JSON.parse(String(settingsWrite?.[1])) as {
+          mcpServers?: Record<string, { command?: string; args?: string[] }>;
+        };
+        expect(writtenSettings.mcpServers?.['shell']).toMatchObject({
+          command: 'sh',
+          args: expectedArgs,
+        });
       } finally {
         mockExit.mockRestore();
+        renameSync.mockRestore();
       }
     },
   );
