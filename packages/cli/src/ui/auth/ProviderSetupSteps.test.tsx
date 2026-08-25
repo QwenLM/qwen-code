@@ -430,7 +430,7 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
-  it('mounts one provider snapshot without promoting new models', async () => {
+  it('mounts one provider snapshot without promoting new models or dropping unserved selections', async () => {
     let resolveDiscovery!: (models: ModelSpec[]) => void;
     discoverProviderModelsMock.mockReturnValue(
       new Promise<ModelSpec[]>((resolve) => {
@@ -464,18 +464,24 @@ describe('ProviderSetupSteps', () => {
     expect(frame).toContain('custom-model');
     expect(frame).toContain('MiniMax-M3');
     expect(frame).toContain('MiniMax-M4');
-    expect(frame).not.toContain('MiniMax-M2.7');
+    // The snapshot has no row for the previously selected MiniMax-M2.7, so it
+    // stays visible and selectable through the free-form input instead.
+    expect(frame).not.toMatch(/[◉○]\uFE0E\s+MiniMax-M2\.7/);
+    const inputLine = frame
+      .split('\n')
+      .find((line) => line.includes('custom-model'));
+    expect(inputLine).toContain('custom-model, MiniMax-M2.7');
     expect(frame).toMatch(/◉\uFE0E\s+MiniMax-M3/);
     expect(frame).toMatch(/○\uFE0E\s+MiniMax-M4/);
     expect(frame).toMatch(/○\uFE0E\s+custom-model/);
     await act(async () => {
       pressLatestKey('x', 'x');
     });
-    expect(lastFrame()).toContain('xcustom-model');
+    expect(lastFrame()).toContain('xcustom-model, MiniMax-M2.7');
     expect(flow.changeModelIds).not.toHaveBeenCalled();
     pressKey('return', '\r');
     expect(submitModelIds).toHaveBeenCalledWith({
-      modelIds: ['xcustom-model', 'MiniMax-M3'],
+      modelIds: ['xcustom-model', 'MiniMax-M2.7', 'MiniMax-M3'],
     });
     unmount();
   });

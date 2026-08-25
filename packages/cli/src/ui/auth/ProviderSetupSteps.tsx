@@ -254,10 +254,11 @@ function getRecommendedSelections(
 
 function getCustomModelIdsText(
   selectedModelIds: string[],
-  recommendedModelIds: Set<string>,
+  selectedRecommendationKeys: string[],
 ): string {
+  const recommendedSelections = new Set(selectedRecommendationKeys);
   return selectedModelIds
-    .filter((id) => !recommendedModelIds.has(id))
+    .filter((id) => !recommendedSelections.has(id))
     .join(', ');
 }
 
@@ -296,12 +297,12 @@ function ModelIdsStep({
   const [focusedModelIndex, setFocusedModelIndex] = useState(
     MODEL_CUSTOM_INPUT_FOCUS_INDEX,
   );
-  const [customModelIdsText, setCustomModelIdsText] = useState(() =>
-    getCustomModelIdsText(selectedModelIds, builtInModelIds),
-  );
   const [selectedRecommendationKeys, setSelectedRecommendationKeys] = useState(
     () =>
       getRecommendedSelections(selectedModelIds, modelOptions, builtInModelIds),
+  );
+  const [customModelIdsText, setCustomModelIdsText] = useState(() =>
+    getCustomModelIdsText(selectedModelIds, selectedRecommendationKeys),
   );
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const filteredModelOptions = useMemo(() => {

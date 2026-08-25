@@ -69,6 +69,7 @@ describe('discoverProviderModels', () => {
       expect.objectContaining({
         timeoutMs: 5000,
         maxBytes: 1024 * 1024,
+        maxRedirects: 2,
         headers: {
           Accept: 'application/json',
           Authorization: 'Bearer secret-key',
@@ -97,10 +98,39 @@ describe('discoverProviderModels', () => {
           { id: 'qwen-tts-1' },
           { id: 'video-generation' },
           { id: 'wanx-v1' },
+          { id: 'wanx2.1-t2i-turbo' },
+          { id: 'wanx2.1-t2v-turbo' },
           { id: 'whisper-v3' },
           { id: 'flux-schnell' },
+          { id: 'bge-m3' },
+          { id: 'sensevoice-v1' },
         ],
       }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toBeNull();
+  });
+
+  it('keeps valid ids and skips ones with structural or control bytes', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({
+        data: [
+          { id: 'a, b' },
+          { id: 'bad\u001b[31mid' },
+          { id: 'del\u007fete' },
+          { id: 'good-model' },
+        ],
+      }),
+    );
+
+    await expect(discoverProviderModels(options)).resolves.toEqual([
+      { id: 'good-model' },
+    ]);
+  });
+
+  it('falls back when every served id is unsafe', async () => {
+    fetchWithPolicyMock.mockResolvedValue(
+      response({ data: [{ id: 'a, b' }, { id: '\u0007bell' }] }),
     );
 
     await expect(discoverProviderModels(options)).resolves.toBeNull();
