@@ -8914,6 +8914,12 @@ export class Config {
       const { TodoWriteTool } = await import('../tools/todoWrite.js');
       return new TodoWriteTool(this);
     });
+    await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
+      const { ReportFindingsTool } = await import(
+        '../tools/report-findings.js'
+      );
+      return new ReportFindingsTool();
+    });
     const supportsUserInteraction = resolveInteractionMode(this) !== 'headless';
     if (supportsUserInteraction) {
       await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
