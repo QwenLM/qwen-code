@@ -368,7 +368,7 @@ function stripUnsafePreviewMarkup(html: string) {
 
 export function isHtmlArtifact(artifact: DaemonSessionArtifact): boolean {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
-  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   return (
     artifact.kind === 'html' ||
     path.endsWith('.html') ||

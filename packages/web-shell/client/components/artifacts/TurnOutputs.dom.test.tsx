@@ -745,6 +745,14 @@ describe('TurnOutputs artifact sharing', () => {
       { kind: 'file', workspacePath: 'output/notes', mimeType: 'text/html' },
       true,
     ],
+    [
+      {
+        kind: 'file',
+        workspacePath: 'output/notes',
+        mimeType: 'text/html; charset=utf-8',
+      },
+      true,
+    ],
     [{ kind: 'file', workspacePath: 'output/notes.md' }, false],
     [{ kind: 'file', workspacePath: 'output/htmlish.txt' }, false],
     [{ kind: 'image', workspacePath: 'output/chart.png' }, false],

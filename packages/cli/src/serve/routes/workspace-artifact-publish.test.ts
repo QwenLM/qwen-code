@@ -64,14 +64,41 @@ const NETLIFY_HOST = {
     'netlify deploy --dir {dir} --json --no-build --prod --site site-id',
   urlFromCommandOutput: true,
 };
-const TEST_GLOBAL_PREFIX = '/qwen-test-global';
-const TEST_NETLIFY_ENTRY = `${TEST_GLOBAL_PREFIX}/lib/node_modules/netlify-cli/bin/run.js`;
-const TEST_WRANGLER_ENTRY = `${TEST_GLOBAL_PREFIX}/lib/node_modules/wrangler/bin/wrangler.js`;
-const TEST_VERCEL_ENTRY = `${TEST_GLOBAL_PREFIX}/lib/node_modules/vercel/dist/vc.js`;
 const TEST_ARTIFACT_NPM_CACHE = path.join(
   Storage.getGlobalQwenDir(),
   'artifact-hosting',
   'npm-cache',
+);
+const TEST_ARTIFACT_TOOL_PREFIX = path.join(
+  Storage.getGlobalQwenDir(),
+  'artifact-hosting',
+  'tools',
+);
+const TEST_GLOBAL_NODE_MODULES = path.join(
+  ...(process.platform === 'win32'
+    ? ['node_modules']
+    : ['lib', 'node_modules']),
+);
+const TEST_NETLIFY_ENTRY = path.join(
+  TEST_ARTIFACT_TOOL_PREFIX,
+  TEST_GLOBAL_NODE_MODULES,
+  'netlify-cli',
+  'bin',
+  'run.js',
+);
+const TEST_WRANGLER_ENTRY = path.join(
+  TEST_ARTIFACT_TOOL_PREFIX,
+  TEST_GLOBAL_NODE_MODULES,
+  'wrangler',
+  'bin',
+  'wrangler.js',
+);
+const TEST_VERCEL_ENTRY = path.join(
+  TEST_ARTIFACT_TOOL_PREFIX,
+  TEST_GLOBAL_NODE_MODULES,
+  'vercel',
+  'dist',
+  'vc.js',
 );
 
 const allowMutations = () =>
@@ -136,7 +163,6 @@ function adaptTestRunner(
 ): ArtifactRouteCommandRunner {
   return async (command, args, options) => {
     const npmArgs = commandArgsAfter(args, '/npm-cli.js');
-    if (npmArgs?.[0] === 'prefix') return TEST_GLOBAL_PREFIX;
     if (npmArgs) return run('/qwen-test/npm', npmArgs, options);
     const netlifyArgs = commandArgsAfter(
       args,
@@ -495,8 +521,6 @@ describe('GET /workspace/artifact/publish-config', () => {
     });
     const runCommand: ArtifactRouteCommandRunner = vi.fn(
       async (command, args, options) => {
-        const npmArgs = commandArgsAfter(args, '/npm-cli.js');
-        if (npmArgs?.[0] === 'prefix') return TEST_GLOBAL_PREFIX;
         expect(command).toBe(process.execPath);
         expect(args[0]).toBe(TEST_NETLIFY_ENTRY);
         expect(options.env['PATH']).toBe(process.env['PATH']);
@@ -530,10 +554,6 @@ describe('GET /workspace/artifact/publish-config', () => {
     const primary = runtime('primary', 'C:\\workspace', { primary: true });
     const runCommand: ArtifactRouteCommandRunner = vi.fn(
       async (command, args) => {
-        const npmArgs = commandArgsAfter(args, '/npm-cli.js');
-        if (npmArgs?.[0] === 'prefix') {
-          return 'C:\\Users\\tester\\AppData\\Roaming\\npm';
-        }
         if (args.at(-1) === '--version') return '27.1.2';
         if (args.at(-2) === 'api') throw new Error('not authenticated');
         throw new Error(`Unexpected command: ${args.join(' ')}`);
@@ -662,10 +682,9 @@ describe('artifact mutation gates', () => {
       .send({ path: 'report.html', provider: 'netlify' });
 
     expect(response.status).toBe(401);
-    expect(mutate).toHaveBeenCalledTimes(3);
+    expect(mutate).toHaveBeenCalledTimes(2);
     expect(mutate).toHaveBeenNthCalledWith(1, { strict: true });
     expect(mutate).toHaveBeenNthCalledWith(2, { strict: true });
-    expect(mutate).toHaveBeenNthCalledWith(3, { strict: true });
   });
 });
 
@@ -715,6 +734,8 @@ describe('POST /workspace/artifact/netlify/setup', () => {
       [
         'install',
         '--global',
+        '--prefix',
+        TEST_ARTIFACT_TOOL_PREFIX,
         '--cache',
         TEST_ARTIFACT_NPM_CACHE,
         'netlify-cli',
@@ -1286,7 +1307,15 @@ describe('multi-provider artifact setup', () => {
     });
     expect(runCommand).toHaveBeenCalledWith(
       '/qwen-test/npm',
-      ['install', '--global', '--cache', TEST_ARTIFACT_NPM_CACHE, 'wrangler'],
+      [
+        'install',
+        '--global',
+        '--prefix',
+        TEST_ARTIFACT_TOOL_PREFIX,
+        '--cache',
+        TEST_ARTIFACT_NPM_CACHE,
+        'wrangler',
+      ],
       expect.objectContaining({ cwd: path.dirname(process.execPath) }),
     );
     expect(persistSettings).toHaveBeenCalledWith(
@@ -1326,9 +1355,6 @@ describe('multi-provider artifact setup', () => {
     const waitForRetry = vi.fn(async () => undefined);
     const runCommand: ArtifactRouteCommandRunner = vi.fn(
       async (command, args) => {
-        if (command === '/qwen-test/npm' && args[0] === 'prefix') {
-          return TEST_GLOBAL_PREFIX;
-        }
         if (command !== 'wrangler') throw new Error('provider unavailable');
         if (args[0] === '--version') return '4.125.0';
         if (args[0] === 'whoami') {
@@ -1411,9 +1437,6 @@ describe('multi-provider artifact setup', () => {
     });
     const runCommand: ArtifactRouteCommandRunner = vi.fn(
       async (command, args) => {
-        if (command === '/qwen-test/npm' && args[0] === 'prefix') {
-          return TEST_GLOBAL_PREFIX;
-        }
         if (command !== 'wrangler') throw new Error('provider unavailable');
         if (args[0] === '--version') return '4.125.0';
         if (args[0] === 'whoami') {
@@ -1537,7 +1560,15 @@ describe('multi-provider artifact setup', () => {
     });
     expect(runCommand).toHaveBeenCalledWith(
       '/qwen-test/npm',
-      ['install', '--global', '--cache', TEST_ARTIFACT_NPM_CACHE, 'vercel'],
+      [
+        'install',
+        '--global',
+        '--prefix',
+        TEST_ARTIFACT_TOOL_PREFIX,
+        '--cache',
+        TEST_ARTIFACT_NPM_CACHE,
+        'vercel',
+      ],
       expect.objectContaining({ cwd: path.dirname(process.execPath) }),
     );
     expect(persistSettings).toHaveBeenCalledWith(
@@ -1565,9 +1596,6 @@ describe('multi-provider artifact setup', () => {
     const persistSettings = vi.fn(async () => undefined);
     const runCommand: ArtifactRouteCommandRunner = vi.fn(
       async (command, args) => {
-        if (command === '/qwen-test/npm' && args[0] === 'prefix') {
-          return TEST_GLOBAL_PREFIX;
-        }
         if (command !== 'vercel') throw new Error('provider unavailable');
         if (args[0] === '--version') return '59.5.0';
         if (args[0] === 'whoami') {
@@ -1640,9 +1668,6 @@ describe('multi-provider artifact setup', () => {
     const waitForRetry = vi.fn(async () => undefined);
     const runCommand: ArtifactRouteCommandRunner = vi.fn(
       async (command, args) => {
-        if (command === '/qwen-test/npm' && args[0] === 'prefix') {
-          return TEST_GLOBAL_PREFIX;
-        }
         if (command !== 'vercel') throw new Error('provider unavailable');
         if (args[0] === '--version') return '59.5.0';
         if (args[0] === 'whoami') return 'tester';
@@ -1716,9 +1741,6 @@ describe('multi-provider artifact setup', () => {
     const persistSettings = vi.fn(async () => undefined);
     const runCommand: ArtifactRouteCommandRunner = vi.fn(
       async (command, args) => {
-        if (command === '/qwen-test/npm' && args[0] === 'prefix') {
-          return TEST_GLOBAL_PREFIX;
-        }
         if (command !== 'vercel') throw new Error('provider unavailable');
         if (args[0] === '--version') return '59.5.0';
         if (args[0] === 'whoami') return 'tester';
@@ -1772,9 +1794,6 @@ describe('multi-provider artifact setup', () => {
     let loginSignal: AbortSignal | undefined;
     const runCommand: ArtifactRouteCommandRunner = vi.fn(
       async (command, args, options) => {
-        if (command === '/qwen-test/npm' && args[0] === 'prefix') {
-          return TEST_GLOBAL_PREFIX;
-        }
         if (command !== 'vercel') throw new Error('provider unavailable');
         if (args[0] === '--version') return '59.5.0';
         if (args[0] === 'whoami') throw new Error('not authenticated');

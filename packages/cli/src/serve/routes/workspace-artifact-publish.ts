@@ -315,6 +315,10 @@ function artifactCliNpmCache(): string {
   return path.join(Storage.getGlobalQwenDir(), 'artifact-hosting', 'npm-cache');
 }
 
+function artifactCliToolPrefix(): string {
+  return path.join(Storage.getGlobalQwenDir(), 'artifact-hosting', 'tools');
+}
+
 function publicationRecords(value: unknown): PublicationRecord[] {
   if (!Array.isArray(value)) return [];
   return value
@@ -428,10 +432,7 @@ function requireArtifactSharingEnabled(
 }
 
 function effectiveEnv(runtime: WorkspaceRuntime): Readonly<NodeJS.ProcessEnv> {
-  if (runtime.env.mode === 'runtime-overlay') {
-    return runtime.env.effectiveEnv ?? {};
-  }
-  return runtime.env.effectiveEnv ?? process.env;
+  return runtime.env.effectiveEnv ?? {};
 }
 
 function providerEnv(runtime: WorkspaceRuntime): NodeJS.ProcessEnv {
@@ -624,39 +625,12 @@ function netlifyCommandForPrefix(
   return { file: process.execPath, prefixArgs: [entry] };
 }
 
-async function readGlobalNpmPrefix(
-  runtime: WorkspaceRuntime,
-  run: ArtifactRouteCommandRunner,
-  platform: NodeJS.Platform,
-): Promise<string | undefined> {
-  try {
-    const output = await runForRuntime(
-      runtime,
-      run,
-      process.execPath,
-      [getNpmCliPath(process.execPath, platform), 'prefix', '--global'],
-      {
-        cwd: path.dirname(process.execPath),
-        env: process.env,
-        timeoutMs: VERSION_TIMEOUT_MS,
-      },
-    );
-    return output.trim() || undefined;
-  } catch {
-    assertRuntimeOpen(runtime);
-    return undefined;
-  }
-}
-
 async function resolveNetlifyCommand(
   runtime: WorkspaceRuntime,
   run: ArtifactRouteCommandRunner,
   platform: NodeJS.Platform,
 ): Promise<NetlifyCommand | undefined> {
-  const prefix = await readGlobalNpmPrefix(runtime, run, platform);
-  const command = prefix
-    ? netlifyCommandForPrefix(prefix, platform)
-    : undefined;
+  const command = netlifyCommandForPrefix(artifactCliToolPrefix(), platform);
   return command && (await commandWorks(command, runtime, run))
     ? command
     : undefined;
@@ -693,10 +667,11 @@ async function resolveProviderCommand(
   if (provider === 'netlify') {
     return resolveNetlifyCommand(runtime, run, platform);
   }
-  const prefix = await readGlobalNpmPrefix(runtime, run, platform);
-  const command = prefix
-    ? providerCommandForPrefix(provider, prefix, platform)
-    : undefined;
+  const command = providerCommandForPrefix(
+    provider,
+    artifactCliToolPrefix(),
+    platform,
+  );
   return command && (await commandWorks(command, runtime, run))
     ? command
     : undefined;
@@ -1439,6 +1414,8 @@ async function installNetlify(
         getNpmCliPath(process.execPath, platform),
         'install',
         '--global',
+        '--prefix',
+        artifactCliToolPrefix(),
         '--cache',
         artifactCliNpmCache(),
         'netlify-cli',
@@ -1961,6 +1938,8 @@ async function installProvider(
         getNpmCliPath(process.execPath, platform),
         'install',
         '--global',
+        '--prefix',
+        artifactCliToolPrefix(),
         '--cache',
         artifactCliNpmCache(),
         packageName,
@@ -3088,21 +3067,6 @@ export function registerWorkspaceArtifactPublishRoutes(
     void handleConfig(req, res, runtime, deps, route);
   });
   app.post(
-    '/workspace/artifact/netlify/setup',
-    deps.mutate({ strict: true }),
-    (req, res) => {
-      const route = 'POST /workspace/artifact/netlify/setup';
-      const runtime = resolvePrimaryRuntime(
-        deps.getPrimaryRuntime,
-        res,
-        deps.sendBridgeError,
-        route,
-      );
-      if (!runtime) return;
-      void handleSetup(req, res, runtime, deps, route);
-    },
-  );
-  app.post(
     '/workspace/artifact/:provider/setup',
     deps.mutate({ strict: true }),
     (req, res) => {
@@ -3171,21 +3135,6 @@ export function registerWorkspaceQualifiedArtifactPublishRoutes(
       'GET /workspaces/:workspace/artifact/publish-config',
     );
   });
-  app.post(
-    '/workspaces/:workspace/artifact/netlify/setup',
-    deps.mutate({ strict: true }),
-    (req, res) => {
-      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
-      if (!runtime) return;
-      void handleSetup(
-        req,
-        res,
-        runtime,
-        deps,
-        'POST /workspaces/:workspace/artifact/netlify/setup',
-      );
-    },
-  );
   app.post(
     '/workspaces/:workspace/artifact/:provider/setup',
     deps.mutate({ strict: true }),
