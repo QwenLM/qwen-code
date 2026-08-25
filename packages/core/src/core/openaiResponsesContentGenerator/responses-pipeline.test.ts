@@ -2044,6 +2044,33 @@ describe('ResponsesPipeline', () => {
           'length 83 instead.","param":"input[1]\\.id",' +
           '"code":"string_above_max_length"}}',
       ],
+      [
+        'a raw newline inside an unrelated top-level field',
+        400,
+        `{"error":{"message":"${MAX_64_MESSAGE}","param":"input[1].id",` +
+          '"code":"string_above_max_length"},"debug":"first\nsecond"}',
+      ],
+      [
+        'a raw NUL inside the recognized error message',
+        400,
+        `{"error":{"message":"${MAX_64_MESSAGE}\u0000","param":"input[1].id",` +
+          '"code":"string_above_max_length"}}',
+      ],
+      [
+        'a vertical tab after the top-level object',
+        400,
+        `${directBody('input[1].id', MAX_64_MESSAGE)}\u000b`,
+      ],
+      [
+        'a form feed after the top-level object',
+        400,
+        `${directBody('input[1].id', MAX_64_MESSAGE)}\u000c`,
+      ],
+      [
+        'a no-break space after the top-level object',
+        400,
+        `${directBody('input[1].id', MAX_64_MESSAGE)}\u00a0`,
+      ],
     ])('control: does not retry on %s', async (_label, status, body) => {
       fetchMock.mockResolvedValueOnce(errorResponse(status as number, body));
       fetchMock.mockResolvedValueOnce(okResponse(COMPLETED));

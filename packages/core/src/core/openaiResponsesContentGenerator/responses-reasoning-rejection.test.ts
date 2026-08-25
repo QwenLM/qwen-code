@@ -224,6 +224,74 @@ describe('parseReasoningIdRejection', () => {
     expect(parseReasoningIdRejection(400, value)).toBeUndefined();
   });
 
+  // Raw control characters are tolerated only where a proxy actually splices
+  // them: a raw newline, tab, or carriage return inside the ONE recognized
+  // `error.message`. Anywhere else -- another field, another control
+  // character, or outside the object entirely -- the body is not one we can
+  // read exactly, so it is not one we act on.
+  it.each<[string, string]>([
+    [
+      'a raw newline sits inside an unrelated top-level field',
+      `{"error":{"message":"${MAX_64}","param":"input[1].id",` +
+        '"code":"string_above_max_length"},"debug":"first\nsecond"}',
+    ],
+    [
+      'a raw NUL sits inside the recognized error message',
+      `{"error":{"message":"${MAX_64}\u0000","param":"input[1].id",` +
+        '"code":"string_above_max_length"}}',
+    ],
+    [
+      'a raw newline sits in a sibling of the recognized error message',
+      `{"error":{"message":"${MAX_64}","type":"invalid\nrequest_error",` +
+        '"param":"input[1].id","code":"string_above_max_length"}}',
+    ],
+    [
+      'a raw newline sits inside the quoted upstream body itself',
+      // The attested proxy shape splices its control character BEFORE the
+      // quoted JSON. One spliced inside the quoted body's own fields is
+      // damage we have no account of, so the reopened text is read strictly.
+      '{"error":{"message":"upstream said -{\\"error\\":{\\"message\\":\\"' +
+        MAX_64 +
+        '\n\\",\\"param\\":\\"input[1].id\\",\\"code\\":' +
+        '\\"string_above_max_length\\"}}","code":"400"}}',
+    ],
+    [
+      'a vertical tab follows the top-level object',
+      `${rejection('input[1].id', MAX_64)}\u000b`,
+    ],
+    [
+      'a form feed follows the top-level object',
+      `${rejection('input[1].id', MAX_64)}\u000c`,
+    ],
+    [
+      'a no-break space follows the top-level object',
+      `${rejection('input[1].id', MAX_64)}\u00a0`,
+    ],
+    [
+      'a vertical tab precedes the top-level object',
+      `\u000b${rejection('input[1].id', MAX_64)}`,
+    ],
+  ])('returns undefined when %s', (_label, value) => {
+    expect(parseReasoningIdRejection(400, value)).toBeUndefined();
+  });
+
+  // The control for the block above: the four characters JSON's own grammar
+  // calls whitespace stay acceptable on both sides of the object.
+  it('accepts JSON whitespace around the top-level object', () => {
+    expect(
+      parseReasoningIdRejection(
+        400,
+        ` \t\r\n${rejection('input[1].id', MAX_64)} \t\r\n`,
+      ),
+    ).toEqual({ namedIndex: 1, maxLength: 64 });
+  });
+
+  it('returns undefined for a revoked proxy rather than throwing', () => {
+    const { proxy, revoke } = Proxy.revocable({ error: {} }, {});
+    revoke();
+    expect(parseReasoningIdRejection(400, proxy)).toBeUndefined();
+  });
+
   it('preserves the valid JSON escapes the grammar does define', () => {
     const message =
       'Invalid \\"input[1].id\\" \\\\ \\/ \\u2014 string too long. ' +
