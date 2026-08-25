@@ -16,6 +16,7 @@ import {
   type GoalEvidenceRecord,
 } from './goal-evidence.js';
 import {
+  InvalidGoalCheckpointError,
   isGoalCheckpointStalled,
   materializeGoalEvidenceCheckpoint,
   type GoalCheckpointVerifier,
@@ -762,19 +763,33 @@ export function createGoalRuntime(
 
   const finishCheckpointCheck = async (
     attempt: CheckpointAttempt,
-    relieved = false,
+    outcome: 'room' | 'stalled' | 'inconclusive' = 'inconclusive',
   ): Promise<void> => {
     await enqueue(async () => {
       if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
+      // Only a check that found room ends a stall streak. A check that
+      // never ran or failed transiently proved nothing about the window;
+      // resetting there would launder the count. An unusable verifier
+      // result while the window overflowed counts like a stalled checkpoint.
+      const checkpointStalls =
+        outcome === 'room'
+          ? 0
+          : outcome === 'stalled'
+            ? (snapshot.goal.checkpointStalls ?? 0) + 1
+            : (snapshot.goal.checkpointStalls ?? 0);
+      if (checkpointStalls >= GOAL_CHECKPOINT_STALL_LIMIT) {
+        // Persist the streak with the stop so the record explains itself.
+        await settleCheckpointFailure(
+          attempt,
+          withCheckpointStalls(snapshot.goal, checkpointStalls),
+          GOAL_CHECKPOINT_STALLED_REASON,
+          'evidence_catalog',
+        );
+        return;
+      }
       const persistedCause =
         nextVerifierFeedback === undefined ? 'checkpoint' : 'verifier_reject';
       const now = Date.now();
-      // Only a check that found room ends a stall streak. A check that
-      // erred or never ran proved nothing about the window; resetting
-      // there would let transient verifier failures launder the count.
-      const checkpointStalls = relieved
-        ? 0
-        : (snapshot.goal.checkpointStalls ?? 0);
       const checkedSnapshot: GoalSnapshotV2 = {
         v: GOAL_STATE_VERSION,
         goal: {
@@ -945,7 +960,7 @@ export function createGoalRuntime(
         return;
       }
       if (!window.shouldCheckpoint) {
-        await finishCheckpointCheck(attempt, true);
+        await finishCheckpointCheck(attempt, 'room');
         return;
       }
       let checkpoint: GoalEvidenceCheckpoint;
@@ -980,9 +995,17 @@ export function createGoalRuntime(
           );
           return;
         }
-        // A transient or malformed checkpoint verification must not abort a
-        // healthy Goal: settle the attempt as bookkeeping so the evidence
-        // stays citable and a later turn retries the checkpoint.
+        if (error instanceof InvalidGoalCheckpointError && window.truncated) {
+          // An unusable result while the window overflows is a compaction
+          // that produced nothing: like a full claim list, it counts toward
+          // the stall limit.
+          await finishCheckpointCheck(attempt, 'stalled');
+          return;
+        }
+        // A transient failure, or an unusable result while the window still
+        // has room, must not abort a healthy Goal: settle the attempt as
+        // bookkeeping so the evidence stays citable and a later turn retries
+        // the checkpoint.
         await finishCheckpointCheck(attempt);
         return;
       }

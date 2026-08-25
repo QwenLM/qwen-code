@@ -1639,6 +1639,80 @@ describe('goal runtime', () => {
     expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT + 1);
   });
 
+  it('stops a Goal whose verifier keeps returning unusable checkpoint results', async () => {
+    const { journal, host, runtime, checkpointVerifier, setRecords } =
+      stallHarness();
+    // An empty claim list fails materialization, so the check settles
+    // without advancing the cursor: while the window keeps overflowing,
+    // that is a compaction that produces nothing.
+    checkpointVerifier.mockResolvedValue({ claims: [] });
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+      const permit = host.started.at(-1)!;
+      const cursor = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+      const additions = verifierEvidenceWindow(
+        permit,
+        cursor,
+        101,
+        `window-${turn}`,
+      );
+      records = turn === 1 ? additions : [...records, ...additions.slice(1)];
+      setRecords(records);
+      await runtime.finishTurn(permit);
+      if (turn < GOAL_CHECKPOINT_STALL_LIMIT) {
+        // Each unusable result counts while the window still overflows.
+        expect(runtime.getSnapshot().goal).toMatchObject({
+          status: 'active',
+          checkpointStalls: turn,
+        });
+      }
+    }
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(
+      GOAL_CHECKPOINT_STALL_LIMIT,
+    );
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        lastReason: GOAL_CHECKPOINT_STALLED_REASON,
+        checkpointStalls: GOAL_CHECKPOINT_STALL_LIMIT,
+      },
+    });
+    expect(journal.appended.at(-1)?.cause).toBe('usage_limited');
+    // No continuation was minted for the stopped Goal.
+    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT);
+  });
+
+  it('does not count an unusable result while the window has room', async () => {
+    const { host, runtime, checkpointVerifier, setRecords } = stallHarness();
+    checkpointVerifier.mockResolvedValue({ claims: [] });
+    await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+
+    let records: RuntimeRecord[] = [];
+    for (let turn = 1; turn <= GOAL_CHECKPOINT_STALL_LIMIT; turn++) {
+      records = await runCheckpointTurn(
+        runtime,
+        host,
+        setRecords,
+        records,
+        80,
+        `window-${turn}`,
+      );
+    }
+
+    expect(checkpointVerifier).toHaveBeenCalledTimes(
+      GOAL_CHECKPOINT_STALL_LIMIT,
+    );
+    expect(runtime.getSnapshot().goal?.status).toBe('active');
+    expect(runtime.getSnapshot().goal).not.toHaveProperty('checkpointStalls');
+    // Every unusable check was settled as bookkeeping and retried.
+    expect(host.started).toHaveLength(GOAL_CHECKPOINT_STALL_LIMIT + 1);
+  });
+
   it('keeps the stall streak when a turn records no evidence at all', async () => {
     const { host, runtime, setRecords } = stallHarness();
     await runtime.dispatch({ action: 'create', objective: 'deliver result' });
@@ -1657,23 +1731,7 @@ describe('goal runtime', () => {
     // A turn that records no goal-owned transcript leaves the lineage tail
     // at the previous turn, so the checkpoint check closes as bookkeeping
     // only. That close proved nothing about room, so it keeps the streak.
-    const checkpoint = runtime.getSnapshot().goal!.evidenceCheckpoint!;
-    records = [
-      ...records,
-      {
-        uuid: checkpoint.checkpointId,
-        parentUuid: records.at(-1)!.uuid,
-        sessionId: 's-1',
-        timestamp: new Date(2).toISOString(),
-        type: 'system',
-        subtype: 'goal_state',
-        provenance: 'goal_control',
-        cwd: '/tmp',
-        version: 'test',
-      },
-    ];
-    setRecords(records);
-    await runtime.finishTurn(host.started.at(-1)!);
+    await runCheckpointTurn(runtime, host, setRecords, records, 0, 'quiet');
 
     expect(runtime.getSnapshot().goal).toMatchObject({
       status: 'active',

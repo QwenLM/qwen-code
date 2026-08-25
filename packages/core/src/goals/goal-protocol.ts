@@ -22,7 +22,7 @@ export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
  */
 export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
 export const GOAL_CHECKPOINT_STALLED_REASON =
-  'The current Goal revision compacted its evidence three times in a row without relief: each checkpoint already held the maximum number of claims while the evidence window still overflowed, so every turn was paying a checkpoint call and losing uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list or a result that could not be folded into claims at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
 
 /**
  * Which bound a `usage_limited` Goal ran into.
@@ -124,11 +124,13 @@ export interface GoalRecord {
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;
   /**
-   * Consecutive checkpoints that ran at the compaction ceiling without
-   * relieving the evidence window (see `isGoalCheckpointStalled`). Persisted
-   * on the record rather than held in memory so a daemon restart or session
-   * resume cannot launder the count; absent means zero. Reset by any
-   * checkpoint check that finds room, and by edit or replace.
+   * Consecutive checkpoint checks that failed to relieve an overflowing
+   * evidence window: the checkpoint came back full (see
+   * `isGoalCheckpointStalled`) or the verifier result could not be folded
+   * into claims at all. Persisted on the record rather than held in memory
+   * so a daemon restart or session resume cannot launder the count; absent
+   * means zero. Reset by any checkpoint check that finds room, and by edit
+   * or replace.
    */
   checkpointStalls?: number;
   lastReason?: string;
