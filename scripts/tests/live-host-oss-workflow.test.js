@@ -49,6 +49,36 @@ describe('Live Host OSS mirror workflow', () => {
     );
   });
 
+  it('rejects a prerelease version that could update the stable feed', () => {
+    const prepare = getWorkflowJob(releaseWorkflow, 'prepare');
+    const resolveVersion = getWorkflowStep(prepare, 'Resolve version');
+    expect(resolveVersion).toContain('if [[ "$version" == *-* ]]');
+    expect(resolveVersion).toContain(
+      'if [ "$version_is_prerelease" != "${{ inputs.prerelease }}" ]',
+    );
+    expect(resolveVersion).toContain(
+      '::error::The prerelease input must match the Live Host version.',
+    );
+  });
+
+  it('serializes releases and rejects stable feed downgrades', () => {
+    expect(releaseWorkflow).toContain(
+      "github.event_name == 'workflow_dispatch' && 'live-host-release'",
+    );
+
+    const updateFeed = getWorkflowStep(
+      getWorkflowJob(releaseWorkflow, 'publish'),
+      'Update stable Live Host feed',
+    );
+    expect(updateFeed).toContain(
+      'gh release download "$FEED_TAG" --pattern \'Qwen-Live-Host-manifest.json\'',
+    );
+    expect(updateFeed).toContain('sort -V | tail -n 1');
+    expect(updateFeed).toContain(
+      '::error::Refusing to replace Live Host feed v$current_version with older v$RELEASE_VERSION.',
+    );
+  });
+
   it('uploads and verifies one release without an OSS state machine', () => {
     const sync = getWorkflowJob(syncWorkflow, 'sync');
     expect(sync).toContain("name: 'production-release'");
