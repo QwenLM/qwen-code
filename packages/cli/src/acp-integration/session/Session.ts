@@ -8148,7 +8148,7 @@ export class Session implements SessionContext {
                 );
 
                 if (usageMetadata) {
-                  this.#recordPromptTokenCount(usageMetadata);
+                  this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
                   if (this.messageRewriter) {
                     this.messageRewriter.flushTurn(ac.signal);
                   }
@@ -8814,7 +8814,7 @@ export class Session implements SessionContext {
             }
 
             if (usageMetadata) {
-              this.#recordPromptTokenCount(usageMetadata);
+              this.#recordPromptTokenCount(usageMetadata, requestRouteKey);
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(
                 usageMetadata,

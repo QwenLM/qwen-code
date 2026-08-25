@@ -12526,6 +12526,119 @@ describe('Session', () => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
       });
 
+      it('records a cron tick usage under the request route even if the route switches mid-stream (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn((callback: (job: { prompt: string }) => void) => {
+            callback({ prompt: 'scheduled prompt' });
+          }),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              };
+              // A model switch landing between request and record: the
+              // request route key was captured before this stream started,
+              // so the over-limit usage above must still be keyed under it.
+              routeIdentity = 'route-b';
+            })(),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const internals = session as unknown as {
+            lastPromptTokenCount: number;
+            lastPromptTokenCountRouteKey: string | undefined;
+          };
+          expect(internals.lastPromptTokenCountRouteKey).toBe('route-a');
+          expect(internals.lastPromptTokenCount).toBe(101);
+        });
+      });
+
+      it('records a background-notification usage under the request route even if the route switches mid-stream (#9529)', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        let routeIdentity = 'route-a';
+        mockConfig.getModelRouteIdentity = vi.fn(() => routeIdentity);
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  usageMetadata: {
+                    totalTokenCount: 101,
+                    promptTokenCount: 101,
+                  },
+                },
+              };
+              // A model switch landing between request and record: the
+              // request route key was captured before this stream started,
+              // so the over-limit usage above must still be keyed under it.
+              routeIdentity = 'route-b';
+            })(),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start background work' }],
+        });
+
+        const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: { agentId: string; status: string; toolUseId?: string },
+        ) => void;
+
+        callback(
+          'Background agent "worker" completed.',
+          '<task-notification><status>completed</status></task-notification>',
+          {
+            agentId: 'agent-1',
+            status: 'completed',
+            toolUseId: 'tool-1',
+          },
+        );
+
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          const internals = session as unknown as {
+            lastPromptTokenCount: number;
+            lastPromptTokenCountRouteKey: string | undefined;
+          };
+          expect(internals.lastPromptTokenCountRouteKey).toBe('route-a');
+          expect(internals.lastPromptTokenCount).toBe(101);
+        });
+      });
+
       it('evicts the oldest route count once the retained-route budget is exhausted (#9529)', async () => {
         mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
         let routeIdentity = 'route-0';
