@@ -587,6 +587,7 @@ export * from './core/environmentContext.js';
 export * from './utils/env.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
+export * from './utils/file-identity.js';
 export * from './utils/fileUtils.js';
 export * from './utils/filesearch/fileSearch.js';
 export * as crawlCache from './utils/filesearch/crawlCache.js';

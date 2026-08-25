@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-vi.mock('../../App', async () => {
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     CompactModeContext: createContext(false),
