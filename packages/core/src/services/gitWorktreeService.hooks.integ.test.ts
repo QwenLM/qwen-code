@@ -196,6 +196,44 @@ describe('GitWorktreeService.createUserWorktree() — hooksPath setup', () => {
     },
   );
 
+  // Dynamic variant of the guard above: a writer to `<repoRoot>/.qwen/`
+  // can swap the file for a symlink between the lstat/read guard and the
+  // rewrite. The rewrite opens the guarded path with O_NOFOLLOW, so the
+  // raced-in link is refused (ELOOP, into the best-effort catch) instead of
+  // carrying the body to the link's target. The tracked-file probe is the
+  // deterministic seam: the swap lands "while git answers". Same platform
+  // caveat as the static case above — Windows has no O_NOFOLLOW and its CI
+  // lane cannot create the fixture symlink.
+  it.skipIf(process.platform === 'win32')(
+    'does not follow a symlink raced in between the guard and the rewrite',
+    async () => {
+      const qwenDir = path.join(repoRoot, '.qwen');
+      await fs.mkdir(qwenDir, { recursive: true });
+      const gitignorePath = path.join(qwenDir, '.gitignore');
+      await fs.writeFile(gitignorePath, LEGACY_WORKTREES_GITIGNORE_BODY);
+      const targetPath = path.join(repoRoot, 'target.txt');
+      await fs.writeFile(targetPath, 'victim\n');
+
+      const svc = new GitWorktreeService(repoRoot);
+      const getGitSpy = vi
+        .spyOn(svc as unknown as { getGit: () => Promise<unknown> }, 'getGit')
+        .mockImplementation(async () => ({
+          raw: async () => {
+            await fs.rm(gitignorePath);
+            await fs.symlink(targetPath, gitignorePath);
+            throw new Error('not tracked');
+          },
+        }));
+      try {
+        await svc.ensureWorktreesGitignored();
+      } finally {
+        getGitSpy.mockRestore();
+      }
+      expect(await fs.readFile(targetPath, 'utf8')).toBe('victim\n');
+      expect((await fs.lstat(gitignorePath)).isSymbolicLink()).toBe(true);
+    },
+  );
+
   // The gated provision paths run the repair BEFORE the dirty check: an
   // untracked pre-fix body is exactly what makes the gate report dirty, so
   // a repair queued behind the gate would never run. Witness the exact

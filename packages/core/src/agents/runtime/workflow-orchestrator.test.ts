@@ -4366,6 +4366,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await expect(queued).rejects.toThrow(
       /did not acquire the provisioning lock within 50ms/,
     );
+    // The guidance must name a remedy that can actually clear a wedge —
+    // "retry" alone can never succeed while the stalled holder persists.
+    await expect(queued).rejects.toThrow(/kill the wedged git process/);
     expect(provisions).toBe(1);
     releaseStalled?.();
     await wedged;
@@ -4415,18 +4418,29 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     await vi.waitFor(() => expect(provisions).toBe(1), { timeout: 5000 });
     const queuedA = dispatch('hi', { isolation: 'worktree' });
     const queuedB = dispatch('hi', { isolation: 'worktree' });
-    // Let queuedA/queuedB run through the dispatch machinery to the point
-    // where they are parked on the provisioning lock (first still holds it),
-    // so the abort lands while they WAIT — that is the state the in-lock
-    // re-check exists to catch. Without this pause the abort reaches them
-    // before provisionWorkflowWorktree and only the pre-acquire check fires.
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Pin the parked state instead of approximating it with a wall-clock
+    // pause: both dispatches WAITING on the provisioning lock (first still
+    // holds it) is the state the abort must land in. On a loaded runner a
+    // timed pause can let the abort arrive before they park, where only the
+    // pre-acquire check fires and the test would pass without ever reaching
+    // the wait it exists to cover.
+    await vi.waitFor(
+      () => expect(worktreeProvisionLockWaiterCountForTesting()).toBe(2),
+      { timeout: 5000 },
+    );
     expect(provisions).toBe(1);
     controller.abort();
     releaseFirst?.();
     await expect(first).resolves.toBeTruthy();
-    await expect(queuedA).rejects.toThrow(/aborted/);
-    await expect(queuedB).rejects.toThrow(/aborted/);
+    // Strict matcher: only the parked-wait abort path produces this message
+    // (the pre-acquire check's differs), so a slow-runner reordering cannot
+    // sneak past it.
+    await expect(queuedA).rejects.toThrow(
+      /aborted while waiting to provision the worktree/,
+    );
+    await expect(queuedB).rejects.toThrow(
+      /aborted while waiting to provision the worktree/,
+    );
     const late = dispatch('hi', { isolation: 'worktree' });
     await expect(late).rejects.toThrow(
       /aborted before the worktree could be provisioned/,
@@ -4436,7 +4450,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
 
   // An abort that lands while a dispatch is parked on the lock must reject
   // as a cancellation at once — not drain the acquire deadline and surface
-  // the stall error ("Retry the dispatch.") for a run that was cancelled.
+  // the provisioning-stall error for a run that was cancelled.
   // The waiter seam pins the parked state instead of a wall-clock pause,
   // and the strict matcher pins the abort path: the stall path produces a
   // different message.
@@ -4490,6 +4504,20 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(Date.now() - t0).toBeLessThan(1000);
     releaseWedge?.();
     await expect(holder).resolves.toBeTruthy();
+    // Abandoned-wait recovery: the parked waiter rejected by the abort must
+    // hand the lock back when its acquire finally resolves. Without that
+    // release the lock stays acquired forever — every later provision waits
+    // the full deadline and fails with the stall error. Dispatch on a FRESH
+    // signal with no lock reset in between and it must provision normally.
+    const freshController = new AbortController();
+    const freshDispatch = createProductionDispatch(
+      config,
+      freshController.signal,
+    );
+    await expect(
+      freshDispatch('hi', { isolation: 'worktree' }),
+    ).resolves.toBeTruthy();
+    expect(provisions).toBe(2);
   });
 
   it("isolation:'worktree' refuses when cwd is not a git repository", async () => {

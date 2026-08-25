@@ -2214,9 +2214,24 @@ export class GitWorktreeService {
           () => false,
         );
       if (tracked) return;
-      await fs.writeFile(gitignorePath, WORKTREES_GITIGNORE_BODY, {
-        encoding: 'utf8',
-      });
+      // Write through an O_NOFOLLOW fd so the guard above and the write act
+      // on the same inode: a symlink raced in between the lstat and a
+      // path-based writeFile would carry the rewrite to the link's target
+      // outside `.qwen/` (the check-then-use window spans the git spawn
+      // above). An ELOOP from a raced-in symlink lands in the best-effort
+      // catch. Windows does not expose O_NOFOLLOW — the lstat remains the
+      // screen there, as before.
+      const fd = await fs.open(
+        gitignorePath,
+        fs.constants.O_WRONLY |
+          fs.constants.O_TRUNC |
+          (fs.constants.O_NOFOLLOW ?? 0),
+      );
+      try {
+        await fd.writeFile(WORKTREES_GITIGNORE_BODY, 'utf8');
+      } finally {
+        await fd.close();
+      }
     } catch (error) {
       debugLogger.warn(
         `upgradeLegacyWorktreesGitignore failed (non-fatal): ${error}`,

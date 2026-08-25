@@ -1400,7 +1400,9 @@ async function provisionWorkflowWorktree(
           `serialised and this dispatch did not acquire the provisioning ` +
           `lock within ${worktreeProvisionLockTimeoutMs}ms — another ` +
           `provision is likely stalled (a hung git process or a blocked ` +
-          `filesystem). Retry the dispatch.`,
+          `filesystem). Retrying now would wait out the same deadline: ` +
+          `kill the wedged git process, or restart the session, then ` +
+          `dispatch again.`,
       );
     }
     throw err;
