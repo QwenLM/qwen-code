@@ -296,8 +296,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     })),
     dispose: vi.fn(),
   })),
-  APPROVAL_MODE_INFO: {},
-  APPROVAL_MODES: [],
+  APPROVAL_MODE_INFO: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).APPROVAL_MODE_INFO,
+  APPROVAL_MODES: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).APPROVAL_MODES,
   applyReasoningEffort: (
     config: {
       setReasoningEffort(effort: string | undefined): void;
@@ -7979,7 +7983,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       workspaceCwd: '/tmp',
       state: {
         models: { currentModelId: 'm(api-key)', availableModels: [] },
-        modes: { currentModeId: 'default', availableModes: [] },
+        modes: {
+          currentModeId: 'default',
+          availableModes: APPROVAL_MODES.map((id) => ({ id })),
+        },
       },
     });
     expect(supportedCommands).toEqual({
