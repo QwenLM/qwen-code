@@ -545,6 +545,42 @@ describe('TodoWriteTool', () => {
       ).toContainEqual(expect.objectContaining({ id: 'note', blockedBy: [] }));
     });
 
+    it('drops preserved dependencies whose target the same update removes', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          todos: [
+            { id: 'a', content: 'Task A', status: 'pending' },
+            {
+              id: 'b',
+              content: 'Task B',
+              status: 'pending',
+              blockedBy: ['a'],
+            },
+          ],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      // Dropping 'a' is a routine plan-shrinking edit. The preserved edge
+      // from 'b' to 'a' must not be re-injected: before the fix this
+      // rejected the ENTIRE call with 'references unknown dependency "a"'
+      // mid-execute and wrote nothing.
+      const result = await tool
+        .build({ todos: [{ id: 'b', content: 'Task B', status: 'pending' }] })
+        .execute(mockAbortSignal);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        todos: [{ id: 'b', blockedBy: [] }],
+      });
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string).todos,
+      ).toEqual([
+        { id: 'b', content: 'Task B', status: 'pending', blockedBy: [] },
+      ]);
+    });
+
     it('marks structured output in Session Workflow context', async () => {
       mockConfig = {
         getSessionId: () => 'test-session-123',

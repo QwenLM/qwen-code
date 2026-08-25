@@ -296,9 +296,19 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         candidateTodos = data['todos'];
       } else {
         candidateTodos = todos.map((todo) => {
+          // Preserved edges may only reference ids that survive this update:
+          // dropping a dependency target is a valid plan-shrinking edit, and
+          // re-injecting the stale edge would make validateTodos reject the
+          // entire call with 'references unknown dependency' mid-execute.
           const blockedBy =
             todo.blockedBy ??
-            (hasActivePlan ? oldTodosMap.get(todo.id)?.blockedBy : undefined);
+            (hasActivePlan
+              ? oldTodosMap
+                  .get(todo.id)
+                  ?.blockedBy?.filter((dependency) =>
+                    todos.some((incoming) => incoming.id === dependency),
+                  )
+              : undefined);
           return blockedBy === undefined ? todo : { ...todo, blockedBy };
         });
       }
