@@ -2756,6 +2756,7 @@ describe('createServeApp', () => {
       // baseline that older clients see on a default-loopback daemon.
       expect(getAdvertisedServeFeatures()).toEqual([
         ...EXPECTED_STAGE1_FEATURES,
+        'web_terminal',
       ]);
       expect(getServeFeatures()).toEqual(getAdvertisedServeFeatures());
     });
