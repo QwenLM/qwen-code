@@ -3774,14 +3774,17 @@ export class Session implements SessionContext {
         ? snapshots[target.turnIndex]?.promptId
         : undefined);
     const rewindFiles = opts?.rewindFiles !== false;
-    // A misaligned legacy zip cannot partially rewind files: the conversation
-    // would truncate while workspace files silently stay behind — or roll
-    // back to a wrong turn's boundary — and the result would still report
-    // success. rewindToPrompt refuses the identical state; fail closed here
-    // too. File history being disabled means there is nothing to restore, so
-    // conversation-only rewinds keep working.
+    // A misaligned legacy zip cannot rewind on EITHER surface. With files,
+    // the conversation would truncate while workspace files silently stay
+    // behind — or roll back to a wrong turn's boundary — and the result
+    // would still report success. Conversation-only is not a safe fallback:
+    // truncating the conversation while the snapshot store keeps every
+    // (shifted) snapshot launders the deficit into a count-equal, mispaired
+    // zip that the later gates bless — the next file rewind then restores a
+    // wrong turn's file state with success:true. rewindToPrompt refuses the
+    // identical state; fail closed here too. File history being disabled
+    // means there is nothing to pair against, so those rewinds keep working.
     if (
-      rewindFiles &&
       mode === 'legacy' &&
       fileHistoryService.isEnabled() &&
       !legacySnapshotsAligned

@@ -4395,6 +4395,45 @@ describe('Session', () => {
       });
     });
 
+    it('refuses a conversation-only rewind on a misaligned legacy snapshot store', () => {
+      // Conversation-only (rewindFiles: false — the Web Shell RewindDialog's
+      // only action) is not a safe fallback for a misaligned store:
+      // truncating the conversation while every shifted snapshot stays
+      // behind launders the deficit into a count-equal, mispaired zip the
+      // later gates bless — the next file rewind would then restore a
+      // wrong turn's file state with success:true. Fail closed like the
+      // file surface does.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      // Deficit: the resumed legacy prefix's second turn owns no snapshot.
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        {
+          promptId: 'snap-0',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      expect(() => session.rewindToTurn(1, { rewindFiles: false })).toThrow(
+        'Its legacy file snapshot pairing is missing or ambiguous',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+    });
+
     it('preserves startup context when rewinding to the first user turn', () => {
       const history: Content[] = [
         {
