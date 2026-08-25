@@ -149,6 +149,7 @@ import {
 import { OpenTuiDialogMount } from './dialog-mount.js';
 import { OpenTuiFolderTrustGate } from './folder-trust-gate.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
+import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import {
@@ -901,6 +902,7 @@ function App({
   settings: settingsProp,
   initialCapturedInput,
   remoteInputWatcher,
+  extensionRefreshState,
 }: {
   events?: AsyncIterable<OpenTuiStreamEvent>;
   config?: Config;
@@ -908,6 +910,8 @@ function App({
   /** Keystrokes captured during startup, injected into the composer. */
   initialCapturedInput?: string;
   remoteInputWatcher?: RemoteInputWatcher;
+  /** Shared extension-refresh bus (ink extensionRefreshState parity). */
+  extensionRefreshState?: ExtensionRefreshState;
 }) {
   const renderer = useRenderer();
   const { width, height } = useTerminalDimensions();
@@ -1467,13 +1471,22 @@ function App({
     createOpenTuiSlashDispatcher(host, {
       config: config ?? null,
       settings,
+      // Shared extension-refresh bus (startInteractiveUI options): the
+      // dispatcher subscribes so /reload-plugins and disk-driven reload
+      // notices reach the same instance the extension file watcher uses.
+      extensionRefreshState,
       // Real logger once initialized (cross-session prompt history).
       get logger() {
         return loggerRef.current;
       },
     })
       .then((dispatcher) => {
-        if (cancelled) return;
+        if (cancelled) {
+          // Cleanup already ran: detach the just-created dispatcher so its
+          // extension-refresh subscriptions don't outlive the effect.
+          dispatcher.dispose();
+          return;
+        }
         dispatcherRef.current = dispatcher;
         gateway.attach(dispatcher);
         setCommands(dispatcher.commands);
@@ -1493,8 +1506,9 @@ function App({
       });
     return () => {
       cancelled = true;
+      dispatcherRef.current?.dispose();
     };
-  }, [host, config, settings, gateway, applyEvent]);
+  }, [host, config, settings, gateway, applyEvent, extensionRefreshState]);
 
   // Real event source (P1d seam) if provided; scripted demo only when there is
   // no live config (qwen2-demo). With a live config, replay the resumed
@@ -2285,6 +2299,7 @@ function App({
       options?: {
         modelOverride?: string;
         onComplete?: () => Promise<void>;
+        refreshContextFilesOnWrite?: boolean;
       },
     ) => {
       if (!config) return;
@@ -2303,6 +2318,9 @@ function App({
             {
               ...(options?.modelOverride
                 ? { modelOverride: options.modelOverride }
+                : {}),
+              ...(options?.refreshContextFilesOnWrite
+                ? { refreshContextFilesOnWrite: true }
                 : {}),
               drainSteering,
               onWaitingCall: ({ callId, name, confirmationDetails }) => {
@@ -2627,6 +2645,9 @@ function App({
               ? { modelOverride: action.modelOverride }
               : {}),
             ...(action.onComplete ? { onComplete: action.onComplete } : {}),
+            ...(action.refreshContextFilesOnWrite
+              ? { refreshContextFilesOnWrite: true }
+              : {}),
           });
           return;
         }

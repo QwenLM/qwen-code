@@ -106,6 +106,7 @@ export async function startInteractiveUI(
           config,
           settings,
           remoteInputWatcher,
+          extensionRefreshState: options.extensionRefreshState,
           postRender: {
             connectIde: options.postRenderConnectIde ?? false,
             initializeTelemetry:

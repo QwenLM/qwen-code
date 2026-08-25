@@ -31,8 +31,10 @@ import {
   ApprovalMode,
   compactToolResultDisplayForHistory,
   CoreToolScheduler,
+  didWriteProjectContextFile,
   isShellProgressData,
   parseAndFormatApiError,
+  refreshMemoryInstruction,
   SendMessageType,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
@@ -78,6 +80,13 @@ export interface LivePromptOptions {
     name: string;
     confirmationDetails: ToolCallConfirmationDetails;
   }) => void;
+  /**
+   * ink parity (useGeminiStream refreshContextFilesOnWriteRef): when the
+   * submitting slash command marked the turn (e.g. a skill that edits
+   * GEMINI.md), check each completed tool batch for a context-file write and
+   * refresh the memory instruction so the model sees the new content.
+   */
+  refreshContextFilesOnWrite?: boolean;
 }
 
 /**
@@ -403,6 +412,22 @@ export async function* livePromptEvents(
     if (!abort.aborted) {
       for (const text of options?.drainSteering?.() ?? []) {
         if (text) responseParts.push({ text });
+      }
+    }
+    // Context-file write check (ink useGeminiStream parity): a slash command
+    // flagged the turn with refreshContextFilesOnWrite; if this batch wrote a
+    // context file (GEMINI.md/…), refresh the memory instruction before the
+    // next model pass so the updated context is already in the system prompt.
+    if (options?.refreshContextFilesOnWrite && completed.length > 0) {
+      const candidates = completed.map((call) => ({
+        toolName: call.request.name ?? '',
+        args: call.request.args as Record<string, unknown> | undefined,
+        status: call.status,
+      }));
+      if (didWriteProjectContextFile(candidates, config.getProjectRoot())) {
+        await refreshMemoryInstruction(config, {
+          logContext: 'opentui context-file memory tool batch',
+        });
       }
     }
     if (responseParts.length === 0) return;

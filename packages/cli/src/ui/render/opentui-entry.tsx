@@ -35,6 +35,7 @@ import type { StreamEvent } from '../model/streaming-model.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { RemoteInputWatcher } from '../../remoteInput/RemoteInputWatcher.js';
+import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { registerCleanup } from '../../utils/cleanup.js';
 import { registerOpenTuiExitCleanup } from '../opentui/opentui-exit-cleanup.js';
 import { writeRuntimeSidecar } from '../opentui/runtime-sidecar.js';
@@ -61,6 +62,13 @@ export interface OpenTuiStartOptions {
   remoteInputWatcher?: RemoteInputWatcher | null;
   /** Loaded settings (window title, post-render prefetches, backend dialogs). */
   settings?: LoadedSettings;
+  /**
+   * Shared extension-refresh bus created in gemini.tsx (also driving the
+   * extension file watcher); the backend threads it into the command
+   * dispatcher so /reload-plugins and disk-driven reload notices share the
+   * same instance as the watcher (ink AppContainer parity).
+   */
+  extensionRefreshState?: ExtensionRefreshState;
   /** Post-render prefetch toggles (ink `StartInteractiveUIOptions` parity). */
   postRender?: {
     connectIde?: boolean;
@@ -71,8 +79,14 @@ export interface OpenTuiStartOptions {
 export async function startOpenTuiUI(
   opts?: OpenTuiStartOptions,
 ): Promise<void> {
-  const { events, config, settings, postRender, remoteInputWatcher } =
-    opts ?? {};
+  const {
+    events,
+    config,
+    settings,
+    postRender,
+    remoteInputWatcher,
+    extensionRefreshState,
+  } = opts ?? {};
 
   // Drain the early-capture buffer BEFORE the renderer takes over stdin, so
   // startup keystrokes are recovered instead of leaking into the terminal.
@@ -137,6 +151,7 @@ export async function startOpenTuiUI(
         settings={settings}
         remoteInputWatcher={remoteInputWatcher ?? undefined}
         initialCapturedInput={initialCapturedInput}
+        extensionRefreshState={extensionRefreshState}
       />
     </OpenTuiErrorBoundary>,
   );

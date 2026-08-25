@@ -118,6 +118,12 @@ export type BackendAction =
       content: PartListUnion;
       onComplete?: () => Promise<void>;
       modelOverride?: string;
+      /**
+       * ink parity (useGeminiStream refreshContextFilesOnWriteRef): when the
+       * turn writes a context file (GEMINI.md/…), refresh the memory
+       * instruction once the tool batch completes.
+       */
+      refreshContextFilesOnWrite?: boolean;
     }
   /**
    * A client-initiated tool call (/restore, /setup-github). The backend
@@ -289,6 +295,9 @@ export function resolveDispatchOutcome(
         ...(outcome.onComplete ? { onComplete: outcome.onComplete } : {}),
         ...(outcome.modelOverride
           ? { modelOverride: outcome.modelOverride }
+          : {}),
+        ...(outcome.refreshContextFilesOnWrite
+          ? { refreshContextFilesOnWrite: true }
           : {}),
       };
     case 'quit':

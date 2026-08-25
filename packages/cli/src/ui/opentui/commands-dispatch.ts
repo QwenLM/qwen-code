@@ -57,6 +57,12 @@ import {
   isBtwCommand,
 } from '../utils/commandUtils.js';
 import { recordAutoSkillCommandUsage } from '../../services/SkillCommandLoader.js';
+import {
+  ExtensionRefreshState,
+  EXTENSION_RELOAD_FAILED_REASON,
+} from '../../config/extension-refresh-state.js';
+import { AppEvent } from '../../utils/events.js';
+import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import {
   appendUserPromptExpansionAdditionalContext,
@@ -152,6 +158,8 @@ export type OpenTuiDispatchOutcome =
       content: PartListUnion;
       onComplete?: () => Promise<void>;
       modelOverride?: string;
+      /** ink parity: refresh memory when the turn writes a context file. */
+      refreshContextFilesOnWrite?: boolean;
     }
   | { kind: 'quit'; messages: HistoryItem[] }
   | { kind: 'open_dialog'; request: OpenTuiDialogRequest };
@@ -176,15 +184,134 @@ function hasUserPromptExpansionHooks(
   );
 }
 
+const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+
 export class OpenTuiSlashDispatcher {
   private activeAbortController: AbortController | null = null;
   private recentCommands = new Map<string, RecentSlashCommand>();
+  private readonly extensionRefreshState: ExtensionRefreshState;
+  private readonly extensionRefreshListeners: Array<() => void> = [];
+  private extensionContentRefreshTimer: ReturnType<typeof setTimeout> | null =
+    null;
+  private extensionContentRefreshRunning = false;
+  private extensionContentRefreshPending = false;
 
   constructor(
     private readonly host: OpenTuiCommandHost,
     private readonly services: OpenTuiCommandServices,
     private commandList: readonly SlashCommand[],
-  ) {}
+  ) {
+    // ink parity: the slash processor subscribes to the shared
+    // ExtensionRefreshState (created once in gemini.tsx and also driving the
+    // extension file watcher) so /reload-plugins and disk-driven reload
+    // notices reach this renderer too. Without the shared instance every
+    // dispatch would build a fresh fallback no watcher ever sees.
+    this.extensionRefreshState =
+      services.extensionRefreshState ?? new ExtensionRefreshState();
+    this.subscribeToExtensionRefresh();
+  }
+
+  private subscribeToExtensionRefresh(): void {
+    const refreshNeededListener = (reason?: unknown) => {
+      this.host.addItem(
+        {
+          type: MessageType.INFO,
+          text:
+            reason === EXTENSION_RELOAD_FAILED_REASON
+              ? 'Extension reload did not complete. Run /reload-plugins to try again.'
+              : 'Extensions changed on disk. Run /reload-plugins to apply updates.',
+        },
+        Date.now(),
+      );
+    };
+    this.extensionRefreshState.on(
+      AppEvent.ExtensionRefreshNeeded,
+      refreshNeededListener,
+    );
+    this.extensionRefreshListeners.push(() => {
+      this.extensionRefreshState.off(
+        AppEvent.ExtensionRefreshNeeded,
+        refreshNeededListener,
+      );
+    });
+
+    // ink's processor debounce ExtensionContentChanged by 250ms and then
+    // re-runs the runtime refresh (command registry + extension content).
+    const contentChangedListener = () => {
+      if (this.extensionContentRefreshTimer) {
+        clearTimeout(this.extensionContentRefreshTimer);
+      }
+      this.extensionContentRefreshTimer = setTimeout(() => {
+        this.extensionContentRefreshTimer = null;
+        void this.runExtensionContentRefresh();
+      }, 250);
+    };
+    this.extensionRefreshState.on(
+      AppEvent.ExtensionContentChanged,
+      contentChangedListener,
+    );
+    this.extensionRefreshListeners.push(() => {
+      this.extensionRefreshState.off(
+        AppEvent.ExtensionContentChanged,
+        contentChangedListener,
+      );
+    });
+  }
+
+  private async runExtensionContentRefresh(): Promise<void> {
+    const config = this.services.config;
+    if (!config) return;
+    if (this.extensionContentRefreshRunning) {
+      this.extensionContentRefreshPending = true;
+      return;
+    }
+    this.extensionContentRefreshRunning = true;
+    let refreshPasses = 0;
+    try {
+      do {
+        if (refreshPasses >= MAX_EXTENSION_CONTENT_REFRESH_PASSES) {
+          this.extensionContentRefreshPending = false;
+          this.host.addItem(
+            {
+              type: MessageType.ERROR,
+              text: 'Failed to refresh extension content: too many extension content changes are still pending. Run /reload-plugins to apply updates.',
+            },
+            Date.now(),
+          );
+          return;
+        }
+        refreshPasses++;
+        this.extensionContentRefreshPending = false;
+        if (this.extensionRefreshState.isReloadInProgress()) return;
+        if (this.extensionRefreshState.needsExtensionRefresh()) return;
+        await refreshExtensionContentRuntime({
+          config,
+          reloadCommands: () => this.loadCommands(),
+        });
+      } while (this.extensionContentRefreshPending);
+    } catch {
+      this.extensionContentRefreshPending = false;
+      this.host.addItem(
+        {
+          type: MessageType.ERROR,
+          text: 'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+        },
+        Date.now(),
+      );
+    } finally {
+      this.extensionContentRefreshRunning = false;
+    }
+  }
+
+  /** Detaches the extension-refresh subscriptions (backend unmount). */
+  dispose(): void {
+    for (const off of this.extensionRefreshListeners) off();
+    this.extensionRefreshListeners.length = 0;
+    if (this.extensionContentRefreshTimer) {
+      clearTimeout(this.extensionContentRefreshTimer);
+      this.extensionContentRefreshTimer = null;
+    }
+  }
 
   get commands(): readonly SlashCommand[] {
     return this.commandList;
@@ -200,6 +327,7 @@ export class OpenTuiSlashDispatcher {
     this.commandList = await loadInteractiveCommands(
       this.services.config,
       signal,
+      this.services.settings,
     );
   }
 
@@ -285,20 +413,37 @@ export class OpenTuiSlashDispatcher {
       args,
       canonicalPath: resolvedCommandPath,
     } = parseSlashCommand(trimmed, this.commandList);
-    if (
-      !isBtwCommand(trimmed) &&
-      invocationItemId === undefined &&
-      !shouldHideSlashCommandInvocation(
+    let hideInvocation =
+      isBtwCommand(trimmed) ||
+      shouldHideSlashCommandInvocation(
         commandToExecute,
         resolvedCommandPath,
         args,
-      )
-    ) {
+      );
+    if (!hideInvocation && invocationItemId === undefined) {
       invocationItemId = addItemWithRecording(
         { type: MessageType.USER, text: trimmed, sentToModel: false },
         userMessageTimestamp,
       );
     }
+
+    // ink parity: a picker-shaped command that rejects its arguments before
+    // opening a dialog (e.g. `/model` with bad args) still owes the user the
+    // invocation echo — otherwise the error message floats context-less.
+    const revealHiddenInvocation = () => {
+      if (
+        resolvedCommandPath.join(' ') !== 'model' ||
+        !hideInvocation ||
+        invocationItemId !== undefined
+      ) {
+        return;
+      }
+      hideInvocation = false;
+      invocationItemId = addItemWithRecording(
+        { type: MessageType.USER, text: trimmed, sentToModel: false },
+        userMessageTimestamp,
+      );
+    };
 
     let hasError = false;
     let delegatedToRecursiveInvocation = false;
@@ -335,6 +480,7 @@ export class OpenTuiSlashDispatcher {
         const combinedContent: PartListUnion[] = [];
         let firstModelOverride: string | undefined;
         const onCompleteCallbacks: Array<() => Promise<void>> = [];
+        let refreshContextFilesOnWrite = false;
 
         for (const skill of stackedResult.skills) {
           if (!skill.action) continue;
@@ -355,6 +501,9 @@ export class OpenTuiSlashDispatcher {
           if (skillResult?.type === 'submit_prompt') {
             combinedContent.push(skillResult.content);
             firstModelOverride ??= skillResult.modelOverride;
+            refreshContextFilesOnWrite ||= Boolean(
+              skillResult.refreshContextFilesOnWrite,
+            );
             if (skillResult.onComplete) {
               onCompleteCallbacks.push(skillResult.onComplete);
             }
@@ -403,6 +552,9 @@ export class OpenTuiSlashDispatcher {
           kind: 'submit_prompt',
           content: mergedContent,
           ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+          ...(refreshContextFilesOnWrite
+            ? { refreshContextFilesOnWrite: true }
+            : {}),
           ...(onCompleteCallbacks.length
             ? {
                 onComplete: async () => {
@@ -493,25 +645,22 @@ export class OpenTuiSlashDispatcher {
                   messageContent =
                     'Vim mode is not yet available in the OpenTUI renderer.';
                 }
-                if (result.messageType === 'info') {
-                  this.addMessage({
-                    type: MessageType.INFO,
-                    content: messageContent,
-                    timestamp: new Date(),
-                  });
-                } else if (result.messageType === 'warning') {
-                  this.addMessage({
-                    type: MessageType.WARNING,
-                    content: result.content,
-                    timestamp: new Date(),
-                  });
-                } else {
-                  this.addMessage({
-                    type: MessageType.ERROR,
-                    content: result.content,
-                    timestamp: new Date(),
-                  });
-                }
+                // Picker-shaped commands can still reject their arguments
+                // before opening a dialog. Keep those failures paired with
+                // the invocation in both live and reconstructed history, and
+                // route the message through addItemWithRecording so the
+                // chat-recording output phase sees it (ink parity).
+                revealHiddenInvocation();
+                const messageType =
+                  result.messageType === 'info'
+                    ? MessageType.INFO
+                    : result.messageType === 'warning'
+                      ? MessageType.WARNING
+                      : MessageType.ERROR;
+                addItemWithRecording(
+                  { type: messageType, text: messageContent },
+                  Date.now(),
+                );
                 return { kind: 'handled' };
               }
               case 'goal_control': {
@@ -619,6 +768,9 @@ export class OpenTuiSlashDispatcher {
                     : {}),
                   ...(result.modelOverride
                     ? { modelOverride: result.modelOverride }
+                    : {}),
+                  ...(result.refreshContextFilesOnWrite
+                    ? { refreshContextFilesOnWrite: true }
                     : {}),
                 };
               }
@@ -731,8 +883,15 @@ export class OpenTuiSlashDispatcher {
         resolvedCommandPath[0] ||
         trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
         trimmed;
+      // The built-in /advisor is skipped by identity (kind + name) so a
+      // user-defined command shadowing the name is still recorded like
+      // any other custom command (ink parity).
+      const isBuiltInAdvisor =
+        primaryCommand === 'advisor' &&
+        commandToExecute?.kind === CommandKind.BUILT_IN;
       const shouldRecord =
         !delegatedToRecursiveInvocation &&
+        !isBuiltInAdvisor &&
         !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
       try {
         if (shouldRecord) {
@@ -740,6 +899,7 @@ export class OpenTuiSlashDispatcher {
             phase: 'invocation',
             rawCommand: trimmed,
             sentToModel: invocationSentToModel,
+            hiddenInvocation: hideInvocation,
           });
           const outputItems = recordedItems
             .filter((item) => item.type !== 'user')
@@ -783,6 +943,10 @@ export async function createOpenTuiSlashDispatcher(
   services: OpenTuiCommandServices,
   signal?: AbortSignal,
 ): Promise<OpenTuiSlashDispatcher> {
-  const commands = await loadInteractiveCommands(services.config, signal);
+  const commands = await loadInteractiveCommands(
+    services.config,
+    signal,
+    services.settings,
+  );
   return new OpenTuiSlashDispatcher(host, services, commands);
 }

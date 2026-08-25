@@ -17,10 +17,15 @@ import {
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { CommandKind, type SlashCommand } from '../commands/types.js';
+import {
+  CommandKind,
+  type SlashCommand,
+  type SlashCommandActionReturn,
+} from '../commands/types.js';
 import type { HistoryItem } from '../types.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import {
   OpenTuiSlashDispatcher,
   shouldHideSlashCommandInvocation,
@@ -393,6 +398,91 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
       type: 'warning',
       text: 'careful',
     });
+  });
+
+  it('reveals the hidden /model invocation when the command emits a message (ink revealHiddenInvocation parity)', async () => {
+    const commands = [
+      stub({
+        name: 'model',
+        // Bare `/model` is picker-only (hidden invocation), but the
+        // command can still reject its arguments / environment and return
+        // a message — the invocation echo must then appear paired with it.
+        action: () => ({
+          type: 'message',
+          messageType: 'error',
+          content: 'bad model id',
+        }),
+      }),
+    ];
+    const { outcome, host } = await dispatch('/model', commands);
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(host.items).toHaveLength(2);
+    expect(host.items[0]).toMatchObject({ type: 'user', text: '/model' });
+    expect(host.items[1]).toMatchObject({
+      type: 'error',
+      text: 'bad model id',
+    });
+  });
+
+  it('message results are recorded in the chat-recording output phase (ink parity)', async () => {
+    const recordSlashCommand = vi.fn();
+    const config = {
+      getChatRecordingService: () => ({ recordSlashCommand }),
+    } as unknown as Config;
+    const commands = [
+      stub({
+        name: 'warn',
+        action: () => ({
+          type: 'message',
+          messageType: 'warning',
+          content: 'careful',
+        }),
+      }),
+    ];
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      { ...services, config },
+      commands,
+    );
+    await dispatcher.handle('/warn');
+    expect(recordSlashCommand).toHaveBeenCalledTimes(2);
+    const resultPhase = recordSlashCommand.mock.calls[1][0];
+    expect(resultPhase.phase).toBe('result');
+    expect(resultPhase.outputHistoryItems).toEqual([
+      { type: 'warning', text: 'careful' },
+    ]);
+  });
+
+  it('submit_prompt outcomes carry refreshContextFilesOnWrite (ink parity)', async () => {
+    const commands = [
+      stub({
+        name: 'memory-add',
+        action: () => ({
+          type: 'submit_prompt',
+          content: 'remember this',
+          refreshContextFilesOnWrite: true,
+        }),
+      }),
+      stub({
+        name: 'plain',
+        action: () => ({
+          type: 'submit_prompt',
+          content: 'plain prompt',
+        }),
+      }),
+    ];
+    const marked = await dispatch('/memory-add remember this', commands);
+    expect(marked.outcome).toMatchObject({
+      kind: 'submit_prompt',
+      refreshContextFilesOnWrite: true,
+    });
+    const unmarked = await dispatch('/plain', commands);
+    expect(unmarked.outcome).toMatchObject({ kind: 'submit_prompt' });
+    expect(
+      (unmarked.outcome as { refreshContextFilesOnWrite?: boolean })
+        .refreshContextFilesOnWrite,
+    ).toBeUndefined();
   });
 
   it('replaces the vim toggle message with a faithful unsupported notice (G-11b)', async () => {
@@ -905,6 +995,7 @@ describe('cancellation, telemetry and recording', () => {
       phase: 'invocation',
       rawCommand: '/greet',
       sentToModel: false,
+      hiddenInvocation: false,
     });
     const resultPhase = recordSlashCommand.mock.calls[1][0];
     expect(resultPhase.phase).toBe('result');
@@ -915,5 +1006,117 @@ describe('cancellation, telemetry and recording', () => {
     recordSlashCommand.mockClear();
     await dispatcher.handle('/clear');
     expect(recordSlashCommand).not.toHaveBeenCalled();
+  });
+
+  it('records hiddenInvocation=true for bare picker invocations (ink parity)', async () => {
+    const recordSlashCommand = vi.fn();
+    const config = {
+      getChatRecordingService: () => ({ recordSlashCommand }),
+    } as unknown as Config;
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      { ...services, config },
+      [
+        stub({
+          name: 'settings',
+          action: () => undefined,
+        }),
+      ],
+    );
+
+    await dispatcher.handle('/settings');
+    expect(recordSlashCommand).toHaveBeenCalledTimes(2);
+    expect(recordSlashCommand.mock.calls[0][0]).toEqual({
+      phase: 'invocation',
+      rawCommand: '/settings',
+      sentToModel: false,
+      hiddenInvocation: true,
+    });
+    // The hidden invocation never echoed, so the result phase has no output.
+    expect(recordSlashCommand.mock.calls[1][0].outputHistoryItems).toEqual([]);
+  });
+
+  it('skips recording for the built-in /advisor by identity (ink parity)', async () => {
+    const recordSlashCommand = vi.fn();
+    const config = {
+      getChatRecordingService: () => ({ recordSlashCommand }),
+    } as unknown as Config;
+    const host = createFakeHost();
+    const advisorAction = (): SlashCommandActionReturn => ({
+      type: 'message',
+      messageType: 'info',
+      content: 'advisor says hi',
+    });
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      { ...services, config },
+      [
+        stub({ name: 'advisor', action: advisorAction }),
+        // A user-defined command shadowing the name is NOT the built-in and
+        // must still be recorded.
+        {
+          ...stub({ name: 'advisor', action: advisorAction }),
+          kind: CommandKind.SKILL,
+        },
+      ],
+    );
+
+    await dispatcher.handle('/advisor');
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+
+    // Re-dispatch through the non-built-in shadow (remove the built-in from
+    // the registry by dispatching with only the shadow installed).
+    recordSlashCommand.mockClear();
+    const shadowOnly = new OpenTuiSlashDispatcher(
+      createFakeHost(),
+      { ...services, config },
+      [
+        {
+          ...stub({ name: 'advisor', action: advisorAction }),
+          kind: CommandKind.SKILL,
+        },
+      ],
+    );
+    await shadowOnly.handle('/advisor');
+    expect(recordSlashCommand).toHaveBeenCalled();
+  });
+});
+
+describe('extension refresh subscription (ink processor parity)', () => {
+  it('subscribes to the shared ExtensionRefreshState and surfaces reload notices', () => {
+    const extensionRefreshState = new ExtensionRefreshState();
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      { ...services, extensionRefreshState },
+      [],
+    );
+
+    extensionRefreshState.markExtensionsChanged();
+    expect(
+      host.items.some(
+        (item) =>
+          item.type === 'info' &&
+          item.text ===
+            'Extensions changed on disk. Run /reload-plugins to apply updates.',
+      ),
+    ).toBe(true);
+
+    extensionRefreshState.markExtensionsReloadFailed();
+    expect(
+      host.items.some(
+        (item) =>
+          item.type === 'info' &&
+          item.text ===
+            'Extension reload did not complete. Run /reload-plugins to try again.',
+      ),
+    ).toBe(true);
+
+    dispatcher.dispose();
+    extensionRefreshState.resetForTesting();
+    const itemsAfterDispose = host.items.length;
+    extensionRefreshState.markExtensionsChanged();
+    expect(host.items.length).toBe(itemsAfterDispose);
   });
 });
