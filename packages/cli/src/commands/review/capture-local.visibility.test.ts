@@ -112,6 +112,12 @@ describe('capture-local — visibility oracle rides the sampling discipline', ()
     invisibleScript.push(['src/a.ts'], [], [], []);
 
     const plan = capture();
+    // Four samples, exactly — 0 before the first capture, 1-2 in the loop,
+    // 3 after. The scripted mock consumes by CALL ORDER, so without this
+    // pin a deleted sample 0 merely shifts the script and the dirty sample
+    // still lands somewhere: the sandboxed verifier's mutation matrix
+    // proved the guard unpinned (M6 survived) and this line red under it.
+    expect(invisibleCalls).toBe(4);
     expect(plan['nothingToReview']).toBeUndefined();
     expect(
       existsSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json')),
