@@ -100,16 +100,19 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   }
 
   /**
-   * DeepSeek's API requires message content to be a plain string, not an
-   * array of content parts. Flatten any text-part arrays into joined
-   * strings; non-text parts (image_url, audio, …) are replaced with a
-   * `[Unsupported content type: <type>]` placeholder so the request still
-   * goes through with a textual breadcrumb rather than silently dropping
-   * the part or raising mid-conversation. Also translate the standard
-   * `reasoning.effort` config into DeepSeek's flat `reasoning_effort`
-   * body parameter — but only on actual DeepSeek hostnames, since the
-   * model-name fallback above can match self-hosted/strict OpenAI-compat
-   * backends that don't accept the DeepSeek extension.
+   * DeepSeek's text models require message content to be a plain string,
+   * not an array of content parts. Flatten any text-part arrays into
+   * joined strings; non-text parts (image_url, audio, …) are replaced
+   * with a `[Unsupported content type: <type>]` placeholder so the request
+   * still goes through with a textual breadcrumb rather than silently
+   * dropping the part or raising mid-conversation. The vision model
+   * (`deepseek-v4-flash-vision-exp`) accepts OpenAI `image_url` content
+   * parts, so when the config declares image support the parts are kept
+   * as-is. Also translate the standard `reasoning.effort` config into
+   * DeepSeek's flat `reasoning_effort` body parameter — but only on actual
+   * DeepSeek hostnames, since the model-name fallback above can match
+   * self-hosted/strict OpenAI-compat backends that don't accept the
+   * DeepSeek extension.
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
@@ -124,8 +127,14 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
       return reshaped;
     }
 
+    // deepseek-v4-flash-vision-exp accepts OpenAI "content parts" with
+    // image_url, so flattening to a plain string would silently drop the
+    // image. Only flatten when the model has not declared image support.
+    const supportsImages =
+      this.contentGeneratorConfig.modalities?.image === true;
+
     const messages = reshaped.messages.map((message) => {
-      const flattened = flattenContentParts(message);
+      const flattened = supportsImages ? message : flattenContentParts(message);
       return ensureReasoningContentOnAssistantMessage(flattened);
     });
 
