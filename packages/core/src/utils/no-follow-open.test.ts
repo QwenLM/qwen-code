@@ -16,7 +16,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { openNoFollow, openSyncNoFollow } from './no-follow-open.js';
+import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+  openSyncNoFollow,
+  UNVERIFIABLE_IDENTITY_CODE,
+} from './no-follow-open.js';
 
 let tmpDirs: string[] = [];
 
@@ -234,9 +239,22 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
       const { openSyncNoFollow: openSyncFallback } = await import(
         './no-follow-open.js'
       );
-      expect(() => openSyncFallback(filePath)).toThrow(
-        expect.objectContaining({ code: 'ELOOP' }),
-      );
+      // Distinct from a genuine symlink refusal: the code must NOT be
+      // 'ELOOP', or consumers' ELOOP-specific handling (symlink-escape
+      // flags, "not a regular file" errors, binary-row collapses) misfires
+      // on legitimate files that merely live on an inode-0 volume.
+      const error = (() => {
+        try {
+          openSyncFallback(filePath);
+          return undefined;
+        } catch (e) {
+          return e as NodeJS.ErrnoException;
+        }
+      })();
+      expect(error).toBeDefined();
+      expect(error?.code).toBe(UNVERIFIABLE_IDENTITY_CODE);
+      expect(error?.code).not.toBe('ELOOP');
+      expect(isUnverifiableIdentityError(error)).toBe(true);
     } finally {
       vi.doUnmock('node:fs');
       vi.resetModules();

@@ -9,7 +9,10 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
-import { openNoFollow } from '@qwen-code/qwen-code-core';
+import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+} from '@qwen-code/qwen-code-core';
 import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { getGlobalQwenDirLite } from '../config/storage-paths-lite.js';
 import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
@@ -362,6 +365,15 @@ export class WorkspaceRegistrationStore {
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         return emptySnapshot(this.primaryWorkspace);
+      }
+      if (isUnverifiableIdentityError(err)) {
+        // inode-0 volume: the store could not be proven identical to the
+        // file the pre-open check saw. Fail closed, but do not claim it
+        // "must be a regular file" — the lstat gate above already proved
+        // it is one (#8227 follow-up).
+        throw new WorkspaceRegistrationStoreError(
+          'Workspace registration store identity could not be verified',
+        );
       }
       if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
         throw new WorkspaceRegistrationStoreError(

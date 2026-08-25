@@ -5,12 +5,13 @@
  */
 
 import { execFile } from 'node:child_process';
-import { access, lstat, readFile, stat } from 'node:fs/promises';
+import { access, lstat, open, readFile, stat } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
 import { findGitRoot, readFirstLineNoFollow } from './gitUtils.js';
-import { openNoFollow } from './no-follow-open.js';
+import { isUnverifiableIdentityError, openNoFollow } from './no-follow-open.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
 export type GitDiffHunk = Hunk;
@@ -83,6 +84,33 @@ const UNTRACKED_READ_CAP_BYTES = MAX_DIFF_SIZE_BYTES;
 const UNTRACKED_READ_CHUNK_BYTES = 64 * 1024;
 /** Scan the first N bytes for NUL to detect binary files (matches git's heuristic). */
 const BINARY_SNIFF_BYTES = 8 * 1024;
+
+/**
+ * Open an untracked file for diff display through {@link openNoFollow},
+ * degrading to a plain read only where the helper's fail-closed refusal is
+ * the inode-unverifiable one (ino 0: FAT/exFAT, some SMB shares on Windows).
+ * Every call site gates on `lstat(...).isFile()` immediately before the
+ * open, so the fallback cannot follow a symlink the gate did not already
+ * accept — it merely restores the pre-#8227 read for volumes where identity
+ * can never be proven. Without the degradation, EVERY untracked text file on
+ * such a volume would collapse to a binary row / dropped hunk even though
+ * diff display is not identity-sensitive. Any other refusal (a genuine
+ * symlink race) and any plain-open error return `undefined`.
+ */
+async function openUntrackedForDiffRead(
+  absPath: string,
+): Promise<FileHandle | undefined> {
+  try {
+    return await openNoFollow(absPath);
+  } catch (error) {
+    if (!isUnverifiableIdentityError(error)) return undefined;
+  }
+  try {
+    return await open(absPath);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Fetch numstat-based git diff stats (files changed, lines added/removed) and
@@ -421,15 +449,11 @@ async function synthesizeUntrackedHunk(
   } catch {
     return null;
   }
-  let fh;
-  try {
-    // O_NOFOLLOW closes the TOCTOU window between the lstat above and the
-    // open — where the flag does not exist (Windows) the helper compensates
-    // with an identity re-check (#8227).
-    fh = await openNoFollow(absPath);
-  } catch {
-    return null;
-  }
+  // O_NOFOLLOW closes the TOCTOU window between the lstat above and the
+  // open — where the flag does not exist (Windows) the helper compensates
+  // with an identity re-check (#8227).
+  const fh = await openUntrackedForDiffRead(absPath);
+  if (!fh) return null;
   try {
     const st = await fh.stat();
     if (!st.isFile()) return null;
@@ -943,13 +967,11 @@ async function countUntrackedLines(
   if (!st.isFile()) {
     return { added: 0, isBinary: true, truncated: false };
   }
-  let fh;
-  try {
-    // O_NOFOLLOW closes the TOCTOU window between the lstat above and the
-    // open — where the flag does not exist (Windows) the helper compensates
-    // with an identity re-check (#8227).
-    fh = await openNoFollow(absPath);
-  } catch {
+  // O_NOFOLLOW closes the TOCTOU window between the lstat above and the
+  // open — where the flag does not exist (Windows) the helper compensates
+  // with an identity re-check (#8227).
+  const fh = await openUntrackedForDiffRead(absPath);
+  if (!fh) {
     // ELOOP from O_NOFOLLOW (path raced into a symlink between lstat and
     // open) and any other open error all collapse to a binary row so the
     // file appears once in the listing without contributing line counts.

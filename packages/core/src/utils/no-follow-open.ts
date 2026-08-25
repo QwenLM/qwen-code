@@ -29,9 +29,13 @@
  * there rather than degrade to a plain open — the same fail-closed posture
  * used for unverifiable inode identities elsewhere (#8290, #9857).
  *
- * Every refusal is reported as an error with `code: 'ELOOP'` — the same
- * code POSIX `O_NOFOLLOW` produces — so existing `ELOOP` handling in
- * callers applies to the fallback path unchanged.
+ * Symlink refusals and identity races are reported as errors with
+ * `code: 'ELOOP'` — the same code POSIX `O_NOFOLLOW` produces — so
+ * existing `ELOOP` handling in callers applies to the fallback path
+ * unchanged. The inode-0 refusal, where identity was never provable in the
+ * first place, carries {@link UNVERIFIABLE_IDENTITY_CODE} instead, so a
+ * legitimate file on an inode-0 volume is not misclassified by
+ * ELOOP-specific handling as a symlink escape.
  *
  * `node:fs` is bound through the DEFAULT import (not a namespace import)
  * so suites that spy the fs object — the way `sessionService.rename.test.ts`
@@ -45,21 +49,50 @@ import type { FileHandle } from 'node:fs/promises';
 
 import { hasVerifiableInode } from './file-identity.js';
 
+/**
+ * Error code carried by the refusal raised when the fallback cannot even
+ * attempt the identity proof — the filesystem reports inode 0 (FAT/exFAT,
+ * some SMB shares), so the opened file cannot be proven identical to the
+ * one the pre-open check saw.
+ *
+ * The refusal itself is the documented fail-closed posture (#8290, #9857).
+ * What must stay distinguishable is the reason: callers with ELOOP-specific
+ * handling (symlink-escape flags, "not a regular file" errors, binary-row
+ * collapses) would otherwise misfire on LEGITIMATE files that merely live
+ * on an inode-0 volume. Genuine symlink refusals and identity races keep
+ * `code: 'ELOOP'`.
+ */
+export const UNVERIFIABLE_IDENTITY_CODE = 'EUNVERIFIABLE';
+
+/**
+ * True iff `error` is the inode-unverifiable refusal described by
+ * {@link UNVERIFIABLE_IDENTITY_CODE}.
+ */
+export function isUnverifiableIdentityError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as NodeJS.ErrnoException).code === UNVERIFIABLE_IDENTITY_CODE
+  );
+}
+
 function noFollowRejection(
   filePath: string,
   reason: string,
+  code: string = 'ELOOP',
 ): NodeJS.ErrnoException {
   const error = new Error(
     `Refusing to open '${filePath}' without a no-follow guarantee: ${reason}`,
   ) as NodeJS.ErrnoException;
-  error.code = 'ELOOP';
+  error.code = code;
   return error;
 }
 
 /**
  * Verify that the handle opened in step (2) still refers to the file seen by
  * the pre-open `lstat` (step 1). Throws an `ELOOP`-coded error when the
- * identity cannot be proven or has changed.
+ * identity changed, and an {@link UNVERIFIABLE_IDENTITY_CODE}-coded error
+ * when it was never provable (inode 0).
  */
 function assertSameIdentity(
   filePath: string,
@@ -71,6 +104,7 @@ function assertSameIdentity(
       filePath,
       'the filesystem reports inode 0, so the opened file cannot be ' +
         'proven identical to the one that was checked',
+      UNVERIFIABLE_IDENTITY_CODE,
     );
   }
   if (before.dev !== after.dev || before.ino !== after.ino) {

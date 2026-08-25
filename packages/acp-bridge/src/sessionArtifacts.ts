@@ -14,6 +14,7 @@ import {
   isPrototypeMetadataKey,
   isRecordableDerivedChild,
   isReservedWorkspaceMetadataKey,
+  isUnverifiableIdentityError,
   MAX_DIRECTORY_ARTIFACT_DEPTH,
   MAX_DIRECTORY_ARTIFACT_FILES,
   metadataBudgetBytes,
@@ -3177,6 +3178,13 @@ async function getWorkspaceStatus(
   } catch (error) {
     if (isNoFollowSymlinkError(error)) {
       return { status: 'missing', escaped: true };
+    }
+    if (isUnverifiableIdentityError(error)) {
+      // inode-0 volume: the file could not be proven identical to the one
+      // the pre-open check saw. Fail closed like a missing artifact, but
+      // do NOT flag a symlink escape we did not observe — the path passed
+      // the containment check above (#8227 follow-up).
+      return { status: 'missing' };
     }
     if (!isNotFoundError(error)) {
       throw error;
