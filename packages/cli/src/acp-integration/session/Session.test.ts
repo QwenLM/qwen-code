@@ -4806,6 +4806,11 @@ describe('Session', () => {
               functionResponse: expect.objectContaining({
                 id: 'call-auq',
                 name: 'ask_user_question',
+                response: expect.objectContaining({
+                  error: expect.stringContaining(
+                    'Permission request was cancelled because the approval UI was unavailable.',
+                  ),
+                }),
               }),
             }),
           ]),
