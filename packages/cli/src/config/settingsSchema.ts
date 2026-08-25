@@ -1434,7 +1434,7 @@ const SETTINGS_SCHEMA = {
   },
 
   advisorMaxUses: {
-    type: 'number',
+    type: 'integer',
     label: 'Advisor Max Uses',
     category: 'Model',
     requiresRestart: false,
@@ -1442,10 +1442,7 @@ const SETTINGS_SCHEMA = {
     description:
       'Optional maximum Advisor consultations per user prompt. Leave unset for unlimited; when set, the value must be a positive integer.',
     showInDialog: true,
-    jsonSchemaOverride: {
-      type: 'integer',
-      minimum: 1,
-    },
+    minimum: 1,
   },
 
   visionModel: {

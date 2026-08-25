@@ -17,6 +17,7 @@ import {
   type SettingsSchema,
 } from './settingsSchema.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
+import { validateSettingValue } from './settingsUtils.js';
 import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
@@ -255,15 +256,18 @@ describe('SettingsSchema', () => {
     it('should define the advisor max uses setting', () => {
       const advisorMaxUses = getSettingsSchema().advisorMaxUses;
 
-      expect(advisorMaxUses.type).toBe('number');
+      expect(advisorMaxUses.type).toBe('integer');
       expect(advisorMaxUses.category).toBe('Model');
       expect(advisorMaxUses.default).toBeUndefined();
       expect(advisorMaxUses.requiresRestart).toBe(false);
       expect(advisorMaxUses.showInDialog).toBe(true);
-      expect(advisorMaxUses.jsonSchemaOverride).toEqual({
-        type: 'integer',
-        minimum: 1,
-      });
+      expect(advisorMaxUses.minimum).toBe(1);
+      expect(validateSettingValue(advisorMaxUses, 0)).toBe(
+        'Value must be >= 1',
+      );
+      expect(validateSettingValue(advisorMaxUses, 1.5)).toBe(
+        'Value must be an integer',
+      );
     });
 
     it('should define the built-in Explore model setting', () => {

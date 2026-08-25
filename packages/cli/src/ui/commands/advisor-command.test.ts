@@ -10,7 +10,7 @@ import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
-import type { LoadedSettings } from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../../i18n/index.js', () => ({
   t: (key: string, params?: Record<string, string>) => {
@@ -85,14 +85,21 @@ describe('advisorCommand', () => {
 
   const createSettings = (
     merged: Record<string, unknown> = {},
-  ): LoadedSettings =>
-    ({
+    userSettings: Record<string, unknown> = {},
+    workspaceSettings: Record<string, unknown> = {},
+  ): LoadedSettings => {
+    const user = { settings: userSettings };
+    const workspace = { settings: workspaceSettings };
+    return {
       merged,
-      user: { settings: {} },
-      workspace: { settings: {} },
+      user,
+      workspace,
       setValue,
       isTrusted: true,
-    }) as unknown as LoadedSettings;
+      forScope: (scope: SettingScope) =>
+        scope === SettingScope.Workspace ? workspace : user,
+    } as unknown as LoadedSettings;
+  };
 
   const createConfig = (overrides: Record<string, unknown> = {}) => ({
     getGeminiClient: () => ({
@@ -296,6 +303,27 @@ describe('advisorCommand', () => {
       messageType: 'info',
       content: 'Advisor disabled',
     });
+  });
+
+  it('disables Advisor in the scope that owns advisorModel', async () => {
+    mockContext = createMockCommandContext({
+      services: {
+        config: createConfig(),
+        settings: createSettings(
+          { advisorModel: 'workspace-advisor' },
+          { modelProviders: {} },
+          { advisorModel: 'workspace-advisor' },
+        ),
+      },
+    });
+
+    await advisorCommand.action!(mockContext, 'off');
+
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'advisorModel',
+      '',
+    );
   });
 
   it('returns a message result for /advisor off in ACP mode', async () => {

@@ -52,12 +52,17 @@ const renderComponent = (
   };
   const combinedProps = { ...defaultProps, ...props };
 
+  const user = settingsValue?.user ?? { settings: {} };
+  const workspace = settingsValue?.workspace ?? { settings: {} };
   const mockSettings = {
     isTrusted: true,
-    user: { settings: {} },
-    workspace: { settings: {} },
-    setValue: vi.fn(),
     ...(settingsValue ?? {}),
+    user,
+    workspace,
+    setValue: settingsValue?.setValue ?? vi.fn(),
+    forScope: vi.fn((scope: SettingScope) =>
+      scope === SettingScope.Workspace ? workspace : user,
+    ),
   } as unknown as LoadedSettings;
 
   const recordSlashCommand = vi.fn();
@@ -778,6 +783,40 @@ describe('<ModelDialog />', () => {
       outputHistoryItems: [{ type: 'success', text: 'Advisor disabled' }],
     });
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('disables Advisor in the scope that owns advisorModel', async () => {
+    const setAdvisorConfig = vi.fn().mockResolvedValue(undefined);
+    const { mockSettings, recordSlashCommand } = renderComponent(
+      { isAdvisorModelMode: true, persistScope: 'user' },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getModel: vi.fn(() => 'gpt-4'),
+        getAllConfiguredModels: vi.fn(() => []),
+        setAdvisorConfig,
+      } as unknown as Partial<Config>,
+      {
+        merged: { advisorModel: 'workspace-advisor' },
+        workspace: {
+          settings: { advisorModel: 'workspace-advisor' },
+        },
+      } as unknown as Partial<LoadedSettings>,
+    );
+
+    await mockedSelect.mock.calls[0][0].onSelect('$advisor-off');
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'advisorModel',
+      '',
+    );
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/advisor',
+      outputHistoryItems: [
+        { type: 'success', text: 'Advisor disabled (this project)' },
+      ],
+    });
   });
 
   it('stores Advisor model selector without switching models', async () => {

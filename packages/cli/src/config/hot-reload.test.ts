@@ -236,6 +236,46 @@ describe('registerMcpHotReload', () => {
     });
   });
 
+  it('ignores a non-string Advisor model without blocking MCP reload', async () => {
+    const fc = makeFakeConfig(cwd, { settingsMcp: {}, gating: {} });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    (merged as Record<string, unknown>)['advisorModel'] = 123;
+    merged.mcpServers = { a: { command: 'a' } };
+    await listener([]);
+
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({
+      a: { command: 'a' },
+    });
+  });
+
+  it('surfaces an Advisor reload error without blocking MCP reload', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: {},
+      advisorModel: 'old-advisor',
+    });
+    fc.setAdvisorConfig.mockRejectedValueOnce(new Error('advisor reload boom'));
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    const spy = vi.fn();
+    appEvents.on(AppEvent.LogError, spy);
+    try {
+      merged.advisorModel = 'new-advisor';
+      merged.mcpServers = { a: { command: 'a' } };
+      await listener([]);
+
+      expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({
+        a: { command: 'a' },
+      });
+      expect(spy).toHaveBeenCalledWith(
+        expect.stringMatching(/Failed to reload Advisor settings/),
+      );
+    } finally {
+      appEvents.off(AppEvent.LogError, spy);
+    }
+  });
+
   it('preserves session Advisor model override while refreshing max uses', async () => {
     const fc = makeFakeConfig(cwd, {
       settingsMcp: {},

@@ -18,7 +18,10 @@ import {
   runForkedAgent,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getOwnKeyScope,
+  getPersistScopeForModelSelection,
+} from '../../config/modelProvidersScope.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 const ADVISOR_SCHEMA = {
@@ -124,7 +127,11 @@ function resolveScope(
   settings: LoadedSettings,
   scopeOverride: SettingScope | undefined,
 ): SettingScope {
-  return scopeOverride ?? getPersistScopeForModelSelection(settings);
+  return (
+    scopeOverride ??
+    getOwnKeyScope(settings, 'advisorModel') ??
+    getPersistScopeForModelSelection(settings)
+  );
 }
 
 function persistScopeSpread(

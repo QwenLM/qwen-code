@@ -29,7 +29,10 @@ import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSel
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  getOwnKeyScope,
+  getPersistScopeForModelSelection,
+} from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
 import {
   formatUnsupportedVoiceModelMessage,
@@ -163,6 +166,16 @@ function resolvePersistScope(
   if (persistScope === 'workspace') return SettingScope.Workspace;
   if (persistScope === 'user') return SettingScope.User;
   return getPersistScopeForModelSelection(settings);
+}
+
+function resolveAdvisorPersistScope(
+  settings: ReturnType<typeof useSettings>,
+  persistScope: 'workspace' | 'user' | undefined,
+): SettingScope {
+  return (
+    getOwnKeyScope(settings, 'advisorModel') ??
+    resolvePersistScope(settings, persistScope)
+  );
 }
 
 function persistModelSelection(
@@ -815,13 +828,13 @@ export function ModelDialog({
           return;
         }
 
-        const scope = resolvePersistScope(settings, persistScope);
+        const scope = resolveAdvisorPersistScope(settings, persistScope);
         const scopeSuffix =
-          persistScope === 'workspace'
-            ? t(' (this project)')
-            : persistScope === 'user'
-              ? t(' (global)')
-              : '';
+          persistScope === undefined
+            ? ''
+            : scope === SettingScope.Workspace
+              ? t(' (this project)')
+              : t(' (global)');
 
         if (selected === ADVISOR_OFF_OPTION) {
           settings.setValue(scope, 'advisorModel', '');
