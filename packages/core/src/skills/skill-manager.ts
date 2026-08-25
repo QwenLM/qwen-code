@@ -1001,9 +1001,15 @@ export class SkillManager {
               `Extension "${extension.name}" skill "${skill.name}" has invalid priority (${typeof skill.priority}: ${String(skill.priority)}); treating as 0.`,
             );
           }
+          const owner = extension.displayName ?? extension.name;
           skills.push({
             ...skill,
-            extensionName: extension.displayName ?? extension.name,
+            // Extension skills are registered under a qualified name so
+            // they cannot collide with user, project, or bundled skills
+            // of the same name (#9408). All consumers see the qualified
+            // form. Mirrors gemini-cli#23566.
+            name: `${owner}:${skill.name}`,
+            extensionName: owner,
             // Normalize so downstream consumers reading `skill.priority`
             // (e.g. the `/skills` display sort) observe the same value
             // reflected by the warning above.

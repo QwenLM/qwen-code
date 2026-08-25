@@ -870,14 +870,68 @@ Body`);
       });
 
       expect(skills.map((skill) => skill.name)).toEqual([
-        'bad-priority',
-        'high-priority',
+        'test-extension:bad-priority',
+        'test-extension:high-priority',
       ]);
       // The non-number priority should still be normalized on the skill
       // itself so downstream consumers (the /skills display sort) see a
       // clean value.
-      const badSkill = skills.find((s) => s.name === 'bad-priority');
+      const badSkill = skills.find(
+        (s) => s.name === 'test-extension:bad-priority',
+      );
       expect(badSkill?.priority).toBe(0);
+    });
+
+    it('should namespace extension skills under the providing extension', async () => {
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'rust',
+          name: 'rust',
+          version: '1.97.1',
+          isActive: true,
+          path: '/extensions/rust',
+          config: { name: 'rust', version: '1.97.1' },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'never-type',
+              description: 'Never type rules',
+              body: 'Body',
+              filePath: '/extensions/rust/skills/never-type/SKILL.md',
+              level: 'extension',
+            },
+            {
+              name: 'pdf',
+              description: 'Rust pdf skill',
+              body: 'Body',
+              filePath: '/extensions/rust/skills/pdf/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+
+      const skills = await manager.listSkills({
+        level: 'extension',
+        force: true,
+      });
+
+      // Skill names come back prefixed with the owning extension's name.
+      expect(skills.map((s) => s.name)).toEqual([
+        'rust:never-type',
+        'rust:pdf',
+      ]);
+      const namespaced = skills.find((s) => s.name === 'rust:never-type');
+      expect(namespaced?.extensionName).toBe('rust');
+
+      // The bare name no longer resolves; lookups must use the prefixed form.
+      await expect(manager.loadSkill('never-type')).resolves.toBeNull();
+      await expect(
+        manager.loadSkillForRuntime('rust:never-type'),
+      ).resolves.toMatchObject({
+        name: 'rust:never-type',
+        extensionName: 'rust',
+      });
     });
 
     it('should deduplicate same-name skills across provider dirs within a level', async () => {
