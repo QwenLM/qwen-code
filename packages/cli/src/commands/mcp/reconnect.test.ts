@@ -271,6 +271,9 @@ describe('mcp reconnect command', () => {
         'Failed to reconnect to server "test-server": Connection refused',
       );
       expect(mockProcessExit).toHaveBeenCalledWith(1);
+      // The handler's `process.exit(1)` does not terminate stdio MCP servers
+      // the failed attempt spawned; shutdown must run on the failure path too.
+      expect(mockConfig.shutdown).toHaveBeenCalled();
     });
   });
 
@@ -456,6 +459,9 @@ describe('mcp reconnect command', () => {
       expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
         'Successfully reconnected to server "test-server".',
       );
+      // Verification failure throws before the success output; shutdown must
+      // still run or the spawned server is orphaned by `process.exit(1)`.
+      expect(mockConfig.shutdown).toHaveBeenCalled();
     });
 
     it('marks --all entries failed when they never reached CONNECTED', async () => {

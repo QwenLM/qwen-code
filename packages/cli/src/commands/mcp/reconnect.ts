@@ -175,17 +175,26 @@ async function reconnectMcpServer(serverName: string): Promise<void> {
 
   writeStdoutLine(`Reconnecting to server "${serverName}"...`);
 
+  // Shutdown must run on the failure path too: `discoverAndVerifyConnection`
+  // throws on a non-CONNECTED status, the handler then `process.exit(1)`s,
+  // and `process.exit` does not terminate stdio MCP servers the failed
+  // attempt spawned — each retry would orphan another process. Mirror the
+  // `--all` try/finally structure (issue #9944).
+  let config: Config | undefined;
   try {
-    const config = await createMinimalConfig();
+    config = await createMinimalConfig();
     await discoverAndVerifyConnection(config, serverName);
     writeStdoutLine(`Successfully reconnected to server "${serverName}".`);
     writeStdoutLine(SESSION_SCOPE_NOTE);
-    await config.shutdown();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw createReconnectError(
       `Failed to reconnect to server "${serverName}": ${message}`,
     );
+  } finally {
+    if (config) {
+      await config.shutdown();
+    }
   }
 }
 
