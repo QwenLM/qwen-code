@@ -654,6 +654,16 @@ export function diagnoseConvergence(input: {
       if (generations.length === 0) continue;
       successorChains.push({ file, generations, newIds });
     }
+    // Sorted, like the cluster above, so WHICH diverging subsystems the two
+    // `.slice(0, MAX_RENDERED_CLUSTERS)` consumers name is a measured
+    // property, never the map's insertion order: the most new work first,
+    // closure volume second, the code-unit path the tie-break.
+    successorChains.sort(
+      (a, b) =>
+        b.newIds.length - a.newIds.length ||
+        b.generations.flat().length - a.generations.flat().length ||
+        (a.file < b.file ? -1 : a.file > b.file ? 1 : 0),
+    );
   }
 
   // A round that produced NO fresh finding is the observation a convergence
@@ -1044,8 +1054,8 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
 
   const clusterAdviceEn = `A cluster that keeps producing siblings usually means the fixes are treating instances of a shared root cause — triaging that cause before the next round, or splitting an independent cluster into its own pull request, tends to end the loop faster than fixing them one at a time.`;
   const clusterAdviceZh = `一个不断再生兄弟发现的簇，通常意味着逐条修复只在处理同一根因的实例——先定位并处理该根因，或把独立的簇拆成单独的 PR，通常比逐条修复更快结束循环。`;
-  const chainAdviceEn = `A mechanism whose fix grows the next Critical is diverging, not converging — consider removing or redesigning that mechanism rather than patching it again.`;
-  const chainAdviceZh = `每次修复都长出下一个 Critical 的机制是在发散而非收敛——建议移除或重新设计该机制，而不是继续打补丁。`;
+  const chainAdviceEn = `A mechanism whose fix grows the next Critical is diverging, not converging — raising the pattern with the mechanism's owner before the next round tends to end the loop faster than patching it again.`;
+  const chainAdviceZh = `每次修复都长出下一个 Critical 的机制是在发散而非收敛——先把这一模式提给该机制的负责人，通常比继续打补丁更快结束循环。`;
   const landEn = `No Critical finding is open on this round, so merging and moving the remaining Suggestion threads to a follow-up issue is available as an ending — a merged pull request cannot diverge further.`;
   const landZh = `本轮没有未决的 Critical，因此"合入后把剩余 Suggestion 线程转到后续 issue"是一个可选的结束方式——已合入的 PR 不会继续发散。`;
 

@@ -718,9 +718,9 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
     expect(text.en).toContain('⚠️ Divergence:');
     expect(text.en).toContain('`src/mechanism.ts`');
     expect(text.en).toContain('`R9-1 → R10-2 → R11-4`');
-    expect(text.en).toContain('removing or redesigning that mechanism');
+    expect(text.en).toContain("raising the pattern with the mechanism's owner");
     expect(text.zh).toContain('⚠️ 发散：');
-    expect(text.zh).toContain('而不是继续打补丁');
+    expect(text.zh).toContain('提给该机制的负责人');
   });
 
   it('stays silent with only ONE round of closures on the file', () => {
@@ -860,6 +860,54 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
     expect(
       recommendationsFor(r).find((x) => x.code === 'successor-chain')?.basis,
     ).toContain('R1-1 → R2-1 → R3-1/R3-2');
+  });
+
+  it('orders chains by measured work, never by ledger-insertion order', () => {
+    // Four diverging files; the LAST-inserted one carries the most fresh
+    // Criticals. Both consumers slice the list at MAX_RENDERED_CLUSTERS, so
+    // an unsorted list lets the map's insertion order — the order the files
+    // first appeared in the build — choose which subsystems the note names.
+    const files = ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'];
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 6,
+      prev: {
+        findings: [],
+        closed: files.map((f, i) => closedAt(2, `R1-${i + 1}`, f)),
+      },
+      drafts: [],
+      closuresThisRound: files.map((f, i) => closedAt(3, `R2-${i + 1}`, f)),
+      thisRoundFindings: [
+        c('R3-1', 'src/a.ts'),
+        c('R3-2', 'src/b.ts'),
+        c('R3-3', 'src/c.ts'),
+        c('R3-4', 'src/d.ts'),
+        c('R3-5', 'src/d.ts'),
+        c('R3-6', 'src/d.ts'),
+      ],
+    })!;
+    expect(r.successorChains.map((x) => x.file)).toEqual([
+      'src/d.ts',
+      'src/a.ts',
+      'src/b.ts',
+      'src/c.ts',
+    ]);
+    // The render and the basis read the same sorted list: the
+    // multi-Critical subsystem is named first, one single-Critical file
+    // lands in the tail.
+    const text = renderConvergenceDiagnosis(r);
+    expect(text.en).toContain('`src/a.ts`');
+    expect(text.en.indexOf('`src/d.ts`')).toBeLessThan(
+      text.en.indexOf('`src/a.ts`'),
+    );
+    expect(text.en).toContain('and 1 more');
+    expect(text.en).not.toContain('`src/c.ts`');
+    expect(text.zh).toContain('`src/d.ts`');
+    expect(text.zh).toContain('；另有 1 个');
+    expect(text.zh).not.toContain('`src/c.ts`');
+    expect(
+      recommendationsFor(r).find((x) => x.code === 'successor-chain')?.basis,
+    ).toContain('src/d.ts');
   });
 });
 
@@ -1069,6 +1117,24 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     expect(r.zh).toContain('根因');
     expect(r.zh).toContain('拆成单独的 PR');
     expect(r.zh).not.toMatch(/重构|重写|重新设计/);
+    // The chain advice renders into the SAME paragraph and binds by the
+    // SAME contract — a chainless fixture left this branch blind to it.
+    const chained = renderConvergenceDiagnosis({
+      ...base,
+      successorChains: [
+        {
+          file: 'src/mechanism.ts',
+          generations: [['R5-1'], ['R6-1']],
+          newIds: ['R6-2'],
+        },
+      ],
+    });
+    expect(chained.en).toContain('⚠️ Divergence:');
+    expect(chained.en).not.toMatch(
+      /refactor|rewrite|extract .* class|redesign/i,
+    );
+    expect(chained.zh).toContain('⚠️ 发散：');
+    expect(chained.zh).not.toMatch(/重构|重写|重新设计/);
   });
 
   it('falls back to the volume reading when nothing recurs', () => {

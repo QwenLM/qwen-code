@@ -74,7 +74,9 @@ import {
   LEDGER_BODY_FILE,
   LEDGER_ID_READBACK,
   LEDGER_MAX_CLOSED,
+  LEDGER_MAX_FILE,
   LEDGER_MAX_ID,
+  LEDGER_MAX_TITLE,
   isLedgerClosure,
   isLedgerFinding,
   isStandInName,
@@ -1694,18 +1696,36 @@ export function composeReview(
   // silent rather than guesses — thin history stays silent.
   const postedIds = new Set(postedLedger?.findings.map((f) => f.id) ?? []);
   // Claim identity, not id identity: a claim this round RE-POSTS without a
-  // carried id — a gate Critical regenerated from the report, a relocated
-  // deferral entry, a model re-post the readback lost — gets a FRESH id in
-  // the build, so the original is absent from `postedIds` while the claim
-  // still stands. Read absent-by-id alone, a still-standing blocker mints a
-  // closure every round of its life, in the very body that re-posts it
-  // open. So the join also runs on the locator projection the gate-repost
-  // dedup uses — over the SAME build the marker stamps, so the record and
-  // the mint cannot disagree about what closed.
+  // carried id — a gate Critical regenerated from the report, a model
+  // re-post the readback lost — gets a FRESH id in the build, so the
+  // original is absent from `postedIds` while the claim still stands. Read
+  // absent-by-id alone, a still-standing blocker mints a closure every
+  // round of its life, in the very body that re-posts it open. So the join
+  // also runs on the locator projection the gate-repost dedup uses — over
+  // the SAME build the marker stamps, so the record and the mint cannot
+  // disagree about what closed.
   const standingClaims = new Set(
     (postedLedger?.findings ?? [])
       .map((g) => claimLocator(g.title))
       .filter((k) => k !== ''),
+  );
+  // The deferral channel's relocated Criticals re-post their claim under a
+  // fresh id the locator join above cannot follow: the typed channel
+  // carries no id field, and the rendered entry's title projects to the
+  // `file:line` locator under `claimLocator` while an inline-drafted
+  // predecessor's title projects to the claim text — the two projections
+  // never meet. Join the previous list against the typed entries
+  // themselves, on (file, claim), the entry side capped the way the
+  // previous list was normalised. Read ONLY where the build above already
+  // parsed the same channel — a null build returned before any parse, so
+  // this adds no throw the round did not already have.
+  const relocatedClaims = new Set(
+    (postedLedger === null ? [] : toDeferredEntries(input.deferredSuggestions))
+      .filter((e) => e.severity === 'Critical')
+      .map(
+        (e) =>
+          `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(e.title).slice(0, LEDGER_MAX_TITLE)}`,
+      ),
   );
   const closuresThisRound: LedgerClosure[] =
     carriedWorkList.complete &&
@@ -1718,7 +1738,8 @@ export function composeReview(
             (f) =>
               f.sev === 'C' &&
               !postedIds.has(f.id) &&
-              !standingClaims.has(claimLocator(f.title)),
+              !standingClaims.has(claimLocator(f.title)) &&
+              !relocatedClaims.has(`${f.file}\u0000${claimLocator(f.title)}`),
           )
           .map((f) => ({ r: postedLedger.round, id: f.id, f: f.file }))
       : [];

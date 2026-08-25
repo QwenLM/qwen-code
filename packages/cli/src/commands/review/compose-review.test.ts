@@ -13076,7 +13076,7 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('⚠️ Divergence:');
     expect(r.body).toContain('`src/mechanism.ts`');
     expect(r.body).toContain('`R9-1 → R10-2 → R11-1`');
-    expect(r.body).toContain('removing or redesigning that mechanism');
+    expect(r.body).toContain("raising the pattern with the mechanism's owner");
     expect((r.recommendations ?? []).map((x) => x.code)).toContain(
       'successor-chain',
     );
@@ -13311,6 +13311,98 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     ).toBe(true);
     // ...so it is NOT closed.
     expect(marker.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints no closure for a claim re-filed through the deferral channel', () => {
+    // Same hazard class as the gate blocker, other channel: the typed
+    // deferral channel carries no id field, so the build stamps the
+    // re-file fresh, and its rendered title projects to the `file:line`
+    // locator while an inline-drafted predecessor's title projects to the
+    // claim text — the locator join never meets, and the exact-id read
+    // mints a closure on a claim this very body re-posts open. A round
+    // later, the fabricated entry arms the sentinel over a lineage whose
+    // first link never happened.
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-1', sev: 'C', file: 'src/auth.ts', title: 'auth bypass' },
+        { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/auth.ts',
+          line: 88,
+          source: 'test',
+          severity: 'Critical',
+          title: 'auth bypass',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    // The re-filed claim rides the work list, fresh-stamped ...
+    expect(marker.findings.some((f) => f.sev === 'C')).toBe(true);
+    // ... so its still-standing original mints no closure — while a truly
+    // vanished same-file Critical beside it still does.
+    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
+  });
+
+  it('mints a closure only for the Critical half of a mixed work list', () => {
+    // Suggestions are not tracked — Critical churn is the signal. Every
+    // sibling fixture's work list is Critical-only, which left the mint's
+    // `f.sev === 'C'` conjunct unwitnessed: a fixed Suggestion, or a
+    // `--severity-floor critical` round that moved one out of the posting
+    // set, would mint a closure, and two such rounds plus a fresh
+    // same-file Critical would fire the note over Suggestion churn.
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        { id: 'R10-3', sev: 'S', file: 'src/mechanism.ts', title: 'polish' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it('mints nothing when only the Suggestion vanishes, and no note fires', () => {
+    sideFile({
+      round: 10,
+      findings: [
+        { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        { id: 'R10-3', sev: 'S', file: 'src/mechanism.ts', title: 'polish' },
+      ],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        {
+          path: 'src/mechanism.ts',
+          line: 9,
+          body: '**[Critical]** R10-2: gen 2',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
     expect(r.body).not.toContain('⚠️ Divergence:');
   });
 
