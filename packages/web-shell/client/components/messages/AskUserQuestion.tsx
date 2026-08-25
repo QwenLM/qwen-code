@@ -608,6 +608,8 @@ export function AskUserQuestion({
     ) {
       return;
     }
+    // A new request is reset by a passive effect later in this commit, so use
+    // its first option explicitly instead of reading the previous selection.
     const idx = requestChanged ? 0 : (selectedIdxRef.current ?? 0);
     if (idx === current.options.length) customRef.current?.focus();
     else optionRefs.current[idx]?.focus();
