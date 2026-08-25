@@ -2810,6 +2810,11 @@ export class GeminiClient {
       // before the settlement try/finally below, and this send provably
       // never pushed: settle the attached carrier here by unconditional
       // restore instead of leaving it to caller-side failure handling.
+      // Symmetric with the Goal-admission catch below: re-add any Retry
+      // orphan entries popped above (a no-op today — hooks never fire for
+      // Retry, the only type that populates the entries — but keeps this
+      // exit safe under future hook-scope changes).
+      restoreStrippedRetryEntries();
       settleSteerInput(attachedSteerInput);
       throw error;
     }
@@ -2884,6 +2889,12 @@ export class GeminiClient {
       // attached carrier here by unconditional restore, the same contract
       // as the hook-failure catch above. Idempotently safe via the
       // `settledSteerInputs` guard when the caller side settles too.
+      // Re-add the Retry orphan entries popped above first: this catch
+      // exits before the settlement try/finally holding the only other
+      // `restoreStrippedRetryEntries` call site, so without this the
+      // popped entries stay dropped from history while the restored
+      // carrier re-records debt against entries that no longer exist.
+      restoreStrippedRetryEntries();
       settleSteerInput(attachedSteerInput);
       throw error;
     }

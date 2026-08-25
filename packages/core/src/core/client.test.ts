@@ -13195,6 +13195,79 @@ Other open files:
         expect(restore).toHaveBeenCalledOnce();
       });
 
+      it('re-adds popped retry entries when Goal admission rejects a Retry after the orphan pop', async () => {
+        // A Retry pops trailing orphaned user entries BEFORE Goal
+        // admission runs. When admission then throws ('An active Goal
+        // requires an exact turn permit' — a permit-less Retry hitting an
+        // active Goal), the catch exits before the settlement try/finally
+        // holding the only restoreStrippedRetryEntries call site. The
+        // popped entries must be re-added in the catch itself —
+        // otherwise a boundary-delivered teammate envelope (accepted,
+        // journaled delivered, then orphaned by a terminal pre-content
+        // failure) is permanently dropped from the model context while
+        // the restored carrier re-records debt against entries that no
+        // longer exist.
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'teammate envelope' }],
+        };
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          getUserContentPushCount: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        // An active Goal requiring an exact turn permit; a Retry carries
+        // no permit, so admission throws after the pop already ran.
+        const goalRuntime = {
+          getSnapshot: () =>
+            ({
+              ...emptyGoalSnapshot(),
+              goal: { goalId: 'goal-1', revision: 1, status: 'active' },
+            }) as unknown as ReturnType<typeof emptyGoalSnapshot>,
+          permitForTurn: vi.fn(() => undefined),
+          subscribe: vi.fn(() => vi.fn()),
+        } as unknown as GoalRuntime;
+        mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(goalRuntime);
+
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry payload' }],
+              new AbortController().signal,
+              'prompt-retry-goal-admission-pop',
+              {
+                type: SendMessageType.Retry,
+                steerInput: {
+                  parts: [],
+                  accept,
+                  restore,
+                },
+              },
+            ),
+          ),
+        ).rejects.toThrow('An active Goal requires an exact turn permit');
+
+        expect(mockTurnRunFn).not.toHaveBeenCalled();
+        // The carrier is settled by unconditional restore (re-records the
+        // debt hook-side)...
+        expect(accept).not.toHaveBeenCalled();
+        expect(restore).toHaveBeenCalledOnce();
+        // ...and the popped orphan entry is re-added even though the send
+        // exited before the settlement try/finally.
+        expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
+      });
+
       it('ends an attached ToolResult interaction when UserPromptSubmit throws', async () => {
         vi.spyOn(telemetryIndex, 'getActiveInteractionSpan').mockReturnValue(
           {} as never,
