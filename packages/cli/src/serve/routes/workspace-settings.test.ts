@@ -98,10 +98,21 @@ function makeApp(
 }
 
 /** Minimal registry for the workspace-qualified routes: one active, trusted entry. */
-function makeQualifiedApp() {
+function makeQualifiedApp(
+  overrides: {
+    invokeWorkspaceCommand?: (
+      method: string,
+      params: Record<string, unknown>,
+    ) => Promise<unknown>;
+  } = {},
+) {
   const app = express();
   app.use(express.json());
   const persistSetting = vi.fn(async () => {});
+  const invokeWorkspaceCommand =
+    overrides.invokeWorkspaceCommand ?? vi.fn().mockResolvedValue(undefined);
+  const publishWorkspaceEvent = vi.fn();
+  const invalidateServeFeaturesCache = vi.fn();
   const registry = {
     getEntryByWorkspaceId: (selector: string) =>
       selector === 'primary'
@@ -111,7 +122,10 @@ function makeQualifiedApp() {
               runtime: {
                 trusted: true,
                 workspaceCwd: '/workspace',
-                bridge: {},
+                bridge: {
+                  invokeWorkspaceCommand,
+                  publishWorkspaceEvent,
+                },
                 generationGuard: undefined,
               },
             },
@@ -127,10 +141,16 @@ function makeQualifiedApp() {
     workspaceRegistry: registry as unknown as Parameters<
       typeof registerWorkspaceQualifiedSettingsRoutes
     >[1]['workspaceRegistry'],
-    invalidateServeFeaturesCache: () => {},
+    invalidateServeFeaturesCache,
   });
 
-  return { app, persistSetting };
+  return {
+    app,
+    persistSetting,
+    invokeWorkspaceCommand,
+    publishWorkspaceEvent,
+    invalidateServeFeaturesCache,
+  };
 }
 
 describe('POST /workspace/settings', () => {
@@ -148,6 +168,41 @@ describe('POST /workspace/settings', () => {
 
     expect(res.status).toBe(200);
     expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
+  });
+
+  it('still broadcasts when the live Session Workflow push fails after persist', async () => {
+    // The persist succeeded (the file now carries the new value) but the
+    // push to live sessions failed with a generic transport error (bridge
+    // channel closed, push timeout — anything that is not
+    // SessionNotFoundError). The requester gets the 500, but every other
+    // observer must still hear about the disk change instead of staying
+    // stale until the next write or daemon restart.
+    const {
+      app,
+      updateSessionWorkflow,
+      broadcastSettingsChanged,
+      persistSetting,
+    } = makeApp({
+      workspaceSettings: { experimental: { sessionWorkflow: true } },
+    });
+    updateSessionWorkflow.mockRejectedValueOnce(new Error('channel closed'));
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ code: 'runtime_update_error' });
+    expect(persistSetting).toHaveBeenCalledTimes(1);
+    expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
+    expect(broadcastSettingsChanged).toHaveBeenCalledWith(
+      'experimental.sessionWorkflow',
+      true,
+      'workspace',
+      undefined,
+    );
   });
 
   it('applies the effective value when a user write is shadowed by workspace', async () => {
@@ -741,5 +796,53 @@ describe('POST /workspaces/:workspace/settings', () => {
     expect(res.status).toBe(400);
     expect(res.body).toMatchObject({ code: 'workspace_restricted_setting' });
     expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('still publishes settings_changed when the live Session Workflow push fails after persist', async () => {
+    // Same contract as the legacy route: the on-disk value changed, so the
+    // qualified route must invalidate the serve-features cache and publish
+    // settings_changed even though the requester got the push-failure 500.
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { experimental: { sessionWorkflow: true } },
+      user: { settings: {} },
+      workspace: { settings: {} },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+    } as never);
+    const {
+      app,
+      persistSetting,
+      invokeWorkspaceCommand,
+      publishWorkspaceEvent,
+      invalidateServeFeaturesCache,
+    } = makeQualifiedApp({
+      invokeWorkspaceCommand: vi
+        .fn()
+        .mockRejectedValue(new Error('bridge channel closed')),
+    });
+
+    const res = await request(app).post('/workspaces/primary/settings').send({
+      scope: 'workspace',
+      key: 'experimental.sessionWorkflow',
+      value: true,
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ code: 'runtime_update_error' });
+    expect(persistSetting).toHaveBeenCalledTimes(1);
+    expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
+      'qwen/control/workspace/session-workflow',
+      { enabled: true },
+    );
+    expect(invalidateServeFeaturesCache).toHaveBeenCalledTimes(1);
+    expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'settings_changed',
+        data: {
+          key: 'experimental.sessionWorkflow',
+          value: true,
+          scope: 'workspace',
+        },
+      }),
+    );
   });
 });
