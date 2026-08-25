@@ -51,6 +51,7 @@ import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
 import * as webShellResolver from './web-shell-resolver.js';
 import * as webShellStatic from './web-shell-static.js';
+import { applyOpenWithAuth } from './open-with-auth.js';
 import * as settingsRuntime from '../config/settings.js';
 import * as environmentRuntime from '../config/environment.js';
 import * as trustedFoldersRuntime from '../config/trustedFolders.js';
@@ -74,6 +75,8 @@ import {
 import { getDeferredRuntimeRequestTiming } from './server/request-helpers.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
+import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
+import * as scheduledTaskKeepalive from './scheduled-task-keepalive.js';
 
 const originalTestRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
 const isolatedTestRuntimeDir = fs.realpathSync(
@@ -488,6 +491,99 @@ function makeRuntimeBridge(): HttpAcpBridge {
     isChannelLive: vi.fn().mockReturnValue(true),
   } as unknown as HttpAcpBridge;
 }
+
+it('restores the Conversations runtime for a persisted scheduled task', async () => {
+  delete process.env['QWEN_RUNTIME_DIR'];
+  const tempRoot = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qws-live-task-keepalive-')),
+  );
+  const workspace = path.join(tempRoot, 'workspace');
+  const physicalHome = path.join(tempRoot, 'home');
+  const linkedHome = path.join(tempRoot, 'home-link');
+  const runtimeDir = path.join(tempRoot, 'runtime');
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(physicalHome);
+  fs.symlinkSync(
+    physicalHome,
+    linkedHome,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  const liveConversationWorkspace = new ConversationWorkspace({
+    homeDir: linkedHome,
+  });
+  const { canonicalRoot } = await liveConversationWorkspace.getRoot();
+  fs.mkdirSync(path.join(canonicalRoot, '.qwen'));
+  fs.writeFileSync(
+    path.join(canonicalRoot, '.qwen', 'settings.json'),
+    JSON.stringify({ advanced: { runtimeOutputDir: runtimeDir } }),
+  );
+  await qwenCore.Storage.runWithResolvedRuntimeBaseDir(runtimeDir, () =>
+    qwenCore.updateCronTasks(canonicalRoot, () => [
+      {
+        id: 'live-task',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId: 'live-session',
+        sessionOwnedByTask: false,
+      },
+    ]),
+  );
+  const startKeepalive = vi
+    .spyOn(scheduledTaskKeepalive, 'startScheduledTaskKeepalive')
+    .mockReturnValue({
+      stop: vi.fn(),
+      tick: vi.fn().mockResolvedValue(undefined),
+    });
+  vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(
+    () =>
+      ({
+        ...makeRuntimeBridge(),
+        recordHeartbeat: vi.fn(),
+        resumeSession: vi.fn().mockResolvedValue({}),
+        setLiveScreenContextCaptureHandler: vi.fn(),
+        setLiveTaskToolRequestHandler: vi.fn(),
+        setLiveSpeakToUserHandler: vi.fn(),
+      }) as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+  );
+  let handle: RunHandle | undefined;
+
+  try {
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        liveConversationWorkspace,
+        // Isolate the Conversations-runtime ownership record from the
+        // machine-global ~/.qwen path: a concurrent live owner there
+        // (another worker / a developer's qwen serve) would fail this boot.
+        liveDiscoveryStableBaseDir: path.join(tempRoot, 'stable'),
+        resolveOnListen: true,
+      },
+    );
+    await handle.runtimeReady;
+    await vi.waitFor(() => {
+      expect(startKeepalive).toHaveBeenCalledWith(
+        expect.objectContaining({
+          boundWorkspace: canonicalRoot,
+        }),
+      );
+    });
+  } finally {
+    await handle?.close();
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  }
+});
 
 function writeWebShellFixture(workspaceDir: string): string {
   const shellDir = path.join(workspaceDir, 'web-shell');
@@ -4610,6 +4706,7 @@ describe('runQwenServe runtime startup failures', () => {
       () =>
         ({
           merged: {
+            tools: { workflowsEnabled: !runtimeMounted },
             advanced: {
               runtimeOutputDir: runtimeMounted
                 ? '.runtime-reloaded'
@@ -4688,6 +4785,7 @@ describe('runQwenServe runtime startup failures', () => {
       const pinnedRuntimeBaseDir = path.join(tmpDir, '.runtime-boot');
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(true);
 
       await workspace!.reload({
         route: 'POST /workspace/reload',
@@ -4704,6 +4802,7 @@ describe('runQwenServe runtime startup failures', () => {
       expect(capturedRuntimeEnv['QWEN_TEST_RELOAD_LEAK']).toBeUndefined();
       expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(pinnedRuntimeBaseDir);
       expect(capturedRuntimeEnv['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(primaryRuntime?.env.workflowsEnabledBySettings).toBe(false);
     } finally {
       if (originalBase === undefined) {
         delete process.env['QWEN_TEST_BOOT_BASE'];
@@ -4858,21 +4957,28 @@ describe('runQwenServe runtime startup failures', () => {
     );
     const primary = path.join(tmpDir, 'primary');
     const secondary = path.join(tmpDir, 'secondary');
+    const dynamic = path.join(tmpDir, 'dynamic');
     const originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
     delete process.env['QWEN_RUNTIME_DIR'];
     fs.mkdirSync(primary);
     fs.mkdirSync(secondary);
+    fs.mkdirSync(dynamic);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
     });
     let runtimeMounted = false;
+    let dynamicReloaded = false;
     vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(
       (...args: Parameters<typeof settingsRuntime.loadSettings>) => {
         const workspace = args[0];
         const isSecondary = workspace === secondary;
         return {
           merged: {
+            tools: {
+              workflowsEnabled:
+                workspace === dynamic ? !dynamicReloaded : !runtimeMounted,
+            },
             advanced: {
               runtimeOutputDir: isSecondary
                 ? runtimeMounted
@@ -4912,10 +5018,17 @@ describe('runQwenServe runtime startup failures', () => {
     let workspaceRegistry:
       | import('./workspace-registry.js').WorkspaceRegistry
       | undefined;
+    let createWorkspaceRuntime:
+      | ((
+          cwd: string,
+          options: { provenance: WorkspaceRuntimeProvenance },
+        ) => Promise<import('./workspace-registry.js').WorkspaceRuntime>)
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation(
       (_opts, _getPort, deps) => {
         runtimeMounted = true;
         workspaceRegistry = deps?.workspaceRegistry;
+        createWorkspaceRuntime = deps?.createWorkspaceRuntime;
         return express();
       },
     );
@@ -4951,6 +5064,7 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(env.workflowsEnabledBySettings).toBe(true);
 
       await secondaryRuntime!.workspaceService.reload({
         route: 'POST /workspace/reload',
@@ -4965,6 +5079,18 @@ describe('runQwenServe runtime startup failures', () => {
         pinnedRuntimeBaseDir,
       );
       expect(env.effectiveEnv?.['QWEN_RUNTIME_DIR']).toBe(pinnedRuntimeBaseDir);
+      expect(env.workflowsEnabledBySettings).toBe(false);
+
+      const dynamicRuntime = await createWorkspaceRuntime!(dynamic, {
+        provenance: 'existing',
+      });
+      expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(true);
+      dynamicReloaded = true;
+      await dynamicRuntime.workspaceService.reload({
+        route: 'POST /workspace/reload',
+        workspaceCwd: dynamic,
+      });
+      expect(dynamicRuntime.env.workflowsEnabledBySettings).toBe(false);
     } finally {
       await handle.close();
       if (originalRuntimeDir === undefined) {
@@ -8310,6 +8436,35 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     } finally {
       await handle.close();
     }
+  });
+
+  it('rejects before creating a listener when required Web Shell assets disappear after pre-check', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
+    const resolveWebShellDir = vi
+      .spyOn(webShellResolver, 'resolveWebShellDir')
+      .mockReturnValueOnce('/tmp/web-shell')
+      .mockReturnValueOnce(undefined);
+    const httpServerFactory = vi.fn(() => {
+      throw new Error('listener created');
+    });
+    const serveOptions = {
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge' as const,
+      workspace: tmpDir,
+      maxSessions: 1,
+    };
+
+    applyOpenWithAuth(serveOptions);
+
+    await expect(
+      runQwenServe(serveOptions, {
+        bridge: makeFakeBridge(),
+        httpServerFactory,
+      }),
+    ).rejects.toThrow('--open-with-auth requires built Web Shell assets.');
+    expect(resolveWebShellDir).toHaveBeenCalledTimes(2);
+    expect(httpServerFactory).not.toHaveBeenCalled();
   });
 
   it('exposes the trimmed bearer token as resolvedToken', async () => {

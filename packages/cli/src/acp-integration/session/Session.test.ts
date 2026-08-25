@@ -16,6 +16,7 @@ import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
   LOOP_DETECTED_TURN_ERROR_MESSAGE,
+  registerCreateSubSessionTool,
   resolveExistingFile,
   resolveHomeLoopResolverRoots,
   Session,
@@ -422,6 +423,7 @@ describe('Session', () => {
   let currentModel: string;
   let currentAuthType: AuthType;
   let originalProcessGuardMode: string | undefined;
+  let originalServeStamp: string | undefined;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockChatRecordingService: {
@@ -484,6 +486,8 @@ describe('Session', () => {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
+    revealDeferredTool: ReturnType<typeof vi.fn>;
+    pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
   };
@@ -495,6 +499,8 @@ describe('Session', () => {
     resolvePendingApproval: ReturnType<typeof vi.fn>;
     get: ReturnType<typeof vi.fn>;
     getHandle: ReturnType<typeof vi.fn>;
+    removeTerminal: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
   };
   let mockGoalRuntime: {
     getSnapshot: ReturnType<typeof vi.fn>;
@@ -598,6 +604,11 @@ describe('Session', () => {
     originalProcessGuardMode =
       process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'];
     process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] = 'shadow';
+    // Sessions under test are daemon sessions: the sub-session spawner (and
+    // with it the create_sub_session tool) is wired only when the daemon's
+    // env stamp is present.
+    originalServeStamp = process.env['QWEN_CODE_SERVE'];
+    process.env['QWEN_CODE_SERVE'] = '1';
     startToolSpanSpy.mockClear();
     addToolArgumentsAttributesSpy.mockClear();
     addToolCallResultAttributesSpy.mockClear();
@@ -715,6 +726,8 @@ describe('Session', () => {
       resolvePendingApproval: vi.fn().mockResolvedValue(true),
       get: vi.fn().mockReturnValue(undefined),
       getHandle: vi.fn().mockReturnValue(undefined),
+      removeTerminal: vi.fn().mockReturnValue(false),
+      list: vi.fn().mockReturnValue([]),
     };
 
     mockChatRecordingService = {
@@ -771,6 +784,8 @@ describe('Session', () => {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       registerTool: vi.fn(),
+      revealDeferredTool: vi.fn(),
+      pinDeferredToolReveal: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
       getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
         names.map((name) => ({ name })),
@@ -912,6 +927,11 @@ describe('Session', () => {
       process.env['QWEN_CODE_ACP_REPEATED_TOOL_FAILURE_GUARD'] =
         originalProcessGuardMode;
     }
+    if (originalServeStamp === undefined) {
+      delete process.env['QWEN_CODE_SERVE'];
+    } else {
+      process.env['QWEN_CODE_SERVE'] = originalServeStamp;
+    }
     // Reset global runtime base dir state to prevent state leakage between tests
     core.Storage.setRuntimeBaseDir(null);
     // Clear session reference to allow garbage collection
@@ -1020,7 +1040,9 @@ describe('Session', () => {
       );
     }
 
-    function holdIds(category: 'agent' | 'notification' | 'shell'): string[] {
+    function holdIds(
+      category: 'agent' | 'notification' | 'shell' | 'workflow',
+    ): string[] {
       return session
         .collectActiveWorkHolds()
         .filter((hold) => hold.category === category)
@@ -1091,6 +1113,23 @@ describe('Session', () => {
       expect(session.isIdle()).toBe(false);
 
       mockBackgroundShellRegistry.getAll.mockReturnValue([]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('holds each non-terminal workflow run', () => {
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-running', status: 'running' },
+        { runId: 'wf-paused', status: 'paused' },
+        { runId: 'wf-complete', status: 'completed' },
+      ]);
+      createReportingSession();
+
+      expect(holdIds('workflow')).toEqual(['wf-running', 'wf-paused']);
+      expect(session.isIdle()).toBe(false);
+
+      mockWorkflowRunRegistry.list.mockReturnValue([]);
       expect(session.collectActiveWorkHolds()).toEqual([]);
       expect(session.isIdle()).toBe(true);
       session.dispose();
@@ -1177,6 +1216,37 @@ describe('Session', () => {
         expect(session.collectActiveWorkHolds()).toEqual([]),
       );
       expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('holds a queued workflow completion notification', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+      const releaseCloseGate = session.beginClose();
+      const notify =
+        mockWorkflowRunRegistry.setCompletionCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { runId: string; status: 'completed' },
+        ) => void;
+
+      notify('Workflow completed.', '<task-notification />', {
+        runId: 'wf-queued',
+        status: 'completed',
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(holdIds('notification')).toEqual(['wf-queued']);
+      expect(session.isIdle()).toBe(false);
+
+      releaseCloseGate();
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
       session.dispose();
     });
 
@@ -2285,6 +2355,94 @@ describe('Session', () => {
     ]);
   });
 
+  it('keeps cached terminal workflow history when its disk write is missing', async () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf-unpersisted',
+      kind: 'workflow',
+      runId: 'wf-unpersisted',
+      description: 'Unpersisted run',
+      meta: null,
+      status: 'completed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await session.refreshWorkflowHistory();
+
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf-unpersisted' }),
+    ]);
+  });
+
+  it('drops persisted workflow history deleted by another session', async () => {
+    session.dispose();
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    const deletingSession = new Session(
+      'deleting-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    session = new Session(
+      'observing-session',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      [snapshot],
+    );
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([snapshot]);
+
+    await expect(
+      deletingSession.deleteWorkflowHistory(snapshot.runId),
+    ).resolves.toBe(true);
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await session.refreshWorkflowHistory();
+
+    expect(session.getWorkflowHistory()).toEqual([]);
+  });
+
   it('keeps cached history on disk failure and removes it after deletion', async () => {
     session.dispose();
     const onActiveWorkChanged = vi.fn();
@@ -2382,6 +2540,42 @@ describe('Session', () => {
       mockConfig,
       snapshot.runId,
     );
+  });
+
+  it('stops deletion when a retry activates the run during refresh', async () => {
+    const snapshot = {
+      runId: 'wf_abcd',
+      meta: null,
+      status: 'failed' as const,
+      script: 'return 1;',
+      phases: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: [],
+      recentLogs: [],
+      startTime: 1_000,
+      endTime: 2_000,
+    };
+    let finishRefresh!: () => void;
+    listWorkflowSnapshotsSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishRefresh = () => resolve([snapshot]);
+        }),
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'failed' });
+
+    const deletion = session.deleteWorkflowHistory(snapshot.runId);
+    await vi.waitFor(() =>
+      expect(listWorkflowSnapshotsSpy).toHaveBeenCalledOnce(),
+    );
+    mockWorkflowRunRegistry.get.mockReturnValue({ status: 'running' });
+    finishRefresh();
+
+    await expect(deletion).resolves.toBe(false);
+    expect(deleteWorkflowSnapshotSpy).not.toHaveBeenCalled();
   });
 
   it('rejects history deletion while the workflow is active', async () => {
@@ -7738,6 +7932,132 @@ describe('Session', () => {
       );
     });
 
+    it('registers the create_sub_session tool on the daemon session registry', async () => {
+      // The tool is daemon-only: it must exist on every session the daemon
+      // creates so the model can call it, and nowhere else.
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'create_sub_session' }),
+      );
+    });
+
+    it('reveals the deferred tool and refreshes the declarations after registering', async () => {
+      // The registration lands after `startChat()` froze the declaration
+      // snapshot, and the tool is deferred — without a reveal + refresh the
+      // model is never offered it for the rest of the session.
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
+      // The reveal is session-setup state, not ToolSearch discovery: it must
+      // be pinned so a `/clear` re-run re-declares the tool even when the
+      // budget-based startup preload withholds it.
+      expect(mockToolRegistry.pinDeferredToolReveal).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
+      expect(mockGeminiClient.setTools).toHaveBeenCalledTimes(1);
+      // Order is load-bearing: reveal before the declaration refresh, both
+      // after the registration.
+      const registerOrder =
+        mockToolRegistry.registerTool.mock.invocationCallOrder[0];
+      const revealOrder =
+        mockToolRegistry.revealDeferredTool.mock.invocationCallOrder[0];
+      const setToolsOrder =
+        mockGeminiClient.setTools.mock.invocationCallOrder[0];
+      expect(registerOrder).toBeLessThan(revealOrder);
+      expect(revealOrder).toBeLessThan(setToolsOrder);
+    });
+
+    it('skips create_sub_session when no sub-session spawner is wired', async () => {
+      // No spawner means the peer cannot reach the daemon bridge (standalone
+      // `--acp` editor session, or any non-daemon path): declaring the tool
+      // there would only advertise an action that always fails with
+      // JSON-RPC -32601.
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getSubSessionSpawner = vi.fn().mockReturnValue(undefined);
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setTools).not.toHaveBeenCalled();
+    });
+
+    it('skips create_sub_session when the permission manager disables it', async () => {
+      // A `tools.core` allowlist that omits the tool, or a whole-tool deny
+      // rule, must keep it out of the declarations too — advertising a tool
+      // whose every call ends in EXECUTION_DENIED is the pollution the
+      // daemon-only gate exists to remove.
+      const isToolEnabled = vi.fn().mockResolvedValue(false);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue({ isToolEnabled });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(mockToolRegistry.registerTool).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'create_sub_session' }),
+      );
+    });
+
+    it('registers create_sub_session when the permission manager enables it', async () => {
+      // The PM-present path must consult the manager and then register: a
+      // gate that skips whenever a manager exists would drop the tool from
+      // every daemon session that runs with permission management on.
+      const isToolEnabled = vi.fn().mockResolvedValue(true);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue({ isToolEnabled });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'create_sub_session' }),
+      );
+      expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
+    });
+
+    it('wires the sub-session spawner only on daemon-backed sessions', () => {
+      // The daemon stamps every child it spawns with QWEN_CODE_SERVE=1. A
+      // standalone `--acp` session (an editor companion spawning the same
+      // command line) lacks the stamp, and its peer answers the bridge's
+      // `qwen/control/*` ext methods with JSON-RPC -32601 — so no spawner
+      // may be wired there.
+      expect(mockConfig.setSubSessionSpawner).toHaveBeenCalledTimes(1); // beforeEach session, stamp set
+
+      delete process.env['QWEN_CODE_SERVE'];
+      vi.mocked(mockConfig.setSubSessionSpawner).mockClear();
+      const standalone = new Session(
+        'standalone-acp-session',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      expect(standalone).toBeDefined();
+      expect(mockConfig.setSubSessionSpawner).not.toHaveBeenCalled();
+    });
+
     it('drops oldest background notifications when the queue reaches its cap', () => {
       (
         session as unknown as {
@@ -11985,6 +12305,37 @@ describe('Session', () => {
               text:
                 'IMPORTANT: This conversation accumulated enough tool screenshots to trigger compaction for qwen3-code-plus. ' +
                 'A compressed context will be sent for future messages (compressed from: 1200 to 450 tokens).',
+            },
+          },
+        });
+      });
+
+      it('marks estimated compression counts in the ACP notice (#9309)', async () => {
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 26600,
+          newTokenCount: 14500,
+          originalTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: false,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'IMPORTANT: This conversation approached the input token limit for qwen3-code-plus. ' +
+                'A compressed context will be sent for future messages (compressed from: ~26600 to 14500 tokens).',
             },
           },
         });
@@ -18633,6 +18984,7 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          verifierFeedback: 'Need independent evidence',
         });
 
         await vi.waitFor(() => {
@@ -18645,6 +18997,26 @@ describe('Session', () => {
               expect.objectContaining({
                 text: expect.stringContaining(
                   'Continue working on the active Goal.',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  '<goal_runtime_data>\n{"goalId":"goal-1","revision":1,"objective":"check weather"}\n</goal_runtime_data>',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'contains no new real user input',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'not evidence that the user supplied it',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'Verifier feedback: Need independent evidence',
                 ),
               }),
             ]),
@@ -33667,6 +34039,55 @@ describe('Session', () => {
         }),
         expect.objectContaining({
           taskId: 'baseline-monitor',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+      ]);
+      internals.notificationProcessing = false;
+    });
+
+    it('classifies workflow notifications from the captured baseline', () => {
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'baseline-workflow', status: 'running' },
+      ]);
+      rebuildSessionWithGuard();
+      const internals = session as unknown as {
+        notificationProcessing: boolean;
+        notificationQueue: Array<{
+          taskId: string;
+          continuesTodoStopGuardWorkChain: boolean;
+        }>;
+      };
+      internals.notificationProcessing = true;
+      const callback =
+        mockWorkflowRunRegistry.setCompletionCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: {
+            runId: string;
+            status: 'completed';
+            todoWorkChainId?: string;
+          },
+        ) => void;
+
+      callback('baseline result', '<baseline-workflow />', {
+        runId: 'baseline-workflow',
+        status: 'completed',
+        todoWorkChainId: 'stale-chain',
+      });
+      callback('new result', '<new-workflow />', {
+        runId: 'new-workflow',
+        status: 'completed',
+      });
+
+      expect(internals.notificationQueue).toEqual([
+        expect.objectContaining({
+          taskId: 'baseline-workflow',
+          continuesTodoStopGuardWorkChain: false,
+        }),
+        expect.objectContaining({
+          taskId: 'new-workflow',
           continuesTodoStopGuardWorkChain: true,
         }),
       ]);

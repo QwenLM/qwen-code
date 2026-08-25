@@ -55,6 +55,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 const { WorkflowRunsPage } = await import('./WorkflowRunsPage');
+const createViaChatMock = vi.fn();
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -73,6 +74,7 @@ afterEach(() => {
   getTasksMock.mockReset();
   refreshCommandsMock.mockReset();
   runSavedWorkflowMock.mockReset();
+  createViaChatMock.mockReset();
   refreshCommandsMock.mockResolvedValue(undefined);
   runSavedWorkflowMock.mockResolvedValue({ started: true });
 });
@@ -134,7 +136,7 @@ async function mountPage() {
   await act(async () => {
     root.render(
       <I18nProvider language="en">
-        <WorkflowRunsPage />
+        <WorkflowRunsPage onCreateViaChat={createViaChatMock} />
       </I18nProvider>,
     );
   });
@@ -162,6 +164,24 @@ async function selectTab(container: HTMLElement, label: string) {
 }
 
 describe('WorkflowRunsPage', () => {
+  it('starts workflow creation from the toolbar', async () => {
+    const container = await renderPage({
+      v: 1,
+      sessionId: 'session-1',
+      now: 10_000,
+      tasks: [],
+    });
+
+    const createButton = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('New'));
+    expect(createButton).toBeDefined();
+
+    await act(async () => createButton!.click());
+
+    expect(createViaChatMock).toHaveBeenCalledTimes(1);
+  });
+
   it('opens directly on compact workflow navigation', async () => {
     const container = await renderPage({
       v: 1,
@@ -275,7 +295,7 @@ describe('WorkflowRunsPage', () => {
     await act(async () => {
       root.render(
         <I18nProvider language="en">
-          <WorkflowRunsPage />
+          <WorkflowRunsPage onCreateViaChat={createViaChatMock} />
         </I18nProvider>,
       );
       await Promise.resolve();
@@ -366,7 +386,7 @@ describe('WorkflowRunsPage', () => {
     await act(async () => {
       root.render(
         <I18nProvider language="en">
-          <WorkflowRunsPage />
+          <WorkflowRunsPage onCreateViaChat={createViaChatMock} />
         </I18nProvider>,
       );
       await Promise.resolve();

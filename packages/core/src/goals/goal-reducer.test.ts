@@ -310,30 +310,51 @@ describe('goal reducer', () => {
   });
 
   it.each(['evidence_catalog', 'checkpoint_request'] as const)(
-    'refuses to resume a Goal that carries limitKind %s',
+    'resumes a Goal limited by %s from a fresh evidence window',
     (limitKind) => {
-      expect(() =>
-        reduceGoalControl(
-          goalRecord({
-            status: 'usage_limited',
-            revision: 4,
-            limitKind,
-            lastReason: 'a reason the guard no longer has to recognise',
-          }),
-          {
-            request: {
-              action: 'resume',
-              expectedGoalId: 'g-1',
-              expectedRevision: 4,
-            },
-            now: 200,
-            nextGoalId: 'unused',
-            cursor: { recordId: 'r-200' },
+      const resumed = reduceGoalControl(
+        goalRecord({
+          status: 'usage_limited',
+          revision: 4,
+          limitKind,
+          lastReason: 'a reason the guard no longer has to recognise',
+          evidenceCheckpoint: {
+            checkpointId: 'r-100',
+            createdAt: 1,
+            claims: [
+              {
+                id: 'r-100:1',
+                proofKind: 'external_fact',
+                claim: 'note-01.md exists',
+                sourceRefs: ['r-99'],
+              },
+            ],
           },
-        ),
-      ).toThrow(
-        'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
+        }),
+        {
+          request: {
+            action: 'resume',
+            expectedGoalId: 'g-1',
+            expectedRevision: 4,
+          },
+          now: 200,
+          nextGoalId: 'unused',
+          cursor: { recordId: 'r-200' },
+        },
       );
+
+      // Same objective, same revision, same accumulated turn count — only the
+      // evidence window resets, because carrying the exhausted one back into
+      // an active Goal would exhaust it again on the next turn.
+      expect(resumed).toMatchObject({
+        status: 'active',
+        revision: 4,
+        objective: 'ship',
+        evidenceCursor: { recordId: 'r-200' },
+      });
+      expect(resumed?.evidenceCheckpoint).toBeUndefined();
+      expect(resumed?.limitKind).toBeUndefined();
+      expect(resumed?.lastReason).toBeUndefined();
     },
   );
 
@@ -352,25 +373,71 @@ describe('goal reducer', () => {
     GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
     GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   ])(
-    'still refuses to resume a pre-limitKind Goal stopped by the sentinel prose',
+    'resets the window for a pre-limitKind Goal known only by its sentinel prose',
     (lastReason) => {
-      expect(() =>
-        reduceGoalControl(
-          goalRecord({ status: 'usage_limited', revision: 4, lastReason }),
-          {
-            request: {
-              action: 'resume',
-              expectedGoalId: 'g-1',
-              expectedRevision: 4,
-            },
-            now: 200,
-            nextGoalId: 'unused',
-            cursor: { recordId: 'r-200' },
+      const resumed = reduceGoalControl(
+        goalRecord({ status: 'usage_limited', revision: 4, lastReason }),
+        {
+          request: {
+            action: 'resume',
+            expectedGoalId: 'g-1',
+            expectedRevision: 4,
           },
-        ),
-      ).toThrow(GoalInvalidTransitionError);
+          now: 200,
+          nextGoalId: 'unused',
+          cursor: { recordId: 'r-200' },
+        },
+      );
+
+      expect(resumed).toMatchObject({
+        status: 'active',
+        evidenceCursor: { recordId: 'r-200' },
+      });
+      expect(resumed?.lastReason).toBeUndefined();
     },
   );
+
+  it('keeps the window of an operationally limited Goal when it resumes', () => {
+    // Only the enumerated evidence bounds reset the window. A `usage_limited`
+    // Goal stopped by a transient operational failure keeps its cursor and
+    // checkpoint, so a resume does not throw away citable evidence it never
+    // had a problem with.
+    const resumed = reduceGoalControl(
+      goalRecord({
+        status: 'usage_limited',
+        revision: 4,
+        lastReason: 'Goal checkpoint recovery dependencies are unavailable',
+        evidenceCheckpoint: {
+          checkpointId: 'r-100',
+          createdAt: 1,
+          claims: [
+            {
+              id: 'r-100:1',
+              proofKind: 'external_fact',
+              claim: 'note-01.md exists',
+              sourceRefs: ['r-99'],
+            },
+          ],
+        },
+      }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 4,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed).toMatchObject({
+      status: 'active',
+      evidenceCursor: { recordId: 'r-100' },
+    });
+    expect(resumed?.evidenceCheckpoint).toBeDefined();
+  });
 
   it('clears limitKind when the objective is edited', () => {
     const edited = reduceGoalControl(

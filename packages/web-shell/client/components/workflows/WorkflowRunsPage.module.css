@@ -19,6 +19,13 @@
   padding: 2px 0 9px;
 }
 
+.toolbarActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .content {
   padding-top: 10px;
 }
@@ -135,10 +142,6 @@
     min-width: 0;
     overflow-x: auto;
     overflow-y: hidden;
-  }
-
-  .toolbar > button {
-    flex: 0 0 auto;
   }
 
   .savedCard {

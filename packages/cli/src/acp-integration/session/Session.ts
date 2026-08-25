@@ -91,6 +91,7 @@ import {
   Kind,
   ToolNames,
   ToolErrorType,
+  CreateSubSessionTool,
   fireNotificationHook,
   firePermissionRequestHook,
   firePreToolUseHook,
@@ -209,9 +210,11 @@ import {
   buildBackgroundEntryLabel,
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
+  buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
@@ -277,10 +280,8 @@ import type {
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import {
-  insertAfterFunctionResponses,
-  normalizePartList,
-} from '../../utils/nonInteractiveHelpers.js';
+import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
+import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -329,7 +330,7 @@ import type {
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
-import { observeAcpToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultProjection } from '../../nonInteractive/tool-result-boundary-diagnostics.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { ToolCallPreparationTracker } from './tool-call-preparation-tracker.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
@@ -522,6 +523,7 @@ type TodoStopGuardBackgroundBaseline = {
   agents: Set<string>;
   shells: Set<string>;
   monitors: Set<string>;
+  workflows: Set<string>;
   wakeups: Set<string>;
 };
 
@@ -565,23 +567,6 @@ function sameGoalPermit(
     left.revision === right.revision &&
     left.turnId === right.turnId
   );
-}
-
-function buildGoalContinuationParts(turn: AcpGoalTurn): Part[] {
-  return [
-    {
-      text: [
-        'Continue working on the active Goal.',
-        'Use get_goal for the authoritative objective and evidence state.',
-        "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-        'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-        `Runtime continuation context: ${turn.continuationContext}`,
-        ...(turn.verifierFeedback
-          ? [`Verifier feedback: ${turn.verifierFeedback}`]
-          : []),
-      ].join('\n'),
-    },
-  ];
 }
 
 async function claimGoalTurn(
@@ -1626,6 +1611,57 @@ function collectMcpServerMentionRefs(
   }
 }
 
+/**
+ * Register `create_sub_session` on a daemon session's tool registry — the one
+ * registry the core-side gate in `Config.createToolRegistry` cannot cover,
+ * because `config.initialize()` builds it before the {@link Session}
+ * constructor wires the sub-session spawner. Registries built later (sub-agent
+ * / override rebuilds) pick the tool up from that gate instead;
+ * `copyDiscoveredToolsFrom` never carries built-ins.
+ *
+ * Gated on the spawner being wired: only daemon-backed sessions wire it (see
+ * {@link Session.#registerSubSessionSpawner}). A standalone `--acp` session's
+ * peer is the editor, which does not implement the bridge's `qwen/control/*`
+ * methods — declaring the tool there would only advertise an action whose
+ * every call fails with JSON-RPC -32601.
+ *
+ * Applies the same `PermissionManager.isToolEnabled()` check that gate does, so
+ * an operator's `tools.core` allowlist or a whole-tool deny rule keeps the tool
+ * out of the model's action space instead of only failing at execution. Being
+ * session-scoped, the tool is absent from the workspace tools inventory the
+ * daemon serves from its bootstrap registry — that panel lists workspace tools,
+ * and a daemon-only tool that exists per session is deliberately not one.
+ */
+export async function registerCreateSubSessionTool(
+  config: Config,
+): Promise<void> {
+  if (!config.getSubSessionSpawner()) {
+    return;
+  }
+  const permissionManager = config.getPermissionManager();
+  if (
+    permissionManager &&
+    !(await permissionManager.isToolEnabled(ToolNames.CREATE_SUB_SESSION))
+  ) {
+    return;
+  }
+  const toolRegistry = config.getToolRegistry();
+  toolRegistry.registerTool(new CreateSubSessionTool(config));
+  // The registration lands after `config.initialize()` → `startChat()` already
+  // snapshotted the chat's tool declarations, and the tool is deferred — so it
+  // stays filtered out of the declarations until revealed. Reveal it and
+  // refresh the snapshot so the model is actually offered the tool this
+  // session. Pin the reveal so a `/clear`-style `startChat` re-run
+  // re-declares it: the startup preload that would otherwise restore it is
+  // all-or-nothing on a schema-size budget (and off entirely when the
+  // operator threshold is ≤ 0 / non-finite), so an unpinned reveal would
+  // silently drop the tool from the declarations on the first `/clear` in
+  // those configurations.
+  toolRegistry.revealDeferredTool(ToolNames.CREATE_SUB_SESSION);
+  toolRegistry.pinDeferredToolReveal(ToolNames.CREATE_SUB_SESSION);
+  await config.getGeminiClient().setTools();
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -1850,13 +1886,14 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
+  private currentWorkflowNotificationTaskId: string | null = null;
   private currentShellNotificationActive = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
   >();
-  private readonly activeAgentNotificationAcceptances = new Set<string>();
+  private readonly activeNotificationAcceptances = new Set<string>();
 
   private readonly goalQueue: AcpGoalTurn[] = [];
   private goalProcessing = false;
@@ -1886,6 +1923,10 @@ export class Session implements SessionContext {
   #statusChangeCallback: (() => void) | undefined;
   #workflowStatusChangeCallback: ((entry?: WorkflowTask) => void) | undefined;
   private workflowHistory: WorkflowSnapshot[];
+  private readonly unpersistedWorkflowHistory = new Map<
+    string,
+    WorkflowSnapshot
+  >();
   #shellStatusChangeCallback: (() => void) | undefined;
   private readonly workflowApprovalAbortController = new AbortController();
   private activeTodoPlanRevision?: {
@@ -2772,6 +2813,7 @@ export class Session implements SessionContext {
     const agents = this.config.getBackgroundTaskRegistry?.()?.getAll?.() ?? [];
     const shells = this.config.getBackgroundShellRegistry?.()?.getAll?.() ?? [];
     const monitors = this.config.getMonitorRegistry?.()?.getAll?.() ?? [];
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
     const wakeups = this.config.isCronEnabled?.()
       ? (this.config.getCronScheduler?.()?.list?.() ?? []).filter(
           (job) => job.cronExpr === '@wakeup',
@@ -2797,6 +2839,7 @@ export class Session implements SessionContext {
           .filter((item) => item.kind === 'monitor')
           .map((item) => item.taskId),
       ]),
+      workflows: new Set(workflows.map((task) => task.runId)),
       wakeups: new Set([
         ...wakeups.map((job) => job.id),
         ...this.cronQueue.flatMap((item) =>
@@ -2899,6 +2942,17 @@ export class Session implements SessionContext {
       return true;
     }
 
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
+    if (
+      workflows.some(
+        (task) =>
+          !baseline.workflows.has(task.runId) &&
+          !isTerminalWorkflowStatus(task.status),
+      )
+    ) {
+      return true;
+    }
+
     if (!this.config.isCronEnabled?.()) return false;
     const wakeups = this.config.getCronScheduler?.()?.list?.() ?? [];
     return wakeups.some(
@@ -2908,15 +2962,26 @@ export class Session implements SessionContext {
 
   /**
    * Wire the sub-session spawner to the daemon over the ACP `extMethod` request
-   * channel. The `create_sub_session` tool (model-initiated) is its caller. ONLY
-   * the ACP/daemon session wires it, so the tool is inert (reports daemon-only)
-   * in interactive TUI / headless, where no bridge exists.
+   * channel. The `create_sub_session` tool (model-initiated) is its caller.
+   * Wired only on daemon-backed sessions: the daemon stamps every child it
+   * spawns with `QWEN_CODE_SERVE=1` (see `acp-bridge/src/spawnChannel.ts` and
+   * `serve/channel-worker-supervisor.ts`). A standalone `--acp` session — an
+   * editor companion spawning the same command line — hosts its peer in the
+   * editor, which does not implement the bridge's `qwen/control/*` methods, so
+   * a spawner there would only power a tool whose every call fails with
+   * JSON-RPC -32601. Interactive TUI / headless never construct a Session at
+   * all. Where no spawner is wired, {@link registerCreateSubSessionTool} and
+   * the core-side registry gate leave the tool out of the model's action space
+   * instead of declaring it forever unable to run.
    *
    * A tool-initiated request runs while the caller's turn is suspended in the
    * tool await — safe because the ACP channel supports concurrent bidirectional
    * in-flight requests and prompts serialize per-session, not per-child.
    */
   #registerSubSessionSpawner(): void {
+    if (process.env[QWEN_CODE_SERVE_ENV] !== '1') {
+      return;
+    }
     this.config.setSubSessionSpawner(async (req) => {
       const resp = await this.client.extMethod(
         SERVE_CONTROL_EXT_METHODS.createSubSession,
@@ -3153,21 +3218,48 @@ export class Session implements SessionContext {
   }
 
   async refreshWorkflowHistory(): Promise<readonly WorkflowSnapshot[]> {
-    this.workflowHistory = await listWorkflowSnapshots(this.config);
+    const persisted = await listWorkflowSnapshots(this.config);
+    const byRunId = new Map(
+      persisted.map((snapshot) => [snapshot.runId, snapshot]),
+    );
+    for (const [runId, snapshot] of this.unpersistedWorkflowHistory) {
+      const stored = byRunId.get(runId);
+      if (
+        stored?.startTime === snapshot.startTime &&
+        stored.endTime === snapshot.endTime
+      ) {
+        this.unpersistedWorkflowHistory.delete(runId);
+      } else {
+        byRunId.set(runId, snapshot);
+      }
+    }
+    this.workflowHistory = [...byRunId.values()]
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
     return this.workflowHistory;
   }
 
   async deleteWorkflowHistory(runId: string): Promise<boolean> {
     const registry = this.config.getWorkflowRunRegistry();
-    const entry = registry.get(runId);
-    if (entry && !isTerminalWorkflowStatus(entry.status)) return false;
+    const isDeletable = (): boolean => {
+      const current = registry.get(runId);
+      return !current || isTerminalWorkflowStatus(current.status);
+    };
+    if (!isDeletable()) return false;
     const handle = registry.getHandle(runId);
-    if (handle) await handle.completion;
+    if (handle) {
+      await handle.completion;
+      if (!isDeletable()) return false;
+    }
     await this.refreshWorkflowHistory();
+    if (!isDeletable()) return false;
     if (!this.workflowHistory.some((item) => item.runId === runId)) {
       return false;
     }
     if (!(await deleteWorkflowSnapshot(this.config, runId))) return false;
+    registry.removeTerminal(runId);
+    this.unpersistedWorkflowHistory.delete(runId);
     this.workflowHistory = this.workflowHistory.filter(
       (item) => item.runId !== runId,
     );
@@ -3178,12 +3270,25 @@ export class Session implements SessionContext {
   #rememberWorkflowHistory(entry: WorkflowTask): void {
     if (!isTerminalWorkflowStatus(entry.status)) return;
     const snapshot = toSnapshot(entry);
+    this.unpersistedWorkflowHistory.set(snapshot.runId, snapshot);
     this.workflowHistory = [
       snapshot,
       ...this.workflowHistory.filter((item) => item.runId !== entry.runId),
     ]
       .sort((a, b) => b.startTime - a.startTime)
       .slice(0, MAX_RETAINED_SNAPSHOTS);
+    this.#pruneUnpersistedWorkflowHistory();
+  }
+
+  #pruneUnpersistedWorkflowHistory(): void {
+    const retainedRunIds = new Set(
+      this.workflowHistory.map((item) => item.runId),
+    );
+    for (const runId of this.unpersistedWorkflowHistory.keys()) {
+      if (!retainedRunIds.has(runId)) {
+        this.unpersistedWorkflowHistory.delete(runId);
+      }
+    }
   }
 
   shouldHintAskUserQuestionRestore(): boolean {
@@ -3265,13 +3370,18 @@ export class Session implements SessionContext {
     }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent') notificationIds.add(item.taskId);
+      if (item.kind === 'agent' || item.kind === 'workflow') {
+        notificationIds.add(item.taskId);
+      }
     }
-    for (const taskId of this.activeAgentNotificationAcceptances) {
+    for (const taskId of this.activeNotificationAcceptances) {
       notificationIds.add(taskId);
     }
     if (this.currentAgentNotificationTaskId !== null) {
       notificationIds.add(this.currentAgentNotificationTaskId);
+    }
+    if (this.currentWorkflowNotificationTaskId !== null) {
+      notificationIds.add(this.currentWorkflowNotificationTaskId);
     }
     for (const taskId of notificationIds) {
       holds.push({ category: 'notification', id: taskId });
@@ -3282,6 +3392,11 @@ export class Session implements SessionContext {
       this.currentShellNotificationActive;
     if (shellActive) {
       holds.push({ category: 'shell', id: 'background-shells' });
+    }
+    for (const task of this.config.getWorkflowRunRegistry().list()) {
+      if (!isTerminalWorkflowStatus(task.status)) {
+        holds.push({ category: 'workflow', id: task.runId });
+      }
     }
     return holds;
   }
@@ -6772,11 +6887,20 @@ export class Session implements SessionContext {
           const warningSuffix = compressed.warning
             ? `\n⚠️ ${compressed.warning}`
             : '';
+          // Estimated counts (#9309) get a '~' prefix so the notice doesn't
+          // read as an API-reported figure on a different scale than a later
+          // banner.
+          const formatCount = (count?: number, isEstimated?: boolean) =>
+            count === undefined
+              ? 'unknown'
+              : isEstimated
+                ? `~${count}`
+                : String(count);
           compressionDiagnostic =
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${compressed.originalTokenCount ?? 'unknown'} to ` +
-            `${compressed.newTokenCount ?? 'unknown'} tokens).` +
+            `${formatCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} to ` +
+            `${formatCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)} tokens).` +
             warningSuffix;
         }
       } catch (compressionError) {
@@ -8227,7 +8351,8 @@ export class Session implements SessionContext {
         taskId: meta.runId,
         status: meta.status,
         kind: 'workflow',
-        continuesTodoStopGuardWorkChain: meta.todoWorkChainId !== undefined,
+        continuesTodoStopGuardWorkChain:
+          !this.todoStopGuardBackgroundBaseline.workflows.has(meta.runId),
         todoWorkChainId: meta.todoWorkChainId,
       });
     });
@@ -8319,8 +8444,8 @@ export class Session implements SessionContext {
 
     const acceptance = this.#persistDaemonBackgroundNotification(item);
     this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
-    if (item.kind === 'agent') {
-      this.activeAgentNotificationAcceptances.add(item.taskId);
+    if (item.kind === 'agent' || item.kind === 'workflow') {
+      this.activeNotificationAcceptances.add(item.taskId);
       this.#activeWorkChanged();
     }
     try {
@@ -8330,8 +8455,8 @@ export class Session implements SessionContext {
         this.backgroundNotificationAcceptances.get(item.taskId) === acceptance
       ) {
         this.backgroundNotificationAcceptances.delete(item.taskId);
-        if (item.kind === 'agent') {
-          this.activeAgentNotificationAcceptances.delete(item.taskId);
+        if (item.kind === 'agent' || item.kind === 'workflow') {
+          this.activeNotificationAcceptances.delete(item.taskId);
           this.#activeWorkChanged();
         }
       }
@@ -8453,6 +8578,8 @@ export class Session implements SessionContext {
         if (!item) break;
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
+        this.currentWorkflowNotificationTaskId =
+          item.kind === 'workflow' ? item.taskId : null;
         this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
@@ -8463,6 +8590,7 @@ export class Session implements SessionContext {
           );
         } finally {
           this.currentAgentNotificationTaskId = null;
+          this.currentWorkflowNotificationTaskId = null;
           this.currentShellNotificationActive = false;
           this.#activeWorkChanged();
         }

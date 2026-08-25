@@ -7685,6 +7685,74 @@ exit 1
     expect(skill).toContain('Deferred non-Critical feedback');
   });
 
+  it('neutralizes both workflow-command syntaxes at every untrusted echo', () => {
+    // #9761: a review finding about workflow-command injection carried its
+    // payload strings (`::error::forged`, `##[add-matcher]`) verbatim as
+    // example text. Prepare echoed feedback.md raw, the runner parsed the
+    // MID-line `##[add-matcher]`, and the step failed before the agent ran —
+    // five consecutive crashes burned the takeover window in ~70 minutes.
+    // `##[` parses mid-line just like the line-start `::` syntax, so every
+    // site that puts reviewer- or agent-written content on step stdout must
+    // neutralize BOTH prefixes.
+    const bothSyntaxes = /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'/g;
+    // Crash site 1: prepare's feedback echo (reviewer bodies, verbatim).
+    expect(prepareBranchAndFeedbackStep).toMatch(
+      /echo '--- feedback\.md ---'[\s\S]*?cat "\$\{WORKDIR\}\/feedback\.md" \| sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'/,
+    );
+    // The full census of the workflow's sites: prepare's feedback echo, the
+    // two dump loops, the repair merge-warning head, the issue-lane gate's
+    // two failure notes, and the upsert re-emit loop. An exact count so a
+    // dropped or weakened KNOWN site fails here instead of in a future
+    // round; a NEW echo site is NOT auto-detected — it must be added to
+    // this census deliberately, using the canonical two-expression sed
+    // (both single-syntax spellings are banned below).
+    expect(workflow.match(bothSyntaxes) ?? []).toHaveLength(7);
+    // The issue lane's gate echoes the agent's failure notes.
+    expect(issueAutofixJob).toMatch(
+      /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/failure\.md"/,
+    );
+    // The PR lane's gate echoes failure/handoff/no-action from the sibling
+    // script: every echo neutralized, no raw cat of an agent-written file.
+    expect(reviewVerificationRunner).not.toMatch(
+      /cat "\$\{WORKDIR\}\/(failure|handoff|no-action)\.md"/,
+    );
+    expect(
+      reviewVerificationRunner.match(
+        /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/(failure|handoff|no-action)\.md"/g,
+      ) ?? [],
+    ).toHaveLength(6);
+    // The deferred-findings upsert neutralizes its own stdout at the source
+    // (the API-error reason and the LOST dump).
+    expect(upsertDeferredScript.match(bothSyntaxes) ?? []).toHaveLength(2);
+    // The push-and-report script's re-emit loop uses the SAME canonical
+    // neutralizer (the family keeps one spelling, so a syntax change cannot
+    // drift across two implementations and re-create the half-guard that let
+    // #9761 through). Its workflow twin rides the workflow census above.
+    expect(pushAndReportScript.match(bothSyntaxes) ?? []).toHaveLength(1);
+    // No single-syntax neutralizer may survive anywhere in the family: the
+    // old `::`-only sed is exactly what #9761 slipped through, a `##[`-only
+    // sed is the mirror blind spot, and a bare bash `//::/;;` expansion is
+    // the third half-guard shape. Assert the PAIRING property instead of
+    // enumerating half-guard spellings — every occurrence of either
+    // substitution expression must belong to the canonical pair, so a
+    // half-copy in ANY spelling (`sed 's/::/;;/g'`, `sed -e 's/::/;;/g'`
+    // alone, or the `##[`-only mirrors) unbalances the count and fails here
+    // (the shape bans only caught the no-`-e` spellings; the canonical
+    // line itself begins with `sed -e`, so its natural half-copy contained
+    // none of the banned substrings).
+    for (const src of [
+      workflow,
+      reviewVerificationRunner,
+      upsertDeferredScript,
+      pushAndReportScript,
+    ]) {
+      const pairs = (src.match(bothSyntaxes) ?? []).length;
+      expect((src.match(/s\/::\/;;\/g/g) ?? []).length).toBe(pairs);
+      expect((src.match(/s\/##\\\[\/##［\/g/g) ?? []).length).toBe(pairs);
+      expect(src).not.toContain('//::/;;');
+    }
+  });
+
   it('turns a budget breach into a growth-audit round instead of a divergence stop', () => {
     // Critical-only only trims non-Criticals, so a Critical-driven diff keeps
     // growing anyway — but a budget breach no longer escalates to a
@@ -12237,7 +12305,7 @@ exit 1
           workspaces: [
             'packages/*',
             'packages/channels/*',
-            '!packages/desktop',
+            '!packages/desktop-shell',
           ],
         }),
       );
@@ -12246,7 +12314,7 @@ exit 1
         'packages/brandnew', // a new top-level workspace the branch adds
         'packages/channels/base',
         'packages/channels/newchannel', // a new nested workspace the branch adds
-        'packages/desktop', // excluded by the ! glob
+        'packages/desktop-shell', // excluded by the ! glob
         'packages/cli/src/commands/examples/starter', // fixture, NOT a workspace
       ]) {
         mkdirSync(join(dir, pkg), { recursive: true });
@@ -12258,7 +12326,7 @@ exit 1
           'packages/cli/src/commands/examples/starter/src/index.ts', // -> packages/cli
           'packages/brandnew/src/z.ts', // -> packages/brandnew (branch-added)
           'packages/channels/newchannel/src/y.ts', // -> newchannel (branch-added nested)
-          'packages/desktop/src/d.ts', // excluded workspace -> dropped
+          'packages/desktop-shell/src/d.ts', // excluded workspace -> dropped
           'packages/sdk-python/foo.py', // no manifest -> dropped
           'README.md', // outside packages/ -> dropped
         ].join('\n') + '\n';
@@ -12274,7 +12342,7 @@ exit 1
       ]);
       expect(out).not.toContain('examples/starter'); // fixture never owns
       expect(out).not.toContain('sdk-python');
-      expect(out).not.toContain('packages/desktop'); // ! negation honoured
+      expect(out).not.toContain('packages/desktop-shell'); // ! negation honoured
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -13196,9 +13264,11 @@ exit 1
       // the throwaway dir and falls back to the shared ~/.config/gh.
       expect(step).toMatch(/\n\s*export GH_CONFIG_DIR\n/);
       // R8-5: the captured output is re-emitted, so the child's warnings
-      // actually reach the log (deleting both loops was invisible).
+      // actually reach the log (deleting both loops was invisible). The
+      // re-emit neutralizes BOTH command syntaxes (`##[` parses mid-line
+      // too — #9761) with the family's canonical two-expression sed.
       expect(step).toMatch(
-        /while IFS= read -r _upsert_line; do[\s\S]*?== __upsert_trusted__\*[\s\S]*?printf '%s\\n' "\$\{_upsert_line#__upsert_trusted__\}"[\s\S]*?printf '%s\\n' "\$\{_upsert_line\/\/::\/;;\}"[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
+        /while IFS= read -r _upsert_line; do[\s\S]*?== __upsert_trusted__\*[\s\S]*?printf '%s\\n' "\$\{_upsert_line#__upsert_trusted__\}"[\s\S]*?printf '%s\\n' "\$\{_upsert_line\}" \| sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'[\s\S]*?done <<< "\$\{UPSERT_OUT\}"/,
       );
       // Ordering: the script executes INSIDE the clean child, after the
       // launch — a relocation outside it must fail here.
@@ -13301,11 +13371,17 @@ exit 1
     expect(reviewAddressJob).toContain(
       'comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff',
     );
-    // R9-11: that dump prints agent-written files, so it neutralizes `::`
-    // like every other echo of them (a line-start `::error::` in the raw file
-    // would otherwise be a workflow command).
+    // R9-11: that dump prints agent-written files, so it neutralizes BOTH
+    // workflow-command syntaxes like every other echo of them — a line-start
+    // `::error::` AND `##[` even mid-line (a quoted `##[add-matcher]` in the
+    // raw file fails the step; measured on #9761, where the dump re-echoed
+    // the same feedback that already killed prepare).
     expect(reviewAddressJob).toMatch(
-      /=============== \$\{f\} ==============="\n(?:\s*#[^\n]*\n)*\s*sed 's\/::\/;;\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
+      /=============== \$\{f\} ==============="\n(?:\s*#[^\n]*\n)*\s*sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
+    );
+    // The issue-lane dump loop carries the same neutralization.
+    expect(showRunArtifactsStep).toMatch(
+      /sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
     );
     expect(reviewAddressJob).toContain(
       '"${WORKDIR}/deferred-findings.json" \\',
@@ -13375,9 +13451,10 @@ exit 1
       'mv "${WORKDIR}/deferred-findings.json" \\\n                  "${WORKDIR}/deferred-findings.unmerged.json"',
     );
     // R8-3: that branch discards THIS run's set, so it dumps it first —
-    // `::` neutralized, like every other echo of agent-written content.
+    // both command syntaxes neutralized, like every other echo of
+    // agent-written content (`##[` parses mid-line too — #9761).
     expect(repairStep).toMatch(
-      /could not merge carried deferrals[\s\S]*?head -c 4000 "\$\{WORKDIR\}\/deferred-findings\.json" \| sed 's\/::\/;;\/g'/,
+      /could not merge carried deferrals[\s\S]*?head -c 4000 "\$\{WORKDIR\}\/deferred-findings\.json" \| sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g'/,
     );
     expect(reviewAddressJob).toContain(
       'mv "${WORKDIR}/deferred-findings.json" \\\n                "${WORKDIR}/deferred-findings.carry.json"',
@@ -13818,17 +13895,22 @@ exit 1
     expect(builderFail.calls).not.toContain('-f title=');
     // R7-2: an abort is PERMANENT for these findings (watermark + the next
     // run's workspace reset), so every abort path says LOST and dumps the raw
-    // deferrals for manual recovery — with `::` neutralized, since the dump is
-    // agent-influenced and a raw `::` at line start is a workflow command.
+    // deferrals for manual recovery — with both workflow-command syntaxes
+    // neutralized, since the dump is agent-influenced. `::` parses at line
+    // start; the `##[` payload below is the #9761 vector and parses MID-line
+    // (the legacy syntax), so `::`-only neutralization is not enough.
     const lostDump = runUpsert({
       findings:
-        '[{"id":7,"reason":"r","path":5},{"id":8,"reason":"::error::forged"}]',
+        '[{"id":7,"reason":"r","path":5},{"id":8,"reason":"::error::forged"},' +
+        '{"id":9,"reason":"##[add-matcher]forged"}]',
     });
     expect(lostDump.out).toContain('are LOST');
     expect(lostDump.out).toContain('watermark-gated');
     expect(lostDump.out).toContain('"id":8');
     expect(lostDump.out).toContain(';;error;;forged');
     expect(lostDump.out).not.toContain('::error::forged');
+    expect(lostDump.out).toContain('##［add-matcher]forged');
+    expect(lostDump.out).not.toContain('##[add-matcher]');
     expect(lostDump.calls).toBe('');
     // R7-1: a review-body / issue-level finding is deferrable, anchored under
     // its own prefix so id spaces cannot collide across sources.
@@ -15548,15 +15630,16 @@ exit 1
       'fi\n          BODY="${BODY}\n\n          <details>\n          <summary>中文说明</summary>\n\n          ${ZH_BLOCK}\n\n          </details>"',
     );
     // The issue-lane run-log dump echoes agent-written files to step
-    // STDOUT, where a line-start `::` parses as a workflow command — it
-    // must neutralize like the PR-lane dump loop does, and carry the zh
-    // report: these loops are the only full-copy echo of it (the handoff
-    // comment carries a 3000-byte excerpt).
+    // STDOUT, where both workflow-command syntaxes parse (`::` at line
+    // start, `##[` even mid-line) — it must neutralize like the PR-lane
+    // dump loop does, and carry the zh report: these loops are the only
+    // full-copy echo of it (the handoff comment carries a 3000-byte
+    // excerpt).
     expect(showRunArtifactsStep).toContain(
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
     );
     expect(showRunArtifactsStep).toMatch(
-      /=============== \$\{f\} ==============="\n(?:[ ]*#[^\n]*\n)*[ ]*sed 's\/::\/;;\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
+      /=============== \$\{f\} ==============="\n(?:[ ]*#[^\n]*\n)*[ ]*sed -e 's\/::\/;;\/g' -e 's\/##\\\[\/##［\/g' "\$\{WORKDIR\}\/\$\{f\}"/,
     );
     expect(issueAutofixReportStep).toContain(
       'for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do',
@@ -21332,7 +21415,7 @@ describe('stale sandbox container cleanup', () => {
         '#!/bin/bash\necho "$@" >> "${AGENT_WORKDIR}/docker-calls.txt"\nexit 0\n',
       );
       chmodSync(join(bin, 'docker'), 0o755);
-      // The launcher line exactly as packages/cli/src/utils/sandbox.ts
+      // The launcher line exactly as packages/cli/src/serve/sandbox.ts
       // prints it, then the wedge shape: one line, then silence.
       const stub = join(dir, 'qwen');
       writeFileSync(

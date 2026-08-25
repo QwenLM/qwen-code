@@ -20,6 +20,7 @@ import type {
   BridgeEvent,
   SessionReplaySnapshot,
 } from '@qwen-code/acp-bridge/eventBus';
+import type { ServeSessionSupportedCommandsStatus } from '@qwen-code/acp-bridge/status';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
@@ -417,7 +418,9 @@ class FakeBridge {
       },
     };
   }
-  async getSessionSupportedCommandsStatus(sessionId: string) {
+  async getSessionSupportedCommandsStatus(
+    sessionId: string,
+  ): Promise<ServeSessionSupportedCommandsStatus> {
     return { v: 1, sessionId, availableCommands: [], availableSkills: [] };
   }
   /** Per-session in-memory pr bindings, mirroring the real bridge's
@@ -3725,6 +3728,27 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.error.message).toContain('sessionIds');
   });
 
+  it('_qwen/sessions/archive rejects a non-boolean conflict repair option', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 141,
+      method: '_qwen/sessions/archive',
+      params: { sessionIds: ['session-1'], resolveConflicts: 'yes' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.id).toBe(141);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('resolveConflicts');
+  });
+
   it('_qwen/sessions/unarchive returns per-id result buckets', async () => {
     const sessionId = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
     const connId = await initialize();
@@ -3743,6 +3767,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       result: {
         unarchived: string[];
         alreadyActive: string[];
+        resolvedConflicts: string[];
         notFound: string[];
         errors: unknown[];
       };
@@ -3751,8 +3776,52 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(frame.result).toEqual({
       unarchived: [],
       alreadyActive: [],
+      resolvedConflicts: [],
       notFound: [sessionId],
       errors: [],
+    });
+  });
+
+  it('_qwen/sessions archive and unarchive repair conflicts only when requested', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440142';
+      await writeStoredSession(sessionId, 'active');
+      await writeStoredSession(sessionId, 'archived');
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const reader = frameReader(connStream);
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 142,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId], resolveConflicts: true },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 142,
+        result: {
+          archived: [sessionId],
+          resolvedConflicts: [sessionId],
+          errors: [],
+        },
+      });
+
+      await writeStoredSession(sessionId, 'active');
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 143,
+        method: '_qwen/sessions/unarchive',
+        params: { sessionIds: [sessionId], resolveConflicts: true },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 143,
+        result: {
+          unarchived: [sessionId],
+          resolvedConflicts: [sessionId],
+          errors: [],
+        },
+      });
+      reader.close();
     });
   });
 
@@ -6874,7 +6943,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     release(); // spawn resolves AFTER destroy
     await vi.waitFor(() => {
       expect(bridge.killed).toContain(sessionId);
-      expect(removeSession).toHaveBeenCalledWith(sessionId);
+      expect(removeSession).toHaveBeenCalledWith(
+        sessionId,
+        expect.objectContaining({
+          assertStorageUnchanged: expect.any(Function),
+        }),
+      );
     });
     removeSession.mockRestore();
   });
@@ -8428,6 +8502,81 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('fails the Workflow surfaces closed for an untrusted workspace', async () => {
+      await restartServer({ primaryTrusted: false });
+      bridge.getSessionSupportedCommandsStatus = async (
+        sessionId: string,
+      ): Promise<ServeSessionSupportedCommandsStatus> => ({
+        v: 1,
+        sessionId,
+        availableCommands: [
+          { name: 'init', description: 'Initialize', input: null },
+          { name: 'workflows', description: 'Manage workflows', input: null },
+        ],
+        availableSkills: [],
+        workflowsEnabled: true,
+        savedWorkflows: [{ name: 'slow-phases', source: 'project' as const }],
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/supported_commands',
+        params: { sessionId: 'sess-1' },
+      });
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/tasks/cancel',
+        params: { sessionId: 'sess-1', taskId: 'wf-1', kind: 'workflow' },
+      });
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 62,
+        method: '_qwen/session/tasks/workflow_action',
+        params: {
+          sessionId: 'sess-1',
+          taskId: 'slow-phases',
+          action: 'run-saved',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 6);
+      const byId = new Map(
+        frames
+          .filter(
+            (frame): frame is { id: number; result?: unknown } =>
+              typeof frame === 'object' &&
+              frame !== null &&
+              'id' in frame &&
+              typeof frame.id === 'number',
+          )
+          .map((frame) => [frame.id, frame]),
+      );
+      expect(byId.get(60)).toMatchObject({
+        result: {
+          workflowsEnabled: false,
+          savedWorkflows: [],
+          availableCommands: [{ name: 'init', description: 'Initialize' }],
+        },
+      });
+      expect(byId.get(61)).toMatchObject({
+        result: { cancelled: false, reason: 'disabled' },
+      });
+      expect(byId.get(62)).toMatchObject({ result: { changed: false } });
+      expect(bridge.lastCancelledTask).toBeUndefined();
+      expect(bridge.lastWorkflowAction).toBeUndefined();
+    });
+
     it('_qwen/session/lsp returns status', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -8924,6 +9073,60 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           },
         },
       });
+    });
+
+    it.each([
+      '_qwen/sessions/delete',
+      '_qwen/sessions/archive',
+      '_qwen/sessions/unarchive',
+    ])('gates lifecycle method %s by trust and generation', async (method) => {
+      await restartServer({ primaryTrusted: false });
+      const untrustedConnId = await initialize();
+      const untrustedStream = await openStream(untrustedConnId);
+      const untrustedFrames = takeFrames(untrustedStream, 1);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await post(untrustedConnId, {
+        jsonrpc: '2.0',
+        id: 594,
+        method,
+        params: { sessionIds: ['session-1'] },
+      });
+      await expect(untrustedFrames).resolves.toEqual([
+        expect.objectContaining({
+          id: 594,
+          error: expect.objectContaining({
+            data: expect.objectContaining({
+              errorKind: 'untrusted_workspace',
+              httpStatus: 403,
+            }),
+          }),
+        }),
+      ]);
+
+      const generationGuard = createWorkspaceGenerationGuard();
+      await restartServer({ generationGuard });
+      const closedConnId = await initialize();
+      const closedStream = await openStream(closedConnId);
+      const closedFrames = takeFrames(closedStream, 1);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      generationGuard.close();
+      await post(closedConnId, {
+        jsonrpc: '2.0',
+        id: 595,
+        method,
+        params: { sessionIds: ['session-1'] },
+      });
+      await expect(closedFrames).resolves.toEqual([
+        expect.objectContaining({
+          id: 595,
+          error: expect.objectContaining({
+            data: expect.objectContaining({
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+            }),
+          }),
+        }),
+      ]);
     });
 
     it.each([
@@ -9775,7 +9978,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
               errors: [{ sessionId, error: removeError }],
             },
           });
-          expect(removeSessionSpy).toHaveBeenCalledWith(sessionId);
+          expect(removeSessionSpy).toHaveBeenCalledWith(
+            sessionId,
+            expect.objectContaining({
+              assertStorageUnchanged: expect.any(Function),
+            }),
+          );
 
           const deleteLog = stdioMocks.writeStderrLine.mock.calls
             .map(([line]) => line)

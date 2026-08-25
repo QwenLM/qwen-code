@@ -21,6 +21,7 @@ type ContentGeneratorConfig =
 export const MODEL_GENERATION_CONFIG_FIELDS = [
   'samplingParams',
   'timeout',
+  'streamIdleTimeoutMs',
   'maxRetries',
   'retryInitialDelayMs',
   'retryMaxDelayMs',

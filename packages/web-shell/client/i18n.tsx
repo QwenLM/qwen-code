@@ -1100,6 +1100,7 @@ const EN: Messages = {
   'workflowRuns.saved': 'Saved',
   'workflowRuns.active': 'Running',
   'workflowRuns.history': 'History',
+  'workflowRuns.create': 'New',
   'workflowRuns.refresh': 'Refresh',
   'workflowRuns.loading': 'Loading workflow runs…',
   'workflowRuns.loadFailed': 'Failed to load workflow runs.',
@@ -1109,7 +1110,7 @@ const EN: Messages = {
   'workflowRuns.emptyHistory': 'No saved workflow runs yet.',
   'workflowRuns.emptySaved': 'No reusable workflows saved yet.',
   'workflowRuns.emptySavedHint':
-    'Save a completed run from the terminal, or add a .js file under .qwen/workflows.',
+    'Select New to create one with Qwen Code, save a completed run from the terminal, or add a .js file under .qwen/workflows.',
   'workflowRuns.project': 'Project',
   'workflowRuns.user': 'User',
   'workflowRuns.projectDescription': 'Available in this project',
@@ -1654,8 +1655,6 @@ const EN: Messages = {
   'skilldesc.e2eTesting': 'Run end-to-end tests of the Qwen Code CLI',
   'skilldesc.featDev': 'End-to-end workflow for a non-trivial feature',
   'skilldesc.memoryLeakDebug': 'Diagnose CLI memory leaks via heap snapshots',
-  'skilldesc.openworkDesktopSync':
-    'Sync packages/desktop with openwork commit-by-commit',
   'skilldesc.preparePr': 'Prepare a GitHub PR title and body from the branch',
   'skilldesc.qwenCodeClaw': 'Use Qwen Code as a code-understanding agent',
   'skilldesc.structuredDebugging':
@@ -2692,6 +2691,8 @@ const EN: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) =>
     `Ran ${v?.count ?? 0} tool${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.ranAgents': (v) =>
+    `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
     `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
@@ -3279,6 +3280,7 @@ const ZH: Messages = {
   'toolName.team_create': '创建团队',
   'toolName.team_delete': '删除团队',
   'toolName.send_message': '发送消息',
+  'toolName.request_shutdown': '请求下线',
   'toolName.list_agents': '列出 Agent',
   'toolName.structured_output': '结构化输出',
   'toolName.monitor': '监控',
@@ -3293,6 +3295,7 @@ const ZH: Messages = {
   'toolName.read_mcp_resource': '读取 MCP 资源',
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
+  'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
   'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
@@ -4207,6 +4210,7 @@ const ZH: Messages = {
   'workflowRuns.saved': '已保存',
   'workflowRuns.active': '运行中',
   'workflowRuns.history': '历史',
+  'workflowRuns.create': '新建',
   'workflowRuns.refresh': '刷新',
   'workflowRuns.loading': '正在加载工作流…',
   'workflowRuns.loadFailed': '工作流加载失败。',
@@ -4215,7 +4219,7 @@ const ZH: Messages = {
   'workflowRuns.emptyHistory': '暂时没有已保存的工作流记录。',
   'workflowRuns.emptySaved': '还没有可复用的工作流。',
   'workflowRuns.emptySavedHint':
-    '可以在终端中保存一次已完成的运行，或在 .qwen/workflows 下添加 .js 文件。',
+    '可以点击“新建”让 Qwen Code 创建、在终端中保存一次已完成的运行，或在 .qwen/workflows 下添加 .js 文件。',
   'workflowRuns.project': '项目',
   'workflowRuns.user': '用户',
   'workflowRuns.projectDescription': '仅在当前项目中可用',
@@ -4713,7 +4717,6 @@ const ZH: Messages = {
   'skilldesc.e2eTesting': '运行 Qwen Code CLI 的端到端测试',
   'skilldesc.featDev': '实现非平凡功能的端到端工作流',
   'skilldesc.memoryLeakDebug': '用堆快照诊断 CLI 内存泄漏',
-  'skilldesc.openworkDesktopSync': '将 packages/desktop 与 openwork 逐提交同步',
   'skilldesc.preparePr': '从当前分支准备 GitHub PR 标题和正文',
   'skilldesc.qwenCodeClaw': '将 Qwen Code 用作代码理解智能体',
   'skilldesc.structuredDebugging': '假设驱动的疑难 bug 调试方法',
@@ -5678,6 +5681,7 @@ const ZH: Messages = {
   'tool.status.failed': '执行失败',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
   'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
   'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
@@ -6147,9 +6151,6 @@ const ZH: Messages = {
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
     '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
-  'settings.label.tools.computerUse.enabled': '启用 Computer Use',
-  'settings.description.tools.computerUse.enabled':
-    '启用后（默认），会注册 9 个 computer_use__* 延迟内置工具。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',

@@ -13,6 +13,9 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
+  SessionStorageEntryError,
+  SessionTranscriptChangedError,
+  SessionTranscriptIdentityUnavailableError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -154,6 +157,7 @@ import {
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
+import { redactWorkflowsFromSupportedCommands } from '../workflow-session-gate.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -1144,12 +1148,42 @@ export function registerSessionRoutes(
     return true;
   };
 
+  const hasLifecycleStorageEvidence = async (
+    service: ReturnType<typeof createWorkspaceRuntimeSessionService>,
+    sessionId: string,
+  ): Promise<boolean> => {
+    try {
+      return (
+        (await service.getMaintainableSessionLocation(sessionId)) !== undefined
+      );
+    } catch (error) {
+      if (error instanceof SessionStorageEntryError) {
+        return error.reason !== 'foreign_project';
+      }
+      if (error instanceof SessionTranscriptIdentityUnavailableError) {
+        return true;
+      }
+      if (error instanceof SessionTranscriptChangedError) {
+        return true;
+      }
+      if (
+        error !== null &&
+        typeof error === 'object' &&
+        typeof (error as NodeJS.ErrnoException).code === 'string'
+      ) {
+        return true;
+      }
+      throw error;
+    }
+  };
+
   const resolveQualifiedSessionRuntime = async (
     req: Request,
     res: Response,
     route: string,
     sessionIds: readonly string[],
     archiveState: SessionArchiveState | 'any',
+    options: { lifecycleMaintenance?: boolean } = {},
   ): Promise<WorkspaceRuntime | undefined> => {
     const target = resolveQualifiedSessionTarget(req, res);
     if (!target) return undefined;
@@ -1164,6 +1198,12 @@ export function registerSessionRoutes(
     const runtime = generation.runtime;
     const service = createWorkspaceRuntimeSessionService(runtime);
     for (const sessionId of sessionIds) {
+      if (options.lifecycleMaintenance) {
+        if (!(await hasLifecycleStorageEvidence(service, sessionId))) {
+          throw new SessionNotFoundError(sessionId);
+        }
+        continue;
+      }
       const location = await service.getSessionLocation(sessionId);
       if (location === 'conflict') {
         if (archiveState !== 'active') {
@@ -1974,22 +2014,52 @@ export function registerSessionRoutes(
     sessionIds: readonly string[],
   ): Promise<WorkspaceRuntime | undefined> => {
     if (req) {
-      return resolveQualifiedSessionRuntime(req, res, route, sessionIds, 'any');
+      return resolveQualifiedSessionRuntime(
+        req,
+        res,
+        route,
+        sessionIds,
+        'any',
+        { lifecycleMaintenance: true },
+      );
     }
 
     let internalRuntime: WorkspaceRuntime | undefined;
     let hasInternalSession = false;
-    const hasOrdinarySession = async (sessionId: string): Promise<boolean> => {
-      for (const runtime of workspaceRegistry.list()) {
+    let hasOrdinaryLiveSession = false;
+    const findOrdinarySessions = async (
+      sessionId: string,
+    ): Promise<Set<WorkspaceRuntime> | undefined> => {
+      const runtimes = new Set<WorkspaceRuntime>();
+      for (const entry of workspaceRegistry.listAllEntries()) {
+        const generation = entry.current;
+        if (entry.internal || !generation) continue;
         if (
-          await createWorkspaceRuntimeSessionService(
-            runtime,
-          ).sessionExistsInAnyState(sessionId)
+          entry.state !== 'active' ||
+          entry.current !== generation ||
+          generation.guard.closed
         ) {
-          return true;
+          sendWorkspaceRuntimeUnavailable(res);
+          return undefined;
         }
+        generation.guard.assertOpen();
+        const exists = await hasLifecycleStorageEvidence(
+          createWorkspaceRuntimeSessionService(generation.runtime),
+          sessionId,
+        );
+        if (
+          entry.state !== 'active' ||
+          entry.current !== generation ||
+          generation.guard.closed
+        ) {
+          sendWorkspaceRuntimeUnavailable(res);
+          return undefined;
+        }
+        if (!exists) continue;
+        generation.guard.assertOpen();
+        runtimes.add(generation.runtime);
       }
-      return false;
+      return runtimes;
     };
     const sendBatchWorkspaceConflict = (): void => {
       res.status(409).json({
@@ -1999,17 +2069,28 @@ export function registerSessionRoutes(
     };
     for (const sessionId of sessionIds) {
       const candidates = new Set<WorkspaceRuntime>();
+      const ordinaryLiveCandidates = new Set<WorkspaceRuntime>();
       const owner = workspaceRegistry.resolveLiveSessionOwner(sessionId);
       if (owner.kind === 'unavailable') {
         sendWorkspaceRuntimeUnavailable(res);
         return undefined;
       }
-      if (owner.kind === 'found' && isInternalWorkspaceRuntime(owner.runtime)) {
-        candidates.add(owner.runtime);
+      if (owner.kind === 'found') {
+        if (isInternalWorkspaceRuntime(owner.runtime)) {
+          candidates.add(owner.runtime);
+        } else {
+          ordinaryLiveCandidates.add(owner.runtime);
+          hasOrdinaryLiveSession = true;
+        }
       }
       if (owner.kind === 'ambiguous') {
         for (const runtime of owner.runtimes) {
-          if (isInternalWorkspaceRuntime(runtime)) candidates.add(runtime);
+          if (isInternalWorkspaceRuntime(runtime)) {
+            candidates.add(runtime);
+          } else {
+            ordinaryLiveCandidates.add(runtime);
+            hasOrdinaryLiveSession = true;
+          }
         }
       }
       for (const entry of workspaceRegistry.listAllEntries()) {
@@ -2020,32 +2101,32 @@ export function registerSessionRoutes(
         }
         const runtime = generation.runtime;
         const service = createWorkspaceRuntimeSessionService(runtime);
-        const exists = await service.sessionExistsInAnyState(sessionId);
+        const exists = await hasLifecycleStorageEvidence(service, sessionId);
         if (!assertCurrentInternalGeneration(entry, generation, res)) {
           return undefined;
         }
         if (!exists) continue;
-        const metadata = await readLoadableLiveConversationMetadata(
-          sessionId,
-          service,
-        );
-        if (!assertCurrentInternalGeneration(entry, generation, res)) {
-          return undefined;
-        }
-        if (!metadata) continue;
         candidates.add(runtime);
       }
-      if (candidates.size > 0) {
-        for (const runtime of workspaceRegistry.list()) {
-          const service = createWorkspaceRuntimeSessionService(runtime);
-          if (await service.sessionExistsInAnyState(sessionId)) {
-            candidates.add(runtime);
-          }
+      if (candidates.size > 0 || hasInternalSession) {
+        if (hasOrdinaryLiveSession && ordinaryLiveCandidates.size === 0) {
+          sendBatchWorkspaceConflict();
+          return undefined;
+        }
+        for (const runtime of ordinaryLiveCandidates) {
+          candidates.add(runtime);
+        }
+        const ordinarySessions = await findOrdinarySessions(sessionId);
+        if (!ordinarySessions) return undefined;
+        for (const runtime of ordinarySessions) {
+          candidates.add(runtime);
         }
       }
       if (candidates.size === 0) {
         if (hasInternalSession) {
-          if (await hasOrdinarySession(sessionId)) {
+          const ordinarySessions = await findOrdinarySessions(sessionId);
+          if (!ordinarySessions) return undefined;
+          if (ordinarySessions.size > 0) {
             sendBatchWorkspaceConflict();
             return undefined;
           }
@@ -2073,18 +2154,13 @@ export function registerSessionRoutes(
 
     for (const sessionId of sessionIds) {
       const service = createWorkspaceRuntimeSessionService(internalRuntime);
-      if (!(await service.sessionExistsInAnyState(sessionId))) {
-        if (await hasOrdinarySession(sessionId)) {
+      if (!(await hasLifecycleStorageEvidence(service, sessionId))) {
+        const ordinarySessions = await findOrdinarySessions(sessionId);
+        if (!ordinarySessions) return undefined;
+        if (ordinarySessions.size > 0) {
           sendBatchWorkspaceConflict();
           return undefined;
         }
-        throw new SessionNotFoundError(sessionId);
-      }
-      const metadata = await readLoadableLiveConversationMetadata(
-        sessionId,
-        service,
-      );
-      if (!metadata) {
         throw new SessionNotFoundError(sessionId);
       }
     }
@@ -2136,6 +2212,20 @@ export function registerSessionRoutes(
     return [...new Set(sessionIds as string[])];
   };
 
+  const parseResolveConflicts = (
+    req: Request,
+    res: Response,
+  ): boolean | undefined => {
+    const value: unknown = safeBody(req)['resolveConflicts'];
+    if (value === undefined) return false;
+    if (typeof value === 'boolean') return value;
+    res.status(400).json({
+      error: '`resolveConflicts` must be a boolean',
+      code: 'invalid_request',
+    });
+    return undefined;
+  };
+
   // Mirrors the bridge's displayName control-character rule (ESLint forbids
   // control-char regexes).
   const hasControlCharacter = (value: string): boolean =>
@@ -2184,11 +2274,12 @@ export function registerSessionRoutes(
   ): Array<{ sessionId: string; error: string }> =>
     errors.map((e) => ({
       sessionId: e.sessionId,
-      error: redactDetails
-        ? 'Session operation failed.'
-        : e.error instanceof Error
-          ? e.error.message
-          : String(e.error),
+      error:
+        redactDetails && !(e.error instanceof SessionConflictError)
+          ? 'Session operation failed.'
+          : e.error instanceof Error
+            ? e.error.message
+            : String(e.error),
     }));
 
   const runResolvedSessionBatch = async <T>(params: {
@@ -2224,7 +2315,10 @@ export function registerSessionRoutes(
         sendWorkspaceRuntimeUnavailable(res);
         return undefined;
       }
-      return { result: await run(verifiedRuntime, true), internal: true };
+      return {
+        result: await run(verifiedRuntime, true),
+        internal: isInternalWorkspaceRuntime(verifiedRuntime),
+      };
     });
   };
 
@@ -2238,9 +2332,10 @@ export function registerSessionRoutes(
       runtime: WorkspaceRuntime,
       coordinatorLockHeld: boolean,
     ) => {
-      captureRuntimeGenerationAssertion(runtime)?.();
+      const assertCanMutate = captureRuntimeGenerationAssertion(runtime);
+      assertCanMutate?.();
       const service = createWorkspaceRuntimeSessionService(runtime);
-      return runWithSessionListInvalidation(
+      const result = await runWithSessionListInvalidation(
         runtime,
         ['active', 'archived'],
         () =>
@@ -2251,6 +2346,7 @@ export function registerSessionRoutes(
               bridge: runtime.bridge,
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
+              assertCanMutate,
               onError: ({ phase, sessionId, error }) => {
                 writeStderrLine(
                   `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
@@ -2259,6 +2355,8 @@ export function registerSessionRoutes(
             }),
           ),
       );
+      assertCanMutate?.();
+      return result;
     };
     return runResolvedSessionBatch({ req, res, route, sessionIds, run });
   };
@@ -2268,16 +2366,18 @@ export function registerSessionRoutes(
     res: Response,
     route: string,
     sessionIds: string[],
+    resolveConflicts = false,
   ) => {
     const run = async (
       runtime: WorkspaceRuntime,
       coordinatorLockHeld: boolean,
     ) => {
-      captureRuntimeGenerationAssertion(runtime)?.();
+      const assertCanMutate = captureRuntimeGenerationAssertion(runtime);
+      assertCanMutate?.();
       const service = createWorkspaceRuntimeSessionService(runtime, {
         onWarning: logSessionArchiveWarning,
       });
-      return runWithSessionListInvalidation(
+      const result = await runWithSessionListInvalidation(
         runtime,
         ['active', 'archived'],
         () =>
@@ -2288,9 +2388,13 @@ export function registerSessionRoutes(
               bridge: runtime.bridge,
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
+              resolveConflicts,
+              assertCanMutate,
             }),
           ),
       );
+      assertCanMutate?.();
+      return result;
     };
     return runResolvedSessionBatch({ req, res, route, sessionIds, run });
   };
@@ -2300,16 +2404,18 @@ export function registerSessionRoutes(
     res: Response,
     route: string,
     sessionIds: string[],
+    resolveConflicts = false,
   ) => {
     const run = async (
       runtime: WorkspaceRuntime,
       coordinatorLockHeld: boolean,
     ) => {
-      captureRuntimeGenerationAssertion(runtime)?.();
+      const assertCanMutate = captureRuntimeGenerationAssertion(runtime);
+      assertCanMutate?.();
       const service = createWorkspaceRuntimeSessionService(runtime, {
         onWarning: logSessionArchiveWarning,
       });
-      return runWithSessionListInvalidation(
+      const result = await runWithSessionListInvalidation(
         runtime,
         ['active', 'archived'],
         () =>
@@ -2319,9 +2425,13 @@ export function registerSessionRoutes(
               service,
               coordinator: archiveCoordinator,
               coordinatorLockHeld,
+              resolveConflicts,
+              assertCanMutate,
             }),
           ),
       );
+      assertCanMutate?.();
+      return result;
     };
     return runResolvedSessionBatch({ req, res, route, sessionIds, run });
   };
@@ -4236,10 +4346,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/supported-commands',
       async (_req, res, sessionId, runtime) => {
+        const status =
+          await runtime.bridge.getSessionSupportedCommandsStatus(sessionId);
         res
           .status(200)
           .json(
-            await runtime.bridge.getSessionSupportedCommandsStatus(sessionId),
+            runtime.trusted
+              ? status
+              : redactWorkflowsFromSupportedCommands(status),
           );
       },
     ),
@@ -4416,6 +4530,10 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (kind === 'workflow' && !runtime.trusted) {
+          res.status(200).json({ cancelled: false, reason: 'disabled' });
+          return;
+        }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         res
@@ -4458,6 +4576,10 @@ export function registerSessionRoutes(
             error:
               '`action` must be "pause", "resume", "retry", "rerun", "delete-history", or "run-saved"',
           });
+          return;
+        }
+        if (!runtime.trusted) {
+          res.status(200).json({ changed: false });
           return;
         }
         const clientId = parseClientIdHeader(req, res);
@@ -5209,6 +5331,8 @@ export function registerSessionRoutes(
   app.post('/sessions/archive', mutate(), async (req, res) => {
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
+    const resolveConflicts = parseResolveConflicts(req, res);
+    if (resolveConflicts === undefined) return;
     if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
 
     try {
@@ -5217,12 +5341,14 @@ export function registerSessionRoutes(
         res,
         'POST /sessions/archive',
         uniqueIds,
+        resolveConflicts,
       );
       if (!operation) return;
       const { result } = operation;
       res.status(200).json({
         archived: result.archived,
         alreadyArchived: result.alreadyArchived,
+        resolvedConflicts: result.resolvedConflicts,
         notFound: result.notFound,
         errors: serializeSessionErrors(result.errors, operation.internal),
       });
@@ -5234,6 +5360,8 @@ export function registerSessionRoutes(
   app.post('/sessions/unarchive', mutate(), async (req, res) => {
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
+    const resolveConflicts = parseResolveConflicts(req, res);
+    if (resolveConflicts === undefined) return;
 
     try {
       const operation = await unarchiveSessions(
@@ -5241,12 +5369,14 @@ export function registerSessionRoutes(
         res,
         'POST /sessions/unarchive',
         uniqueIds,
+        resolveConflicts,
       );
       if (!operation) return;
       const { result } = operation;
       res.status(200).json({
         unarchived: result.unarchived,
         alreadyActive: result.alreadyActive,
+        resolvedConflicts: result.resolvedConflicts,
         notFound: result.notFound,
         errors: serializeSessionErrors(result.errors, operation.internal),
       });
@@ -5291,14 +5421,23 @@ export function registerSessionRoutes(
       const route = 'POST /workspaces/:workspace/sessions/archive';
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
+      const resolveConflicts = parseResolveConflicts(req, res);
+      if (resolveConflicts === undefined) return;
       if (rejectActiveLiveSessionMutation(res, uniqueIds)) return;
       try {
-        const operation = await archiveSessions(req, res, route, uniqueIds);
+        const operation = await archiveSessions(
+          req,
+          res,
+          route,
+          uniqueIds,
+          resolveConflicts,
+        );
         if (!operation) return;
         const { result } = operation;
         res.status(200).json({
           archived: result.archived,
           alreadyArchived: result.alreadyArchived,
+          resolvedConflicts: result.resolvedConflicts,
           notFound: result.notFound,
           errors: serializeSessionErrors(result.errors, operation.internal),
         });
@@ -5315,13 +5454,22 @@ export function registerSessionRoutes(
       const route = 'POST /workspaces/:workspace/sessions/unarchive';
       const uniqueIds = parseSessionIdsBody(req, res);
       if (uniqueIds === undefined) return;
+      const resolveConflicts = parseResolveConflicts(req, res);
+      if (resolveConflicts === undefined) return;
       try {
-        const operation = await unarchiveSessions(req, res, route, uniqueIds);
+        const operation = await unarchiveSessions(
+          req,
+          res,
+          route,
+          uniqueIds,
+          resolveConflicts,
+        );
         if (!operation) return;
         const { result } = operation;
         res.status(200).json({
           unarchived: result.unarchived,
           alreadyActive: result.alreadyActive,
+          resolvedConflicts: result.resolvedConflicts,
           notFound: result.notFound,
           errors: serializeSessionErrors(result.errors, operation.internal),
         });

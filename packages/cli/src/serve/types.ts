@@ -339,9 +339,9 @@ export interface ServeOptions {
    */
   sessionRestoreTimeoutMs?: number;
   /**
-   * Wall-clock timeout in ms for a single human permission /
-   * ask_user_question response in daemon (ACP) mode. 0 = disabled
-   * (wait forever). Default: 300000 (5 min).
+   * Wall-clock timeout in ms for a human permission or `ask_user_question`
+   * response in daemon mode. 0 = disabled. Default: 0 (wait until an explicit
+   * decision or session lifecycle cancellation).
    */
   permissionResponseTimeoutMs?: number;
   /**
