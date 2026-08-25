@@ -506,6 +506,14 @@ export function useQueuedSubmissionDrain({
             );
             markAdmissionFailed();
           },
+          onDeliveryFailed: () => {
+            restorePeerMessage(
+              submission.modelText,
+              submission.displayText,
+              true,
+            );
+            markAdmissionFailed();
+          },
         },
       );
     } else {
