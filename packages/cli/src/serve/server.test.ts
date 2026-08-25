@@ -33736,9 +33736,18 @@ describe('Live conversation runtime lifecycle', () => {
         bridge: primaryBridge,
       }),
     ]);
+    // The Live catalog routes prove an exact root with
+    // `path.resolve(selector) === selector`, which only holds in the host's
+    // native path shape — build it the way the WS_BOUND fixtures above do,
+    // so it round-trips through `path.resolve` on every platform.
+    const liveConversationsRoot = path.resolve(
+      path.sep,
+      'work',
+      'live-conversations',
+    );
     const root = {
-      configuredRoot: '/work/live-conversations',
-      canonicalRoot: '/work/live-conversations',
+      configuredRoot: liveConversationsRoot,
+      canonicalRoot: liveConversationsRoot,
       device: 1,
       inode: 2,
       inodeVerifiable: true,
