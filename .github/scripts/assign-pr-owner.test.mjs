@@ -153,6 +153,13 @@ function runAssign(dryRun, options = {}) {
     prLatestJson = '',
     files = 'packages/core/src/foo.ts',
     zeroLoadOwner = 'DennisYu07',
+    // What every collaborator permission lookup answers; 'error' fails the
+    // lookup outright instead of answering.
+    permission = 'write',
+    // When set, this one login's lookup answers denyPerm instead, so a test
+    // can drop a single owner out of the eligible set.
+    denyLogin = '',
+    denyPerm = 'read',
     editExit = 0,
     editErr = '',
     expectExit = 0,
@@ -176,7 +183,14 @@ case "$*" in
     fi
     ;;
   *"pulls/77/files"*) printf '%s' "$GH_STUB_FILES" ;;
-  *"/collaborators/"*"/permission"*) printf '%s' 'write' ;;
+  *"/collaborators/$GH_STUB_DENY_LOGIN/permission"*) printf '%s' "$GH_STUB_DENY_PERM" ;;
+  *"/collaborators/"*"/permission"*)
+    if [ "$GH_STUB_PERMISSION" = "error" ]; then
+      printf '%s' 'permission lookup failed' >&2
+      exit 1
+    fi
+    printf '%s' "$GH_STUB_PERMISSION"
+    ;;
   *"--assignee ${zeroLoadOwner}"*"--json number"*) printf '%s' '0' ;;
   *"issue list"*"--json number"*) printf '%s' '5' ;;
   "pr edit "*) printf '%s' "$GH_STUB_EDIT_ERR" >&2; exit "$GH_STUB_EDIT_EXIT" ;;
@@ -194,6 +208,11 @@ esac
       GH_STUB_PR: prJson,
       GH_STUB_PR_LATEST: prLatestJson,
       GH_STUB_FILES: files,
+      GH_STUB_PERMISSION: permission,
+      // The stub's deny branch pattern-expands this login; '__none__' can
+      // never collide with a real collaborator lookup.
+      GH_STUB_DENY_LOGIN: denyLogin || '__none__',
+      GH_STUB_DENY_PERM: denyPerm,
       GH_STUB_EDIT_EXIT: String(editExit),
       GH_STUB_EDIT_ERR: editErr,
       GITHUB_REPOSITORY: 'QwenLM/qwen-code',
@@ -203,7 +222,11 @@ esac
     },
   });
   assert.equal(result.status, expectExit, result.stderr);
-  return { log: readFileSync(log, 'utf8'), stdout: result.stdout };
+  return {
+    log: readFileSync(log, 'utf8'),
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
 }
 
 describe('assign-pr-owner: apply boundary', () => {
@@ -282,6 +305,35 @@ describe('assign-pr-owner: apply boundary', () => {
     });
     assert.match(stdout, /falling back to core/);
     assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
+  });
+
+  it('drops an owner who lost push access and falls back to the coarser area', () => {
+    const module = policy.areas.find((area) => area.name === 'core-skills');
+    const { log, stdout } = runAssign(false, {
+      denyLogin: module.owners[0],
+      files: 'packages/core/src/skills/loader.ts',
+    });
+    assert.match(stdout, /falling back to core/);
+    assert.doesNotMatch(
+      log,
+      new RegExp(`--add-assignee ${module.owners[0]}\\b`),
+    );
+    assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
+  });
+
+  it('exits without assigning when no owner passes the push-access check', () => {
+    // 'read' answers every lookup with a non-write permission; 'error' fails
+    // the lookup outright (the canWrite catch branch). Both routes must land
+    // on the same terminal skip with a clean exit — never a failed run, and
+    // never a blind assignment past the collaborator check.
+    for (const permission of ['read', 'error']) {
+      const { log, stdout, stderr } = runAssign(false, { permission });
+      assert.doesNotMatch(log, /pr edit/);
+      assert.match(stdout, /no eligible owner for the matched areas/);
+      if (permission === 'error') {
+        assert.match(stderr, /Cannot verify push access/);
+      }
+    }
   });
 
   it('tolerates a read-only token instead of failing', () => {
