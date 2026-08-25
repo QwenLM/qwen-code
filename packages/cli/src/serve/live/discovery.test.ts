@@ -10,7 +10,9 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   getLiveDiscoveryPath,
+  handoffLiveDiscoveryOwner,
   LiveDiscoveryOwnerActiveError,
+  LiveDiscoveryStateError,
   removeLiveDiscoveryFile,
   writeLiveDiscoveryFile,
   type LiveDiscoveryRecord,
@@ -54,7 +56,11 @@ describe('Live discovery file', () => {
     expect(JSON.parse(await fs.readFile(writtenPath, 'utf8'))).toEqual(
       expected,
     );
-    expect((await fs.stat(writtenPath)).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX permission bits; the read side already skips
+    // the mode check there (see discovery.ts).
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(writtenPath)).mode & 0o777).toBe(0o600);
+    }
     expect(
       (await fs.readdir(path.dirname(writtenPath))).filter((name) =>
         name.endsWith('.tmp'),
@@ -62,23 +68,79 @@ describe('Live discovery file', () => {
     ).toEqual([]);
   });
 
+  it('safely creates a missing nested runtime directory tree', async () => {
+    const parent = await temporaryRuntime();
+    const runtime = path.join(parent, 'nested', 'runtime', 'base');
+    const expected = record('daemon_instance_nonce_nested_01');
+
+    await expect(writeLiveDiscoveryFile(runtime, expected)).resolves.toBe(
+      getLiveDiscoveryPath(runtime),
+    );
+    await expect(
+      fs.readFile(getLiveDiscoveryPath(runtime), 'utf8'),
+    ).resolves.toContain(expected.instanceNonce);
+    if (process.platform !== 'win32') {
+      expect(
+        (await fs.stat(path.dirname(getLiveDiscoveryPath(runtime)))).mode &
+          0o777,
+      ).toBe(0o700);
+    }
+  });
+
+  it('rejects a symlinked runtime base without publishing through it', async () => {
+    if (process.platform === 'win32') return;
+    const parent = await temporaryRuntime();
+    const target = path.join(parent, 'target');
+    const runtimeBaseDir = path.join(parent, 'runtime-link');
+    await fs.mkdir(target, { mode: 0o700 });
+    await fs.symlink(target, runtimeBaseDir);
+
+    await expect(
+      writeLiveDiscoveryFile(
+        runtimeBaseDir,
+        record('daemon_instance_nonce_symlink_01'),
+      ),
+    ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
+    await expect(fs.readdir(target)).resolves.toEqual([]);
+  });
+
+  it('rejects an unsafe discovery lock shape without replacing it', async () => {
+    const runtime = await temporaryRuntime();
+    const discoveryDirectory = path.dirname(getLiveDiscoveryPath(runtime));
+    const lockPath = path.join(discoveryDirectory, '.daemon.lock');
+    await fs.mkdir(discoveryDirectory, { mode: 0o700 });
+    await fs.writeFile(lockPath, 'unsafe', { mode: 0o600 });
+
+    await expect(
+      writeLiveDiscoveryFile(
+        runtime,
+        record('daemon_instance_nonce_unsafe_lock_01'),
+      ),
+    ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
+
+    await expect(fs.readFile(lockPath, 'utf8')).resolves.toBe('unsafe');
+    await expect(fs.stat(getLiveDiscoveryPath(runtime))).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
   it('only removes a record owned by the matching daemon pid and nonce', async () => {
     const runtime = await temporaryRuntime();
     const current = record('daemon_instance_nonce_0002');
     await writeLiveDiscoveryFile(runtime, current);
 
-    expect(
-      await removeLiveDiscoveryFile(runtime, {
+    await expect(
+      removeLiveDiscoveryFile(runtime, {
         pid: current.pid,
         instanceNonce: 'daemon_instance_nonce_old0',
       }),
-    ).toBe(false);
-    expect(
-      await removeLiveDiscoveryFile(runtime, {
+    ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
+    await expect(
+      removeLiveDiscoveryFile(runtime, {
         pid: current.pid + 1,
         instanceNonce: current.instanceNonce,
       }),
-    ).toBe(false);
+    ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
     await expect(
       fs.readFile(getLiveDiscoveryPath(runtime), 'utf8'),
     ).resolves.toContain(current.instanceNonce);
@@ -115,7 +177,7 @@ describe('Live discovery file', () => {
     );
   });
 
-  it('reclaims only a valid record whose owner process is stale', async () => {
+  it('does not publish over a stale foreign owner without a handoff', async () => {
     const runtime = await temporaryRuntime();
     const previous = record('daemon_instance_nonce_0005', 999_999);
     const replacement = record('daemon_instance_nonce_0006');
@@ -128,13 +190,13 @@ describe('Live discovery file', () => {
           return false;
         },
       }),
-    ).resolves.toBe(getLiveDiscoveryPath(runtime));
+    ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
     expect(
       JSON.parse(await fs.readFile(getLiveDiscoveryPath(runtime), 'utf8')),
-    ).toEqual(replacement);
+    ).toEqual(previous);
   });
 
-  it('reclaims a valid legacy-protocol record whose owner is stale', async () => {
+  it('does not publish over a stale legacy-protocol owner without a handoff', async () => {
     const runtime = await temporaryRuntime();
     const discoveryPath = getLiveDiscoveryPath(runtime);
     const previous = {
@@ -157,12 +219,63 @@ describe('Live discovery file', () => {
           return false;
         },
       }),
-    ).resolves.toBe(discoveryPath);
+    ).rejects.toBeInstanceOf(LiveDiscoveryStateError);
     expect(JSON.parse(await fs.readFile(discoveryPath, 'utf8'))).toEqual(
-      replacement,
+      previous,
     );
-    expect((await fs.stat(discoveryPath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await fs.stat(discoveryPath)).mode & 0o777).toBe(0o600);
+    }
   });
+
+  it.each([
+    ['current', LIVE_HOST_PROTOCOL_VERSION, 999_996],
+    ['legacy', 2, 999_995],
+  ])(
+    'reclaims a valid stale %s-protocol owner during handoff',
+    async (_label, protocolVersion, pid) => {
+      const runtime = await temporaryRuntime();
+      const discoveryPath = getLiveDiscoveryPath(runtime);
+      const previous = {
+        ...record('daemon_instance_nonce_handoff_old', pid),
+        protocolVersion,
+      };
+      const replacement = record('daemon_instance_nonce_handoff_new');
+      await fs.mkdir(path.dirname(discoveryPath), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await fs.writeFile(discoveryPath, `${JSON.stringify(previous)}\n`, {
+        mode: 0o600,
+      });
+      let committed = false;
+      const wait = vi.fn(async () => undefined);
+
+      await expect(
+        handoffLiveDiscoveryOwner(
+          runtime,
+          replacement,
+          async () => {
+            committed = true;
+          },
+          {
+            wait,
+            handoffGraceMs: 37,
+            isProcessAlive: (ownerPid) => {
+              expect(ownerPid).toBe(previous.pid);
+              return false;
+            },
+          },
+        ),
+      ).resolves.toEqual({ reclaimed: true });
+      expect(committed).toBe(true);
+      expect(wait).toHaveBeenCalledOnce();
+      expect(wait).toHaveBeenCalledWith(37);
+      await expect(fs.stat(discoveryPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    },
+  );
 
   it('does not replace a live owner only because its protocol is legacy', async () => {
     const runtime = await temporaryRuntime();

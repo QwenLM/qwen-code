@@ -85,6 +85,20 @@ export interface TestScope {
    * run covers everything the diff can break, as far as the graph can see.
    */
   caveat?: string;
+  /**
+   * The scope's OWN caveat, before any budget-stop or resume clause was
+   * appended to `caveat` — the machine-readable half of the split that lets a
+   * continuation retire the appended clauses without re-parsing rendered
+   * prose. The prose parse was the defect: caveat segments interpolate
+   * workspace dirs from the reviewed diff, dirs may contain the segment
+   * separator, and the skipped/unmapped/excluded producers put their honest
+   * tail in the same segment AFTER the interpolated list — so a dir NAMED
+   * like a machine clause fabricated a segment boundary and retired the live
+   * limitation with it. A continuation now carries this string through
+   * untouched (empty when the scope had no caveat of its own) and rebuilds
+   * `caveat` from it plus its own current clause; nothing content-matches.
+   */
+  liveCaveat?: string;
 }
 
 /**
@@ -182,7 +196,7 @@ export function resolveTestScope(input: {
   const unmapped = affected.filter(
     (d) => d !== '.' && !scriptsOf.has(d) && !skipped.includes(d),
   );
-  // Files a negation excludes (!packages/desktop — a separate toolchain with
+  // Files a negation excludes (!packages/desktop-shell — a separate toolchain with
   // its own lockfile) cannot affect any included workspace's tests, so they
   // earn no incomplete-scope caveat — but their own suites were not run
   // either, and "nothing is silent" covers that too: disclose it as the

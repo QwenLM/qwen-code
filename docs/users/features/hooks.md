@@ -522,6 +522,8 @@ The `permissionDecision` value controls whether the tool runs:
 - `"deny"` — block the tool; it does not execute and an error is returned to the model.
 - `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
 
+For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather than interpreting inline Markdown. This keeps formatting markers and link targets visible to the user.
+
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
 **Example Output**:
@@ -633,6 +635,56 @@ This field is provenance, not authentication, tenant identity, authorization, or
 When both fields are present, prompt-hook payloads contain overlapping text and can consume additional model input tokens. There is no per-hook field suppression in this version.
 
 Sequential UserPromptSubmit hooks can append `additionalContext` to `prompt`; `submitted_prompt` continues to represent the captured submission. Function hooks are trusted same-process code and are not constrained by an immutability guarantee.
+
+When the final hook output contains non-empty `additionalContext`, Qwen first
+sanitizes the value and then sends it to the model as a separate text part:
+
+```xml
+<qwen:user-prompt-submit-context>
+sanitized hook context
+</qwen:user-prompt-submit-context>
+```
+
+The tag tells the model and transcript consumers that the part came from a
+configured hook rather than from the user prompt. It is a provenance marker,
+not authentication, authorization, or a general trust boundary.
+
+For a `UserQuery` with this added context, the session JSONL record preserves
+the model-bound parts, including the tagged part, and adds the following
+`systemPayload`:
+
+```json
+{
+  "displayText": "pre-hook display projection",
+  "hookContext": "sanitized hook context"
+}
+```
+
+This two-field payload is written only for this kind of user-prompt record.
+`hookContext` intentionally duplicates the tagged part so offline and
+third-party consumers can identify its provenance without parsing model text.
+`displayText` is the pre-hook display projection and never includes the hook
+context. For a supported interactive TUI submission it is the raw composer
+projection carried by `submitted_prompt`; ACP, headless, `serve`, SDK, remote
+input, and other paths without that provenance record the expanded pre-hook
+prompt instead.
+
+Transcript display consumers treat `displayText` as this user-prompt projection
+when `systemPayload.hookContext` is a string. For compatibility with released
+`displayText`-only user-prompt records, a complete tagged context in the final
+part after at least one other part is equivalent pairing evidence. Notification,
+cron, and mid-turn records can also have `displayText`, but those values are
+compact display labels and must not be substituted for their model-bound text
+without that evidence.
+Legacy bare-context records keep their model-bound display behavior because the
+context cannot be separated reliably. For metadata-free records that use the
+current tagged shape, compatibility consumers may remove the same complete
+final tagged part; they must not infer that arbitrary tag-like user text is hook
+provenance.
+
+Sensitive prompt telemetry attributes, when enabled, and managed auto-memory
+recall both use the pre-hook prompt. They do not include
+`UserPromptSubmit`-added context.
 
 **Output Options**:
 

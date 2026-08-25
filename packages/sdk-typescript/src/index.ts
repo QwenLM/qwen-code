@@ -2,6 +2,7 @@ export { query } from './query/createQuery.js';
 export { AbortError, isAbortError } from './types/errors.js';
 export { Query } from './query/Query.js';
 export { SdkLogger } from './utils/logger.js';
+export { PERMISSION_MODES } from './types/permission-mode.js';
 
 // Daemon HTTP client (talks to `qwen serve`)
 export {
@@ -15,6 +16,7 @@ export {
   DaemonClient,
   DaemonHttpError,
   DaemonPendingPromptLimitError,
+  DaemonSessionIdProtocolError,
   WorkspaceDaemonClient,
   DaemonSessionClient,
   asKnownDaemonEvent,
@@ -59,6 +61,12 @@ export {
   type DaemonChannelWorkerStartErrorResponse,
   type DaemonChannelConfigFieldKind,
   type DaemonChannelConfigFieldDescriptor,
+  type DaemonChannelConfigValueFieldDescriptor,
+  type DaemonChannelConfigPlainValueFieldDescriptor,
+  type DaemonChannelConfigEnumFieldDescriptor,
+  type DaemonChannelConfigNumberFieldDescriptor,
+  type DaemonChannelConfigObjectFieldDescriptor,
+  type DaemonChannelConfigNestedFieldDescriptor,
   type DaemonChannelTypeDescriptor,
   type DaemonChannelTypeCatalog,
   type DaemonChannelRuntimeState,
@@ -71,6 +79,7 @@ export {
   type DaemonChannelStartupRequest,
   type DaemonChannelMutationResult,
   type DaemonChannelPairingRequest,
+  type DaemonChannelPairingSubject,
   type DaemonChannelPairingRequestsSnapshot,
   type DaemonChannelPairingApprovalRequest,
   type DaemonChannelPairingApprovalResult,
@@ -93,8 +102,20 @@ export {
   type DaemonMcpServerRestartRefusedEvent,
   type DaemonSettingsReloadedData,
   type DaemonSettingsReloadedEvent,
+  type DaemonSettingsChangedData,
+  type DaemonSettingsChangedEvent,
   type DaemonToolToggleResult,
+  type DaemonSkillBatchToggleError,
+  type DaemonSkillBatchToggleErrorCode,
+  type DaemonSkillBatchToggleItem,
+  type DaemonSkillBatchToggleResult,
+  type ExtensionMutationResponse,
+  type ExtensionWorkspaceBatchActivationState,
+  type ExtensionDefaultActivationBatchItem,
+  type ExtensionWorkspaceActivationBatchItem,
   type DaemonSkillToggleActivation,
+  type DaemonSkillToggleMutation,
+  type DaemonSkillToggleMutationSkill,
   type DaemonSkillToggleResult,
   type DaemonSkillScope,
   type DaemonSkillInstallSource,
@@ -211,6 +232,9 @@ export {
   type DaemonSessionListPage,
   type DaemonSessionListPageOptions,
   type DaemonSessionListView,
+  type DaemonSessionCatalogVersion,
+  type DaemonSessionLiveState,
+  type DaemonWorkspaceSessionLiveState,
   type DaemonSessionOrganizationResult,
   type DaemonSessionOrganizationUpdate,
   type DaemonSessionSubscribeOptions,
@@ -241,6 +265,8 @@ export {
   type DaemonWorkspaceFileBytes,
   type DaemonWorkspaceFileEditRequest,
   type DaemonWorkspaceFileEditResult,
+  type DaemonWorkspaceFileUploadRequest,
+  type DaemonWorkspaceFileUploadResult,
   type DaemonWorkspaceFileWriteRequest,
   type DaemonWorkspaceFileWriteResult,
   type DaemonWorkspaceMemoryDreamOptions,
@@ -392,6 +418,11 @@ export type {
 export type { ServeBridgeMcpServerOptions } from './daemon-mcp/serve-bridge/index.js';
 
 export type { QueryOptions } from './query/createQuery.js';
+export type {
+  EffortOverride,
+  EffortStatus,
+  EffortTier,
+} from './types/types.js';
 export type { LogLevel, LoggerConfig, ScopedLogger } from './utils/logger.js';
 
 export type {

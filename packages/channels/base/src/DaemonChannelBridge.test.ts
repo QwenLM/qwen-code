@@ -9,6 +9,10 @@ import {
   type DaemonChannelLoopMcpHost,
   type DaemonChannelSessionClient,
 } from './DaemonChannelBridge.js';
+import {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from './ChannelAgentBridge.js';
 
 class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
   private events: DaemonChannelEvent[] = [];
@@ -131,6 +135,73 @@ function turnCompleteEvent(sessionId = 'session-1'): DaemonChannelEvent {
 }
 
 describe('DaemonChannelBridge', () => {
+  it('deletes an internal session through its owning workspace', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const deleteSessionData = vi.fn().mockResolvedValue(undefined);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      deleteSessionData,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await bridge.deleteSessionData?.('session-1');
+
+    expect(deleteSessionData).toHaveBeenCalledWith('session-1');
+    expect(bridge.listSessions()).toEqual([]);
+    events.close();
+    bridge.stop();
+  });
+
+  it('deletes session data after the live binding has already died', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const deleteSessionData = vi.fn().mockResolvedValue(undefined);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      deleteSessionData,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    events.push({
+      v: 1,
+      type: 'session_died',
+      data: { sessionId: 'session-1', reason: 'child_exit' },
+    });
+    await waitFor(() => expect(bridge.listSessions()).toEqual([]));
+
+    await bridge.deleteSessionData?.('session-1');
+
+    expect(deleteSessionData).toHaveBeenCalledWith('session-1');
+    events.close();
+    bridge.stop();
+  });
+
+  it('keeps the live binding when permanent deletion fails', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const deleteSessionData = vi.fn().mockRejectedValue(new Error('locked'));
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      deleteSessionData,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await expect(bridge.deleteSessionData?.('session-1')).rejects.toThrow(
+      'locked',
+    );
+
+    expect(bridge.listSessions()).toHaveLength(1);
+    events.close();
+    bridge.stop();
+  });
+
   it('registers the loop MCP server for the exact daemon session', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -243,6 +314,7 @@ describe('DaemonChannelBridge', () => {
     expect(session.prompt).toHaveBeenCalledWith(
       {
         prompt: [{ type: 'text', text: 'summarize' }],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
       },
       expect.any(AbortSignal),
     );
@@ -683,6 +755,45 @@ describe('DaemonChannelBridge', () => {
       expect(backgroundResponses).toEqual([
         ['session-1', 'Background final answer.'],
       ]);
+    });
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('emits discrete vision bridge notices as text chunks', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const textChunks: Array<[string, string]> = [];
+    bridge.on('textChunk', (sessionId, text) => {
+      textChunks.push([sessionId, text]);
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Vision bridge cancelled.' },
+          _meta: {
+            source: 'vision_bridge_notice',
+            qwenDiscreteMessage: true,
+          },
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(textChunks).toEqual([['session-1', 'Vision bridge cancelled.']]);
     });
 
     events.close();
@@ -1849,6 +1960,7 @@ describe('DaemonChannelBridge', () => {
           { type: 'image', data: 'base64-image', mimeType: 'image/png' },
           { type: 'text', text: 'describe' },
         ],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
       },
       expect.any(AbortSignal),
     );
@@ -1861,6 +1973,78 @@ describe('DaemonChannelBridge', () => {
     });
     await expect(promptPromise).rejects.toThrow('aborted');
 
+    events.close();
+    bridge.stop();
+  });
+
+  it('forwards a distinct user-facing prompt text in daemon metadata', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      promptAuthorization: 'worker-token',
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const promptPromise = bridge.prompt(
+      'session-1',
+      'internal context\n\nhello',
+      {
+        displayText: 'hello',
+      },
+    );
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'internal context\n\nhello' }],
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
+          'qwen.daemon.promptDisplayText': 'hello',
+        },
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.push(turnCompleteEvent());
+    await promptPromise;
+    events.close();
+    bridge.stop();
+  });
+
+  it('presents the prompt authorization even without a display text', async () => {
+    // The daemon validates the token for the channel-turn classification
+    // too; a channel prompt without display text still needs it to keep
+    // its classification (and the loop-rejection opt-out that rides it).
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      promptAuthorization: 'worker-token',
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const promptPromise = bridge.prompt('session-1', 'hello');
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
+        },
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.push(turnCompleteEvent());
+    await promptPromise;
     events.close();
     bridge.stop();
   });

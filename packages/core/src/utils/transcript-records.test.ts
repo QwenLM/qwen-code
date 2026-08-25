@@ -7,6 +7,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   prepareTranscriptRecords,
+  projectUserTranscriptForDisplay,
+  wrapUserPromptSubmitContext,
   type TranscriptRecordPreparationError,
 } from './transcript-records.js';
 
@@ -155,6 +157,46 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts session model metadata as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('model', null, {
+        type: 'system',
+        subtype: 'session_model',
+        message: undefined,
+        systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+      }),
+      record('root', 'model'),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'model',
+        path: 'subtype',
+      }),
+    );
+  });
+
+  it('accepts the workflow agent retry marker as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('root', null),
+      record('retry', 'root', {
+        type: 'system',
+        subtype: 'agent_retry',
+        message: undefined,
+        systemPayload: { attempt: 2 },
+      }),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'retry',
+        path: 'subtype',
+      }),
+    );
+  });
+
   it('accepts Realtime dialogue as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('realtime-user', null, {
@@ -177,6 +219,28 @@ describe('prepareTranscriptRecords', () => {
       record('goal-runtime', 'goal-state', {
         subtype: 'goal_runtime',
       }),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        path: 'subtype',
+      }),
+    );
+  });
+
+  it('accepts branch_checkpoint as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('checkpoint', null, {
+        type: 'system',
+        subtype: 'branch_checkpoint',
+        message: undefined,
+        systemPayload: {
+          assistantRecordUuid: 'a1b2c3d4-e5f6-1a2b-8c3d-4e5f6a7b8c9d',
+          checkpointUuid: 'f9e8d7c6-b5a4-1f2e-9a3b-4c5d6e7f8a9b',
+        },
+      }),
+      record('root', 'checkpoint'),
     ]);
 
     expect(prepared.diagnostics).not.toContainEqual(
@@ -214,5 +278,113 @@ describe('prepareTranscriptRecords', () => {
         code: 'leaf_not_found',
       }),
     );
+  });
+});
+
+describe('projectUserTranscriptForDisplay', () => {
+  it('uses display metadata even when the display text is empty', () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'data' },
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: {
+          parts: [
+            imagePart,
+            { text: wrapUserPromptSubmitContext('hook context') },
+          ],
+        },
+        systemPayload: { displayText: '', hookContext: 'hook context' },
+      }),
+    ).toEqual({ displayText: '', parts: [imagePart] });
+  });
+
+  it('uses released single-field display metadata when the final tag proves provenance', () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'data' },
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: {
+          parts: [
+            imagePart,
+            { text: 'expanded model prompt' },
+            { text: wrapUserPromptSubmitContext('hook context') },
+          ],
+        },
+        systemPayload: { displayText: 'raw @file prompt' },
+      }),
+    ).toEqual({ displayText: 'raw @file prompt', parts: [imagePart] });
+  });
+
+  it('does not treat notification display labels as user prompt metadata', () => {
+    const modelPart = { text: 'notification model text' };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [modelPart] },
+        systemPayload: { displayText: 'Background agent completed' },
+      }),
+    ).toEqual({ displayText: undefined, parts: [modelPart] });
+  });
+
+  it('removes only a complete final tag-only context part', () => {
+    const userPart = { text: 'user text' };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: {
+          parts: [
+            userPart,
+            { text: wrapUserPromptSubmitContext('hook context') },
+          ],
+        },
+      }),
+    ).toEqual({ displayText: undefined, parts: [userPart] });
+  });
+
+  it('treats non-object system payloads as absent metadata', () => {
+    const userPart = { text: 'user text' };
+    const taggedPart = {
+      text: wrapUserPromptSubmitContext('hook context'),
+    };
+
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [userPart, taggedPart] },
+        systemPayload: null,
+      }),
+    ).toEqual({ displayText: undefined, parts: [userPart] });
+  });
+
+  it('preserves legacy bare context and user-authored tag-like text', () => {
+    const legacyParts = [{ text: 'user text' }, { text: 'bare hook context' }];
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: legacyParts },
+      }),
+    ).toEqual({ displayText: undefined, parts: legacyParts });
+
+    const userAuthoredTag = {
+      text: wrapUserPromptSubmitContext('user-authored text'),
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [userAuthoredTag] },
+      }),
+    ).toEqual({ displayText: undefined, parts: [userAuthoredTag] });
+  });
+
+  it('does not trust bare displayText without a final context tag', () => {
+    const taggedPart = {
+      text: '<qwen:user-prompt-submit-context>user-authored text</qwen:user-prompt-submit-context>',
+    };
+    expect(
+      projectUserTranscriptForDisplay({
+        message: { parts: [{ text: 'user text' }, taggedPart] },
+        systemPayload: { displayText: 'notification label' },
+      }),
+    ).toEqual({
+      displayText: undefined,
+      parts: [{ text: 'user text' }, taggedPart],
+    });
   });
 });

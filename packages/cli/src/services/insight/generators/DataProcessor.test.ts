@@ -112,6 +112,108 @@ describe('DataProcessor', () => {
       expect(result).toContain('[User]: Hello, world!');
     });
 
+    it('should analyze clean user display text instead of hook context', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'expanded model prompt' },
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              },
+            ],
+          },
+          systemPayload: {
+            displayText: 'raw @file prompt',
+            hookContext: 'hook-only context',
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: raw @file prompt');
+      expect(result).not.toContain('hook-only context');
+    });
+
+    it('should keep notification model text instead of its display label', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          subtype: 'notification',
+          message: {
+            role: 'user',
+            parts: [{ text: 'notification model text' }],
+          },
+          systemPayload: { displayText: 'Background agent completed' },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: notification model text');
+      expect(result).not.toContain('Background agent completed');
+    });
+
+    it('should strip a complete final tag-only context part without metadata', () => {
+      const records: ChatRecord[] = [
+        {
+          sessionId: 'test-session',
+          timestamp: new Date().toISOString(),
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [
+              { text: 'user prompt' },
+              {
+                text: [
+                  '<qwen:user-prompt-submit-context>',
+                  'hook-only context',
+                  '</qwen:user-prompt-submit-context>',
+                ].join('\n'),
+              },
+            ],
+          },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const result = (
+        dataProcessor as unknown as {
+          formatRecordsForAnalysis(records: ChatRecord[]): string;
+        }
+      ).formatRecordsForAnalysis(records);
+
+      expect(result).toContain('[User]: user prompt');
+      expect(result).not.toContain('hook-only context');
+    });
+
     it('should format assistant text messages correctly', () => {
       const records: ChatRecord[] = [
         {
@@ -979,6 +1081,57 @@ describe('DataProcessor', () => {
       expect(paths.some((p) => p.includes('chat1.jsonl'))).toBe(true);
       expect(paths.some((p) => p.includes('chat2.jsonl'))).toBe(true);
       expect(paths.some((p) => p.includes('chat3.jsonl'))).toBe(true);
+    });
+
+    it('should skip prompt terminal ledger sidecars when scanning chat files', async () => {
+      mockedFs.readdir.mockResolvedValueOnce(['project1'] as unknown as Awaited<
+        ReturnType<typeof fs.readdir>
+      >);
+
+      mockedFs.stat.mockImplementation((path) => {
+        const pathStr = String(path);
+        if (pathStr.includes('project1') && !pathStr.includes('chats')) {
+          return Promise.resolve({
+            isDirectory: () => true,
+            mtimeMs: 1234567890,
+          } as Awaited<ReturnType<typeof fs.stat>>);
+        }
+        if (pathStr.endsWith('.jsonl')) {
+          return Promise.resolve({
+            isDirectory: () => false,
+            mtimeMs: 1234567890,
+          } as Awaited<ReturnType<typeof fs.stat>>);
+        }
+        throw new Error('Unexpected path: ' + pathStr);
+      });
+
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      mockedFs.readdir.mockImplementation((path) => {
+        const pathStr = String(path);
+        if (pathStr.endsWith('chats')) {
+          return Promise.resolve([
+            `${sessionId}.jsonl`,
+            `${sessionId}.ledger.jsonl`,
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      const result = await (
+        dataProcessor as unknown as {
+          scanChatFiles(
+            baseDir: string,
+          ): Promise<Array<{ path: string; mtime: number }>>;
+        }
+      ).scanChatFiles('/base');
+
+      // The ledger sidecar is not a transcript: only the real session
+      // JSONL may be selected.
+      expect(result).toHaveLength(1);
+      expect(result[0].path).toContain(`${sessionId}.jsonl`);
+      expect(result[0].path).not.toContain('.ledger.jsonl');
     });
 
     it('should skip projects without chats directory', async () => {

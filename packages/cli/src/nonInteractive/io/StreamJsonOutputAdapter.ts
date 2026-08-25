@@ -29,6 +29,7 @@ import {
   type ResultOptions,
   type JsonOutputAdapterInterface,
 } from './BaseJsonOutputAdapter.js';
+import { observeHeadlessToolResultWire } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Stream JSON output adapter that emits messages immediately
@@ -67,7 +68,11 @@ export class StreamJsonOutputAdapter
     }
 
     // Emit messages immediately in stream mode
-    this.outputStream.write(`${JSON.stringify(message)}\n`);
+    const frame = `${JSON.stringify(message)}\n`;
+    if ('session_id' in message) {
+      observeHeadlessToolResultWire(message as CLIMessage, frame);
+    }
+    this.outputStream.write(frame);
   }
 
   /**

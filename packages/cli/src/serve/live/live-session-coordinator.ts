@@ -42,10 +42,11 @@ import type { LiveProviderCredential } from './provider-credentials.js';
 import {
   isCompatibleLiveSessionSource,
   LIVE_SESSION_SOURCE_PREFIX,
-} from './session-source.js';
+} from '../../runtime/live-session-source.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
 
-export { LIVE_SESSION_SOURCE_PREFIX } from './session-source.js';
+export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
 
 const MAX_COORDINATOR_REQUEST_CHARS = 32_000;
 const MAX_COORDINATOR_RESULT_CHARS = 48_000;
@@ -1255,9 +1256,56 @@ export class LiveSessionCoordinator {
       event.request,
       event.activeTranscript,
     );
+    const runAsNextTurn = async (notifyAdmission: boolean) => {
+      if (
+        !this.isCurrentSocket(context, generation) ||
+        context.realtime !== source
+      ) {
+        return false;
+      }
+      let admitted = false;
+      await this.runCoordinatorTurn(
+        context,
+        locator,
+        event.request,
+        modelPrompt,
+        () => {
+          admitted = true;
+          if (notifyAdmission) onPromptAdmitted();
+        },
+        (message) => {
+          if (this.isCurrentSocket(context, generation)) {
+            source.sendBackendContext(message);
+          }
+        },
+      );
+      return admitted;
+    };
+    // `queueOnly`: if the turn already settled, promotion would run this
+    // steering as a bare prompt no coordinator collector subscribes to — the
+    // response would never reach the Realtime source, and no turn deadline
+    // would apply. Rejecting the idle case keeps the `runCoordinatorTurn`
+    // fallback in charge of the next turn.
     const routed = runtime.bridge.enqueueMidTurnMessage(
       locator.sessionId,
       modelPrompt,
+      undefined,
+      undefined,
+      {
+        queueOnly: true,
+        onSettledWithoutDrain: () => {
+          void runAsNextTurn(false).catch((error: unknown) => {
+            if (
+              this.isCurrentSocket(context, generation) &&
+              context.realtime === source
+            ) {
+              source.sendBackendContext(
+                `The Qwen Code agent could not complete the request: ${errorMessage(error)}`,
+              );
+            }
+          });
+        },
+      },
     );
     if (routed.accepted) {
       onPromptAdmitted();
@@ -1265,29 +1313,7 @@ export class LiveSessionCoordinator {
     }
 
     await activeHandoff.turnComplete;
-    if (
-      !this.isCurrentSocket(context, generation) ||
-      context.realtime !== source
-    ) {
-      return false;
-    }
-    let admitted = false;
-    await this.runCoordinatorTurn(
-      context,
-      locator,
-      event.request,
-      modelPrompt,
-      () => {
-        admitted = true;
-        onPromptAdmitted();
-      },
-      (message) => {
-        if (this.isCurrentSocket(context, generation)) {
-          source.sendBackendContext(message);
-        }
-      },
-    );
-    return admitted;
+    return runAsNextTurn(true);
   }
 
   private async handleDelegate(
@@ -1382,7 +1408,7 @@ export class LiveSessionCoordinator {
     if (candidate) {
       try {
         const resumed = await runtime.bridge.resumeSession({
-          sessionId: candidate.sessionId,
+          sessionId: normalizeSessionIdForLookup(candidate.sessionId),
           workspaceCwd: runtime.workspaceCwd,
           ...(candidate.parentSessionId
             ? { parentSessionId: candidate.parentSessionId }
@@ -1537,9 +1563,10 @@ export class LiveSessionCoordinator {
     if (!sessionClosed) return;
     if (removeFreshTranscript) {
       try {
-        await new SessionService(runtime.workspaceCwd).removeSession(
-          session.sessionId,
-        );
+        const transcriptRemoved = await new SessionService(
+          runtime.workspaceCwd,
+        ).removeSession(session.sessionId);
+        if (transcriptRemoved) bridge.markSessionCatalogChanged();
       } catch {
         /* preserve the original setup failure */
       }

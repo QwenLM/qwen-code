@@ -15,7 +15,7 @@ from typing import (
 
 from typing_extensions import NotRequired
 
-PermissionMode: TypeAlias = Literal["default", "plan", "auto-edit", "yolo"]
+PermissionMode: TypeAlias = Literal["default", "plan", "auto-edit", "auto", "yolo"]
 AuthType: TypeAlias = Literal[
     "openai",
     "openai-responses",
@@ -25,6 +25,17 @@ AuthType: TypeAlias = Literal[
     "vertex-ai",
 ]
 Effort: TypeAlias = Literal["low", "medium", "high", "xhigh", "max"]
+
+
+class EffortOverride(TypedDict):
+    source: Literal["extra_body", "samplingParams"]
+    field: Literal["enable_thinking", "reasoning_effort", "thinking_budget"]
+
+
+class EffortStatus(TypedDict):
+    applied: bool
+    override: EffortOverride | None
+    reason: NotRequired[str]
 
 
 class PermissionSuggestion(TypedDict):

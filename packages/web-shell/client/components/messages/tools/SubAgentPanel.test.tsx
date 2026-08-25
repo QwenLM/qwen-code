@@ -6,12 +6,13 @@ import { I18nProvider } from '../../../i18n';
 import type { ACPToolCall } from '../../../adapters/types';
 import { formatTimestamp } from '../../MessageTimestamp';
 
-// SubAgentPanel pulls in ToolGroup, which imports App only for
-// CompactModeContext; loading the real App module would drag the whole
-// application graph into this unit test.
-vi.mock('../../../App', async () => {
+// SubAgentPanel pulls in ToolGroup, which reads both todo contexts.
+vi.mock('../../../WebShellContexts', async () => {
   const { createContext } = await import('react');
-  return { CompactModeContext: createContext(false) };
+  return {
+    TodoTimelineContext: createContext(new Map()),
+    TodoDetailContext: createContext(new Map()),
+  };
 });
 
 const { SubAgentPanel } = await import('./SubAgentPanel');
@@ -55,6 +56,21 @@ function makeAgentWithSubTool(subTool: ACPToolCall): ACPToolCall {
 }
 
 describe('SubAgentPanel sub-tool timestamps', () => {
+  it('marks a failed sub-tool with an error icon instead of text', () => {
+    const container = renderPanel(
+      makeAgentWithSubTool({
+        callId: 'sub-1',
+        toolName: 'Read',
+        status: 'failed',
+      }),
+    );
+
+    const errorIcon = container.querySelector('[class*="iconError"]');
+    expect(errorIcon).not.toBeNull();
+    expect(errorIcon?.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('Failed');
+  });
+
   it('renders completed result content through assistant markdown', () => {
     const container = renderPanel({
       callId: 'agent-1',

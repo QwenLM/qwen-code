@@ -3,13 +3,17 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import type {
-  AvailableCommand,
-  BridgeSessionInfo,
-  ChannelAgentBridge,
-  ChannelAgentBridgeSessionOptions,
-  ChannelLoopToolHandler,
-  ToolCallEvent,
+import {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+  type AvailableCommand,
+  type BridgeSessionInfo,
+  type ChannelAgentBridge,
+  type ChannelAgentBridgePromptOptions,
+  type ChannelAgentBridgeSessionOptions,
+  type ChannelLoopToolHandler,
+  type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import { readAvailableCommandAltNames } from './AcpBridge.js';
 import {
@@ -35,6 +39,7 @@ export interface DaemonChannelSessionClient {
   prompt(
     req: {
       prompt: Array<Record<string, unknown>>;
+      _meta?: Record<string, unknown>;
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
@@ -84,6 +89,8 @@ export interface DaemonChannelBridgeOptions {
   modelServiceId?: string;
   sessionScope?: SessionScope;
   channelLoopMcpHost?: DaemonChannelLoopMcpHost;
+  deleteSessionData?: (sessionId: string) => Promise<void>;
+  promptAuthorization?: string;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -231,10 +238,18 @@ export class DaemonChannelBridge
   private lifecycleGeneration = 0;
   private latestAvailableCommandsSessionId: string | undefined;
   private lastError: unknown;
+  readonly deleteSessionData?: (sessionId: string) => Promise<void>;
 
   constructor(options: DaemonChannelBridgeOptions) {
     super();
     this.options = options;
+    const deleteSessionData = options.deleteSessionData;
+    if (deleteSessionData) {
+      this.deleteSessionData = async (sessionId) => {
+        await deleteSessionData(sessionId);
+        this.removeSessionBinding(sessionId);
+      };
+    }
     this.on('error', (error) => {
       this.lastError = error;
     });
@@ -346,7 +361,7 @@ export class DaemonChannelBridge
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const session = this.ensureSession(sessionId);
     if (this.activePrompts.has(sessionId)) {
@@ -402,9 +417,31 @@ export class DaemonChannelBridge
       });
     }
     prompt.push({ type: 'text', text });
+    // Always presented: the daemon validates it for the channel-turn
+    // classification as well as the display projection, and channel
+    // prompts without display text still need the classification.
+    const promptAuthorization = this.options.promptAuthorization;
 
     try {
-      const result = await session.prompt({ prompt }, controller.signal);
+      const result = await session.prompt(
+        {
+          prompt,
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            ...(promptAuthorization
+              ? {
+                  [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: promptAuthorization,
+                }
+              : {}),
+            ...(options?.displayText !== undefined
+              ? {
+                  [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+                }
+              : {}),
+          },
+        },
+        controller.signal,
+      );
       // Prefer turn_complete for deterministic chunk collection (SSE path).
       // Fall back to one event-loop tick for non-SSE prompt paths (blocking
       // HTTP, non-202 responses) where turn_complete never arrives.
@@ -700,6 +737,8 @@ export class DaemonChannelBridge
             text
           ) {
             this.emit('backgroundResponse', sessionId, text);
+          } else if (meta['source'] === 'vision_bridge_notice' && text) {
+            this.emit('textChunk', sessionId, text);
           }
           break;
         }

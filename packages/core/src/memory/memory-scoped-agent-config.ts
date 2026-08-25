@@ -13,7 +13,7 @@ import type {
   PermissionDecision,
 } from '../permissions/types.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
+import { isShellCommandReadOnlyASTInDirectory } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
   AUTO_MEMORY_PINNED_DIRNAME,
@@ -28,6 +28,7 @@ type MemoryScopedPermissionManager = Pick<
   | 'findMatchingDenyRule'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
+  | 'isPermissionsAllowListActive'
   | 'isToolEnabled'
 >;
 
@@ -250,8 +251,9 @@ async function evaluateScopedDecision(
       if (!opts.allowShell || !ctx.command) {
         return 'deny';
       }
-      const isReadOnly = await isShellCommandReadOnlyAST(
+      const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
         stripShellWrapper(ctx.command),
+        ctx.cwd ?? projectRoot,
       );
       return isReadOnly ? 'allow' : 'deny';
     }
@@ -399,6 +401,14 @@ export function createMemoryScopedAgentConfig(
         return basePm.isToolEnabled(toolName);
       }
       return true;
+    },
+    // The scheduler's permission-denied message branch calls this on
+    // whatever `getPermissionManager()` returns (#9827). Without the
+    // delegation a shim-rejected call under an active allowlist threw
+    // `TypeError: ... is not a function` instead of reaching the
+    // designed permission error.
+    isPermissionsAllowListActive(): boolean {
+      return basePm?.isPermissionsAllowListActive() ?? false;
     },
   };
 

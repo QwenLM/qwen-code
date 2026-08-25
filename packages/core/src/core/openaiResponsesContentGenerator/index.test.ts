@@ -14,13 +14,6 @@ import {
   vi,
 } from 'vitest';
 
-const mockTokenizer = {
-  calculateTokens: vi.fn(),
-};
-vi.mock('../../utils/request-tokenizer/index.js', () => ({
-  RequestTokenEstimator: vi.fn(() => mockTokenizer),
-}));
-
 const mockExecute = vi.fn();
 const mockExecuteStream = vi.fn();
 const mockConnectStream = vi.fn();
@@ -201,28 +194,6 @@ describe('OpenAIResponsesContentGenerator', () => {
       'prompt-1',
       undefined,
     );
-  });
-
-  it('countTokens uses the request tokenizer', async () => {
-    mockTokenizer.calculateTokens.mockResolvedValue({ totalTokens: 42 });
-    const result = await generator.countTokens({
-      model: 'gpt-5',
-      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-    });
-    expect(result).toEqual({ totalTokens: 42 });
-  });
-
-  it('countTokens falls back to a character-based estimate on tokenizer failure', async () => {
-    mockTokenizer.calculateTokens.mockRejectedValue(new Error('boom'));
-    const result = await generator.countTokens({
-      model: 'gpt-5',
-      contents: [{ role: 'user', parts: [{ text: 'hi' }] }],
-    });
-    expect(result.totalTokens).toBe(11);
-  });
-
-  it('useSummarizedThinking returns true', () => {
-    expect(generator.useSummarizedThinking()).toBe(true);
   });
 
   describe('embedContent', () => {

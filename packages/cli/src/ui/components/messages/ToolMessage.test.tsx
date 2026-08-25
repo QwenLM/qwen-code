@@ -193,6 +193,55 @@ describe('<ToolMessage />', () => {
     expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
   });
 
+  it('routes a findings_list result to the findings renderer', () => {
+    // Pins the ToolMessage discriminator itself: FindingsDisplay has its own
+    // render tests, but without this the routing branch could be removed and
+    // every test would stay green (the display would fall through to the
+    // JSON-string path, which never joins file and line as `file:line`).
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReportFindings"
+        resultDisplay={{
+          type: 'findings_list',
+          level: 'high',
+          findings: [
+            {
+              id: 'R1-1',
+              severity: 'Critical',
+              confidence: 'high',
+              file: 'src/foo.ts',
+              line: 42,
+              // shortSummary differs from summary so this also pins that the
+              // routed renderer shows the compact label, not the summary.
+              summary:
+                'the provider returns the wrong value on every cold-cache lookup',
+              shortSummary: 'cold-cache wrong return',
+              failureScenario: 'first call after start returns undefined',
+            },
+            {
+              severity: 'Suggestion',
+              confidence: 'low',
+              file: 'src/bar.ts',
+              summary: 'the helper is duplicated between bar.ts and baz.ts',
+              shortSummary: 'duplicated helper',
+              failureScenario: 'two copies drift',
+            },
+          ],
+        }}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('src/foo.ts:42');
+    expect(output).toContain('cold-cache wrong return');
+    expect(output).toContain('(low confidence)');
+    expect(output).not.toContain('"findings"'); // not the JSON fallback
+    expect(output.replace(/\s+/g, ' ')).not.toContain(
+      'wrong value on every cold-cache lookup',
+    );
+  });
+
   it('renders inline images returned by a tool', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage
@@ -665,6 +714,80 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
       expect(lastFrame()).toContain('?');
+    });
+
+    it('hides a tool description repeated in a plain-text Hook confirmation', () => {
+      const content = `DESCRIPTION_TOP \u200b${'middle '.repeat(40)} DESCRIPTION_TAIL`;
+      const escapedContent = JSON.stringify(content).replace(
+        '\u200b',
+        '\\u200b',
+      );
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={JSON.stringify({ content })}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: `Complete content is shown here:\n${escapedContent}`,
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={50}
+        />,
+        StreamingState.Idle,
+      );
+
+      const frame = lastFrame();
+      const header = frame?.split('\n')[0];
+      expect(header).toContain('test-tool');
+      expect(header).not.toContain('DESCRIPTION_TOP');
+      expect(header).not.toContain('DESCRIPTION_TAIL');
+    });
+
+    it('does not hide a tool description absent from the Hook confirmation', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={`COMMAND_TOP ${'middle '.repeat(20)} COMMAND_TAIL`}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: 'A hook requires approval.',
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={50}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('COMMAND_TOP');
+      expect(lastFrame()).toContain('COMMAND_TAIL');
+    });
+
+    it('keeps a repeated string description when another argument is not shown', () => {
+      const content = 'visible content';
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          status={ToolCallStatus.Confirming}
+          description={JSON.stringify({ content, destructive: true })}
+          confirmationDetails={{
+            type: 'info',
+            title: 'Hook confirmation',
+            prompt: `Complete content is shown here:\n${JSON.stringify(content)}`,
+            renderPromptAsPlainText: true,
+            onConfirm: vi.fn(),
+          }}
+          contentWidth={80}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('destructive');
     });
 
     it('shows - for Canceled status', () => {
@@ -1726,6 +1849,31 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('MockMarkdown:# My Plan');
     expect(output).toContain('- Step 1: Do something');
     expect(output).toContain('- Step 2: Do another thing');
+  });
+
+  it('renders MCP App fallback text instead of stringifying HTML', () => {
+    const html = `<main>PROBE_MCP_APP_HTML${'x'.repeat(200)}</main>`;
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        forceShowResult
+        resultDisplay={{
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html,
+          toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('MockMarkdown:Dashboard ready');
+    expect(output).not.toContain('PROBE_MCP_APP_HTML');
+    expect(output).not.toContain('mcp_app');
   });
 
   it('renders approved plan content with approval message', () => {

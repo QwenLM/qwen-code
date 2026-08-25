@@ -197,6 +197,13 @@ describe('getPillLabel', () => {
     );
   });
 
+  it.each(['pausing', 'paused'] as const)(
+    'keeps an active %s workflow out of the done tally',
+    (status) => {
+      expect(getPillLabel([workflowEntry({ status })])).toBe('1 workflow');
+    },
+  );
+
   it('uses generic done form when all entries are terminal', () => {
     expect(
       getPillLabel([agentEntry({ agentId: 'a', status: 'completed' })]),

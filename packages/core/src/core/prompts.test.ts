@@ -15,6 +15,10 @@ import {
   getCompressionPrompt,
   resolveInteractionMode,
 } from './prompts.js';
+import {
+  BUILT_IN_OUTPUT_STYLES,
+  getBuiltInOutputStyle,
+} from './output-styles.js';
 import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
@@ -71,6 +75,15 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
     expect(prompt).toContain(
       'request explicit approval only when the current interaction mode can receive it',
+    );
+  });
+
+  it('identifies UserPromptSubmit hook context as distinct from user input', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Text inside a `<qwen:user-prompt-submit-context>` tag is model context added by a configured `UserPromptSubmit` hook, not user input.',
     );
   });
 
@@ -566,6 +579,207 @@ describe('Core System Prompt (prompts.ts)', () => {
       );
     });
   });
+
+  describe('outputStyle parameter', () => {
+    const concise = getBuiltInOutputStyle('Concise')!;
+    const learning = getBuiltInOutputStyle('Learning')!;
+
+    it('leaves the prompt untouched when no style is active', () => {
+      const prompt = getCoreSystemPrompt();
+      for (const style of BUILT_IN_OUTPUT_STYLES) {
+        expect(prompt).not.toContain(`# Output Style: ${style.name}`);
+      }
+    });
+
+    it('appends the style section to the end of the base prompt', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt).toContain('# Output Style: Concise');
+      // The style refines the mandates, so it has to land after them...
+      expect(prompt.indexOf('# Output Style: Concise')).toBeGreaterThan(
+        prompt.indexOf('# Core Mandates'),
+      );
+      // ...and the base prompt must still be intact.
+      expect(prompt).toContain('# Core Mandates');
+    });
+
+    it('keeps the style ahead of the context and volatile layers', () => {
+      const prompt = getCoreSystemPrompt(
+        'MEMORY_MARKER',
+        undefined,
+        'APPEND_MARKER',
+        'interactive',
+        concise,
+      );
+      const styleIndex = prompt.indexOf('# Output Style: Concise');
+      expect(styleIndex).toBeGreaterThan(-1);
+      expect(styleIndex).toBeLessThan(prompt.indexOf('MEMORY_MARKER'));
+      expect(styleIndex).toBeLessThan(prompt.indexOf('APPEND_MARKER'));
+    });
+
+    it('is ignored when QWEN_SYSTEM_MD replaces the base prompt', () => {
+      vi.stubEnv('QWEN_SYSTEM_MD', '/custom/path/system.md');
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('custom system prompt');
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt).toContain('custom system prompt');
+      expect(prompt).not.toContain('# Output Style: Concise');
+    });
+
+    it('points the identity sentence at the style when one is active', () => {
+      const plain = getCoreSystemPrompt();
+      expect(plain).toContain('specializing in software engineering tasks');
+
+      const styled = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(styled).toContain('responding according to your "Output Style"');
+      expect(styled).not.toContain(
+        'specializing in software engineering tasks',
+      );
+    });
+
+    it('drops only the software-engineering section for keepCodingInstructions: false', () => {
+      const nonCoding = {
+        ...concise,
+        name: 'NonCoding',
+        keepCodingInstructions: false,
+      };
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        nonCoding,
+      );
+      expect(prompt).not.toContain('## Software Engineering Tasks');
+      // Everything else the base prompt carries must survive — dropping the
+      // safety rules along with the workflow guidance would be a regression.
+      expect(prompt).toContain('# Core Mandates');
+      expect(prompt).toContain('# Executing actions with care');
+      expect(prompt).toContain('## Using Your Tools');
+      expect(prompt).toContain('## Tone and Style (CLI Interaction)');
+      expect(prompt).toContain('# Output Style: NonCoding');
+    });
+
+    it('keeps the software-engineering section under a normal style', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt).toContain('## Software Engineering Tasks');
+    });
+
+    it('omits Learning from headless prompts that cannot receive a reply', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'headless',
+        learning,
+      );
+
+      expect(prompt).toContain('This is a non-interactive, single-turn run');
+      expect(prompt).toContain('specializing in software engineering tasks');
+      expect(prompt).not.toContain(
+        'responding according to your "Output Style"',
+      );
+      expect(prompt).not.toContain('# Output Style: Learning');
+      expect(prompt).not.toContain('TODO(human)');
+      expect(prompt).not.toContain('until the user has written their piece');
+    });
+
+    it('keeps Learning in interactive prompts', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        learning,
+      );
+
+      expect(prompt).toContain('# Output Style: Learning');
+      expect(prompt).toContain('TODO(human)');
+    });
+
+    it('keeps Learning in acp prompts', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'acp',
+        learning,
+      );
+
+      expect(prompt).toContain('# Output Style: Learning');
+    });
+
+    it('keeps the style section under a QWEN_SYSTEM_IDENTITY_MD override', () => {
+      // The override owns the identity sentence verbatim, so the styled
+      // wording is skipped there — but the style itself still has to land.
+      const identityPath = path.resolve('/custom/identity.md');
+      const customIdentity =
+        'You are Acme Code, an interactive CLI agent for Acme Corp.';
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockImplementation(
+        (p) => path.resolve(String(p)) === identityPath,
+      );
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === identityPath) {
+          return customIdentity;
+        }
+        throw new Error(`unexpected read: ${String(p)}`);
+      });
+
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      expect(prompt.startsWith(customIdentity)).toBe(true);
+      expect(prompt).not.toContain(
+        'responding according to your "Output Style"',
+      );
+      expect(prompt).toContain('# Output Style: Concise');
+    });
+
+    it('does not bake the style into the QWEN_WRITE_SYSTEM_MD dump', () => {
+      // The dump is meant to be reusable as a QWEN_SYSTEM_MD base; baking the
+      // style in would apply it twice when that file is fed back.
+      vi.stubEnv('QWEN_WRITE_SYSTEM_MD', 'true');
+      getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'interactive',
+        concise,
+      );
+      const [, written] = vi.mocked(fs.writeFileSync).mock.calls[0];
+      expect(written).not.toContain('# Output Style: Concise');
+      // ...and the dumped identity sentence is the unstyled one.
+      expect(written).toContain('specializing in software engineering tasks');
+    });
+  });
 });
 
 describe('Model-specific tool call formats', () => {
@@ -811,6 +1025,9 @@ describe('getPlanModeSystemReminder', () => {
       'wrappers, quoting tricks, aliases, or obfuscation',
     );
     expect(result).toContain('Pivot to read-only');
+    // list_directory is opt-in (off by default) — the reminder must not steer
+    // the model toward a tool that is not registered.
+    expect(result).not.toContain('list_directory');
     expect(result).toContain('does not approve the plan');
     expect(result).toContain('exit Plan mode');
   });

@@ -9,10 +9,18 @@ import {
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
-import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import type {
+  ContentGeneratorConfig,
+  PromptCacheSharingParameters,
+} from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
+import {
+  applyOfficialOpenAIPromptCaching,
+  isOfficialOpenAIEndpoint,
+} from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
+import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -45,8 +53,105 @@ import {
   reportOpenAiResponse,
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
+import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
+import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+const OPENAI_STRICT_SCHEMA_KEYS = new Set([
+  'type',
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'description',
+  'enum',
+]);
+const OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS = new Set([
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'uniqueItems',
+]);
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeSchemaType(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toLowerCase();
+  return [
+    'object',
+    'array',
+    'string',
+    'number',
+    'integer',
+    'boolean',
+    'null',
+  ].includes(normalized)
+    ? normalized
+    : undefined;
+}
+
+function normalizeOpenAIStrictSchema(
+  schema: unknown,
+): Record<string, unknown> | undefined {
+  const source = asObject(schema);
+  if (!source) return undefined;
+
+  const type = normalizeSchemaType(source['type']);
+  if (!type) return undefined;
+
+  const normalized: Record<string, unknown> = { type };
+  for (const [key, value] of Object.entries(source)) {
+    if (
+      key === 'type' ||
+      OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS.has(key) ||
+      !OPENAI_STRICT_SCHEMA_KEYS.has(key)
+    ) {
+      continue;
+    }
+    normalized[key] = value;
+  }
+
+  if (type === 'object') {
+    const properties = asObject(source['properties']);
+    if (!properties) return undefined;
+
+    const normalizedProperties: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(properties)) {
+      const property = normalizeOpenAIStrictSchema(value);
+      if (!property) return undefined;
+      normalizedProperties[key] = property;
+    }
+
+    const propertyKeys = Object.keys(normalizedProperties);
+    const required = source['required'];
+    if (
+      !Array.isArray(required) ||
+      !propertyKeys.every((key) => required.includes(key)) ||
+      required.length !== propertyKeys.length
+    ) {
+      return undefined;
+    }
+
+    normalized['properties'] = normalizedProperties;
+    normalized['required'] = required;
+    normalized['additionalProperties'] = false;
+  }
+
+  if (type === 'array') {
+    const items = normalizeOpenAIStrictSchema(source['items']);
+    if (!items) return undefined;
+    normalized['items'] = items;
+  }
+
+  return normalized;
+}
 
 function isRequiredThinkingError(error: unknown): boolean {
   if (getErrorStatus(error) !== 400) return false;
@@ -446,7 +551,7 @@ export class ContentGenerationPipeline {
   }
 
   async execute(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     return this.executeWithErrorHandling(
@@ -486,7 +591,7 @@ export class ContentGenerationPipeline {
   }
 
   async executeStream(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     return this.executeWithErrorHandling(
@@ -819,9 +924,10 @@ export class ContentGenerationPipeline {
         throw redactProxyError(error);
       }
 
-      // Bypass handleError: it strips `code` from timeout errors, which would
-      // prevent classifyRetryError from recognizing retryable ETIMEDOUT. Both
-      // stream guards share that code and the same retry path (issue #8597).
+      // Bypass handleError so callers retain the dedicated timeout type and
+      // its idle/chunk/lifetime metadata for retry telemetry and diagnostics.
+      // Both stream guards share the ETIMEDOUT code and the same retry path
+      // (issue #8597).
       // Hoisted above the thinking-tag check: a drip-fed gateway cutting the
       // model mid-`<think>` would otherwise surface the guard's ETIMEDOUT as a
       // PROTOCOL_TAG_LEAK and burn the tag-leak retry budget instead of the
@@ -938,7 +1044,7 @@ export class ContentGenerationPipeline {
   }
 
   private async buildRequest(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     context: RequestContext,
     isStreaming: boolean,
@@ -953,6 +1059,7 @@ export class ContentGenerationPipeline {
       model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
+      ...this.buildResponseFormat(request),
     };
 
     if (isStreaming) {
@@ -992,10 +1099,21 @@ export class ContentGenerationPipeline {
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
-    const providerRequest = this.config.provider.buildRequest(
+    let providerRequest = this.config.provider.buildRequest(
       baseRequest,
       userPromptId,
     );
+    if (
+      this.contentGeneratorConfig.enableCacheControl !== false &&
+      isOfficialOpenAIEndpoint(this.contentGeneratorConfig)
+    ) {
+      providerRequest = applyOfficialOpenAIPromptCaching(
+        providerRequest,
+        this.config.cliConfig.getSessionId?.(),
+        request.promptCacheSharing === true,
+        isInForkExecution() ? undefined : (getCurrentAgentId() ?? undefined),
+      );
+    }
 
     // Reasoning is disabled when either:
     //   - the per-request opt-out is set (forked queries for suggestions),
@@ -1098,12 +1216,42 @@ export class ContentGenerationPipeline {
       if (isDeepSeekHostname(this.contentGeneratorConfig)) {
         typed['thinking'] = { type: 'disabled' };
       }
+      // OpenRouter's thinking switch is the provider-level `reasoning`
+      // parameter (`reasoning: { enabled: false }`, see
+      // https://openrouter.ai/docs/features/reasoning-tokens). The shapes
+      // emitted above are ignored by the gateway, and the strip just above
+      // removes any `reasoning` object a provider hook injected — so
+      // thinking-capable models routed through OpenRouter keep thinking on.
+      // That breaks the AUTO-mode classifier's stage-1 side query (#9757):
+      // the 256-token budget is spent on reasoning, the forced
+      // respond_in_schema tool call never ships, and the classifier
+      // fail-closes. Must be emitted after the strip, which runs later
+      // than the provider buildRequest hook.
+      //
+      // Provider-level, not model-family-gated: unlike `enable_thinking`
+      // (a qwen-family wire field that leaks upstream on non-qwen
+      // routings), `reasoning` is an OpenRouter API parameter the gateway
+      // applies to whatever model supports it. `thinkingMandatory` models
+      // stay exempt: a disable shape they reject would be a guaranteed
+      // request failure.
+      if (
+        !thinkingMandatory &&
+        isOpenRouterHostname(this.contentGeneratorConfig)
+      ) {
+        typed['reasoning'] = { enabled: false };
+      }
     }
 
     if (thinkingMandatory) {
       const typed = providerRequest as unknown as Record<string, unknown>;
       if (typed['enable_thinking'] === false) {
         delete typed['enable_thinking'];
+      }
+      // `reasoning_effort: 'none'` is the tiered family's canonical disable
+      // shape (the provider canonicalizes the extra_body escape hatch into
+      // it); a thinking-mandatory model rejects it like the boolean shapes.
+      if (typed['reasoning_effort'] === 'none') {
+        delete typed['reasoning_effort'];
       }
       const chatTemplateKwargs = typed['chat_template_kwargs'] as
         | Record<string, unknown>
@@ -1121,6 +1269,7 @@ export class ContentGenerationPipeline {
 
     const typed = providerRequest as unknown as Record<string, unknown>;
     const reasoningEffort = typed['reasoning_effort'];
+    const thinkingBudget = typed['thinking_budget'];
     // DashScope rejects forced tool selection while thinking is enabled
     // ("The tool_choice parameter does not support being set to required or
     // object in thinking mode"). Both field clauses are family-gated like
@@ -1137,17 +1286,47 @@ export class ContentGenerationPipeline {
       (thinkingMandatory ||
         (isQwenFamilyWireModel(model) &&
           (typed['enable_thinking'] === true ||
+            (thinkingBudget != null && typed['enable_thinking'] !== false) ||
             (typeof reasoningEffort === 'string' &&
               reasoningEffort !== 'none'))))
     ) {
       debugLogger.debug(
         'DashScope: dropping tool_choice=required while thinking is enabled',
-        { model, reasoningEffort, thinkingMandatory },
+        { model, reasoningEffort, thinkingBudget, thinkingMandatory },
       );
       delete typed['tool_choice'];
     }
 
     return providerRequest;
+  }
+
+  private buildResponseFormat(
+    request: PromptCacheSharingParameters,
+  ): Pick<OpenAI.Chat.ChatCompletionCreateParams, 'response_format'> {
+    // `response_format` (both `json_object` and the strict `json_schema`
+    // variant) is official-OpenAI-specific wire shape. Third-party
+    // OpenAI-compatible endpoints reject it (DeepSeek accepts only
+    // text/json_object; older vLLM builds and validating gateways refuse
+    // unknown fields), and this pipeline never sent the field before this
+    // feature. Gate on the official endpoint, same precedent as the
+    // prompt-caching feature above.
+    if (!isOfficialOpenAIEndpoint(this.contentGeneratorConfig)) return {};
+    if (request.config?.responseMimeType !== 'application/json') return {};
+    const schema =
+      request.config.responseJsonSchema ?? request.config.responseSchema;
+    if (!schema) return { response_format: { type: 'json_object' } };
+    const strictSchema = normalizeOpenAIStrictSchema(schema);
+    if (!strictSchema) return { response_format: { type: 'json_object' } };
+    return {
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'response',
+          schema: strictSchema,
+          strict: true,
+        },
+      },
+    };
   }
 
   private requiresThinking(model: string): boolean {
@@ -1292,7 +1471,7 @@ export class ContentGenerationPipeline {
    * Common error handling wrapper for execute methods
    */
   private async executeWithErrorHandling<T>(
-    request: GenerateContentParameters,
+    request: PromptCacheSharingParameters,
     userPromptId: string,
     isStreaming: boolean,
     executor: (

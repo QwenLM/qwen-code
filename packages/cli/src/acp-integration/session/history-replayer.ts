@@ -7,7 +7,13 @@
 import type {
   ChatRecord,
   GoalSnapshotV2,
+  GoalStateCause,
   HistoryGap,
+} from '@qwen-code/qwen-code-core';
+import {
+  parseGoalSnapshotV2,
+  parseGoalStateCause,
+  projectGoalStateToLegacy,
 } from '@qwen-code/qwen-code-core';
 import {
   createTranscriptReplayMachine,
@@ -18,36 +24,12 @@ import {
   type TranscriptReplayStateV1,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionEmitterContext } from './types.js';
-import { hasFullSessionContext } from './types.js';
-import { MessageEmitter } from './emitters/MessageEmitter.js';
 import {
   buildToolResultContentPrefix,
   ToolCallEmitter,
 } from './emitters/tool-call-emitter.js';
 import { formatHistoryGapNotice } from '../../ui/utils/history-gap-notice.js';
-import {
-  collectGoalStatusItemsFromRecords,
-  findGoalToRestore,
-  goalConditionBlockedBy,
-  goalRestoreBlockedBy,
-  type GoalRestoreBlockedReason,
-} from '../../ui/utils/restoreGoal.js';
 import { writeStderrLineSafe } from '../../utils/stdioHelpers.js';
-
-/**
- * Shown on the `cleared` card that supersedes an active goal the resumed
- * session refuses to restore. `condition-invalid` never reaches here: such a
- * card is dropped from the replay outright.
- */
-const GOAL_NOT_RESTORED_REASON: Record<
-  Exclude<GoalRestoreBlockedReason, 'condition-invalid'>,
-  string
-> = {
-  'untrusted-folder':
-    'Goal not restored: this folder is not trusted, so its Stop hook cannot run.',
-  'hooks-disabled': 'Goal not restored: hooks are disabled for this session.',
-  'no-hook-system': 'Goal not restored: the hook system is unavailable.',
-};
 
 export const MISSING_TOOL_RESULT_MESSAGE =
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE;
@@ -62,13 +44,27 @@ export interface PendingReplayToolCall {
 export interface HistoryReplayPageOptions {
   pendingToolCalls?: PendingReplayToolCall[];
   finalizeDangling?: boolean;
+  skipFinalizeCallIds?: ReadonlySet<string>;
   gaps?: HistoryGap[];
   goalState?: GoalSnapshotV2;
+  goalCause?: GoalStateCause;
 }
 
 export interface HistoryReplayPageState {
   pendingToolCalls: PendingReplayToolCall[];
   replay: TranscriptReplayStateV1;
+}
+
+export interface HistoryReplayGoalBootstrap {
+  goalStatus: {
+    kind: 'set' | 'checking';
+    condition: string;
+    iterations?: number;
+    setAt?: number;
+    durationMs?: number;
+    lastReason?: string;
+  };
+  goalState?: GoalSnapshotV2;
 }
 
 /**
@@ -78,46 +74,77 @@ export interface HistoryReplayPageState {
  * This ensures that replayed history looks identical to how it would
  * have appeared during the original session.
  */
-export interface HistoryReplayerOptions {
-  /**
-   * Emit a trailing `cleared` card when the transcript ends on an active goal
-   * this session will refuse to restore. Only meaningful where goal restore
-   * actually follows the replay — i.e. resuming a session into a live agent.
-   *
-   * Off by default. A replay that merely renders a transcript (export, or
-   * reading another session's history) must reproduce what happened, not
-   * editorialize about a Stop hook it was never going to register. It also has
-   * no business asking `config` for trust and hook policy: the export path
-   * supplies a config stub that throws on any method it does not implement.
-   */
-  supersedeUnrestorableGoal?: boolean;
-}
 export class HistoryReplayer {
-  private readonly messageEmitter: MessageEmitter;
   private readonly toolCallEmitter: ToolCallEmitter;
-  private readonly options: HistoryReplayerOptions;
   private machine: TranscriptReplayMachine;
 
-  constructor(
-    private readonly ctx: SessionEmitterContext,
-    options: HistoryReplayerOptions = {},
-  ) {
-    this.options = options;
-    this.messageEmitter = new MessageEmitter(ctx);
+  constructor(private readonly ctx: SessionEmitterContext) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.machine = this.createMachine();
   }
 
-  async replay(records: ChatRecord[], gaps?: HistoryGap[]): Promise<void> {
+  async replay(
+    records: ChatRecord[],
+    gaps?: HistoryGap[],
+    options: {
+      initialGoalState?: GoalSnapshotV2;
+      initialGoalCause?: GoalStateCause;
+      goalBootstrap?: HistoryReplayGoalBootstrap;
+      skipFinalizeCallIds?: ReadonlySet<string>;
+      finalizeDangling?: boolean;
+    } = {},
+  ): Promise<void> {
     try {
+      if (options.goalBootstrap) {
+        const update = {
+          sessionUpdate: 'agent_message_chunk' as const,
+          content: { type: 'text' as const, text: '' },
+          _meta: {
+            ...(options.goalBootstrap.goalState
+              ? { goalState: options.goalBootstrap.goalState }
+              : {}),
+            goalStatus: options.goalBootstrap.goalStatus,
+          },
+        };
+        await this.sendUpdate(update);
+      }
       await this.replayPage(records, {
-        finalizeDangling: true,
+        finalizeDangling: options.finalizeDangling ?? true,
         gaps,
+        ...(options.skipFinalizeCallIds
+          ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
+          : {}),
+        ...(options.initialGoalState
+          ? { goalState: options.initialGoalState }
+          : {}),
+        ...(options.initialGoalCause
+          ? { goalCause: options.initialGoalCause }
+          : {}),
       });
-      await this.supersedeUnrestorableGoal(records);
     } finally {
       this.setActiveRecordId(null);
     }
+  }
+
+  static v2GoalBootstrap(
+    rawGoalState: unknown,
+    rawGoalCause: unknown,
+  ): HistoryReplayGoalBootstrap | undefined {
+    const goalState = parseGoalSnapshotV2(rawGoalState);
+    const goalCause = parseGoalStateCause(rawGoalCause);
+    if (!goalState?.goal || goalState.goal.status !== 'active' || !goalCause) {
+      return undefined;
+    }
+    const projection = projectGoalStateToLegacy({
+      v: 2,
+      cause: goalCause,
+      snapshot: goalState,
+    });
+    const { type: _type, kind, ...goalStatus } = projection.goalStatus;
+    if (kind !== 'set' && kind !== 'checking') {
+      return undefined;
+    }
+    return { goalStatus: { ...goalStatus, kind }, goalState };
   }
 
   async replayPage(
@@ -158,10 +185,7 @@ export class HistoryReplayer {
     const replay = this.machine.snapshot();
     this.copyCumulativeUsage(replay);
     const state = {
-      pendingToolCalls:
-        options.finalizeDangling === true
-          ? []
-          : replay.pendingToolCalls.map(toLegacyPendingToolCall),
+      pendingToolCalls: replay.pendingToolCalls.map(toLegacyPendingToolCall),
       replay,
     };
     this.setActiveRecordId(null);
@@ -205,11 +229,15 @@ export class HistoryReplayer {
             apiTimeMs: 0,
           },
       ...(options.goalState ? { goalState: options.goalState } : {}),
+      ...(options.goalCause ? { goalCause: options.goalCause } : {}),
     };
     return createTranscriptReplayMachine({
       initialState,
       gaps: options.gaps,
       presentation: this.presentationAdapter(),
+      ...(options.skipFinalizeCallIds
+        ? { skipFinalizeCallIds: options.skipFinalizeCallIds }
+        : {}),
       onDiagnostic: (diagnostic) => {
         if (
           diagnostic.code === 'malformed_part' &&
@@ -248,47 +276,6 @@ export class HistoryReplayer {
     cumulative.cachedTokens = state.cumulativeUsage.cachedTokens;
     cumulative.candidateTokens = state.cumulativeUsage.candidateTokens;
     cumulative.apiTimeMs = state.cumulativeUsage.apiTimeMs;
-  }
-
-  /**
-   * Emits a trailing `cleared` card when the transcript ends on an active goal
-   * that `restoreGoalFromHistory` is about to refuse.
-   *
-   * A client reads "there is an active goal" off the newest goal card it has
-   * seen, so replaying a `set` card that no Stop hook will drive leaves the UI
-   * claiming a goal is running when the loop is dead. The gates are pure
-   * functions of `config`, so the answer is known here, before restore runs.
-   *
-   * This card is emitted, not recorded: the transcript keeps its `set` card, so
-   * a later resume in a trusted folder (or with hooks re-enabled) restores the
-   * goal instead of finding it destroyed. Emitting from inside replay is also
-   * what puts the card *after* the `set` card — `loadSession` batches replay
-   * updates into its response, and a notification sent afterwards would reach
-   * the client first.
-   *
-   * Gated on `supersedeUnrestorableGoal`: only a resume registers a hook, and
-   * only a resume has a `config` that answers trust and hook-policy questions.
-   */
-  private async supersedeUnrestorableGoal(
-    records: ChatRecord[],
-  ): Promise<void> {
-    if (!this.options.supersedeUnrestorableGoal) return;
-    const active = findGoalToRestore(
-      collectGoalStatusItemsFromRecords(records),
-    );
-    // An invalid condition was never replayed, so no active card is on screen.
-    if (!active || goalConditionBlockedBy(active.condition)) return;
-    // Goal restore only follows a resume, where the context carries a config.
-    if (!hasFullSessionContext(this.ctx)) return;
-    const blockedBy = goalRestoreBlockedBy(this.ctx.config);
-    if (!blockedBy) return;
-    await this.messageEmitter.emitGoalStatus({
-      kind: 'cleared',
-      condition: active.condition,
-      iterations: active.iterations,
-      ...(active.setAt !== undefined ? { setAt: active.setAt } : {}),
-      lastReason: GOAL_NOT_RESTORED_REASON[blockedBy],
-    });
   }
 
   private setActiveRecordId(recordId: string | null, timestamp?: string): void {

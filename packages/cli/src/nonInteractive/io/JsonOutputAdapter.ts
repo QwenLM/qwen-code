@@ -11,6 +11,7 @@ import {
   type JsonOutputAdapterInterface,
   type ResultOptions,
 } from './BaseJsonOutputAdapter.js';
+import { observeHeadlessJsonToolResultWire } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * JSON output adapter that collects all messages and emits them
@@ -74,7 +75,9 @@ export class JsonOutputAdapter
     } else {
       // Emit the entire messages array as JSON (includes all main agent + subagent messages)
       const json = JSON.stringify(this.messages);
-      process.stdout.write(`${json}\n`);
+      const frame = `${json}\n`;
+      observeHeadlessJsonToolResultWire(this.messages, frame);
+      process.stdout.write(frame);
     }
   }
 

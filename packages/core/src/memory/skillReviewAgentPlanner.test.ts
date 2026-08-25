@@ -18,6 +18,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import type { PermissionManager } from '../permissions/permission-manager.js';
 import {
   AUTO_SKILL_DIR_PREFIX,
   buildTaskPrompt,
@@ -29,9 +30,9 @@ import {
   SKILL_REVIEW_SYSTEM_PROMPT,
 } from './skillReviewAgentPlanner.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
@@ -142,6 +143,36 @@ describe('skillReviewAgentPlanner — write_file collision deny (#4437)', () => 
       filePath: fresh,
     });
     expect(decision).toBe('allow');
+  });
+
+  it('delegates isPermissionsAllowListActive to the base PM so the scheduler message branch never throws (#9827)', () => {
+    // The scheduler's permission-denied message branch calls
+    // `isPermissionsAllowListActive()` on whatever
+    // `getPermissionManager()` returns. Before this shim exposed the
+    // method, a shim-rejected call under an active allowlist threw
+    // `TypeError: pm.isPermissionsAllowListActive is not a function`
+    // instead of producing the designed permission error.
+    const basePm: Pick<PermissionManager, 'isPermissionsAllowListActive'> = {
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+    };
+    const scoped = createSkillScopedAgentConfig(
+      {
+        getProjectRoot: () => projectRoot,
+        getPermissionManager: () => basePm as PermissionManager,
+      } as unknown as Config,
+      projectRoot,
+    );
+    const pm = scoped.getPermissionManager();
+    if (!pm) {
+      throw new Error(
+        'createSkillScopedAgentConfig must install a PermissionManager',
+      );
+    }
+    expect(pm.isPermissionsAllowListActive()).toBe(true);
+
+    // No base PM: the shim reports the allowlist as inactive instead of
+    // throwing.
+    expect(scopedPm(projectRoot).isPermissionsAllowListActive()).toBe(false);
   });
 
   it('denies write_file when the directory name is already archived', async () => {
@@ -404,6 +435,12 @@ describe('buildTaskPrompt', () => {
     expect(prompt).toContain('alpha');
     expect(prompt).toContain('beta');
     expect(prompt).toMatch(/Active skill directory names/i);
+    // The inspection guidance must only reference tools in this run's filter
+    // (read_file/write_file/edit) — not `ls`/list_directory, which is opt-in.
+    expect(prompt).toContain(
+      'Use `read_file` to inspect the existing skill files listed above',
+    );
+    expect(prompt).not.toContain('Use `ls`');
   });
 
   it('lists archived directory names as reserved', async () => {
@@ -583,5 +620,22 @@ describe('runSkillReviewByAgent limit wiring', () => {
         maxTimeMinutes: DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000,
       }),
     );
+  });
+
+  it('passes only always-registered tools to the forked agent', async () => {
+    // list_directory is disabled by default, so it must not be requested for
+    // this turn-budgeted background agent — the prompt steers to read_file.
+    await runSkillReviewByAgent({
+      config: makeConfig(),
+      projectRoot,
+      history: [],
+    });
+
+    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    expect(call?.tools).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.WRITE_FILE,
+      ToolNames.EDIT,
+    ]);
   });
 });

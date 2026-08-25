@@ -1,5 +1,4 @@
-import { memo, useContext } from 'react';
-import { CompactModeContext } from '../../App';
+import { memo } from 'react';
 import { useI18n } from '../../i18n';
 import styles from './UserShellMessage.module.css';
 
@@ -12,25 +11,16 @@ export const UserShellMessage = memo(function UserShellMessage({
   command,
   output,
 }: UserShellMessageProps) {
-  const compactMode = useContext(CompactModeContext);
   const { t } = useI18n();
 
   return (
-    <div
-      className={
-        compactMode ? `${styles.message} ${styles.compact}` : styles.message
-      }
-    >
+    <div className={styles.message}>
       <div className={styles.header}>
         <span className={styles.status}>✓</span>
         <span className={styles.name}>{t('shell.command')}</span>
         {command && <span className={styles.command}>{command}</span>}
       </div>
-      {compactMode ? (
-        <div className={styles.compactHint}>{t('compact.hint')}</div>
-      ) : (
-        output && <pre className={styles.output}>{output}</pre>
-      )}
+      {output && <pre className={styles.output}>{output}</pre>}
     </div>
   );
 });

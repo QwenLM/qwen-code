@@ -10,8 +10,6 @@ import type {
 } from '../contentGenerator.js';
 import type { Config } from '../../config/config.js';
 import type {
-  CountTokensParameters,
-  CountTokensResponse,
   EmbedContentParameters,
   EmbedContentResponse,
   GenerateContentParameters,
@@ -19,7 +17,6 @@ import type {
 } from '@google/genai';
 import type OpenAI from 'openai';
 import { ResponsesPipeline } from './responses-pipeline.js';
-import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import {
   buildRuntimeFetchOptions,
   redactProxyError,
@@ -105,20 +102,6 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
     return this.pipeline.connectStream(request, userPromptId, signal);
   }
 
-  async countTokens(
-    request: CountTokensParameters,
-  ): Promise<CountTokensResponse> {
-    try {
-      const estimator = new RequestTokenEstimator();
-      const result = await estimator.calculateTokens(request);
-      return { totalTokens: result.totalTokens };
-    } catch (error) {
-      debugLogger.warn('Token estimation fallback:', error);
-      const content = JSON.stringify(request.contents);
-      return { totalTokens: Math.ceil(content.length / 4) };
-    }
-  }
-
   async embedContent(
     request: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
@@ -146,10 +129,6 @@ export class OpenAIResponsesContentGenerator implements ContentGenerator {
         `Embedding error: ${redactedError instanceof Error ? redactedError.message : String(redactedError)}`,
       );
     }
-  }
-
-  useSummarizedThinking(): boolean {
-    return true;
   }
 }
 

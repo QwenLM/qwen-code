@@ -356,8 +356,13 @@ describe('qwen resolve workflow', () => {
     expect(contextStep).toContain('timeout=*)');
     expect(contextStep).toContain('TIMEOUT_MINUTES="${token#timeout=}"');
     expect(runStep).toContain('if [ "${#TIMEOUT_MINUTES}" -gt 3 ]; then');
+    // The cap still comes from the repository variable, but reaches the script
+    // through the step's env: the run body must stay free of `${{ }}` or the
+    // whole workflow exceeds the 21000-character expression limit and becomes
+    // invalid. Both halves are asserted so neither can drift alone.
+    expect(runStep).toContain('MAX_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"');
     expect(runStep).toContain(
-      'MAX_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+      "MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'",
     );
     expect(runStep).toContain(
       'if [ "$TIMEOUT_MINUTES" -gt "$MAX_TIMEOUT_MINUTES" ]; then',
@@ -403,7 +408,10 @@ describe('qwen resolve workflow', () => {
     expect(sizeGuardArm).toContain('if [ "$PR_SIZE_LINES" -le 300 ]; then');
     expect(runStep).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
     expect(runStep).toContain(
-      'EFFECTIVE_TIMEOUT_MINUTES="${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}"',
+      'EFFECTIVE_TIMEOUT_MINUTES="$MAX_TIMEOUT_MINUTES_VAR"',
+    );
+    expect(runStep).toContain(
+      "MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'",
     );
     // Slice the small-PR arm so a swap of the two assignments between the
     // branches fails: unordered containment keeps both texts present.
@@ -416,7 +424,7 @@ describe('qwen resolve workflow', () => {
       runStep.indexOf('else', smallPrStart),
     );
     expect(smallPrArm).toContain('EFFECTIVE_TIMEOUT_MINUTES=180');
-    expect(smallPrArm).not.toContain('vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES');
+    expect(smallPrArm).not.toContain('MAX_TIMEOUT_MINUTES_VAR');
     expect(runStep).not.toContain('EFFECTIVE_TIMEOUT_MINUTES=210');
     expect(runStep).toContain(
       'echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"',
@@ -532,15 +540,26 @@ describe('qwen resolve workflow', () => {
 
   it('skips stale automatic review runs before invoking qwen', () => {
     const runStep = step(reviewJob, 'Run review');
+    const staleHeadStart = runStep.indexOf(
+      'if [ "$EVENT_NAME" = "pull_request_target" ]; then',
+    );
+    // Without this, a reworded guard makes `indexOf` return -1 and the slice
+    // below silently degrades instead of failing.
+    expect(staleHeadStart).toBeGreaterThan(-1);
     const staleHeadCheck = runStep.slice(
-      runStep.indexOf(
-        'if [ "${{ github.event_name }}" = "pull_request_target" ]; then',
-      ),
+      staleHeadStart,
       runStep.indexOf('PROMPT="/review ${REVIEW_URL}"'),
     );
 
+    // Both context values arrive as step env so the run body carries no
+    // `${{ }}` — see the expression-length test in
+    // qwen-pr-review-workflow.test.js for why that is load-bearing.
+    expect(runStep).toContain("EVENT_NAME: '${{ github.event_name }}'");
+    expect(runStep).toContain(
+      "EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'",
+    );
     expect(staleHeadCheck).toContain(
-      'EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"',
+      'if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then',
     );
     expect(runStep).toContain(
       'PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq \'[.state, .headRefOid] | @tsv\')"',

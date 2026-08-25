@@ -41,6 +41,24 @@ export interface TranscriptRecordInput {
   };
 }
 
+export const USER_PROMPT_SUBMIT_CONTEXT_OPEN =
+  '<qwen:user-prompt-submit-context>';
+export const USER_PROMPT_SUBMIT_CONTEXT_CLOSE =
+  '</qwen:user-prompt-submit-context>';
+
+export interface UserTranscriptDisplayProjection<TPart = unknown> {
+  /**
+   * Authoritative pre-hook display text when provenance metadata is present.
+   * An empty string is meaningful and must not fall back to model-facing parts.
+   */
+  readonly displayText: string | undefined;
+  /**
+   * User-visible model parts. With display metadata, text parts are omitted in
+   * favor of `displayText`; non-text parts (for example images) are retained.
+   */
+  readonly parts: readonly TPart[];
+}
+
 export interface TranscriptReplayGapInput {
   readonly childUuid: string;
   readonly missingParentUuid: string;
@@ -105,15 +123,86 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'rewind',
   'agent_bootstrap',
   'agent_launch_prompt',
+  'agent_retry',
   'file_history_snapshot',
   'session_source',
+  'session_model',
+  'branch_checkpoint',
   'goal_state',
   'goal_runtime',
+  'turn_result',
   ...ARTIFACT_RECORD_SUBTYPES,
 ]);
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function wrapUserPromptSubmitContext(context: string): string {
+  return `${USER_PROMPT_SUBMIT_CONTEXT_OPEN}\n${context}\n${USER_PROMPT_SUBMIT_CONTEXT_CLOSE}`;
+}
+
+export function isUserPromptSubmitContextPartText(text: string): boolean {
+  const trimmed = text.trim();
+  const prefix = `${USER_PROMPT_SUBMIT_CONTEXT_OPEN}\n`;
+  const suffix = `\n${USER_PROMPT_SUBMIT_CONTEXT_CLOSE}`;
+  if (!trimmed.startsWith(prefix) || !trimmed.endsWith(suffix)) {
+    return false;
+  }
+  const body = trimmed.slice(prefix.length, -suffix.length);
+  return (
+    !body.includes(USER_PROMPT_SUBMIT_CONTEXT_OPEN) &&
+    !body.includes(USER_PROMPT_SUBMIT_CONTEXT_CLOSE)
+  );
+}
+
+function isUserPromptSubmitContextPart(part: unknown): boolean {
+  return (
+    isObjectRecord(part) &&
+    typeof part['text'] === 'string' &&
+    isUserPromptSubmitContextPartText(part['text'])
+  );
+}
+
+/**
+ * Selects the user-visible projection of a transcript record.
+ *
+ * New user-prompt records pair authoritative `systemPayload.displayText` with
+ * `hookContext` provenance. Released `displayText`-only records use a complete
+ * final hook-context part as equivalent pairing evidence. For tag-only
+ * third-party records with no metadata, only that complete final part is
+ * removed. Legacy records without either shape retain their model-facing parts.
+ */
+export function projectUserTranscriptForDisplay<TPart>(record: {
+  readonly message?: {
+    readonly parts?: readonly TPart[];
+  };
+  readonly systemPayload?: unknown;
+}): UserTranscriptDisplayProjection<TPart> {
+  const parts = record.message?.parts ?? [];
+  const hasFinalHookContextPart =
+    parts.length > 1 && isUserPromptSubmitContextPart(parts[parts.length - 1]);
+  const payload = isObjectRecord(record.systemPayload)
+    ? record.systemPayload
+    : undefined;
+  const isUserPromptPayload =
+    payload &&
+    (typeof payload['hookContext'] === 'string' || hasFinalHookContextPart);
+  const displayText =
+    isUserPromptPayload && typeof payload['displayText'] === 'string'
+      ? payload['displayText']
+      : undefined;
+  if (displayText !== undefined) {
+    const visibleParts = parts.filter(
+      (part) => !isObjectRecord(part) || typeof part['text'] !== 'string',
+    );
+    return { displayText, parts: visibleParts };
+  }
+
+  if (payload === undefined && hasFinalHookContextPart) {
+    return { displayText: undefined, parts: parts.slice(0, -1) };
+  }
+  return { displayText: undefined, parts };
 }
 
 function diagnostic(

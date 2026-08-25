@@ -198,6 +198,30 @@ describe('build artifact — package boundary', () => {
     expect(conflictingLayers).toEqual([]);
   });
 
+  it('removes the transcript width cap from fullscreen panels', () => {
+    let fullscreenRule: Rule | undefined;
+    postcss.parse(readInjectedCss()).walkRules((rule) => {
+      if (
+        rule.selector.includes('panelFullscreen') &&
+        rule.nodes.some(
+          (node) =>
+            node.type === 'decl' &&
+            node.prop === '--chat-content-width' &&
+            node.value === '100%',
+        )
+      ) {
+        fullscreenRule = rule;
+      }
+    });
+
+    expect(fullscreenRule).toBeDefined();
+    expect(fullscreenRule?.selector).toMatch(
+      /\._panelFullscreen_[A-Za-z0-9_]+$/,
+    );
+    expect(fullscreenRule?.selector).not.toContain('panelDrawer');
+    expect(fullscreenRule?.selector).not.toContain(':not(');
+  });
+
   it('prefixes global CSS registrations and animations', () => {
     const unscoped: string[] = [];
     postcss.parse(readInjectedCss()).walkAtRules((atRule) => {
@@ -248,5 +272,33 @@ describe('build artifact — package boundary', () => {
           (n.prop === 'background' || n.prop === 'background-color'),
       ),
     ).toBe(true);
+  });
+
+  it('ships self-contained KaTeX styles and fonts for embedded transcripts', () => {
+    const css = readInjectedCss();
+    const root = postcss.parse(css);
+    let mathmlRule: Rule | undefined;
+    let hasInlineFont = false;
+
+    root.walkRules((rule) => {
+      if (rule.selector.includes('.katex-mathml')) {
+        mathmlRule = rule;
+      }
+    });
+    root.walkAtRules('font-face', (atRule) => {
+      if (
+        atRule.nodes?.some(
+          (node) =>
+            node.type === 'decl' &&
+            node.prop === 'src' &&
+            node.value.includes('data:font/woff2;base64,'),
+        )
+      ) {
+        hasInlineFont = true;
+      }
+    });
+
+    expect(mathmlRule?.selector).toContain('[data-web-shell-root]');
+    expect(hasInlineFont).toBe(true);
   });
 });
