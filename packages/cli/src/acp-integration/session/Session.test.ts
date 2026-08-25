@@ -2268,6 +2268,10 @@ describe('Session', () => {
   });
 
   it('fails closed when a retry strips multiple marked orphans', async () => {
+    // The retried prompt matches NEITHER stripped orphan, so no identity
+    // may be adopted from the mixed strip — the resend records fresh.
+    // (A retry matching the LAST orphan adopts it instead; see the
+    // 'adopts the matching last orphan' test below.)
     const orphanA: Content = {
       role: 'user',
       parts: [{ text: 'first failed prompt' }],
@@ -2285,13 +2289,13 @@ describe('Session', () => {
 
     await session.prompt({
       sessionId: 'test-session-id',
-      prompt: [{ type: 'text', text: 'second failed prompt' }],
+      prompt: [{ type: 'text', text: 'a third prompt, matching neither' }],
       _meta: { 'qwen.daemon.retry': true },
     } as PromptRequest);
 
     expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
     expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
-      'second failed prompt',
+      'a third prompt, matching neither',
       undefined,
       undefined,
       'test-session-id########1',
@@ -2425,7 +2429,55 @@ describe('Session', () => {
     // re-pushes only the retried prompt — on send success nothing else
     // re-adds the stripped entries (the push-count-gated catch covers
     // throws alone), so they must be restored at strip time or they vanish
-    // from live history while their records and snapshots stay.
+    // from live history while their records and snapshots stay. The retry
+    // targets a DIFFERENT prompt than either orphan here, so nothing is
+    // held back from the re-add.
+    const orphanA: Content = {
+      role: 'user',
+      parts: [{ text: 'first failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphanA, 'original-a');
+    const orphanB: Content = {
+      role: 'user',
+      parts: [{ text: 'second failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphanB, 'original-b');
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphanA, orphanB]);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'a fresh prompt, not a failed one' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    // Both stripped entries come back, in their original order, and the
+    // resend's fresh record stays a single boundary.
+    const readdedIds = vi
+      .mocked(mockChat.addHistory)
+      .mock.calls.map((call) => core.getApiHistoryPromptId(call[0]));
+    expect(readdedIds).toEqual(['original-a', 'original-b']);
+    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
+    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+      'qwen3-code-plus',
+      expect.any(Object),
+      'test-session-id########1',
+      undefined,
+      { promptId: 'test-session-id########1' },
+    );
+  });
+
+  it('adopts the matching last orphan a multi-orphan retry re-pushes instead of duplicating it', async () => {
+    // R10-6: the user retries prompt P whose failed first attempt is the
+    // LAST trailing orphan (an earlier failed prompt A precedes it). The
+    // strip pops [A, P] and fails the single-orphan adoption gate, but
+    // re-adding BOTH and then pushing the resend would hand the model the
+    // retried prompt twice back-to-back. The content-matching last orphan
+    // is dropped from the re-add and adopted like the single-orphan case:
+    // the resend reuses its identity and record instead of landing a
+    // fresh turn.
     const orphanA: Content = {
       role: 'user',
       parts: [{ text: 'first failed prompt' }],
@@ -2447,12 +2499,50 @@ describe('Session', () => {
       _meta: { 'qwen.daemon.retry': true },
     } as PromptRequest);
 
-    // Both stripped entries come back, in their original order, and the
-    // resend's fresh record stays a single boundary.
+    // Only the earlier orphan is re-added; the matching last one comes
+    // back through the resend itself, under its OWN identity.
     const readdedIds = vi
       .mocked(mockChat.addHistory)
       .mock.calls.map((call) => core.getApiHistoryPromptId(call[0]));
-    expect(readdedIds).toEqual(['original-a', 'original-b']);
+    expect(readdedIds).toEqual(['original-a']);
+    // Adoption skips the fresh record — the original attempt's record is
+    // reused.
+    expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
+    expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+      'qwen3-code-plus',
+      expect.any(Object),
+      'test-session-id########1',
+      undefined,
+      { promptId: 'original-b' },
+    );
+  });
+
+  it('drops a matching UNMARKED last orphan a no-adoption retry re-pushes fresh', async () => {
+    // R10-6 twin: a resumed pre-identity session's orphan carries no
+    // promptId, so the single-orphan adoption gate fails on the marking
+    // even when the strip pops exactly the retried prompt. The resend
+    // still re-pushes that same content fresh — the stripped copy must
+    // NOT be re-added on top of it (the duplication is the bug either
+    // way), and the resend records a fresh boundary under the new id.
+    const orphan: Content = {
+      role: 'user',
+      parts: [{ text: 'resumed legacy prompt' }],
+    };
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphan]);
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'resumed legacy prompt' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    const readdedIds = vi
+      .mocked(mockChat.addHistory)
+      .mock.calls.map((call) => core.getApiHistoryPromptId(call[0]));
+    expect(readdedIds).toEqual([]);
     expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
     expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
       'qwen3-code-plus',

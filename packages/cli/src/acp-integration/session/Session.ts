@@ -5222,8 +5222,42 @@ export class Session implements SessionContext {
                 // below. The continuation twin re-pushes its stripped
                 // content too (merged into the resent parts), so this keeps
                 // retries divergence-free on every exit path.
-                for (const entry of strippedRetryEntries) {
-                  this.#getCurrentChat().addHistory(entry);
+                //
+                // One exception (R10-6): when the LAST stripped orphan IS
+                // the retried prompt's own failed first attempt (same
+                // text), re-adding it would put the prompt in history
+                // twice back-to-back once the resend pushes its copy. Drop
+                // that entry from the re-add; if it is marked, adopt its
+                // identity exactly like the single-orphan branch so the
+                // resend reuses it (and its record) instead of landing a
+                // fresh turn. The content match is what keeps the adoption
+                // safe here — the mixed-strip gate above only refuses to
+                // donate a marked identity to DIFFERENT resent content.
+                const retriedPromptText = promptText.trim();
+                const lastStrippedEntry =
+                  strippedRetryEntries[strippedRetryEntries.length - 1]!;
+                const lastStrippedIsRetriedPrompt =
+                  retriedPromptText.length > 0 &&
+                  (lastStrippedEntry.parts ?? []).some(
+                    (part) =>
+                      'text' in part && part.text.trim() === retriedPromptText,
+                  );
+                if (lastStrippedIsRetriedPrompt) {
+                  for (const entry of strippedRetryEntries.slice(0, -1)) {
+                    this.#getCurrentChat().addHistory(entry);
+                  }
+                  const lastStrippedIdentity =
+                    getApiHistoryPromptId(lastStrippedEntry);
+                  if (lastStrippedIdentity !== undefined) {
+                    resubmittedPromptIdentity = lastStrippedIdentity;
+                    strippedOrphanEntries = [lastStrippedEntry];
+                    orphanPushCountSnapshot =
+                      this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+                  }
+                } else {
+                  for (const entry of strippedRetryEntries) {
+                    this.#getCurrentChat().addHistory(entry);
+                  }
                 }
               }
               if (
