@@ -99,9 +99,6 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }> = [];
   private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
-  // Exact body outputs produced this process (residency provenance; see
-  // getGenuineSkillBodyOutputs). Bounded by the session's load count.
-  private genuineSkillBodyOutputs: Set<string> = new Set();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
@@ -307,7 +304,6 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       (name: string) => this.loadedSkillNames.add(name),
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
-      (output: string) => this.genuineSkillBodyOutputs.add(output),
       (name: string) => this.hiddenSkillNames.has(name),
     );
   }
@@ -332,48 +328,13 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }
 
   /**
-   * Residency provenance: the exact body outputs this tool produced via
-   * buildSkillLlmContent this process. History-eviction paths consult
-   * this set to tell a real body apart from a marker-spoofed command
-   * result (see getGenuineSkillBodyOutputs in skill-utils). In-memory by
-   * design: a fresh process has an empty tracker anyway, so failing
-   * closed on unknown bodies there only costs a bounded duplicate body.
-   */
-  getGenuineSkillBodyOutputs(): ReadonlySet<string> {
-    return this.genuineSkillBodyOutputs;
-  }
-
-  /**
-   * Clears the loaded-skills tracking. Should be called when the session
-   * is reset (e.g. /clear) so that stale body-token data is not shown.
+   * Clears the loaded-skills tracking. Called when the session is reset
+   * (e.g. /clear) and conservatively at destructive history-rewrite
+   * boundaries (compaction, truncation, orphan stripping), so a skill
+   * whose body was evicted never stays stuck behind the dedup guard.
    */
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
-  }
-
-  /**
-   * Removes the given names from loaded-skills tracking. Called when a
-   * history rewrite (microcompaction, /compress-fast, memory-pressure
-   * compaction) drops a skill body, so the dedup guard re-arms
-   * and the next invocation returns the full body again instead of
-   * "already loaded in context".
-   */
-  unloadSkills(names: Iterable<string>): void {
-    for (const name of names) {
-      this.loadedSkillNames.delete(name);
-    }
-  }
-
-  /**
-   * Re-adds the given names to loaded-skills tracking. Called when skill
-   * bodies previously stripped from history are restored (client retry
-   * restore), so the dedup guard matches the resident bodies again
-   * instead of letting a duplicate body through.
-   */
-  trackSkills(names: Iterable<string>): void {
-    for (const name of names) {
-      this.loadedSkillNames.add(name);
-    }
   }
 
   /**
@@ -408,9 +369,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
     private readonly isSkillLoaded: (name: string) => boolean = () => false,
-    private readonly recordGenuineBodyOutput: (
-      output: string,
-    ) => void = () => {},
     private readonly isSkillHidden: (name: string) => boolean = () => false,
   ) {
     super(params);
@@ -595,10 +553,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
             );
             // Don't track via `onSkillLoaded` (mirrors the disabled
             // branch above): the result is raw command text, not a
-            // skill body, so no eviction/sync path keyed on body
-            // markers could ever un-track it — a tracked name here
-            // would deadlock a later same-named file skill behind the
-            // dedup guard forever.
+            // skill body, so a tracked name here would block a later
+            // same-named file skill behind the dedup guard even though
+            // no body is resident.
             return {
               llmContent: [{ text: commandResult }],
               returnDisplay: `Executed command: ${this.params.skill}`,
@@ -707,10 +664,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
-      // Record provenance BEFORE returning: only outputs this tool
-      // actually produced may later prove residency (marker text alone
-      // can be spoofed by command-delegation results).
-      this.recordGenuineBodyOutput(llmContent);
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {
         skillName: this.params.skill,

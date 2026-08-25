@@ -14,7 +14,6 @@ import type { Config } from '../config/config.js';
 import { MemoryDiagnosticsDumper } from './memoryDiagnosticsDumper.js';
 import { microcompactHistory } from './microcompaction/microcompact.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
-import { getGenuineSkillBodyOutputs } from '../tools/skill-utils.js';
 import {
   recordMemoryUsage,
   recordCpuUsage,
@@ -733,13 +732,9 @@ export class MemoryPressureMonitor extends EventEmitter {
             {
               preserveReadFileResult: (filePath) =>
                 isManagedMemoryPath(filePath, projectRoot, targetDir),
-              genuineSkillBodyOutputs: getGenuineSkillBodyOutputs(
-                this.coreConfig.getToolRegistry(),
-              ),
             },
           );
           if (result.meta) {
-            // setHistory's reconcile is the single loaded-skill sync here.
             chat.setHistory(result.history);
             // Explicitly clear fileReadCache here instead of relying on
             // the subsequent clear_file_cache step. This removes the

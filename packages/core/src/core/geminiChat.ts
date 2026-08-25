@@ -56,11 +56,7 @@ import {
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
-import {
-  getGenuineSkillBodyOutputs,
-  reconcileLoadedSkillTracking,
-  unloadSkillsFromEntries,
-} from '../tools/skill-utils.js';
+import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -2409,11 +2405,8 @@ export class GeminiChat {
       // the session-token-limit gate blocks a prompt that fits the
       // compressed history (#9506).
       this.tokenCountsByRouteKey.clear();
-      // No explicit loaded-skill sync here: the setHistory above already
-      // reconciled tracking exactly from the compressed history (residue
-      // bodies re-tracked, dropped ones not). Forked chats are covered by
-      // setHistory's own fork guard. A blanket clear after an exact
-      // reconcile would only un-track still-resident bodies.
+      // Loaded-skill tracking was conservatively cleared by the setHistory
+      // above — no second sync here.
       this.setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated,
@@ -2489,9 +2482,6 @@ export class GeminiChat {
         force: true,
         preserveReadFileResult: (filePath) =>
           isManagedMemoryPath(filePath, projectRoot, targetDir),
-        genuineSkillBodyOutputs: getGenuineSkillBodyOutputs(
-          this.config.getToolRegistry(),
-        ),
       },
     );
     const mcMeta = mcResult.meta;
@@ -2895,9 +2885,8 @@ export class GeminiChat {
           // state. The JSONL compression checkpoint is intentionally not
           // written because the send is about to be rejected.
           this.setHistory(historyBeforeHardRescue);
-          // The verbatim restore makes residency knowable again; setHistory's
-          // own fork-guarded reconcile rebuilds tracking from the restored
-          // history — no second, explicit reconcile here.
+          // setHistory conservatively cleared loaded-skill tracking; the
+          // restored bodies re-arm it on their next invoke.
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
@@ -4909,17 +4898,14 @@ export class GeminiChat {
     // stash too: its referent (the model turn at the old index) is gone.
     this.clearPendingPartialState();
     this.redactApprovedPlansFromLoadedHistory();
-    // Wholesale replacement can drop resident skill bodies (/restore,
-    // session-manager load_history, ACP restoreSessionHistory all land
-    // here); residency is fully knowable from the new history, so
-    // rebuild tracking instead of letting stale names deadlock reload
-    // behind the dedup guard. The resume door is deliberately NOT
-    // enumerated: GeminiClient.initialize installs resumed history via
-    // the constructor, and a fresh process has an empty tracker AND
-    // empty body provenance, so a constructor/initialize reconcile would
-    // fail closed and admit nothing anyway — the cost is one bounded
-    // duplicate body on the first post-resume invoke (self-healing).
-    this.reconcileLoadedSkillTracking('setHistory');
+    // Wholesale replacement can drop resident skill bodies (compression,
+    // /restore, session-manager load_history, ACP restoreSessionHistory
+    // all land here). Conservatively clear the tracking so an evicted
+    // skill never stays stuck behind the dedup guard; a still-resident
+    // body costs at most one duplicate injection on the next invoke.
+    if (!this.isForkedChat) {
+      clearLoadedSkillTracking(this.config.getToolRegistry(), 'setHistory');
+    }
   }
 
   truncateHistory(keepCount: number): void {
@@ -4931,13 +4917,13 @@ export class GeminiChat {
     // ephemeral, so losing them across a truncate is safe (the
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
-    if (this.history.length < prevLen) {
-      // Truncation keeps a prefix of history, so residency is knowable:
-      // rebuild tracking from the surviving entries instead of a blanket
-      // clear that would un-track skills whose bodies are still resident.
-      // Guarded wrapper: a forked chat shares the parent's tracker
-      // while holding only a tail slice.
-      this.reconcileLoadedSkillTracking('truncateHistory');
+    if (this.history.length < prevLen && !this.isForkedChat) {
+      // Truncation may have dropped a skill body; conservative clear
+      // re-arms reload (see setHistory for the trade-off).
+      clearLoadedSkillTracking(
+        this.config.getToolRegistry(),
+        'truncateHistory',
+      );
     }
     this.clearPendingPartialState();
   }
@@ -4995,46 +4981,18 @@ export class GeminiChat {
     // `sendMessageStream` would otherwise leave a stale marker that
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
-    if (strippedEntries.length > 0) {
-      // Targeted un-track: only skills whose bodies were provably in the
-      // stripped entries lose their tracking; resident bodies earlier in
-      // history keep theirs. Any unresolvable stripped body falls back to
-      // a wholesale clear — over-clearing self-heals with one duplicate
-      // body on the next invoke; leaving it tracked deadlocks reload.
-      // Guarded: a forked chat shares the parent's tracker while holding
-      // only a tail slice.
-      if (!this.isForkedChat) {
-        unloadSkillsFromEntries(
-          strippedEntries,
-          this.history,
-          this.config.getToolRegistry(),
-          'stripOrphanedUserEntries',
-        );
-      }
+    if (strippedEntries.length > 0 && !this.isForkedChat) {
+      // The stripped entries may have carried a skill body; conservative
+      // clear re-arms reload (see setHistory for the trade-off). A forked
+      // chat shares the parent's tracker while holding only a tail slice,
+      // so only the authoritative session's chat may clear.
+      clearLoadedSkillTracking(
+        this.config.getToolRegistry(),
+        'stripOrphanedUserEntries',
+      );
     }
     this.clearPendingPartialState();
     return strippedEntries;
-  }
-
-  /**
-   * Residency-aware settle twin of the additive re-track this replaces:
-   * rebuild tracking from the CURRENT (settled) history. A mid-turn
-   * rewrite (tryCompress / microcompaction) can blank or summarize away
-   * the re-pushed bodies and correctly un-track them; re-adding names
-   * resolved before the send anyway would resurrect the ghost the strip
-   * removed. Forked chats hold only a tail slice while sharing the
-   * parent's tracker — reconciling from the slice would corrupt the
-   * parent's tracking in both directions.
-   */
-  reconcileLoadedSkillTracking(logTag: string): void {
-    if (this.isForkedChat) {
-      return;
-    }
-    reconcileLoadedSkillTracking(
-      this.history,
-      this.config.getToolRegistry(),
-      logTag,
-    );
   }
 
   /**

@@ -10,10 +10,6 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearContextDefaults.js';
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames } from '../../tools/tool-names.js';
-import {
-  buildCallIdToSkillName,
-  isProvenSkillBody,
-} from '../../tools/skill-utils.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -270,8 +266,9 @@ function estimatePartTokens(part: Part): number {
 
 /** Defensive guard against re-clearing if a future change reshapes a cleared part into a collectable form. */
 function isAlreadyCleared(part: Part): boolean {
-  const output = part.functionResponse?.response?.['output'];
-  return output === MICROCOMPACT_CLEARED_MESSAGE;
+  return (
+    part.functionResponse?.response?.['output'] === MICROCOMPACT_CLEARED_MESSAGE
+  );
 }
 
 function stripNestedMedia(
@@ -353,18 +350,6 @@ function getFilePathsForResponse(
   return paths && paths.length > 0 ? [...new Set(paths)] : undefined;
 }
 
-function getSkillNamesForResponse(
-  part: Part | undefined,
-  callIdToSkillName: Map<string, string[]>,
-): string[] | undefined {
-  const response = part?.functionResponse;
-  if (!response?.id || response.name !== ToolNames.SKILL) {
-    return undefined;
-  }
-  const names = callIdToSkillName.get(response.id);
-  return names && names.length > 0 ? [...new Set(names)] : undefined;
-}
-
 function buildPreservedReadRefs(
   history: Content[],
   refs: PartRef[],
@@ -418,52 +403,6 @@ function buildKeptFilePaths(
     // let it protect any candidate path from disarming.
     if (paths?.length === 1) {
       kept.add(paths[0]!);
-    }
-  }
-  return kept;
-}
-
-/**
- * Skill names whose full body is still resident via a tool result that
- * survives this pass (not scheduled for clearing). Mirrors
- * `buildKeptFilePaths`: blanking a stale dedup confirmation left over
- * from an earlier load cycle must NOT un-track a skill whose reloaded
- * body is still in context — the next invocation would re-append the
- * body, doubling its tokens on every later aging-out pass.
- *
- * Residency is positive: only an output built by `buildSkillLlmContent`
- * (the `Base directory for this skill:` prefix) proves a body — a kept
- * dedup confirmation, SkillTool error text, `/unskill` placeholder, or
- * cleared message does not. An ambiguous call-id (one id mapped to
- * multiple skill names) protects NONE, matching `buildKeptFilePaths`'
- * `paths.length !== 1` guard. Filtering on the clear-set (not the
- * keepRecent set) also covers the size path, where a body can survive
- * via the low-watermark early break without entering `keepToolRefs`.
- */
-function buildKeptSkillNames(
-  history: Content[],
-  refs: PartRef[],
-  clearRefKeys: Set<string>,
-  callIdToSkillName: Map<string, string[]>,
-  genuineOutputs: ReadonlySet<string> | undefined,
-): Set<string> {
-  const kept = new Set<string>();
-  for (const ref of refs) {
-    if (clearRefKeys.has(refKey(ref))) continue;
-    const part = getPart(history, ref);
-    if (!part || isErrorResponse(part) || isAlreadyCleared(part)) continue;
-    if (part.functionResponse?.name !== ToolNames.SKILL) continue;
-    if (
-      !isProvenSkillBody(
-        part.functionResponse.response?.['output'],
-        genuineOutputs,
-      )
-    ) {
-      continue;
-    }
-    const names = getSkillNamesForResponse(part, callIdToSkillName);
-    if (names?.length === 1) {
-      kept.add(names[0]!);
     }
   }
   return kept;
@@ -580,15 +519,6 @@ export interface MicrocompactOptions {
   sizeOnly?: boolean;
   pendingContent?: Content | Content[];
   preserveReadFileResult?: PreserveReadFileResult;
-  /**
-   * Residency provenance from SkillTool (outputs it actually produced
-   * this process). When provided, a marker-shaped Skill result proves a
-   * body only if it is in this set — a crafted command-delegation output
-   * copying the two public markers must neither shield a same-named
-   * skill's eviction nor count as an evicted/unresolved body. `undefined`
-   * keeps the legacy marker-only check (no tracker wired).
-   */
-  genuineSkillBodyOutputs?: ReadonlySet<string>;
 }
 
 export interface MicrocompactMeta {
@@ -619,28 +549,6 @@ export interface MicrocompactMeta {
    * armed entry would serve a dangling placeholder.
    */
   unresolvedEvictedReads: number;
-  /**
-   * Names of skills whose blanked Skill result dropped the loaded body
-   * from history. DIAGNOSTIC ONLY — no production consumer. Loaded-skill
-   * tracking is rebuilt from the applied history by `setHistory`'s
-   * `reconcileLoadedSkillTracking` at every application site (pre-send
-   * microcompaction, tryCompress, compact_history); callers must NOT
-   * second-write tracking from this field (the removed post-setHistory
-   * sync degraded ground truth — see the R3-2 tests). A skill whose
-   * full body still survives this pass (via `buildKeptSkillNames`) is
-   * suppressed from this list; within one load cycle a body is always
-   * older than its dedup confirmations, so a kept confirmation never
-   * suppresses (only a kept full body does).
-   */
-  evictedSkillNames: string[];
-  /**
-   * Count of blanked Skill results whose skill name could NOT be
-   * recovered. DIAGNOSTIC ONLY — same contract as `evictedSkillNames`:
-   * tracking sync belongs to `setHistory`'s reconcile, which rebuilds
-   * from the actually-applied history and so needs no fallback signal
-   * here. Callers must NOT clear tracking based on this field.
-   */
-  unresolvedEvictedSkills: number;
 }
 
 /**
@@ -755,14 +663,7 @@ export function microcompactHistory(
     tool = sizePlan.toolRefs.filter((r) => r.contentIndex < history.length);
     keptPathHistory =
       pending.length > 0 ? [...history, ...pending] : keptPathHistory;
-    // Use the pending-filtered refs: a result that only exists in pending
-    // content has not been committed to history, so a kept ref there cannot
-    // prove residency (matches buildKeepRefs' pending exclusion). Known
-    // corner: if the same turn re-invokes a skill whose old body is blanked
-    // here, the pending replacement cannot suppress that eviction report, so
-    // tracking is un-tracked while the replacement lands — one bounded
-    // duplicate body on the next invoke (the self-healing direction).
-    keptPathRefs = tool;
+    keptPathRefs = sizePlan.toolRefs;
     keepRefs = sizePlan.keepToolRefs;
     clearRefs = sizePlan.clearRefs;
     toolResultCharsBefore = sizePlan.toolResultCharsBefore;
@@ -778,8 +679,6 @@ export function microcompactHistory(
 
   const evictedReadPaths = new Set<string>();
   let unresolvedEvictedReads = 0;
-  const evictedSkillNames = new Set<string>();
-  let unresolvedEvictedSkills = 0;
 
   let tokensSaved = 0;
   let toolsCleared = 0;
@@ -789,20 +688,11 @@ export function microcompactHistory(
   if (clearRefs.length > 0) {
     const clearMap = buildClearMap(clearRefs);
     const callIdToFilePath = buildCallIdToFilePath(keptPathHistory);
-    const callIdToSkillName = buildCallIdToSkillName(keptPathHistory);
     const keptFilePaths = buildKeptFilePaths(
       keptPathHistory,
       keptPathRefs,
       keepRefs,
       callIdToFilePath,
-    );
-    const clearRefKeys = new Set(clearRefs.map(refKey));
-    const keptSkillNames = buildKeptSkillNames(
-      keptPathHistory,
-      keptPathRefs,
-      clearRefKeys,
-      callIdToSkillName,
-      opts?.genuineSkillBodyOutputs,
     );
 
     result = history.map((content, ci) => {
@@ -838,34 +728,6 @@ export function microcompactHistory(
               }
             } else {
               unresolvedEvictedReads++;
-            }
-          }
-          // Record the blanked skill so the caller un-tracks it from
-          // loadedSkillNames — otherwise the dedup guard keeps returning
-          // "already loaded in context" for a body that no longer exists.
-          // Only a body proves residency/eviction; non-body outputs (SkillTool
-          // errors, dedup confirmations) never created tracking or are
-          // vouched for by their body's own record, so counting them as
-          // unresolved would force a blanket clear that doubles resident bodies.
-          if (
-            part.functionResponse.name === ToolNames.SKILL &&
-            isProvenSkillBody(
-              part.functionResponse.response?.['output'],
-              opts?.genuineSkillBodyOutputs,
-            )
-          ) {
-            const skillNames = getSkillNamesForResponse(
-              part,
-              callIdToSkillName,
-            );
-            if (skillNames && skillNames.length > 0) {
-              for (const n of skillNames) {
-                if (!keptSkillNames.has(n)) {
-                  evictedSkillNames.add(n);
-                }
-              }
-            } else {
-              unresolvedEvictedSkills++;
             }
           }
           return {
@@ -944,8 +806,6 @@ export function microcompactHistory(
       tokensSaved,
       evictedReadPaths: [...evictedReadPaths],
       unresolvedEvictedReads,
-      evictedSkillNames: [...evictedSkillNames],
-      unresolvedEvictedSkills,
     },
   };
 }

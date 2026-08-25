@@ -87,10 +87,6 @@ import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
-import {
-  getGenuineSkillBodyOutputs,
-  reconcileLoadedSkillTracking,
-} from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
@@ -911,9 +907,6 @@ export class GeminiClient {
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
     this.config.getFileReadCache().clear();
-    // Loaded-skill tracking is synced in GeminiChat.stripOrphanedUserEntriesFromHistory
-    // (targeted un-track of provable bodies; any unresolvable stripped
-    // body triggers a wholesale clear) so both TUI and ACP paths are covered.
     // The stripped user turn may have carried the IDE context (open files,
     // workspace state) that `lastSentIdeContext` advanced past. Without
     // forcing a resend, the next request would either skip IDE context
@@ -1011,8 +1004,6 @@ export class GeminiClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
-      // Loaded-skill tracking is reconciled to the kept prefix in
-      // GeminiChat.truncateHistory so both TUI and ACP paths are covered.
     }
     this.forceFullIdeContext = true;
   }
@@ -2470,9 +2461,6 @@ export class GeminiClient {
           ...opts,
           preserveReadFileResult: (filePath) =>
             isManagedMemoryPath(filePath, projectRoot, targetDir),
-          genuineSkillBodyOutputs: getGenuineSkillBodyOutputs(
-            this.config.getToolRegistry(),
-          ),
         },
       );
       if (!mcResult.meta) {
@@ -2482,9 +2470,7 @@ export class GeminiClient {
       const m = mcResult.meta;
       const changed = m.tokensSaved > 0;
       if (changed) {
-        // setHistory's reconcile is the single loaded-skill sync here: it
-        // rebuilds tracking exactly from the post-eviction history, so no
-        // follow-up eviction sync may second-write that state.
+        // setHistory conservatively clears loaded-skill tracking.
         this.getChat().setHistory(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
@@ -2783,20 +2769,8 @@ export class GeminiClient {
           this.getChat().addHistory(entry);
         }
       }
-      // Both branches leave history in a FINAL state: either the restore
-      // re-added the stripped entries, or the retry re-pushed them. Only
-      // bodies actually resident should be tracked, so reconcile against
-      // the settled history: an entry the retry did NOT re-push (the
-      // counter can advance on a text-only resubmission while a skill
-      // body entry stays dropped) must not be re-tracked — additive
-      // re-tracking would recreate the ghost the strip just removed.
-      // Read-only pairing walk — the shallow variant avoids a full
-      // deep-clone of long histories on every retry.
-      reconcileLoadedSkillTracking(
-        this.getHistoryShallow(),
-        this.config.getToolRegistry(),
-        'restoreStrippedRetryEntries',
-      );
+      // Loaded-skill tracking was conservatively cleared by the strip
+      // above; restored bodies simply re-inject on their next invoke.
       strippedRetryEntries = [];
     };
 
@@ -4691,8 +4665,6 @@ export class GeminiClient {
     }
 
     if (microcompactMeta) {
-      // compressFast's internal setHistory already reconciled tracking
-      // from the post-eviction history — no second sync here.
       await this.disarmFileReadCacheAfterEviction(
         microcompactMeta,
         'compress-fast',

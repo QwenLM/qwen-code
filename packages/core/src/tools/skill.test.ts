@@ -629,10 +629,6 @@ describe('SkillTool', () => {
         '/test/project',
         mockRuntimeConfig,
       );
-      // Provenance recording, positive half (R4-3): the exact returned
-      // body string is the ONLY residency proof downstream — a byte
-      // mismatch would fail-closed every residency check.
-      expect([...skillTool.getGenuineSkillBodyOutputs()]).toEqual([llmText]);
     });
 
     it('records usage while Auto Skill generation is disabled', async () => {
@@ -1056,69 +1052,6 @@ describe('SkillTool', () => {
       expect(llmText2).toContain('Review code for quality and best practices.');
     });
 
-    it('unloadSkills re-arms dedup only for the given names', async () => {
-      vi.mocked(mockSkillManager.loadSkillForRuntime)
-        .mockResolvedValueOnce(mockSkills[0])
-        .mockResolvedValueOnce(mockSkills[1])
-        .mockResolvedValue(mockRuntimeConfig);
-
-      const inv1 = (
-        skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'code-review' });
-      await inv1.execute();
-      const inv2 = (
-        skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'testing' });
-      await inv2.execute();
-
-      skillTool.unloadSkills(['code-review']);
-      expect([...skillTool.getLoadedSkillNames()]).toEqual(['testing']);
-
-      // Unloaded skill reloads with full content…
-      const inv3 = (
-        skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'code-review' });
-      const result3 = await inv3.execute();
-      expect(partToString(result3.llmContent)).toContain(
-        'Review code for quality and best practices.',
-      );
-
-      // …while the untouched skill still dedups.
-      const inv4 = (
-        skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'testing' });
-      const result4 = await inv4.execute();
-      expect(partToString(result4.llmContent)).toBe(
-        'Skill "testing" is already loaded in context.',
-      );
-    });
-
-    it('trackSkills re-arms dedup for restored bodies', async () => {
-      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
-        mockSkills[0],
-      );
-
-      const inv1 = (
-        skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'code-review' });
-      await inv1.execute();
-
-      // A history rewrite cleared the tracking; the restore puts the body
-      // back and re-tracks it.
-      skillTool.clearLoadedSkills();
-      skillTool.trackSkills(['code-review']);
-      expect([...skillTool.getLoadedSkillNames()]).toEqual(['code-review']);
-
-      // The resident body must dedup again instead of doubling up.
-      const inv2 = (
-        skillTool as SkillToolWithProtectedMethods
-      ).createInvocation({ skill: 'code-review' });
-      const result2 = await inv2.execute();
-      expect(partToString(result2.llmContent)).toBe(
-        'Skill "code-review" is already loaded in context.',
-      );
-    });
-
     it('re-invocation still logs telemetry and calls onSkillLoaded', async () => {
       vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
         mockRuntimeConfig,
@@ -1475,17 +1408,10 @@ describe('SkillTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Prompt content from MCP');
       expect(result.returnDisplay).toBe('Executed command: mcp-prompt-a');
-      // Command delegations are NOT tracked (R1-14): the result is raw
-      // command text, not a skill body, so no eviction/sync path could
-      // ever un-track it — tracking here would deadlock a later
-      // same-named file skill behind the dedup guard forever.
+      // Command delegations are NOT tracked: the result is raw command
+      // text, not a skill body, so a tracked name here would block a
+      // later same-named file skill behind the dedup guard.
       expect([...skillTool.getLoadedSkillNames()]).toEqual([]);
-      // Provenance recording, negative half (R4-3): delegated output
-      // must NOT enter the genuine set, or marker-shaped command text
-      // would become 'proven' and reconcile would track a name no
-      // eviction path can ever un-track (the R1-14 deadlock reached
-      // through the provenance set).
-      expect([...skillTool.getGenuineSkillBodyOutputs()]).toEqual([]);
     });
 
     it('should fall through to not-found error when executor returns null', async () => {
