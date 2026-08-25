@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
+import { makeSwapSlotClient } from '../../test-utils/mock-swap-slot-client.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 const mockSettings = {
@@ -617,6 +618,98 @@ describe('useBranchCommand', () => {
     expect(startNewSessionUI).not.toHaveBeenCalled();
   });
 
+  it('rejects the branch when another session switch holds the swap latch', async () => {
+    // Another /resume or /branch holds the single telemetry-swap slot, so
+    // beginTelemetrySwap returns false. The hook must surface the error,
+    // create no fork, and settle NOTHING: the slot belongs to the in-flight
+    // swap — committing or aborting it here would discard that swap's armed
+    // undo and reintroduce the #9833 double-count (#9844). The latch also
+    // runs BEFORE any outgoing-session work, so nothing is finalized or
+    // forked on a rejection.
+    const beginTelemetrySwap = vi.fn().mockReturnValue(false);
+    const commitTelemetrySwap = vi.fn();
+    const abortTelemetrySwap = vi.fn();
+    config.getGeminiClient = () => ({
+      initialize: vi.fn(),
+      beginTelemetrySwap,
+      commitTelemetrySwap,
+      abortTelemetrySwap,
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    expect(beginTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(finalize).not.toHaveBeenCalled();
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(removeSession).not.toHaveBeenCalled();
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(commitTelemetrySwap).not.toHaveBeenCalled();
+    expect(abortTelemetrySwap).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('settles the swap slot when the branch fails before the core swap', async () => {
+    // The latch opened in step 0 means this attempt owns the slot even when
+    // the pre-core-swap work (flush / fork / title persistence) fails. The
+    // catch must settle that transaction so the next swap is not rejected
+    // with "already in progress" (#9844). The default client mock
+    // ({ initialize: vi.fn() }) has no commitTelemetrySwap, so the settle
+    // there is an optional-chained no-op — observe the release through a
+    // stateful slot fake instead.
+    forkSession.mockRejectedValue(new Error('disk full'));
+    const geminiClient = makeSwapSlotClient();
+    config.getGeminiClient = () => geminiClient;
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+
+    // The failure surfaced before any core/UI swap...
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/Failed to branch conversation.*disk full/),
+      }),
+      expect.any(Number),
+    );
+    // ...and the catch settled (committed, never aborted) the transaction
+    // this attempt opened.
+    expect(geminiClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(geminiClient.abortTelemetrySwap).not.toHaveBeenCalled();
+
+    // The released slot admits the next attempt: the retry is NOT rejected
+    // with "already in progress" and completes the full swap.
+    forkSession.mockResolvedValue({
+      filePath: '/tmp/new.jsonl',
+      copiedCount: 2,
+    });
+    await act(async () => {
+      await result.current.handleBranch('x');
+    });
+    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(2);
+    expect(addItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('already in progress'),
+      }),
+      expect.any(Number),
+    );
+    expect(startNewSessionConfig).toHaveBeenCalledTimes(1);
+    expect(startNewSessionUI).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ['returns false', () => renameSession.mockResolvedValue(false)],
     [
@@ -686,11 +779,11 @@ describe('useBranchCommand', () => {
       sid === oldSessionId ? parentResumed : forkResumed,
     );
 
-    const initialize = vi
-      .fn()
+    const geminiClient = makeSwapSlotClient();
+    geminiClient.initialize
       .mockRejectedValueOnce(new Error('init boom')) // fork init fails
       .mockResolvedValueOnce(undefined); // rollback re-init succeeds
-    config.getGeminiClient = () => ({ initialize });
+    config.getGeminiClient = () => geminiClient;
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -710,7 +803,16 @@ describe('useBranchCommand', () => {
     );
     // Client was re-initialized after rollback so chat history re-hydrates
     // against the parent session.
-    expect(initialize).toHaveBeenCalledTimes(2);
+    expect(geminiClient.initialize).toHaveBeenCalledTimes(2);
+    // The rollback aborted the transaction this attempt opened — never
+    // committed it. The true return is safe to assert here: initialize ran
+    // during the open transaction, so the real client armed an undo and
+    // also returns true — unlike the open-but-unarmed shape, which the
+    // slot fake over-approximates (#9844 review; see
+    // mock-swap-slot-client.ts).
+    expect(geminiClient.abortTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(geminiClient.abortTelemetrySwap).toHaveReturnedWith(true);
+    expect(geminiClient.commitTelemetrySwap).not.toHaveBeenCalled();
     // UI never switched — no cleared history, no UI sessionId swap.
     expect(clearItems).not.toHaveBeenCalled();
     expect(loadHistory).not.toHaveBeenCalled();
