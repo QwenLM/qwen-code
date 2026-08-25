@@ -5313,6 +5313,42 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
+    it('honours QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
+      // Anthropic twin of the OpenAI pipeline.test.ts case: with no explicit
+      // `streamIdleTimeoutMs` config field, the constructor must resolve the
+      // idle window from the deployment env knob. Mutant check: replacing the
+      // constructor's `resolveStreamIdleTimeoutMs(contentGeneratorConfig)`
+      // with `contentGeneratorConfig.streamIdleTimeoutMs ??
+      // DEFAULT_STREAM_IDLE_TIMEOUT_MS` ignores the env knob (falls back to
+      // the 240s default) and this test fails on the sentinel.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '3000');
+      const gated = gatedEventStream(); // never pushes → silent
+      anthropicState.createImpl.mockResolvedValue(gated.stream);
+      const generator = await buildGenerator({});
+      const stream = await generator.generateContentStream(streamRequest);
+      const captured = consumeUntilSettled(stream);
+      await vi.advanceTimersByTimeAsync(2999); // inside the env window
+      await vi.advanceTimersByTimeAsync(0);
+      const earlySentinel = Symbol('idle-watchdog-fired-before-env-value');
+      const early = await Promise.race([
+        captured,
+        Promise.resolve(earlySentinel),
+      ]);
+      expect(early).toBe(earlySentinel); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1); // t=3000 — the env value
+      await vi.advanceTimersByTimeAsync(0);
+      const lateSentinel = Symbol('env-idle-watchdog-did-not-fire');
+      const err = await Promise.race([captured, Promise.resolve(lateSentinel)]);
+      expect(err).toMatchObject({
+        name: 'StreamInactivityTimeoutError',
+        code: 'ETIMEDOUT',
+        idleMs: 3000,
+        chunksReceived: 0,
+      });
+      expect((err as Error).message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
+      expect(gated.wasReturned()).toBe(true);
+    });
+
     it('does not interrupt a stream whose events keep arriving inside the idle window', async () => {
       const gated = gatedEventStream();
       anthropicState.createImpl.mockResolvedValue(gated.stream);
