@@ -5,7 +5,17 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -47,8 +57,9 @@ test('workflow pins the ossutil credential lifecycle (sha256 install, config, al
   assert.match(install, /continue-on-error: true/);
   assert.match(install, /sha256sum -c/);
   const configure =
-    workflow.split("'Configure Aliyun OSS credentials'")[1]?.split('- name:')[0] ??
-    '';
+    workflow
+      .split("'Configure Aliyun OSS credentials'")[1]
+      ?.split('- name:')[0] ?? '';
   assert.match(configure, /continue-on-error: true/);
   assert.match(configure, /-c "\$RUNNER_TEMP\/\.ossutilconfig"/);
   // ...but the cleanup must run even on failure, or the OSS key pair
@@ -56,6 +67,158 @@ test('workflow pins the ossutil credential lifecycle (sha256 install, config, al
   const cleanup = workflow.split("'Cleanup Aliyun OSS credentials'")[1] ?? '';
   assert.match(cleanup, /if: '\$\{\{ always\(\) \}\}'/);
   assert.match(cleanup, /rm -f "\$RUNNER_TEMP\/\.ossutilconfig"/);
+});
+
+// --- Behavioural coverage for the OSS hosting block -----------------------
+// The shape regexes above pin the hosting contract as text; this harness
+// EXECUTES the extracted hosting block against a stub uploader that mirrors
+// scripts/upload-aliyun-oss-assets.js's flag contract (readOptionValue
+// rejects a valueless --bucket/--config/--prefix; at least one asset is
+// required) and records where the objects land — the same stub-uploader
+// pattern as the verify path in scripts/tests/qwen-triage-workflow.test.js.
+// A --prefix that drifts away from RAW_BASE (every preview URL 404s) or a
+// dropped --config (the real uploader dies before any comment posts) fails
+// here, where the shape regexes stay green.
+
+function hostingBlockSource() {
+  const raw = workflow
+    .split('# --- Host on Aliyun OSS')[1]
+    ?.split('\n')
+    .slice(1) // drop the marker line's trailing dashes — not a comment.
+    .join('\n')
+    .split('# --- Changed paths')[0]
+    .replace(/^ {10}/gm, ''); // the step run block's indentation.
+  assert.ok(raw, 'hosting block markers not found in the publish workflow');
+  return raw;
+}
+
+function runHostingBlock(hasImages) {
+  const dir = mkdtempSync(join(tmpdir(), 'visuals-hosting-'));
+  const runnerTemp = join(dir, 'runner-temp');
+  const stage = join(dir, 'stage');
+  const work = join(dir, 'work');
+  const stubRoot = join(dir, 'oss');
+  const recordPath = join(dir, 'upload-record.json');
+  mkdirSync(runnerTemp, { recursive: true });
+  mkdirSync(stage, { recursive: true });
+  mkdirSync(join(work, 'scripts'), { recursive: true });
+  // The block installs its job-private ossutil copy from here; the stub
+  // uploader never executes it, but the install must succeed.
+  writeFileSync(join(runnerTemp, 'ossutil'), 'fake ossutil\n');
+  writeFileSync(join(stage, 'home-light.png'), 'png-bytes');
+  writeFileSync(join(stage, 'model-switch.gif'), 'gif-bytes');
+  // Stub uploader: enforces the real flag contract, then copies the objects
+  // under $OSS_STUB_ROOT/<bucket>/<prefix> and records the flags it saw.
+  writeFileSync(
+    join(work, 'scripts', 'upload-aliyun-oss-assets.js'),
+    [
+      "'use strict';",
+      "const { copyFileSync, mkdirSync, writeFileSync } = require('node:fs');",
+      "const { basename, join } = require('node:path');",
+      "const opts = { bucket: '', config: '', prefix: '' };",
+      'const assets = [];',
+      'const argv = process.argv.slice(2);',
+      'for (let i = 0; i < argv.length; i += 1) {',
+      '  const arg = argv[i];',
+      "  if (arg === '--bucket' || arg === '--config' || arg === '--prefix') {",
+      '    opts[arg.slice(2)] = argv[i + 1] ?? "";',
+      '    i += 1;',
+      '  } else {',
+      '    assets.push(arg);',
+      '  }',
+      '}',
+      'for (const [name, value] of Object.entries(opts)) {',
+      '  if (!value || value.startsWith("-")) {',
+      '    console.error(`upload-assets stub: --${name} requires a value`);',
+      '    process.exit(1);',
+      '  }',
+      '}',
+      'if (assets.length === 0) {',
+      '  console.error("upload-assets stub: at least one ASSET path is required");',
+      '  process.exit(1);',
+      '}',
+      'const target = join(process.env.OSS_STUB_ROOT, opts.bucket, opts.prefix);',
+      'mkdirSync(target, { recursive: true });',
+      'for (const file of assets) {',
+      '  copyFileSync(file, join(target, basename(file)));',
+      '}',
+      'writeFileSync(process.env.OSS_STUB_RECORD, JSON.stringify(opts));',
+    ].join('\n'),
+  );
+  const pr = '4242';
+  const headSha = 'cafe4242cafe4242cafe4242cafe4242cafe4242';
+  const script = [
+    'set -euo pipefail',
+    `HAS_IMAGES=${hasImages ? 1 : 0}`,
+    `PR=${pr}`,
+    `RUN_HEAD_SHA=${headSha}`,
+    `STAGE=${JSON.stringify(stage)}`,
+    'ALIYUN_OSS_BUCKET=assets-bucket',
+    'ALIYUN_OSS_PUBLIC_BASE_URL=https://assets.example.test',
+    `RUNNER_TEMP=${JSON.stringify(runnerTemp)}`,
+    hostingBlockSource(),
+    'printf \'RAW_BASE=%s\\n\' "$RAW_BASE"',
+  ].join('\n');
+  const driverPath = join(dir, 'driver.sh');
+  writeFileSync(driverPath, script);
+  const res = spawnSync('bash', [driverPath], {
+    encoding: 'utf8',
+    cwd: work,
+    env: {
+      ...process.env,
+      OSS_STUB_ROOT: stubRoot,
+      OSS_STUB_RECORD: recordPath,
+    },
+  });
+  return { res, recordPath, stubRoot, pr, headSha, runnerTemp };
+}
+
+test('hosting block uploads staged images to the exact prefix RAW_BASE promises', () => {
+  const { res, recordPath, stubRoot, pr, headSha, runnerTemp } =
+    runHostingBlock(true);
+  assert.equal(res.status, 0, res.stderr);
+  // Flag wiring: the uploader gets the bucket, the credential file the
+  // configure step writes, and the prefix the comment URLs are built from.
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  assert.deepEqual(record, {
+    bucket: 'assets-bucket',
+    config: `${runnerTemp}/.ossutilconfig`,
+    prefix: `pr-assets/web-shell-visuals/${pr}/${headSha}`,
+  });
+  // Upload-prefix ↔ URL agreement: the objects land exactly where RAW_BASE
+  // (the comment's image base URL) points.
+  const hosted = readdirSync(
+    join(
+      stubRoot,
+      'assets-bucket',
+      'pr-assets',
+      'web-shell-visuals',
+      pr,
+      headSha,
+    ),
+  ).sort();
+  assert.deepEqual(hosted, ['home-light.png', 'model-switch.gif']);
+  assert.match(
+    res.stdout,
+    new RegExp(
+      `^RAW_BASE=https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}$`,
+      'm',
+    ),
+  );
+  assert.match(
+    res.stdout,
+    new RegExp(
+      `Web-shell visuals hosted at https://assets\\.example\\.test/pr-assets/web-shell-visuals/${pr}/${headSha}\\.`,
+    ),
+  );
+});
+
+test('hosting block skips the uploader entirely on the no-change arm', () => {
+  const { res, recordPath } = runHostingBlock(false);
+  assert.equal(res.status, 0, res.stderr);
+  assert.match(res.stdout, /^RAW_BASE=$/m); // empty -> image-less comment
+  assert.doesNotMatch(res.stdout, /hosted at/);
+  assert.equal(existsSync(recordPath), false); // the uploader never ran
 });
 
 test('sanitizeName preserves the extension (regression: a trailing char broke the .png filter)', () => {
