@@ -481,6 +481,42 @@ describe('parseArguments', () => {
   );
 
   it.each([
+    ['--bg'],
+    ['--background'],
+    ['--debug', '--bg'],
+    ['--proxy', 'http://localhost:7890', '--bg'],
+    ['--include-directories', '/a', '/b', '--bg'],
+  ])(
+    'rejects prefix options %j before a complete MCP command',
+    async (...prefix) => {
+      process.argv = [
+        'node',
+        'script.js',
+        ...prefix,
+        'mcp',
+        'add',
+        'background-guard',
+        'sh',
+      ];
+      const writeFileSync = vi.mocked(fs.writeFileSync);
+      writeFileSync.mockClear();
+      const originalIsTTY = process.stdin.isTTY;
+      process.stdin.isTTY = true;
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      try {
+        await expect(parseArguments()).rejects.toThrow();
+        expect(writeFileSync).not.toHaveBeenCalled();
+      } finally {
+        mockExit.mockRestore();
+        process.stdin.isTTY = originalIsTTY;
+      }
+    },
+  );
+
+  it.each([
     ['agents', 'explain', 'this', 'project'],
     ['--debug', 'agents', 'fix', 'the', 'bug'],
   ])('reserves `agents` as a command word for %j', async (...args) => {
@@ -721,6 +757,7 @@ describe('parseArguments', () => {
 
   it.each([
     ['--bg', 'auth'],
+    ['--background', 'auth'],
     ['--bg', 'channel'],
     ['--bg', 'extensions'],
     ['--bg', 'hook'],
@@ -753,6 +790,84 @@ describe('parseArguments', () => {
       } finally {
         mockExit.mockRestore();
         process.stdin.isTTY = originalIsTTY;
+      }
+    },
+  );
+
+  it.each([
+    'agents',
+    'auth',
+    'channel',
+    'extensions',
+    'hook',
+    'hooks',
+    'mcp',
+    'review',
+    'serve',
+    'sessions',
+    'update',
+  ])(
+    'keeps the second prompt word `%s` in a background prompt',
+    async (command) => {
+      process.argv = ['node', 'script.js', '--bg', 'fix', command, 'task'];
+      const originalIsTTY = process.stdin.isTTY;
+      process.stdin.isTTY = true;
+      mockUpdateHandler.mockClear();
+      mockEnsureAgentViewSupervisor.mockClear();
+
+      try {
+        const argv = await parseArguments();
+
+        expect(argv.background).toBe(true);
+        expect(argv.query).toBe(`fix ${command} task`);
+        expect(mockUpdateHandler).not.toHaveBeenCalled();
+        expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+      } finally {
+        process.stdin.isTTY = originalIsTTY;
+      }
+    },
+  );
+
+  it.each([
+    ['--bg', 'fix', 'mcp', 'add', 'myserver', 'sh'],
+    ['--background', 'fix', 'mcp', 'add', 'myserver', 'sh'],
+    ['fix', '--bg', 'mcp', 'add', 'myserver', 'sh'],
+    ['fix', 'mcp', 'add', 'myserver', 'sh', '--bg'],
+  ])('parses a zero-argument background flag in %j', async (...args) => {
+    process.argv = ['node', 'script.js', ...args];
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+
+    try {
+      const argv = await parseArguments();
+
+      expect(argv.background).toBe(true);
+      expect(argv.query).toBe('fix mcp add myserver sh');
+    } finally {
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it.each([
+    ['mcp', 'list', '--bg'],
+    ['update', '--background'],
+    ['agents', 'list', '--bg'],
+  ])(
+    'rejects a background flag on the real subcommand in %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      mockUpdateHandler.mockClear();
+      mockEnsureAgentViewSupervisor.mockClear();
+      const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('process.exit called');
+      });
+
+      try {
+        await expect(parseArguments()).rejects.toThrow();
+        expect(mockUpdateHandler).not.toHaveBeenCalled();
+        expect(mockEnsureAgentViewSupervisor).not.toHaveBeenCalled();
+      } finally {
+        mockExit.mockRestore();
       }
     },
   );

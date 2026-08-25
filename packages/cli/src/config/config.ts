@@ -654,6 +654,13 @@ function buildCliParser(rawArgv: string[]): Argv {
       description:
         'Enable chat recording to disk. If false, chat history is not saved and --continue/--resume will not work.',
     })
+    .option('background', {
+      alias: 'bg',
+      type: 'boolean',
+      nargs: 0,
+      global: false,
+      description: 'Start a new Agent View background session',
+    })
     .command('$0 [query..]', 'Launch Qwen Code CLI', (yargsInstance: Argv) =>
       yargsInstance
         .positional('query', {
@@ -1154,6 +1161,27 @@ function validateBackgroundInvocation(rawArgv: string[]): string | undefined {
   }
 }
 
+function getLeadingBackgroundCommand(rawArgv: string[]): string | undefined {
+  const separatorIndex = rawArgv.indexOf('--');
+  const leadingArgv =
+    separatorIndex === -1 ? rawArgv : rawArgv.slice(0, separatorIndex);
+  const argv = yargs(leadingArgv)
+    .exitProcess(false)
+    .help(false)
+    .version(false)
+    .parserConfiguration({ 'halt-at-non-option': true })
+    .option('background', {
+      alias: 'bg',
+      type: 'boolean',
+      nargs: 0,
+    })
+    .parseSync();
+  const command = argv._[0];
+  return argv['background'] === true && typeof command === 'string'
+    ? command
+    : undefined;
+}
+
 export async function parseArguments(): Promise<CliArgs> {
   let rawArgv = hideBin(process.argv);
 
@@ -1165,6 +1193,17 @@ export async function parseArguments(): Promise<CliArgs> {
       rawArgv[0].endsWith('/dist/cli/cli.js'))
   ) {
     rawArgv = rawArgv.slice(1);
+  }
+
+  const backgroundCommand = getLeadingBackgroundCommand(rawArgv);
+  if (
+    backgroundCommand &&
+    BACKGROUND_RESERVED_PROMPT_WORDS.has(backgroundCommand)
+  ) {
+    writeStderrLine(
+      `Cannot use --bg/--background before the "${backgroundCommand}" subcommand; place -- before prompt text that starts with a command name`,
+    );
+    process.exit(1);
   }
 
   const yargsInstance = buildCliParser(rawArgv);
