@@ -422,7 +422,19 @@ export function useProviderSetupFlow(
     const masked = maskApiKey(apiKey);
 
     const genConfig: Record<string, unknown> = {};
-    if (thinkingEnabled) genConfig['extra_body'] = { enable_thinking: true };
+    if (thinkingEnabled) {
+      // The review screen states that this exact JSON is what gets saved, so
+      // it has to show the shape provider persistence actually writes.
+      // `extra_body.enable_thinking` is a DashScope/Qwen wire knob with no
+      // meaning on the Responses API, and buildAdvancedGenerationConfig
+      // (core providers/provider-config.ts) normalizes it to the unified
+      // reasoning ladder for that protocol.
+      if (protocol === AuthType.USE_OPENAI_RESPONSES) {
+        genConfig['reasoning'] = { effort: 'medium' };
+      } else {
+        genConfig['extra_body'] = { enable_thinking: true };
+      }
+    }
     if (modalityEnabled) {
       const mod: Record<string, boolean> = {};
       if (modalityImage) mod['image'] = true;

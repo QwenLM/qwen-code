@@ -1768,4 +1768,79 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       unmount();
     },
   );
+
+  itWhenTuiInputReliable(
+    'previews the persisted reasoning shape for the OpenAI Responses protocol',
+    async () => {
+      // The review screen promises "the following JSON will be saved", but
+      // provider persistence normalizes enable_thinking to
+      // `generationConfig.reasoning.effort` on this protocol
+      // (provider-config.ts: buildAdvancedGenerationConfig), so the preview
+      // was showing a shape that never reaches settings.json.
+      const settings = createStandardSettings();
+
+      const mockUIState = createMockUIState();
+      const mockUIActions = createMockUIActions();
+
+      const mockConfig = {
+        getAuthType: vi.fn(() => undefined),
+        getContentGeneratorConfig: vi.fn(() => ({})),
+      } as unknown as Config;
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <UIStateContext.Provider value={mockUIState}>
+          <UIActionsContext.Provider value={mockUIActions}>
+            <AuthDialog />
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>,
+        { settings, config: mockConfig },
+      );
+
+      await navigateToCustomProtocolSelect(stdin, lastFrame);
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'OpenAI Responses');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 2/6 · Base URL',
+      );
+      // Submit the placeholder default endpoint for this protocol.
+      await wait();
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 3/6 · API Key',
+      );
+      await typeText(stdin, 'sk-test');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 4/6 · Model IDs',
+      );
+      await typeText(stdin, 'model-1');
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Custom Provider · Step 5/6 · Advanced Config',
+      );
+
+      // Toggle thinking (initially focused), then continue to review.
+      stdin.write(' ');
+      await wait();
+      stdin.write('\r');
+      await wait();
+
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame();
+          expect(frame).toContain('"generationConfig"');
+          expect(frame).toContain('"reasoning"');
+          expect(frame).toContain('"effort": "medium"');
+          expect(frame).not.toContain('"enable_thinking"');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
+
+      unmount();
+    },
+  );
 });

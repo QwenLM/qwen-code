@@ -111,11 +111,11 @@ Built-in provider ids (`openai`, `openai-responses`, `gemini`, `anthropic`, `ver
 
 Without a matching `providerProtocol` entry, a custom provider id is skipped (see the warning above).
 
-### SDKs Used for API Requests
+### Transports Used for API Requests
 
-Qwen Code uses the following official SDKs to send requests to each provider:
+Qwen Code sends requests to each provider through an official SDK, except for `openai-responses`, which talks to the endpoint over direct HTTP/SSE:
 
-| Auth Type          | SDK Package                                                                                                        |
+| Auth Type          | Transport                                                                                                          |
 | ------------------ | ------------------------------------------------------------------------------------------------------------------ |
 | `openai`           | [`openai`](https://www.npmjs.com/package/openai) - Official OpenAI Node.js SDK                                     |
 | `openai-responses` | Direct HTTP/SSE calls to `/v1/responses` (no SDK); embeddings use [`openai`](https://www.npmjs.com/package/openai) |
@@ -123,7 +123,7 @@ Qwen Code uses the following official SDKs to send requests to each provider:
 | `gemini`           | [`@google/genai`](https://www.npmjs.com/package/@google/genai) - Official Google GenAI SDK                         |
 | `qwen-oauth`       | [`openai`](https://www.npmjs.com/package/openai) with custom provider (DashScope-compatible)                       |
 
-This means the `baseUrl` you configure should be compatible with the corresponding SDK's expected API format. For example, when using `openai` auth type, the endpoint must accept OpenAI API format requests.
+This means the `baseUrl` you configure should be compatible with the corresponding transport's expected API format. For example, when using `openai` auth type, the endpoint must accept OpenAI API format requests.
 
 ### OpenAI-compatible providers (`openai`)
 
@@ -246,7 +246,7 @@ This auth type targets OpenAI's `/v1/responses` endpoint rather than Chat Comple
 ```
 
 > [!note]
-> `extra_body` on this wire is forwarded verbatim, except the legacy `enable_thinking` key: it is translated into `reasoning.effort: "medium"` when no explicit `reasoning` is set, and never appears literally on the wire (it isn't a Responses API field). Set `reasoning.effort` directly instead of `extra_body.enable_thinking` for this provider.
+> `extra_body` on this wire is fill-only: a key is written to the request body only when the generated request has no value for it, so it cannot override a field the pipeline already set (`model`, `input`, `reasoning`, `temperature`, `max_output_tokens`, ...). The legacy `enable_thinking` key is the one exception to even that — it is removed rather than forwarded (it isn't a Responses API field), and translated into `reasoning.effort: "medium"` when no explicit `reasoning` is set. Set `reasoning.effort` directly instead of `extra_body.enable_thinking` for this provider.
 
 ### Anthropic (`anthropic`)
 
