@@ -251,6 +251,7 @@ import {
   decideNotificationAdmission,
   DroppedNotificationTally,
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
+  AUTO_REJECT_APPROVAL_PAYLOAD,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -3059,10 +3060,7 @@ export class Session implements SessionContext {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
-        {
-          cancelMessage:
-            'Workflow approval was cancelled before it could be answered.',
-        },
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
       await this.#finishWorkflowApprovalToolCall(
         approval,

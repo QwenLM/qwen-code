@@ -398,6 +398,12 @@ describe('permissionUtils', () => {
         'qwen.daemon.permissionCancelReason': '',
       },
     } as RequestPermissionResponse;
+    const unknownReasonResponse: RequestPermissionResponse = {
+      outcome: { outcome: 'cancelled' },
+      _meta: {
+        'qwen.daemon.permissionCancelReason': 'approval_ui_unavailable',
+      },
+    } as RequestPermissionResponse;
 
     expect(permissionCancelReasonFromResponse(cancelledResponse)).toBe(
       'agent_cancelled',
@@ -409,6 +415,12 @@ describe('permissionUtils', () => {
       undefined,
     );
     expect(permissionCancelMessageFromResponse(emptyReasonResponse)).toBe(
+      undefined,
+    );
+    expect(permissionCancelReasonFromResponse(unknownReasonResponse)).toBe(
+      undefined,
+    );
+    expect(permissionCancelMessageFromResponse(unknownReasonResponse)).toBe(
       undefined,
     );
   });

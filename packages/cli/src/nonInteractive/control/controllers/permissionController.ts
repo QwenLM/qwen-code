@@ -26,6 +26,7 @@ import {
   ApprovalMode,
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { AUTO_REJECT_APPROVAL_PAYLOAD } from '@qwen-code/qwen-code-core/agents/workflow-run-registry.js';
 import { InputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
@@ -40,7 +41,6 @@ import { BaseController } from './baseController.js';
 import { buildPermissionSuggestions } from '../../permission-suggestions.js';
 
 const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
-
 export class PermissionController extends BaseController {
   private pendingOutgoingRequests = new Set<string>();
 
@@ -446,6 +446,7 @@ export class PermissionController extends BaseController {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
       return;
     }
@@ -455,6 +456,7 @@ export class PermissionController extends BaseController {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
       return;
     }
@@ -503,6 +505,7 @@ export class PermissionController extends BaseController {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
     }
   }
@@ -528,6 +531,11 @@ export class PermissionController extends BaseController {
       if (signal.aborted) {
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
+          requiresUserInteraction
+            ? {
+                cancelMessage: interactionUnavailableMessage,
+              }
+            : undefined,
         );
         return;
       }

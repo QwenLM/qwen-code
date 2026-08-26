@@ -1987,7 +1987,7 @@ describe('Session', () => {
     vi.mocked(mockClient.requestPermission).mockResolvedValue({
       outcome: { outcome: 'cancelled' },
       _meta: {
-        'qwen.daemon.permissionCancelReason': 'approval_ui_unavailable',
+        'qwen.daemon.permissionCancelReason': 'timeout',
       },
     } as RequestPermissionResponse);
     const callback = mockWorkflowRunRegistry.setApprovalRequestCallback.mock
@@ -2020,8 +2020,7 @@ describe('Session', () => {
       'wfap_cancel',
       core.ToolConfirmationOutcome.Cancel,
       {
-        cancelMessage:
-          'Permission request was cancelled because the approval UI was unavailable.',
+        cancelMessage: 'Permission request timed out before the user answered.',
       },
     );
   });
@@ -5873,7 +5872,7 @@ describe('Session', () => {
       vi.mocked(mockClient.requestPermission).mockResolvedValue({
         outcome: { outcome: 'cancelled' },
         _meta: {
-          'qwen.daemon.permissionCancelReason': 'approval_ui_unavailable',
+          'qwen.daemon.permissionCancelReason': 'timeout',
         },
       });
 
@@ -5889,7 +5888,7 @@ describe('Session', () => {
         core.ToolConfirmationOutcome.Cancel,
         expect.objectContaining({
           cancelMessage:
-            'Permission request was cancelled because the approval UI was unavailable.',
+            'Permission request timed out before the user answered.',
         }),
       );
       expect(mockChat.addHistory).toHaveBeenCalledWith(
@@ -5902,7 +5901,7 @@ describe('Session', () => {
                 name: 'ask_user_question',
                 response: expect.objectContaining({
                   error: expect.stringContaining(
-                    'Permission request was cancelled because the approval UI was unavailable.',
+                    'Permission request timed out before the user answered.',
                   ),
                 }),
               }),
