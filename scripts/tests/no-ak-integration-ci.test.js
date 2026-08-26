@@ -317,7 +317,7 @@ describe('no-AK integration CI wiring', () => {
       "expected_sha: '${{ github.event.pull_request.head.sha }}'",
     );
     expect(guardCalls.test_windows).toContain(
-      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
     expect(guardCalls.integration_cli).toContain(
       "expected_sha: '${{ github.event.merge_group.head_sha }}'",
@@ -334,7 +334,7 @@ describe('no-AK integration CI wiring', () => {
       'if: "${{ github.event_name == \'pull_request\' }}"',
     );
     expect(guardCalls.test_windows).toContain(
-      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\"",
     );
     expect(guardCalls.integration_cli).not.toContain('if:');
   });
@@ -346,23 +346,27 @@ describe('no-AK integration CI wiring', () => {
     );
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
 
-    // The runs-on expression is the Windows gate's escape hatch. Pin the
-    // whole line so a variable typo, a quoting regression in the nested
-    // ''true'' escapes, or an && / || regrouping fails here instead of
-    // surfacing only when the switch is flipped.
+    // The runs-on expression is the Windows gate's escape hatch and its fork
+    // trust policy: pull requests never reach the pool, because a
+    // pull_request run executes the PR's own YAML and could rewrite runs-on
+    // itself. Pin the whole line so a variable typo, a quoting regression in
+    // the nested ''true'' escapes, or an && / || regrouping fails here
+    // instead of surfacing only when the switch is flipped — or when a fork
+    // PR finds the persistent pool.
     const windowsRunsOn = windowsJob
       .split('\n')
       .find((line) => line.startsWith('    runs-on:'));
     expect(windowsRunsOn).toBe(
-      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
+      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
     );
     expect(windowsJob.split('\n')).toContain('    timeout-minutes: 60');
 
-    // The guard must stay wired to the merge-queue head for this job.
+    // The guard must stay wired to the expected head for this job: the
+    // event-aware shape, since the revived triggers have no merge-queue head.
     const guard = getWorkflowStep(windowsJob, GUARD_STEP);
     expect(guard).toContain("uses: './.github/actions/verify-checkout-head'");
     expect(guard).toContain(
-      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
 
     // The self-hosted-only tuning comes from the composite action shared with

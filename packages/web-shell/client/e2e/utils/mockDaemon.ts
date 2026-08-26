@@ -1588,13 +1588,30 @@ async function handleDaemonRoute(
         await badRequest(route, 'Invalid config-option request.');
         return;
       }
-      const configOptions = Array.isArray(scenario.state.configOptions)
-        ? scenario.state.configOptions.map((option) =>
-            isRecord(option) && option['id'] === configId
-              ? { ...option, currentValue: value }
-              : option,
-          )
+      const currentConfigOptions = Array.isArray(scenario.state.configOptions)
+        ? scenario.state.configOptions
         : [];
+      const reasoningOption = currentConfigOptions.find(
+        (option) => isRecord(option) && option['id'] === configId,
+      );
+      const allowedValues = isRecord(reasoningOption)
+        ? reasoningOption['options']
+        : undefined;
+      if (
+        !Array.isArray(allowedValues) ||
+        !allowedValues.some(
+          (option) =>
+            isRecord(option) && readStringField(option, 'value') === value,
+        )
+      ) {
+        await badRequest(route, 'Unsupported config-option value.');
+        return;
+      }
+      const configOptions = currentConfigOptions.map((option) =>
+        isRecord(option) && option['id'] === configId
+          ? { ...option, currentValue: value }
+          : option,
+      );
       scenario.state.configOptions = configOptions;
       await json(route, { configOptions });
       return;

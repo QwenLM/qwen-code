@@ -526,6 +526,15 @@ const EN: Messages = {
   'toast.dismissShort': 'Dismiss',
   'insight.ready': 'Insight report generated successfully!',
   'request.cancelled': 'Request cancelled.',
+  'visionBridge.model': 'vision model',
+  'visionBridge.skipped': (v) =>
+    `Vision bridge cancelled.${v?.egressOccurred === 1 ? ` Your image and prompt/context were sent to ${v?.target ?? ''}.` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `Vision bridge (${v?.modelName ?? ''}) failed: the vision model request failed. Your image and prompt/context were sent to ${v?.target ?? ''}. The image was not interpreted.`
+      : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
+  'visionBridge.ok': (v) =>
+    `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -1643,7 +1652,6 @@ const EN: Messages = {
   'skilldesc.bugfix': 'Fix a bug from a GitHub issue, reproduce-first',
   'skilldesc.codegraph': 'Analyze the codebase via graph and vector index',
   'skilldesc.createIssue': 'Draft and submit a GitHub issue from an idea',
-  'skilldesc.desktopPet': 'Create a pixel-art desktop pet for Qwen Code',
   'skilldesc.docsAuditAndRefresh':
     'Audit and refresh docs/ against the codebase',
   'skilldesc.docsUpdateFromDiff': 'Update official docs from local git diff',
@@ -3612,6 +3620,15 @@ const ZH: Messages = {
   'toast.dismissShort': '关闭',
   'insight.ready': 'Insight 报告已生成！',
   'request.cancelled': '请求已取消。',
+  'visionBridge.model': '视觉模型',
+  'visionBridge.skipped': (v) =>
+    `视觉桥接已取消。${v?.egressOccurred === 1 ? `你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `视觉桥接（${v?.modelName ?? ''}）失败：视觉模型请求失败。你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。图片未被解析。`
+      : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
+  'visionBridge.ok': (v) =>
+    `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -4643,7 +4660,6 @@ const ZH: Messages = {
   'skilldesc.bugfix': '按先复现流程修复 GitHub issue 中的 bug',
   'skilldesc.codegraph': '通过图数据库和向量索引分析代码库',
   'skilldesc.createIssue': '根据想法或 bug 描述起草并提交 GitHub issue',
-  'skilldesc.desktopPet': '为 Qwen Code 创建像素风桌面宠物',
   'skilldesc.docsAuditAndRefresh': '对照代码库审计并刷新 docs/ 文档',
   'skilldesc.docsUpdateFromDiff': '按本地 git diff 更新官方文档',
   'skilldesc.e2eTesting': '运行 Qwen Code CLI 的端到端测试',
