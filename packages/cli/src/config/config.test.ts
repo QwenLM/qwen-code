@@ -3025,6 +3025,20 @@ describe('Approval mode tool exclusion logic', () => {
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
 
+  it('should preserve an explicitly empty tools.core allowlist', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toEqual([]);
+  });
+
   it('should exclude only shell tools in non-interactive mode with auto-edit approval mode', async () => {
     process.argv = [
       'node',

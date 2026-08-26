@@ -232,8 +232,10 @@ export class PermissionManager {
     // Each entry may be a bare name ("Bash", "read_file") or include a specifier
     // ("Bash(ls -l)") – we normalise to canonical tool names and ignore specifiers
     // because the registry check is at the tool level, not the invocation level.
+    // An explicitly configured empty list is still an active allowlist: it
+    // disables every core tool. `undefined` alone means no restriction.
     const rawCoreTools = this.config.getCoreTools?.();
-    if (rawCoreTools && rawCoreTools.length > 0) {
+    if (rawCoreTools !== undefined) {
       this.coreToolsAllowList = new Set(
         rawCoreTools.map((t) => parseRule(t).toolName),
       );
@@ -794,7 +796,14 @@ export class PermissionManager {
       return false;
     }
 
-    // Non-core tools bypass coreTools allowlist check
+    // An explicitly empty coreTools allowlist means no tools. Apply this before
+    // the historical non-core exemption so `tools.core: []` is an actual
+    // tool-free configuration rather than silently sending every schema.
+    if (this.coreToolsAllowList?.size === 0) {
+      return false;
+    }
+
+    // Non-core tools bypass a non-empty coreTools allowlist check.
     if (!this.isCoreTool(canonicalName)) {
       const decision = await this.evaluate({ toolName: canonicalName });
       return decision !== 'deny';
@@ -803,10 +812,11 @@ export class PermissionManager {
     // Core tools: if a coreTools allowlist is active, only explicitly listed
     // tools are registered. This mirrors the legacy `tools.core` whitelist
     // semantic: any tool NOT in the allowlist is excluded from the registry.
-    if (this.coreToolsAllowList !== null && this.coreToolsAllowList.size > 0) {
-      if (!this.coreToolsAllowList.has(canonicalName)) {
-        return false;
-      }
+    if (
+      this.coreToolsAllowList !== null &&
+      !this.coreToolsAllowList.has(canonicalName)
+    ) {
+      return false;
     }
 
     // evaluate({ toolName }) without a command will only match rules that have

@@ -2567,11 +2567,20 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('read_file')).toBe(false);
     });
 
-    it('empty coreTools: all tools enabled (no whitelist restriction)', async () => {
+    it('empty coreTools disables every tool', async () => {
       pm = new PermissionManager(makeConfig({ coreTools: [] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('read_file')).toBe(false);
+      expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
+      expect(await pm.isToolEnabled('agent')).toBe(false);
+    });
+
+    it('undefined coreTools keeps tools enabled', async () => {
+      pm = new PermissionManager(makeConfig());
       pm.initialize();
       expect(await pm.isToolEnabled('read_file')).toBe(true);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      expect(await pm.isToolEnabled('agent')).toBe(true);
     });
 
     it('coreTools allowlist + deny rule: deny takes precedence for listed tools', async () => {
