@@ -11,6 +11,7 @@ import React from 'react';
 import {
   createDebugLogger,
   isDebugLogFileEnabled,
+  registerSession,
   type Config,
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
@@ -52,10 +53,7 @@ import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './utils/textUtils.js';
 import { startPostRenderPrefetches } from '../startup/startup-prefetch.js';
-import {
-  computeWindowTitle,
-  writeTerminalTitle,
-} from '../utils/windowTitle.js';
+import { computeWindowTitle, writeTerminalTitle } from './utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
 
 const debugLogger = createDebugLogger('STARTUP');
@@ -254,6 +252,7 @@ export async function startInteractiveUI(
       exitOnCtrlC: false,
       isScreenReaderEnabled: config.getScreenReader(),
       alternateScreen: useVP,
+      ...(useVP ? { maxFps: 60 } : {}),
     },
   );
   if (useVP) {
@@ -376,6 +375,20 @@ export async function startInteractiveUI(
       // Best-effort: a hint must never block or break exit.
     }
   });
+
+  // Announce this session only after the terminal teardown cleanup above is
+  // armed. Registration writes HOME and can stall independently of the
+  // project filesystem, so startup and terminal restoration must not await it.
+  // Config owns the ordering with /clear, /cd, and exit: transitions queued
+  // while registration is pending run after it, and unregister runs last.
+  config.trackSessionRegistration(
+    registerSession({
+      sessionId: config.getSessionId(),
+      cwd: config.getTargetDir(),
+      qwenVersion: version,
+    }),
+  );
+  registerCleanup(() => config.unregisterSessionRegistry());
 }
 
 function setWindowTitle(settings: LoadedSettings, folderName?: string) {

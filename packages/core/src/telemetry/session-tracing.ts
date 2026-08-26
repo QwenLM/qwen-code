@@ -475,13 +475,19 @@ function buildInteractionAttributes(
 ): Attributes {
   const sessionId = config.getSessionId();
   const userId = config.getTelemetryUserId();
+  const ownsStructuredOutputContract =
+    options.messageType === 'userQuery' ||
+    options.messageType === 'retry' ||
+    options.messageType === 'acp_prompt';
   return {
     'session.id': sessionId,
     ...(userId ? { 'gen_ai.user.id': userId } : {}),
     'gen_ai.operation.name': 'invoke_agent',
     'gen_ai.agent.name': 'qwen-code',
     'gen_ai.conversation.id': sessionId,
-    ...(config.getJsonSchema?.() ? { 'gen_ai.output.type': 'json' } : {}),
+    ...(ownsStructuredOutputContract && config.getJsonSchema?.()
+      ? { 'gen_ai.output.type': 'json' }
+      : {}),
     'qwen-code.prompt_id': options.promptId,
     'qwen-code.message_type': options.messageType,
     'qwen-code.model': options.model,

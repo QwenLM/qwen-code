@@ -761,6 +761,45 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('emits discrete vision bridge notices as text chunks', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const textChunks: Array<[string, string]> = [];
+    bridge.on('textChunk', (sessionId, text) => {
+      textChunks.push([sessionId, text]);
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'Vision bridge cancelled.' },
+          _meta: {
+            source: 'vision_bridge_notice',
+            qwenDiscreteMessage: true,
+          },
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(textChunks).toEqual([['session-1', 'Vision bridge cancelled.']]);
+    });
+
+    events.close();
+    bridge.stop();
+  });
+
   it('ignores a rewritten background response to avoid duplicate delivery', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -1965,6 +2004,40 @@ describe('DaemonChannelBridge', () => {
           [CHANNEL_PROMPT_META_KEY]: true,
           [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
           'qwen.daemon.promptDisplayText': 'hello',
+        },
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.push(turnCompleteEvent());
+    await promptPromise;
+    events.close();
+    bridge.stop();
+  });
+
+  it('presents the prompt authorization even without a display text', async () => {
+    // The daemon validates the token for the channel-turn classification
+    // too; a channel prompt without display text still needs it to keep
+    // its classification (and the loop-rejection opt-out that rides it).
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      promptAuthorization: 'worker-token',
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const promptPromise = bridge.prompt('session-1', 'hello');
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'hello' }],
+        _meta: {
+          [CHANNEL_PROMPT_META_KEY]: true,
+          [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: 'worker-token',
         },
       },
       expect.any(AbortSignal),

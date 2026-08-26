@@ -183,6 +183,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
   'toolDisplayName.RecordArtifact': '記錄製品',
+  'toolDisplayName.ReportFindings': '上報評審發現',
   'toolDisplayName.DisplayImage': '顯示圖片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
@@ -206,6 +207,7 @@ export default {
   'toolDisplayName.TeamDelete': '刪除團隊',
   'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.RequestShutdown': '請求下線',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
@@ -724,6 +726,7 @@ export default {
   'Tool Output Truncation Lines': '工具輸出截斷行數',
   'Folder Trust': '檔案夾信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
+  Unset: '未設定',
   'Auto (detect from system)': '自動（從系統檢測）',
   'Auto (follow user input)': '自動（跟隨使用者輸入）',
   'Auto (detect terminal theme)': '自動（檢測終端主題）',
@@ -2062,6 +2065,17 @@ export default {
   'Save a durable memory to the memory system.': '將持久記憶保存到記憶系統。',
   'Ask a quick side question without affecting the main conversation':
     '在不影響主對話的情況下快速提問旁支問題',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '讓審查模型對目前對話給出第二意見',
+  'Consulting advisor...': '正在諮詢審查模型...',
+  'Advisor review failed: {{error}}': '審查失敗：{{error}}',
+  'No conversation context available for /advisor':
+    '沒有可供 /advisor 使用的對話上下文',
+  'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '另一個操作正在進行中，請等待其完成後再執行 /advisor',
+  'No response received.': '未收到回覆。',
+  'No model configured.': '未設定模型。',
   'Manage Arena sessions': '管理 Arena 會話',
   'Start an Arena session with multiple models competing on the same task':
     '啟動一個 Arena 會話，讓多個模型在同一任務上競爭',
@@ -2118,6 +2132,7 @@ export default {
   'rejected — edit config to re-approve': '已拒絕 — 編輯設定以重新審批',
   'Background agent needs approval': '背景 agent 等待審批',
   'Approve or deny the request above': '請核准或拒絕上方的請求',
+  'from nested agent': '來自嵌套 agent',
   Running: '執行中',
   Pausing: '暫停中',
   Paused: '已暫停',

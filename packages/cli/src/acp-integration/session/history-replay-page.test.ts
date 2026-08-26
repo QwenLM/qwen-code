@@ -6,11 +6,13 @@
 
 import type {
   ChatRecord,
+  Config,
   GoalRecord,
   GoalSnapshotV2,
   SessionTranscriptCursorState,
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { Buffer } from 'node:buffer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
@@ -23,6 +25,17 @@ import {
   createReplayCumulativeUsage,
   replayTranscriptRecordPage,
 } from './history-replay-page.js';
+
+const observeAcpProjectionMock = vi.hoisted(() => vi.fn());
+vi.mock(
+  '../../nonInteractive/tool-result-boundary-diagnostics.js',
+  async (original) => ({
+    ...(await original<
+      typeof import('../../nonInteractive/tool-result-boundary-diagnostics.js')
+    >()),
+    observeAcpToolResultProjection: observeAcpProjectionMock,
+  }),
+);
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const TIMESTAMP = '2026-07-12T00:00:00.000Z';
@@ -37,6 +50,7 @@ const GOAL_STATE: GoalSnapshotV2 = {
     evidenceCursor: { recordId: 'goal-state' },
     turnCount: 2,
     activeTimeMs: 1000,
+    tokensUsed: 0,
     createdAt: 1,
     updatedAt: 2,
   },
@@ -54,6 +68,19 @@ function userRecord(): ChatRecord {
     message: {
       role: 'user',
       parts: [{ text: 'hello' }],
+    },
+  };
+}
+
+function assistantRecord(): ChatRecord {
+  return {
+    ...userRecord(),
+    uuid: 'assistant-record',
+    parentUuid: 'user-record',
+    type: 'assistant',
+    message: {
+      role: 'model',
+      parts: [{ text: 'answer' }],
     },
   };
 }
@@ -179,6 +206,118 @@ afterEach(() => {
 });
 
 describe('history replay page', () => {
+  it('does not probe getChat on an uninitialized client for the restore skip', async () => {
+    // Bootstrap configs for non-live sessions are never chat-initialized;
+    // getChat() THROWS there. The skip probe must guard on isInitialized().
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getGeminiClient: () => ({
+        isInitialized: () => false,
+        getChat: () => {
+          throw new Error('Chat not initialized');
+        },
+      }),
+    } as unknown as Config;
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      config,
+      records: [userRecord(), toolCallRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.replayError).toBeUndefined();
+    // No skip without an initialized chat: the dangling call finalizes.
+    expect(
+      result.updates.some(
+        (update) =>
+          update.sessionUpdate === 'tool_call_update' &&
+          (update as { status?: string }).status === 'failed',
+      ),
+    ).toBe(true);
+  });
+
+  it('skips finalize for a trailing restorable ask_user_question', async () => {
+    const lastEntry = {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-auq',
+            name: 'ask_user_question',
+            args: {
+              questions: [
+                {
+                  question: 'Pick?',
+                  header: 'H',
+                  options: [
+                    { label: 'A', description: 'a' },
+                    { label: 'B', description: 'b' },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    };
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getGeminiClient: () => ({
+        isInitialized: () => true,
+        getChat: () => ({ peekLastHistoryEntry: () => lastEntry }),
+      }),
+    } as unknown as Config;
+    const auqRecord: ChatRecord = {
+      ...toolCallRecord(),
+      message: lastEntry,
+    };
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      config,
+      records: [userRecord(), auqRecord],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.replayError).toBeUndefined();
+    expect(
+      result.updates.some(
+        (update) => update.sessionUpdate === 'tool_call_update',
+      ),
+    ).toBe(false);
+  });
+
+  it('finalizes a dangling tool call as failed by default', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [userRecord(), toolCallRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.replayError).toBeUndefined();
+    expect(result.updates).toContainEqual(
+      expect.objectContaining({
+        sessionUpdate: 'tool_call_update',
+        status: 'failed',
+      }),
+    );
+  });
+
+  it('keeps a dangling tool call in flight when finalizeDangling is false', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [userRecord(), toolCallRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      finalizeDangling: false,
+    });
+
+    expect(result.replayError).toBeUndefined();
+    expect(
+      result.updates.some(
+        (update) => update.sessionUpdate === 'tool_call_update',
+      ),
+    ).toBe(false);
+  });
+
   it('bounds textual tool results collected for bulk replay', async () => {
     const source = 'x'.repeat(499_999);
     const result = await collectHistoryReplayUpdates({
@@ -227,6 +366,7 @@ describe('history replay page', () => {
   });
 
   it('lifts record timestamps for bulk replay callers', async () => {
+    observeAcpProjectionMock.mockClear();
     const result = await collectHistoryReplayUpdates({
       sessionId: SESSION_ID,
       records: [userRecord()],
@@ -239,6 +379,72 @@ describe('history replay page', () => {
         timestamp: Date.parse(TIMESTAMP),
       }),
     ]);
+    const deliveredUpdate = result.updates[0];
+    const projectionCall = observeAcpProjectionMock.mock.calls.find(
+      ([, , sessionId]) => sessionId === SESSION_ID,
+    );
+    expect(projectionCall?.[3]).toBe(deliveredUpdate);
+  });
+
+  it('attaches the checkpoint only to the final chunk of a multi-chunk Assistant record', async () => {
+    // One assistant record replays as text/thought/text. The checkpoint
+    // marks the END of the record, so only the last visible assistant
+    // chunk may expose the branch point.
+    const multiChunk: ChatRecord = {
+      ...assistantRecord(),
+      message: {
+        role: 'model',
+        parts: [
+          { text: 'first part' },
+          { text: 'thinking', thought: true },
+          { text: 'last part' },
+        ],
+      },
+    };
+
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        records: [multiChunk],
+        branchPointsByAssistantUuid: {
+          'assistant-record': 'checkpoint-record',
+        },
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    const readBranchRecordId = (update: SessionUpdate): string | undefined => {
+      const meta = (update as { _meta?: Record<string, unknown> })._meta;
+      const transcript =
+        meta && typeof meta['qwenTranscript'] === 'object'
+          ? (meta['qwenTranscript'] as Record<string, unknown>)
+          : undefined;
+      const branchRecordId = transcript?.['branchRecordId'];
+      return typeof branchRecordId === 'string' ? branchRecordId : undefined;
+    };
+
+    const decorated = result.updates.filter(
+      (update) => readBranchRecordId(update) !== undefined,
+    );
+    expect(decorated).toHaveLength(1);
+    expect(decorated[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'last part' },
+    });
+
+    const thoughtChunk = result.updates.find(
+      (update) => update.sessionUpdate === 'agent_thought_chunk',
+    );
+    expect(thoughtChunk).toBeDefined();
+    expect(readBranchRecordId(thoughtChunk!)).toBeUndefined();
+    const firstChunk = result.updates.find(
+      (update) =>
+        update.sessionUpdate === 'agent_message_chunk' &&
+        (update as { content?: { text?: string } }).content?.text ===
+          'first part',
+    );
+    expect(firstChunk).toBeDefined();
+    expect(readBranchRecordId(firstChunk!)).toBeUndefined();
   });
 
   it('fails incrementally before collecting an update above the count limit', async () => {
@@ -511,7 +717,11 @@ describe('history replay page', () => {
         return 'next-cursor';
       },
     });
-    expect(firstPage.updates).toHaveLength(2);
+    expect(firstPage.updates).toHaveLength(3);
+    expect(firstPage.updates[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `/goal ${goal.objective}` },
+    });
     expect(nextReplay).toMatchObject({ goalCause: 'verifier_reject' });
 
     const recommittedGoal = {
@@ -553,6 +763,7 @@ describe('history replay page', () => {
         evidenceCursor: { recordId: 'goal-state' },
         turnCount: 3,
         activeTimeMs: 1234,
+        tokensUsed: 0,
         createdAt: 10,
         updatedAt: 20,
       },

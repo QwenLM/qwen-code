@@ -30,7 +30,7 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { truncateToolOutput } from '../utils/truncation.js';
+import { truncateToolOutput } from './truncation.js';
 import {
   CommitAttributionService,
   type StagedFileInfo,
@@ -88,6 +88,13 @@ import {
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
+const DEFAULT_SHELL_OUTPUT_THRESHOLD = 30_000;
+
+function getShellOutputThreshold(config: Config): number {
+  return config.isTruncateToolOutputThresholdExplicit()
+    ? config.getTruncateToolOutputThreshold()
+    : DEFAULT_SHELL_OUTPUT_THRESHOLD;
+}
 
 /**
  * Model-facing liveness guidance shared verbatim by both background
@@ -2903,6 +2910,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // Truncate large output and save full content to a temp file.
     if (typeof llmContent === 'string') {
       const originalLlmContent = llmContent;
+      const outputThreshold = getShellOutputThreshold(this.config);
       const truncatedResult = await truncateToolOutput(
         this.config,
         ShellTool.Name,
@@ -2913,11 +2921,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // scheduler) so the long-run hint below is appended OUTSIDE the
         // truncation envelope; the scheduler's sentinel makes its later pass a
         // no-op here. lines: Infinity keeps this char-only so the global line
-        // cap can't undercut the declared 30k char budget — many short lines
+        // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
-          threshold: 30_000,
-          previewChars: 4000,
+          threshold: outputThreshold,
+          previewChars: Math.min(4000, outputThreshold),
           keep: 'both',
           lines: Number.POSITIVE_INFINITY,
         },
@@ -5036,7 +5044,7 @@ export class ShellTool extends BaseDeclarativeTool<
   static Name: string = ToolNames.SHELL;
 
   override get maxOutputChars(): number {
-    return 30_000;
+    return getShellOutputThreshold(this.config);
   }
 
   constructor(private readonly config: Config) {

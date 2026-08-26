@@ -444,6 +444,7 @@ export default {
   'Tool Output Truncation Lines': 'Zeilen für Werkzeugausgabe-Kürzung',
   'Folder Trust': 'Ordnervertrauen',
   'Tool Schema Compliance': 'Tool Schema-Konformität',
+  Unset: 'Nicht festgelegt',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
   'Auto (follow user input)': 'Automatisch (Benutzereingabe folgen)',
@@ -1531,6 +1532,7 @@ export default {
   'rejected — edit config to re-approve':
     'abgelehnt — Konfiguration bearbeiten, um erneut zu genehmigen',
   'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
+  'from nested agent': 'von verschachteltem Agent',
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',
   Running: 'Läuft',
@@ -2000,6 +2002,18 @@ export default {
   'not updatable': 'nicht aktualisierbar',
   'Ask a quick side question without affecting the main conversation':
     'Eine kurze Nebenfrage stellen, ohne die Hauptunterhaltung zu beeinflussen',
+  'Get a second opinion on the current conversation from a reviewer model':
+    'Eine zweite Meinung zur aktuellen Unterhaltung von einem Prüfmodell einholen',
+  'Consulting advisor...': 'Berater wird konsultiert...',
+  'Advisor review failed: {{error}}':
+    'Berater-Überprüfung fehlgeschlagen: {{error}}',
+  'No conversation context available for /advisor':
+    'Kein Gesprächskontext für /advisor verfügbar',
+  'Focus too long (max {{max}} chars)': 'Fokus zu lang (max. {{max}} Zeichen)',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    'Ein anderer Vorgang läuft gerade. Warten Sie, bis er abgeschlossen ist, bevor Sie /advisor ausführen',
+  'No response received.': 'Keine Antwort erhalten.',
+  'No model configured.': 'Kein Modell konfiguriert.',
   'Manage Arena sessions': 'Arena-Sitzungen verwalten',
   'Start an Arena session with multiple models competing on the same task':
     'Eine Arena-Sitzung starten, in der mehrere Modelle dieselbe Aufgabe bearbeiten',

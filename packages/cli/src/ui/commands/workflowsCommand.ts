@@ -21,7 +21,7 @@ import { formatDuration, formatTokenCount } from '../utils/formatters.js';
  * `outputFile`, etc.) are filled with inert values — a snapshot is always
  * terminal, so the controls that read those fields are never reached.
  */
-function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
+export function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
   return {
     id: s.runId,
     kind: 'workflow',
@@ -30,10 +30,16 @@ function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     meta: s.meta,
     status: s.status,
     currentPhase: null,
+    currentPhaseVisitId: null,
     phases: s.phases ?? [],
+    phaseVisits: s.phaseVisits ?? [],
+    dispatches: s.dispatches ?? [],
+    sourceRunId: s.sourceRunId,
+    startMode: s.startMode,
     agentsDispatched: s.agentsDispatched ?? 0,
     agentsCompleted: s.agentsCompleted ?? 0,
     recentLogs: s.recentLogs ?? [],
+    events: s.events ?? [],
     tokensSpent: s.tokensSpent ?? 0,
     tokenBudgetTotal: s.tokenBudgetTotal ?? null,
     perPhaseTokens: new Map(s.perPhaseTokens ?? []),
@@ -48,7 +54,7 @@ function snapshotToTask(s: WorkflowSnapshot): WorkflowTask {
     outputOffset: 0,
     notified: true,
     abortController: new AbortController(),
-  } as WorkflowTask;
+  };
 }
 
 /**

@@ -9,8 +9,9 @@
  *
  * Two routing modes:
  * - Team mode: `to` matches a teammate name (or "*" for broadcast). Messages
- *   route through TeamManager. Supports structured messages like
- *   `shutdown_request`.
+ *   route through TeamManager as plain text. This tool carries content only;
+ *   team control actions are separate tools (see `request-shutdown.ts`), so a
+ *   teammate cannot express a control action at all — see #9276.
  * - Background-task mode: `task_id` matches an entry in the background task
  *   registry. Running tasks receive the message at the next tool-round
  *   boundary; paused recovered tasks are resumed first and take the message as
@@ -21,7 +22,7 @@ import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { getAgentName, isTeammate } from '../agents/team/identity.js';
+import { getAgentName } from '../agents/team/identity.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
@@ -44,8 +45,6 @@ export interface SendMessageParams {
   message: string;
   /** Optional 5-10 word summary for UI display (team mode). */
   summary?: string;
-  /** Structured control message type (team mode). */
-  type?: 'shutdown_request';
 }
 
 class SendMessageInvocation extends BaseToolInvocation<
@@ -241,26 +240,6 @@ class SendMessageInvocation extends BaseToolInvocation<
     }
 
     try {
-      // Structured control messages route through mailbox.
-      if (this.params.type === 'shutdown_request') {
-        // Only the leader can request shutdowns. A teammate
-        // calling this would be impersonating the leader, since
-        // requestShutdown writes the mailbox entry with
-        // `from: LEADER_NAME` and arms shutdown_approved tracking
-        // for the target.
-        if (isTeammate()) {
-          const msg = 'Only the team leader can request shutdowns.';
-          return {
-            llmContent: msg,
-            returnDisplay: msg,
-            error: { message: msg },
-          };
-        }
-        await teamManager.requestShutdown(to);
-        const msg = `Shutdown requested for "${to}".`;
-        return { llmContent: msg, returnDisplay: msg };
-      }
-
       if (to === '*') {
         const sender = getAgentName() ?? LEADER_NAME;
         await teamManager.broadcast(this.params.message, sender);
@@ -301,7 +280,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
         'For teams, set "to" to a bare teammate name (no @) or "*" to broadcast. ' +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
         'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
-        'Your text output is NOT visible to other agents — use this tool to communicate.',
+        'Your text output is NOT visible to peer teammates — use this tool to communicate.',
       Kind.Other,
       {
         type: 'object',
@@ -326,14 +305,6 @@ export class SendMessageTool extends BaseDeclarativeTool<
             type: 'string',
             description: 'Optional 5-10 word summary for UI display.',
           },
-          type: {
-            type: 'string',
-            enum: ['shutdown_request'],
-            description:
-              'Structured message type for control flow. ' +
-              'When set, routes through the mailbox ' +
-              'instead of plain text delivery.',
-          },
         },
         required: ['message'],
         additionalProperties: false,
@@ -356,8 +327,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
    * Forward the routing fields and the message verbatim to the classifier —
    * `to`/`task_id` identify the privileged sink and the `message` itself is
    * the new instruction the recipient will execute, so the classifier needs
-   * the full text to evaluate the action's safety. `type` surfaces control
-   * messages (e.g. shutdown_request).
+   * the full text to evaluate the action's safety.
    */
   override toAutoClassifierInput(
     params: SendMessageParams,
@@ -366,7 +336,6 @@ export class SendMessageTool extends BaseDeclarativeTool<
       to: params.to,
       task_id: params.task_id,
       message: params.message,
-      type: params.type,
     };
   }
 }

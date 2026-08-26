@@ -26,6 +26,10 @@
 // reached a verdict" from "blocking verdict" (opt-in via --fail-on).
 
 import type { CommandModule } from 'yargs';
+import {
+  APPROVAL_MODES,
+  isUnusableScriptEntry,
+} from '@qwen-code/qwen-code-core';
 import { spawn, execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -34,12 +38,13 @@ import {
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, REVIEWS_DIR } from './lib/paths.js';
-import { EFFORT_LEVELS } from './parse-args.js';
+import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
 
 export interface RunReviewArgs {
   target?: string;
   effort?: string;
   comment: boolean;
+  resume: boolean;
   json: boolean;
   failOn: 'none' | 'request-changes';
   timeoutMinutes: number;
@@ -73,6 +78,13 @@ export interface RunReviewResult {
   downgradedFrom: string | null;
   remediation: string[];
   composedPath: string | null;
+  /**
+   * The exact `.qwen/tmp` filename this run's target class pins — named in
+   * the result so a completed-but-uncaptured review (a naming drift between
+   * this pin and the skill's template) is diagnosable after Step 9 has
+   * swept the directory that would show the near-miss.
+   */
+  expectedComposedName: string;
   reportPath: string | null;
   childExitCode: number | null;
   childSignal: string | null;
@@ -80,8 +92,114 @@ export interface RunReviewResult {
   durationMs: number;
 }
 
-/** The composed verdict `compose-review` writes and Step 9 cleanup sweeps. */
-const COMPOSED_PATTERN = /^qwen-review-.*composed\.json$/;
+/**
+ * What a `review run` target IS, in the child's own terms. Classified by the
+ * child's parser, not a local regex: the child names its artifacts after
+ * what `parse-args` decided, so any second classifier here diverges exactly
+ * where the shapes get interesting — `/pull/9014/files` (a PR to the parser,
+ * unmatched by a $-anchored regex), `0042` (the parser writes `pr-42-`, a
+ * verbatim pin looks for `pr-0042-`), `docs/pull/42` (a file path to the
+ * parser). A run whose pin disagrees with the child reports a completed
+ * review as "no verdict was produced".
+ */
+export type RunTargetClass =
+  | { kind: 'pr'; number: string }
+  | { kind: 'file'; base: string }
+  | { kind: 'local' };
+
+export function classifyRunTarget(target?: string): RunTargetClass {
+  if (!target) return { kind: 'local' };
+  const { target: t } = parseReviewArgs(target);
+  if (t.type === 'pr-number' || t.type === 'pr-url') {
+    return { kind: 'pr', number: String(t.number) };
+  }
+  if (t.type === 'file') {
+    // The skill's `{target}` token for a file review is the file's basename
+    // (`--target <filename>` in the capture step), so that is the identity
+    // the child's artifact names carry. Trailing separators are stripped
+    // first: a tab-completed `src/` classifies as a file target and reviews
+    // the directory, and a bare `.pop()` would return `''` — a pin
+    // (`qwen-review--composed.json`) no child artifact can ever carry.
+    const trimmed = t.path.replace(/[\\/]+$/, '');
+    return { kind: 'file', base: trimmed.split(/[\\/]/).pop() || trimmed };
+  }
+  return { kind: 'local' };
+}
+
+const escapeRe = (s: string): string =>
+  s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The one composed-verdict filename this run's target class produces, per
+ * the skill's literal `--out .qwen/tmp/qwen-review-{target}-composed.json`
+ * template: `pr-<n>` for a PR, the file's basename for a file review, the
+ * fixed token `local` for a bare run. Exact names, not shape heuristics —
+ * a name-shape pin (`(?!pr-\d+-)…`) rejected a file run's OWN artifact
+ * whenever the reviewed file was named `pr-<digits>-…`, and conversely let
+ * a PR pin claim that file run's artifact. Two concurrent `review run`s
+ * share `.qwen/tmp`, and the pre-pin newest-composed scan captured the
+ * OTHER run's verdict the moment it appeared (measured: two of three
+ * parallel PR reviews republished a neighbour's `composedPath`).
+ *
+ * Known residual races, accepted — the pin separates composed FILENAMES,
+ * which is as much identity as the child's naming carries; do not diagnose
+ * any of these as a pin failure:
+ *
+ *  - same target twice (two bare runs, or the same PR twice) — the same
+ *    filename, so whichever child composes last wins for both parents;
+ *  - two FILE targets with different paths but one basename (a monorepo's
+ *    two `index.ts`) — the child names by basename, so their filenames
+ *    collide the same way;
+ *  - a FILE target whose basename is literally `local` or `pr-<digits>` —
+ *    its filename is byte-identical to the local/PR pin.
+ *
+ * Only a per-run nonce in the child's artifact names could key these
+ * apart, and the bundled skill, not this command, would have to mint it.
+ */
+export function composedNameFor(cls: RunTargetClass): string {
+  switch (cls.kind) {
+    case 'pr':
+      return `qwen-review-pr-${cls.number}-composed.json`;
+    case 'file':
+      return `qwen-review-${cls.base}-composed.json`;
+    case 'local':
+    default:
+      return 'qwen-review-local-composed.json';
+  }
+}
+
+export function composedPatternFor(cls: RunTargetClass): RegExp {
+  return new RegExp(`^${escapeRe(composedNameFor(cls))}$`);
+}
+
+/**
+ * The saved report under `.qwen/reviews/`, pinned as far as its naming
+ * allows. PR reports reliably end `-pr-<n>.md`, and file reports carry the
+ * filename in the same slot (`<date>-<time>-<filename>.md`, the `.md` not
+ * doubled) — so a file target named `pr-1234.md` claims its OWN report
+ * instead of tripping the local branch's PR exclusion. Local report stems
+ * are model-chosen (three date formats observed in one day), so a bare run
+ * claims any report EXCEPT a PR-suffixed one — concurrent local runs can
+ * still pool reports, and a PR run cannot be told from a file run whose
+ * basename is `pr-<n>.md` by name alone. The report is informational; the
+ * verdict (`composedPatternFor`) is what carries the exit code, and it is
+ * exact.
+ */
+export function reportPatternFor(cls: RunTargetClass): RegExp {
+  switch (cls.kind) {
+    case 'pr':
+      return new RegExp(`-pr-${cls.number}\\.md$`);
+    case 'file':
+      return new RegExp(
+        cls.base.toLowerCase().endsWith('.md')
+          ? `-${escapeRe(cls.base)}$`
+          : `-${escapeRe(cls.base)}\\.md$`,
+      );
+    case 'local':
+    default:
+      return /^(?!.*-pr-\d+\.md$).*\.md$/;
+  }
+}
 
 // How often to poll for the composed verdict while the child runs. The verdict
 // sits on disk from Step 6 (compose-review) until Step 9 (cleanup) — a window
@@ -102,18 +220,30 @@ export function buildReviewPrompt(args: {
   target?: string;
   effort?: string;
   comment?: boolean;
+  resume?: boolean;
 }): string {
   const parts = ['/review'];
-  if (args.target) {
+  // Presence, not truthiness: an EMPTY target is a target the caller named
+  // and got wrong — `qwen review run "$TARGET"` with `TARGET` unset — and
+  // treating it as "no target given" silently launches a full local review
+  // on the caller's tree, at the 120-minute default timeout and real model
+  // spend, instead of the error its siblings `/`, `//`, `\` now get.
+  if (args.target !== undefined) {
     // The child re-tokenizes this string; a target carrying whitespace or a
     // leading dash would split into extra tokens (`123 --comment` would
     // silently authorise posting), and a quote is stripped by the tokenizer
     // (`src/it's.ts` would re-target to `src/its.ts`) — refuse anything but a
     // single clean token.
     if (
+      args.target.trim() === '' ||
       /\s/.test(args.target) ||
       args.target.startsWith('-') ||
-      /['"]/.test(args.target)
+      /['"]/.test(args.target) ||
+      // A separators-only path (`/`, `//`, `\`) names no file: it survives
+      // basename extraction as the empty string, which pins the unmatchable
+      // `qwen-review--composed.json` and burns a whole child review before
+      // reporting "no composed verdict". Refuse it here instead.
+      /^[\\/]+$/.test(args.target)
     ) {
       throw new Error(
         `Invalid review target ${JSON.stringify(args.target)}: expected a single PR number, PR URL, or file path`,
@@ -123,6 +253,7 @@ export function buildReviewPrompt(args: {
   }
   if (args.effort) parts.push(`--effort ${args.effort}`);
   if (args.comment) parts.push('--comment');
+  if (args.resume) parts.push('--resume');
   return parts.join(' ');
 }
 
@@ -131,13 +262,16 @@ export function buildReviewPrompt(args: {
  * `startMs`, or null. Pre-existing artifacts from earlier reviews in the same
  * repo must not be mistaken for this run's verdict — a stale composed JSON says
  * whatever the LAST review decided, which is exactly the wrong thing to
- * republish — so anything older than the run is invisible here.
+ * republish — so anything older than the run is invisible here. The mtime
+ * rides along with the path: the capture poll compares it against what it
+ * already holds, and re-statting the path here would race the child's Step 9
+ * sweep, which unlinks these files while the parent may still be polling.
  */
 export function newestArtifactSince(
   dir: string,
   pattern: RegExp,
   startMs: number,
-): string | null {
+): { path: string; mtime: number } | null {
   let best: { path: string; mtime: number } | null = null;
   let names: string[];
   try {
@@ -157,7 +291,7 @@ export function newestArtifactSince(
     if (mtime < startMs) continue;
     if (!best || mtime > best.mtime) best = { path, mtime };
   }
-  return best ? best.path : null;
+  return best;
 }
 
 /**
@@ -218,6 +352,23 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
 /**
  * The child review's environment, with one correction: QWEN_CODE_CLI.
  *
+ * An UNSET slot is corrected too, and that case is not hypothetical: cli.ts
+ * stamps a *derived* `../index.js`, which does not exist beside the bundle, so
+ * a `node dist/cli.js review run <pr>` never stamps anything and the child
+ * review inherits nothing. Measured on PR #9113: the skill's second subcommand,
+ * `"${QWEN_CODE_CLI:-qwen}" review match-remote`, resolved `qwen` off PATH,
+ * landed in an older global install whose `review` has no `match-remote`, and
+ * came back `Unknown arguments: owner, repo, host, match-remote` — the review
+ * then spent minutes diagnosing its own harness instead of reading the diff.
+ * `review run` is the one place that can close this without guessing: it is
+ * about to re-enter `process.argv[1]` as the review CLI, so argv[1] IS this
+ * build's entry, no derivation involved.
+ *
+ * The stamp is only written when a shell could exec it — the same test the
+ * consumer applies at spawn time (isUnusableScriptEntry). A stamp that fails
+ * that test is worse than none: `${QWEN_CODE_CLI:-qwen}` falls back on empty,
+ * but a set-and-unusable path dies on exit 126.
+ *
  * cli.ts stamps QWEN_CODE_CLI first-writer-wins, so a `review run` launched
  * from INSIDE a parent Qwen session inherits the parent's entry — and the
  * skill's every `"${QWEN_CODE_CLI:-qwen}" review …` subcommand then runs the
@@ -231,25 +382,35 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
  * bundle). The child runs argv[1], so compare the resolved package roots
  * (dirname of realpathSync): cli-entry.js stamps itself but spawns cli.js,
  * so an exact-file comparison would blank a valid same-install stamp. On a
- * root mismatch — or an inherited path that does not resolve at all — write
- * '': empty counts as unset in stampCliEntryEnv, and the child re-stamps
- * from its own modules.
+ * root mismatch, an inherited path that does not resolve, or an UNSET slot,
+ * stamp this build's own `argv[1]` — the entry this command is about to
+ * re-enter — when a shell could exec it; write '' only when that entry fails
+ * `isUnusableScriptEntry`, preserving the bare-`qwen` fallback instead of a
+ * stamp that dies on exit 126.
  */
 function childEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   const inherited = env['QWEN_CODE_CLI'];
   const ownEntry = process.argv[1];
-  if (!inherited || !ownEntry) {
+  if (!ownEntry) {
     return env;
   }
-  try {
-    if (dirname(realpathSync(inherited)) === dirname(realpathSync(ownEntry))) {
-      return env;
+  if (inherited) {
+    try {
+      if (
+        dirname(realpathSync(inherited)) === dirname(realpathSync(ownEntry))
+      ) {
+        return env;
+      }
+    } catch {
+      // An inherited entry that does not resolve cannot be this build's.
     }
-  } catch {
-    // An inherited entry that does not resolve cannot be this build's.
   }
-  env['QWEN_CODE_CLI'] = '';
+  // Either nothing was stamped, or what was stamped belongs to another install.
+  // Both are answered by this build's own entry — when a shell can exec it.
+  env['QWEN_CODE_CLI'] = isUnusableScriptEntry(resolve(ownEntry))
+    ? ''
+    : resolve(ownEntry);
   return env;
 }
 
@@ -315,23 +476,24 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // every `.qwen/tmp/qwen-review-<target>-*` file — including it — before the
   // child exits. Reading it only AFTER `close` therefore sees nothing and
   // reports a review that completed as one that failed. Snapshot it the moment
-  // compose-review writes it: the first verdict newer than the run start is
-  // this run's, and caching it in memory survives the sweep.
+  // compose-review writes it, and keep re-reading while the child runs: a
+  // coverage re-check can legitimately recompose the verdict (measured: a live
+  // run rewrote its composed artifact twelve minutes after the first write),
+  // and the FIRST snapshot would republish the superseded one.
+  const targetClass = classifyRunTarget(args.target);
+  const composedPattern = composedPatternFor(targetClass);
   let capturedPath: string | null = null;
   let capturedVerdict: ComposedVerdict | null = null;
+  let capturedMtime = -Infinity;
   const captureTimer = setInterval(() => {
-    if (capturedVerdict !== null) return;
-    const path = newestArtifactSince(
-      REVIEW_TMP_DIR,
-      COMPOSED_PATTERN,
-      cutoffMs,
-    );
-    if (path === null) return;
+    const best = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
+    if (best === null || best.mtime <= capturedMtime) return;
     // A half-written file fails to parse; the next tick retries it.
-    const verdict = readComposed(path);
+    const verdict = readComposed(best.path);
     if (verdict !== null) {
-      capturedPath = path;
+      capturedPath = best.path;
       capturedVerdict = verdict;
+      capturedMtime = best.mtime;
     }
   }, COMPOSED_POLL_MS);
 
@@ -403,14 +565,13 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   let composedPath: string | null = capturedPath;
   let composed: ComposedVerdict | null = capturedVerdict;
   if (composed === null) {
-    composedPath = newestArtifactSince(
-      REVIEW_TMP_DIR,
-      COMPOSED_PATTERN,
-      cutoffMs,
-    );
+    const best = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
+    composedPath = best?.path ?? null;
     composed = composedPath ? readComposed(composedPath) : null;
   }
-  const reportPath = newestArtifactSince(REVIEWS_DIR, /\.md$/, cutoffMs);
+  const reportPath =
+    newestArtifactSince(REVIEWS_DIR, reportPatternFor(targetClass), cutoffMs)
+      ?.path ?? null;
 
   const completed = composed !== null;
   const result: RunReviewResult = {
@@ -423,6 +584,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     downgradedFrom: composed?.downgradedFrom ?? null,
     remediation: composed?.remediation ?? [],
     composedPath: composedPath ? resolve(composedPath) : null,
+    expectedComposedName: composedNameFor(targetClass),
     reportPath: reportPath ? resolve(reportPath) : null,
     childExitCode,
     childSignal,
@@ -443,10 +605,18 @@ async function runReview(args: RunReviewArgs): Promise<void> {
       writeStdoutLine(result.verdictLine ?? `Event: ${result.event}`);
       if (result.reportPath) writeStdoutLine(`Report: ${result.reportPath}`);
     } else {
+      // Name the expectation: the pin is an exact-filename contract with the
+      // skill's naming template, and by the time anyone investigates, Step 9
+      // has swept `.qwen/tmp` — the near-miss name is gone. A no-verdict
+      // report that does not say which file it was waiting for cannot be
+      // diagnosed as a naming drift.
       const detail =
         composedPath !== null
           ? `a composed verdict was found at ${resolve(composedPath)} but could not be parsed`
-          : 'no composed verdict was produced';
+          : `no composed verdict was produced (expected ${join(
+              REVIEW_TMP_DIR,
+              composedNameFor(targetClass),
+            )})`;
       writeStdoutLine(
         timedOut
           ? 'Review did not complete: timed out.'
@@ -483,6 +653,12 @@ export const runCommand: CommandModule = {
         describe:
           'Authorise posting the review to GitHub (PR targets only) — same meaning as `/review <pr> --comment`',
       })
+      .option('resume', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Continue an interrupted review of this PR when its on-disk state still matches, instead of starting over (PR targets only) — same meaning as `/review <pr> --resume`. Falls back to a fresh review when nothing can be resumed.',
+      })
       .option('json', {
         type: 'boolean',
         default: false,
@@ -504,7 +680,7 @@ export const runCommand: CommandModule = {
       .option('approval-mode', {
         type: 'string',
         default: 'yolo',
-        choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
+        choices: APPROVAL_MODES,
         describe:
           'Approval mode for the child CLI. The default is yolo: headless runs cannot answer ' +
           'confirmation prompts, and anything still unapproved would be auto-denied mid-review.',
@@ -519,6 +695,7 @@ export const runCommand: CommandModule = {
       target: argv['target'] as string | undefined,
       effort: argv['effort'] as string | undefined,
       comment: Boolean(argv['comment']),
+      resume: Boolean(argv['resume']),
       json: Boolean(argv['json']),
       failOn: (argv['fail-on'] as 'none' | 'request-changes') ?? 'none',
       // `|| 120` would treat an explicit `--timeout-minutes 0` as falsy and

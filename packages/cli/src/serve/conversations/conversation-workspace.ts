@@ -4,169 +4,129 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
-import type { Stats } from 'node:fs';
-import { lstat, mkdir, realpath, rmdir } from 'node:fs/promises';
+import { readdir, rmdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { resolve } from 'node:path';
+import {
+  assertExactConversationRootIdentity,
+  ConversationDirectoryIdentityError,
+  createConversationRootIdentity,
+  inspectConversationDirectoryIdentity,
+  materializeConversationDirectoryIdentity,
+  revalidateConversationRootIdentity,
+  type ConversationDirectoryIdentity,
+  type ConversationRootIdentity,
+} from '../../utils/conversation-directory-identity.js';
+import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 
-export interface ConversationRootIdentity {
-  readonly configuredRoot: string;
-  readonly canonicalRoot: string;
-  readonly device: number;
-  readonly inode: number;
-}
+export type { ConversationRootIdentity } from '../../utils/conversation-directory-identity.js';
 
 export interface ConversationWorkspaceOptions {
   homeDir?: string;
 }
 
-const isSamePath = (left: string, right: string): boolean =>
-  process.platform === 'win32'
-    ? left.toLowerCase() === right.toLowerCase()
-    : left === right;
+export type StandaloneDirectoryInspection =
+  | { status: 'ready'; identity: ConversationDirectoryIdentity }
+  | { status: 'missing' }
+  | {
+      status: 'compromised';
+      error: ConversationDirectoryIdentityError;
+    };
 
-function conversationDirectoryName(sessionId: string): string {
-  if (sessionId.length === 0 || sessionId.length > 256) {
-    throw new Error('Live conversation session id is invalid');
-  }
-  return `conversation-${createHash('sha256').update(sessionId).digest('hex')}`;
-}
+export type StandaloneDirectoryEnsureResult =
+  | { status: 'ready'; identity: ConversationDirectoryIdentity }
+  | { status: 'created'; identity: ConversationDirectoryIdentity }
+  | { status: 'recreated'; identity: ConversationDirectoryIdentity }
+  | {
+      status: 'compromised';
+      error: ConversationDirectoryIdentityError;
+    };
 
-function validateRootStats(stats: Stats, label = 'root'): void {
-  if (stats.isSymbolicLink() || !stats.isDirectory()) {
-    throw new Error(
-      `Live conversation ${label} must be a non-symlink directory`,
-    );
+function liveIdentityError(
+  error: unknown,
+  exactRoot = false,
+  creatingRoot = false,
+): never {
+  if (!(error instanceof ConversationDirectoryIdentityError)) throw error;
+  if (error.reason === 'io_error' && error.cause !== undefined) {
+    throw error.cause;
   }
-  if (
-    process.platform !== 'win32' &&
-    typeof process.getuid === 'function' &&
-    stats.uid !== process.getuid()
-  ) {
-    throw new Error(
-      `Live conversation ${label} must be owned by the daemon user`,
-    );
+  if (error.scope === 'root') {
+    switch (error.reason) {
+      case 'not_directory':
+        throw new Error(
+          'Live conversation root must be a non-symlink directory',
+        );
+      case 'wrong_owner':
+        throw new Error(
+          'Live conversation root must be owned by the daemon user',
+        );
+      case 'wrong_mode':
+        throw new Error(
+          'Live conversation root must be accessible only to its owner',
+        );
+      case 'canonical_path_changed':
+        throw new Error('Live conversation root canonical path changed');
+      case 'identity_changed':
+        throw new Error(
+          creatingRoot
+            ? 'Live conversation root identity changed during validation'
+            : 'Live conversation root identity changed',
+        );
+      case 'unexpected_identity':
+        if (exactRoot) {
+          throw new Error('Workspace must be the exact Live conversation root');
+        }
+        throw new Error('Live conversation root identity changed');
+      default:
+        throw new Error('Live conversation root identity changed');
+    }
   }
-  if (process.platform !== 'win32' && (stats.mode & 0o077) !== 0) {
-    throw new Error(
-      `Live conversation ${label} must be accessible only to its owner`,
-    );
+  switch (error.reason) {
+    case 'invalid_session_id':
+      throw new Error('Live conversation session id is invalid');
+    case 'not_directory':
+      throw new Error(
+        'Live conversation directory must be a non-symlink directory',
+      );
+    case 'wrong_owner':
+      throw new Error(
+        'Live conversation directory must be owned by the daemon user',
+      );
+    case 'wrong_mode':
+      throw new Error(
+        'Live conversation directory must be accessible only to its owner',
+      );
+    default:
+      throw new Error(
+        'Live conversation directory must be an owned direct child',
+      );
   }
-}
-
-function hasIdentity(stats: Stats, root: ConversationRootIdentity): boolean {
-  return stats.dev === root.device && stats.ino === root.inode;
-}
-
-async function validateConversationDirectory(
-  root: ConversationRootIdentity,
-  name: string,
-  candidate: string,
-  parent: string = root.canonicalRoot,
-): Promise<string> {
-  const before = await lstat(candidate);
-  validateRootStats(before, 'directory');
-  const canonical = await realpath(candidate);
-  const after = await lstat(canonical);
-  validateRootStats(after, 'directory');
-  const child = relative(parent, canonical);
-  if (
-    child !== name ||
-    child.includes(sep) ||
-    child.startsWith('..') ||
-    isAbsolute(child) ||
-    before.dev !== after.dev ||
-    before.ino !== after.ino
-  ) {
-    throw new Error(
-      'Live conversation directory must be an owned direct child',
-    );
-  }
-  await revalidateConversationRoot(root);
-  return canonical;
 }
 
 export function getConversationRootPath(homeDir: string = homedir()): string {
   return resolve(homeDir, 'Documents', 'Qwen Code', 'Conversations');
 }
 
-async function createRoot(
-  configuredRoot: string,
-): Promise<ConversationRootIdentity> {
-  try {
-    await mkdir(configuredRoot, { recursive: true, mode: 0o700 });
-  } catch (error) {
-    let existing: Stats;
-    try {
-      existing = await lstat(configuredRoot);
-    } catch {
-      throw error;
-    }
-    validateRootStats(existing);
-    throw error;
-  }
-
-  const before = await lstat(configuredRoot);
-  validateRootStats(before);
-  const canonicalRoot = await realpath(configuredRoot);
-  const after = await lstat(canonicalRoot);
-  validateRootStats(after);
-  if (before.dev !== after.dev || before.ino !== after.ino) {
-    throw new Error(
-      'Live conversation root identity changed during validation',
-    );
-  }
-  return {
-    configuredRoot,
-    canonicalRoot,
-    device: after.dev,
-    inode: after.ino,
-  };
-}
-
 export async function revalidateConversationRoot(
   root: ConversationRootIdentity,
 ): Promise<ConversationRootIdentity> {
-  const configuredStats = await lstat(root.configuredRoot);
-  validateRootStats(configuredStats);
-  if (!hasIdentity(configuredStats, root)) {
-    throw new Error('Live conversation root identity changed');
+  try {
+    return await revalidateConversationRootIdentity(root);
+  } catch (error) {
+    liveIdentityError(error);
   }
-
-  const canonical = await realpath(root.configuredRoot);
-  if (!isSamePath(canonical, root.canonicalRoot)) {
-    throw new Error('Live conversation root canonical path changed');
-  }
-
-  const canonicalStats = await lstat(root.canonicalRoot);
-  validateRootStats(canonicalStats);
-  if (!hasIdentity(canonicalStats, root)) {
-    throw new Error('Live conversation root identity changed');
-  }
-  return root;
 }
 
 export async function assertExactConversationRoot(
   root: ConversationRootIdentity,
   candidate: string,
 ): Promise<ConversationRootIdentity> {
-  await revalidateConversationRoot(root);
-  const resolvedCandidate = resolve(candidate);
-  if (
-    !isSamePath(resolvedCandidate, root.configuredRoot) &&
-    !isSamePath(resolvedCandidate, root.canonicalRoot)
-  ) {
-    throw new Error('Workspace must be the exact Live conversation root');
+  try {
+    return await assertExactConversationRootIdentity(root, candidate);
+  } catch (error) {
+    liveIdentityError(error, true);
   }
-
-  const stats = await lstat(resolvedCandidate);
-  validateRootStats(stats);
-  const canonical = await realpath(resolvedCandidate);
-  if (!isSamePath(canonical, root.canonicalRoot) || !hasIdentity(stats, root)) {
-    throw new Error('Workspace must be the exact Live conversation root');
-  }
-  return root;
 }
 
 export class ConversationWorkspace {
@@ -177,15 +137,27 @@ export class ConversationWorkspace {
     this.rootPath = getConversationRootPath(options.homeDir);
   }
 
-  async getRoot(): Promise<ConversationRootIdentity> {
+  private getRootIdentity(): Promise<ConversationRootIdentity> {
     if (!this.rootPromise) {
-      const pending = createRoot(this.rootPath);
+      const pending = createConversationRootIdentity(this.rootPath);
       this.rootPromise = pending;
       void pending.catch(() => {
         if (this.rootPromise === pending) this.rootPromise = undefined;
       });
     }
     return this.rootPromise;
+  }
+
+  async getRoot(): Promise<ConversationRootIdentity> {
+    try {
+      return await this.getRootIdentity();
+    } catch (error) {
+      liveIdentityError(error, false, true);
+    }
+  }
+
+  private async revalidateStandaloneRoot(): Promise<ConversationRootIdentity> {
+    return revalidateConversationRootIdentity(await this.getRootIdentity());
   }
 
   async revalidate(): Promise<ConversationRootIdentity> {
@@ -196,50 +168,61 @@ export class ConversationWorkspace {
     return assertExactConversationRoot(await this.getRoot(), candidate);
   }
 
+  /**
+   * The private directory is derived from the canonical session id, not from
+   * whatever spelling a caller happens to hold.
+   *
+   * `getConversationDirectoryName()` is a case-sensitive hash, and callers reach
+   * these methods with a mix of request ids, live-entry ids and ids echoed back
+   * from tool arguments. Canonicalizing here makes one session resolve to one
+   * directory by construction instead of leaving it to every call site.
+   */
+  private directoryKey(sessionId: string): string {
+    return normalizeSessionIdForLookup(sessionId);
+  }
+
   async materializeConversationDirectory(sessionId: string): Promise<string> {
     const root = await this.revalidate();
-    const name = conversationDirectoryName(sessionId);
-    const candidate = join(root.canonicalRoot, name);
     try {
-      await mkdir(candidate, { mode: 0o700 });
+      return (
+        await materializeConversationDirectoryIdentity(
+          root,
+          this.directoryKey(sessionId),
+        )
+      ).identity.canonicalPath;
     } catch (error) {
-      if (
-        !error ||
-        typeof error !== 'object' ||
-        (error as NodeJS.ErrnoException).code !== 'EEXIST'
-      ) {
-        throw error;
-      }
+      liveIdentityError(error);
     }
-
-    return validateConversationDirectory(root, name, candidate);
   }
 
   async discardEmptyConversationDirectory(sessionId: string): Promise<boolean> {
     const root = await this.revalidate();
-    const name = conversationDirectoryName(sessionId);
-    const candidate = join(root.canonicalRoot, name);
-    let canonical: string;
+    let identity: ConversationDirectoryIdentity | undefined;
     try {
-      canonical = await validateConversationDirectory(root, name, candidate);
+      identity = await inspectConversationDirectoryIdentity(
+        root,
+        this.directoryKey(sessionId),
+      );
     } catch (error) {
+      // A root that vanished mid-inspection means there is nothing left to
+      // discard: keep the ENOENT-race → `false` contract instead of
+      // reporting an identity violation.
       if (
-        error &&
-        typeof error === 'object' &&
-        (error as NodeJS.ErrnoException).code === 'ENOENT'
+        error instanceof ConversationDirectoryIdentityError &&
+        error.reason === 'io_error' &&
+        (error.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
       ) {
         return false;
       }
-      throw error;
+      liveIdentityError(error);
     }
+    if (!identity) return false;
     try {
-      await rmdir(canonical);
+      await rmdir(identity.canonicalPath);
     } catch (error) {
       if (
-        error &&
-        typeof error === 'object' &&
-        ((error as NodeJS.ErrnoException).code === 'ENOENT' ||
-          (error as NodeJS.ErrnoException).code === 'ENOTEMPTY')
+        (error as NodeJS.ErrnoException).code === 'ENOENT' ||
+        (error as NodeJS.ErrnoException).code === 'ENOTEMPTY'
       ) {
         return false;
       }
@@ -247,5 +230,113 @@ export class ConversationWorkspace {
     }
     await revalidateConversationRoot(root);
     return true;
+  }
+
+  async prepareStandaloneDirectory(
+    storageSessionId: string,
+  ): Promise<{ identity: ConversationDirectoryIdentity; created: boolean }> {
+    const root = await this.revalidateStandaloneRoot();
+    const prepared = await materializeConversationDirectoryIdentity(
+      root,
+      storageSessionId,
+    );
+    const identity = await inspectConversationDirectoryIdentity(
+      root,
+      storageSessionId,
+      prepared.identity,
+    );
+    if (!identity) {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    // Entries are read after the final identity re-inspection so a same-uid
+    // entry appearing across the inspect cannot slip past the emptiness
+    // verdict on a stale snapshot.
+    let entries: string[];
+    try {
+      entries = await readdir(identity.canonicalPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new ConversationDirectoryIdentityError(
+          'child',
+          'identity_changed',
+        );
+      }
+      throw new ConversationDirectoryIdentityError('child', 'io_error', error);
+    }
+    if (entries.length > 0) {
+      throw new ConversationDirectoryIdentityError('child', 'not_empty');
+    }
+    return { identity, created: prepared.created };
+  }
+
+  async inspectStandaloneDirectory(
+    storageSessionId: string,
+    expected?: ConversationDirectoryIdentity,
+  ): Promise<StandaloneDirectoryInspection> {
+    const root = await this.revalidateStandaloneRoot();
+    try {
+      const identity = await inspectConversationDirectoryIdentity(
+        root,
+        storageSessionId,
+        expected,
+      );
+      return identity ? { status: 'ready', identity } : { status: 'missing' };
+    } catch (error) {
+      if (
+        error instanceof ConversationDirectoryIdentityError &&
+        error.scope === 'child'
+      ) {
+        return { status: 'compromised', error };
+      }
+      throw error;
+    }
+  }
+
+  async ensureStandaloneDirectory(
+    storageSessionId: string,
+    expected?: ConversationDirectoryIdentity,
+  ): Promise<StandaloneDirectoryEnsureResult> {
+    const inspected = await this.inspectStandaloneDirectory(
+      storageSessionId,
+      expected,
+    );
+    if (inspected.status !== 'missing') return inspected;
+
+    const root = await this.revalidateStandaloneRoot();
+    try {
+      const materialized = await materializeConversationDirectoryIdentity(
+        root,
+        storageSessionId,
+      );
+      if (!materialized.created) {
+        // The directory appeared inside the race window, so it is adopted
+        // only through the same inspection verdict as one found up front —
+        // never as a blind 'ready' carrying whatever the racing creator put
+        // there.
+        const raced = await this.inspectStandaloneDirectory(
+          storageSessionId,
+          expected,
+        );
+        if (raced.status !== 'missing') return raced;
+        throw new ConversationDirectoryIdentityError(
+          'child',
+          'identity_changed',
+        );
+      }
+      // 'recreated' is reserved for a directory that vanished after its
+      // identity was captured; a first-ever creation reports 'created'.
+      return {
+        status: expected ? 'recreated' : 'created',
+        identity: materialized.identity,
+      };
+    } catch (error) {
+      if (
+        error instanceof ConversationDirectoryIdentityError &&
+        error.scope === 'child'
+      ) {
+        return { status: 'compromised', error };
+      }
+      throw error;
+    }
   }
 }

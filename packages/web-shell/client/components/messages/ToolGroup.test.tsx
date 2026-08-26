@@ -3,14 +3,16 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { ACPToolCall } from '../../adapters/types';
+import type { SessionContentGenerator } from './AssistantMessage';
 import { hasActiveAgents } from '../../adapters/toolClassification';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
+import { McpAppHostContext } from '../../mcpAppHostContext';
 
-vi.mock('../../App', async () => {
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     TodoTimelineContext: createContext(new Map()),
@@ -81,15 +83,51 @@ function renderToolLine(
 function renderToolGroup(
   tools: ACPToolCall[],
   customization = {},
+  thoughts?: Array<{
+    content: string;
+    isStreaming?: boolean;
+    beforeToolCallId?: string;
+  }>,
+  compactSummary = false,
+  onOpenSubagent?: (tool: ACPToolCall) => void,
+  onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
+  language: 'en' | 'zh-CN' = 'en',
+  generateContent?: SessionContentGenerator,
+  mcpAppHostUrl?: string,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
+    const toolGroup = (
+      <ToolGroup
+        tools={tools}
+        thoughts={thoughts}
+        compactSummary={compactSummary}
+        generateContent={generateContent}
+      />
+    );
+    const group = mcpAppHostUrl ? (
+      <McpAppHostContext.Provider value={mcpAppHostUrl}>
+        {toolGroup}
+      </McpAppHostContext.Provider>
+    ) : (
+      toolGroup
+    );
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <WebShellCustomizationProvider value={customization}>
-          <ToolGroup tools={tools} />
+          {onOpenMonitor ? (
+            <MonitorDetailsProvider onOpen={onOpenMonitor}>
+              {group}
+            </MonitorDetailsProvider>
+          ) : onOpenSubagent ? (
+            <SubagentDetailsProvider onOpen={onOpenSubagent}>
+              {group}
+            </SubagentDetailsProvider>
+          ) : (
+            group
+          )}
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -106,6 +144,9 @@ const t = (key: string, values?: Record<string, string | number>): string => {
   }
   if (key === 'toolGroup.summary') {
     return `Ran ${values?.count ?? 0} tool${values?.count === 1 ? '' : 's'}`;
+  }
+  if (key === 'toolGroup.summary.ranAgents') {
+    return `Ran ${values?.count ?? 0} agent${values?.count === 1 ? '' : 's'}`;
   }
   if (key === 'toolGroup.summary.editedFiles') {
     return `Edited ${values?.count ?? 0} files`;
@@ -140,6 +181,21 @@ const zhT = (key: string, values?: Record<string, string | number>): string => {
 };
 
 describe('tool group summary logic', () => {
+  it('counts agents separately only for compact summaries', () => {
+    const tools = [
+      makeTool({ callId: 'agent-1', toolName: 'Agent' }),
+      makeTool({ callId: 'agent-2', toolName: 'Agent' }),
+      makeTool({ callId: 'read', toolName: 'Read' }),
+    ];
+
+    expect(formatToolGroupSummary(tools, t, undefined, true)).toBe(
+      'Ran 2 agents · Ran 1 tool',
+    );
+    expect(formatToolGroupSummary(tools, t)).toBe(
+      'Read 1 files Called 2 other tools',
+    );
+  });
+
   it('uses the active tool in running summaries', () => {
     const tools = [
       makeTool({ callId: 'done', status: 'completed' }),
@@ -435,6 +491,118 @@ describe('tool group summary logic', () => {
     expect(summary?.textContent).not.toContain('timeout: 30000ms');
   });
 
+  it('opens a completed MCP App result in the session transcript', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__show_dashboard',
+          rawOutput: {
+            type: 'mcp_app',
+            serverName: 'demo',
+            resourceUri: 'ui://demo/dashboard',
+            html: '<main>Dashboard</main>',
+            toolResult: { content: [] },
+            toolArguments: {},
+            fallbackText: 'Dashboard ready',
+          },
+        }),
+      ],
+      {},
+      undefined,
+      false,
+      undefined,
+      undefined,
+      'en',
+      undefined,
+      'http://localhost:5173',
+    );
+
+    expect(
+      container.querySelector('button')?.getAttribute('aria-expanded'),
+    ).toBe('true');
+
+    const content = container.querySelector(
+      '[class*="chatSummaryContentClip"]',
+    );
+    const iframe = container.querySelector('iframe');
+    expect(iframe).not.toBeNull();
+    iframe!.dataset['testState'] = 'preserved';
+    act(() => container.querySelector('button')?.click());
+    expect(content).toBe(
+      container.querySelector('[class*="chatSummaryContentClip"]'),
+    );
+    expect((content as HTMLElement | null)?.style.display).toBe('none');
+    act(() => container.querySelector('button')?.click());
+    expect(container.querySelector('iframe')).toBe(iframe);
+    expect(iframe?.dataset['testState']).toBe('preserved');
+    expect((content as HTMLElement | null)?.style.display).toBe('');
+  });
+
+  it('keeps an MCP App open when multiple tools share a summary', () => {
+    const container = renderToolGroup([
+      makeTool({ callId: 'read', toolName: 'read_file' }),
+      makeTool({
+        callId: 'app',
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '<main>Dashboard</main>',
+          toolResult: { content: [] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+    ]);
+
+    expect(
+      container.querySelector('button')?.getAttribute('aria-expanded'),
+    ).toBe('true');
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
+  it('renders fallbackText for a compacted MCP App without mounting the iframe', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '',
+          toolResult: {},
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+    );
+
+    expect(container.textContent).toContain('Dashboard ready');
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(container.querySelector('[data-testid="mcp-app"]')).toBeNull();
+  });
+
+  it('keeps an MCP App open in a summary-only row', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__show_dashboard',
+        rawOutput: {
+          type: 'mcp_app',
+          serverName: 'demo',
+          resourceUri: 'ui://demo/dashboard',
+          html: '<main>Dashboard</main>',
+          toolResult: { content: [] },
+          toolArguments: {},
+          fallbackText: 'Dashboard ready',
+        },
+      }),
+      { summaryOnly: true },
+    );
+
+    expect(container.textContent).toContain('Dashboard ready');
+  });
+
   it('uses action descriptions for shell rows inside grouped summaries', () => {
     const container = renderToolGroup([
       makeTool({
@@ -454,6 +622,7 @@ describe('tool group summary logic', () => {
         args: { file_path: 'README.md' },
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     expect(container.textContent).toContain('Shell');
     expect(container.textContent).toContain('查询用户工作空间列表');
@@ -694,7 +863,6 @@ describe('tool row rendering', () => {
       const content = container.querySelector(
         '[class*="chatSummaryContentClip"]',
       );
-      expect(content?.className).not.toContain('chatSummaryContentCollapsed');
       expect(content?.textContent).toContain('custom 5s');
 
       act(() => {
@@ -864,6 +1032,7 @@ describe('tool row rendering', () => {
         },
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -878,6 +1047,7 @@ describe('tool row rendering', () => {
         content: [{ type: 'content', content: { text: 'Permission denied' } }],
       }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -888,6 +1058,7 @@ describe('tool row rendering', () => {
     const container = renderToolGroup([
       makeTool({ toolName: 'glob', status: 'failed' }),
     ]);
+    act(() => container.querySelector('button')?.click());
 
     const titleRow = container.querySelector('[class*="expandedCardTitleRow"]');
     expect(titleRow).not.toBeNull();
@@ -1387,6 +1558,89 @@ describe('tool row rendering', () => {
     expect(onOpen).toHaveBeenCalledWith(tool);
   });
 
+  it('keeps the agent row static while its launch approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'pending',
+      args: { subagent_type: 'Explore' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-1',
+                toolCallId: tool.callId,
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // No expand affordance while the launch approval is unanswered: the row
+    // must not open details for an agent that has not started yet.
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
+    expect(container.querySelector('button[class*="lineButton"]')).toBeNull();
+    act(() => {
+      (container.querySelector('[class*="lineButton"]') as HTMLElement).click();
+    });
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('keeps the agent row openable while a sub-tool approval is pending', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'in_progress',
+      args: { subagent_type: 'Explore' },
+      subTools: [{ callId: 'sub-1', toolName: 'web_fetch', status: 'pending' }],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine
+              tool={tool}
+              approval={{
+                id: 'perm-sub',
+                toolCallId: 'sub-1',
+                content: [],
+                options: [],
+              }}
+            />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    // A sub-tool approval is not the agent's own launch approval: the row
+    // stays openable so the pending sub-tool stays reachable in the details
+    // panel.
+    expect(
+      container.querySelector('button[class*="lineButton"]'),
+    ).not.toBeNull();
+    act(() => {
+      (
+        container.querySelector('button[class*="lineButton"]') as HTMLElement
+      ).click();
+    });
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
   it('respects hideHeader for agent tools inside SubagentDetailsProvider', () => {
     const onOpen = vi.fn();
     const tool = makeTool({
@@ -1516,6 +1770,372 @@ describe('tool row rendering', () => {
 
     expect(summary?.textContent).toContain('Running');
     expect(summary?.textContent).toContain('Updated task list');
+  });
+});
+
+describe('thinking rows in the compact summary', () => {
+  it('expands a single-agent compact summary before opening agent details', () => {
+    const onOpenSubagent = vi.fn();
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'inspect' },
+        }),
+      ],
+      {},
+      [{ content: 'main-agent thought' }],
+      true,
+      onOpenSubagent,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    act(() => outerSummary.click());
+
+    expect(onOpenSubagent).not.toHaveBeenCalled();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    const thoughtSummary = container.querySelector<HTMLElement>(
+      '[data-testid="compact-thinking-summary"]',
+    )!;
+    act(() => thoughtSummary.click());
+    expect(container.textContent).toContain('main-agent thought');
+  });
+
+  it('expands a single-monitor compact summary before opening monitor details', () => {
+    const onOpenMonitor = vi.fn().mockResolvedValue(true);
+    const container = renderToolGroup(
+      [makeTool({ callId: 'monitor-1', toolName: 'Monitor' })],
+      {},
+      [{ content: 'main-agent thought' }],
+      true,
+      undefined,
+      onOpenMonitor,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    act(() => outerSummary.click());
+
+    expect(onOpenMonitor).not.toHaveBeenCalled();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelector('[data-testid="compact-thinking-summary"]'),
+    ).not.toBeNull();
+  });
+
+  it('nests parallel-agent details behind the compact summary', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'first' },
+        }),
+        makeTool({
+          callId: 'agent-2',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'second' },
+        }),
+      ],
+      {},
+      [{ content: 'thinking' }],
+      true,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    expect(outerSummary.textContent).toContain('Ran 2 agents');
+    expect(
+      container.querySelector('[data-testid="compact-parallel-agents"]'),
+    ).toBeNull();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('false');
+
+    act(() => outerSummary.click());
+    const parallelSummary = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('Parallel agents'))!;
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(parallelSummary.getAttribute('aria-expanded')).toBe('false');
+    expect(parallelSummary.textContent).toContain('2/2 done');
+
+    act(() => parallelSummary.click());
+    expect(parallelSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelectorAll('[data-agent-status]')).toHaveLength(2);
+  });
+
+  it('shows a running summary while a thought is streaming', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'thinking about it', isStreaming: true }],
+    );
+
+    expect(container.querySelector('button')?.textContent).toContain(
+      'Thinking',
+    );
+    expect(
+      container.querySelector('[class*="chatSummaryThoughtHeader"]'),
+    ).toBeNull();
+
+    act(() => container.querySelector('button')?.click());
+
+    expect(
+      container.querySelector('[class*="chatSummaryThoughtHeader"]'),
+    ).not.toBeNull();
+  });
+
+  it('renders a completed thought line that expands its content on click', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'private chain of thought' }],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const thoughtHeader = Array.from(
+      container.querySelectorAll('[data-testid="compact-thinking-summary"]'),
+    ).find((el) =>
+      (el as HTMLElement).textContent?.includes('Done thinking'),
+    ) as HTMLElement;
+    expect(thoughtHeader).toBeTruthy();
+    // Collapsed by default; content appears on click.
+    expect(container.textContent).not.toContain('private chain of thought');
+    act(() => thoughtHeader.click());
+    expect(container.textContent).toContain('private chain of thought');
+  });
+
+  it('expands the thought when the header row is clicked outside the button', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'private chain of thought' }],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const header = container.querySelector(
+      '[class*="chatSummaryThoughtHeader"]',
+    ) as HTMLElement;
+    expect(header).toBeTruthy();
+    expect(container.textContent).not.toContain('private chain of thought');
+    // The pointer-styled row is the hit target, not just the nested controls.
+    act(() => header.click());
+    expect(container.textContent).toContain('private chain of thought');
+    act(() => header.click());
+    expect(container.textContent).not.toContain('private chain of thought');
+    const chevron = header.querySelector(
+      '[class*="chatSummaryThoughtChevron"]',
+    ) as HTMLElement;
+    expect(chevron).toBeTruthy();
+    act(() => chevron.click());
+    expect(container.textContent).toContain('private chain of thought');
+  });
+
+  it('does not toggle the folded thought on clicks inside the translation popover', async () => {
+    const generateContent = vi.fn(async function* () {
+      yield {
+        v: 1 as const,
+        type: 'started' as const,
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+      };
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'request-1',
+        seq: 0,
+        text: '翻译结果',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'request-1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 12,
+        outputTokens: 4,
+      };
+    });
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'private thought for translation' }],
+      false,
+      undefined,
+      undefined,
+      'zh-CN',
+      generateContent,
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const header = container.querySelector(
+      '[class*="chatSummaryThoughtHeader"]',
+    ) as HTMLElement;
+    expect(header).toBeTruthy();
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+
+    // The popover renders through a portal, but React events from it still
+    // bubble through the React tree into the header row.
+    const translateButton =
+      header.querySelector<HTMLButtonElement>('button[title="翻译"]');
+    expect(translateButton).not.toBeNull();
+    await act(async () => translateButton?.click());
+    expect(document.body.textContent).toContain('翻译结果');
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+
+    const translationContent = document.body.querySelector(
+      '[class*="translationContent"]',
+    ) as HTMLElement;
+    expect(translationContent).toBeTruthy();
+    act(() => translationContent.click());
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+
+    const retranslateButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === '重新翻译');
+    expect(retranslateButton).toBeTruthy();
+    await act(async () => retranslateButton?.click());
+    expect(container.textContent).not.toContain(
+      'private thought for translation',
+    );
+  });
+
+  it('keeps the single tool compact when thinking is folded in', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'DUMPED CONTENT' },
+            },
+          ],
+        }),
+      ],
+      {},
+      [{ content: 'thinking' }],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    // The single tool renders as a compact line, not a force-expanded dump.
+    expect(container.textContent).not.toContain('DUMPED CONTENT');
+  });
+
+  it('renders thoughts interleaved with their tools in original order', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+        makeTool({ callId: 'tool-2', toolName: 'Glob', status: 'completed' }),
+      ],
+      {},
+      [
+        { content: 'first thought', beforeToolCallId: 'tool-1' },
+        { content: 'second thought', beforeToolCallId: 'tool-2' },
+      ],
+    );
+
+    act(() => container.querySelector('button')?.click());
+    act(() => {
+      for (const header of container.querySelectorAll(
+        '[data-testid="compact-thinking-summary"]',
+      )) {
+        (header as HTMLElement).click();
+      }
+    });
+    const text = container.textContent ?? '';
+    const positions = [
+      'first thought',
+      'ReadFile',
+      'second thought',
+      'Glob',
+    ].map((marker) => text.indexOf(marker));
+    expect(
+      positions.every((v, i) => v >= 0 && (i === 0 || v > positions[i - 1]!)),
+    ).toBe(true);
+  });
+
+  it('renders a thought bound to a later parallel agent after the agent group', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'first' },
+        }),
+        makeTool({
+          callId: 'agent-2',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'second' },
+        }),
+      ],
+      {},
+      [{ content: 'second agent reasoning', beforeToolCallId: 'agent-2' }],
+      true,
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const parallelBlock = container.querySelector(
+      '[data-testid="compact-parallel-agents"]',
+    );
+    const thoughtHeader = container.querySelector(
+      '[class*="chatSummaryThoughtHeader"]',
+    ) as HTMLElement;
+    expect(parallelBlock).toBeTruthy();
+    expect(thoughtHeader).toBeTruthy();
+    expect(
+      parallelBlock!.compareDocumentPosition(thoughtHeader) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    expect(container.textContent).not.toContain('second agent reasoning');
+    act(() => thoughtHeader.click());
+    expect(container.textContent).toContain('second agent reasoning');
   });
 });
 

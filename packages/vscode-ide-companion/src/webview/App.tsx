@@ -10,7 +10,6 @@ import React, {
   useRef,
   useCallback,
   useMemo,
-  useLayoutEffect,
 } from 'react';
 import { useVSCode } from './hooks/useVSCode.js';
 import { useSessionManagement } from './hooks/session/useSessionManagement.js';
@@ -18,33 +17,22 @@ import { useFileContext } from './hooks/file/useFileContext.js';
 import { useMessageHandling } from './hooks/message/useMessageHandling.js';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import { useWebViewMessages } from './hooks/useWebViewMessages.js';
+import { useAcpTranscript } from './hooks/useAcpTranscript.js';
 import {
   shouldSendMessage,
   useMessageSubmit,
 } from './hooks/useMessageSubmit.js';
 import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import { stripZeroWidthSpaces } from '@qwen-code/webui';
-import type { TextMessage } from './hooks/message/useMessageHandling.js';
-import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
-import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
-import { hasToolCallOutput, shouldShowToolCall } from './utils/utils.js';
 import { Onboarding } from './components/layout/Onboarding.js';
 import { type CompletionItem } from '../types/completionItemTypes.js';
 import { useCompletionTrigger } from './hooks/useCompletionTrigger.js';
 import {
-  AssistantMessage,
-  UserMessage,
-  ThinkingMessage,
-  WaitingMessage,
-  InterruptedMessage,
   FileIcon,
   PermissionDrawer,
   AskUserQuestionDialog,
-  InsightProgressCard,
-  ImageMessageRenderer,
   ImagePreview,
-  ZERO_WIDTH_SPACE,
-  CloseSmallIcon,
+  InsightProgressCard,
   // Layout components imported directly from webui
   EmptyState,
   ChatHeader,
@@ -60,8 +48,15 @@ import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
-import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
+import { useImagePaste } from './hooks/useImage.js';
 import { computeContextUsage } from './utils/contextUsage.js';
+import { resolveFileLinkFromAnchor } from './utils/fileLinks.js';
+import {
+  findBlockByRowKey,
+  findLastAssistantText,
+  formatBlocksForCopyAll,
+  getBlockCopyText,
+} from './utils/copyTranscript.js';
 import {
   SKILL_ITEM_ID_PREFIX,
   isSkillsSecondaryQuery,
@@ -71,224 +66,71 @@ import {
   buildSlashCommandItems,
   isExpandableSlashCommand,
 } from './utils/slashCommandUtils.js';
-
-/**
- * Memoized message list that only re-renders when messages or callbacks change,
- * not on every keystroke in the input field.
- */
-export interface MessageListItem {
-  type: 'message' | 'in-progress-tool-call' | 'completed-tool-call';
-  data: TextMessage | ToolCallData;
-  timestamp: number;
-}
-
-interface UserTurnCounter {
-  next: number;
-}
-
-const consumeUserTurnIndex = (
-  msg: TextMessage,
-  counter: UserTurnCounter,
-): number => {
-  if (typeof msg.turnIndex === 'number') {
-    counter.next = Math.max(counter.next, msg.turnIndex + 1);
-    return msg.turnIndex;
-  }
-
-  const fallback = counter.next;
-  counter.next += 1;
-  return fallback;
-};
-
-export const getLastUserTurnIndex = (
-  allMessages: MessageListItem[],
-): number | null => {
-  const counter: UserTurnCounter = { next: 0 };
-  let lastUserTurnIndex: number | null = null;
-
-  allMessages.forEach((item) => {
-    if (item.type !== 'message') {
-      return;
-    }
-
-    const msg = item.data as TextMessage;
-    if (msg.role === 'user') {
-      lastUserTurnIndex = consumeUserTurnIndex(msg, counter);
-    }
-  });
-
-  return lastUserTurnIndex;
-};
-
-interface MessageListProps {
-  allMessages: MessageListItem[];
-  onFileClick: (path: string) => void;
-  onEditUserMessage: (targetTurnIndex: number, content: string) => void;
-  canEditMessages: boolean;
-  /**
-   * After each render, this ref is updated with an array that maps
-   * DOM child position → allMessages index, only for items that
-   * actually render a DOM element (skipping nulls).
-   */
-  childIndexMap: React.MutableRefObject<number[]>;
-}
-
-const MessageList = React.memo<MessageListProps>(
-  ({
-    allMessages,
-    onFileClick,
-    onEditUserMessage,
-    canEditMessages,
-    childIndexMap,
-  }) => {
-    let imageIndex = 0;
-    const userTurnCounter: UserTurnCounter = { next: 0 };
-    const lastUserTurnIndex = getLastUserTurnIndex(allMessages);
-
-    // Build child→allMessages index mapping: for each item that renders
-    // a non-null element, record its allMessages index. This array's
-    // position corresponds to the DOM child position in the container.
-    const mapping: number[] = [];
-
-    const elements = allMessages.map((item, index) => {
-      let child: React.ReactNode;
-      switch (item.type) {
-        case 'message': {
-          const msg = item.data as TextMessage;
-
-          if (msg.kind === 'image' && msg.imagePath) {
-            if (msg.role === 'user') {
-              consumeUserTurnIndex(msg, userTurnCounter);
-            }
-            imageIndex += 1;
-            child = (
-              <ImageMessageRenderer
-                msg={msg as WebViewImageMessage}
-                imageIndex={imageIndex}
-              />
-            );
-            break;
-          }
-
-          if (msg.role === 'thinking') {
-            child = (
-              <ThinkingMessage
-                content={msg.content || ''}
-                timestamp={msg.timestamp || 0}
-                onFileClick={onFileClick}
-              />
-            );
-            break;
-          }
-
-          if (msg.role === 'user') {
-            const targetTurnIndex = consumeUserTurnIndex(msg, userTurnCounter);
-            const canEditThisMessage =
-              canEditMessages && targetTurnIndex === lastUserTurnIndex;
-            child = (
-              <UserMessage
-                content={msg.content || ''}
-                timestamp={msg.timestamp || 0}
-                onFileClick={onFileClick}
-                fileContext={msg.fileContext}
-                onEdit={
-                  canEditThisMessage
-                    ? () =>
-                        onEditUserMessage(targetTurnIndex, msg.content || '')
-                    : undefined
-                }
-              />
-            );
-            break;
-          }
-
-          {
-            const content = (msg.content || '').trim();
-            if (!content) {
-              child = null;
-              break;
-            }
-            if (content === 'Interrupted' || content === 'Tool interrupted') {
-              child = <InterruptedMessage text={content} />;
-              break;
-            }
-            child = (
-              <AssistantMessage
-                content={content}
-                timestamp={msg.timestamp || 0}
-                onFileClick={onFileClick}
-              />
-            );
-          }
-          break;
-        }
-
-        case 'in-progress-tool-call':
-        case 'completed-tool-call': {
-          const tc = item.data as ToolCallData;
-          if (!shouldShowToolCall(tc.kind)) {
-            child = null;
-            break;
-          }
-          child = <ToolCall toolCall={tc} />;
-          break;
-        }
-
-        default:
-          child = null;
-      }
-      // No wrapper div — message components render directly as children
-      // of the scroll container, preserving the original CSS layout.
-      if (child == null) {
-        return null;
-      }
-      mapping.push(index);
-      return <React.Fragment key={`msg-${index}`}>{child}</React.Fragment>;
-    });
-
-    // Update the mapping ref so the copy handler can use it
-    childIndexMap.current = mapping;
-
-    return <>{elements}</>;
-  },
+// Lazy-load the WebShell transcript renderer so the ~17MB web-shell chunk
+// stays split into its own bundle and is fetched on demand.
+const WebShellTranscriptLazy = React.lazy(() =>
+  import('@qwen-code/web-shell').then((module) => ({
+    default: module.WebShellTranscript,
+  })),
 );
 
-MessageList.displayName = 'MessageList';
+/** Map VS Code's body theme attribute onto the transcript's dark/light prop. */
+function readVSCodeWebviewTheme(): 'dark' | 'light' {
+  const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
+  return kind.includes('light') ? 'light' : 'dark';
+}
 
 /**
- * Given a click target inside the messages container, find which
- * allMessages index it belongs to by walking up from the target to
- * the container's direct child, then mapping through childIndexMap.
- *
- * NOTE: childIndexMap indices correspond to MessageList's DOM children
- * which must be the first N children of the container. Elements rendered
- * after MessageList (InsightProgressCard, WaitingMessage, etc.) are
- * excluded from the map and will correctly return -1.
+ * Keep a failed lazy chunk load from blanking the whole panel. The
+ * transcript renderer ships as a content-hashed dynamic import, so a
+ * webview retained across an extension auto-update can request chunk
+ * hashes that no longer exist in the new bundle. Suspense does not catch
+ * the rejected import — React rethrows it and unmounts the entire root —
+ * so catch it here and show a recoverable error state instead.
  */
-function findMessageIndex(
-  target: Element,
-  container: Element,
-  childIndexMap: number[],
-): number {
-  // Walk up from the click target to find the direct child of the container.
-  // This works for all message types regardless of whether they have
-  // .qwen-message class (e.g. InterruptedMessage does not).
-  let directChild: Element | null = target;
-  while (directChild && directChild.parentElement !== container) {
-    directChild = directChild.parentElement;
-  }
-  if (!directChild) {
-    return -1;
+class TranscriptErrorBoundary extends React.Component<
+  { children?: React.ReactNode },
+  { hasError: boolean }
+> {
+  state: { hasError: boolean } = { hasError: false };
+
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
   }
 
-  // Find DOM child position among container's children
-  const children = container.children;
-  for (let i = 0; i < children.length; i++) {
-    if (children[i] === directChild) {
-      return i < childIndexMap.length ? childIndexMap[i] : -1;
+  private handleReload = () => {
+    // A full webview reload re-requests the HTML entry and picks up the
+    // current bundle, which is the reliable recovery when the stale
+    // webview is pinned to chunk hashes that no longer exist.
+    window.location.reload();
+  };
+
+  render(): React.ReactNode {
+    if (!this.state.hasError) {
+      return this.props.children;
     }
+    return (
+      <div
+        data-testid="transcript-load-error"
+        className="flex h-full flex-col items-center justify-center gap-3 px-4 text-center"
+      >
+        <span
+          className="text-sm"
+          style={{ color: 'var(--app-secondary-foreground)' }}
+        >
+          The conversation timeline failed to load.
+        </span>
+        <button
+          type="button"
+          onClick={this.handleReload}
+          className="text-sm underline"
+          style={{ color: 'var(--app-secondary-foreground)' }}
+        >
+          Reload panel
+        </button>
+      </div>
+    );
   }
-  return -1;
 }
 
 export const App: React.FC = () => {
@@ -329,6 +171,11 @@ export const App: React.FC = () => {
   >([]);
   const [availableSkills, setAvailableSkills] = useState<string[]>([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [showModelSelector, setShowModelSelector] = useState(false);
+  const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
+  // /insight feedback: latest structured progress update and the generated
+  // report path, surfaced by the extension via insightProgress /
+  // insightReportReady messages.
   const [insightProgress, setInsightProgress] = useState<{
     stage: string;
     progress: number;
@@ -337,14 +184,6 @@ export const App: React.FC = () => {
   const [insightReportPath, setInsightReportPath] = useState<string | null>(
     null,
   );
-  const [showModelSelector, setShowModelSelector] = useState(false);
-  const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
-  // Maps DOM child position → allMessages index. Built during render by
-  // MessageList, only includes items that actually produce DOM elements.
-  const childIndexMapRef = useRef<number[]>([]);
-  // Scroll container for message list; used to keep the view anchored to the latest content
-  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const inputFieldRef = useRef<HTMLDivElement | null>(null);
 
   const [editMode, setEditMode] = useState<ApprovalModeValue>(
@@ -352,9 +191,6 @@ export const App: React.FC = () => {
   );
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [isComposing, setIsComposing] = useState(false);
-  const [editingMessage, setEditingMessage] = useState<{
-    targetTurnIndex: number;
-  } | null>(null);
   // When true, do NOT auto-attach the active editor file/selection to message context
   const [skipAutoActiveContext, setSkipAutoActiveContext] = useState(false);
 
@@ -538,67 +374,11 @@ export const App: React.FC = () => {
       },
     });
 
-  const setComposerText = useCallback(
-    (text: string) => {
-      setInputText(text);
-      const inputElement = inputFieldRef.current;
-      if (!inputElement) {
-        return;
-      }
-
-      inputElement.textContent = text || ZERO_WIDTH_SPACE;
-      inputElement.setAttribute(
-        'data-empty',
-        text.trim().length === 0 ? 'true' : 'false',
-      );
-      inputElement.focus();
-
-      requestAnimationFrame(() => {
-        const selection = window.getSelection();
-        if (!selection) {
-          return;
-        }
-        const range = document.createRange();
-        range.selectNodeContents(inputElement);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      });
-    },
-    [setInputText],
-  );
-
-  const handleEditUserMessage = useCallback(
-    (targetTurnIndex: number, content: string) => {
-      if (messageHandling.isStreaming || messageHandling.isWaitingForResponse) {
-        return;
-      }
-      clearImages();
-      setEditingMessage({ targetTurnIndex });
-      setComposerText(content);
-    },
-    [
-      clearImages,
-      messageHandling.isStreaming,
-      messageHandling.isWaitingForResponse,
-      setComposerText,
-    ],
-  );
-
-  const clearEditingMessage = useCallback(() => {
-    setEditingMessage(null);
-    setComposerText('');
-    clearImages();
-    fileContext.clearFileReferences();
-  }, [clearImages, fileContext, setComposerText]);
-
   const { handleSubmit: submitMessage } = useMessageSubmit({
     inputText,
     setInputText,
     attachedImages,
     clearImages,
-    editTargetTurnIndex: editingMessage?.targetTurnIndex ?? null,
-    onSubmitted: () => setEditingMessage(null),
     messageHandling,
     fileContext,
     skipAutoActiveContext,
@@ -607,42 +387,6 @@ export const App: React.FC = () => {
     isStreaming: messageHandling.isStreaming,
     isWaitingForResponse: messageHandling.isWaitingForResponse,
   });
-
-  useEffect(() => {
-    const clearEditingOnRestoreOrFailure = (event: MessageEvent) => {
-      const message = event.data;
-      if (
-        message?.type === 'conversationLoaded' ||
-        message?.type === 'qwenSessionSwitched' ||
-        message?.type === 'conversationCleared'
-      ) {
-        setEditingMessage(null);
-        return;
-      }
-
-      if (message?.type === 'streamEnd') {
-        const reason = String(message.data?.reason ?? '').toLowerCase();
-        if (
-          reason === 'user_cancelled' ||
-          reason === 'cancelled' ||
-          reason === 'timeout' ||
-          reason === 'error' ||
-          reason === 'session_expired'
-        ) {
-          setEditingMessage(null);
-        }
-        return;
-      }
-
-      if (message?.type === 'error' || message?.type === 'sessionExpired') {
-        setEditingMessage(null);
-      }
-    };
-
-    window.addEventListener('message', clearEditingOnRestoreOrFailure);
-    return () =>
-      window.removeEventListener('message', clearEditingOnRestoreOrFailure);
-  }, []);
 
   const canSubmit = shouldSendMessage({
     inputText,
@@ -654,15 +398,6 @@ export const App: React.FC = () => {
   // Handle cancel/stop from the input bar
   // Emit a cancel to the extension and immediately reflect interruption locally.
   const handleCancel = useCallback(() => {
-    if (
-      editingMessage &&
-      !messageHandling.isStreaming &&
-      !messageHandling.isWaitingForResponse
-    ) {
-      clearEditingMessage();
-      return;
-    }
-
     if (!messageHandling.isStreaming && !messageHandling.isWaitingForResponse) {
       const inputElement = inputFieldRef.current;
       if (inputElement) {
@@ -694,6 +429,7 @@ export const App: React.FC = () => {
           role: 'assistant',
           content: 'Interrupted',
           timestamp: Date.now(),
+          localOnly: true,
         });
       }
     }
@@ -702,14 +438,7 @@ export const App: React.FC = () => {
       type: 'cancelStreaming',
       data: {},
     });
-  }, [
-    clearEditingMessage,
-    editingMessage,
-    inputFieldRef,
-    messageHandling,
-    setInputText,
-    vscode,
-  ]);
+  }, [inputFieldRef, messageHandling, setInputText, vscode]);
 
   // Message handling
   useWebViewMessages({
@@ -742,120 +471,13 @@ export const App: React.FC = () => {
     setAccountInfo: (info) => {
       setAccountInfo(info);
     },
-    setInsightReportPath,
-    setInsightProgress,
+    setInsightProgress: (progress) => {
+      setInsightProgress(progress);
+    },
+    setInsightReportPath: (path) => {
+      setInsightReportPath(path);
+    },
   });
-
-  // Auto-scroll handling: keep the view pinned to bottom when new content arrives,
-  // but don't interrupt the user if they scrolled up.
-  // We track whether the user is currently "pinned" to the bottom (near the end).
-  const [pinnedToBottom, setPinnedToBottom] = useState(true);
-  const prevCountsRef = useRef({ msgLen: 0, inProgLen: 0, doneLen: 0 });
-
-  // Observe scroll position to know if user has scrolled away from the bottom.
-  useEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) {
-      return;
-    }
-
-    const onScroll = () => {
-      // Use a small threshold so slight deltas don't flip the state.
-      // Note: there's extra bottom padding for the input area, so keep this a bit generous.
-      const threshold = 80; // px tolerance
-      const distanceFromBottom =
-        container.scrollHeight - (container.scrollTop + container.clientHeight);
-      setPinnedToBottom(distanceFromBottom <= threshold);
-    };
-
-    // Initialize once mounted so first render is correct
-    onScroll();
-    container.addEventListener('scroll', onScroll, { passive: true });
-    return () => container.removeEventListener('scroll', onScroll);
-  }, []);
-
-  // When content changes, if the user is pinned to bottom, keep it anchored there.
-  // Only smooth-scroll when new items are appended; do not smooth for streaming chunk updates.
-  useLayoutEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) {
-      return;
-    }
-
-    // Detect whether new items were appended (vs. streaming chunk updates)
-    const prev = prevCountsRef.current;
-    const newMsg = messageHandling.messages.length > prev.msgLen;
-    const newInProg = inProgressToolCalls.length > prev.inProgLen;
-    const newDone = completedToolCalls.length > prev.doneLen;
-    prevCountsRef.current = {
-      msgLen: messageHandling.messages.length,
-      inProgLen: inProgressToolCalls.length,
-      doneLen: completedToolCalls.length,
-    };
-
-    if (!pinnedToBottom) {
-      // Do nothing if user scrolled away; avoid stealing scroll.
-      return;
-    }
-
-    const smooth = newMsg || newInProg || newDone; // avoid smooth on streaming chunks
-
-    // Anchor to the bottom on next frame to avoid layout thrash.
-    const raf = requestAnimationFrame(() => {
-      const top = container.scrollHeight - container.clientHeight;
-      // Use scrollTo to avoid cross-context issues with scrollIntoView.
-      container.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
-    });
-    return () => cancelAnimationFrame(raf);
-  }, [
-    pinnedToBottom,
-    messageHandling.messages,
-    inProgressToolCalls,
-    completedToolCalls,
-    messageHandling.isWaitingForResponse,
-    messageHandling.loadingMessage,
-    messageHandling.isStreaming,
-    planEntries,
-  ]);
-
-  // When the last rendered item resizes (e.g., images/code blocks load/expand),
-  // if we're pinned to bottom, keep it anchored there.
-  useEffect(() => {
-    const container = messagesContainerRef.current;
-    const endEl = messagesEndRef.current;
-    if (!container || !endEl) {
-      return;
-    }
-
-    const lastItem = endEl.previousElementSibling as HTMLElement | null;
-    if (!lastItem) {
-      return;
-    }
-
-    let frame = 0;
-    const ro = new ResizeObserver(() => {
-      if (!pinnedToBottom) {
-        return;
-      }
-      // Defer to next frame to avoid thrash during rapid size changes
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const top = container.scrollHeight - container.clientHeight;
-        container.scrollTo({ top });
-      });
-    });
-    ro.observe(lastItem);
-
-    return () => {
-      cancelAnimationFrame(frame);
-      ro.disconnect();
-    };
-  }, [
-    pinnedToBottom,
-    messageHandling.messages,
-    inProgressToolCalls,
-    completedToolCalls,
-  ]);
 
   // Set loading state to false after initial mount and when we have authentication info
   useEffect(() => {
@@ -1203,16 +825,6 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
-  const handleOpenInsightReport = useCallback(() => {
-    if (!insightReportPath) {
-      return;
-    }
-    vscode.postMessage({
-      type: 'openInsightReport',
-      data: { path: insightReportPath },
-    });
-  }, [insightReportPath, vscode]);
-
   // Handle toggle edit mode (Default -> Auto-edit -> YOLO -> Default)
   const handleToggleEditMode = useCallback(() => {
     setEditMode((prev) => {
@@ -1250,243 +862,136 @@ export const App: React.FC = () => {
     setThinkingEnabled((prev) => !prev);
   }, []);
 
-  // When user sends a message after scrolling up, re-pin and jump to the bottom
-  const handleSubmitWithScroll = useCallback(
-    (e: React.FormEvent | React.KeyboardEvent, explicitText?: string) => {
-      setPinnedToBottom(true);
+  const hasContent =
+    messageHandling.messages.length > 0 ||
+    messageHandling.isStreaming ||
+    inProgressToolCalls.length > 0 ||
+    completedToolCalls.length > 0 ||
+    planEntries.length > 0;
 
-      const container = messagesContainerRef.current;
-      if (container) {
-        const top = container.scrollHeight - container.clientHeight;
-        container.scrollTo({ top });
-      }
-
-      submitMessage(e, explicitText);
-    },
-    [submitMessage],
+  // Locally generated messages (connection/auth/generic errors and the
+  // "Interrupted" cancel mark) never flow through ACP `transcriptUpdate`,
+  // so the WebShell transcript cannot render them. Surface them in a
+  // notice slot above the composer instead of dropping them silently.
+  const localNotices = messageHandling.messages.filter(
+    (message) => message.localOnly,
   );
 
-  // Create unified message array containing all types of messages and tool calls
-  const allMessages = useMemo<
-    Array<{
-      type: 'message' | 'in-progress-tool-call' | 'completed-tool-call';
-      data: TextMessage | ToolCallData;
-      timestamp: number;
-    }>
-  >(() => {
-    // Regular messages
-    const regularMessages = messageHandling.messages.map((msg) => ({
-      type: 'message' as const,
-      data: msg,
-      timestamp: msg.timestamp,
-    }));
-
-    // In-progress tool calls
-    const inProgressTools = inProgressToolCalls.map((toolCall) => ({
-      type: 'in-progress-tool-call' as const,
-      data: toolCall,
-      timestamp: toolCall.timestamp ?? 0,
-    }));
-
-    // Completed tool calls
-    const completedTools = completedToolCalls
-      .filter(hasToolCallOutput)
-      .map((toolCall) => ({
-        type: 'completed-tool-call' as const,
-        data: toolCall,
-        timestamp: toolCall.timestamp ?? 0,
-      }));
-
-    // Merge and sort by timestamp to ensure messages and tool calls are interleaved
-    return [...regularMessages, ...inProgressTools, ...completedTools].sort(
-      (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
-    );
-  }, [messageHandling.messages, inProgressToolCalls, completedToolCalls]);
-
-  const handleFileClick = useCallback(
-    (path: string): void => {
+  // The WebShell transcript has no file-open callback; intercept file-like
+  // anchor clicks at the container level and route them through the
+  // existing `openFile` message (handled by FileMessageHandler), restoring
+  // the pre-PR behavior where file references opened in the editor.
+  const handleTranscriptClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const target = event.target as HTMLElement | null;
+      const anchor = target?.closest?.('a') as HTMLAnchorElement | null;
+      if (!anchor) {
+        return;
+      }
+      const filePath = resolveFileLinkFromAnchor(anchor);
+      if (!filePath) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
       vscode.postMessage({
         type: 'openFile',
-        data: { path },
+        data: { path: filePath },
       });
     },
     [vscode],
   );
 
-  // Build a markdown code fence that won't collide with content containing backticks
-  const buildFence = useCallback((content: string): string => {
-    const matches = (content ?? '').match(/`+/g);
-    const maxRun = matches ? Math.max(...matches.map((m) => m.length)) : 0;
-    return '`'.repeat(Math.max(3, maxRun + 1));
-  }, []);
+  // Open the generated /insight report in the editor via the extension's
+  // existing `openInsightReport` handler.
+  const handleOpenInsightReport = useCallback(() => {
+    if (!insightReportPath) {
+      return;
+    }
+    vscode.postMessage({
+      type: 'openInsightReport',
+      data: { path: insightReportPath },
+    });
+  }, [insightReportPath, vscode]);
 
-  // Format a tool call's content for clipboard copy
-  // wrapCodeBlock: true for Copy All (markdown), false for single Copy Message (plain text)
-  const formatToolCallForCopy = useCallback(
-    (tc: ToolCallData, wrapCodeBlock = false): string => {
-      const parts: string[] = [];
-      if (tc.content) {
-        for (const c of tc.content) {
-          if (c.type === 'content' && c.content?.text) {
-            if (wrapCodeBlock) {
-              const fence = buildFence(c.content.text);
-              parts.push(`${fence}\n${c.content.text}\n${fence}`);
-            } else {
-              parts.push(c.content.text);
-            }
-          } else if (c.type === 'diff') {
-            const filePath = c.path || '';
-            if (c.oldText) {
-              const oldLines = c.oldText
-                .split('\n')
-                .map((l) => `-${l}`)
-                .join('\n');
-              const newLines = (c.newText || '')
-                .split('\n')
-                .map((l) => `+${l}`)
-                .join('\n');
-              const diffContent = `--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}`;
-              if (wrapCodeBlock) {
-                const fence = buildFence(diffContent);
-                parts.push(`${fence}diff\n${diffContent}\n${fence}`);
-              } else {
-                parts.push(diffContent);
-              }
-            } else {
-              if (wrapCodeBlock) {
-                const fence = buildFence(c.newText || '');
-                parts.push(
-                  `${filePath}:\n${fence}\n${c.newText || ''}\n${fence}`,
-                );
-              } else {
-                parts.push(`${filePath}:\n${c.newText || ''}`);
-              }
-            }
-          }
-        }
-      }
-      return parts.join('\n\n');
-    },
-    [buildFence],
+  // VS Code applies color-theme changes to an open webview in place
+  // (updating data-vscode-theme-kind on <body> without reloading it), and
+  // the panel keeps its context while hidden, so a mount-time snapshot
+  // would go stale. Track the live value via a body-attribute observer.
+  const [webShellTheme, setWebShellTheme] = useState<'dark' | 'light'>(
+    readVSCodeWebviewTheme,
   );
-
-  // Track which message was right-clicked by resolving the index immediately.
-  // Storing the DOM element reference would be fragile: React re-renders between
-  // the right-click and the async copy command (routed via extension host) can
-  // detach the element, causing findMessageIndex to fail intermittently.
-  const contextMenuMsgIdxRef = useRef<number>(-1);
   useEffect(() => {
-    const trackTarget = (e: MouseEvent) => {
+    const observer = new MutationObserver(() => {
+      setWebShellTheme(readVSCodeWebviewTheme());
+    });
+    observer.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['data-vscode-theme-kind', 'class'],
+    });
+    return () => observer.disconnect();
+  }, []);
+  const transcriptBlocks = useAcpTranscript();
+
+  // === Contributed copy commands (qwen-code.copyMessage/copyAllMessages/
+  // copyLastReply) ===
+  // The extension host routes the commands back to the webview that last
+  // reported a context menu (`contextMenuTriggered`) via a `copyCommand`
+  // message. The transcript container carries the `webviewSection` context
+  // key the `webview/context` contributions filter on.
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const transcriptBlocksRef = useRef(transcriptBlocks);
+  useEffect(() => {
+    transcriptBlocksRef.current = transcriptBlocks;
+  }, [transcriptBlocks]);
+  const contextMenuRowKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const trackTarget = (event: MouseEvent) => {
       const container = messagesContainerRef.current;
-      if (container && e.target instanceof Element) {
-        contextMenuMsgIdxRef.current = findMessageIndex(
-          e.target,
-          container,
-          childIndexMapRef.current,
-        );
-      }
-      // Notify extension that this webview was right-clicked, so copy commands route here
+      const target = event.target instanceof Element ? event.target : null;
+      const row = target?.closest?.('[data-message-row-key]') as
+        | HTMLElement
+        | null
+        | undefined;
+      contextMenuRowKeyRef.current =
+        container && row && container.contains(row)
+          ? row.getAttribute('data-message-row-key')
+          : null;
+      // Notify the extension that this webview was right-clicked, so the
+      // contributed copy commands route here.
       vscode.postMessage({ type: 'contextMenuTriggered', data: {} });
     };
     document.addEventListener('contextmenu', trackTarget, true);
     return () => document.removeEventListener('contextmenu', trackTarget, true);
   }, [vscode]);
 
-  // Copy text via the extension host's clipboard API (more reliable than navigator.clipboard in webview)
-  const copyToClipboard = useCallback(
-    (text: string) => {
-      vscode.postMessage({ type: 'copyToClipboard', data: { text } });
-    },
-    [vscode],
-  );
-
-  // Handle copy commands from VSCode native context menu
   useEffect(() => {
-    const handler = (event: MessageEvent) => {
-      const message = event.data;
+    const handleCopyCommand = (event: MessageEvent) => {
+      const message = event.data as {
+        type?: string;
+        data?: { action?: string };
+      };
       if (message?.type !== 'copyCommand') {
         return;
       }
-
-      const { action } = message.data as { action: string };
-
-      if (action === 'copyMessage') {
-        const idx = contextMenuMsgIdxRef.current;
-        if (idx >= 0 && idx < allMessages.length) {
-          const item = allMessages[idx];
-          if (item.type === 'message') {
-            const msg = item.data as TextMessage;
-            if (msg.kind === 'image' && msg.imagePath) {
-              copyToClipboard(`![image](${msg.imagePath})`);
-            } else {
-              copyToClipboard(msg.content || '');
-            }
-          } else if (
-            item.type === 'completed-tool-call' ||
-            item.type === 'in-progress-tool-call'
-          ) {
-            copyToClipboard(formatToolCallForCopy(item.data as ToolCallData));
-          }
-        }
-      } else if (action === 'copyAllMessages') {
-        const parts: string[] = [];
-        for (const item of allMessages) {
-          if (item.type === 'message') {
-            const msg = item.data as TextMessage;
-            const content =
-              msg.kind === 'image' && msg.imagePath
-                ? `![image](${msg.imagePath})`
-                : (msg.content || '').trim();
-            if (!content) {
-              continue;
-            }
-            if (msg.role === 'user') {
-              parts.push(`**User:** ${content}`);
-            } else if (msg.role === 'thinking') {
-              parts.push(`**Thinking:** ${content}`);
-            } else {
-              parts.push(`**Qwen Code:** ${content}`);
-            }
-          } else if (
-            item.type === 'completed-tool-call' ||
-            item.type === 'in-progress-tool-call'
-          ) {
-            const tc = item.data as ToolCallData;
-            if (!shouldShowToolCall(tc.kind)) {
-              continue;
-            }
-            const text = formatToolCallForCopy(tc, true);
-            if (text) {
-              parts.push(`**[Tool: ${tc.kind}]**\n\n${text}`);
-            }
-          }
-        }
-        copyToClipboard(parts.join('\n\n---\n\n'));
-      } else if (action === 'copyLastReply') {
-        for (let i = allMessages.length - 1; i >= 0; i--) {
-          const item = allMessages[i];
-          if (item.type === 'message') {
-            const msg = item.data as TextMessage;
-            if (msg.role === 'assistant' && msg.content?.trim()) {
-              copyToClipboard(msg.content);
-              return;
-            }
-          }
-        }
+      const blocks = transcriptBlocksRef.current;
+      let text: string | null = null;
+      if (message.data?.action === 'copyMessage') {
+        const block = findBlockByRowKey(blocks, contextMenuRowKeyRef.current);
+        text = block ? getBlockCopyText(block) : null;
+      } else if (message.data?.action === 'copyAllMessages') {
+        text = formatBlocksForCopyAll(blocks);
+      } else if (message.data?.action === 'copyLastReply') {
+        text = findLastAssistantText(blocks);
+      }
+      if (text) {
+        vscode.postMessage({ type: 'copyToClipboard', data: { text } });
       }
     };
-
-    window.addEventListener('message', handler);
-    return () => window.removeEventListener('message', handler);
-  }, [allMessages, copyToClipboard, formatToolCallForCopy]);
-
-  const hasContent =
-    messageHandling.messages.length > 0 ||
-    messageHandling.isStreaming ||
-    inProgressToolCalls.length > 0 ||
-    completedToolCalls.length > 0 ||
-    planEntries.length > 0 ||
-    allMessages.length > 0;
+    window.addEventListener('message', handleCopyCommand);
+    return () => window.removeEventListener('message', handleCopyCommand);
+  }, [vscode]);
 
   return (
     <div className="chat-container relative">
@@ -1532,7 +1037,10 @@ export const App: React.FC = () => {
 
       <div
         ref={messagesContainerRef}
-        className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-sm [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
+        className="flex-1 min-h-0 relative"
+        onClick={handleTranscriptClick}
+        // Context key the contributed copy commands filter on
+        // (`when: "webviewSection == 'chat-messages'"` in package.json).
         data-vscode-context={
           hasContent ? '{"webviewSection": "chat-messages"}' : undefined
         }
@@ -1560,27 +1068,55 @@ export const App: React.FC = () => {
             <EmptyState isAuthenticated />
           )
         ) : (
-          <>
-            {/* Render all messages and tool calls */}
-            <MessageList
-              allMessages={allMessages}
-              onFileClick={handleFileClick}
-              onEditUserMessage={handleEditUserMessage}
-              canEditMessages={
-                !messageHandling.isStreaming &&
-                !messageHandling.isWaitingForResponse
+          <TranscriptErrorBoundary>
+            <React.Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center">
+                  <span className="border-primary inline-block h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
+                </div>
               }
-              childIndexMap={childIndexMapRef}
-            />
-
-            {insightProgress && (
-              <InsightProgressCard
-                stage={insightProgress.stage}
-                progress={insightProgress.progress}
-                detail={insightProgress.detail}
+            >
+              <WebShellTranscriptLazy
+                blocks={transcriptBlocks}
+                theme={webShellTheme}
+                // WebShellTranscript hardcodes isResponding={false}, so
+                // MessageList's auto-collapse would treat the in-progress
+                // turn as completed and collapse it mid-response. Disable
+                // collapsing until a live isResponding prop is plumbed
+                // through; the pre-PR timeline was always fully expanded.
+                collapseCompletedTurns={false}
+                // The composer is an absolutely-positioned overlay at the
+                // bottom of the chat container; MessageList reserves
+                // clearance through --web-shell-bottom-panel-inset (padding
+                // and scroll-padding bottom). Nothing else in this package
+                // sets the variable, so the transcript tail would be hidden
+                // under the input box. 140px restores the pb-[140px]
+                // clearance the old scroll container provided.
+                style={
+                  {
+                    '--web-shell-bottom-panel-inset': '140px',
+                  } as React.CSSProperties
+                }
               />
+            </React.Suspense>
+          </TranscriptErrorBoundary>
+        )}
+        {(localNotices.length > 0 || insightProgress || insightReportPath) && (
+          <div
+            data-testid="local-message-notices"
+            // Above the 140px composer clearance so the notices sit right
+            // over the input box without covering transcript content.
+            className="absolute bottom-[150px] left-0 right-0 z-20 mx-auto flex w-full max-w-[600px] flex-col gap-1 px-4"
+          >
+            {insightProgress && (
+              <div data-testid="insight-progress">
+                <InsightProgressCard
+                  stage={insightProgress.stage}
+                  progress={insightProgress.progress}
+                  detail={insightProgress.detail}
+                />
+              </div>
             )}
-
             {insightReportPath && (
               <div className="px-[30px] py-2">
                 <div className="text-sm text-[var(--vscode-descriptionForeground)]">
@@ -1588,6 +1124,7 @@ export const App: React.FC = () => {
                 </div>
                 <a
                   href="#"
+                  data-testid="insight-report-link"
                   className="mt-1 inline-block break-all text-sm text-[var(--vscode-textLink-foreground)] underline decoration-[color-mix(in_srgb,var(--vscode-textLink-foreground)_55%,transparent)] underline-offset-2 hover:text-[var(--vscode-textLink-activeForeground)]"
                   onClick={(event) => {
                     event.preventDefault();
@@ -1598,18 +1135,22 @@ export const App: React.FC = () => {
                 </a>
               </div>
             )}
-
-            {/* Waiting message positioned fixed above the input form to avoid layout shifts */}
-            {messageHandling.isWaitingForResponse &&
-              messageHandling.loadingMessage && (
-                <div className="waiting-message-slot min-h-[28px]">
-                  <WaitingMessage
-                    loadingMessage={messageHandling.loadingMessage}
-                  />
-                </div>
-              )}
-            <div ref={messagesEndRef} />
-          </>
+            {localNotices.map((notice, index) => (
+              <div
+                key={`${notice.timestamp}-${index}`}
+                data-testid="local-message-notice"
+                className="break-words rounded border px-3 py-2 text-sm"
+                style={{
+                  color:
+                    'var(--vscode-editorError-foreground, var(--app-secondary-foreground))',
+                  borderColor: 'var(--vscode-editorError-border, transparent)',
+                  backgroundColor: 'var(--vscode-editorWidget-background)',
+                }}
+              >
+                {notice.content}
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
@@ -1630,7 +1171,7 @@ export const App: React.FC = () => {
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}
           onKeyDown={handleInputKeyDown}
-          onSubmit={handleSubmitWithScroll}
+          onSubmit={submitMessage}
           onCancel={handleCancel}
           onToggleEditMode={handleToggleEditMode}
           onToggleThinking={handleToggleThinking}
@@ -1682,29 +1223,11 @@ export const App: React.FC = () => {
           onCompletionClose={closeCompletion}
           canSubmit={canSubmit}
           extraContent={
-            editingMessage || attachedImages.length > 0 ? (
-              <>
-                {editingMessage && (
-                  <div className="flex items-center justify-between gap-2 border-t border-[var(--app-input-border)] px-2 py-1 text-xs text-[var(--app-secondary-foreground)]">
-                    <span className="truncate">Editing message</span>
-                    <button
-                      type="button"
-                      className="btn-icon-compact h-6 w-6"
-                      title="Cancel editing"
-                      aria-label="Cancel editing"
-                      onClick={clearEditingMessage}
-                    >
-                      <CloseSmallIcon />
-                    </button>
-                  </div>
-                )}
-                {attachedImages.length > 0 ? (
-                  <ImagePreview
-                    images={attachedImages}
-                    onRemove={handleRemoveImage}
-                  />
-                ) : null}
-              </>
+            attachedImages.length > 0 ? (
+              <ImagePreview
+                images={attachedImages}
+                onRemove={handleRemoveImage}
+              />
             ) : null
           }
           showModelSelector={showModelSelector}

@@ -314,6 +314,8 @@ describe('qwen serve — capabilities envelope', () => {
       'session_source_metadata',
       'session_side_task',
       'session_prompt',
+      'session_turn_status',
+      'session_attachments',
       'session_mid_turn_message_mutation',
       'session_mid_turn_message_query',
       'session_cancel',
@@ -351,6 +353,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_status',
       'session_close',
       'session_archive',
+      'session_storage_conflict_repair',
       'session_metadata',
       'session_organization',
       'session_export',
@@ -369,6 +372,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_tool_toggle',
       'workspace_skill_toggle',
       'workspace_skill_batch_toggle',
+      'extension_batch_activation_v2',
       'workspace_skill_manage',
       'workspace_settings',
       'workspace_permissions',
@@ -403,9 +407,12 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_runtime_removal',
       'workspace_qualified_rest_core',
       'extension_management_v2',
+      'extension_git_credentials',
       'workspace_persisted_transcript',
       'workspace_session_export',
       'workspace_archived_session_export',
+      'workspace_session_live_state',
+      'workspace_session_metadata',
       'voice_transcribe',
     ]);
   });
@@ -475,7 +482,7 @@ describe('qwen serve — transcript paging route', () => {
     expect(missing.status).toBe(404);
   });
 
-  it('maps archived, conflicting, and unavailable transcript snapshots to 409', async () => {
+  it('reads exact conflicts from active and maps archived/unavailable snapshots to 409', async () => {
     const archivedId = '99999999-aaaa-bbbb-cccc-444444444444';
     const archivedRecord = chatRecord(
       archivedId,
@@ -491,19 +498,33 @@ describe('qwen serve — transcript paging route', () => {
     });
 
     const conflictId = '99999999-aaaa-bbbb-cccc-555555555555';
-    const conflictRecord = chatRecord(
+    const activeConflictRecord = chatRecord(
       conflictId,
       'u1',
       null,
-      'conflicting transcript',
+      'active conflicting transcript',
     );
-    writePersistedTranscript(conflictId, [conflictRecord]);
-    writePersistedTranscript(conflictId, [conflictRecord], 'archived');
+    const archivedConflictRecord = chatRecord(
+      conflictId,
+      'u1',
+      null,
+      'archived conflicting transcript',
+    );
+    writePersistedTranscript(conflictId, [activeConflictRecord]);
+    writePersistedTranscript(conflictId, [archivedConflictRecord], 'archived');
     const conflict = await getTranscript(conflictId);
-    expect(conflict.status).toBe(409);
-    await expect(conflict.json()).resolves.toMatchObject({
-      code: 'session_conflict',
+    expect(conflict.status).toBe(200);
+    const conflictBody = await conflict.json();
+    expect(conflictBody).toMatchObject({
+      sessionId: conflictId,
+      hasMore: false,
     });
+    expect(JSON.stringify(conflictBody)).toContain(
+      'active conflicting transcript',
+    );
+    expect(JSON.stringify(conflictBody)).not.toContain(
+      'archived conflicting transcript',
+    );
 
     const unavailable = await getTranscript(
       '99999999-aaaa-bbbb-cccc-666666666666',

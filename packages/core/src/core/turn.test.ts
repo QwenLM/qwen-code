@@ -101,21 +101,26 @@ describe('isCompressionFailureStatus', () => {
 describe('findRepeatedDuplicateProviderToolCall', () => {
   const getProviderCallId = (item: { providerCallId?: string }) =>
     item.providerCallId;
+  const replayOf =
+    (...handledIds: string[]) =>
+    (item: { providerCallId?: string }) =>
+      item.providerCallId !== undefined &&
+      handledIds.includes(item.providerCallId);
 
-  it('finds a handled provider id that already received a synthetic response', () => {
+  it('finds a replayed provider id that already received a synthetic response', () => {
     const items = [{ providerCallId: 'fresh' }, { providerCallId: 'handled' }];
 
     expect(
       findRepeatedDuplicateProviderToolCall(
         items,
         getProviderCallId,
-        new Set(['handled']),
+        replayOf('handled'),
         new Set(['handled']),
       ),
     ).toBe(items[1]);
   });
 
-  it('finds a handled provider id repeated within the same batch', () => {
+  it('finds a replayed provider id repeated within the same batch', () => {
     const items = [
       { providerCallId: 'handled' },
       { providerCallId: 'fresh' },
@@ -126,7 +131,7 @@ describe('findRepeatedDuplicateProviderToolCall', () => {
       findRepeatedDuplicateProviderToolCall(
         items,
         getProviderCallId,
-        new Set(['handled']),
+        replayOf('handled'),
         new Set<string>(),
       ),
     ).toBe(items[0]);
@@ -139,8 +144,21 @@ describe('findRepeatedDuplicateProviderToolCall', () => {
       findRepeatedDuplicateProviderToolCall(
         items,
         getProviderCallId,
-        new Set(['handled']),
+        replayOf('handled'),
         new Set<string>(),
+      ),
+    ).toBeUndefined();
+  });
+
+  it('ignores id collisions the replay predicate rejects, even after a synthetic response', () => {
+    const items = [{ providerCallId: 'handled' }];
+
+    expect(
+      findRepeatedDuplicateProviderToolCall(
+        items,
+        getProviderCallId,
+        () => false,
+        new Set(['handled']),
       ),
     ).toBeUndefined();
   });
@@ -719,6 +737,71 @@ describe('Turn', () => {
         'Turn.run-sendMessageStream',
         { contextAlreadySummarized: true },
       );
+    });
+
+    it('preserves the status of friendly forbidden errors', async () => {
+      mockSendMessageStream.mockRejectedValue({
+        response: {
+          data: {
+            error: {
+              code: 403,
+              message: 'Code Assist is not enabled',
+            },
+          },
+        },
+      });
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Trigger forbidden error' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Error,
+          value: {
+            error: {
+              message: 'Code Assist is not enabled',
+              status: 403,
+            },
+          },
+        },
+      ]);
+    });
+
+    it.each([
+      [{ statusCode: 429 }, 429],
+      [{ response: { status: 503, data: {} } }, 503],
+      [new Error('upstream :HTTP_STATUS/429'), 429],
+    ])('normalizes supported provider status shapes', async (error, status) => {
+      mockSendMessageStream.mockRejectedValue(error);
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Trigger provider error' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Error,
+          value: {
+            error: {
+              message: expect.any(String),
+              status,
+            },
+          },
+        },
+      ]);
     });
 
     it('should report API errors with empty history summary', async () => {

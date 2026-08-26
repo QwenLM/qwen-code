@@ -11,10 +11,12 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonSessionGroupPresetColor,
+  DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonStatusReportSession,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
+import { SessionPrBadge } from './SessionPrBadge';
 import { formatRelativeTime } from '../utils/formatRelativeTime';
 import { buildSplitUrl, MAX_SPLIT_PANES } from '../utils/splitUrl';
 import {
@@ -57,6 +59,8 @@ export interface SessionCard {
   updatedAt?: string;
   color?: DaemonSessionGroupPresetColor | null;
   isCurrent: boolean;
+  /** GitHub PRs bound to the session, in binding order (last = latest). */
+  prs?: DaemonSessionPrInfo[];
   /** The workspace the session lives in. */
   workspaceCwd: string;
   /** True when the session belongs to a non-primary workspace. */
@@ -104,6 +108,7 @@ export function deriveSessionCards(
       updatedAt: session.updatedAt || session.createdAt,
       color: session.color,
       isCurrent: session.sessionId === currentSessionId,
+      prs: session.prs,
       workspaceCwd: session.workspaceCwd,
       isNonPrimary: isNonPrimaryWorkspaceSession(
         session.workspaceCwd,
@@ -162,7 +167,7 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces,
   workspaceCwd,
 }: {
-  onOpenSession: (sessionId: string) => void;
+  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   includeOtherWorkspaces: boolean;
   workspaceCwd?: string;
@@ -412,7 +417,7 @@ function SessionOverviewPanelInner({
               <button
                 type="button"
                 className={styles.cardLabel}
-                onClick={() => onOpenSession(card.sessionId)}
+                onClick={() => onOpenSession(card.sessionId, card.workspaceCwd)}
                 title={card.label}
               >
                 {card.label}
@@ -422,6 +427,7 @@ function SessionOverviewPanelInner({
                   {t('sessionsOverview.current')}
                 </span>
               )}
+              <SessionPrBadge prs={card.prs ?? []} />
             </div>
             <div className={styles.cardMeta}>
               <span
@@ -479,7 +485,7 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces = true,
   workspaceCwd,
 }: {
-  onOpenSession: (sessionId: string) => void;
+  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   includeOtherWorkspaces?: boolean;
   workspaceCwd?: string;

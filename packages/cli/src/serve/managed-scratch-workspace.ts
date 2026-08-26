@@ -85,6 +85,15 @@ function validateRootStats(stats: Stats): void {
   }
 }
 
+// Restates core's `hasVerifiableInode()` (packages/core/src/utils/
+// file-identity.ts) rather than importing it: this module is loaded from the
+// serve entry, and a core barrel import would pull the whole core module
+// graph into that bundle closure — the same trade-off
+// conversation-directory-identity.ts documents for its restatement.
+function hasVerifiableInode(ino: number): boolean {
+  return Number(ino) !== 0;
+}
+
 /**
  * Creates and accepts the daemon's scratch root, recording its identity so
  * later requests can fail closed if the path is replaced.
@@ -99,6 +108,11 @@ export function prepareManagedScratchRoot(
   const canonicalRoot = realpathSync.native(resolve(root));
   const after = lstatSync(canonicalRoot);
   validateRootStats(after);
+  if (!hasVerifiableInode(after.ino)) {
+    throw new Error(
+      'Managed scratch root identity cannot be verified on this volume',
+    );
+  }
   if (before.dev !== after.dev || before.ino !== after.ino) {
     throw new Error('Managed scratch root identity changed during validation');
   }

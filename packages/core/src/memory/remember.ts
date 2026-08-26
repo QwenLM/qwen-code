@@ -7,7 +7,7 @@
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import { getAutoMemoryRoot, getUserAutoMemoryRoot } from './paths.js';
 import { buildManagedAutoMemoryPrompt } from './prompt.js';
 import {
@@ -198,7 +198,6 @@ export async function runManagedRememberByAgent(params: {
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
-      ToolNames.LS,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
     ],

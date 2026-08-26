@@ -21,6 +21,7 @@ import {
   isVisionBridgeNoticeDisplay,
   ToolErrorType,
   parseAndFormatApiError,
+  toolResultBoundaryArtifact,
 } from '@qwen-code/qwen-code-core';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type {
@@ -41,8 +42,9 @@ import type {
   ToolUseBlock,
   Usage,
 } from '../types.js';
-import { functionResponsePartsToString } from '../../utils/nonInteractiveHelpers.js';
+import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
 import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
+import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Internal state for managing a single message context (main agent or subagent).
@@ -1059,8 +1061,10 @@ export abstract class BaseJsonOutputAdapter {
       is_error: hasError,
     };
     const content = toolResultContent(response);
+    let projectedContent: string | undefined;
     if (content !== undefined) {
-      block.content = projectHeadlessToolResultContent(content);
+      projectedContent = projectHeadlessToolResultContent(content);
+      block.content = projectedContent;
     }
 
     const message: CLIUserMessage = {
@@ -1073,6 +1077,19 @@ export abstract class BaseJsonOutputAdapter {
         content: [block],
       },
     };
+    if (content !== undefined && projectedContent !== undefined) {
+      observeHeadlessToolResultProjection(
+        message,
+        content,
+        projectedContent,
+        request.callId,
+        response.boundaryArtifact ??
+          toolResultBoundaryArtifact(
+            response.persistedOutputFiles,
+            response.artifacts,
+          ),
+      );
+    }
     this.emitMessageImpl(message);
   }
 
@@ -1403,6 +1420,21 @@ function checkResponsePartsForError(
  * @param response - Tool call response
  * @returns String content or undefined
  */
+function mcpAppFallbackText(display: unknown): string | undefined {
+  if (
+    !display ||
+    typeof display !== 'object' ||
+    !('type' in display) ||
+    display.type !== 'mcp_app' ||
+    !('fallbackText' in display) ||
+    typeof display.fallbackText !== 'string'
+  ) {
+    return undefined;
+  }
+  const text = display.fallbackText.trim();
+  return text.length > 0 ? display.fallbackText : undefined;
+}
+
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
@@ -1438,6 +1470,10 @@ export function toolResultContent(
   }
   if (response.error) {
     return response.error.message;
+  }
+  const mcpAppFallback = mcpAppFallbackText(response.resultDisplay);
+  if (mcpAppFallback) {
+    return mcpAppFallback;
   }
   if (
     typeof response.resultDisplay === 'string' &&

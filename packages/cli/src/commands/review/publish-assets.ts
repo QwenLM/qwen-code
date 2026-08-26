@@ -240,6 +240,23 @@ export function runPublishAssets(args: PublishAssetsArgs): void {
   // host the write will actually route at, not merely the flag. Binding
   // args.host while routing at effectiveHost let a GH_HOST-driven Enterprise
   // write pass a github.com authorisation; caught by this skill's own review.
+  //
+  // Validate the RAW flag first: a non-empty all-whitespace `--host` must
+  // throw setGhHost's documented TypeError here (it resolves to '' / falsy,
+  // which would skip the routing setGhHost below and silently retarget the
+  // Contents-API write at the env/default host). `setGhHost('')` legitimately
+  // resets; `setGhHost(' ')` throws — so guard on presence, not on trim-non-empty.
+  if (args.host !== undefined) {
+    try {
+      setGhHost(args.host);
+    } catch (err) {
+      refuse(
+        `${err instanceof Error ? err.message : String(err)} (from --host)`,
+      );
+      return;
+    }
+    setGhHost(undefined); // restore default; effectiveHost routing re-applies
+  }
   const effectiveHost = resolveGhHost(args.host);
 
   // ── Gate 2: an authorised run — the same gate as `submit` ─────────────────

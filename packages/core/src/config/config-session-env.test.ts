@@ -88,7 +88,7 @@ vi.mock('../ide/ide-client.js', () => ({
     }),
   },
 }));
-vi.mock('../memory/const.js', () => ({
+vi.mock('../utils/memory-constants.js', () => ({
   setGeminiMdFilename: vi.fn(),
 }));
 
@@ -116,12 +116,15 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 let originalEnv: string | undefined;
 let originalModelEnv: string | undefined;
+let originalIdentityEnv: string | undefined;
 
 beforeEach(() => {
   originalEnv = process.env['QWEN_CODE_SESSION_ID'];
   delete process.env['QWEN_CODE_SESSION_ID'];
   originalModelEnv = process.env['QWEN_CODE_MODEL'];
   delete process.env['QWEN_CODE_MODEL'];
+  originalIdentityEnv = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  delete process.env['QWEN_CODE_MODEL_IDENTITY'];
 
   (fs.existsSync as Mock).mockReturnValue(true);
   (fs.readdirSync as Mock).mockReturnValue([]);
@@ -147,6 +150,11 @@ afterEach(() => {
     process.env['QWEN_CODE_MODEL'] = originalModelEnv;
   } else {
     delete process.env['QWEN_CODE_MODEL'];
+  }
+  if (originalIdentityEnv !== undefined) {
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = originalIdentityEnv;
+  } else {
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
   }
   vi.resetModules();
 });
@@ -284,5 +292,256 @@ describe('Config modelEnvClaimed guard', () => {
     expect(newSessionId).not.toBe(oldSessionId);
     expect(getSessionModel(newSessionId)).toBe('other-model');
     expect(getSessionModel(oldSessionId)).toBeUndefined();
+  });
+});
+
+describe('Config provider-qualified model identity', () => {
+  it('publishes `<model>@<digest>` beside the bare model', async () => {
+    const { Config } = await import('./config.js');
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'qualified-model',
+        apiKey: 'k',
+        baseUrl: 'https://provider-a.example/v1',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    const config = new Config({ ...baseParams });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    expect(process.env['QWEN_CODE_MODEL']).toBe('qualified-model');
+    expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toMatch(
+      /^qualified-model@[0-9a-f]{8}$/,
+    );
+  });
+
+  it('falls back to the bare id when there is nothing to qualify with', async () => {
+    // No auth type and no base URL resolved yet — the pre-auth boot. Inventing
+    // a digest over two empty strings would qualify nothing while looking like
+    // it did; the bare id says exactly as much as is known.
+    const { Config } = await import('./config.js');
+    new Config({ ...baseParams });
+
+    expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toBe(
+      process.env['QWEN_CODE_MODEL'],
+    );
+  });
+
+  it('separates one model id exposed by two provider configurations', async () => {
+    // The whole point: /review\u2019s same-model gate must not let a review
+    // done against provider A\u2019s `qwen3-coder-plus` certify a range for
+    // provider B\u2019s. Same model name, different base URL, different
+    // identity.
+    const { Config } = await import('./config.js');
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    const config = new Config({ ...baseParams });
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'same-model',
+        apiKey: 'k',
+        baseUrl: 'https://provider-a.example/v1',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    const a = process.env['QWEN_CODE_MODEL_IDENTITY'];
+
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'same-model',
+        apiKey: 'k',
+        baseUrl: 'https://provider-b.example/v1',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    const b = process.env['QWEN_CODE_MODEL_IDENTITY'];
+
+    expect(process.env['QWEN_CODE_MODEL']).toBe('same-model');
+    expect(a).toMatch(/^same-model@[0-9a-f]{8}$/);
+    expect(b).toMatch(/^same-model@[0-9a-f]{8}$/);
+    expect(a).not.toBe(b);
+  });
+
+  it('is stable for one configuration \u2014 the gate must not drift per boot', async () => {
+    const { Config } = await import('./config.js');
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'steady-model',
+        apiKey: 'k',
+        baseUrl: 'https://provider-a.example/v1',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    const config = new Config({ ...baseParams });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    const first = process.env['QWEN_CODE_MODEL_IDENTITY'];
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toBe(first);
+  });
+
+  it('registers the identity PER SESSION, which is what daemon spawns read', async () => {
+    // The process-global slot is first-writer-wins, so in daemon mode it
+    // belongs to whichever session booted first. Handing that to a later
+    // session's subprocess is worse than handing it nothing — a confidently
+    // wrong qualification passes a gate the bare id would have failed — so
+    // the registry is what `getShellContextEnvVars` resolves, and this is
+    // where each session's entry is written.
+    const { Config } = await import('./config.js');
+    const { getSessionModelIdentity } = await import(
+      '../utils/sessionIdContext.js'
+    );
+    const first = new Config({ ...baseParams });
+    const later = new Config({ ...baseParams, model: 'other-model' });
+
+    expect(getSessionModelIdentity(first.getSessionId())).toBe('test-model');
+    expect(getSessionModelIdentity(later.getSessionId())).toBe('other-model');
+    // …and it is the OWNER's that reached the global slot.
+    expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toBe('test-model');
+  });
+
+  it('re-keys the identity on a mid-session model switch', async () => {
+    // `setModel` republishes; an identity left keyed on the previous model
+    // would qualify one this session no longer runs.
+    const { Config } = await import('./config.js');
+    const { getSessionModelIdentity } = await import(
+      '../utils/sessionIdContext.js'
+    );
+    const config = new Config({ ...baseParams });
+    expect(getSessionModelIdentity(config.getSessionId())).toBe('test-model');
+
+    await config.setModel('switched-model');
+    expect(getSessionModelIdentity(config.getSessionId())).toBe(
+      'switched-model',
+    );
+  });
+
+  it('a later Config cannot overwrite the claimed identity slot', async () => {
+    const { Config } = await import('./config.js');
+    new Config({ ...baseParams });
+    const claimed = process.env['QWEN_CODE_MODEL_IDENTITY'];
+
+    new Config({ ...baseParams, model: 'other-model' });
+
+    expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toBe(claimed);
+  });
+});
+
+describe('Config.getModelRouteIdentity (#9454 route key)', () => {
+  it('returns an identical identity across repeated calls for one configuration', async () => {
+    const { Config } = await import('./config.js');
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'steady-model',
+        apiKey: 'k',
+        baseUrl: 'https://provider-a.example/v1',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    const config = new Config({ ...baseParams });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    // Route-scoped caches (e.g. GeminiChat token counts) compare these
+    // strings for equality — the value must not drift between calls.
+    const first = config.getModelRouteIdentity();
+    expect(config.getModelRouteIdentity()).toBe(first);
+    expect(config.getModelRouteIdentity()).toBe(first);
+    expect(first).toMatch(/^steady-model@[0-9a-f]{8}$/);
+  });
+
+  it('keeps the `model@<sha-prefix>` digest shape for explicit route queries', async () => {
+    const { Config } = await import('./config.js');
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'active-model',
+        apiKey: 'k',
+        baseUrl: 'https://provider-a.example/v1',
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    const config = new Config({ ...baseParams });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    // The readable model id stays the prefix; the discriminator is exactly
+    // eight hex characters, stable for one (auth type, endpoint) pair.
+    const explicit = config.getModelRouteIdentity('route-model', {
+      model: 'route-model',
+      authType: 'openai',
+      baseUrl: 'https://route.example/v1',
+    } as ContentGeneratorConfig);
+    expect(explicit).toMatch(/^route-model@[0-9a-f]{8}$/);
+    expect(
+      config.getModelRouteIdentity('route-model', {
+        model: 'route-model',
+        authType: 'openai',
+        baseUrl: 'https://route.example/v1',
+      } as ContentGeneratorConfig),
+    ).toBe(explicit);
+  });
+
+  it('does not mix the registry base URL into a non-active model identity', async () => {
+    // The registry-baseUrl fallback qualifies the ACTIVE model's route when
+    // its own generator config carries no baseUrl. A foreign model queried
+    // with its own configuration must not pick that fallback up — hashing
+    // the registry endpoint into another model's identity would invalidate
+    // its route-scoped state on unrelated registry changes.
+    const { Config } = await import('./config.js');
+    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+      '../core/contentGenerator.js'
+    );
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: {
+        model: 'active-model',
+        apiKey: 'k',
+        // No baseUrl of its own: the active model falls back to the
+        // registry base URL below.
+      } as ContentGeneratorConfig,
+      sources: {},
+    });
+    const config = new Config({ ...baseParams });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    const registrySpy = vi.spyOn(config, 'getCurrentModelRegistryBaseUrl');
+
+    const foreignGeneratorConfig = {
+      model: 'foreign-model',
+      authType: 'openai',
+    } as ContentGeneratorConfig;
+
+    registrySpy.mockReturnValue('https://registry.example/v1');
+    const activeWithRegistry = config.getModelRouteIdentity();
+    const foreignWithRegistry = config.getModelRouteIdentity(
+      'foreign-model',
+      foreignGeneratorConfig,
+    );
+
+    registrySpy.mockReturnValue(null);
+    const activeWithoutRegistry = config.getModelRouteIdentity();
+    const foreignWithoutRegistry = config.getModelRouteIdentity(
+      'foreign-model',
+      foreignGeneratorConfig,
+    );
+
+    // The fallback is load-bearing for the ACTIVE model…
+    expect(activeWithRegistry).toMatch(/^active-model@[0-9a-f]{8}$/);
+    expect(activeWithRegistry).not.toBe(activeWithoutRegistry);
+    // …but the foreign model's identity ignores the registry entirely.
+    expect(foreignWithRegistry).toMatch(/^foreign-model@[0-9a-f]{8}$/);
+    expect(foreignWithRegistry).toBe(foreignWithoutRegistry);
   });
 });

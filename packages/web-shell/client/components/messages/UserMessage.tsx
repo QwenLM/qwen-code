@@ -10,10 +10,12 @@ import {
   type ReactNode,
 } from 'react';
 import { RefreshCwIcon } from 'lucide-react';
+import { FileTypeIcon } from '../FileTypeIcon';
 import {
   getComposerTagIconUrl,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
@@ -26,6 +28,7 @@ import type {
   WebShellComposerTag,
   WebShellComposerTagIconMap,
 } from '../../customization';
+import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import {
   getComposerTagDisplay,
   getComposerTagLabel,
@@ -41,15 +44,25 @@ interface UserMessageImage {
   mimeType: string;
 }
 
+interface UserMessageFile {
+  name: string;
+  mimeType: string;
+  data?: Blob;
+  text?: string;
+  attachmentId?: string;
+}
+
 interface UserMessageProps {
   content: string;
   images?: UserMessageImage[];
+  files?: UserMessageFile[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
   isLocateFlashing?: boolean;
   sendFailed?: boolean;
   onRetrySend?: () => void;
   /** Click an uploaded image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
+  onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
 }
 
 function DefaultUserMessageContent({
@@ -57,6 +70,7 @@ function DefaultUserMessageContent({
   content,
   inputAnnotations,
   onComposerTagClick,
+  onFileTagClick,
   renderComposerTag,
   renderComposerTagTooltip,
 }: {
@@ -64,6 +78,7 @@ function DefaultUserMessageContent({
   content: string;
   inputAnnotations?: readonly DaemonInputAnnotation[];
   onComposerTagClick?: ComposerTagClickHandler;
+  onFileTagClick?: ComposerTagClickHandler;
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
 }) {
@@ -82,7 +97,13 @@ function DefaultUserMessageContent({
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
             key={`${segment.tag.id}:${index}`}
-            onComposerTagClick={onComposerTagClick}
+            onComposerTagClick={
+              segment.tag.kind === 'file'
+                ? isPreviewableFileComposerTag(segment.tag)
+                  ? onFileTagClick
+                  : onComposerTagClick
+                : onComposerTagClick
+            }
             renderComposerTag={renderComposerTag}
             renderComposerTagTooltip={renderComposerTagTooltip}
             tag={segment.tag}
@@ -98,11 +119,13 @@ function DefaultUserMessageContent({
 export const UserMessage = memo(function UserMessage({
   content,
   images,
+  files,
   inputAnnotations,
   isLocateFlashing = false,
   sendFailed = false,
   onRetrySend,
   onImagePreview,
+  onAttachmentPreview,
 }: UserMessageProps) {
   const { t } = useI18n();
   const {
@@ -116,10 +139,27 @@ export const UserMessage = memo(function UserMessage({
   const contentRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [heightOverflowing, setHeightOverflowing] = useState(false);
+  const handleComposerTagClick = useCallback<ComposerTagClickHandler>(
+    (info) => {
+      if (isPreviewableFileComposerTag(info.tag)) {
+        onAttachmentPreview?.({
+          name: info.tag.value.split(/[\\/]/).pop() ?? info.tag.value,
+          workspacePath: info.tag.value,
+        });
+      }
+      onComposerTagClick?.(info);
+    },
+    [onAttachmentPreview, onComposerTagClick],
+  );
+  const fileTagClick =
+    onAttachmentPreview || onComposerTagClick
+      ? handleComposerTagClick
+      : undefined;
   const renderedContent = useMemo(() => {
     const explicit = renderUserMessageContent?.({
       content,
       images,
+      files,
       inputAnnotations,
     });
     if (explicit !== undefined && explicit !== null) return explicit;
@@ -130,6 +170,7 @@ export const UserMessage = memo(function UserMessage({
           content={content}
           inputAnnotations={inputAnnotations}
           onComposerTagClick={onComposerTagClick}
+          onFileTagClick={fileTagClick}
           renderComposerTag={renderComposerTag}
           renderComposerTagTooltip={renderComposerTagTooltip}
         />
@@ -150,14 +191,22 @@ export const UserMessage = memo(function UserMessage({
           composerTagIcons={composerTagIcons}
           renderComposerTag={renderComposerTag}
           renderComposerTagTooltip={renderComposerTagTooltip}
-          onComposerTagClick={onComposerTagClick}
+          onComposerTagClick={
+            part.tag.kind === 'file'
+              ? isPreviewableFileComposerTag(part.tag)
+                ? fileTagClick
+                : onComposerTagClick
+              : onComposerTagClick
+          }
         />
       );
     });
   }, [
     content,
     images,
+    files,
     inputAnnotations,
+    fileTagClick,
     onComposerTagClick,
     parseUserMessageContent,
     composerTagIcons,
@@ -187,81 +236,132 @@ export const UserMessage = memo(function UserMessage({
 
   return (
     <div className={styles.chatMessageRow}>
-      <div className={styles.chatMessageColumn}>
-        <div
-          className={`${styles.chatBubble}${
-            isLocateFlashing ? ` ${flashStyles.flash}` : ''
-          }`}
-        >
-          <div
-            ref={contentRef}
-            className={`${styles.chatContent} ${
-              heightOverflowing && !expanded ? styles.chatContentCollapsed : ''
-            }`}
-          >
-            {images && images.length > 0 && (
-              <div className={styles.chatImages}>
-                {images.map((img, index) => {
-                  const src = img.data.startsWith('data:')
-                    ? img.data
-                    : `data:${img.mimeType};base64,${img.data}`;
-                  if (!isSafeImageSrc(src)) return null;
-                  return (
-                    <img
-                      key={index}
-                      src={src}
-                      alt={t('user.uploadedImage', { index: index + 1 })}
-                      className={`${styles.chatImageThumb}${
-                        onImagePreview
-                          ? ` ${styles.chatImageThumbInteractive}`
-                          : ''
-                      }`}
-                      onClick={
-                        onImagePreview
-                          ? () =>
-                              onImagePreview(
-                                src,
-                                t('user.uploadedImage', { index: index + 1 }),
-                              )
-                          : undefined
-                      }
-                      onLoad={measureOverflow}
-                    />
-                  );
-                })}
-              </div>
-            )}
-            {renderedContent}
-          </div>
-          {heightOverflowing && (
-            <button
-              type="button"
-              className={styles.toggleButton}
-              onClick={() => setExpanded((value) => !value)}
-            >
-              <span>
-                {expanded
-                  ? t('userMessage.showLess')
-                  : t('userMessage.showMore')}
-              </span>
-              <svg
-                className={`${styles.toggleIcon} ${
-                  expanded ? styles.toggleIconExpanded : ''
-                }`}
-                viewBox="0 0 16 16"
-                aria-hidden="true"
-              >
-                <path
-                  d="m4 6 4 4 4-4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
+      <div
+        className={`${styles.chatMessageColumn}${
+          isLocateFlashing && content.trim().length === 0
+            ? ` ${flashStyles.flash}`
+            : ''
+        }`}
+      >
+        {images && images.length > 0 && (
+          <div className={styles.chatImages} data-web-shell-user-images>
+            {images.map((img, index) => {
+              const src = img.data.startsWith('data:')
+                ? img.data
+                : `data:${img.mimeType};base64,${img.data}`;
+              if (!isSafeImageSrc(src)) return null;
+              return (
+                <img
+                  key={index}
+                  src={src}
+                  alt={t('user.uploadedImage', { index: index + 1 })}
+                  className={`${styles.chatImageThumb}${
+                    onImagePreview ? ` ${styles.chatImageThumbInteractive}` : ''
+                  }`}
+                  onClick={
+                    onImagePreview
+                      ? () =>
+                          onImagePreview(
+                            src,
+                            t('user.uploadedImage', { index: index + 1 }),
+                          )
+                      : undefined
+                  }
                 />
-              </svg>
-            </button>
-          )}
-        </div>
+              );
+            })}
+          </div>
+        )}
+        {files && files.length > 0 && (
+          <div className={styles.chatFiles} data-web-shell-user-files>
+            {files.map((file, index) => {
+              const previewable = Boolean(
+                onAttachmentPreview &&
+                  (file.data !== undefined ||
+                    file.text !== undefined ||
+                    file.attachmentId),
+              );
+              return (
+                <span
+                  key={`${file.name}-${index}`}
+                  className={`${styles.chatFileChip}${
+                    previewable ? ` ${styles.chatFileChipPreviewable}` : ''
+                  }`}
+                  role={previewable ? 'button' : undefined}
+                  tabIndex={previewable ? 0 : undefined}
+                  onClick={
+                    previewable ? () => onAttachmentPreview?.(file) : undefined
+                  }
+                  onKeyDown={(event) => {
+                    if (
+                      previewable &&
+                      (event.key === 'Enter' || event.key === ' ')
+                    ) {
+                      event.preventDefault();
+                      onAttachmentPreview?.(file);
+                    }
+                  }}
+                >
+                  <FileTypeIcon
+                    name={file.name}
+                    mimeType={file.mimeType}
+                    size={16}
+                    className={styles.chatFileIcon}
+                    aria-hidden="true"
+                  />
+                  <span className={styles.chatFileName}>{file.name}</span>
+                </span>
+              );
+            })}
+          </div>
+        )}
+        {content.trim().length > 0 && (
+          <div
+            className={`${styles.chatBubble}${
+              isLocateFlashing ? ` ${flashStyles.flash}` : ''
+            }`}
+            data-web-shell-user-bubble
+          >
+            <div
+              ref={contentRef}
+              className={`${styles.chatContent} ${
+                heightOverflowing && !expanded
+                  ? styles.chatContentCollapsed
+                  : ''
+              }`}
+            >
+              {renderedContent}
+            </div>
+            {heightOverflowing && (
+              <button
+                type="button"
+                className={styles.toggleButton}
+                onClick={() => setExpanded((value) => !value)}
+              >
+                <span>
+                  {expanded
+                    ? t('userMessage.showLess')
+                    : t('userMessage.showMore')}
+                </span>
+                <svg
+                  className={`${styles.toggleIcon} ${
+                    expanded ? styles.toggleIconExpanded : ''
+                  }`}
+                  viewBox="0 0 16 16"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="m4 6 4 4 4-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
+          </div>
+        )}
         {sendFailed && onRetrySend && (
           <div className={styles.sendFailure}>
             <span>{t('userMessage.sendFailed')}</span>

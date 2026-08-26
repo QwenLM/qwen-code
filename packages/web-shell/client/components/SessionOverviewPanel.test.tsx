@@ -268,6 +268,17 @@ describe('deriveSessionCards', () => {
     expect(cards[0].clientCount).toBe(2);
   });
 
+  it('passes bound PRs through to the card', () => {
+    const prs = [
+      { number: 9500, url: 'https://github.com/o/r/pull/9500' },
+      { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+    ];
+    const cards = deriveSessionCards([session('s', { prs })], [], undefined);
+    expect(cards[0].prs).toEqual(prs);
+    const bare = deriveSessionCards([session('bare')], [], undefined);
+    expect(bare[0].prs).toBeUndefined();
+  });
+
   it('does not expose opaque route ids as model names', () => {
     const cards = deriveSessionCards(
       [session('s')],
@@ -309,7 +320,29 @@ describe('SessionOverviewPanel', () => {
     render();
     const label = container!.querySelector('ul li button') as HTMLButtonElement;
     act(() => label.dispatchEvent(new MouseEvent('click', { bubbles: true })));
-    expect(onOpenSession).toHaveBeenCalledWith('s-run');
+    expect(onOpenSession).toHaveBeenCalledWith('s-run', '/w');
+  });
+
+  it("passes the owning workspace cwd when clicking another workspace's session", async () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
+    otherWorkspaceSessions['/wsB'] = [
+      session('b1', { workspaceCwd: '/wsB', displayName: 'Beta' }),
+    ];
+    render();
+    await flushAsync();
+    const beta = Array.from(container!.querySelectorAll('ul li button')).find(
+      (b) => b.textContent?.trim() === 'Beta',
+    ) as HTMLButtonElement;
+    act(() => beta.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    expect(onOpenSession).toHaveBeenCalledWith('b1', '/wsB');
   });
 
   it('always shows selection + the "Open in new tab" batch action', () => {

@@ -24,11 +24,23 @@ export interface CompressionDisplayProps {
 export function CompressionMessage({
   compression,
 }: CompressionDisplayProps): React.JSX.Element {
-  const { isPending, originalTokenCount, newTokenCount, compressionStatus } =
-    compression;
+  const {
+    isPending,
+    originalTokenCount,
+    newTokenCount,
+    compressionStatus,
+    originalTokenCountIsEstimated,
+    newTokenCountIsEstimated,
+  } = compression;
 
   const originalTokens = originalTokenCount ?? 0;
   const newTokens = newTokenCount ?? 0;
+
+  // Estimated counts (#9309): the two compression paths measure on different
+  // scales, so a '~' prefix marks which banner numbers are local estimates
+  // rather than API-reported counts.
+  const formatTokens = (count: number, isEstimated?: boolean) =>
+    isEstimated ? `~${count}` : String(count);
 
   const getCompressionText = () => {
     if (isPending) {
@@ -40,8 +52,11 @@ export function CompressionMessage({
         return t(
           'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.',
           {
-            originalTokens: String(originalTokens),
-            newTokens: String(newTokens),
+            originalTokens: formatTokens(
+              originalTokens,
+              originalTokenCountIsEstimated,
+            ),
+            newTokens: formatTokens(newTokens, newTokenCountIsEstimated),
           },
         );
       case CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT:

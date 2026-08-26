@@ -719,14 +719,8 @@
    the wrapper must shrink to its content instead of filling the pane — the same
    thing `.content` already does in this state. */
 .appChatEmpty .chatViewWrap {
-  position: relative;
-  z-index: 1;
   flex: 0 0 auto;
   overflow: visible;
-}
-
-.appChatEmpty .chatPane {
-  position: relative;
 }
 
 .footer {
@@ -754,13 +748,16 @@
   pointer-events: auto;
 }
 
+/* In-flow bottom sheet: the approval replaces the hidden composer, so the
+   message list shrinks above it instead of being covered by a floating
+   overlay. The relative positioning + z-index still keeps the sheet above
+   portal-hosted DialogShell modals (backdrop at z-50) without overlapping
+   the message list. */
 .approvalOverlay {
-  position: absolute;
-  right: 20px;
-  bottom: calc(100% + 8px);
-  left: 20px;
+  position: relative;
   z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
-  pointer-events: auto;
+  margin-bottom: 8px;
+  min-width: 0;
 }
 
 .approvalOverlay:focus,
@@ -831,6 +828,10 @@
 .composer {
   flex-shrink: 0;
   padding: 0;
+}
+
+.composerHidden {
+  display: none;
 }
 
 .composerHeader {
@@ -934,18 +935,12 @@
     overflow: hidden;
   }
 
-  /* Override chatViewWrap's relative positioning so the absolute footer
-     anchors to chatPane. The wrap remains a flex item, so the z-index: 1 it
-     gets from `.appChatEmpty .chatViewWrap` still applies under static
-     positioning and keeps the welcome content and composer above the dot
-     field. The welcome-middle + custom-footer variant keeps the positioned
-     wrap: `.footerWithCustomFooter` renders `display: contents` there, so
-     the wrap must remain the containing block for `.bottomPanels`. */
+  /* The custom-footer variant renders the composer footer `display: contents`,
+     so this wrap stays the containing block for the absolutely-positioned
+     bottom panels (status panel) anchored above it. */
   .appChatEmpty
-    .chatViewWithMobileComposerBottom:not(
-      .chatViewWithWelcomeMiddle.chatViewWithCustomFooter
-    ) {
-    position: static;
+    .chatViewWithMobileComposerBottom.chatViewWithWelcomeMiddle.chatViewWithCustomFooter {
+    position: relative;
   }
 
   .appChatEmpty .chatViewWithMobileComposerBottom .footer {
@@ -1031,12 +1026,6 @@
   color: var(--foreground);
 }
 
-.queuedPromptAmbiguity {
-  color: var(--secondary-foreground);
-  font-size: 12px;
-  line-height: 18px;
-}
-
 .queuedPrompt + .queuedPrompt {
   border-top: 0;
 }
@@ -1068,6 +1057,56 @@
 .queuedPromptText {
   min-width: 0;
   flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queuedPromptImages {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.queuedPromptImage {
+  width: 18px;
+  height: 18px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.queuedPromptImageInteractive {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.queuedPromptImageInteractive:hover {
+  opacity: 0.85;
+}
+
+.queuedPromptFile {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 120px;
+  height: 22px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.queuedPromptFile:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.queuedPromptFile span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

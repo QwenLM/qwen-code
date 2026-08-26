@@ -417,10 +417,10 @@ export class DaemonChannelBridge
       });
     }
     prompt.push({ type: 'text', text });
-    const promptAuthorization =
-      options?.displayText !== undefined
-        ? this.options.promptAuthorization
-        : undefined;
+    // Always presented: the daemon validates it for the channel-turn
+    // classification as well as the display projection, and channel
+    // prompts without display text still need the classification.
+    const promptAuthorization = this.options.promptAuthorization;
 
     try {
       const result = await session.prompt(
@@ -737,6 +737,8 @@ export class DaemonChannelBridge
             text
           ) {
             this.emit('backgroundResponse', sessionId, text);
+          } else if (meta['source'] === 'vision_bridge_notice' && text) {
+            this.emit('textChunk', sessionId, text);
           }
           break;
         }

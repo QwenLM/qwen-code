@@ -8,7 +8,7 @@ import type { PartListUnion } from '@google/genai';
 import {
   parseSlashCommand,
   parseStackedSlashCommands,
-} from './utils/commands.js';
+} from './ui/commands/commands.js';
 import {
   Logger,
   uiTelemetryService,
@@ -66,7 +66,7 @@ function getSkillCommandName(command: SlashCommand): string {
  * - 'unsupported': Command cannot be executed in this mode
  * - 'no_command': No command was found or executed
  */
-export type NonInteractiveSlashCommandResult =
+export type NonInteractiveSlashCommandResult = (
   | {
       type: 'submit_prompt';
       content: PartListUnion;
@@ -102,7 +102,22 @@ export type NonInteractiveSlashCommandResult =
     }
   | {
       type: 'no_command';
-    };
+    }
+) & {
+  /** Present when a command was resolved and executed. */
+  resolvedCommand?: ResolvedSlashCommandInfo;
+};
+
+/**
+ * The command the processor actually resolved the input to — shadowing-aware.
+ * Callers that gate behavior on "which command ran" (e.g. the ACP recording
+ * gate for the built-in `advisor`) must use this, not the raw input token:
+ * a user-defined command named `advisor` shadows the built-in.
+ */
+export interface ResolvedSlashCommandInfo {
+  name: string;
+  kind: CommandKind;
+}
 
 /**
  * Converts a SlashCommandActionReturn to a NonInteractiveSlashCommandResult.
@@ -558,6 +573,11 @@ export const handleSlashCommand = async (
     return { type: 'no_command' };
   }
 
+  const resolvedCommand: ResolvedSlashCommandInfo = {
+    name: commandToExecute.name,
+    kind: commandToExecute.kind,
+  };
+
   // Not used by custom commands but may be in the future.
   const sessionStats: SessionStatsState = {
     sessionId: config?.getSessionId(),
@@ -580,6 +600,8 @@ export const handleSlashCommand = async (
 
   const context: CommandContext = {
     executionMode,
+    abortSignal:
+      commandToExecute.name === 'advisor' ? abortController.signal : undefined,
     services: {
       config,
       settings,
@@ -627,6 +649,7 @@ export const handleSlashCommand = async (
       type: 'message',
       messageType: 'info',
       content: 'Command executed successfully.',
+      resolvedCommand,
     };
   }
 
@@ -646,18 +669,24 @@ export const handleSlashCommand = async (
     }
     if (hookResult.blockedResult) {
       recordSkillCommandInvocation(false);
-      return hookResult.blockedResult;
+      return { ...hookResult.blockedResult, resolvedCommand };
     }
     recordSkillCommandInvocation(true);
     void recordAutoSkillCommandUsage(config, commandToExecute);
-    return handleCommandResult(
-      { ...result, content: hookResult.content },
-      outputHistoryItems,
-    );
+    return {
+      ...handleCommandResult(
+        { ...result, content: hookResult.content },
+        outputHistoryItems,
+      ),
+      resolvedCommand,
+    };
   }
 
   // Handle different result types
-  return handleCommandResult(result, outputHistoryItems);
+  return {
+    ...handleCommandResult(result, outputHistoryItems),
+    resolvedCommand,
+  };
 };
 
 /**

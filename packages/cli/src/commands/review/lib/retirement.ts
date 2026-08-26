@@ -34,12 +34,21 @@
 // matching transcript, a whiffed receipt, an unclassifiable return — each
 // reads as "not dry", and a chunk that cannot prove itself cold stays hot.
 // The failure mode of a bug in this file is the old behaviour (audit every
-// territory every round), never a skipped one.
+// territory every round), never a skipped one. Since #9206 the failure is
+// also not SILENT: a chunk whose two most recent audits neither retired it
+// nor proved it hot carries a `diagnostics` line naming the bar each round
+// fell at, so a never-retiring loop is diagnosable from the round's own
+// output instead of from evidence cleanup was about to destroy.
 
 import { readFileSync, statSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
-import { readTranscripts, type AgentRecord } from './transcripts.js';
+import { readRunTranscripts, type AgentRecord } from './transcripts.js';
 import { REVERSE_AUDIT_EXAMPLE_RECEIPT } from './agent-briefs.js';
+import { readFindingsPointer } from './certification.js';
+import {
+  INLINE_LAYER_WALKED_RE,
+  LAYER_RECEIPT_LINE_RE,
+} from './audit-layers.js';
 import {
   deliveredVerbatimLines,
   findingsPointerOf,
@@ -52,6 +61,38 @@ import { stripBudgetGapLines, INLINE_BUDGET_GAP_RE } from './budget.js';
 
 /** What one prior audit of one chunk provably produced. */
 export type AuditOutcome = 'yielded' | 'dry' | 'unknown';
+
+/**
+ * Why an audit that could have certified a chunk cold did not — the bar it
+ * failed, named. #9206: a loop whose cold chunks never retired ran five
+ * rounds to the cap without ONE word of why, because every refusal below
+ * landed in the same silent `unknown`; the evidence was then cleaned up
+ * unread. Failing toward auditing stays right — a chunk that cannot prove
+ * itself cold stays hot — but the failure must say its name on the round's
+ * own output, where the reader can act on it.
+ */
+export type CertificationFailure =
+  | 'no matching transcript'
+  | 'launch matched multiple records'
+  | 'auditor never returned'
+  | 'no successful tool calls'
+  | 'no read of the diff'
+  | 'territory read missing'
+  | 'receipt not matched'
+  | 'receipt not alone'
+  | 'receipt lead contradicts the phrase'
+  | 'receipt clause restates the all-clear'
+  | 'receipt clause contradicts the phrase'
+  | 'receipt clause names no walk'
+  | 'receipt clause too thin'
+  | 'findings list unread';
+
+/** One transcript's classified return, with the failed bar when not dry. */
+interface Classification {
+  outcome: AuditOutcome;
+  /** Defined exactly when `outcome` is `unknown`. */
+  failure: CertificationFailure | null;
+}
 
 /** A retired chunk skipped this round, with the receipts that earned it. */
 export interface RetiredChunk {
@@ -71,6 +112,14 @@ export interface RoundSchedule {
   skipped: RetiredChunk[];
   /** Every chunk is retired and none is due: the audit has converged. */
   converged: boolean;
+  /**
+   * One line per chunk whose two most recent audits are NEITHER dry enough
+   * to retire NOR hot with a yield — the certification failures, named per
+   * round, that leave it under audit (#9206). Empty when every chunk is
+   * retired, yielded, or still establishing its record. The caller prints
+   * these on STDERR; stdout is the deliverable the orchestrator pastes.
+   */
+  diagnostics: string[];
 }
 
 /**
@@ -148,43 +197,80 @@ const FILE_LINE_RE = /\*\*File:\*\*\s*([^\n]*)/g;
 const SEVERITY_LINE_RE = /\*\*Severity:\*\*/;
 
 /**
- * The no-issues receipt, read by its STRUCTURE: the phrase, a dash or colon,
- * then the clause naming what was re-examined.
+ * The no-issues receipt, read as the one FORM the reverse-audit brief
+ * mandates for a dry return (#9213 on #9206): the phrase LEADS the return,
+ * a separator opens the clause, and the clause — the rest of that line —
+ * names what was re-examined. A dry return carries NOTHING else: any prose
+ * before the phrase or after the receipt's line — the brief's other
+ * mandated line forms, `Budget gap:` and `Layer walked:`, stripped first —
+ * is not the form, reads `unknown`, and the chunk stays under audit. The
+ * form is the structural half of the polarity guard: prose has no last
+ * hedge, so no enumeration of hedges closes, and a return that is not
+ * exactly the receipt cannot certify, whatever it says. Within the form,
+ * the clause still carries a marker test, a walk test and the substance
+ * floor below.
  *
- * The reverse-audit brief demands a receipt that "names what it re-examined",
- * and its own model answer has exactly this shape — "No issues found —
- * re-walked the reconnect state machine and the two changed exports' call
- * sites; …". A bare "No issues found." — the text 23 real whiffing agents
- * returned — has the phrase and nothing after it, and specific-sounding
- * brevity is not evidence of a walk. The first cut enforced a 120-character
- * floor on the whole return instead of this structure, and both of its
- * failure modes pointed the same silent way: an honest 78-character English
- * receipt and a Chinese receipt of ANY length both read `unknown`, and the
- * chunk never retired — on exactly the budgeted runs the optimization exists
- * for. Auditors narrate in the review's output language (`未发现问题` is the
- * phrasing compose-review itself ships), so the phrase accepts the zh forms
- * beside the English ones.
+ * A bare "No issues found." — the text 23 real whiffing agents returned —
+ * matches the form and fails the clause checks: specific-sounding brevity
+ * is not evidence of a walk. Auditors narrate in the review's output
+ * language (`未发现问题` is the phrasing compose-review itself ships), so
+ * the phrase accepts the zh forms beside the English ones.
  *
  * The separator admits an em/en dash anywhere (`——` doubled included), a
- * colon in either width, and an ASCII hyphen only when it stands alone —
- * space-led or doubled — so the dash inside `retry-cap` never opens a clause
- * mid-word. Closing emphasis and quotation may sit between the phrase and
- * the separator — auditors bold the phrase (`**No issues found** — …`,
- * `**未发现新问题** —— …`) in the same `**File:**` / `**Severity:**` idiom
- * the rest of the pipeline writes in, and a receipt refused on a bold mark
- * reads `unknown` and never retires, on exactly the budgeted runs the
- * optimization exists for. The filler between phrase and separator (`were
- * found`, `were detected`, a parenthesised scope) is capped and word-only
- * apart from parentheses: a period or other markdown in between is a new
- * sentence, not this receipt.
+ * colon in either width, an ASCII hyphen only when it stands alone —
+ * space-led or doubled — so the dash inside `retry-cap` never opens a
+ * clause mid-word, and sentence punctuation in either width: a run whose
+ * cold chunks returned `No new issues were found. Re-walked …` (period)
+ * and `未发现新问题，重新走查了…` (full-width comma) never retired one of
+ * them while the stop sat outside the class (#9206's widening). The
+ * anchor does the quoting guard's old work — a quotation of the phrase is
+ * never the LEAD, so `I cannot write "No new issues were found." …` opens
+ * no clause — and it closes every hedge BEFORE the phrase the line-scoped
+ * domain never saw: such prose is not the form. Opening emphasis may lead
+ * (`**No issues found** — …`) in the same `**File:**` idiom the pipeline
+ * writes in. The filler between phrase and separator (`were found`, a
+ * parenthesised scope) is capped and word-only apart from parentheses:
+ * other markdown in between is a new sentence, not this receipt.
+ */
+const DRY_RECEIPT_EN = '\\bno (?:new )?(?:issues?|findings?|gaps?)';
+const DRY_RECEIPT_ZH =
+  '|未发现(?:新的?)?(?:问题|发现)' +
+  '|无新的?(?:问题|发现)' +
+  '|没有(?:发现)?(?:新的?)?问题';
+
+/**
+ * The matcher's phrase: the EN alternative carries the filler between
+ * phrase and separator (`were found`, `(chunk 13)`); the zh ones do not.
+ */
+const DRY_RECEIPT_PHRASE =
+  '(?:' + DRY_RECEIPT_EN + '[ \\w()]{0,32}' + DRY_RECEIPT_ZH + ')';
+
+/**
+ * Closing emphasis/quotation that may sit between the phrase and the stop.
+ * Every whitespace element here is LINE-BOUND (`[ \t]`, never `\s`): a
+ * `\s*` matches `\n`, so the matcher itself spanned lines and pulled the
+ * clause in from a LATER line — `No issues found —\nre-walked …` matched
+ * with the next line as its clause, and the receipt-is-its-line form
+ * refused nothing (#9213).
+ */
+const DRY_RECEIPT_TAIL = '[ \\t]*[*_)\\]"”’]*[ \\t]*';
+
+/**
+ * The ONE receipt matcher: anchored — prose before the phrase is a form
+ * violation, not a receipt lead — with every separator in one class and
+ * the clause captured to the END OF THE LINE: the receipt is its line,
+ * and prose on any later line is the form's to refuse, not the clause's
+ * to judge (#9213). The separator's own whitespace is line-bound for the
+ * same reason as the tail's: the ASCII hyphen's "stands alone" rule asks
+ * for a space, not any `\s`, and a separator left dangling at a line end
+ * opens no clause on the next one.
  */
 const DRY_RECEIPT_RE = new RegExp(
-  '(?:\\bno (?:new )?(?:issues?|findings?|gaps?)[ \\w()]{0,32}?' +
-    '|未发现(?:新的?)?(?:问题|发现)' +
-    '|无新的?(?:问题|发现)' +
-    '|没有(?:发现)?(?:新的?)?问题)' +
-    '\\s*[*_)\\]"”’]*\\s*(?:[—–]+|[:：]|--+|-+\\s)\\s*' +
-    '([\\s\\S]*)',
+  '^[ \\t]*[*_~]*' +
+    DRY_RECEIPT_PHRASE +
+    DRY_RECEIPT_TAIL +
+    '(?:[—–]+|[:：.,;。，；]|--+|-+[ \\t])[ \\t]*' +
+    '([^\\n]*)',
   'i',
 );
 
@@ -195,40 +281,163 @@ const CJK_RE = /[一-鿿]/g;
  * The clause the brief's own example receipt leaves AFTER its separator —
  * extracted with the same regex that parses receipts, so the two cannot
  * drift. Empty when the example ever stops matching its own parser, which
- * disables the parrot refusal rather than refuse every clause.
+ * disables the parrot refusal rather than refuse every clause. The
+ * lowercase copy is the parrot compare itself: the example clause starts
+ * lowercase because it continues the model receipt mid-sentence, and a
+ * parroting auditor opening it as a NEW sentence capitalizes it — no
+ * honest clause contains the model clause verbatim in any casing (#9213).
  */
 const EXAMPLE_RECEIPT_CLAUSE = (
   DRY_RECEIPT_RE.exec(REVERSE_AUDIT_EXAMPLE_RECEIPT)?.[1] ?? ''
 ).trim();
+const EXAMPLE_RECEIPT_CLAUSE_LC = EXAMPLE_RECEIPT_CLAUSE.toLowerCase();
 
 /**
- * Does the clause after the receipt's separator name anything? An ENCLOSED
- * code span or a real path is a named object at any length — a stray
- * backtick is prose punctuation, not a quotation, and "N/A" is not a path
- * (one character on the slash's left), neither is the conjunction "and/or":
- * a path has a second slash or a dotted extension. Otherwise ~20 flattened
- * characters, or a handful of ideographs, is the least that can name a
- * territory; "all good." can not. The brief's own example receipt is
- * refused outright, but only VERBATIM: a clause containing the example's
- * whole clause reads as the parrot it is, while real parroting is partial
- * — the shape and a phrase or two — and a partial echo passes this check;
- * what catches that is the rest of the dry bar (the territory read, the
- * substance floor). This refusal closes the cheapest path: the exact
- * sentence every auditor is handed. Misjudging here fails the way
- * everything in this module fails — the receipt reads `unknown` and the
- * chunk stays under audit.
+ * The polarity guard's marker vocabulary, one of the clause tests the
+ * form leaves standing (#9213 on #9206): a clause carrying ANY negation,
+ * incapacity, or omission marker contradicts the all-clear phrase however
+ * long and object-named it is (`…found — I was unable to open the
+ * generated files` clears every length floor on the admission's own
+ * words) and reads `unknown`; a contrast word WITHOUT one contradicts
+ * nothing — `…the list already covered them, but I re-verified the
+ * readers` is the walk the receipt claims, not a hedge. The vocabulary
+ * names the marker families the executed leak probes carried — incapacity
+ * (`unable`), omission (`failed`, `skipped`, `unchecked`, `untested`), a
+ * shallow walk (`skimmed`), zh bare-不 (`打不开`) and 跳过 — with 不过
+ * exempted as the pinned innocuous connective.
+ *
+ * The marker list is BARE on purpose (#9272): an absence-of-problems
+ * exception class (`no regressions`, 没有回归, `fail-open` jargon) was
+ * tried and removed after two review rounds of executed entrances —
+ * passive voice (`no regressions have been verified`), lexicalized
+ * compounds (回归测试), limiter compounds (只不过) — because an
+ * exception list over natural language has no last corner, the same
+ * lesson the polarity guard itself learned in #9213 (the form closes
+ * what enumeration cannot). The stated residue is the honest mirror:
+ * absence-of-problem phrasing that IS honest (`verified no
+ * regressions`, `确认没有回归`) reads `unknown` and the chunk stays
+ * under audit — the never-retire cost this module already declares as
+ * its failure direction, preferable to certifying one admission. The
+ * list has no last word, and the residue is stated rather than
+ * papered over: a marker it misses still fails toward RETIREMENT when the
+ * clause ALSO names a walk; what closes that class is the form itself —
+ * the brief tells an auditor that did not walk its scope to return
+ * prose, not the receipt, and prose is not the form.
+ */
+const NEGATION_MARKER_RE =
+  /\bnot\b|n['’]t\b|\bnever\b|\bno\b|\bcannot\b|\bunable\b|\bfail(?:ed|ing|s)?\b|\bskip(?:ped|ping|s)?\b|\bskim(?:med|ming|s)?\b|\bun(?:checked|tested|verified|read|opened|examined)\b|未|没|无法|跳过|不(?!过)/i;
+
+/**
+ * The brief's own all-clear vocabulary — the exact shapes
+ * `DRY_RECEIPT_PHRASE` names — restates the phrase inside the receipt's
+ * line (`no gaps:`, 未发现问题) instead of contradicting it. Stripped
+ * before the substance floor, so a walk narrated in the brief's own words
+ * is not refused by the floor and a clause made of echoed phrases cannot
+ * lend it their length (the filler rides along in the strip, greedy with
+ * the phrase's own). A novel positive phrasing the strip misses still
+ * fails toward audit, like every other refusal here.
+ */
+const SATURATED_CLAUSE_RE = new RegExp(DRY_RECEIPT_PHRASE, 'gi');
+
+/**
+ * The walk the FORM's vocabulary names — the brief spells the same
+ * family out when it mandates the receipt. A dry clause must carry one of
+ * verbs, or name an object: a clause that names no walk proves none,
+ * whatever its length and whatever markers it dodges (#9213 — the
+ * unbounded hedge class no marker list closes: `overlooked`, `missed`,
+ * `ignored`, `without checking`, 忽略, 略过, 遗漏 …). The test's misses
+ * fail toward AUDIT — a clause whose walk verb the vocabulary does not
+ * name reads `unknown` and the chunk stays hot — the opposite direction
+ * of a marker miss, and the only one the module header declares.
+ */
+const WALK_VERB_SRC =
+  '\\bwalk|\\bverif|\\btrace|\\bexamin|走查|核对|复核|核查|复查|重走';
+const WALK_VERB_RE = new RegExp(WALK_VERB_SRC, 'i');
+
+/**
+ * The polarity guard, closed by FORM rather than enumeration (#9272,
+ * rounds 4–6 — three shipped guard shapes were each falsified by
+ * execution the round they landed: walk-verb lookaheads, passive-head
+ * lookaheads, a `found` exemption; every one left an executed entrance
+ * retiring a chunk on a receipt that admitted the walk was not done).
+ * The bars:
+ *
+ * 1. THE LEAD (the phrase's own side of the separator) is stripped of
+ *    its phrase cores and the residue is marker-tested: a hedge riding
+ *    the filler (`…found but only skimmed.`) contradicts the claim
+ *    exactly as one in the clause.
+ * 2. THE CLAUSE must not contain the receipt's core AT ALL — a clause
+ *    restating the all-clear (`no issues …`, 未发现问题 …) proves no
+ *    walk, whatever follows the restatement, and no regex tells the
+ *    honest `no issues were found verifying X` from the admission `no
+ *    issues were found because nothing was verified`: both refuse as
+ *    `receipt clause restates the all-clear`. This one bar retires the
+ *    entire executed entrance family — passive voice, reduced passives,
+ *    dash- or comma-spliced runs — with no lookahead and no list.
+ * 3. What survives restatement is marker-tested bare: a clause carrying
+ *    ANY negation, incapacity, or omission marker contradicts the
+ *    phrase however long and object-named it is.
+ *
+ * The stated residue, declared rather than papered over: an admission
+ * phrased with no restatement, no listed marker, and a walk verb
+ * (`nothing was verified`, `overlooked the files`, 忽略/略过/遗漏)
+ * still reads dry; what closes that class is the form itself — the
+ * brief tells an auditor that did not walk its scope to return prose,
+ * not the receipt, and prose is not the form — and a wrongly granted
+ * retirement self-corrects at the next even-round cold check.
+ */
+const DRY_RECEIPT_PHRASE_CORE = '(?:' + DRY_RECEIPT_EN + DRY_RECEIPT_ZH + ')';
+const PHRASE_CORE_RE = new RegExp(DRY_RECEIPT_PHRASE_CORE, 'gi');
+/** The restatement bar's own copy — non-global, so `.test` carries no lastIndex state. */
+const CLAUSE_CORE_RE = new RegExp(DRY_RECEIPT_PHRASE_CORE, 'i');
+
+/**
+ * An ENCLOSED code span or a real path is a named object at any length —
+ * a stray backtick is prose punctuation, not a quotation, and "N/A" is
+ * not a path (one character on the slash's left), neither is the
+ * conjunction "and/or": a path has a second slash or a dotted extension.
+ */
+function namesAnObject(clause: string): boolean {
+  return (
+    /`[^`]+`/.test(clause) ||
+    /\w[\w.-]+\/[\w.$-]+\/\w/.test(clause) ||
+    /\w[\w.-]+\/[\w$-]+\.\w+/.test(clause)
+  );
+}
+
+function namesTheWalk(clause: string): boolean {
+  const stripped = clause.replace(SATURATED_CLAUSE_RE, ' ');
+  return WALK_VERB_RE.test(stripped) || namesAnObject(stripped);
+}
+
+/**
+ * Does the clause after the receipt's separator name anything? A named
+ * object clears it at any length; otherwise ~20 flattened characters, or
+ * a handful of ideographs, is the least that can name a territory; "all
+ * good." can not — and the floor measures the phrase-STRIPPED clause, so
+ * echoed phrases cannot lend it their length (#9213). The brief's own
+ * example receipt is refused outright, in ANY casing: a clause containing
+ * the example's whole clause reads as the parrot it is, while real
+ * parroting is partial — the shape and a phrase or two — and a partial
+ * echo passes this check; what catches that is the rest of the dry bar
+ * (the territory read, the substance floor). This refusal closes the
+ * cheapest path: the exact sentence every auditor is handed. Misjudging
+ * here fails the way everything in this module fails — the receipt reads
+ * `unknown` and the chunk stays under audit.
  */
 function substantiveClause(clause: string): boolean {
   const c = clause.replace(/\s+/g, ' ').trim();
   if (c.length === 0) return false;
-  if (EXAMPLE_RECEIPT_CLAUSE.length > 0 && c.includes(EXAMPLE_RECEIPT_CLAUSE)) {
+  if (
+    EXAMPLE_RECEIPT_CLAUSE_LC.length > 0 &&
+    c.toLowerCase().includes(EXAMPLE_RECEIPT_CLAUSE_LC)
+  ) {
     return false;
   }
-  if (/`[^`]+`/.test(c)) return true;
-  if (/\w[\w.-]+\/[\w.$-]+\/\w/.test(c)) return true;
-  if (/\w[\w.-]+\/[\w$-]+\.\w+/.test(c)) return true;
-  if ((c.match(CJK_RE) ?? []).length >= 4) return true;
-  return c.length >= 20;
+  const stripped = c.replace(SATURATED_CLAUSE_RE, ' ').trim();
+  if (namesAnObject(stripped)) return true;
+  if ((stripped.match(CJK_RE) ?? []).length >= 4) return true;
+  return stripped.length >= 20;
 }
 
 /**
@@ -244,6 +453,7 @@ function substantiveClause(clause: string): boolean {
  * this module lands on the audit side. `memo` keys on the pointer so the
  * pairing walk reads each round's list once, not once per record.
  */
+
 function findingsListFor(
   prompt: string,
   recordDir: string,
@@ -271,6 +481,35 @@ function findingsListFor(
 }
 
 /**
+ * The return's `Layer walked:` lines — the brief's other mandated line
+ * form, parsed by `audit-layers` — stripped beside the budget-gap lines,
+ * so a dry return on a modeled-system diff (layer receipts ABOVE the
+ * no-issues line) still stands ALONE. The matcher is audit-layers' own:
+ * a line it would not read as a layer receipt is prose, and prose beside
+ * the receipt is the form's refusal. Fence- and blockquote-aware like the
+ * gap strip — a QUOTED layer line stays, and fails the form, the safe
+ * way (#9213).
+ */
+function stripLayerReceiptLines(finalText: string): string {
+  const kept: string[] = [];
+  let inFence = false;
+  for (const line of finalText.split(/\r?\n/)) {
+    const fence = /^[ \t]*(?:```|~~~)/.test(line);
+    if (fence) inFence = !inFence;
+    if (
+      !fence &&
+      !inFence &&
+      !/^[ \t]*>/.test(line) &&
+      LAYER_RECEIPT_LINE_RE.test(line)
+    ) {
+      continue;
+    }
+    kept.push(line);
+  }
+  return kept.join('\n');
+}
+
+/**
  * Classify one auditor's return.
  *
  * `yielded` outranks everything: a return that files a finding against a
@@ -282,7 +521,10 @@ function findingsListFor(
  * still returned confident, specific-sounding prose) — AND the read must
  * land in the chunk's territory: a successful read of the diff's first
  * screenful proves nothing about lines a thousand down. Anything else is
- * `unknown`, which the scheduler treats as NOT dry.
+ * `unknown`, which the scheduler treats as NOT dry — and `failure` names
+ * the FIRST bar that fell, in the order the bars are checked, so the
+ * scheduler can say why a twice-audited chunk never retired (#9206: the
+ * refusal used to land in the same silent `unknown` for all of them).
  *
  * `territory` is the diff lines the record's own prompt bakes for this
  * chunk (1-based, inclusive); empty when it bakes no read, where the old
@@ -292,7 +534,15 @@ function classifyReturn(
   rec: AgentRecord,
   territory: Array<[number, number]>,
   findingsList: string,
-): AuditOutcome {
+  findingsRead: boolean,
+): Classification {
+  // RETURNED, before anything else — the yield branch included: `finalText`
+  // keeps the last non-empty assistant text, narration included, so a
+  // died-mid-flight auditor's flushed narration can carry a receipt shape
+  // or a quoted finding; neither is a return.
+  if (!rec.returned) {
+    return { outcome: 'unknown', failure: 'auditor never returned' };
+  }
   const text = rec.finalText.trim();
   if (SEVERITY_LINE_RE.test(text)) {
     // The cumulative list is on hand for this agent: since #8597 it rides
@@ -308,7 +558,7 @@ function classifyReturn(
       const file = (m[1] ?? '').trim();
       if (file === '' || /^N\/A\b/i.test(file)) continue;
       if (findingsList.includes(`**File:** ${file}`)) continue;
-      return 'yielded';
+      return { outcome: 'yielded', failure: null };
     }
   }
   // The receipt is judged WITHOUT its budget-gap disclosure lines. Two
@@ -327,27 +577,76 @@ function classifyReturn(
   // about. The gap itself is not lost: coverage reports it and Step 3D
   // rules on it; retirement certifies the audit that DID happen, not the
   // exploration that did not.
-  const judged = stripBudgetGapLines(text);
+  // Re-trimmed after the strip: a disclosure line parted from the receipt
+  // by a blank line leaves a leading \n, and the anchored matcher's ^ must
+  // not die on the strip's own leftover whitespace (#9213).
+  const judged = stripLayerReceiptLines(stripBudgetGapLines(text)).trim();
   const receipt = DRY_RECEIPT_RE.exec(judged);
-  // The clause is cut at any INLINE disclosure marker before its substance
-  // is judged: a one-line return (`No new issues found — …; Budget gap: X`)
-  // slips past the line-based strip, and the `[\s\S]*` capture would
+  // The clause is cut at any INLINE disclosure marker before its checks
+  // run: a one-line return (`No new issues found — …; Budget gap: X`)
+  // slips past the line-based strip, and the clause capture would
   // otherwise absorb the gap text and get its substantiveness from it —
-  // the admission doubling as the receipt again, one line lower.
+  // the admission doubling as the receipt again, one line lower. The
+  // `Layer walked:` label fused onto the receipt's line is the same
+  // absorption one marker over: the label's own "walked" passes the walk
+  // test and its length the substance floor, certifying a receipt the
+  // identical two-line form refuses (#9213) — cut at whichever marker
+  // comes first.
   const clause = receipt?.[1] ?? '';
   const inlineGap = INLINE_BUDGET_GAP_RE.exec(clause);
-  const judgedClause =
-    inlineGap === null ? clause : clause.slice(0, inlineGap.index);
-  if (
-    rec.successfulToolCalls > 0 &&
-    rec.diffToolCalls > 0 &&
-    openedTheTerritory(rec.diffReads, territory) &&
-    receipt !== null &&
-    substantiveClause(judgedClause)
-  ) {
-    return 'dry';
-  }
-  return 'unknown';
+  const inlineLayer = INLINE_LAYER_WALKED_RE.exec(clause);
+  const cutAt = Math.min(
+    inlineGap?.index ?? clause.length,
+    inlineLayer?.index ?? clause.length,
+  );
+  const judgedClause = clause.slice(0, cutAt);
+  const unknown = (failure: CertificationFailure): Classification => ({
+    outcome: 'unknown',
+    failure,
+  });
+  if (rec.successfulToolCalls === 0) return unknown('no successful tool calls');
+  if (rec.diffToolCalls === 0) return unknown('no read of the diff');
+  if (!openedTheTerritory(rec.diffReads, territory))
+    return unknown('territory read missing');
+  if (receipt === null) return unknown('receipt not matched');
+  // The receipt must STAND ALONE: the form is the whole return once the
+  // structured lines are stripped, so prose after the receipt's line is
+  // not the form — an admission there reads exactly as one inside the
+  // clause, and the anchor refuses prose BEFORE it the same way (#9213):
+  // identical prose on either side of the line, identical `unknown`.
+  if (judged.slice(receipt[0].length).trim() !== '')
+    return unknown('receipt not alone');
+  // The polarity bars, each naming itself (#9259) and each single-domain
+  // (#9272 — no bar reads across the lead/clause boundary, so the split
+  // cannot hide a cross-boundary run from a guard that needs it):
+  //
+  // The LEAD: its own phrase core is expected there — strip it and
+  // marker-test the residue, so a hedge riding the filler
+  // (`…found but only skimmed.`) contradicts the claim exactly as one
+  // inside the clause.
+  const receiptLead = receipt[0].slice(0, receipt[0].length - clause.length);
+  if (NEGATION_MARKER_RE.test(receiptLead.replace(PHRASE_CORE_RE, ' ')))
+    return unknown('receipt lead contradicts the phrase');
+  // The CLAUSE must not restate the all-clear at all — the form's close
+  // over the executed passive/reduced-passive/spliced entrance family,
+  // no enumeration (#9272).
+  if (CLAUSE_CORE_RE.test(judgedClause))
+    return unknown('receipt clause restates the all-clear');
+  if (NEGATION_MARKER_RE.test(judgedClause))
+    return unknown('receipt clause contradicts the phrase');
+  if (!namesTheWalk(judgedClause))
+    return unknown('receipt clause names no walk');
+  if (!substantiveClause(judgedClause))
+    return unknown('receipt clause too thin');
+  // The DRY bar only, and last: the brief's whole method is the comparison
+  // against the cumulative findings list, and a no-issues receipt from an
+  // auditor that never opened the list certifies a comparison nobody made.
+  // A filed YIELD (above) needs no such gate — the finding proves the
+  // territory hot whatever else was skipped, and gating it before
+  // classification flipped a round from yielded to dry and retired a chunk
+  // with a live finding.
+  if (!findingsRead) return unknown('findings list unread');
+  return { outcome: 'dry', failure: null };
 }
 
 /**
@@ -414,6 +713,7 @@ export function scheduleReverseAuditRound(
       coldChecks: [],
       skipped: [],
       converged: false,
+      diagnostics: [],
     };
   }
 
@@ -429,7 +729,17 @@ export function scheduleReverseAuditRound(
   // retries with the least time left. A record older than the plan is the
   // dead attempt's, and reads as absent.
   const since = statSync(planPath).mtimeMs;
-  const transcripts = readTranscripts(since, env, diffPath);
+  // Run-scoped: a resumed run's earlier rounds ran in a different session,
+  // and their dry receipts are exactly what lets the continuation retire
+  // territory instead of re-auditing it. The fence stays the plan's mtime,
+  // which a resume deliberately leaves untouched.
+  // `currentDirOptional`: a resumed run schedules its next round BEFORE
+  // launching any current-session agent, so its own transcript dir does not
+  // exist yet; without the option this throws and re-audits territory the
+  // prior attempt already retired.
+  const transcripts = readRunTranscripts(planPath, since, env, diffPath, {
+    currentDirOptional: true,
+  });
   const built = readRecordedPrompts(planPath, since);
 
   // The prior-round records: one per (chunk, round) prompt this CLI built.
@@ -443,6 +753,7 @@ export function scheduleReverseAuditRound(
     lines: string[];
     territory: Array<[number, number]>;
     findings: string;
+    pointer: string | null;
   }> = [];
   for (const [key, prompt] of built) {
     const m = RECORD_KEY_RE.exec(key);
@@ -458,6 +769,7 @@ export function scheduleReverseAuditRound(
       lines: promptLines(prompt),
       territory: bakedRanges(prompt, diffPath),
       findings: findingsListFor(prompt, recordDir, findingsMemo),
+      pointer: findingsPointerOf(prompt),
     });
   }
 
@@ -501,36 +813,85 @@ export function scheduleReverseAuditRound(
       recordsPerTranscript.set(t, (recordsPerTranscript.get(t) ?? 0) + 1);
     }
   }
-  const outcomesByRecord = matchesByRecord.map((matches, i) =>
-    matches
-      .filter((t) => recordsPerTranscript.get(t) === 1)
-      .map((t) => classifyReturn(t, records[i].territory, records[i].findings)),
-  );
+  // Every record's classifications AND the bar each uncertified one fell
+  // at: a record no transcript matches reads `no matching transcript`; one
+  // whose only matches are ambiguous launches (themselves matching several
+  // records) reads `launch matched multiple records`; one a transcript
+  // certifies carries the classifier's own bar. These are what the round's
+  // diagnostic names when a chunk that looked certifiable never retires
+  // (#9206) — the refusal is the same fail-toward-audit refusal it always
+  // was, only no longer silent.
+  const classificationsByRecord: Classification[][] = [];
+  const failuresByRecord: CertificationFailure[][] = [];
+  matchesByRecord.forEach((matches, i) => {
+    const unique = matches.filter((t) => recordsPerTranscript.get(t) === 1);
+    const classifications = unique.map((t) =>
+      // The findings-read fact rides INTO the classification and gates only
+      // the dry branch there: applied out here as a filter it also
+      // suppressed filed YIELDS, flipping a round to dry and retiring a
+      // chunk that had a live finding. The POINTER was extracted once from
+      // the RAW prompt by the same call `findingsListFor` uses: extracting
+      // again from trim-normalized lines asks the same question under a
+      // different normalization, and trimming defeats the `^…$` anchors
+      // that reject indented quotations.
+      classifyReturn(
+        t,
+        records[i].territory,
+        records[i].findings,
+        readFindingsPointer(t, records[i].pointer),
+      ),
+    );
+    classificationsByRecord.push(classifications);
+    if (classifications.some((c) => c.outcome === 'dry')) {
+      // The round's merge takes this dry; whatever else the record's
+      // launches did cannot hold the chunk back from retirement.
+      failuresByRecord.push([]);
+      return;
+    }
+    const failures: CertificationFailure[] = [];
+    if (matches.length === 0) failures.push('no matching transcript');
+    for (let m = 0; m < matches.length - unique.length; m++) {
+      failures.push('launch matched multiple records');
+    }
+    for (const c of classifications) {
+      if (c.failure !== null) failures.push(c.failure);
+    }
+    failuresByRecord.push(failures);
+  });
 
-  // chunk id → prior round → every outcome that round's records produced. A
-  // record no transcript certifies (a blank partial write, an undelivered
-  // build, an ambiguous launch) contributes nothing, and its round
-  // classifies `unknown`: the round was scheduled for this chunk, and
-  // nothing proves it dry.
-  const history = new Map<number, Map<number, AuditOutcome[]>>();
+  // chunk id → prior round → every outcome that round's records produced,
+  // plus the certification failures behind its unknowns. A record no
+  // transcript certifies (a blank partial write, an undelivered build, an
+  // ambiguous launch) contributes nothing, and its round classifies
+  // `unknown`: the round was scheduled for this chunk, and nothing proves
+  // it dry.
+  const history = new Map<
+    number,
+    Map<number, { outcomes: AuditOutcome[]; failures: CertificationFailure[] }>
+  >();
   records.forEach((rec, i) => {
     let byRound = history.get(rec.chunkId);
     if (!byRound) {
       byRound = new Map();
       history.set(rec.chunkId, byRound);
     }
-    byRound.set(rec.round, [
-      ...(byRound.get(rec.round) ?? []),
-      ...outcomesByRecord[i],
-    ]);
+    const entry = byRound.get(rec.round) ?? { outcomes: [], failures: [] };
+    entry.outcomes.push(...classificationsByRecord[i].map((c) => c.outcome));
+    entry.failures.push(...failuresByRecord[i]);
+    byRound.set(rec.round, entry);
   });
 
   const due: number[] = [];
   const coldChecks: number[] = [];
   const skipped: RetiredChunk[] = [];
+  const diagnostics: string[] = [];
   for (const chunkId of chunkIds) {
     const audits = [...(history.get(chunkId)?.entries() ?? [])]
-      .map(([r, outcomes]) => ({ round: r, outcome: mergeOutcomes(outcomes) }))
+      .map(([r, entry]) => ({
+        round: r,
+        outcome: mergeOutcomes(entry.outcomes),
+        failures: entry.failures,
+      }))
       .sort((a, b) => a.round - b.round);
     const lastTwo = audits.slice(-2);
     const retired =
@@ -539,6 +900,27 @@ export function scheduleReverseAuditRound(
       // Hot — including a chunk with no history at all, one whose latest
       // receipt was a whiff, and one whose cold check yielded.
       due.push(chunkId);
+      // The diagnostic the silent never-retire loop never printed (#9206):
+      // a chunk with two audits on record that NEITHER yielded NOR retired
+      // failed certification somewhere — name the bar, round by round. A
+      // yield explains its own heat, and one audit is still establishing
+      // its record; both stay quiet.
+      const certifiable =
+        lastTwo.length === 2 && lastTwo.every((a) => a.outcome !== 'yielded');
+      if (certifiable) {
+        const roundNotes = lastTwo
+          .filter((a) => a.outcome === 'unknown')
+          .map((a) => {
+            const reasons = [...new Set(a.failures)];
+            return (
+              `round ${a.round}: ` +
+              (reasons.length > 0 ? reasons.join(', ') : 'uncertified')
+            );
+          });
+        if (roundNotes.length > 0) {
+          diagnostics.push(`chunk ${chunkId} — ${roundNotes.join('; ')}`);
+        }
+      }
       continue;
     }
     // Cold checks land on ONE global parity — the even rounds — not on the
@@ -577,5 +959,6 @@ export function scheduleReverseAuditRound(
     // and convergence is an exit-5 termination rule: it must not be
     // reachable from nothing.
     converged: chunkIds.length > 0 && due.length === 0,
+    diagnostics,
   };
 }

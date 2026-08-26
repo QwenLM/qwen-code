@@ -22,9 +22,11 @@ import {
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import dns from 'node:dns';
 import fs from 'node:fs';
@@ -85,14 +87,14 @@ import {
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
-import { start_sandbox } from './utils/sandbox.js';
+import { start_sandbox } from './serve/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine, writeStderrLineSafe } from './utils/stdioHelpers.js';
 import { sanitizeTerminalText } from './ui/utils/textUtils.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
-import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import { initializeLlmOutputLanguage } from './i18n/languageUtils.js';
 import {
   CUSTOM_SANDBOX_IMAGE_ENV_VAR,
   HOST_UPDATE_RELAUNCH_ENV_VAR,
@@ -367,6 +369,12 @@ export async function main() {
       ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
       : undefined;
   delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_ENV];
+  const privateExternalToolGuardProvider =
+    process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV] ===
+    EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
+      : undefined;
+  delete process.env[PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV];
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -393,6 +401,12 @@ export async function main() {
           ...(privateExternalToolGuard
             ? {
                 [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: privateExternalToolGuard,
+                ...(privateExternalToolGuardProvider
+                  ? {
+                      [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]:
+                        privateExternalToolGuardProvider,
+                    }
+                  : {}),
               }
             : {}),
         }
@@ -504,9 +518,7 @@ export async function main() {
       await initializeI18n(
         resolveLanguageSetting(settings.merged.general?.language as string),
       );
-      const { updateBeforeRelaunch } = await import(
-        './utils/update-relaunch.js'
-      );
+      const { updateBeforeRelaunch } = await import('./ui/update-relaunch.js');
       const shouldRelaunch = await updateBeforeRelaunch(
         settings,
         updateProjectRoot,
@@ -859,7 +871,7 @@ export async function main() {
 
     const nonInteractiveHousekeeping =
       !config.isInteractive() || config.getExperimentalZedIntegration()
-        ? await import('./utils/housekeeping/scheduler.js')
+        ? await import('./services/housekeeping/scheduler.js')
         : undefined;
     if (nonInteractiveHousekeeping) {
       registerCleanup(() =>
@@ -1072,6 +1084,11 @@ export async function main() {
             isAcpMode &&
             privateAcpParentCapability !== undefined &&
             privateExternalToolGuard === EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+          externalToolGuardProviderAttached:
+            isAcpMode &&
+            privateAcpParentCapability !== undefined &&
+            privateExternalToolGuardProvider ===
+              EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
         });
       } finally {
         // Clean up child processes even when ACP setup or shutdown fails.

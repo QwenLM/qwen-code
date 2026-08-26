@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { type FC, memo, useState } from 'react';
+import { type FC, memo } from 'react';
 import { MessageContent } from './MessageContent.js';
 import { ChevronIcon } from '../icons/index.js';
+import { useControlledExpanded } from '../../context/ExpandControlContext.js';
 import './ThinkingMessage.css';
 
 /**
@@ -41,7 +42,7 @@ const ThinkingMessageBase: FC<ThinkingMessageProps> = ({
   defaultExpanded = false,
   status = 'default',
 }) => {
-  const [isExpanded, setIsExpanded] = useState(defaultExpanded);
+  const [isExpanded, setIsExpanded] = useControlledExpanded(defaultExpanded);
 
   const handleToggle = () => {
     setIsExpanded(!isExpanded);

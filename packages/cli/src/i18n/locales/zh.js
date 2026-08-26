@@ -184,6 +184,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '制品',
   'toolDisplayName.RecordArtifact': '记录制品',
+  'toolDisplayName.ReportFindings': '上报评审发现',
   'toolDisplayName.DisplayImage': '显示图片',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '进入计划模式',
@@ -207,6 +208,7 @@ export default {
   'toolDisplayName.TeamDelete': '删除团队',
   'toolDisplayName.TeamPlanApproval': '团队计划审批',
   'toolDisplayName.SendMessage': '发送消息',
+  'toolDisplayName.RequestShutdown': '请求下线',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',
   'toolDisplayName.NotebookEdit': '编辑 Notebook',
@@ -766,6 +768,7 @@ export default {
   'Tool Output Truncation Lines': '工具输出截断行数',
   'Folder Trust': '文件夹信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
+  Unset: '未设置',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
   'Auto (follow user input)': '自动（跟随用户输入）',
@@ -2241,6 +2244,17 @@ export default {
   // === Core: added from PR #3328 ===
   'Ask a quick side question without affecting the main conversation':
     '在不影响主对话的情况下快速问一个旁支问题',
+  'Get a second opinion on the current conversation from a reviewer model':
+    '让审查模型对当前对话给出第二意见',
+  'Consulting advisor...': '正在咨询审查模型...',
+  'Advisor review failed: {{error}}': '审查失败：{{error}}',
+  'No conversation context available for /advisor':
+    '没有可供 /advisor 使用的对话上下文',
+  'Focus too long (max {{max}} chars)': '关注点过长（最多 {{max}} 个字符）',
+  'Another operation is in progress, wait for it to complete before running /advisor':
+    '另一个操作正在进行中，请等待其完成后再运行 /advisor',
+  'No response received.': '未收到回复。',
+  'No model configured.': '未配置模型。',
   'Manage Arena sessions': '管理 Arena 会话',
   'Start an Arena session with multiple models competing on the same task':
     '启动一个 Arena 会话，让多个模型在同一任务上竞争',
@@ -2314,6 +2328,7 @@ export default {
   'rejected — edit config to re-approve': '已拒绝 — 编辑配置以重新审批',
   'Background agent needs approval': '后台 agent 等待审批',
   'Approve or deny the request above': '请批准或拒绝上方的请求',
+  'from nested agent': '来自嵌套 agent',
   Running: '运行中',
   Pausing: '暂停中',
   Paused: '已暂停',

@@ -94,7 +94,6 @@ vi.mock('./ChatPane', () => ({
         data-testid="chat-pane"
         data-pane-workspace={props.workspaceCwd}
         data-maximized={props.isMaximized ? 'true' : 'false'}
-        data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
         data-hidden={props.hidden ? 'true' : 'false'}
         data-report-catalog-turn-completion={
@@ -257,11 +256,6 @@ describe('SplitView', () => {
       container!
         .querySelector('[data-session="s1"]')
         ?.getAttribute('data-restart-sse'),
-    ).toBe('true');
-    expect(
-      container!
-        .querySelector('[data-session="s1"] [data-testid="chat-pane"]')
-        ?.getAttribute('data-pane-restart-sse'),
     ).toBe('true');
   });
 

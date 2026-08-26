@@ -121,7 +121,7 @@ Everything between `handleInbound()` and `sendMessage()` is handled by the base 
 | `Envelope`           | Normalized inbound message format                                        |
 | `SenderPolicy`       | `'allowlist' \| 'pairing' \| 'open'`                                     |
 | `GroupPolicy`        | `'disabled' \| 'allowlist' \| 'pairing' \| 'open'`                       |
-| `SessionScope`       | `'user' \| 'thread' \| 'single'`                                         |
+| `SessionScope`       | `'user' \| 'chat_thread' \| 'single'`; legacy `'thread'` is deprecated   |
 | `GroupConfig`        | Per-group settings (e.g. `requireMention`)                               |
 | `SessionTarget`      | Maps a session back to its channel/sender/chat                           |
 | `ToolCallEvent`      | Agent tool-call event delivered to adapters                              |

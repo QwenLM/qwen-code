@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SessionService } from '@qwen-code/qwen-code-core';
+import {
+  SessionIdCaseConflictError,
+  SessionService,
+} from '@qwen-code/qwen-code-core';
 import { access } from 'node:fs/promises';
 import {
   SessionNotFoundError,
@@ -70,13 +73,15 @@ async function persistedSessionExists(
   sessionService: SessionService,
   sessionId: string,
 ): Promise<boolean> {
-  if ((await sessionService.getSessionLocation(sessionId)) !== undefined) {
-    return true;
-  }
-  if (
-    (await sessionService.findSessionIdIgnoringCase?.(sessionId)) !== undefined
-  ) {
-    return true;
+  try {
+    if (
+      (await sessionService.findSessionIdIgnoringCase(sessionId)) !== undefined
+    ) {
+      return true;
+    }
+  } catch (error) {
+    if (error instanceof SessionIdCaseConflictError) return true;
+    throw error;
   }
 
   for (const state of ['active', 'archived'] as const) {
