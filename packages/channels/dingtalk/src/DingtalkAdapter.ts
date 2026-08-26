@@ -706,9 +706,12 @@ export class DingtalkChannel extends ChannelBase {
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
   private readonly cardRunBySession = new Map<string, string>();
   private readonly cardRuns = new Map<string, CardRunCorrelation>();
+  // Keyed by runId, not segmentId: a mid-turn segment reset (response
+  // boundary, input requested) mints a fresh segment UUID but the projection
+  // state must survive it, or a marker split across the reset leaks.
   private readonly fileProjectors = new Map<
     string,
-    { runId: string; sessionId: string; projector: OutboundFileProjector }
+    { sessionId: string; projector: OutboundFileProjector }
   >();
   private readonly blockFileProjectors = new Map<
     string,
@@ -1584,8 +1587,8 @@ export class DingtalkChannel extends ChannelBase {
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
     this.blockFileProjectors.delete(sessionId);
-    for (const [segmentId, state] of this.fileProjectors) {
-      if (state.sessionId === sessionId) this.fileProjectors.delete(segmentId);
+    for (const [runId, state] of this.fileProjectors) {
+      if (state.sessionId === sessionId) this.fileProjectors.delete(runId);
     }
     const bufferedTargets = this.bufferedMentionTargetsBySession.get(sessionId);
     if (bufferedTargets) {
@@ -1788,9 +1791,30 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    this.blockFileProjectors.delete(sessionId);
+    this.settleBlockFileProjector(chatId, sessionId);
     this.sessionMentionTargets.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
+  }
+
+  /**
+   * Turn end is the only point where the block projector's held state can be
+   * settled: ChannelBase drains the turn's queued block sends before calling
+   * onPromptEnd, so everything already appended belongs to this turn. Flush
+   * the held candidate bytes (a trailing `[FILE:` prefix the stream never
+   * completed) before deleting the entry — a later delete-without-settle
+   * would silently drop them from the delivered answer.
+   */
+  private settleBlockFileProjector(chatId: string, sessionId: string): void {
+    const state = this.blockFileProjectors.get(sessionId);
+    if (!state) return;
+    this.blockFileProjectors.delete(sessionId);
+    const tail = state.projector.complete();
+    if (!tail.trim()) return;
+    void this.sendReply(chatId, tail).catch((err) => {
+      process.stderr.write(
+        `[DingTalk:${this.name}] projector tail delivery failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    });
   }
 
   /**
@@ -1883,9 +1907,9 @@ export class DingtalkChannel extends ChannelBase {
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
     const streamed = segment
-      ? this.fileProjectors.get(segment.segmentId)?.projector
+      ? this.fileProjectors.get(segment.runId)?.projector
       : undefined;
-    if (segment) this.fileProjectors.delete(segment.segmentId);
+    if (segment) this.fileProjectors.delete(segment.runId);
     const outgoingText = await this.prepareOutgoingText(text, streamed);
     if (segment && this.interactionPresenter) {
       if (
@@ -1908,7 +1932,13 @@ export class DingtalkChannel extends ChannelBase {
     segment: ChannelOutputSegmentContext,
     reason: ChannelOutputSegmentEndReason,
   ): void | Promise<void> {
-    this.fileProjectors.delete(segment.segmentId);
+    if (
+      reason === 'completed' ||
+      reason === 'failed' ||
+      reason === 'cancelled'
+    ) {
+      this.fileProjectors.delete(segment.runId);
+    }
     if (!this.interactionPresenter) return;
     return this.interactionPresenter
       .closeOutput(segment.segmentId, '', reason, segment)
@@ -1922,23 +1952,20 @@ export class DingtalkChannel extends ChannelBase {
     segment?: ChannelOutputSegmentContext,
   ): void {
     if (!segment) return;
-    let state = this.fileProjectors.get(segment.segmentId);
+    let state = this.fileProjectors.get(segment.runId);
     if (!state) {
       state = {
-        runId: segment.runId,
         sessionId: segment.sessionId,
         projector: new OutboundFileProjector(),
       };
-      this.fileProjectors.set(segment.segmentId, state);
+      this.fileProjectors.set(segment.runId, state);
     }
     const safe = state.projector.append(chunk);
     if (safe) this.interactionPresenter?.appendOutput(segment, safe);
   }
 
   private deleteFileProjectorsForRun(runId: string): void {
-    for (const [segmentId, state] of this.fileProjectors) {
-      if (state.runId === runId) this.fileProjectors.delete(segmentId);
-    }
+    this.fileProjectors.delete(runId);
   }
 
   protected override async presentUserInputRequest(

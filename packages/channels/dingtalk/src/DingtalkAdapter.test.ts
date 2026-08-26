@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
+import { BlockStreamer } from '@qwen-code/channel-base';
 import type {
   ChannelOutputSegmentContext,
   ChannelOutputSegmentEndReason,
@@ -171,6 +172,9 @@ vi.mock('@qwen-code/channel-base', async () => {
     // ship green.
     truncateUtf16Units: real.truncateUtf16Units,
     isTerminalTaskLifecycleType: real.isTerminalTaskLifecycleType,
+    // Real: the block-boundary regression drives blocks through the actual
+    // streamer's trim contract, not a hand-built block shape.
+    BlockStreamer: real.BlockStreamer,
   };
 });
 
@@ -6114,6 +6118,193 @@ describe('DingtalkChannel outbound file projection', () => {
       (channel as unknown as { fileProjectors: Map<string, unknown> })
         .fileProjectors.size,
     ).toBe(0);
+  });
+
+  it('flushes the block projector held tail when the turn ends', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+
+    await getResponseHook(channel)('cid123', 'Answer ends here [', 'session-1');
+    getPromptHook(channel, 'onPromptEnd')('cid123', 'session-1');
+
+    await vi.waitFor(() => {
+      expect(fetchSpy.mock.calls).toHaveLength(2);
+    });
+    const lastBody = JSON.parse(
+      String((fetchSpy.mock.calls[1]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(lastBody.markdown.text).toBe('[');
+    expect(lastBody.markdown.text).not.toContain('File delivery unavailable');
+    expect(
+      (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+        .blockFileProjectors.size,
+    ).toBe(0);
+  });
+
+  it('redacts an unfinished marker at turn end instead of leaking a fragment', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+
+    await getResponseHook(channel)(
+      'cid123',
+      'Report\n[FILE: /workspace/sec',
+      'session-1',
+    );
+    getPromptHook(channel, 'onPromptEnd')('cid123', 'session-1');
+
+    // Settle must not emit the held reserved line: the marker never
+    // completed, so nothing may follow it as a standalone message.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fetchSpy.mock.calls).toHaveLength(1);
+    expect(JSON.stringify(fetchSpy.mock.calls)).not.toContain('/workspace/sec');
+    expect(
+      (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+        .blockFileProjectors.size,
+    ).toBe(0);
+  });
+
+  it('keeps the status projector across a mid-turn segment reset', async () => {
+    const channel = createChannel();
+    const projected: string[] = [];
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          appendOutput: (_segment: unknown, chunk: string) => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = {
+      appendOutput: (_segment, chunk) => projected.push(chunk),
+      closeOutput,
+    };
+    const first = segment('segment-1');
+
+    getChunkHook(channel)('cid123', 'before\n[FI', 'session-1', first);
+    await getOutputSegmentEndHook(channel)(
+      'cid123',
+      'session-1',
+      first,
+      'response_boundary',
+    );
+    // The base mints a fresh segment UUID after closeOutputSegment, but the
+    // same run continues.
+    const next = { ...first, segmentId: 'segment-2' };
+    getChunkHook(channel)(
+      'cid123',
+      'LE: /workspace/secret.txt]\nafter',
+      'session-1',
+      next,
+    );
+
+    expect(projected.join('')).toBe('before\n\nafter');
+    expect(projected.join('')).not.toContain('secret.txt');
+  });
+
+  it('delivers the line after a marker line ending exactly on a block boundary', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const send = getResponseHook(channel);
+    const streamer = new BlockStreamer({
+      minChars: 20,
+      maxChars: 1000,
+      idleMs: 0,
+      send: (text) => send('cid123', text, 'session-1'),
+    });
+
+    streamer.push(
+      '[FILE: /workspace/report.txt]\n\nThe answer is 42.\nSecond line',
+    );
+    await streamer.flush();
+
+    const bodies = JSON.stringify(fetchSpy.mock.calls);
+    expect(bodies).toContain('The answer is 42.');
+    expect(bodies).toContain('File delivery unavailable');
+    expect(bodies).not.toContain('/workspace/report.txt');
+  });
+
+  it('drops the block projector when its session dies', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+
+    await getResponseHook(channel)('cid123', 'Answer text', 'session-1');
+    const projectors = (
+      channel as unknown as { blockFileProjectors: Map<string, unknown> }
+    ).blockFileProjectors;
+    expect(projectors.size).toBe(1);
+
+    channel.onSessionDied('session-1');
+    expect(projectors.size).toBe(0);
+  });
+
+  it("keeps other sessions' status projectors when one session dies", () => {
+    const channel = createChannel();
+    const sessionOne = segment('segment-a');
+    const sessionTwo = {
+      ...segment('segment-b'),
+      sessionId: 'session-2',
+      runId: 'run-2',
+    };
+    getChunkHook(channel)('cid123', 'chunk a', 'session-1', sessionOne);
+    getChunkHook(channel)('cid123', 'chunk b', 'session-2', sessionTwo);
+    const projectors = (
+      channel as unknown as {
+        fileProjectors: Map<string, { sessionId: string }>;
+      }
+    ).fileProjectors;
+    expect(projectors.size).toBe(2);
+
+    channel.onSessionDied('session-1');
+    expect(projectors.size).toBe(1);
+    expect([...projectors.values()][0]!.sessionId).toBe('session-2');
+  });
+
+  it('drops the status projector on the terminal lifecycle event', () => {
+    const channel = createChannel();
+    getChunkHook(channel)('cid123', 'streamed', 'session-1', segment());
+    const projectors = (
+      channel as unknown as { fileProjectors: Map<string, unknown> }
+    ).fileProjectors;
+    expect(projectors.size).toBe(1);
+
+    getLifecycleHook(channel)({
+      type: 'completed',
+      channelName: 'dingtalk',
+      chatId: 'cid123',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    });
+    expect(projectors.size).toBe(0);
+  });
+
+  it('keeps file projection when rebuilding image-replaced text', async () => {
+    const channel = createChannel();
+    const prepare = (
+      channel as unknown as {
+        prepareOutgoingText(text: string): Promise<string>;
+      }
+    ).prepareOutgoingText.bind(channel);
+
+    const out = await prepare(
+      'before\n[FILE: /workspace/report.txt]\n[IMAGE: /workspace/missing.png]\nafter',
+    );
+
+    expect(out).toContain('[File delivery unavailable]');
+    expect(out).not.toContain('[FILE:');
+    expect(out).not.toContain('/workspace/report.txt');
+    expect(out).toContain('[Image delivery failed: missing.png]');
   });
 });
 

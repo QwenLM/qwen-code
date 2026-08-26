@@ -80,6 +80,7 @@ describe('OutboundFileProjector', () => {
     expect(projected.excessMarkers).toBe(2);
     expect(projected.invalidMarkers).toBe(1);
     expect(projected.text).not.toContain('/tmp/');
+    expect(projected.text).not.toContain('x'.repeat(100));
   });
 
   it('detects a final response that differs from streamed bytes', () => {

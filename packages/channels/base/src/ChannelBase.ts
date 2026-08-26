@@ -5749,7 +5749,13 @@ export abstract class ChannelBase {
       } finally {
         promptBridge.off('textChunk', onChunk);
         promptBridge.off('responseBoundary', onResponseBoundary);
-        streamer?.stop();
+        if (streamer) {
+          streamer.stop();
+          // Queued block sends belong to this turn: let them land before
+          // onPromptEnd settles turn-scoped adapter state, or a send racing
+          // the settle can recreate discarded state and leak unredacted text.
+          await streamer.drain();
+        }
         // Identity guard: a turn that wedged past /clear's bounded wait gets
         // EVICTED — /clear gives up on active.done, deletes activePrompts, and a
         // turn the user starts AFTER the clear can re-seed activePrompts (and own
