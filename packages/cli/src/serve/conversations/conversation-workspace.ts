@@ -4,14 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readdir, rmdir } from 'node:fs/promises';
+import { readdir, rename, rm, rmdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   assertExactConversationRootIdentity,
   ConversationDirectoryIdentityError,
   createConversationRootIdentity,
+  getConversationDirectoryName,
+  getConversationStagedDirectoryName,
   inspectConversationDirectoryIdentity,
+  inspectConversationStagedDirectoryIdentity,
+  isSameConversationDirectoryObject,
   materializeConversationDirectoryIdentity,
   revalidateConversationRootIdentity,
   type ConversationDirectoryIdentity,
@@ -37,6 +41,15 @@ export type StandaloneDirectoryEnsureResult =
   | { status: 'ready'; identity: ConversationDirectoryIdentity }
   | { status: 'created'; identity: ConversationDirectoryIdentity }
   | { status: 'recreated'; identity: ConversationDirectoryIdentity }
+  | {
+      status: 'compromised';
+      error: ConversationDirectoryIdentityError;
+    };
+
+export type StandaloneDeletionPathsInspection =
+  | { status: 'absent' }
+  | { status: 'normal'; identity: ConversationDirectoryIdentity }
+  | { status: 'staged'; identity: ConversationDirectoryIdentity }
   | {
       status: 'compromised';
       error: ConversationDirectoryIdentityError;
@@ -338,5 +351,141 @@ export class ConversationWorkspace {
       }
       throw error;
     }
+  }
+
+  async inspectStandaloneDeletionPaths(
+    storageSessionId: string,
+    expected?: ConversationDirectoryIdentity,
+  ): Promise<StandaloneDeletionPathsInspection> {
+    const root = await this.revalidateStandaloneRoot();
+    try {
+      const normal = await inspectConversationDirectoryIdentity(
+        root,
+        storageSessionId,
+      );
+      const staged = await inspectConversationStagedDirectoryIdentity(
+        root,
+        storageSessionId,
+      );
+      if (normal && staged) {
+        throw new ConversationDirectoryIdentityError(
+          'child',
+          'unexpected_identity',
+        );
+      }
+      const identity = normal ?? staged;
+      if (
+        identity &&
+        expected &&
+        !isSameConversationDirectoryObject(identity, expected)
+      ) {
+        throw new ConversationDirectoryIdentityError(
+          'child',
+          'unexpected_identity',
+        );
+      }
+      if (normal) return { status: 'normal', identity: normal };
+      if (staged) return { status: 'staged', identity: staged };
+      return { status: 'absent' };
+    } catch (error) {
+      if (
+        error instanceof ConversationDirectoryIdentityError &&
+        error.scope === 'child'
+      ) {
+        return { status: 'compromised', error };
+      }
+      throw error;
+    }
+  }
+
+  async stageStandaloneDirectory(
+    storageSessionId: string,
+    expected: ConversationDirectoryIdentity,
+  ): Promise<ConversationDirectoryIdentity> {
+    const inspected = await this.inspectStandaloneDeletionPaths(
+      storageSessionId,
+      expected,
+    );
+    if (inspected.status === 'compromised') throw inspected.error;
+    if (inspected.status !== 'normal') {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    const root = await this.revalidateStandaloneRoot();
+    await rename(
+      inspected.identity.canonicalPath,
+      join(
+        root.canonicalRoot,
+        getConversationStagedDirectoryName(storageSessionId),
+      ),
+    );
+    await revalidateConversationRootIdentity(root);
+    const staged = await inspectConversationStagedDirectoryIdentity(
+      root,
+      storageSessionId,
+    );
+    if (
+      !staged ||
+      !isSameConversationDirectoryObject(staged, inspected.identity)
+    ) {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    return staged;
+  }
+
+  async restoreStagedStandaloneDirectory(
+    storageSessionId: string,
+    expected: ConversationDirectoryIdentity,
+  ): Promise<ConversationDirectoryIdentity> {
+    const inspected = await this.inspectStandaloneDeletionPaths(
+      storageSessionId,
+      expected,
+    );
+    if (inspected.status === 'compromised') throw inspected.error;
+    if (inspected.status !== 'staged') {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    const root = await this.revalidateStandaloneRoot();
+    await rename(
+      inspected.identity.canonicalPath,
+      join(root.canonicalRoot, getConversationDirectoryName(storageSessionId)),
+    );
+    await revalidateConversationRootIdentity(root);
+    const restored = await inspectConversationDirectoryIdentity(
+      root,
+      storageSessionId,
+    );
+    if (
+      !restored ||
+      !isSameConversationDirectoryObject(restored, inspected.identity)
+    ) {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    return restored;
+  }
+
+  async removeStagedStandaloneDirectory(
+    storageSessionId: string,
+    expected: ConversationDirectoryIdentity,
+  ): Promise<void> {
+    const inspected = await this.inspectStandaloneDeletionPaths(
+      storageSessionId,
+      expected,
+    );
+    if (inspected.status === 'compromised') throw inspected.error;
+    if (inspected.status !== 'staged') {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    const confirmed = await inspectConversationStagedDirectoryIdentity(
+      inspected.identity.root,
+      storageSessionId,
+    );
+    if (
+      !confirmed ||
+      !isSameConversationDirectoryObject(confirmed, inspected.identity)
+    ) {
+      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
+    }
+    await rm(confirmed.canonicalPath, { recursive: true });
+    await revalidateConversationRootIdentity(confirmed.root);
   }
 }

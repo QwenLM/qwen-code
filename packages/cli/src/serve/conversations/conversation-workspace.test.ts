@@ -530,4 +530,111 @@ describe('Live conversation workspace root', () => {
     }
     expect(ensured.error).toBe(racedError);
   });
+
+  it('stages and restores the exact standalone directory identity', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    await writeFile(
+      join(prepared.identity.canonicalPath, 'transient.txt'),
+      'keep during staging',
+    );
+
+    const staged = await workspace.stageStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+
+    expect(staged.name).toBe(`${prepared.identity.name}.deleting`);
+    expect(staged.canonicalPath).toBe(
+      `${prepared.identity.canonicalPath}.deleting`,
+    );
+    expect(staged).toMatchObject({
+      storageSessionId: prepared.identity.storageSessionId,
+      device: prepared.identity.device,
+      inode: prepared.identity.inode,
+    });
+    await expect(
+      workspace.inspectStandaloneDeletionPaths('standalone', prepared.identity),
+    ).resolves.toMatchObject({ status: 'staged' });
+
+    const restored = await workspace.restoreStagedStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+    expect(restored).toMatchObject({
+      name: prepared.identity.name,
+      canonicalPath: prepared.identity.canonicalPath,
+      device: prepared.identity.device,
+      inode: prepared.identity.inode,
+    });
+    await expect(
+      lstat(join(restored.canonicalPath, 'transient.txt')),
+    ).resolves.toMatchObject({ size: 19 });
+  });
+
+  it('removes only a matching staged standalone directory', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    await mkdir(join(prepared.identity.canonicalPath, 'nested'), {
+      mode: 0o700,
+    });
+    await writeFile(
+      join(prepared.identity.canonicalPath, 'nested', 'remove.txt'),
+      'remove',
+    );
+    const staged = await workspace.stageStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+
+    await workspace.removeStagedStandaloneDirectory(
+      'standalone',
+      prepared.identity,
+    );
+
+    await expect(lstat(staged.canonicalPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+    expect(
+      (await lstat((await workspace.getRoot()).canonicalRoot)).isDirectory(),
+    ).toBe(true);
+  });
+
+  it('fails closed when both normal and staged deletion paths exist', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    await mkdir(`${prepared.identity.canonicalPath}.deleting`, { mode: 0o700 });
+
+    const inspected = await workspace.inspectStandaloneDeletionPaths(
+      'standalone',
+      prepared.identity,
+    );
+
+    expect(inspected.status).toBe('compromised');
+    if (inspected.status !== 'compromised') {
+      throw new Error('expected compromised');
+    }
+    expect(inspected.error.reason).toBe('unexpected_identity');
+  });
+
+  it('rejects a replacement directory during deletion staging', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+    await rename(
+      prepared.identity.canonicalPath,
+      `${prepared.identity.canonicalPath}.preserved`,
+    );
+    await mkdir(prepared.identity.canonicalPath, { mode: 0o700 });
+
+    await expect(
+      workspace.stageStandaloneDirectory('standalone', prepared.identity),
+    ).rejects.toMatchObject({
+      name: 'ConversationDirectoryIdentityError',
+      reason: 'unexpected_identity',
+    });
+  });
 });
