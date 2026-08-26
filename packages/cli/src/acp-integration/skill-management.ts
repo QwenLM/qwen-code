@@ -294,11 +294,11 @@ async function installSkillFromUrl(
   }
 
   // Install atomically: stage all files in a sibling temp directory, then
-  // swap it in with a single rename. A mid-write failure (disk full,
-  // permission error) therefore leaves the previously installed skill
-  // intact instead of deleting it up front and ending up with a partial
-  // install. Removing the old dir before writing also dropped orphaned
-  // files from older versions; the rename preserves that property.
+  // swap it in with a rollback-capable rename sequence. A mid-write failure
+  // (disk full, permission error) therefore leaves the previously installed
+  // skill intact instead of deleting it up front and ending up with a partial
+  // install. The rename-based swap also drops orphaned files from older
+  // versions, preserving the behavior of the previous rm-based approach.
   const stagingDir = `${skillDir}.installing-${process.pid}-${Date.now()}`;
   try {
     await fs.rm(stagingDir, { recursive: true, force: true });
@@ -307,11 +307,29 @@ async function installSkillFromUrl(
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
       await fs.writeFile(targetPath, file.content);
     }
-    // stagingDir is a sibling of skillDir (same filesystem), so the rename
-    // is atomic; the only gap is between the rm and rename, during which
-    // the fully-staged copy still exists for recovery.
-    await fs.rm(skillDir, { recursive: true, force: true });
-    await fs.rename(stagingDir, skillDir);
+    // Rollback-capable swap: backup the old directory, rename staging in,
+    // then remove the backup. On rename failure, restore the backup.
+    const backupDir = `${skillDir}.backup-${process.pid}-${Date.now()}`;
+    let backedUp = false;
+    try {
+      try {
+        await fs.rename(skillDir, backupDir);
+        backedUp = true;
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        // Old directory doesn't exist, no backup needed.
+      }
+      await fs.rename(stagingDir, skillDir);
+    } catch (error) {
+      if (backedUp) {
+        await fs.rename(backupDir, skillDir).catch(() => {});
+      }
+      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    }
+    if (backedUp) {
+      await fs.rm(backupDir, { recursive: true, force: true }).catch(() => {});
+    }
   } catch (error) {
     await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
     throw error;

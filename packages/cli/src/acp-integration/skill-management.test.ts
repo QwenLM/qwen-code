@@ -308,6 +308,46 @@ describe('managed Skill mutations', () => {
     }
   });
 
+  it('cleans up the backup directory on a successful reinstall', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    await writeSkill(tempHome, 'skills', 'pptx');
+    const manager = managerFor('pptx');
+    downloadSkillMock.mockResolvedValue({
+      skillContent:
+        '---\nname: pptx\ndescription: Create slide decks\n---\nNew body\n',
+      files: [
+        {
+          relativePath: 'SKILL.md',
+          content: Buffer.from('---\nname: pptx\n---\nNew body\n'),
+        },
+      ],
+    });
+
+    try {
+      await installManagedSkill(configWith(manager), {
+        skill: {
+          id: 'pptx-id',
+          slug: 'pptx',
+          name: 'PPTX',
+          sourceUrl:
+            'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+        },
+      });
+
+      const skillsDir = path.join(tempHome, 'skills');
+      const entries = await fs.readdir(skillsDir);
+      // Only the real skill dir should remain; no leftover .backup-* siblings.
+      expect(entries).toEqual(['pptx']);
+      const installedPath = path.join(skillsDir, 'pptx', 'SKILL.md');
+      await expect(fs.readFile(installedPath, 'utf8')).resolves.toContain(
+        'name: pptx',
+      );
+    } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
   it('rejects traversal slugs before downloading or touching disk', async () => {
     const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
     vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
