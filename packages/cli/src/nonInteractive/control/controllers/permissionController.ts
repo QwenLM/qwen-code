@@ -574,6 +574,11 @@ export class PermissionController extends BaseController {
       const behavior = String(payload['behavior'] || '').toLowerCase();
 
       if (behavior === 'allow') {
+        // exit_plan_mode approves through the dialog alone: its onConfirm
+        // takes no payload, and the approved plan must not be replaced by
+        // the host's updatedInput. Any other requiresUserInteraction tool
+        // (e.g. ask_user_question) must take the updatedInput path below —
+        // that channel carries the user's answers.
         if (
           requiresUserInteraction &&
           toolCall.request.name === ToolNames.EXIT_PLAN_MODE

@@ -20,7 +20,7 @@ import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { InputFormat } from '../output/types.js';
+import { resolveInteractionMode } from '../core/prompts.js';
 
 const debugLogger = createDebugLogger('ASK_USER_QUESTION');
 
@@ -178,10 +178,7 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
    * confirmation channel.
    */
   private canCollectAnswers(): boolean {
-    const isAcpMode =
-      this._config.getExperimentalZedIntegration() ||
-      this._config.getInputFormat() === InputFormat.STREAM_JSON;
-    return this._config.isInteractive() || isAcpMode;
+    return resolveInteractionMode(this._config) !== 'headless';
   }
 
   /**
