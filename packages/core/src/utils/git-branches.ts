@@ -16,10 +16,6 @@ const GIT_TIMEOUT_MS = 30_000;
 const MAX_RECENT_BRANCHES = 20;
 const MAX_REFLOG_ENTRIES = 200;
 
-// The unique SHA of the empty tree: the merge base for a pull into an
-// unborn HEAD, where every incoming path is new.
-const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
-
 export interface GitBranchInfo {
   name: string;
   isHead: boolean;
@@ -724,6 +720,22 @@ async function stoppedAmDir(
   return fs.existsSync(path.join(abs, 'onto')) ? '' : abs;
 }
 
+// A stopped `git merge --squash` writes SQUASH_MSG without MERGE_HEAD
+// or a sequence head; the staged conflict resolution it holds is just
+// as unrecoverable by reflog as a cherry-pick's once the discard
+// resets it. `reset` (the squash's abort) and `commit` both remove
+// the file, so only a genuinely pending squash trips this probe.
+async function hasStoppedSquash(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  const rel = (
+    await runGit(cwd, ['rev-parse', '--git-path', 'SQUASH_MSG'], env)
+  ).trim();
+  if (!rel) return false;
+  return fs.existsSync(path.resolve(cwd, rel));
+}
+
 async function hasInProgressRebase(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -791,6 +803,20 @@ function splitBuffer(buf: Buffer, byte: number): Buffer[] {
   return parts;
 }
 
+// The object id of the empty tree depends on the repository's object
+// format — a sha256 repository's empty tree is a different id — so
+// derive it per repository instead of hardcoding one. It is the merge
+// base for a pull into an unborn HEAD (every incoming path is new), and
+// for a pull whose upstream shares no common ancestor with HEAD.
+async function emptyTreeSha(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  return (
+    await runGit(cwd, ['hash-object', '-t', 'tree', '/dev/null'], env)
+  ).trim();
+}
+
 // Paths the incoming update would add over local IGNORED files: git
 // refuses a merge that would overwrite an untracked file, but silently
 // checks the incoming file out over an IGNORED one of the same path, and
@@ -853,8 +879,10 @@ async function incomingIgnoredPaths(
   // range diffs of EVERY base. The union is a sound over-approximation
   // whose only extra refusals are the probe's declared fail-closed
   // direction.
-  const bases = headExists
-    ? splitBuffer(
+  let bases: string[];
+  if (headExists) {
+    try {
+      bases = splitBuffer(
         await runGitBuffer(
           toplevel,
           ['merge-base', '--all', 'HEAD', fetchedTip],
@@ -863,8 +891,19 @@ async function incomingIgnoredPaths(
         10,
       )
         .map((line) => line.toString('utf8').trim())
-        .filter((line) => line !== '')
-    : [EMPTY_TREE_SHA];
+        .filter((line) => line !== '');
+    } catch (err) {
+      // Exit 1 is merge-base's legitimate "no common ancestor" answer
+      // — a re-rooted upstream — which the unborn arm already models
+      // with the empty tree: unioning over it enumerates every
+      // incoming path, a sound over-approximation. Any other failure
+      // refuses the pull like every probe error.
+      if ((err as { code?: number })?.code !== 1) throw err;
+      bases = [await emptyTreeSha(toplevel, env)];
+    }
+  } else {
+    bases = [await emptyTreeSha(toplevel, env)];
+  }
   const foldCase = await repoFoldsCase(toplevel, env);
   const additions: Buffer[] = [];
   const seenAdditions = new Set<string>();
@@ -1214,6 +1253,12 @@ async function refuseForeignMergeOrRebase(
     throw new GitPullFailure(
       'merge_in_progress',
       'cannot pull: a merge is already in progress — finish or abort it before updating',
+    );
+  }
+  if (await hasStoppedSquash(cwd, env)) {
+    throw new GitPullFailure(
+      'merge_in_progress',
+      'cannot pull: a squash merge is already in progress — finish or abort it before updating',
     );
   }
   if (

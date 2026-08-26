@@ -1913,6 +1913,45 @@ describe('gitPull state guards', () => {
     git(dir, '-c', 'core.editor=true', 'cherry-pick', '--continue');
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('resolved\n');
   });
+  it('refuses every pull shape while a resolved squash merge is staged', async () => {
+    const dir = makeRepo();
+    // A conflicted squash merge writes SQUASH_MSG without MERGE_HEAD or a
+    // sequence head, and the staged resolution is just as unrecoverable by
+    // reflog as a cherry-pick's once the discard resets it.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'to squash\n');
+    git(dir, 'commit', '-q', '-am', 'to squash');
+    const source = headSha(dir);
+    git(dir, 'reset', '-q', '--hard', 'HEAD~1');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'other\n');
+    git(dir, 'commit', '-q', '-am', 'other');
+    expect(() => git(dir, 'merge', '--squash', source)).toThrow();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'resolved\n');
+    git(dir, 'add', 'a.txt');
+
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    for (const opts of [{}, { stash: true }, { force: true }] as const) {
+      await expect(gitPull(dir, opts)).rejects.toMatchObject({
+        code: 'merge_in_progress',
+      });
+    }
+
+    // The refusal precedes any action: the resolution stays staged, nothing
+    // was stashed, and the squash is still completable.
+    expect(fs.existsSync(path.join(dir, '.git', 'SQUASH_MSG'))).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('resolved\n');
+    expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+    git(dir, 'commit', '-q', '-m', 'finish the squash');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('resolved\n');
+  });
 
   it('refuses a stash pull while a resolved revert is staged', async () => {
     const dir = makeRepo();
@@ -2313,6 +2352,53 @@ describe('gitPull incoming-tip guards', () => {
         'upstream\n',
       );
     }
+  });
+  it('pulls an unborn-HEAD sha256 repository like the pre-PR bare pull', async () => {
+    // The unborn merge base is the empty tree, whose object id depends on
+    // the repository's object format: a hardcoded sha1 id fatals "unknown
+    // revision" on sha256 repositories, refusing a pull the pre-PR bare
+    // `git pull` handled. A clone of an EMPTY remote does not reliably
+    // inherit the format, so the fixture inits each repo with it.
+    const makeSha256Repo = (bare: boolean) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitsha256-'));
+      tmpRoots.push(dir);
+      git(
+        dir,
+        'init',
+        '-q',
+        '-b',
+        'master',
+        '--object-format=sha256',
+        ...(bare ? ['--bare'] : []),
+      );
+      git(dir, 'config', 'user.email', 'test@example.com');
+      git(dir, 'config', 'user.name', 'Test');
+      git(dir, 'config', 'commit.gpgsign', 'false');
+      return dir;
+    };
+    const remote = makeSha256Repo(true);
+    const writer = makeSha256Repo(false);
+    git(writer, 'remote', 'add', 'origin', remote);
+    fs.writeFileSync(path.join(writer, 'upstream.txt'), 'upstream\n');
+    git(writer, 'add', '.');
+    git(writer, 'commit', '-q', '-m', 'upstream commit');
+    git(writer, 'push', '-q', 'origin', 'HEAD');
+
+    const dir = makeSha256Repo(false);
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'config', 'branch.master.remote', 'origin');
+    git(dir, 'config', 'branch.master.merge', 'refs/heads/master');
+    // Fixture pin: a sha1 repository would pass this test vacuously.
+    expect(git(dir, 'config', 'extensions.objectformat').trim()).toBe('sha256');
+    git(dir, 'fetch', '-q', 'origin');
+    expect(() => git(dir, 'rev-parse', '-q', '--verify', 'HEAD')).toThrow();
+
+    const result = await gitPull(dir);
+
+    expect(result.success).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'upstream.txt'), 'utf8')).toBe(
+      'upstream\n',
+    );
   });
 
   it('refuses a force pull when an incoming non-ASCII path collides with a local ignored file', async () => {
@@ -4441,6 +4527,63 @@ describe('gitPull incoming-tip guards', () => {
       'local edit\n',
     );
     expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('surfaces a re-rooted upstream instead of dead-ending on the probe', async () => {
+    // A force push onto a brand-new root leaves no common ancestor:
+    // `merge-base --all` exits 1 printing nothing. That is its legitimate
+    // answer, not a probe failure — the empty-tree fallback (the unborn
+    // arm's model of the same state) lets the update run and surface
+    // git's own diagnostic instead of refusing with a blank message.
+    const makeFixture = () => {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+      const clone = makeClone(remote);
+      git(clone, 'checkout', '-q', '--orphan', 'newroot');
+      git(clone, 'rm', '-q', '-rf', '.');
+      fs.writeFileSync(path.join(clone, 'b.txt'), 'fresh root\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'fresh root');
+      git(clone, 'push', '-q', '-f', 'origin', 'newroot:master');
+      return dir;
+    };
+
+    // The merge shapes surface git's own unrelated-histories fatal
+    // instead of a blank refusal.
+    const plainDir = makeFixture();
+    let plainThrown: unknown;
+    await gitPull(plainDir).catch((err) => {
+      plainThrown = err;
+    });
+    expect(plainThrown).toMatchObject({ code: 'diverged' });
+    expect((plainThrown as Error).message).toContain('unrelated histories');
+
+    // The stash shape restores the auto-stash on the way down.
+    const stashDir = makeFixture();
+    fs.writeFileSync(path.join(stashDir, 'a.txt'), 'local edit\n');
+    let stashThrown: unknown;
+    await gitPull(stashDir, { stash: true }).catch((err) => {
+      stashThrown = err;
+    });
+    expect(stashThrown).toMatchObject({ code: 'diverged' });
+    expect((stashThrown as Error).message).toContain('unrelated histories');
+    expect(fs.readFileSync(path.join(stashDir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(stashDir, 'stash', 'list').trim()).toBe('');
+
+    // The rebase shape replays the local commits onto the new root.
+    const rebaseDir = makeFixture();
+    const result = await gitPull(rebaseDir, { rebase: true });
+    expect(result.success).toBe(true);
+    expect(fs.readFileSync(path.join(rebaseDir, 'b.txt'), 'utf8')).toBe(
+      'fresh root\n',
+    );
+    expect(fs.readFileSync(path.join(rebaseDir, 'a.txt'), 'utf8')).toBe(
+      'one\n',
+    );
   });
 
   it('refuses a non-ASCII case-variant collision when the repository folds case', async () => {
