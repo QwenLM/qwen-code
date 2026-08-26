@@ -495,24 +495,12 @@ describe('SendMessageTool — background-task mode', () => {
 });
 
 describe('SendMessageTool — destination validation (#10073)', () => {
-  it('rejects calls that specify both "to" and "task_id"', async () => {
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: { sendMessage, broadcast: vi.fn() },
-      }),
-    );
+  it('rejects calls that specify both "to" and "task_id" at build time', () => {
+    const tool = new SendMessageTool(makeTeamConfig());
 
-    const invocation = tool.build({
-      to: 'alice',
-      task_id: 'agent-1',
-      message: 'hello',
-    });
-    const result = await invocation.execute(new AbortController().signal);
-
-    expect(result.error).toBeDefined();
-    expect(result.llmContent).toContain('exactly one destination');
-    expect(sendMessage).not.toHaveBeenCalled();
+    expect(() =>
+      tool.build({ to: 'alice', task_id: 'agent-1', message: 'hello' }),
+    ).toThrow('exactly one destination');
   });
 
   it('suggests "to" when a failed task_id matches a teammate name', async () => {
@@ -528,7 +516,7 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     const tool = new SendMessageTool(config);
 
     const result = await tool.validateBuildAndExecute(
-      { task_id: 'qa-reviewer', message: 'hello' },
+      { task_id: 'QA Reviewer', message: 'hello' },
       new AbortController().signal,
     );
 
@@ -536,5 +524,26 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     expect(result.llmContent).toContain('No background task found');
     expect(result.llmContent).toContain('teammate');
     expect(result.llmContent).toContain('"to"');
+  });
+
+  it('adds no teammate hint when the task_id matches no teammate', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({
+          members: [{ agentId: 'alice@team', name: 'alice' }],
+        }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'definitely-not-a-teammate', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).not.toContain('is a teammate name');
   });
 });
