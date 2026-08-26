@@ -74,7 +74,7 @@ describe('bundled goal-draft skill', () => {
   });
 
   it('stays model-invocable and user-invocable so both `/goal-draft` and "define a goal" reach it', () => {
-    const { config } = loadGoalDraftSkill();
+    const { config, body } = loadGoalDraftSkill();
 
     expect(config.disableModelInvocation).toBeFalsy();
     expect(config.userInvocable ?? true).toBe(true);
@@ -83,6 +83,11 @@ describe('bundled goal-draft skill', () => {
     );
     expect(config.description).toContain('/goal-draft');
     expect(config.description).toContain('never starts the work');
+    // Both entry paths — the `/goal-draft` slash command and the model's
+    // own Skill call — inject this body, so a second Skill call can only
+    // re-request an approval that headless runs cannot give, and the
+    // session stops without drafting anything. The body must forbid it.
+    expect(body).toContain('do not call the `skill` tool to invoke it again');
   });
 
   it('explains the verifier rules the objective format is derived from', () => {
@@ -162,6 +167,10 @@ describe('bundled goal-draft skill', () => {
     );
     expect(body).toContain('`/goal set <objective on one line>`');
     expect(body).toContain('or `/goal edit …` when tightening the active goal');
+    // Wrapping the hand-off line in inline code makes the terminal render
+    // escaped backticks, and copying it then pastes backslashes into the
+    // objective — the line must go out as plain text.
+    expect(body).toContain('Print it as plain text with no code markers');
   });
 
   it('ends with the self-check list and an explicit stop', () => {

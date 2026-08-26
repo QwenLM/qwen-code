@@ -11,6 +11,8 @@ allowedTools:
 
 # /goal-draft — write a Goal the verifier can judge
 
+You are already inside the loaded `goal-draft` skill — do not call the `skill` tool to invoke it again; start with Step 0.
+
 You are drafting the text for `/goal set`. You are NOT doing the work the goal describes. Do not edit files, do not run the checks, do not start on the task. The only deliverable is the objective text and the `/goal set` line the user can run.
 
 ## How Goals are judged (why the format below matters)
@@ -101,7 +103,7 @@ Check every line before printing:
 Then print, and nothing else:
 
 1. The objective in a fenced code block.
-2. One line the user can run as-is: `/goal set <objective on one line>` (or `/goal edit …` when tightening the active goal).
+2. One line the user can run as-is: `/goal set <objective on one line>` (or `/goal edit …` when tightening the active goal). Print it as plain text with no code markers, so it can be copied verbatim.
 3. One sentence on what you assumed (`[ASSUMPTION]` / `<TODO>` items), if any.
 
 Do not run /goal yourself. Do not begin the task. Stop and wait for the user.
