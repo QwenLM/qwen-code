@@ -325,6 +325,21 @@ describe('emit-workflow — where it writes', () => {
     );
   });
 
+  // The other stdout line is the dispatch contract the orchestrator acts
+  // on: how many agents, ONE Workflow call, no hand-built agent calls.
+  // Unpinned, the count or the instruction could drift without notice.
+  it('prints the dispatch guidance beside the path', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    run(plan);
+    const count = requiredAgents(localPlan() as unknown as RosterPlan).length;
+    expect(mocks.writeStdoutLine).toHaveBeenCalledWith(
+      `${count} agents required. The fan-out is a workflow: make ONE ` +
+        'Workflow call with the scriptPath below and no `args`, and do not ' +
+        'build agent calls by hand for this step.',
+    );
+  });
+
   // The writer's directory and the loader's trusted root are computed by two
   // packages from two inputs. Pin them together through core's own function:
   // a project dir exported by the harness is `storage.getProjectDir()`, and
@@ -713,5 +728,29 @@ describe('emit-workflow — residue parity with the hand-launched path', () => {
         'could not measure whether the review worktree is clean',
       ),
     );
+  });
+
+  // The two warnings above name the unhealthy states only — the healthy
+  // run, the common case, is silence. A regression that warned on every
+  // worktree review would pass both of them and fail here.
+  it('stays silent on a measured-clean worktree', () => {
+    const cleanTree = join(repo, '.qwen', 'tmp', 'review-wt-clean');
+    mkdirSync(dirname(cleanTree), { recursive: true });
+    execFileSync(
+      'git',
+      ['worktree', 'add', '--detach', '-q', cleanTree, 'HEAD'],
+      { cwd: repo },
+    );
+    // The fixture must be measured-clean, or the silence proves nothing:
+    // an unmeasured tree warns, and a probe that never ran is silent too.
+    const residue = worktreeResidue(cleanTree, RESIDUE_PATH_CAP, headSha);
+    expect(residue.paths).toEqual([]);
+    expect(residue.unmeasured).toBeUndefined();
+
+    buildFanOutRoster(
+      localPlan({ worktreePath: cleanTree, fetchedSha: headSha }),
+      planPath,
+    );
+    expect(mocks.writeStderrLine).not.toHaveBeenCalled();
   });
 });
