@@ -1258,14 +1258,30 @@ describe('formatChannelWorkerDaemonUrl', () => {
     },
   );
 
-  // R7-7: `[::]` -> 127.0.0.1 is only reachable through a dual-stack mapping
-  // the kernel is free not to give (IPv6-only hosts, net.ipv6.bindv6only=1).
+  // R7-7: the IPv6 wildcard's dial-back loopback follows what the host
+  // ASSIGNS — `[::1]` when the host carries it (an IPv4-less host has no
+  // other loopback). Node keeps the bound socket dual-stack (libuv pins
+  // IPV6_V6ONLY=0), so the `net.ipv6.bindv6only` sysctl never changes this.
   it.each(['::', '[::]'])(
-    'uses IPv6 loopback when the daemon binds IPv6 wildcard host %j',
+    'uses IPv6 loopback for the IPv6 wildcard host %j when the host assigns ::1',
     (host) => {
-      expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
-        'http://[::1]:4170',
-      );
+      expect(
+        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
+      ).toBe('http://[::1]:4170');
+    },
+  );
+
+  // The other half of R7-7 (#9406): a host that binds `::` while its
+  // loopback carries no `::1` (e.g. `net.ipv6.conf.lo.disable_ipv6=1`)
+  // reaches the dual-stack socket only through `127.0.0.1` — the old
+  // spelling-based `[::1]` dialled an address nothing owned there, and the
+  // first worker's `fetch failed` exited the daemon.
+  it.each(['::', '[::]'])(
+    'falls back to IPv4 loopback for the IPv6 wildcard host %j when the host carries no ::1',
+    (host) => {
+      expect(
+        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, false),
+      ).toBe('http://127.0.0.1:4170');
     },
   );
 
@@ -1276,10 +1292,21 @@ describe('formatChannelWorkerDaemonUrl', () => {
   // which nothing listened on, and the first worker's failure exited the
   // daemon. Explicit `::`/`0.0.0.0` keep their spelling-based mapping: those
   // binds fail loud when their family is unavailable.
-  it('uses IPv6 loopback for an empty hostname when the bound socket is IPv6', () => {
-    expect(formatChannelWorkerDaemonUrl('', 4170)).toBe('http://[::1]:4170');
-    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6')).toBe(
+  it('uses IPv6 loopback for an empty hostname on an IPv6 socket when the host assigns ::1', () => {
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, undefined, true)).toBe(
       'http://[::1]:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', true)).toBe(
+      'http://[::1]:4170',
+    );
+  });
+
+  it('falls back to IPv4 loopback for an empty hostname on an IPv6 socket when the host carries no ::1', () => {
+    expect(
+      formatChannelWorkerDaemonUrl('', 4170, false, undefined, false),
+    ).toBe('http://127.0.0.1:4170');
+    expect(formatChannelWorkerDaemonUrl('', 4170, false, 'IPv6', false)).toBe(
+      'http://127.0.0.1:4170',
     );
   });
 
@@ -1295,9 +1322,9 @@ describe('formatChannelWorkerDaemonUrl', () => {
   it.each(['::0', '0::0', '[::0]', '0:0:0:0:0:0:0:0'])(
     'canonicalizes IPv6 wildcard spelling %j before choosing loopback',
     (host) => {
-      expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
-        'http://[::1]:4170',
-      );
+      expect(
+        formatChannelWorkerDaemonUrl(host, 4170, false, undefined, true),
+      ).toBe('http://[::1]:4170');
     },
   );
 
@@ -1324,13 +1351,17 @@ describe('formatChannelWorkerDaemonUrl', () => {
     );
   });
 
-  // The oracle for the two cases above: a real socket per family, dialled at
-  // the address the worker is actually handed. A v6-only server models the
-  // bindv6only host; the dual-stack control proves the fix costs nothing
-  // there. Mutating either mapping back to the other family reddens this.
+  // The oracle for the mappings above: a real socket per bind shape, dialled
+  // at the address the worker is actually handed. The certification reads
+  // the host's interface table, so whichever loopback it picks IS assigned
+  // and the dial must succeed on every host where the bind itself succeeds —
+  // including runners that bind `::` yet carry no `::1`, the one state where
+  // the old spelling-based mapping was wrong (#9406). There is no v6-only
+  // arm: the daemon listens via `server.listen(port, host)`, and libuv pins
+  // IPV6_V6ONLY=0 unless `ipv6Only` is requested, so the product never binds
+  // a v6-only wildcard socket (`net.ipv6.bindv6only` cannot change that).
   it('hands workers a loopback address the bound socket really answers', async () => {
     for (const [bind, listenOptions] of [
-      ['::', { host: '::', port: 0, ipv6Only: true }],
       ['::', { host: '::', port: 0 }],
       ['0.0.0.0', { host: '0.0.0.0', port: 0 }],
       // R14-2: the v4-mapped wildcard binds a WORKING wildcard that serves
@@ -1365,13 +1396,6 @@ describe('formatChannelWorkerDaemonUrl', () => {
         // URL keeps IPv6 literals bracketed; net.connect wants them bare.
         const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
         const dial = await dialLoopback(dialHost, addr.port);
-        // EADDRNOTAVAIL means the certified loopback is not assigned on this
-        // host (IPv6-less runners bind `::` yet carry no `::1`) — the arm is
-        // unmeasurable here, same as a failed bind. A wrong mapping still
-        // reddens where the family exists: that dial fails ECONNREFUSED.
-        if (!dial.ok && dial.code === 'EADDRNOTAVAIL') {
-          continue;
-        }
         expect({
           bind: listenOptions,
           certified: certified.host,
@@ -11384,6 +11408,95 @@ describe('runQwenServe channel worker supervisor', () => {
       const opts = factory.mock.calls[0]![0];
       expect(opts.tlsCaCertPath).toBe(certPath);
       expect(opts.daemonUrl).toMatch(/^https:\/\//);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('certifies the channel worker daemon URL at boot before workers start', async () => {
+    // Deleting the assertChannelWorkerDaemonUrlIsLocal call site in
+    // ensureChannelWorkerManager leaves this uncalled (mutation M3 in the
+    // #9406 review): the direct-call suite above never observes the boot
+    // path, so pin the boot wiring itself.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-url-certify-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const channelWorkerUrlCertifier = vi.fn();
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        channelWorkerUrlCertifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(channelWorkerUrlCertifier).toHaveBeenCalledTimes(1);
+      const [daemonUrl, hostname] = channelWorkerUrlCertifier.mock.calls[0]!;
+      expect(hostname).toBe('127.0.0.1');
+      expect(daemonUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(factory).toHaveBeenCalled();
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('fails the channel boot when the worker URL certification refuses the bind', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-url-refuse-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        resolveOnListen: true,
+        channelWorkerUrlCertifier: () => {
+          throw new Error(
+            'Channels cannot start: --hostname "127.0.0.1" is not a ' +
+              'loopback bind',
+          );
+        },
+      },
+    );
+
+    try {
+      await expect(handle.runtimeReady).rejects.toThrow(
+        /Channels cannot start/,
+      );
+      expect(factory).not.toHaveBeenCalled();
     } finally {
       await handle.close();
     }

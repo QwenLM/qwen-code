@@ -80,7 +80,10 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isDeepHealthQuery } from './health-query.js';
-import { isOwnInterfaceAddress } from './local-bind-addresses.js';
+import {
+  hostAssignsIpv6Loopback,
+  isOwnInterfaceAddress,
+} from './local-bind-addresses.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -699,19 +702,21 @@ export function formatChannelWorkerDaemonUrl(
   port: number,
   tls = false,
   boundFamily?: 'IPv4' | 'IPv6',
+  ipv6LoopbackAssigned: boolean = hostAssignsIpv6Loopback(),
 ): string {
   const scheme = tls ? 'https' : 'http';
   const normalized = host.trim().toLowerCase();
   const canonicalIp = canonicalIpLiteral(normalized);
-  // R7-7: a wildcard bind's loopback has to match the FAMILY that was bound.
-  // An IPv6 wildcard socket answers 127.0.0.1 only when the kernel gives it a
-  // dual-stack mapping; on an IPv6-only host, or one with
-  // `net.ipv6.bindv6only=1` (historically Debian's default, still set on
-  // hardened hosts), it does not. Measured on this Node against a v6-only
-  // `[::]` socket: `dial 127.0.0.1` -> ECONNREFUSED while `dial ::1` -> ok;
-  // against a dual-stack `[::]` socket both succeed. So `::1` is the one
-  // address an IPv6 wildcard bind answers everywhere. The v4 wildcard keeps
-  // v4 loopback: measured against `0.0.0.0`, `dial ::1` is ECONNREFUSED.
+  // R7-7: the loopback an IPv6 wildcard bind is dialled back on follows what
+  // the host ASSIGNS, not the bind spelling. Node keeps such sockets
+  // dual-stack (libuv pins `IPV6_V6ONLY=0` unless `ipv6Only` is requested,
+  // so `net.ipv6.bindv6only` never reaches this listener), so both loopbacks
+  // usually reach it — but an IPv4-less host has only `::1`, and a host that
+  // binds `::` while its loopback carries no `::1` (e.g.
+  // `net.ipv6.conf.lo.disable_ipv6=1`) has only `127.0.0.1`. The old
+  // spelling-based rule handed the latter `[::1]`, and the first worker's
+  // `fetch failed` exited the daemon. The v4 wildcard keeps v4 loopback:
+  // measured against `0.0.0.0`, `dial ::1` is ECONNREFUSED.
   //
   // An EMPTY --hostname decides by the socket that actually bound, not by
   // spelling (R10-1): Node's `_listen2` tries the IPv6 unspecified address
@@ -719,15 +724,19 @@ export function formatChannelWorkerDaemonUrl(
   // fallback host the socket is IPv4 while the spelling said IPv6 — handing
   // workers `[::1]` there dialled an address nothing listens on, and the
   // first worker's failure exited the daemon. Explicit `::`/`[::]` and
-  // `0.0.0.0` keep their spelling-based mapping: those binds fail loud when
-  // their family is unavailable, so the spelling cannot lie about them.
+  // `0.0.0.0` keep their spelling-based family mapping: those binds fail
+  // loud when their family is unavailable, so the spelling cannot lie about
+  // them.
+  const v6Loopback = ipv6LoopbackAssigned
+    ? `${scheme}://[::1]:${port}`
+    : `${scheme}://127.0.0.1:${port}`;
   if (normalized === '') {
     return boundFamily === 'IPv4'
       ? `${scheme}://127.0.0.1:${port}`
-      : `${scheme}://[::1]:${port}`;
+      : v6Loopback;
   }
   if (canonicalIp === '::') {
-    return `${scheme}://[::1]:${port}`;
+    return v6Loopback;
   }
   // The v4 wildcard's IPv4-mapped spelling `::ffff:0.0.0.0` canonicalizes to
   // `::ffff:0:0` (WHATWG URL serializes the mapped form by dropping the
@@ -2059,6 +2068,14 @@ export interface RunQwenServeDeps {
     opts: CreateChannelWorkerSupervisorOptions,
   ) => ChannelWorkerSupervisor;
   workerTlsTrustVerifier?: typeof verifyWorkerTlsTrust;
+  /**
+   * Test/embed override for the boot-time certification that the channel
+   * worker daemon URL is local to this host. Production refuses a bind the
+   * host cannot answer through `assertChannelWorkerDaemonUrlIsLocal`; tests
+   * inject a recorder to pin that boot runs the certification before
+   * starting workers.
+   */
+  channelWorkerUrlCertifier?: typeof assertChannelWorkerDaemonUrlIsLocal;
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   /** Test/embed override; production uses the private user Conversations root. */
@@ -8190,7 +8207,11 @@ async function runQwenServeImpl(
               ? addr.family
               : undefined,
           );
-          assertChannelWorkerDaemonUrlIsLocal(workerDaemonUrl, opts.hostname);
+
+          (
+            deps.channelWorkerUrlCertifier ??
+            assertChannelWorkerDaemonUrlIsLocal
+          )(workerDaemonUrl, opts.hostname);
           if (
             tlsOptions &&
             tlsCertPath &&

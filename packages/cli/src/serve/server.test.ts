@@ -4072,6 +4072,30 @@ describe('createServeApp', () => {
       }
     });
 
+    it('forwards the native directory picker probe result to capabilities', async () => {
+      // M5 witness (#9406): the envelope mirror above calls the same probe
+      // as the product path, so on a headless host both sides say "tag
+      // absent" even when server.ts stops wiring the flag. Inject the probe
+      // result instead so the wiring is assertable on every host.
+      const enabled = await request(
+        createServeApp(baseOpts, undefined, {
+          nativeDirectoryPickerAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(enabled.body.features).toContain('native_directory_picker');
+
+      const disabled = await request(
+        createServeApp(baseOpts, undefined, {
+          nativeDirectoryPickerAvailable: false,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(disabled.body.features).not.toContain('native_directory_picker');
+    });
+
     it('omits artifact persistence when the durable sink is unavailable', async () => {
       const app = createServeApp(baseOpts, undefined, {
         sessionArtifactsPersistenceAvailable: false,
