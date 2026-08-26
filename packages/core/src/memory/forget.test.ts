@@ -51,12 +51,16 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'project',
         type: 'user',
         filePath: '/tmp/auto/user/note.md',
         relativePath: 'user/note.md',
         filename: 'note.md',
         title: 'Note',
         description: 'A note',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: '- summary: prefers tabs over spaces\n  why: legacy code uses tabs\n  howToApply: respect tabs in this repo',
         mtimeMs: 1,
       },
@@ -91,22 +95,30 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // 500 documents: the newest 499 are noise, the oldest one matches the
     // query. A plain recency slice would drop it; the bound must not.
     const docs = Array.from({ length: 499 }, (_, index) => ({
+      scope: 'project' as const,
       type: 'reference' as const,
       filePath: `/tmp/project/memory/reference/noise-${index}.md`,
       relativePath: `reference/noise-${index}.md`,
       filename: `noise-${index}.md`,
       title: `Noise ${index}`,
       description: 'Unrelated',
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
       body: 'Unrelated historical note',
       mtimeMs: 1_000 + index,
     }));
     docs.push({
+      scope: 'project' as const,
       type: 'reference' as const,
       filePath: '/tmp/project/memory/reference/overflow.md',
       relativePath: 'reference/overflow.md',
       filename: 'overflow.md',
       title: 'Overflow',
       description: 'Oldest',
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
       body: 'the saved codeword is overflow-zephyr-7040',
       mtimeMs: 1,
     });
@@ -137,24 +149,32 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // unselectable while recall can still inject it.
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
       Array.from({ length: 400 }, (_, index) => ({
+        scope: 'project' as const,
         type: 'reference' as const,
         filePath: `/tmp/project/memory/reference/proj-${index}.md`,
         relativePath: `reference/proj-${index}.md`,
         filename: `proj-${index}.md`,
         title: `Project ${index}`,
         description: 'Unrelated',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'Unrelated project note',
         mtimeMs: 10_000 + index,
       })),
     );
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue(
       Array.from({ length: 3 }, (_, index) => ({
+        scope: 'user' as const,
         type: 'user' as const,
         filePath: `/tmp/user/memories/user/old-${index}.md`,
         relativePath: `user/old-${index}.md`,
         filename: `old-${index}.md`,
         title: `Old ${index}`,
         description: 'Oldest',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'An old cross-project preference',
         mtimeMs: index + 1,
       })),
@@ -177,22 +197,30 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
 
   it('falls back to the full uncapped candidate list when the model fails', async () => {
     const docs = Array.from({ length: 500 }, (_, index) => ({
+      scope: 'project' as const,
       type: 'reference' as const,
       filePath: `/tmp/project/memory/reference/noise-${index}.md`,
       relativePath: `reference/noise-${index}.md`,
       filename: `noise-${index}.md`,
       title: `Noise ${index}`,
       description: 'Unrelated',
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
       body: 'Unrelated historical note',
       mtimeMs: 1_000 + index,
     }));
     docs.push({
+      scope: 'project' as const,
       type: 'reference' as const,
       filePath: '/tmp/project/memory/reference/overflow.md',
       relativePath: 'reference/overflow.md',
       filename: 'overflow.md',
       title: 'Overflow',
       description: 'Oldest',
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
       body: 'the saved codeword is overflow-zephyr-7040',
       mtimeMs: 1,
     });
@@ -244,12 +272,16 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
             'utf-8',
           );
           return {
+            scope: 'project' as const,
             type: 'reference' as const,
             filePath,
             relativePath: `reference/doc-${index}.md`,
             filename: `doc-${index}.md`,
             title: `Doc ${index}`,
             description: 'Matching',
+            category: 'uncategorized' as const,
+            keywords: [],
+            usageScenarios: [],
             body,
             mtimeMs: 1_000 + index,
           };
@@ -284,12 +316,16 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // quota itself decides the split. Mutating the quota changes these counts.
     const makeDocs = (scope: 'user' | 'project', dir: string, base: number) =>
       Array.from({ length: 300 }, (_, index) => ({
+        scope,
         type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
         filePath: `${dir}/doc-${index}.md`,
         relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
         filename: `doc-${index}.md`,
         title: `Doc ${index}`,
         description: 'Unrelated',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'Unrelated note',
         mtimeMs: base + index,
       }));
@@ -325,12 +361,16 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       base: number,
     ) =>
       Array.from({ length: count }, (_, index) => ({
+        scope,
         type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
         filePath: `${dir}/doc-${index}.md`,
         relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
         filename: `doc-${index}.md`,
         title: `Doc ${index}`,
         description: 'Matching',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'the saved codeword is overflow-zephyr-7040',
         mtimeMs: base + index,
       }));
@@ -362,12 +402,16 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // newest entries instead.
     const matching = (scope: 'user' | 'project', dir: string) =>
       Array.from({ length: 300 }, (_, index) => ({
+        scope,
         type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
         filePath: `${dir}/doc-${index}.md`,
         relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
         filename: `doc-${index}.md`,
         title: `Doc ${index}`,
         description: 'Matching',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'the saved codeword is overflow-zephyr-7040',
         mtimeMs: 1_000 + index,
       }));
@@ -401,12 +445,16 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // recency comparator (the model path never runs here).
     const matching = (scope: 'user' | 'project', dir: string) =>
       Array.from({ length: 300 }, (_, index) => ({
+        scope,
         type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
         filePath: `${dir}/doc-${index}.md`,
         relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
         filename: `doc-${index}.md`,
         title: `Doc ${index}`,
         description: 'Matching',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'the saved codeword is overflow-zephyr-7040',
         mtimeMs: 1_000 + index,
       }));
@@ -442,12 +490,16 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     // leave 50 entries undeleted after a model failure.
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
       Array.from({ length: 450 }, (_, index) => ({
+        scope: 'project' as const,
         type: 'reference' as const,
         filePath: `/tmp/project/memory/reference/match-${index}.md`,
         relativePath: `reference/match-${index}.md`,
         filename: `match-${index}.md`,
         title: `Match ${index}`,
         description: 'Matching',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'the saved codeword is overflow-zephyr-7040',
         mtimeMs: 1_000 + index,
       })),
@@ -487,24 +539,32 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
   it('indexes user and project candidates with scope-prefixed ids', async () => {
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'user',
         type: 'user',
         filePath: '/tmp/user/memories/user/note.md',
         relativePath: 'user/note.md',
         filename: 'note.md',
         title: 'User note',
         description: 'User note',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'User duplicate path preference',
         mtimeMs: 2,
       },
     ]);
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'project',
         type: 'project',
         filePath: '/tmp/project/memory/user/note.md',
         relativePath: 'user/note.md',
         filename: 'note.md',
         title: 'Project note',
         description: 'Project note',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'Project duplicate path preference',
         mtimeMs: 1,
       },
@@ -546,12 +606,16 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([]);
     vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'user',
         type: 'user',
         filePath: '/tmp/user/memories/user/editor.md',
         relativePath: 'user/editor.md',
         filename: 'editor.md',
         title: 'Editor',
         description: 'Editor preference',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
         body: 'Prefers compact editor output',
         mtimeMs: 1,
       },

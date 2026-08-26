@@ -78,6 +78,13 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('leaves mode-specific managed-memory access out of the core prompt', () => {
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).not.toContain('search_memory');
+    expect(prompt).not.toContain('Managed Memory Access');
+  });
+
   it('identifies UserPromptSubmit hook context as distinct from user input', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt();

@@ -78,6 +78,7 @@ const mockConfigInternal = {
   getDefaultFileEncoding: () => 'utf-8',
   getFileReadCache: () => fileReadCache,
   getFileReadCacheDisabled: () => false,
+  allowsDirectAutoMemoryWrite: vi.fn(() => true),
   getFileHistoryService: () => mockFileHistoryService,
   isRecordArtifactEnabled: vi.fn(() => false),
 };
@@ -95,6 +96,7 @@ describe('WriteFileTool', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockConfigInternal.allowsDirectAutoMemoryWrite.mockReturnValue(true);
     // The fileReadCache is module-scope (declared at L41) and shared
     // across every test in this file, so state from one test leaks
     // into the next. Clear it before each test so every test starts
@@ -296,6 +298,34 @@ describe('WriteFileTool', () => {
         }
         clearAutoMemoryRootCache();
       }
+    });
+
+    it('denies direct managed-memory writes in structured mode', async () => {
+      mockConfigInternal.allowsDirectAutoMemoryWrite.mockReturnValue(false);
+      const filePath = path.join(rootDir, '.qwen', 'memory', 'direct.md');
+      const invocation = tool.build({ file_path: filePath, content: 'body' });
+
+      expect(await invocation.getDefaultPermission()).toBe('deny');
+      const result = await invocation.execute(abortSignal);
+      expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(result.llmContent).toContain('Use manage_memory instead');
+      expect(fs.existsSync(filePath)).toBe(false);
+    });
+
+    it('keeps team-memory writes confirmable in structured mode', async () => {
+      mockConfigInternal.allowsDirectAutoMemoryWrite.mockReturnValue(false);
+      const filePath = path.join(
+        rootDir,
+        '.qwen',
+        'team-memory',
+        'feedback.md',
+      );
+      const invocation = tool.build({ file_path: filePath, content: 'body' });
+
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+      const result = await invocation.execute(abortSignal);
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('body');
     });
 
     it('blocks writing a secret to a team-memory path', () => {

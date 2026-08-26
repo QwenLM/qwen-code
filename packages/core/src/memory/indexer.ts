@@ -18,11 +18,13 @@ import {
   TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
 import {
+  scanAllAutoMemoryTopicDocumentsFromRoot,
   scanAutoMemoryTopicDocuments,
   scanTeamAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
+import type { AutoMemoryScope } from './types.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 const MAX_INDEX_LINE_CHARS = 150;
@@ -243,6 +245,19 @@ export async function rebuildManagedAutoMemoryIndex(
   const content = buildManagedAutoMemoryIndex(docs, metadata);
   await atomicWriteFile(getAutoMemoryIndexPath(projectRoot), content, {
     encoding: 'utf-8',
+  });
+  return content;
+}
+
+export async function rebuildAutoMemoryIndexAtRoot(
+  root: string,
+  scope: AutoMemoryScope,
+): Promise<string> {
+  const docs = await scanAllAutoMemoryTopicDocumentsFromRoot(root, scope);
+  const content = buildManagedAutoMemoryIndex(docs);
+  await atomicWriteFile(path.join(root, 'MEMORY.md'), content, {
+    encoding: 'utf-8',
+    noFollow: true,
   });
   return content;
 }

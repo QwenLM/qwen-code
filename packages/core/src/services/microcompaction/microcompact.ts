@@ -48,7 +48,99 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.EDIT,
   ToolNames.WRITE_FILE,
   ToolNames.SKILL,
+  ToolNames.SEARCH_MEMORY,
 ]);
+
+export interface MemoryBodyVersion {
+  memoryRef: string;
+  mtimeMs: number;
+}
+
+interface MemoryBodySlice extends MemoryBodyVersion {
+  start: number;
+  end: number;
+  total: number;
+}
+
+function getMemoryBodySlicesForResponse(
+  part: Part | undefined,
+): MemoryBodySlice[] {
+  if (part?.functionResponse?.name !== ToolNames.SEARCH_MEMORY) return [];
+  const output = part.functionResponse.response?.['output'];
+  if (typeof output !== 'string') return [];
+  try {
+    const parsed = JSON.parse(output) as {
+      mode?: unknown;
+      results?: Array<{
+        ref?: unknown;
+        version?: unknown;
+        content?: unknown;
+        range?: { start?: unknown; end?: unknown; total?: unknown };
+      }>;
+    };
+    if (
+      (parsed.mode !== 'fetch' && parsed.mode !== 'search') ||
+      !Array.isArray(parsed.results)
+    ) {
+      return [];
+    }
+    return parsed.results
+      .filter(
+        (result) =>
+          typeof result.ref === 'string' &&
+          typeof result.version === 'number' &&
+          typeof result.content === 'string' &&
+          result.content.length > 0 &&
+          typeof result.range?.start === 'number' &&
+          typeof result.range.end === 'number' &&
+          typeof result.range.total === 'number',
+      )
+      .map((result) => ({
+        memoryRef: result.ref as string,
+        mtimeMs: result.version as number,
+        start: result.range!.start as number,
+        end: result.range!.end as number,
+        total: result.range!.total as number,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function memoryBodyVersionKey(body: MemoryBodyVersion): string {
+  return `${body.memoryRef}\0${body.mtimeMs}`;
+}
+
+export function collectResidentMemoryBodies(
+  history: Content[],
+): MemoryBodyVersion[] {
+  const slicesByVersion = new Map<string, MemoryBodySlice[]>();
+  for (const content of history) {
+    for (const part of content.parts ?? []) {
+      for (const slice of getMemoryBodySlicesForResponse(part)) {
+        const key = memoryBodyVersionKey(slice);
+        const slices = slicesByVersion.get(key) ?? [];
+        slices.push(slice);
+        slicesByVersion.set(key, slices);
+      }
+    }
+  }
+  const complete: MemoryBodyVersion[] = [];
+  for (const slices of slicesByVersion.values()) {
+    const sorted = [...slices].sort((a, b) => a.start - b.start);
+    const first = sorted[0];
+    if (!first || first.start !== 0) continue;
+    let coveredUntil = 0;
+    for (const slice of sorted) {
+      if (slice.total !== first.total || slice.start > coveredUntil) break;
+      coveredUntil = Math.max(coveredUntil, slice.end);
+    }
+    if (coveredUntil >= first.total) {
+      complete.push({ memoryRef: first.memoryRef, mtimeMs: first.mtimeMs });
+    }
+  }
+  return complete;
+}
 
 /**
  * Tools whose blanked output drops a file's bytes from history. We
@@ -542,6 +634,8 @@ export interface MicrocompactMeta {
   tokensSaved: number;
   /** Recovered paths of files whose read/edit/write result was blanked; the caller disarms their fast-path (issue #4239). */
   evictedReadPaths: string[];
+  /** Memory bodies whose last remaining search_memory result was blanked. */
+  evictedMemoryBodies?: MemoryBodyVersion[];
   /**
    * Count of blanked file results whose path could NOT be recovered
    * (e.g. provider didn't populate `functionCall.id`). Non-zero means
@@ -678,6 +772,7 @@ export function microcompactHistory(
   }
 
   const evictedReadPaths = new Set<string>();
+  const clearedMemoryBodies = new Map<string, MemoryBodyVersion>();
   let unresolvedEvictedReads = 0;
 
   let tokensSaved = 0;
@@ -728,6 +823,11 @@ export function microcompactHistory(
               }
             } else {
               unresolvedEvictedReads++;
+            }
+          }
+          if (part.functionResponse.name === ToolNames.SEARCH_MEMORY) {
+            for (const body of getMemoryBodySlicesForResponse(part)) {
+              clearedMemoryBodies.set(memoryBodyVersionKey(body), body);
             }
           }
           return {
@@ -786,6 +886,12 @@ export function microcompactHistory(
     triggerReason === 'size'
       ? 0
       : Math.min(media.length + nestedMedia.length, keepRecent);
+  const residentMemoryBodies = new Set(
+    collectResidentMemoryBodies([
+      ...result,
+      ...normalizePendingContent(opts?.pendingContent),
+    ]).map(memoryBodyVersionKey),
+  );
 
   return {
     history: result,
@@ -805,6 +911,9 @@ export function microcompactHistory(
       keepRecent,
       tokensSaved,
       evictedReadPaths: [...evictedReadPaths],
+      evictedMemoryBodies: [...clearedMemoryBodies.values()]
+        .filter((body) => !residentMemoryBodies.has(memoryBodyVersionKey(body)))
+        .map(({ memoryRef, mtimeMs }) => ({ memoryRef, mtimeMs })),
       unresolvedEvictedReads,
     },
   };

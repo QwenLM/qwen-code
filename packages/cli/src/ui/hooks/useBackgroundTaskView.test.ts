@@ -215,12 +215,13 @@ const dream = (
       | 'skipped';
     progressText: string;
     error: string;
+    projectRoot: string;
     metadata: Record<string, unknown>;
   }> = {},
 ) => ({
   id,
   taskType: 'dream' as const,
-  projectRoot: '/test/project',
+  projectRoot: overrides.projectRoot ?? '/test/project',
   status: overrides.status ?? ('running' as const),
   createdAt: new Date(startTimeMs).toISOString(),
   updatedAt: new Date(startTimeMs).toISOString(),
@@ -629,6 +630,31 @@ describe('useBackgroundTaskView', () => {
     const [only] = result.current.entries;
     expect(only.kind).toBe('dream');
     expect(only.status).toBe('cancelled');
+  });
+
+  it('shows the current project Dream and global User Dream only', () => {
+    const { config } = makeConfig({
+      agents: () => [],
+      shells: () => [],
+      monitors: () => [],
+      dreams: () => [
+        dream('project-dream', 100),
+        dream('other-project-dream', 200, {
+          projectRoot: '/other/project',
+        }),
+        dream('user-dream', 300, {
+          projectRoot: '/global/user-memory',
+          metadata: { scope: 'user' },
+        }),
+      ],
+    });
+
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+
+    expect(result.current.entries.map(entryId)).toEqual([
+      'user-dream',
+      'project-dream',
+    ]);
   });
 
   it('subscribes to MemoryManager with a dream taskType filter so extract notifies are skipped at the source', () => {

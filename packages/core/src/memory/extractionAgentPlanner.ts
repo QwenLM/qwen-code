@@ -24,9 +24,11 @@ import type { AutoMemoryType } from './types.js';
 import {
   scanAutoMemoryTopicDocuments,
   scanUserAutoMemoryTopicDocuments,
+  type ScannedAutoMemoryDocument,
 } from './scan.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
+import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
 
@@ -44,6 +46,14 @@ const EXTRACTION_AGENT_SYSTEM_PROMPT = [
   '- If the user explicitly asks the assistant to remember something durable, preserve it.',
   '- Use one of the allowed topics: user, feedback, project, reference.',
   '- Keep entries concise and suitable for bullet points. No leading bullet markers.',
+  '- Keep one independently retrievable durable fact or rule per file.',
+  '- Create a separate file when new information has different usage scenarios, keywords, or staleness.',
+  '- Keep each memory body near or below 1,200 characters.',
+  '- Choose exactly one fixed category for every memory.',
+  '- Add 1-3 usage_scenarios for future tasks where this memory would help. Do not repeat the description.',
+  '- Add 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
+  '- Reuse an existing canonical term or phrase when it fits; otherwise create a new one.',
+  '- When updating a file, refresh its description, category, usage_scenarios, and full keyword list from the complete content.',
   '- Do not investigate repository code, git history, or unrelated files.',
   '- Work only from the conversation history in your context and the existing memory files.',
   '- If nothing durable should be saved, make no file changes.',
@@ -104,7 +114,10 @@ function truncate(text: string, maxChars: number): string {
   return `${normalized.slice(0, maxChars).trimEnd()}…`;
 }
 
-async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
+async function buildExistingMemoryContext(projectRoot: string): Promise<{
+  topicSummaries: string;
+  keywordVocabularySnapshot: string;
+}> {
   // Deliberately capped, unlike recall (recall.ts) and forget (forget.ts):
   // every doc is rendered into the extraction agent's task prompt below, so
   // an uncapped scan would grow that prompt without bound. Anything past the
@@ -136,18 +149,25 @@ async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
     ].join('\n');
   };
 
+  const docs: ScannedAutoMemoryDocument[] = [...userDocs, ...projectDocs];
   const blocks = [
     ...userDocs.map((doc) => renderDoc(doc, 'user')),
     ...projectDocs.map((doc) => renderDoc(doc, 'project')),
   ];
 
-  return blocks.join('\n\n');
+  return {
+    topicSummaries: blocks.join('\n\n'),
+    keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(docs, {
+      scopes: ['user', 'project'],
+    }),
+  };
 }
 
 function buildTaskPrompt(
   projectMemoryRoot: string,
   userMemoryRoot: string,
   topicSummaries: string,
+  keywordVocabularySnapshot: string,
 ): string {
   return [
     'Managed memory has TWO directories. Choose which one to write each memory into using the per-type `<scope>` guidance in your system instructions:',
@@ -175,6 +195,8 @@ function buildTaskPrompt(
     '## Existing memory files (across both directories)',
     '',
     topicSummaries || '(none yet)',
+    '',
+    keywordVocabularySnapshot,
   ].join('\n');
 }
 
@@ -260,7 +282,8 @@ export async function runAutoMemoryExtractionByAgent(
   }
   const extraHistory = buildAgentHistory(cacheSafe.history);
 
-  const topicSummaries = await buildTopicSummaryBlock(projectRoot);
+  const { topicSummaries, keywordVocabularySnapshot } =
+    await buildExistingMemoryContext(projectRoot);
   const projectMemoryRoot = getAutoMemoryRoot(projectRoot);
   const userMemoryRoot = getUserAutoMemoryRoot();
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
@@ -275,6 +298,7 @@ export async function runAutoMemoryExtractionByAgent(
       projectMemoryRoot,
       userMemoryRoot,
       topicSummaries,
+      keywordVocabularySnapshot,
     ),
     systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
     maxTurns: config.getMemoryAgentMaxTurns() ?? 5,

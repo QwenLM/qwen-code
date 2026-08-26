@@ -65,12 +65,16 @@ describe('runAutoMemoryExtractionByAgent', () => {
     });
     vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([
       {
+        scope: 'project',
         type: 'user',
         filePath: '/tmp/auto-memory/user/prefs.md',
         relativePath: 'user/prefs.md',
         filename: 'prefs.md',
         title: 'User Memory',
         description: 'User preferences',
+        category: 'uncategorized',
+        keywords: [],
+        usageScenarios: [],
         body: '- Existing terse preference.',
         mtimeMs: 1,
       },
@@ -97,6 +101,9 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(getCacheSafeParams).toHaveBeenCalledWith('session-1');
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
+        systemPrompt: expect.stringMatching(
+          /category[\s\S]*usage_scenarios[\s\S]*discriminative retrieval terms or short phrases/,
+        ),
         tools: [
           'read_file',
           'grep_search',

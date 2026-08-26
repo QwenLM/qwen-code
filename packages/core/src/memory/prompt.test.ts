@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildManagedAutoMemoryPrompt,
+  buildStructuredAutoMemoryPrompt,
   CONDENSED_DO_NOT_SAVE_SECTION,
   CONDENSED_TEAM_GUIDANCE,
   CONDENSED_TYPES_SECTION,
@@ -15,6 +16,22 @@ import {
 } from './prompt.js';
 
 describe('managed auto-memory prompt helpers', () => {
+  it('keeps the structured main-model contract minimal', () => {
+    const prompt = buildStructuredAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '/home/user/.qwen/memories',
+      '/tmp/project/.qwen/team-memory',
+    );
+
+    expect(prompt).toContain('complete tree and focused metadata');
+    expect(prompt).toContain('search_memory only when');
+    expect(prompt).not.toContain('remember, update, or forget');
+    expect(prompt).not.toContain('frontmatter');
+    expect(prompt).not.toContain('usage_scenarios');
+    expect(prompt).not.toContain('## Memory categories');
+    expect(prompt).not.toContain('```markdown');
+  });
+
   it('builds a condensed memory prompt when MEMORY.md is empty', () => {
     const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
 
@@ -308,7 +325,13 @@ describe('managed auto-memory prompt helpers', () => {
   it('condensed prompt includes maintenance directives', () => {
     const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
 
-    expect(prompt).toContain('Keep the name, description, and type fields');
+    expect(prompt).toContain(
+      'Keep the name, description, type, category, keywords, and usage_scenarios fields',
+    );
+    expect(prompt).toContain('one independently retrievable fact or rule');
+    expect(prompt).toContain('body near or below 1,200 characters');
+    expect(prompt).toContain('discriminative retrieval terms or short phrases');
+    expect(prompt).toContain('domain-qualified phrases');
     expect(prompt).toContain('Organize memories semantically by topic');
     expect(prompt).toContain(
       'Update or remove memories that turn out to be wrong',

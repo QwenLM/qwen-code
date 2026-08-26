@@ -66,6 +66,9 @@ export {
   logMemoryDream,
   logMemoryRecall,
   logMemoryRecallDelivery,
+  logMemorySearch,
+  logMemoryMigration,
+  logMemoryRecallModeTransition,
 } from './loggers.js';
 export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
 export {
@@ -97,6 +100,9 @@ export {
   MemoryDreamEvent,
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
+  MemoryMigrationEvent,
+  MemoryRecallModeTransitionEvent,
   RepeatedToolFailureGuardEvent,
 } from './types.js';
 export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';

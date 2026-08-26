@@ -182,6 +182,30 @@ describe('GlobTool', () => {
       );
     });
 
+    it('filters managed auto-memory paths only in structured mode', async () => {
+      const memoryDir = path.join(tempRootDir, '.qwen', 'memory', 'user');
+      await fs.mkdir(memoryDir, { recursive: true });
+      const memoryFile = path.join(memoryDir, 'preference.md');
+      await fs.writeFile(memoryFile, 'memory');
+
+      const structuredTool = new GlobTool({
+        ...mockConfig,
+        getMemoryRecallMode: () => 'structured',
+      } as Config);
+      const structuredResult = await structuredTool
+        .build({ pattern: '**/*.md' })
+        .execute(abortSignal);
+      expect(structuredResult.llmContent).not.toContain(memoryFile);
+      expect(structuredResult.llmContent).toContain(
+        path.join(tempRootDir, 'sub', 'fileC.md'),
+      );
+
+      const legacyResult = await globTool
+        .build({ pattern: '**/*.md' })
+        .execute(abortSignal);
+      expect(legacyResult.llmContent).toContain(memoryFile);
+    });
+
     it('should return "No files found" message when pattern matches nothing', async () => {
       const params: GlobToolParams = { pattern: '*.nonexistent' };
       const invocation = globTool.build(params);

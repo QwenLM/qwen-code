@@ -121,6 +121,8 @@ describe('dreamAgentPlanner', () => {
 
     expect(prompt).toContain('`pinned/`');
     expect(prompt).toContain('Skip `pinned/` during Dream');
+    expect(prompt).toContain('description`, `category`, `usage_scenarios`');
+    expect(prompt).toContain('2-6 discriminative retrieval terms');
     expect(prompt).toContain(
       'Do not intentionally remove existing index entries for valid `pinned/` files',
     );
@@ -143,6 +145,10 @@ describe('dreamAgentPlanner', () => {
     expect(result).toBe(mockResult);
     expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
+        taskPrompt: expect.stringContaining('.dream-operations.json'),
+        systemPrompt: expect.stringContaining(
+          'discriminative retrieval terms or short phrases',
+        ),
         maxTurns: 8,
         maxTimeMinutes: 5,
         tools: [

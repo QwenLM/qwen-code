@@ -173,6 +173,9 @@ function createMockConfig(
         ...overrides.fileReadCache,
       }) as unknown as FileReadCache,
     getGeminiClient: () => client as never,
+    getMemoryManager: () => ({
+      markMemoryBodiesEvictedFromHistory: vi.fn(),
+    }),
     getClearContextOnIdle: () => ({
       clearContextMinutes: 60,
       toolResultsNumToKeep: 5,
