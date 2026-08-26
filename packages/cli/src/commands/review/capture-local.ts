@@ -53,7 +53,8 @@ import {
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
-import { gitOpt } from './lib/git.js';
+import { gitOpt, gitRaw } from './lib/git.js';
+import { LITERAL_PATHSPECS } from './lib/diff-flags.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
@@ -161,6 +162,65 @@ function display(path: string): string {
  * — or that either side cannot hash — is refused, at the cost of a full
  * round.
  */
+/**
+ * Whether a FILE review's subject is a directory — the one shape that must
+ * not enter the anchor's hashed population (see the call site). Only a
+ * confirmed directory answers true: an unmeasurable path keeps the
+ * pre-existing behaviour rather than silently dropping the subject's
+ * coverage, the opposite lean from the ENOENT-only rules elsewhere because
+ * the risk here is a poisoned anchor, not a false certification.
+ */
+function isDirectorySubject(repoRoot: string, rel: string): boolean {
+  try {
+    return lstatSync(join(repoRoot, rel)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Which of `paths` the tree at `rev` records as a submodule gitlink.
+ *
+ * Asked of git rather than inferred: `hashWorktreeFiles` and
+ * `revisionIdentities` both answer UNHASHABLE for a gitlink, so the
+ * placeholder they share cannot tell a submodule from an unreadable name —
+ * and only the submodule is one git measures for itself. An unlistable
+ * revision answers nothing, which leaves every path refused.
+ */
+function gitlinkPathsAt(
+  repoRoot: string,
+  rev: string,
+  paths: readonly string[],
+): string[] {
+  let raw: Buffer;
+  try {
+    raw = gitRaw(
+      '-C',
+      repoRoot,
+      LITERAL_PATHSPECS,
+      'ls-tree',
+      '-z',
+      rev,
+      '--',
+      ...paths,
+    );
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const rec of raw.toString('utf8').split('\0')) {
+    // `<mode> SP <type> SP <oid> TAB <path>` — 160000 is the gitlink mode.
+    if (!rec.startsWith('160000 ')) continue;
+    const tab = rec.indexOf('\t');
+    if (tab === -1) continue;
+    const path = rec.slice(tab + 1);
+    // A decode that mangled the name cannot be matched back to the caller's
+    // spelling; leaving it out keeps it refused.
+    if (!path.includes('\ufffd')) out.push(path);
+  }
+  return out;
+}
+
 function vanishedStillOnDisk(
   repoRoot: string,
   headSha: string | null,
@@ -198,19 +258,62 @@ function vanishedStillOnDisk(
   // `git diff HEAD` stays empty. Certifying by the FULL identity then
   // refused every such path (and the stop suppression beside it withheld
   // every stop) over a divergence git does not recognise: fold 100755 into
-  // 100644 and compare. The fold is the exec bit ONLY — the mode still
-  // carries the file↔symlink type, which git reports under every fileMode.
-  const identity =
-    gitOpt('-C', repoRoot, 'config', '--get', 'core.fileMode') !== 'false'
-      ? (id: string | undefined) => id
-      : (id: string | undefined) =>
-          id !== undefined && id.startsWith('100755:')
-            ? `100644:${id.slice('100755:'.length)}`
-            : id;
+  // 100644 and compare.
+  //
+  // The flag is read `--type=bool`, never raw: `--get` echoes the STORED
+  // spelling and git accepts `off`/`no`/`0`/`FALSE`, every one of which
+  // failed a `!== 'false'` test and silently disabled the fold (R20-1 — the
+  // same misreading R18-2 fixed for `core.sparseCheckout`). Only an
+  // EXPLICIT false folds: the knob defaults to true, and an unset one must
+  // not erase a real exec divergence from the comparison.
+  //
+  // DISCLOSED, not folded: `core.symlinks=false` erases the file↔symlink
+  // TYPE the same way — git materializes a tracked symlink as a regular
+  // file, so the worktree side reads `100644:<oid>:<attrs>` against HEAD's
+  // `120000:<oid>` and the designed discarded-change shape never certifies
+  // (R20-5). A mode fold does NOT close it: the two spellings also differ
+  // in whether they carry rendering attributes at all, so folding the mode
+  // leaves them unequal, and equalizing the attributes would mean dropping
+  // the rendering dimension for that path — trading a bounded over-review
+  // for a certification this layer cannot make. The cost is that such a
+  // path is re-reviewed every round on repos with the knob off; the
+  // direction is the affordable one, as everywhere else here.
+  const foldsExec =
+    gitOpt(
+      '-C',
+      repoRoot,
+      'config',
+      '--type=bool',
+      '--get',
+      'core.fileMode',
+    ) === 'false';
+  const identity = (id: string | undefined): string | undefined =>
+    foldsExec && id !== undefined && id.startsWith('100755:')
+      ? `100644:${id.slice('100755:'.length)}`
+      : id;
+  // A path this layer cannot hash on EITHER side is normally uncertifiable —
+  // the `worktree === UNHASHABLE` clause below. One class is different: a
+  // submodule GITLINK is unhashable by design here (a directory in the
+  // worktree, type `commit` in the tree), yet git measures it itself and the
+  // pinned flags keep it in the capture (`--ignore-submodules=none`). So its
+  // absence from the diff IS git's own answer that the pointer did not move,
+  // and refusing it every round wedged the loop for ever on any repo whose
+  // round-1 review touched a submodule (R20-3). Ask git which of them are
+  // gitlinks rather than infer it from the placeholder both sides share:
+  // anything else unhashable — an undecodable name, a FIFO — still refuses.
+  const bothUnhashable = onDisk.filter(
+    (p) => worktree[p] === UNHASHABLE && head[p] === UNHASHABLE,
+  );
+  const gitlinks = new Set(
+    bothUnhashable.length === 0 || headSha === null
+      ? []
+      : gitlinkPathsAt(repoRoot, headSha, bothUnhashable),
+  );
   return onDisk.filter(
     (path) =>
-      identity(worktree[path]) !== identity(head[path]) ||
-      worktree[path] === UNHASHABLE,
+      !gitlinks.has(path) &&
+      (identity(worktree[path]) !== identity(head[path]) ||
+        worktree[path] === UNHASHABLE),
   );
 }
 
@@ -526,7 +629,21 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       // `git diff HEAD` while `hash-object` reads through the bit — hashing
       // the subject keeps the next round's comparison honest instead of
       // certifying "unchanged since last round" over bytes nobody read.
-      ...(sourcePath !== undefined ? [sourcePath] : []),
+      //
+      // …but a DIRECTORY subject is not hashable, and `qwen review <dir>`
+      // is a supported entrance. Recorded, it lands in every candidate as
+      // UNHASHABLE — which never equals itself — so `changedSince` reports
+      // the directory every round, `stateChanged` is never empty, and the
+      // `unchanged-since-last-round` stop is unreachable for that target
+      // for ever (R20-2), while the round prints "could not be hashed on
+      // either side" about the user's own subject. Its FILES are already
+      // in `fullPlan.files`; the directory itself carries no bytes to
+      // certify. Only a confirmed directory is skipped: an lstat that
+      // fails leaves the subject in, which is the pre-existing coverage.
+      ...(sourcePath !== undefined &&
+      !isDirectorySubject(capture.repoRoot, sourcePath)
+        ? [sourcePath]
+        : []),
     ]),
   ];
   const hashes = hashWorktreeFiles(capture.repoRoot, planPaths);
