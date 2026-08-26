@@ -186,7 +186,14 @@ export function untrustedGitfile(
   if (resolved.error || resolved.status !== 0 || !resolved.stdout) {
     return `${tree}: git could not resolve its own git dir`;
   }
-  const target = resolved.stdout.trim();
+  // Strip the terminator `rev-parse` adds, and NOTHING else. `.trim()` here
+  // re-opened the very divergence the paragraph above closes: it also removes
+  // U+00A0, U+FEFF and the U+2000 block, so an admin entry whose directory name
+  // ENDS in one of those is resolved by git with the character kept and judged
+  // here with it gone — and a twin of that name without it, symlinked outside
+  // the mount, is what the judgment then lands on. The resolver that decides
+  // has to receive git's answer unedited.
+  const target = resolved.stdout.replace(/\r?\n$/, '');
   if (adminEntryInsideReviewTmp(target, mountRoot, tree)) {
     return `${tree}'s admin entry is inside the review temp dir, where the reviewed code can rewrite it`;
   }

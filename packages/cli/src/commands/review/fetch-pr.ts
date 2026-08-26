@@ -999,10 +999,14 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     try {
       mkdirSync(dirname(wt), { recursive: true });
       // The fresh path checks files out too, and resolves through the same
-      // pointer the resume path was gated on. A tree left planted by a
-      // previous run is removed by `cleanStale` above, but a pointer rewritten
-      // in THIS run's build phase is still here.
-      const freshUntrusted = untrustedGitfile(wt, mountRootFor);
+      // pointer the resume path was gated on — but the pointer it resolves
+      // through is the LAUNCH directory's, not the new tree's: `git()` sets no
+      // cwd, so `worktree add` finds the repository from `process.cwd()`.
+      // Gating `wt` was a no-op — `cleanStale` above has just removed whatever
+      // stood there, and a tree that does not exist has no pointer to
+      // distrust. In the nested geometry `mountRootFor` itself documents, the
+      // outer review's containerized phase can rewrite exactly this one.
+      const freshUntrusted = untrustedGitfile(process.cwd(), mountRootFor);
       if (freshUntrusted !== null) {
         throw new Error(
           `refusing to create a review worktree: ${freshUntrusted}`,

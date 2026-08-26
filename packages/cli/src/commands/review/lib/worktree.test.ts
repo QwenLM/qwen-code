@@ -1880,6 +1880,8 @@ describe('worktreeCreateFailureDetail', () => {
   });
 });
 
+const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
+
 describe('untrustedGitfile', () => {
   const made: string[] = [];
   const tmp = () => {
@@ -1972,6 +1974,31 @@ describe('untrustedGitfile', () => {
     // Node would resolve the real entry here; git resolves the planted one.
     expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
   });
+
+  itWhereContainmentExists(
+    "takes git's answer unedited, trailing NBSP and all",
+    () => {
+      // The trap the ASK GIT fix walked back into: `.trim()` on git's stdout
+      // removes U+00A0 too, so an entry whose directory NAME ends in one is
+      // resolved by git with it and judged here without it — and a twin of
+      // that name minus the character, symlinked outside the mount, is what
+      // the judgment then lands on. Only the terminator may be stripped.
+      const { repo, tree, mount } = pipelineTree();
+      const real = readFileSync(join(tree, '.git'), 'utf8')
+        .trim()
+        .replace('gitdir: ', '');
+      const planted = join(repo, '.qwen', 'tmp', 'entry\u00a0');
+      const twin = join(repo, '.qwen', 'tmp', 'entry');
+      cpSync(real, planted, { recursive: true });
+      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
+      // The twin points OUTSIDE the mount; trimming the NBSP lands here.
+      symlinkSync(repo, twin);
+      writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
+
+      expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
+    },
+  );
 
   it('says nothing about a tree that does not exist yet', () => {
     // `--resume` asks about a worktree before deciding whether to build one.
