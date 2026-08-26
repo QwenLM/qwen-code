@@ -107,6 +107,34 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('pins the pre-verify carried-ledger dedup as a mechanical step (#10105)', () => {
+    const body = coreBody();
+    // The command, not prose: the whole point is that the model is out of
+    // the matching loop, in the spirit of the script-lint gate.
+    expect(body).toContain('review dedup-candidates --plan');
+    // The kept list is what shards — a run that shards the raw union pays
+    // the verify cost the step exists to end.
+    expect(body).toContain(
+      "**Build the verify shards from the report's `kept` list only.**",
+    );
+    // The safe-to-be-wrong direction, both halves: the severity guard and
+    // the posting-layer backstop.
+    expect(body).toContain(
+      'a Critical candidate never drops against a non-Critical entry',
+    );
+    expect(body).toContain(
+      "the posting layer's duplicate drop remains the backstop",
+    );
+    // A dropped candidate's claim survives through the Step 6 ruling — the
+    // sentence that licenses dropping it at all.
+    expect(body).toContain(
+      'a matched posted finding is a ledger entry Step 6 still rules on',
+    );
+    // Step 5's reporting rounds route their fresh findings through the same
+    // command, or the leak reopens from round 3 on.
+    expect(body).toContain('the report accumulates within the round');
+  });
+
   it('keeps the language-pitfall and wrapper/proxy checks as dedicated high-effort angles', () => {
     // #9788: both rode inside Agent 1a's line-by-line brief as bullets, and
     // the walk's rhythm diluted them — a checklist pattern-match and a

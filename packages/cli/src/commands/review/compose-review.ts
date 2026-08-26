@@ -69,6 +69,7 @@ import {
 import { repositoryContextOf } from './lib/repository-context.js';
 import { layerAuditGate } from './lib/layer-audit-gate.js';
 import { diffHashOf, type ScriptLintReport } from './script-lint.js';
+import { ledgerDedupFacts } from './dedup-candidates.js';
 import type { TestPlanReport } from './test-plan.js';
 import {
   LEDGER_BODY_FILE,
@@ -4482,6 +4483,47 @@ function composeReviewBody(
           },
         ];
 
+  // Candidates the pre-verify carried-ledger dedup set aside (issue #10105) —
+  // read from the report the Step 4 command wrote, the same
+  // model-out-of-the-loop shape as `scriptLintGate` but non-capping: nothing
+  // is owed, so an absent or stale report renders nothing. Only validated ids
+  // are quoted (the titles are model-written and stay in the report), so this
+  // block needs none of the sanitation the model-written lists above get.
+  const ledgerDedup: ReturnType<typeof ledgerDedupFacts> = input.planPath
+    ? ledgerDedupFacts(input.planPath)
+    : { droppedCount: 0, ids: [] };
+  const MAX_DEDUP_IDS_SHOWN = 12;
+  const dedupIdsShown = ledgerDedup.ids
+    .slice(0, MAX_DEDUP_IDS_SHOWN)
+    .map(({ id, n }) => (n > 1 ? `${id} ×${n}` : id));
+  const dedupIdsMore = ledgerDedup.ids.length - dedupIdsShown.length;
+  const dedupIdList =
+    dedupIdsShown.length === 0
+      ? ''
+      : dedupIdsShown.join(', ') +
+        (dedupIdsMore > 0 ? `, +${dedupIdsMore} more` : '');
+  const ledgerDedupBlock: Bi[] =
+    ledgerDedup.droppedCount === 0
+      ? []
+      : [
+          {
+            trim: 1,
+            en:
+              `${ledgerDedup.droppedCount} candidate finding(s) this round's ` +
+              `reviewers re-derived matched entries already carried on this PR ` +
+              `and were set aside before verification` +
+              (dedupIdList ? ` (${dedupIdList})` : '') +
+              ` — a matched posted finding is ruled in the previous-round ` +
+              `status as always, and a matched deferral stays on the standing ` +
+              `deferral record.`,
+            zh:
+              `本轮评审重新推导出的 ${ledgerDedup.droppedCount} 条候选发现与本 PR ` +
+              `已携带的条目匹配，已在验证前搁置` +
+              (dedupIdList ? `（${dedupIdList}）` : '') +
+              `——被匹配的已发布条目照常在上一轮状态区裁定，被匹配的延后条目仍保留在延后清单记录中。`,
+          },
+        ];
+
   const contextUnavailableClause: Bi = {
     keep: 1,
     en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
@@ -4872,6 +4914,7 @@ function composeReviewBody(
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...approachBlock,
       ...duplicatesBlock,
+      ...ledgerDedupBlock,
       ...cannotTellBlock,
       ...notReviewedForBody,
       ...unverifiedTagsBlock,
@@ -4927,9 +4970,12 @@ function composeReviewBody(
     // With posture-deferred Suggestions on record, "No issues found" would be
     // a lie the deferral list two lines down contradicts: the review DID find
     // them — it recorded them and chose, per the posture, not to request them.
+    // The carried-ledger dedup disclosure contradicts it the same way: the
+    // reviewers derived those candidates; the round set them aside because
+    // the PR already carries them.
     const body = render(
       [
-        deferredSuggestionsBlock.length
+        deferredSuggestionsBlock.length || ledgerDedupBlock.length
           ? {
               keep: 1,
               en: 'No blocking issues. LGTM! ✅',
@@ -4940,6 +4986,7 @@ function composeReviewBody(
               en: 'No issues found. LGTM! ✅',
               zh: '未发现问题。LGTM！✅',
             },
+        ...ledgerDedupBlock,
         ...notReviewedForBody,
         ...deferredBlock,
         ...testPlanBlock,
@@ -4961,6 +5008,7 @@ function composeReviewBody(
         ...continuityBlock,
       ],
       notReviewedParts.length ||
+        ledgerDedupBlock.length ||
         deferredBlock.length ||
         testPlanBlock.length ||
         repositoryContextBlock.length ||
@@ -5145,6 +5193,10 @@ function composeReviewBody(
   // 4a. Duplicate-dropped Suggestions — built above with the other body
   //     blocks; it renders on every event, RC included.
   clauses.push(...duplicatesBlock);
+
+  // 4b. Pre-verify carried-ledger dedup disclosure — same render-on-every-
+  //     event rule as 4a, whose posting-layer drop it front-runs.
+  clauses.push(...ledgerDedupBlock);
 
   // 5. Unresolved existing Criticals.
   clauses.push(...cannotTellBlock);
@@ -5371,8 +5423,9 @@ interface Bi {
    * operator-facing mechanism-health note (trim rank -1), then the
    * persistently-critical advisory (trim rank 0 — the maintainer has it
    * whole on the terminal line and in the composed JSON), then the display
-   * of findings the review deliberately did NOT request (the deferral list,
-   * trim rank 1, kept whole in the findings artifact), then the disclosures
+   * of findings the review deliberately did NOT request (the deferral list
+   * and the carried-ledger dedup disclosure, trim rank 1 — kept whole in the
+   * findings artifact and the dedup report), then the disclosures
    * of what went unreviewed (trim rank 2, which have no other durable
    * copy), and the convergence observation last (trim rank 3 — see its own
    * block for why the cheapest paragraph is shed last). The blockers, the

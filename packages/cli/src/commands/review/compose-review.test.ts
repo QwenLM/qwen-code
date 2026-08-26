@@ -1916,6 +1916,95 @@ describe('composeReview — duplicate-dropped Suggestions (#9204: the body claim
   });
 });
 
+describe('composeReview — pre-verify carried-ledger dedup disclosure (#10105)', () => {
+  // The disclosure is deterministic: it reads the report `dedup-candidates`
+  // wrote beside the plan, bound to the plan diff's hash — the same freshness
+  // key as the script-lint gate, but non-capping: absent or stale renders
+  // nothing, because nothing is owed.
+  const PR = 8255;
+  function planWithReport(over: Record<string, unknown> = {}): string {
+    const p = coveredPlan(['verify', 'reverse-audit'], { prNumber: PR });
+    writeFileSync(
+      join(dirname(p), `qwen-review-pr-${PR}-ledger-dedup.json`),
+      JSON.stringify({
+        v: 1,
+        diffHash: DIFF_HASH,
+        sources: { ledger: { round: 3, findings: 2 }, artifact: null },
+        kept: [],
+        dropped: [
+          dropEntry('R3-2'),
+          dropEntry('R3-2'),
+          dropEntry('D5-1'),
+          dropEntry('not-an-id'),
+        ],
+        droppedCount: 4,
+        note: '',
+        ...over,
+      }),
+    );
+    return p;
+  }
+  const dropEntry = (matchedId: string) => ({
+    file: 'src/a.ts',
+    line: 42,
+    title: 'a re-derived claim',
+    severity: 'Suggestion',
+    matchedId,
+    matchedTitle: 'the carried claim',
+    via: 'posted',
+  });
+
+  // Not base(): its planPath default runs coveredPlan() again on the same
+  // path and would overwrite the pr-numbered plan the report name derives
+  // from (same trap the Chinese-fold duplicate test names).
+  function input(
+    planPath: string,
+    over: Partial<ComposeReviewInput> = {},
+  ): ComposeReviewInput {
+    return {
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      ...over,
+    };
+  }
+
+  it('renders the set-aside count with the validated ids only', () => {
+    const r = composeReview(input(planWithReport()));
+    // Beside the disclosure, "No issues found" would be a lie — the
+    // reviewers derived those candidates; the round set them aside.
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('No blocking issues. LGTM!');
+    expect(r.body).not.toContain('No issues found');
+    expect(r.body).toContain(
+      "4 candidate finding(s) this round's reviewers re-derived matched entries already carried on this PR and were set aside before verification (R3-2 ×2, D5-1)",
+    );
+    // The shapeless id is counted but never quoted — the titles stay in the
+    // report; only ids the two shape tests vouch for reach the posted body.
+    expect(r.body).not.toContain('not-an-id');
+  });
+
+  it('renders on a blocking event too — the drop happened either way', () => {
+    const r = composeReview(input(planWithReport(), { criticalsInline: 1 }));
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('set aside before verification');
+  });
+
+  it('renders nothing off a stale report — its diffHash is another round’s', () => {
+    const r = composeReview(
+      input(planWithReport({ diffHash: 'another-diff' })),
+    );
+    expect(r.body).not.toContain('set aside before verification');
+  });
+
+  it('renders nothing when no report exists', () => {
+    const r = composeReview(base({}));
+    expect(r.body).not.toContain('set aside before verification');
+  });
+});
+
 describe('composeReview — presubmit downgrades', () => {
   it('downgradeApprove turns a clean APPROVE into COMMENT with the downgrade sentence', () => {
     const r = composeReview(

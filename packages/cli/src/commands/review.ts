@@ -34,6 +34,7 @@ import { driveCommand } from './review/drive.js';
 import { mockProviderCommand } from './review/mock-provider.js';
 import { extractStepCommand } from './review/extract-step.js';
 import { scriptLintCommand } from './review/script-lint.js';
+import { dedupCandidatesCommand } from './review/dedup-candidates.js';
 import { submitCommand } from './review/submit.js';
 import { testEfficacyCommand } from './review/test-efficacy.js';
 import { testPlanCommand } from './review/test-plan.js';
@@ -75,6 +76,7 @@ export const reviewCommand: CommandModule = {
       .command(mockProviderCommand)
       .command(extractStepCommand)
       .command(scriptLintCommand)
+      .command(dedupCandidatesCommand)
       .command(resolveAnchorsCommand)
       .command(checkCoverageCommand)
       .command(costLedgerCommand)
@@ -90,7 +92,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, scratch-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, scratch-tree, test-delta, drive, mock-provider, extract-step, script-lint, dedup-candidates, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {
