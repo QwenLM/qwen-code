@@ -9,7 +9,10 @@ import type {
 import { useI18n } from '../../i18n';
 import { isSessionDisconnectedError } from '../../utils/sessionErrors';
 import { formatDuration } from '../messages/StatsMessage';
-import { localizeToolDisplayName } from '../messages/toolFormatting';
+import {
+  localizeAgentTypeName,
+  localizeToolDisplayName,
+} from '../messages/toolFormatting';
 import styles from './TokenUsagePanel.module.css';
 
 const POLL_INTERVAL_MS = 2_000;
@@ -306,37 +309,41 @@ function TokenUsageBody({
         </div>
       </section>
 
-      <details className={styles.section}>
-        <summary className={styles.collapsibleSummary}>
-          <h3 className={styles.sectionTitle}>{t('tokenUsage.subagents')}</h3>
-          <ChevronRightIcon
-            className={styles.collapseIcon}
-            size={14}
-            aria-hidden="true"
-          />
-        </summary>
-        {subagentEntries.length > 0 ? (
-          <div className={styles.subagentList}>
-            {subagentEntries.map((source) => (
-              <SubagentCard key={source.id} source={source} />
-            ))}
-          </div>
-        ) : (
-          <div className={styles.empty}>{t('tokenUsage.noSubagents')}</div>
-        )}
-      </details>
+      {status.sources !== undefined && (
+        <details className={styles.section}>
+          <summary className={styles.collapsibleSummary}>
+            <h3 className={styles.sectionTitle}>{t('tokenUsage.subagents')}</h3>
+            <ChevronRightIcon
+              className={styles.collapseIcon}
+              size={14}
+              aria-hidden="true"
+            />
+          </summary>
+          {subagentEntries.length > 0 ? (
+            <div className={styles.subagentList}>
+              {subagentEntries.map((source) => (
+                <SubagentCard key={source.id} source={source} />
+              ))}
+            </div>
+          ) : (
+            <div className={styles.empty}>{t('tokenUsage.noSubagents')}</div>
+          )}
+        </details>
+      )}
 
-      <details className={styles.section}>
-        <summary className={styles.collapsibleSummary}>
-          <h3 className={styles.sectionTitle}>{t('tokenUsage.tools')}</h3>
-          <ChevronRightIcon
-            className={styles.collapseIcon}
-            size={14}
-            aria-hidden="true"
-          />
-        </summary>
-        <ToolList status={status} />
-      </details>
+      {status.tools.byName !== undefined && (
+        <details className={styles.section}>
+          <summary className={styles.collapsibleSummary}>
+            <h3 className={styles.sectionTitle}>{t('tokenUsage.tools')}</h3>
+            <ChevronRightIcon
+              className={styles.collapseIcon}
+              size={14}
+              aria-hidden="true"
+            />
+          </summary>
+          <ToolList status={status} />
+        </details>
+      )}
     </>
   );
 }
@@ -362,7 +369,7 @@ function LegendEntry({
           aria-hidden="true"
         />
       )}
-      <span className={styles.legendLabel}>{label}</span>
+      <span>{label}</span>
       <span className={styles.legendValue}>{formatCompact(value)}</span>
       {percent && <span className={styles.legendPercent}>{percent}</span>}
     </span>
@@ -421,7 +428,9 @@ function SubagentCard({ source }: { source: DaemonSessionStatsSource }) {
           {source.name}
         </span>
         {source.type && (
-          <span className={styles.subagentType}>{source.type}</span>
+          <span className={styles.subagentType}>
+            {localizeAgentTypeName(source.type, t)}
+          </span>
         )}
       </div>
       <div className={styles.subagentBreakdown}>

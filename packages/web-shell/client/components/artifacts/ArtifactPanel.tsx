@@ -205,6 +205,7 @@ export type ArtifactPanelTab =
       title: string;
       sessionId?: string;
       sessionActions?: DaemonSessionActions;
+      closeWithPane?: boolean;
     };
 
 type WorkspaceScopedArtifactPanelTab = Extract<

@@ -683,9 +683,6 @@ export class UiTelemetryService extends EventEmitter {
     const id = event.subagent_id ?? getLegacySubagentId(event, sessionId);
     if (!id) return undefined;
 
-    const legacyType = event.subagent_id
-      ? undefined
-      : id.match(/^(.+)-[0-9a-f]{8}$/i)?.[1];
     const meta = (metrics.sourceMeta ??= Object.create(null) as Record<
       string,
       { name: string; type: string }
@@ -698,11 +695,7 @@ export class UiTelemetryService extends EventEmitter {
         event.subagent_name ??
         id,
       type:
-        event.subagent_type ??
-        existingMeta?.type ??
-        event.subagent_name ??
-        legacyType ??
-        '',
+        event.subagent_type ?? existingMeta?.type ?? event.subagent_name ?? '',
     };
     const sourceMetrics = (metrics.sourceMetrics ??= Object.create(
       null,

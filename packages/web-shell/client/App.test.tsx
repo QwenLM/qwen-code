@@ -1031,6 +1031,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenSplitView?: () => void;
       onNewSession?: () => Promise<boolean> | boolean;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onSessionsDeleted?: (sessionIds: string[]) => void;
       onOpenAddWorkspace?: () => void;
     }) => {
       // Expose the Daemon Status / Session Overview openers so tests can
@@ -1067,6 +1068,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: () => props.onLoadSession?.('session-2'),
           },
           'load session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'delete-session',
+            type: 'button',
+            onClick: () => props.onSessionsDeleted?.(['session-1']),
+          },
+          'delete session',
         ),
         React.createElement(
           'button',
@@ -1372,6 +1382,15 @@ vi.doMock('./components/SplitView', async () => {
             onClick: () => props.onPanesChange?.(['s1', 's2', 's3']),
           },
           'report',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-remove-panes',
+            type: 'button',
+            onClick: () => props.onPanesChange?.([]),
+          },
+          'remove panes',
         ),
         React.createElement(
           'button',
@@ -8256,6 +8275,13 @@ describe('App session callbacks', () => {
     // Docked right panel on the main chat view renders in the container.
     expect(container.textContent).toContain('Token Usage');
     expect(container.textContent).toContain('qwen-plus::hybrid');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="delete-session"]')!
+        .click();
+    });
+    expect(container.textContent).not.toContain('qwen-plus::hybrid');
   });
 
   it('wires the composer context ring from the connection and opens /context on click', async () => {
@@ -17952,6 +17978,13 @@ describe('App session callbacks', () => {
     expect(document.body.textContent).toContain('Token Usage');
     expect(document.body.textContent).toContain('qwen-plus::hybrid');
     expect(document.body.textContent).toContain('600K');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="split-remove-panes"]')!
+        .click();
+    });
+    expect(document.body.textContent).not.toContain('qwen-plus::hybrid');
   });
 
   it('does not add a token usage pane action unless it is enabled', async () => {

@@ -367,6 +367,7 @@ interface WebShellSidebarProps {
     sessionId: string,
     displayName: string,
   ) => void;
+  onSessionsDeleted?: (sessionIds: string[]) => void;
   onError: (error: unknown, fallback: string) => void;
   theme: WebShellTheme;
   onThemeChange: (theme: WebShellTheme) => void;
@@ -829,6 +830,7 @@ export function WebShellSidebar({
   onLoadSession,
   onSelectCurrentSession,
   onSessionRenameConfirmed,
+  onSessionsDeleted,
   onError,
   theme,
   onThemeChange,
@@ -2793,6 +2795,7 @@ export function WebShellSidebar({
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
     removeSession(sessionId)
       .then(() => {
+        onSessionsDeleted?.([sessionId]);
         bumpWorkspaceReload();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
@@ -2812,6 +2815,7 @@ export function WebShellSidebar({
     deleteSession,
     getIdentityForSession,
     onError,
+    onSessionsDeleted,
     primaryWorkspaceCwd,
     resolveSessionWorkspaceScope,
     sessionCatalogController,

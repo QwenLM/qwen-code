@@ -184,7 +184,7 @@ describe('TokenUsagePanel', () => {
     expect(container.textContent).toContain('1.35M');
     expect(container.textContent).toContain('qwen-plus::hybrid');
     expect(container.textContent).toContain('echoer');
-    expect(container.textContent).toContain('general-purpose');
+    expect(container.textContent).toContain('General-purpose');
     expect(container.textContent).toContain('review the diff');
     expect(container.textContent).toContain('Input200K');
     expect(container.textContent).toContain('Total output100K');
@@ -224,6 +224,7 @@ describe('TokenUsagePanel', () => {
     expect(container.textContent).toContain('搜索内容(grep_search)');
     expect(container.textContent).toContain('查找文件(glob)');
     expect(container.textContent).toContain('智能体(agent)');
+    expect(container.textContent).toContain('通用');
   });
 
   it('collapses subagents and tools by default', async () => {
@@ -246,7 +247,7 @@ describe('TokenUsagePanel', () => {
     // Inline dot colors (CSS Modules class names are lowercased in some
     // environments). All four categories get a dot; cache-hit carries the
     // green tag.
-    expect(html).toContain('var(--success-color)');
+    expect(html).toContain('style="background: var(--success-color);"');
     expect(html).toContain(
       'color-mix(in srgb, var(--success-color) 70%, var(--foreground))',
     );
@@ -663,13 +664,14 @@ describe('TokenUsagePanel', () => {
     consoleError.mockRestore();
   });
 
-  it('accepts legacy v1 stats without sources', async () => {
+  it('does not present missing legacy source details as an empty result', async () => {
     const stats = statsFixture();
     delete stats.sources;
     const container = renderPanel(vi.fn().mockResolvedValue(stats));
     await act(async () => {});
 
-    expect(container.textContent).toContain(
+    expect(container.textContent).not.toContain('Subagents');
+    expect(container.textContent).not.toContain(
       'No subagent calls in this session yet.',
     );
   });
@@ -685,13 +687,14 @@ describe('TokenUsagePanel', () => {
     );
   });
 
-  it('accepts legacy stats without per-tool details', async () => {
+  it('does not present missing legacy tool details as an empty result', async () => {
     const stats = statsFixture();
     Reflect.deleteProperty(stats.tools, 'byName');
     const container = renderPanel(vi.fn().mockResolvedValue(stats));
     await act(async () => {});
 
-    expect(container.textContent).toContain(
+    expect(container.textContent).not.toContain('Tools');
+    expect(container.textContent).not.toContain(
       'No tool calls in this session yet.',
     );
   });
