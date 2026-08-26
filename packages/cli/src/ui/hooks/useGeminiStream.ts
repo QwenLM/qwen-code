@@ -1674,11 +1674,18 @@ export const useGeminiStream = (
 
   // Commit a streamed thought item and, when it is a `gemini_thought` head,
   // migrate the provisional expansion to the committed id. Content tails key
-  // off the head id, so they never settle a second entry.
+  // off the head id, so they never settle a second entry. Streams that do
+  // not own the turn (concurrent `?btw` side questions) share this hook's
+  // pending-thought slot but must never touch the main turn's provisional
+  // expansion, so they commit without settling.
   const addItemAndSettleThoughtHead = useCallback(
-    (item: HistoryItemWithoutId, userMessageTimestamp: number): number => {
+    (
+      item: HistoryItemWithoutId,
+      userMessageTimestamp: number,
+      ownsThoughtSettlement = true,
+    ): number => {
       const committedId = addItem(item, userMessageTimestamp);
-      if (item.type === 'gemini_thought') {
+      if (item.type === 'gemini_thought' && ownsThoughtSettlement) {
         settlePendingThoughtExpansion?.(committedId);
       }
       return committedId;
@@ -1691,6 +1698,7 @@ export const useGeminiStream = (
       eventValue: ThoughtSummary,
       currentThoughtBuffer: string,
       userMessageTimestamp: number,
+      ownsThoughtSettlement = true,
     ): string => {
       if (turnCancelledRef.current) {
         return '';
@@ -1716,8 +1724,13 @@ export const useGeminiStream = (
         thoughtStartTimeRef.current = Date.now();
         newThoughtBuffer = description;
         // A fresh thought begins; drop any stale provisional expansion key
-        // left over from a pending thought that never committed.
-        settlePendingThoughtExpansion?.(null);
+        // left over from a pending thought that never committed. Only the
+        // stream that owns the turn may drop it — a concurrent `?btw`
+        // stream's first thought would otherwise erase a sentinel the user
+        // recorded on the main turn's still-streaming thought.
+        if (ownsThoughtSettlement) {
+          settlePendingThoughtExpansion?.(null);
+        }
       }
 
       // Keep the transient `thought` (subject) in sync for the window title.
@@ -1772,6 +1785,7 @@ export const useGeminiStream = (
         addItemAndSettleThoughtHead(
           buildThoughtItem(pendingThoughtType, beforeText),
           userMessageTimestamp,
+          ownsThoughtSettlement,
         );
         pendingThoughtType = 'gemini_thought_content';
         newThoughtBuffer = afterText;
@@ -1799,13 +1813,17 @@ export const useGeminiStream = (
   // Commit the streamed reasoning to history as a collapsible block (or drop
   // it). Called when the answer/tool/turn begins, or on cancel/error.
   const commitPendingThought = useCallback(
-    (userMessageTimestamp: number) => {
+    (userMessageTimestamp: number, ownsThoughtSettlement = true) => {
       if (pendingThoughtItemRef.current) {
         const item = { ...pendingThoughtItemRef.current };
         if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
           item.durationMs = Date.now() - thoughtStartTimeRef.current;
         }
-        addItemAndSettleThoughtHead(item, userMessageTimestamp);
+        addItemAndSettleThoughtHead(
+          item,
+          userMessageTimestamp,
+          ownsThoughtSettlement,
+        );
       }
       setPendingThoughtItem(null);
       thoughtStartTimeRef.current = null;
@@ -1814,14 +1832,14 @@ export const useGeminiStream = (
   );
 
   const handleUserCancelledEvent = useCallback(
-    (userMessageTimestamp: number) => {
+    (userMessageTimestamp: number, ownsThoughtSettlement = true) => {
       if (turnCancelledRef.current) {
         return;
       }
 
       lastPromptErroredRef.current = false;
       // Persist any streamed reasoning (collapsed) above the cancelled answer.
-      commitPendingThought(userMessageTimestamp);
+      commitPendingThought(userMessageTimestamp, ownsThoughtSettlement);
       if (pendingHistoryItemRef.current) {
         if (pendingHistoryItemRef.current.type === 'tool_group') {
           const updatedTools = pendingHistoryItemRef.current.tools.map(
@@ -1866,6 +1884,7 @@ export const useGeminiStream = (
       eventValue: GeminiErrorEventValue,
       userMessageTimestamp: number,
       submitType: SendMessageType,
+      ownsThoughtSettlement = true,
     ) => {
       if (submitType !== SendMessageType.Goal) {
         lastPromptErroredRef.current = true;
@@ -1873,7 +1892,7 @@ export const useGeminiStream = (
         goalTerminalErrorRef.current = true;
       }
       // Persist any streamed reasoning (collapsed) above the error.
-      commitPendingThought(userMessageTimestamp);
+      commitPendingThought(userMessageTimestamp, ownsThoughtSettlement);
       if (pendingHistoryItemRef.current) {
         commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -2159,6 +2178,7 @@ export const useGeminiStream = (
       signal: AbortSignal,
       submitType: SendMessageType,
       turnAdmission?: GoalTurnAdmission,
+      ownsThoughtSettlement = true,
     ): Promise<StreamProcessingResult> => {
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
@@ -2231,6 +2251,7 @@ export const useGeminiStream = (
             },
             thoughtBuffer,
             userMessageTimestamp,
+            ownsThoughtSettlement,
           );
         }
       };
@@ -2276,7 +2297,10 @@ export const useGeminiStream = (
                 bufferedEvents.some((e) => e.kind === 'thought')
               ) {
                 flushBufferedStreamEvents();
-                commitPendingThought(userMessageTimestamp);
+                commitPendingThought(
+                  userMessageTimestamp,
+                  ownsThoughtSettlement,
+                );
                 thoughtBuffer = '';
               }
               setThought((prev) => (prev ? null : prev));
@@ -2288,7 +2312,7 @@ export const useGeminiStream = (
               // reasoning then commit it to history (collapsed) above the tool
               // output.
               flushBufferedStreamEvents();
-              commitPendingThought(userMessageTimestamp);
+              commitPendingThought(userMessageTimestamp, ownsThoughtSettlement);
               thoughtBuffer = '';
               setThought((prev) => (prev ? null : prev));
               if (event.value.goalContext && turnAdmission) {
@@ -2311,14 +2335,22 @@ export const useGeminiStream = (
             case ServerGeminiEventType.UserCancelled:
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
-              handleUserCancelledEvent(userMessageTimestamp);
+              handleUserCancelledEvent(
+                userMessageTimestamp,
+                ownsThoughtSettlement,
+              );
               return {
                 status: StreamProcessingStatus.UserCancelled,
                 scheduledToolContinuation: false,
               };
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
-              handleErrorEvent(event.value, userMessageTimestamp, submitType);
+              handleErrorEvent(
+                event.value,
+                userMessageTimestamp,
+                submitType,
+                ownsThoughtSettlement,
+              );
               break;
             case ServerGeminiEventType.ChatCompressed:
               flushBufferedStreamEvents();
@@ -2340,7 +2372,7 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               // A thinking-only turn (no content/tool) still commits its
               // reasoning so it persists collapsed in history.
-              commitPendingThought(userMessageTimestamp);
+              commitPendingThought(userMessageTimestamp, ownsThoughtSettlement);
               handleFinishedEvent(
                 event as ServerGeminiFinishedEvent,
                 userMessageTimestamp,
@@ -2384,7 +2416,10 @@ export const useGeminiStream = (
                 if (pendingHistoryItemRef.current) {
                   setPendingHistoryItem(null);
                 }
-                commitPendingThought(userMessageTimestamp);
+                commitPendingThought(
+                  userMessageTimestamp,
+                  ownsThoughtSettlement,
+                );
                 thoughtBuffer = '';
                 setThought(null);
                 geminiMessageBuffer = '';
@@ -2414,7 +2449,7 @@ export const useGeminiStream = (
               if (pendingHistoryItemRef.current) {
                 setPendingHistoryItem(null);
               }
-              commitPendingThought(userMessageTimestamp);
+              commitPendingThought(userMessageTimestamp, ownsThoughtSettlement);
               thoughtBuffer = '';
               setThought(null);
               geminiMessageBuffer = '';
@@ -2490,7 +2525,7 @@ export const useGeminiStream = (
         }
       } finally {
         flushBufferedStreamEvents();
-        commitPendingThought(userMessageTimestamp);
+        commitPendingThought(userMessageTimestamp, ownsThoughtSettlement);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
         dualOutput?.finalizeAssistantMessage();
@@ -3308,6 +3343,7 @@ export const useGeminiStream = (
             processingSignal,
             submitType,
             turnAdmission,
+            !allowConcurrentBtwDuringResponse,
           );
           if (
             !goalBinding &&

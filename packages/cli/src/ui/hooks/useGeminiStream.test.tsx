@@ -11121,6 +11121,83 @@ describe('useGeminiStream', () => {
       expect(findAddedItemId('gemini_thought_content')).toBeDefined();
       expect(settle).toHaveBeenCalledTimes(2);
     });
+
+    it('never settles from a concurrent ?btw stream', async () => {
+      const settle = vi.fn();
+      const btwQuery = '?btw quick side question';
+      let releaseMain!: () => void;
+      const holdMain = new Promise<void>((resolve) => {
+        releaseMain = resolve;
+      });
+      let callCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        callCount += 1;
+        if (callCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'main thinking' },
+            };
+            await holdMain;
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'main answer',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'btw thinking' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'btw answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderWithSettleSpy(settle);
+
+      let mainRequest!: Promise<void>;
+      act(() => {
+        mainRequest = result.current.submitQuery('main query');
+      });
+
+      await waitFor(() => {
+        expect(settle).toHaveBeenNthCalledWith(1, null);
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+      });
+
+      await act(async () => {
+        await result.current.submitQuery(
+          btwQuery,
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: btwQuery },
+        );
+      });
+
+      // The side question shares the pending-thought slot, but its fresh
+      // thought must not drop the main turn's sentinel and its commit must
+      // not migrate it: settlement belongs to the stream that owns the turn.
+      expect(settle).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        releaseMain();
+        await mainRequest;
+      });
+
+      expect(settle).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('Concurrent Execution Prevention', () => {
