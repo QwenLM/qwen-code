@@ -48,19 +48,26 @@
 import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { operatorReviewSettings } from './review-settings.js';
 import { REVIEW_TMP_DIR } from './paths.js';
 import { redirectedAncestor } from './worktree.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../../../utils/processUtils.js';
 import { isFileSourcedEnvKey } from '../../../config/environment.js';
+import { readPackageUpSync } from 'read-package-up';
+import { CLI_VERSION } from '../../../generated/git-commit.js';
 
 /**
- * The fallback when neither override names an image: the published sandbox
- * image for this CLI line. Pinned by tag rather than digest on purpose — a
- * digest would go stale in a file nobody updates, and the override exists for
- * anyone who needs reproducibility.
+ * Last resort only: the real default is the CLI's own `config.sandboxImageUri`
+ * — see `cliSandboxImage`. This literal covers the case where the package
+ * manifest cannot be found at all (an unusual install layout), so the argv
+ * still names something that exists.
+ *
+ * Versioned rather than floating on `:latest`, and by tag rather than digest —
+ * a digest would go stale in a file nobody updates, and the overrides exist
+ * for anyone who needs reproducibility.
  */
-const DEFAULT_IMAGE = 'ghcr.io/qwenlm/qwen-code/sandbox:latest';
+const DEFAULT_IMAGE = `ghcr.io/qwenlm/qwen-code:${CLI_VERSION}`;
 
 /** Container runtimes this module knows how to drive, in preference order. */
 const RUNTIMES = ['docker', 'podman'] as const;
@@ -689,17 +696,75 @@ export function containerCommand(
 }
 
 /**
+ * The image `qwen --sandbox` itself runs, read from the package manifest that
+ * ships with this CLI (`config.sandboxImageUri`) — the same field
+ * `sandboxConfig.ts` reads, so the two cannot drift.
+ *
+ * This is a correction, not a refinement. The first cut hardcoded
+ * `ghcr.io/qwenlm/qwen-code/sandbox:latest` and its comment claimed that was
+ * "the same image `qwen --sandbox` uses". It is not: the CLI's image is
+ * `ghcr.io/qwenlm/qwen-code:<version>`, a different repository path and a
+ * pinned tag, and the hardcoded name does not resolve at all — an anonymous
+ * manifest request answers 403 where the real one answers 200. Every command
+ * of an opted-in review therefore failed at image pull, which nineteen rounds
+ * of argv-level review could not see because no container was ever started
+ * from that argv.
+ *
+ * Read once and cached: this is on the per-command path.
+ */
+function cliSandboxImage(): string | undefined {
+  if (manifestImage !== undefined) return manifestImage ?? undefined;
+  try {
+    const found = readPackageUpSync({
+      cwd: dirname(fileURLToPath(import.meta.url)),
+    });
+    const uri = (
+      found?.packageJson as
+        | { config?: { sandboxImageUri?: string } }
+        | undefined
+    )?.config?.sandboxImageUri;
+    manifestImage = typeof uri === 'string' && uri.trim() ? uri.trim() : null;
+  } catch {
+    manifestImage = null;
+  }
+  return manifestImage ?? undefined;
+}
+
+let manifestImage: string | null | undefined;
+
+/**
  * The image the reviewed repository's commands run in.
  *
  * Defaults to the CLI's own sandbox image, which already carries a Node
- * toolchain — the same image `qwen --sandbox` uses, so a repository that
- * builds under one builds under the other. `QWEN_REVIEW_SANDBOX_IMAGE`
- * overrides it for a repository whose toolchain needs more (a JDK, a Python,
- * a specific Node major), which is the case this default cannot cover and
- * should not pretend to.
+ * toolchain — literally the same image `qwen --sandbox` resolves, read from
+ * the same manifest field, so a repository that builds under one builds under
+ * the other. That sentence was here before `cliSandboxImage` existed, when a
+ * hardcoded name made it false; it is now a description of the code rather
+ * than an intention about it.
+ *
+ * The parity is over the DEFAULT, not over every channel `--sandbox` reads.
+ * An operator who set `QWEN_SANDBOX_IMAGE` in a user-level `~/.qwen/.env` or
+ * in `settings.env` loses it here and falls back to that default: the loader
+ * records every key it applies from a file without distinguishing the user's
+ * own from the reviewed repository's, and this side cannot afford to guess
+ * wrong about which one it is holding. Exporting it in the shell keeps
+ * parity. Widening that would mean teaching the loader to carry the
+ * home-scoped classification it already computes — a change to the loader,
+ * not to this pick.
+ *
+ * `QWEN_REVIEW_SANDBOX_IMAGE` overrides it for a repository whose toolchain
+ * needs more (a JDK, a Python, a specific Node major), which is the case this
+ * default cannot cover and should not pretend to.
  */
 export function reviewSandboxImage(
   env: NodeJS.ProcessEnv = process.env,
+  // Injected so a test can tell the manifest apart from the fallback. It
+  // cannot otherwise: `DEFAULT_IMAGE`'s tag comes from `CLI_VERSION`, which is
+  // generated from the same manifest version, so the two currently produce the
+  // SAME string — deleting the manifest lookup falls through to a literal that
+  // string-equals it and the suite stays green. That is the mechanism this
+  // change exists to add, pinned by nothing until the two can be told apart.
+  manifest: () => string | undefined = cliSandboxImage,
 ): string {
   // File-sourced overrides are ignored for the same reason the policy ignores
   // them, and this one is sharper: the image IS the code the reviewed
@@ -711,6 +776,11 @@ export function reviewSandboxImage(
   return (
     pick('QWEN_REVIEW_SANDBOX_IMAGE') ||
     pick(CUSTOM_SANDBOX_IMAGE_ENV_VAR) ||
+    // The operator's own sandbox image, if they configured one for
+    // `qwen --sandbox`. Through `pick`, so a repository shipping it in its
+    // `.qwen/.env` cannot choose the image its own code runs in.
+    pick('QWEN_SANDBOX_IMAGE') ||
+    manifest() ||
     DEFAULT_IMAGE
   );
 }

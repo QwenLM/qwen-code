@@ -107,6 +107,7 @@ export function reduceGoalControl(
       objective: normalizeObjective(request.objective, snapshotOf(current)),
       evidenceCursor: copyCursor(transition.cursor),
       evidenceCheckpoint: undefined,
+      checkpointStalls: undefined,
       lastReason: undefined,
       limitKind: undefined,
     });
@@ -153,6 +154,10 @@ export function reduceGoalControl(
       status: 'active',
       evidenceCursor: copyCursor(transition.cursor),
       evidenceCheckpoint: undefined,
+      // The streak counts checkpoints against one window; this resume starts
+      // a different one, so carrying it over would spend the new window's
+      // allowance on the old window's failures.
+      checkpointStalls: undefined,
       lastReason: undefined,
       limitKind: undefined,
     });
@@ -452,6 +457,7 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'createdAt',
       'updatedAt',
       'evidenceCheckpoint',
+      'checkpointStalls',
       'lastReason',
       'limitKind',
     ]) ||
@@ -470,6 +476,8 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isFiniteNumber(value['createdAt']) ||
     !isFiniteNumber(value['updatedAt']) ||
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
+    (value['checkpointStalls'] !== undefined &&
+      !isNonNegativeInteger(value['checkpointStalls'])) ||
     (value['lastReason'] !== undefined &&
       typeof value['lastReason'] !== 'string') ||
     (value['limitKind'] !== undefined &&
@@ -502,6 +510,10 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       : {
           evidenceCheckpoint: structuredClone(value['evidenceCheckpoint']),
         }),
+    // Zero is spelled as no field; a persisted 0 restores the same way.
+    ...(value['checkpointStalls']
+      ? { checkpointStalls: value['checkpointStalls'] }
+      : {}),
     ...(value['lastReason'] === undefined
       ? {}
       : { lastReason: value['lastReason'] }),

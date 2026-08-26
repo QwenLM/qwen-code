@@ -2471,6 +2471,7 @@ export class GeminiClient {
       const m = mcResult.meta;
       const changed = m.tokensSaved > 0;
       if (changed) {
+        // setHistory conservatively clears loaded-skill tracking.
         this.getChat().setHistory(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
@@ -2770,6 +2771,8 @@ export class GeminiClient {
           this.getChat().addHistory(entry);
         }
       }
+      // Loaded-skill tracking was conservatively cleared by the strip
+      // above; restored bodies simply re-inject on their next invoke.
       strippedRetryEntries = [];
     };
 

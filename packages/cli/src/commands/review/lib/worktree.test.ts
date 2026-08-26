@@ -1734,7 +1734,11 @@ describe('discardWorktree', () => {
 
     discardWorktree(repo, mine);
 
-    expect(git(repo, 'worktree', 'list')).toContain(other);
+    // Git prints worktree paths forward-slashed on Windows; `other` is a
+    // backslash `join` there. Compare slash-normalized (identity on POSIX).
+    expect(git(repo, 'worktree', 'list').replace(/\\/g, '/')).toContain(
+      other.replace(/\\/g, '/'),
+    );
   });
 });
 
