@@ -90,7 +90,11 @@ describe('qwen serve Live Host discovery', () => {
         pid: process.pid,
       });
       expect(record['instanceNonce']).toMatch(/^[A-Za-z0-9_-]{16,256}$/);
-      expect((await fs.stat(discoveryPath)).mode & 0o777).toBe(0o600);
+      // Windows has no POSIX permission bits; the discovery read side
+      // already skips the mode check there.
+      if (process.platform !== 'win32') {
+        expect((await fs.stat(discoveryPath)).mode & 0o777).toBe(0o600);
+      }
 
       const statusResponse = await fetch(`${handle.url}/live/status`, {
         headers: { Authorization: `Bearer ${token}` },

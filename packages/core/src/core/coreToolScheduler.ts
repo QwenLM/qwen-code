@@ -2128,7 +2128,7 @@ export class CoreToolScheduler {
 
     // MCP tool whose server is gone / unconfigured: explain in MCP terms
     // instead of falling through to a Levenshtein suggestion that would surface
-    // unrelated tools (e.g. "did you mean computer_use__click?").
+    // unrelated tools (e.g. "did you mean read_file?").
     const mcpMessage = this.getMcpToolUnavailableMessage(unknownToolName);
     if (mcpMessage) {
       return mcpMessage;
@@ -2470,10 +2470,36 @@ export class CoreToolScheduler {
             const matchingRule = pm.findMatchingDenyRule({
               toolName: canonicalName,
             });
-            const ruleInfo = matchingRule
-              ? ` Matching deny rule: "${matchingRule}".`
-              : '';
-            const permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.${ruleInfo}`;
+            let permissionErrorMessage: string;
+            if (matchingRule) {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined. Matching deny rule: "${matchingRule}".`;
+            } else if (
+              pm.isPermissionsAllowListActive() &&
+              // Only attribute the miss to `permissions.allow` when the tool
+              // is genuinely uncovered. While the allowlist is active a
+              // COVERED tool can still be rejected by a different gate —
+              // e.g. the legacy `coreTools` (`--core-tools` / `tools.core`)
+              // allowlist — and there the "add a permissions.allow rule"
+              // advice is factually wrong and a no-op (#9827). The optional
+              // call keeps scoped PermissionManager shims (installed via
+              // `as unknown as PermissionManager`, e.g.
+              // memory-scoped-agent-config.ts) from throwing until they grow
+              // the delegation; when coverage is unknown the fallback stays
+              // on the pre-#9827 message rather than risk the wrong
+              // attribution (#9827).
+              (typeof pm.isCoveredByAllowOrAskRule === 'function'
+                ? !pm.isCoveredByAllowOrAskRule(canonicalName)
+                : false)
+            ) {
+              // The tool was rejected by the `permissions.allow` registry
+              // allowlist, not by any deny rule: it is not covered by an
+              // allow/ask rule and so was never registered. Point at the
+              // real config knob instead of a denial that never happened
+              // (nothing was ever asked or declined on this path).
+              permissionErrorMessage = `"${reqInfo.name}" is not covered by any permissions.allow rule in the active registry allowlist, so the tool is not available. Add a rule covering it to settings permissions.allow (or permissions.ask) and restart to re-enable it.`;
+            } else {
+              permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined.`;
+            }
             newToolCalls.push({
               status: 'error',
               request: reqInfo,

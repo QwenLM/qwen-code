@@ -2403,6 +2403,7 @@ export default {
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': 'Artefacte',
   'toolDisplayName.RecordArtifact': "Enregistra l'artefacte",
+  'toolDisplayName.ReportFindings': 'Informa de les troballes',
   'toolDisplayName.Skill': 'Habilitat',
   'toolDisplayName.EnterPlanMode': 'Entra al mode de planificació',
   'toolDisplayName.ExitPlanMode': 'Surt del mode de planificació',

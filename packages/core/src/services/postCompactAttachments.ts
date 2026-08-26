@@ -233,7 +233,7 @@ export function extractRecentImages(
  * Count images RETURNED BY TOOLS across the whole history — inlineData
  * image parts nested inside `functionResponse.parts`. User-pasted
  * top-level images are intentionally excluded: this drives the
- * computer-use screenshot-overflow auto-compact trigger, whose concern
+ * tool screenshot-overflow auto-compact trigger, whose concern
  * is screenshot accumulation from tool results, not occasional pastes.
  */
 export function countToolResponseImages(history: Content[]): number {

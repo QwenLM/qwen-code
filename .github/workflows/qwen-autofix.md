@@ -40,6 +40,16 @@ fails until the number is updated in the same PR. Growing a file is still
 allowed — the ratchet only insists the growth be visible in review rather than
 discovered at the wall.
 
+The ratchet's blast radius is scoped to the PR that earned it (#9904). The
+comparison above is worktree-vs-checked-in-baseline, so a file that grew on
+main without the same-PR bump would otherwise fail every unrelated open PR on
+a file it never touched — that red-walled the queue twice in two weeks
+(#9747, #9822). Given the PR's base commit (`WORKFLOW_SIZE_BASE_SHA`, wired
+in `ci.yml`), the gate hard-fails only when the PR's copy of the file differs
+from the base; a byte-identical copy means the staleness is main-side drift
+and earns a warning pointing at the one-line baseline-bump PR instead. An
+unresolvable base keeps the strict failure — the gate fails closed.
+
 ### Steps that moved out, not just their prose
 
 `review-address` · `Push and report` was 626 lines of inline shell — ~41 KB,
