@@ -11,9 +11,10 @@
 // happens when there is no runtime at all.
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { join, sep } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import {
   existsSync,
+  readFileSync,
   mkdirSync,
   writeFileSync,
   mkdtempSync,
@@ -22,6 +23,8 @@ import {
   symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { CLI_VERSION } from '../../../generated/git-commit.js';
+import { fileURLToPath } from 'node:url';
 import type { spawnSync } from 'node:child_process';
 import { isolateOperatorReviewSettings } from './test-utils.js';
 import * as environment from '../../../config/environment.js';
@@ -917,6 +920,79 @@ describe('reviewSandboxImage', () => {
     expect(reviewSandboxImage({ QWEN_REVIEW_SANDBOX_IMAGE: 'mine:1' })).toBe(
       'mine:1',
     );
-    expect(reviewSandboxImage({})).toContain('sandbox');
+    // The operator's own sandbox image, if they configured one for
+    // `qwen --sandbox`, rather than ignoring it and pulling a second one.
+    expect(reviewSandboxImage({ QWEN_SANDBOX_IMAGE: 'theirs:2' })).toBe(
+      'theirs:2',
+    );
+    // ORDER, with both set at once — the only way a reordering of the chain
+    // can be seen. Reviewed-repository-specific beats the operator's general
+    // one, because the review override exists for a toolchain the repository
+    // declared it needs; the other way round runs the build in an image
+    // missing it.
+    expect(
+      reviewSandboxImage({
+        QWEN_REVIEW_SANDBOX_IMAGE: 'mine:1',
+        QWEN_SANDBOX_IMAGE: 'theirs:2',
+      }),
+    ).toBe('mine:1');
+    expect(
+      reviewSandboxImage({
+        QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'custom:3',
+        QWEN_SANDBOX_IMAGE: 'theirs:2',
+      }),
+    ).toBe('custom:3');
+    expect(
+      reviewSandboxImage({
+        QWEN_REVIEW_SANDBOX_IMAGE: 'mine:1',
+        QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'custom:3',
+      }),
+    ).toBe('mine:1');
+  });
+
+  it('consults the manifest, and falls back to a name that exists', () => {
+    // These two cannot be told apart by their VALUE: `DEFAULT_IMAGE`'s tag is
+    // `CLI_VERSION`, generated from the same manifest version, so today the
+    // fallback string-equals the manifest field. Deleting the manifest lookup
+    // entirely therefore leaves the pin below green. Injecting the reader is
+    // what makes the mechanism visible at all.
+    expect(reviewSandboxImage({}, () => 'manifest-image:test')).toBe(
+      'manifest-image:test',
+    );
+    // ...and when the manifest cannot be found — the unusual install layout
+    // the literal exists for — the argv still names something that resolves.
+    // This is the branch the defect this PR fixes lived in: with no coverage,
+    // reverting it to an unpullable name ships green.
+    const fallback = reviewSandboxImage({}, () => undefined);
+    expect(fallback).toBe(`ghcr.io/qwenlm/qwen-code:${CLI_VERSION}`);
+    expect(fallback).not.toContain('/sandbox');
+    expect(fallback).not.toContain(':latest');
+  });
+
+  it('defaults to the image this CLI actually ships with', () => {
+    // Pinned against the MANIFEST, not against a spelling. The assertion this
+    // replaces was `toContain('sandbox')`, which is how a default of
+    // `ghcr.io/qwenlm/qwen-code/sandbox:latest` shipped: it contains the word,
+    // it is not the CLI's image, and it does not resolve at all — an anonymous
+    // manifest request answers 403 where the real one answers 200, so every
+    // command of an opted-in review failed at image pull. Nineteen rounds of
+    // argv-level review could not see it because no container was ever
+    // started. The real image happens NOT to contain "sandbox", so the old
+    // assertion would fail on the correct value and pass on the broken one.
+    const manifest = JSON.parse(
+      readFileSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          '..',
+          '..',
+          '..',
+          '..',
+          'package.json',
+        ),
+        'utf8',
+      ),
+    ) as { config?: { sandboxImageUri?: string } };
+    expect(manifest.config?.sandboxImageUri).toBeTruthy();
+    expect(reviewSandboxImage({})).toBe(manifest.config?.sandboxImageUri);
   });
 });
