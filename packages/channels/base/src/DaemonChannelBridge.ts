@@ -45,13 +45,13 @@ export interface DaemonChannelSessionClient {
     },
     signal?: AbortSignal,
   ): Promise<{ stopReason?: string; [key: string]: unknown }>;
-  uploadAttachment(
+  uploadAttachment?(
     data: Blob,
     name: string,
     mimeType: string,
     signal?: AbortSignal,
   ): Promise<Record<string, unknown>>;
-  removeAttachment(attachmentId: string): Promise<boolean>;
+  removeAttachment?(attachmentId: string): Promise<boolean>;
   events(opts?: {
     signal?: AbortSignal;
     lastEventId?: number;
@@ -498,11 +498,17 @@ export class DaemonChannelBridge
     const turnBarrier = this.createTurnBarrier(sessionId);
     const uploadedAttachmentIds: string[] = [];
     let rollbackUploadedAttachments = false;
+    const uploadAttachment = session.uploadAttachment?.bind(session);
+    const removeAttachment = session.removeAttachment?.bind(session);
 
     try {
       const prompt: Array<Record<string, unknown>> = [];
       const images = resolvePromptImages(options);
-      if (this.options.sessionAttachments) {
+      if (
+        this.options.sessionAttachments &&
+        uploadAttachment &&
+        removeAttachment
+      ) {
         try {
           // Fan the uploads out like the webui's attachment path: names are
           // index-disambiguated and prompt order comes from the array order,
@@ -528,7 +534,7 @@ export class DaemonChannelBridge
                 );
                 return undefined;
               }
-              const attachment = await session.uploadAttachment(
+              const attachment = await uploadAttachment(
                 new Blob([decoded.bytes], {
                   type: image.mimeType,
                 }),
@@ -665,10 +671,10 @@ export class DaemonChannelBridge
       ) {
         this.activePromptControllers.delete(sessionId);
       }
-      if (rollbackUploadedAttachments) {
+      if (rollbackUploadedAttachments && removeAttachment) {
         const removals = await Promise.allSettled(
           uploadedAttachmentIds.map((attachmentId) =>
-            session.removeAttachment(attachmentId),
+            removeAttachment(attachmentId),
           ),
         );
         removals.forEach((removal, index) => {

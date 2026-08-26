@@ -2533,6 +2533,48 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('keeps legacy session clients compatible when attachment methods are absent', async () => {
+    const events = new EventQueue();
+    const prompt = vi.fn().mockResolvedValue({});
+    const legacySession = {
+      sessionId: 'session-1',
+      workspaceCwd: '/repo',
+      lastEventId: undefined,
+      prompt,
+      events: vi.fn(() => events),
+      cancel: vi.fn().mockResolvedValue(undefined),
+      setModel: vi.fn().mockResolvedValue({}),
+      respondToPermission: vi.fn().mockResolvedValue(true),
+    };
+    const sessionFactory = async (): Promise<DaemonChannelSessionClient> =>
+      legacySession;
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory,
+      sessionAttachments: true,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await bridge.prompt('session-1', 'describe', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+    expect(prompt).toHaveBeenCalledWith(
+      {
+        prompt: [
+          { type: 'image', data: 'AQID', mimeType: 'image/png' },
+          { type: 'text', text: 'describe' },
+        ],
+        _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
   it('bounds the inline image payload for daemons without session attachments', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
