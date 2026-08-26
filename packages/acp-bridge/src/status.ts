@@ -222,6 +222,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `first-turn` mode, which waits for the sub-session's first turn to finish).
    */
   createSubSession: 'qwen/control/create-sub-session',
+  createCurrentSessionScheduledTask:
+    'qwen/control/scheduled-task/create-current',
   liveCaptureScreenContext: 'qwen/control/live/capture-screen-context',
   liveTaskTool: 'qwen/control/live/task-tool',
   liveSpeakToUser: 'qwen/control/live/speak-to-user',
