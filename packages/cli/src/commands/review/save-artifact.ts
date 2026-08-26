@@ -53,11 +53,11 @@ interface PersistedVerdict
     | 'postedFresh'
     | 'prevPostedInline'
     | 'fixedFindings'
-    // Submit-time gate channels, live-only: the validator neither reads
+    // Submit-time stamp inputs, live-only: the validator neither reads
     // nor writes them, so carrying them here would advertise fields no
     // artifact contains (the `prevPostedInline` precedent).
-    | 'floorEnforcedEntries'
-    | 'budgetGapDisclosures'
+    | 'draftedIds'
+    | 'mintedIds'
   > {
   verdictLine: string;
   /**

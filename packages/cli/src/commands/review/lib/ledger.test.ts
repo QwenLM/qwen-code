@@ -23,7 +23,6 @@ import {
   LEDGER_MAX_VOLUME,
   LEDGER_MAX_ID,
   LEDGER_ID_SHAPE,
-  LEDGER_ID_SCAN,
   isLedgerFinding,
   type Ledger,
   type LedgerFinding,
@@ -708,44 +707,6 @@ describe('LEDGER_ID_READBACK', () => {
   ];
   it.each(cases)('reads %j as %j', (line, expected) => {
     expect(LEDGER_ID_READBACK.exec(line)?.[1] ?? null).toBe(expected);
-  });
-});
-
-// The whole-token scan behind the contradiction gate's entry channels:
-// the prescribed entry shapes put a carried id MID-LINE (a cannot-tell
-// leads with the location, a chunk entry with the chunk), so the gate
-// scans them whole-token and fails closed on any mention of a retired
-// id. The flank rules keeping a fragment of a longer token OUT are what
-// keep that fail-closed posture from refusing cross-references, and they
-// are pinned here exactly the way the readback's terminator set is
-// (#9940 review).
-describe('LEDGER_ID_SCAN', () => {
-  const scan = (text: string): Array<string | undefined> =>
-    [...text.matchAll(LEDGER_ID_SCAN)].map((m) => m[1]);
-
-  it('finds ids wherever a one-line entry puts them', () => {
-    expect(scan('R1-2 still stands')).toEqual(['R1-2']);
-    expect(scan("src/parse.ts:42 — cannot verify R2-1's fix")).toEqual([
-      'R2-1',
-    ]);
-    expect(scan('chunk 5 (src/big.min.js) — R1-2 at HEAD')).toEqual(['R1-2']);
-    expect(scan('R3-2: claim')).toEqual(['R3-2']);
-    expect(scan('see R3-2, and (R3-2) again')).toEqual(['R3-2', 'R3-2']);
-    // The end-of-string position the entry shapes reach when the id
-    // CLOSES the line ('cannot verify R2-1', 'still blocking: R1-2',
-    // 'the revert of R1-2') — pinned like the readback's terminator set.
-    expect(scan('chunk 5 — R1-2')).toEqual(['R1-2']);
-    expect(scan('R1-2')).toEqual(['R1-2']);
-  });
-
-  it('refuses fragments of longer tokens', () => {
-    expect(scan('XR1-2 glued left')).toEqual([]);
-    expect(scan('R1-2x glued right')).toEqual([]);
-    expect(scan('R1-2-3 hyphen run')).toEqual([]);
-    expect(scan('branch fix/R1-2-thing')).toEqual([]);
-    // The LEFT flank's hyphen rule, pinned apart from the word rule:
-    // an id glued after a hyphen is a longer token's tail.
-    expect(scan('issue-R1-2 hyphen left')).toEqual([]);
   });
 });
 

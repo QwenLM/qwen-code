@@ -2798,7 +2798,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time)',
       );
 
       // With a recorded predecessor the previous round rides along.
@@ -2813,7 +2813,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 9)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time) (previous round: 9)',
       );
 
       // A CONVERGED predecessor: zero is a recorded value, not an absence.
@@ -2831,7 +2831,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr()).toContain(
-        'VOLUME: 2 inline comment(s) this round (2 reported for the first time) (previous round: 0)',
+        'VOLUME: 2 comment(s) this round (2 reported for the first time) (previous round: 0)',
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -3541,7 +3541,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       });
       // The total ROSE — this is exactly the input the old window fired on.
       expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
-        '6 inline comment(s) this round (4 reported for the first time) (previous round: 5)',
+        '6 comment(s) this round (4 reported for the first time) (previous round: 5)',
       );
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
@@ -3619,7 +3619,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         comments: commentsPath,
       });
       expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
-        '3 inline comment(s) this round (0 reported for the first time) (previous round: 5)',
+        '3 comment(s) this round (0 reported for the first time) (previous round: 5)',
       );
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
@@ -5704,8 +5704,6 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       floorEnforced: [],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       postedInline: 0,
       postedFresh: 0,
       downgradedFrom: null,
@@ -5863,6 +5861,17 @@ describe('composeReview — fixedFindings', () => {
       }),
     );
     expect(r.fixedFindings[0]!.by).toHaveLength(240);
+  });
+
+  it('caps `by` by code point — the cut never orphans a surrogate pair', () => {
+    const r = composeReview(
+      base({
+        fixedFindings: [{ id: 'R1-2', by: `${'x'.repeat(239)}😀tail` }],
+      }),
+    );
+    const by = r.fixedFindings[0]!.by!;
+    expect([...by]).toHaveLength(240);
+    expect(by.endsWith('😀')).toBe(true);
   });
 
   it('refuses a non-array field', () => {

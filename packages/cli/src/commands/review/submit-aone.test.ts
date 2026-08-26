@@ -280,8 +280,6 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       fixedFindings: [],
     });
   });
@@ -380,8 +378,6 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       fixedFindings: [{ id: 'R1-2', by: 'the guard rewrite' }],
     });
     expect(() =>
@@ -436,8 +432,6 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       fixedFindings: [],
       draftedIds: ['R1-1'],
     });
@@ -489,8 +483,6 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       fixedFindings: [],
     });
     authMock.mockReturnValue({
@@ -1522,8 +1514,6 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'No issues found. LGTM!',
       cappedBy: [],
       floorEnforced: [],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       fixedFindings: [],
     });
     submitAoneMock.mockReturnValue({
@@ -1555,8 +1545,6 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'No issues found. LGTM!',
       cappedBy: [],
       floorEnforced: [],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       fixedFindings: [],
     });
     submitAoneMock.mockReturnValue({
@@ -1721,8 +1709,6 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       fixedFindings: [],
     });
   });
@@ -2247,6 +2233,85 @@ describe('the Aone anchor gate — the validation the platform does not perform'
         defaultComment: false,
       }),
     ).toThrow(/renders as nothing/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('a contradiction refusal cites the AUTHORED comment index past the anchor degrade (#9940 review)', () => {
+    // The degrade discards comments[1] and renumbers the posting set; the
+    // fixed-vs-re-post gate reads the payload as authored, so the refusal
+    // names comments[2] — the entry the re-compose loop can find in the
+    // model's own JSON — never the reduced position 1.
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+    });
+    const review = writeReview({
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Critical]** Anchors fine — stays inline.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Beyond EOF — discarded.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 13,
+          body: '**[Suggestion]** R1-2: still stands at HEAD',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    });
+    let message = '';
+    try {
+      runSubmit(base({ review }), 'unknown', { defaultComment: false });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/comments\[2\] re-posts R1-2/);
+    expect(message).not.toMatch(/comments\[1\]/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('a relocated Critical re-posting a fixed id is refused at its comment index, never as a fabricated body entry (#9940 review)', () => {
+    // The degrade relocates an unanchorable Critical into `bodyCriticals`
+    // — an entry the authored state never had. The gate reads the
+    // authored payload, so the refusal cites comments[0], the culprit the
+    // model wrote, not a `state.bodyCriticals[0]` that exists only in the
+    // degraded copy.
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+    });
+    const review = writeReview({
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 4,
+          body: '**[Critical]** R1-2: still stands — old-side number.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    });
+    let message = '';
+    try {
+      runSubmit(base({ review }), 'unknown', { defaultComment: false });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/comments\[0\] re-posts R1-2/);
+    expect(message).not.toContain('bodyCriticals');
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
@@ -2790,8 +2855,6 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [0],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       fixedFindings: [],
     });
     const renumbered = {
@@ -2957,8 +3020,6 @@ describe('the Aone submit receipt (producer half of the audit contract)', () => 
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
-      floorEnforcedEntries: [],
-      budgetGapDisclosures: [],
       fixedFindings: [],
     });
   });

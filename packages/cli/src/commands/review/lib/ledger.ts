@@ -329,29 +329,6 @@ export const LEDGER_ID_READBACK = new RegExp(
 export const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 
 /**
- * Whole-token id scan for the contradiction gate: every ledger id anywhere
- * in a model-authored line, never a fragment of a longer token. The
- * readback above is ^-anchored on purpose — a thread root or a drafted
- * claim line carries its id at ONE grammar position — but the gate's
- * entry channels render model text VERBATIM and their prescribed shapes
- * put the id mid-line (a cannot-tell leads with the location, a chunk
- * entry leads with the chunk), so an anchored read there policed one
- * spelling of the re-post and missed the rest (#9940 review).
- *
- * Both flanks reject word characters and hyphens: ids glued into longer
- * hyphen runs or words are the cross-references the readback's docstring
- * exempts, and the gate must not act on those. A mention that SURVIVES
- * the flank test — `R2-1's fix`, `R1-2:`, `(R1-2)` — re-voices the id
- * wherever the line puts it, and the gate fails closed on it: a refusal
- * costs one re-compose, while a missed re-post beside a `fixed` ruling
- * posts the self-contradiction this scan exists to refuse.
- */
-export const LEDGER_ID_SCAN = new RegExp(
-  `(?<![\\w-])(${LEDGER_ID_TOKEN})(?![\\w-])`,
-  'g',
-);
-
-/**
  * The fix-induced marking, read from the head of the CLAIM — after the id and
  * its separator, never inside the id grammar.
  *

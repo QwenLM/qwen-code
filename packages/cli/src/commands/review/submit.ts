@@ -70,8 +70,8 @@ import {
   normalizeSeverityFloor,
   tryIngestBodyCriticals,
   tryToCount,
+  bodyCriticalClaim,
   type ComposeReviewInput,
-  type DeferredEntry,
   type FixedFinding,
 } from './compose-review.js';
 import {
@@ -93,7 +93,6 @@ import {
   parseRemoteUrl,
 } from './lib/remote-match.js';
 import { gitOpt } from './lib/git.js';
-import { LEDGER_ID_SCAN } from './lib/ledger.js';
 import {
   AonePartialPostError,
   submitAoneReview,
@@ -422,18 +421,6 @@ function compose(
    * ruling naming one (#9940 review).
    */
   mintedIds: string[] | undefined;
-  /**
-   * The deferral entries floor enforcement CONSTRUCTED out of drafted
-   * comments — index-parallel with `floorEnforced` — for the gate's
-   * scan of the rerouted `file`/`title` channels (#9940 review).
-   */
-  floorEnforcedEntries: DeferredEntry[];
-  /**
-   * The `Budget gap:` disclosures the composed body renders —
-   * transcript-derived text no payload state field carries, scanned by
-   * the gate like the other rendered channels (#9940 review).
-   */
-  budgetGapDisclosures: string[];
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
@@ -487,8 +474,6 @@ function compose(
     fixedFindings: r.fixedFindings,
     draftedIds: r.draftedIds,
     mintedIds: r.mintedIds,
-    floorEnforcedEntries: r.floorEnforcedEntries,
-    budgetGapDisclosures: r.budgetGapDisclosures,
   };
 }
 
@@ -667,58 +652,44 @@ function inconsistencies(
    */
   authoredIndices?: number[],
   /**
-   * Step 6's `fixed` rulings (validated by the compose). Any channel that
-   * re-voices an id a ruling retires is the payload contradicting itself:
-   * the finding is either still standing (re-reported) or fixed (retired),
-   * and posting both copies would reply "fixed" into the very thread the
-   * re-report just revived. The scan covers every channel the compose
-   * renders model text through: the drafted comments AS COMPOSED —
-   * `preRerouteComments`, the set before the floor-enforcement removal,
-   * because a rerouted re-post still re-voices its id from the body's
-   * deferral list — read through the same claim-line projection the
-   * ledger builder applies; every one-line state entry rendered VERBATIM
-   * (the body Criticals, the cannot-tell Criticals, the duplicate-drop
-   * account, the uncoverable chunks, the not-reviewed dimensions, the
-   * downgrade reasons, and the deferral entries' `file` and `title` at
-   * any severity), scanned WHOLE-TOKEN because the prescribed entry
-   * shapes put the id mid-line; the deferral entries floor enforcement
-   * CONSTRUCTS out of drafted comments and the `Budget gap:` lines
-   * parsed from sub-agent transcripts — both rendered verbatim and
-   * carried by NO payload state field (#9940 review); and the `modelId`
-   * the attribution footer interpolates — the footer, the marker and the
-   * reply render it only when attribution is on, and so does its scan
-   * (#9940 review). The rulings' `by` text is NOT a channel: every id a
-   * scan of it can catch is a member of `fixedFindings` — singly ruled
-   * fixed in this same payload — so the leg could only refuse
-   * self-consistent payloads, never a standing-vs-fixed re-post, and
-   * real re-posts ride the channels above (#9940 review).
+   * Step 6's `fixed` rulings (validated by the compose), beside the payload
+   * AS THE MODEL AUTHORED IT. A ruling retires a finding; a re-report under
+   * the same id re-asserts it as standing; one payload doing both has ruled
+   * one finding two ways. Posted, the pair would reply "fixed" into the
+   * very thread its re-report just revived (an Aone-relocated Critical
+   * would carry the id into the ledger beside the closed thread); left
+   * unposted by a reroute or a discard, it is still the model's own state
+   * contradicting itself, and the re-compose loop is told which comment to
+   * settle. The gate refuses exactly the RE-REPORTS: the
+   * two channels whose ids the ledger builder carries, read through the
+   * same readback it applies — a drafted comment's claim line
+   * (`**[Critical]** R1-2: …`, `carriedFindingOf`) and a body Critical
+   * leading with its id (`bodyCriticalClaim`) — plus a ruling naming an id
+   * this same pass MINTS, the round-off-by-one. It reads the comments the
+   * model authored rather than the posting set, so a comment the Aone
+   * anchor gate degraded or the floor enforcement rerouted still counts
+   * as the assertion it is, and the refusal cites the index in the model's
+   * own payload JSON — the one the re-compose loop fixes against.
+   *
+   * Nothing else is a channel. A retired id MENTIONED in prose — a
+   * cannot-tell about the fix, a duplicate-drop note, a deferral title or
+   * path, a downgrade reason, a budget-gap line, a `by` clause naming a
+   * sibling — is a cross-reference, not a re-report: the ledger does not
+   * carry it, the next round rules on nothing under it, and the thread it
+   * names is legitimately closed. A token scan over such text refused
+   * self-consistent payloads over prose no re-compose could redraft (a
+   * transcript-derived gap line) and over text the body never rendered
+   * (#9940 review, round 6); prose stays the model's responsibility — the
+   * ruling section of SKILL.md — and fails open here.
    */
   fixedFindings: FixedFinding[] = [],
-  preRerouteComments?: ReviewComment[],
-  preRerouteAuthoredIndices?: number[],
+  authored?: { comments: ReviewComment[]; bodyCriticals: unknown },
   /**
    * The ids this pass MINTS fresh — the ledger's own account, never the
-   * carried ones. A fixed ruling retires a PREVIOUS round's entry, so one
-   * naming a minted id is the round-off-by-one this gate polices (#9940
-   * review).
+   * carried ones. A fixed ruling retires an EARLIER finding, so one naming
+   * a minted id is the round-off-by-one this gate polices (#9940 review).
    */
   mintedIds: readonly string[] = [],
-  /**
-   * The deferral entries floor enforcement CONSTRUCTED out of drafted
-   * comments, beside the AUTHORED index of the comment each was moved
-   * out of — the refusal cites that index, the one naming the culprit
-   * in the model's own payload (#9940 review).
-   */
-  reroutedDeferrals: { indices: number[]; entries: DeferredEntry[] } = {
-    indices: [],
-    entries: [],
-  },
-  /**
-   * The `Budget gap:` disclosures the compose renders into the body —
-   * transcript-derived text no payload state field carries (#9940
-   * review).
-   */
-  budgetGapDisclosures: readonly string[] = [],
 ): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
@@ -743,126 +714,36 @@ function inconsistencies(
         );
       }
     }
-    const drafted = preRerouteComments ?? comments;
-    const indices = preRerouteComments
-      ? preRerouteAuthoredIndices
-      : authoredIndices;
+    // The drafted comments as authored: every one the model wrote, at
+    // its authored index. Without the authored set (a caller that ran
+    // no removal) the posting set IS the authored set.
+    const drafted = authored?.comments ?? comments;
     drafted.forEach((c, i) => {
-      const carried =
-        typeof c.body === 'string' ? carriedFindingOf(c.body) : null;
+      const carried = carriedFindingOf(c.body);
       if (carried !== null && fixedIds.has(carried.id)) {
         problems.push(
-          contradiction(`comments[${indices?.[i] ?? i}]`, carried.id),
+          contradiction(
+            `comments[${authored ? i : (authoredIndices?.[i] ?? i)}]`,
+            carried.id,
+          ),
         );
       }
     });
-    // The still-standing re-post's OTHER channels — every one-line state
-    // entry the compose renders VERBATIM (Step 6's still-stands rule: an
-    // unanchorable carried finding goes to the body with its id, and
-    // buildLedger reads it back there). Whole-token, not ^-anchored: the
-    // prescribed entry shapes put the id mid-line — a cannot-tell leads
-    // with the LOCATION, a chunk entry with the chunk, a downgrade or
-    // not-reviewed reason can carry it anywhere — and checking only the
-    // inline channel would let one payload resolve a finding's thread as
-    // fixed while its body lists the same id as a standing blocker, caps
-    // on it, discloses it as uncoverable, or downgrades over it (#9940
-    // review).
-    const entryChannels: Array<[string, unknown]> = [
-      ['state.bodyCriticals', payload.state?.bodyCriticals],
-      ['state.cannotTellCriticals', payload.state?.cannotTellCriticals],
-      [
-        'state.suggestionsDroppedAsDuplicates',
-        payload.state?.suggestionsDroppedAsDuplicates,
-      ],
-      ['state.uncoverableChunks', payload.state?.uncoverableChunks],
-      ['state.unreviewedDimensions', payload.state?.unreviewedDimensions],
-      [
-        'state.presubmit.downgradeReasons',
-        payload.state?.presubmit?.downgradeReasons,
-      ],
-    ];
-    for (const [name, channel] of entryChannels) {
-      if (!Array.isArray(channel)) continue;
-      channel.forEach((entry, i) => {
+    // The still-standing re-post's other channel — Step 6's rule for an
+    // UNANCHORABLE carried finding sends it to the body with its id, and
+    // buildLedger carries it from there. The same read the builder
+    // performs: the id LEADS the entry, or the entry carries none.
+    const bodyCriticals = authored
+      ? authored.bodyCriticals
+      : payload.state?.bodyCriticals;
+    if (Array.isArray(bodyCriticals)) {
+      bodyCriticals.forEach((entry, i) => {
         if (typeof entry !== 'string') return;
-        for (const [, id] of entry.matchAll(LEDGER_ID_SCAN)) {
-          if (id !== undefined && fixedIds.has(id)) {
-            problems.push(contradiction(`${name}[${i}]`, id));
-          }
+        const { id } = bodyCriticalClaim(entry);
+        if (id !== undefined && fixedIds.has(id)) {
+          problems.push(contradiction(`state.bodyCriticals[${i}]`, id));
         }
       });
-    }
-    const deferred = payload.state?.deferredSuggestions;
-    if (Array.isArray(deferred)) {
-      deferred.forEach((entry, i) => {
-        if (
-          entry === null ||
-          typeof entry !== 'object' ||
-          Array.isArray(entry)
-        ) {
-          return;
-        }
-        const { file, title } = entry as { file?: unknown; title?: unknown };
-        if (typeof title !== 'string') return;
-        // `file` is model-authored too, and the deferral line splices it
-        // VERBATIM ahead of the title — a retired id rides either field
-        // past a scan that reads one of them (#9940 review).
-        if (typeof file === 'string') {
-          for (const [, id] of file.matchAll(LEDGER_ID_SCAN)) {
-            if (id !== undefined && fixedIds.has(id)) {
-              problems.push(
-                contradiction(`state.deferredSuggestions[${i}].file`, id),
-              );
-            }
-          }
-        }
-        for (const [, id] of title.matchAll(LEDGER_ID_SCAN)) {
-          if (id !== undefined && fixedIds.has(id)) {
-            problems.push(contradiction(`state.deferredSuggestions[${i}]`, id));
-          }
-        }
-      });
-    }
-    // The floor-enforced reroute CONSTRUCTS its deferral entries out of
-    // drafted comments — `file` from the comment's path, `title` from
-    // its whole marker-stripped body — and the deferral list renders
-    // both verbatim. Neither field rides the `state.deferredSuggestions`
-    // the leg above reads, so a retired id planted in either escapes it
-    // (#9940 review).
-    reroutedDeferrals.entries.forEach((entry, i) => {
-      const at = `comments[${reroutedDeferrals.indices[i] ?? i}]`;
-      for (const [channel, text] of [
-        ['rerouted path', entry.file],
-        ['rerouted body', entry.title],
-      ] as const) {
-        for (const [, id] of text.matchAll(LEDGER_ID_SCAN)) {
-          if (id !== undefined && fixedIds.has(id)) {
-            problems.push(contradiction(`${at} (${channel})`, id));
-          }
-        }
-      }
-    });
-    // `Budget gap:` lines parsed from sub-agent transcripts render
-    // VERBATIM into the not-reviewed section — a channel no payload
-    // state field carries, read off the compose's own disclosure of
-    // what the body posts (#9940 review).
-    budgetGapDisclosures.forEach((gap, i) => {
-      for (const [, id] of gap.matchAll(LEDGER_ID_SCAN)) {
-        if (id !== undefined && fixedIds.has(id)) {
-          problems.push(contradiction(`budgetGapDisclosures[${i}]`, id));
-        }
-      }
-    });
-    // `modelId` rides VERBATIM into the public footer — the body's and
-    // every fixed-resolve reply's — but only while attribution is on;
-    // with it off nothing renders the field, so it contradicts nothing.
-    const modelId = payload.state?.modelId;
-    if (attribution && typeof modelId === 'string') {
-      for (const [, id] of modelId.matchAll(LEDGER_ID_SCAN)) {
-        if (id !== undefined && fixedIds.has(id)) {
-          problems.push(contradiction('state.modelId', id));
-        }
-      }
     }
   }
 
@@ -1242,6 +1123,16 @@ function submit(
       attribution,
     ),
   };
+  // The payload as the model authored it — normalized like everything the
+  // gates read, captured BEFORE the Aone anchor gate and the floor
+  // enforcement rewrite the posting set. The fixed-vs-re-post gate reads
+  // this: a degraded or rerouted comment is still the assertion the model
+  // made, and a refusal must cite the index of the model's own JSON, which
+  // no reduced array carries (#9940 review).
+  const authored = {
+    comments: payload.comments ?? [],
+    bodyCriticals: payload.state?.bodyCriticals,
+  };
 
   // The Aone anchor gate. GitHub validates every anchor server-side and
   // 422s the whole review — the skill's recovery loop then relocates the
@@ -1503,8 +1394,6 @@ function submit(
   let fixedFindings: FixedFinding[];
   let draftedIds: Array<string | undefined> | undefined;
   let mintedIds: string[] | undefined;
-  let floorEnforcedEntries: DeferredEntry[];
-  let budgetGapDisclosures: string[];
   try {
     ({
       event,
@@ -1514,8 +1403,6 @@ function submit(
       fixedFindings,
       draftedIds,
       mintedIds,
-      floorEnforcedEntries,
-      budgetGapDisclosures,
     } = compose(
       payload,
       cliVersion,
@@ -1543,13 +1430,6 @@ function submit(
   // gate: a rerouted comment is no longer posting, so it is no longer the
   // gate's business (an unmarked comment is never rerouted and still
   // refuses below).
-  // The consistency gate's fixed-vs-re-post scan must also see the
-  // comments the floor enforcement is ABOUT to move: a rerouted carried
-  // re-post keeps re-voicing its id from the body's deferral list, so its
-  // pairing with a `fixed` ruling stays a contradiction after the removal
-  // (#9940 review).
-  const preRerouteComments = payload.comments ?? [];
-  const preRerouteAuthoredIndices = authoredIndices;
   if (floorEnforced.length > 0) {
     const drop = new Set(floorEnforced);
     const comments = payload.comments ?? [];
@@ -1572,11 +1452,8 @@ function submit(
     attribution,
     authoredIndices,
     fixedFindings,
-    preRerouteComments,
-    preRerouteAuthoredIndices,
+    authored,
     mintedIds ?? [],
-    { indices: floorEnforced, entries: floorEnforcedEntries },
-    budgetGapDisclosures,
   );
   if (problems.length > 0) {
     throw new Error(
@@ -1739,10 +1616,11 @@ function submit(
           // the re-post would have carried inline.
           body: finalComments[r.index].body ?? '',
         }));
+        // A PLAN, like the resolve line below: nothing is written yet.
         writeStderrLine(
           `Thread lifecycle: ${plan.replies.length} carried finding(s) ` +
-            `reply into their original thread instead of opening a new ` +
-            `one (one finding, one thread).`,
+            `to reply into their original thread instead of opening a ` +
+            `new one (one finding, one thread).`,
         );
       }
       // Threads opened before id-stamping shipped carry no ledger id the
@@ -1756,22 +1634,36 @@ function submit(
         'no ledger id and cannot be matched — if such an original is ' +
         'still open, resolve it by hand.';
       if (plan.resolves.length > 0) {
-        // The footer the inline comments carry, so the reply is attributed
-        // the same way everything else this account posts is.
+        // The `by` clause is model text posted into a thread, so it takes
+        // the SAME two strips an inline comment's body takes: the trailing
+        // footer at normalize time, and under attribution off the whole
+        // unattributed-post projection (mid-line footer spans included)
+        // the posted bodies get — a `by` cannot carry into the thread
+        // what the comments may not. A clause that was nothing but a
+        // forged footer reads as no clause. The real footer is then
+        // appended under attribution exactly as `normalizeInlineComments`
+        // appends it to every comment.
         const modelId = payload.state?.modelId;
-        const footer =
-          attribution && typeof modelId === 'string' && modelId.trim() !== ''
-            ? reviewFooter(modelId, cliVersion)
-            : undefined;
-        fixedResolves = plan.resolves.map((r) => ({
-          threadId: r.threadId,
-          commentId: r.commentId,
-          body:
-            (r.by === undefined
-              ? `${r.id} fixed`
-              : `${r.id} fixed by ${r.by}`) +
-            (footer === undefined ? '' : `\n\n${footer}`),
-        }));
+        fixedResolves = plan.resolves.map((r) => {
+          const by =
+            r.by === undefined
+              ? ''
+              : stripReviewFooter(
+                  attribution ? r.by : stripForUnattributedPost(r.by),
+                ).trim();
+          const line = by === '' ? `${r.id} fixed` : `${r.id} fixed by ${by}`;
+          return {
+            threadId: r.threadId,
+            commentId: r.commentId,
+            body:
+              normalizeInlineComments(
+                [{ body: line }],
+                modelId,
+                cliVersion,
+                attribution,
+              )[0]?.body ?? line,
+          };
+        });
         // Phrased as a PLAN: the line is written before the dry-run
         // check and before any write, and a resolve mutation can still
         // fail — a past-tense "resolved" here would claim what the

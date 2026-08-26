@@ -783,9 +783,12 @@ export interface ComposeReviewInput {
    */
   cannotTellCriticals?: string[];
   /**
-   * Step 6's `fixed` rulings on previous-round ledger entries — one
-   * `{id, by}` per entry whose mechanism can no longer fire, the same
-   * ruling the status table renders as `R1-2 fixed by <what>`.
+   * Step 6's `fixed` rulings — one `{id, by}` per finding whose mechanism
+   * can no longer fire, the same ruling the status table renders as
+   * `R1-2 fixed by <what>`. The id names the finding's thread: a
+   * previous-round ledger entry, or any open thread whose root leads with
+   * a ledger id — a blocker the open-Criticals re-check rules fixed
+   * reaches here too, whether or not the ledger still carries it.
    *
    * Decides nothing HERE: a fixed entry already weighs nothing in the
    * verdict by its absence from every findings channel. The field exists
@@ -796,8 +799,10 @@ export interface ComposeReviewInput {
    * forever, and the PR's unresolved list stopped meaning "still
    * standing" (#9906). Only a `fixed` ruling rides it — never a
    * `still stands`, `cannot tell`, `superseded`, or `fix-induced`
-   * disposition, and never an id this round also re-reports (submit
-   * refuses that contradiction).
+   * disposition, and never an id this round also re-reports as standing
+   * (a drafted comment or body Critical leading with it — submit refuses
+   * that contradiction; a mere mention of the id elsewhere in the state
+   * is a cross-reference and is fine).
    */
   fixedFindings?: FixedFinding[];
   /** Uncoverable chunks, e.g. `"chunk 5 (src/big.min.js)"`. */
@@ -922,11 +927,15 @@ export interface ComposeReviewResult {
    */
   floorEnforced: number[];
   /**
-   * How many inline comments this round will post — the posting set after
-   * floor enforcement, i.e. what `submit` sends. Convergence telemetry: it
-   * rides the ledger marker for the next round to read, and the terminal
-   * report states it so the operator sees this round's contribution to the
-   * PR's comment volume without counting threads by hand. Decides nothing.
+   * How many findings this round posts as comments — the posting set after
+   * floor enforcement, i.e. what `submit` sends to the PR, whether a
+   * comment opens a new thread or (a carried re-report) lands as a reply
+   * in its original one; the split between the two is decided at post
+   * time by the thread lifecycle, and `submit`'s receipt reports it.
+   * Convergence telemetry: it rides the ledger marker for the next round
+   * to read, and the terminal report states it so the operator sees this
+   * round's contribution to the PR's comment volume without counting
+   * threads by hand. Decides nothing.
    */
   postedInline: number;
   /**
@@ -963,22 +972,6 @@ export interface ComposeReviewResult {
    * id's thread as a standing defect (#9940 review).
    */
   mintedIds?: string[];
-  /**
-   * The deferral entries floor enforcement CONSTRUCTED out of drafted
-   * comments — index-parallel with `floorEnforced` — each one's `file`
-   * the comment's path and its `title` the whole marker-stripped body.
-   * The deferral list renders both verbatim, and neither field rides
-   * `state.deferredSuggestions`, so `submit`'s contradiction gate scans
-   * exactly these beside the model's own entries (#9940 review).
-   */
-  floorEnforcedEntries: DeferredEntry[];
-  /**
-   * The `Budget gap:` lines this body discloses — parsed from sub-agent
-   * transcripts and rendered verbatim into the not-reviewed section, a
-   * channel no payload state field carries. `submit`'s contradiction
-   * gate scans them like every other rendered model line (#9940 review).
-   */
-  budgetGapDisclosures: string[];
   /**
    * The convergence paragraph, when a signal fired — the SAME text the body
    * carries, returned so a terminal copy exists.
@@ -2705,7 +2698,11 @@ export function ingestFixedFindings(value: unknown): FixedFinding[] {
     seen.add(id);
     out.push({
       id,
-      ...(by === undefined ? {} : { by: by.trim().slice(0, FIXED_BY_MAX) }),
+      // Cut by code point, not UTF-16 unit: a slice landing inside a
+      // surrogate pair would post a lone surrogate into the thread.
+      ...(by === undefined
+        ? {}
+        : { by: [...by.trim()].slice(0, FIXED_BY_MAX).join('') }),
     });
   });
   return out;
@@ -5066,8 +5063,6 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
-      floorEnforcedEntries: reroute.entries,
-      budgetGapDisclosures: keptBudgetGaps.map((it) => it.gap),
       postedInline,
       postedFresh,
       fixedFindings,
@@ -5158,8 +5153,6 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
-      floorEnforcedEntries: reroute.entries,
-      budgetGapDisclosures: keptBudgetGaps.map((it) => it.gap),
       postedInline,
       postedFresh,
       fixedFindings,
@@ -5413,8 +5406,6 @@ function composeReviewBody(
     remediation,
     deferredCount: deferredSuggestions.length,
     floorEnforced: reroute.indices,
-    floorEnforcedEntries: reroute.entries,
-    budgetGapDisclosures: keptBudgetGaps.map((it) => it.gap),
     postedInline,
     postedFresh,
     fixedFindings,
@@ -6185,7 +6176,7 @@ export const composeReviewCommand: CommandModule = {
     // posting runs: a report-only round's volume is what the NEXT round's
     // trend is measured against.)
     writeStderrLine(
-      `VOLUME: ${result.postedInline} inline comment(s) this round` +
+      `VOLUME: ${result.postedInline} comment(s) this round` +
         ` (${result.postedFresh} reported for the first time)` +
         (result.prevPostedInline === undefined
           ? ''
@@ -6234,6 +6225,28 @@ export const composeReviewCommand: CommandModule = {
     writeStderrLine(verdictLine(result));
   },
 };
+
+/**
+ * A body Critical entry's claim — the id it leads with, when it leads with
+ * one, and the title past it. The entry strips through the same fixpoint
+ * chain the visible list uses — the ledger marker rides the posted body as
+ * an HTML comment, and the autofix grep reads the whole body, comments
+ * included. Leading render-nothing residue goes too, for the same reason as
+ * the drafted-comment leg: residue before a carried id would defeat the id
+ * anchor and silently renumber the finding. Stated once: the ledger builder
+ * carries the id this reads, and submit's contradiction gate refuses a
+ * `fixed` ruling on it through the same read (#9940 review).
+ */
+export function bodyCriticalClaim(
+  entry: unknown,
+): ReturnType<typeof readClaim> {
+  return readClaim(
+    stripForUnattributedPost(typeof entry === 'string' ? entry : '').replace(
+      LEADING_INVISIBLE_RE,
+      '',
+    ),
+  );
+}
 
 /**
  * A drafted comment's claim line, projected the way every id consumer must
@@ -6476,15 +6489,7 @@ export function buildLedger(
     });
   });
   for (const b of bodyCriticals) {
-    // The title strips through the same fixpoint chain the visible list
-    // uses — the ledger marker rides the posted body as an HTML comment,
-    // and the autofix grep reads the whole body, comments included.
-    // Leading render-nothing residue goes too, for the same reason as the
-    // drafted-comment leg: residue between the marker and a carried id
-    // would defeat the id anchor and silently renumber the finding.
-    const { id: carried, title } = readClaim(
-      stripForUnattributedPost(b).replace(LEADING_INVISIBLE_RE, ''),
-    );
+    const { id: carried, title } = bodyCriticalClaim(b);
     findings.push({
       id: idFor(carried),
       sev: 'C',
