@@ -326,6 +326,13 @@ async function runSpeculativeLoop(
         const name = fc.name ?? '';
         const id = fc.id;
         const args = (fc.args ?? {}) as Record<string, unknown>;
+        const toolRegistry = config.getToolRegistry();
+        // Permission-deferred calls must use the normal scheduler approval
+        // path; speculation deliberately bypasses that path.
+        if (toolRegistry.isPermissionDeferred?.(name)) {
+          hitBoundary = true;
+          break;
+        }
         const persistenceCallId =
           id ?? `${name}-${state.id}-${turn}-${responseEntries.length}`;
         let producerObserved = false;
@@ -370,7 +377,6 @@ async function runSpeculativeLoop(
         // Execute the tool directly (bypassing CoreToolScheduler)
         // SECURITY: Only reaches here for read-only tools or writes gated by approvalMode
         try {
-          const toolRegistry = config.getToolRegistry();
           const tool = await toolRegistry.ensureTool(name);
           if (!tool) {
             const responsePart: Part = {
