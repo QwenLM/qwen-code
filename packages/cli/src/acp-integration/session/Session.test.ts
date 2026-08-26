@@ -4834,6 +4834,32 @@ describe('Session', () => {
   });
 
   describe('persistReasoningEffort', () => {
+    it('rejects persistence for a standalone session', () => {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      let thrown: unknown;
+      try {
+        session.persistReasoningEffort('high');
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toMatchObject({
+        code: -32602,
+        message: expect.stringContaining(
+          'Reasoning effort cannot be persisted for this session',
+        ),
+      });
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+    });
+
     it('writes opaque effort values to the model selection scope', () => {
       session.persistReasoningEffort('ultra');
 

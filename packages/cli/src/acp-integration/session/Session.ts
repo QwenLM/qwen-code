@@ -9495,6 +9495,12 @@ export class Session implements SessionContext {
     scope: SettingScope.User | SettingScope.Workspace;
     effectiveValue: string | undefined;
   } {
+    if (this.requiresManagedConversationBinding) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Reasoning effort cannot be persisted for this session',
+      );
+    }
     const persistedValue = value?.trim() ? value : undefined;
     const persistScope =
       getPersistScopeForModelSelection(this.settings) === SettingScope.Workspace

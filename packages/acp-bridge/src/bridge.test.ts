@@ -22943,6 +22943,52 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('setSessionConfigOption', () => {
+    it('keeps standalone reasoning changes session-scoped', async () => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const publishGlobalWorkspaceEvent = vi.fn();
+      const handle = makeChannel({
+        newSessionImpl: (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+        setSessionConfigOptionImpl: () => ({ configOptions: [] }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        publishGlobalWorkspaceEvent,
+      });
+      await bridge.spawnStandaloneSession({ workspaceCwd: WS_A, sessionId });
+
+      await bridge.setSessionConfigOption(sessionId, {
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'ultra',
+        _meta: {
+          [PERSIST_REASONING_EFFORT_META_KEY]: true,
+          'qwenCode/testMarker': 'keep',
+        },
+      });
+
+      expect(handle.agent.setSessionConfigOptionCalls).toEqual([
+        {
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'ultra',
+          _meta: { 'qwenCode/testMarker': 'keep' },
+        },
+      ]);
+      expect(publishGlobalWorkspaceEvent).not.toHaveBeenCalled();
+      expect(
+        bridge
+          .getSessionReplaySnapshot(sessionId)
+          ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+      ).toEqual([]);
+      await bridge.shutdown();
+    });
+
     it('broadcasts a persisted reasoning value after the ACP update succeeds', async () => {
       const handle = makeChannel({
         setSessionConfigOptionImpl: () => ({

@@ -11313,14 +11313,24 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
       const normalized: SetSessionConfigOptionRequest = { ...req, sessionId };
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        normalized.configId === 'reasoning_effort' &&
+        normalized._meta?.[PERSIST_REASONING_EFFORT_META_KEY] === true
+      ) {
+        const forwardedMeta = { ...normalized._meta };
+        delete forwardedMeta[PERSIST_REASONING_EFFORT_META_KEY];
+        normalized._meta =
+          Object.keys(forwardedMeta).length > 0 ? forwardedMeta : undefined;
+      }
       const transportClosed = getTransportClosedReject(entry);
       const work = entry.modelChangeQueue.then(() => {
         const operation = entry.connection
           .setSessionConfigOption(normalized)
           .then((response) => {
             if (
-              req.configId === 'reasoning_effort' &&
-              req._meta?.[PERSIST_REASONING_EFFORT_META_KEY] === true
+              normalized.configId === 'reasoning_effort' &&
+              normalized._meta?.[PERSIST_REASONING_EFFORT_META_KEY] === true
             ) {
               const persistence =
                 response._meta?.[REASONING_EFFORT_PERSISTENCE_META_KEY];
