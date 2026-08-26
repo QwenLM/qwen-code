@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   CdWhilePromptActiveError,
+  SessionArchivingError,
   SessionNotFoundError,
   StandaloneSessionSpawnError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -601,29 +602,34 @@ export class StandaloneSessionService {
       const sessions: StandaloneSessionSummary[] = [];
       for (const summary of byCanonicalId.values()) {
         options.signal?.throwIfAborted();
-        const stable = await this.options.lifecycle.runSharedMany(
-          [summary.sessionId],
-          async () => {
-            options.signal?.throwIfAborted();
-            if (
-              await this.options.deletionJournal.hasRecord(summary.sessionId)
-            ) {
-              return false;
-            }
-            options.signal?.throwIfAborted();
-            const durable = await this.inspectStoredStandalone(
-              runtime,
-              summary.sessionId,
-            );
-            options.signal?.throwIfAborted();
-            return (
-              durable.kind === 'standalone' &&
-              durable.source.metadata.parentSessionId === undefined &&
-              (durable.location === 'archived') ===
-                (summary.isArchived === true)
-            );
-          },
-        );
+        let stable = false;
+        try {
+          stable = await this.options.lifecycle.runSharedMany(
+            [summary.sessionId],
+            async () => {
+              options.signal?.throwIfAborted();
+              if (
+                await this.options.deletionJournal.hasRecord(summary.sessionId)
+              ) {
+                return false;
+              }
+              options.signal?.throwIfAborted();
+              const durable = await this.inspectStoredStandalone(
+                runtime,
+                summary.sessionId,
+              );
+              options.signal?.throwIfAborted();
+              return (
+                durable.kind === 'standalone' &&
+                durable.source.metadata.parentSessionId === undefined &&
+                (durable.location === 'archived') ===
+                  (summary.isArchived === true)
+              );
+            },
+          );
+        } catch (error) {
+          if (!(error instanceof SessionArchivingError)) throw error;
+        }
         options.signal?.throwIfAborted();
         if (stable) sessions.push(summary);
       }
@@ -969,6 +975,11 @@ export class StandaloneSessionService {
       }
     })();
     this.reconciliations.set(runtime, pending);
+    void pending.catch(() => {
+      if (this.reconciliations.get(runtime) === pending) {
+        this.reconciliations.delete(runtime);
+      }
+    });
     return pending;
   }
 

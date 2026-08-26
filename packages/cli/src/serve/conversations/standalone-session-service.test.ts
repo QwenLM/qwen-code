@@ -493,6 +493,33 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.detachClient).toHaveBeenCalledTimes(2);
   });
 
+  it('retries deletion reconciliation after a transient sweep failure', async () => {
+    mockActiveStandalone();
+    const harness = createHarness();
+    harness.deletionJournal.listSessionIds
+      .mockRejectedValueOnce(
+        Object.assign(new Error('transient'), { code: 'EIO' }),
+      )
+      .mockResolvedValueOnce([]);
+    harness.bridge.getSessionSummary.mockReturnValue({
+      sessionId,
+      workspaceCwd: root.canonicalRoot,
+      sourceType: 'standalone',
+      clientCount: 1,
+      hasActivePrompt: false,
+    });
+
+    await expect(
+      harness.service.rename(sessionId, 'First attempt'),
+    ).rejects.toMatchObject({ code: 'EIO' });
+    await expect(
+      harness.service.rename(sessionId, 'Second attempt'),
+    ).resolves.toEqual({ sessionId, displayName: 'Second attempt' });
+
+    expect(harness.deletionJournal.listSessionIds).toHaveBeenCalledTimes(2);
+    expect(harness.bridge.updateSessionMetadata).toHaveBeenCalledOnce();
+  });
+
   it('fails read-only exact lookup closed while deletion is journaled', async () => {
     mockActiveStandalone();
     vi.spyOn(SessionService.prototype, 'getSessionListItem').mockResolvedValue({
@@ -1763,6 +1790,76 @@ describe('StandaloneSessionService', () => {
     const harness = createHarness();
 
     await expect(harness.service.list()).resolves.toEqual({ sessions: [] });
+  });
+
+  it('omits a transitioning catalog row without hiding stable rows', async () => {
+    const stableSessionId = '22222222-2222-4222-8222-222222222222';
+    listWorkspaceSessionsForResponse.mockResolvedValueOnce({
+      sessions: [
+        {
+          sessionId,
+          workspaceCwd: root.canonicalRoot,
+          createdAt: '2026-08-24T00:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: stableSessionId,
+          workspaceCwd: root.canonicalRoot,
+          createdAt: '2026-08-24T01:00:00.000Z',
+          sourceType: 'standalone',
+          clientCount: 0,
+          hasActivePrompt: false,
+        },
+      ],
+    });
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockImplementation(async (candidate) => candidate);
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'active',
+    );
+    vi.spyOn(
+      SessionService.prototype,
+      'readCreationMetadataIfReadable',
+    ).mockResolvedValue({ sourceType: 'standalone' });
+    const harness = createHarness();
+    let releaseExclusive!: () => void;
+    let markExclusiveEntered!: () => void;
+    const exclusiveEntered = new Promise<void>((resolve) => {
+      markExclusiveEntered = resolve;
+    });
+    const heldExclusive = harness.lifecycle.runExclusiveAfterShared(
+      sessionId,
+      async () => {
+        markExclusiveEntered();
+        await new Promise<void>((resolve) => {
+          releaseExclusive = resolve;
+        });
+      },
+    );
+    await exclusiveEntered;
+
+    try {
+      await expect(harness.service.list()).resolves.toEqual({
+        sessions: [
+          {
+            sessionId: stableSessionId,
+            workspaceCwd: root.canonicalRoot,
+            createdAt: '2026-08-24T01:00:00.000Z',
+            sourceType: 'standalone',
+            context: { kind: 'standalone' },
+            clientCount: 0,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+    } finally {
+      releaseExclusive();
+      await heldExclusive;
+    }
   });
 
   it('aborts while a catalog row is waiting for durable verification', async () => {
