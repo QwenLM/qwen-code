@@ -236,10 +236,7 @@
 }
 
 .terminalPaneHidden {
-  position: absolute;
-  inset: 12px;
-  visibility: hidden;
-  pointer-events: none;
+  display: none;
 }
 
 .attachmentPreviewButton {

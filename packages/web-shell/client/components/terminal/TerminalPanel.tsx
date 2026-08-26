@@ -7,6 +7,7 @@
 import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import '@xterm/xterm/css/xterm.css';
 import { useTheme, type WebShellTheme } from '../../themeContext';
 import { getDaemonToken } from '../../config/daemon';
@@ -55,13 +56,17 @@ function wsProtocols(): string[] {
 }
 
 function buildWsUrl(
+  baseUrl: string,
   terminalId: string,
   cwd: string | undefined,
   release = false,
 ): string {
-  const isSecure = window.location.protocol === 'https:';
-  const base = `${isSecure ? 'wss:' : 'ws:'}//${window.location.host}`;
-  const url = new URL('/terminal', base);
+  const base = new URL(baseUrl);
+  const url = new URL(
+    'terminal',
+    `${base.origin}${base.pathname.replace(/\/?$/, '/')}`,
+  );
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('terminalId', terminalId);
   if (cwd) url.searchParams.set('cwd', cwd);
   if (release) url.searchParams.set('release', '1');
@@ -88,11 +93,14 @@ export function TerminalPanel({
   active = true,
 }: TerminalPanelProps) {
   const theme = useTheme();
+  const { baseUrl } = useWorkspace();
   const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
 
   // Follow web-shell theme switches without rebuilding the terminal or
   // dropping the WebSocket connection.
@@ -204,7 +212,7 @@ export function TerminalPanel({
       if (disposed && !releaseOnly) return;
       if (releaseOnly) releaseAttempts += 1;
       const ws = new WebSocket(
-        buildWsUrl(terminalId, cwd, releaseOnly),
+        buildWsUrl(baseUrl, terminalId, cwd, releaseOnly),
         protocols.length > 0 ? protocols : undefined,
       );
       ws.binaryType = 'arraybuffer';
@@ -284,6 +292,7 @@ export function TerminalPanel({
 
     // xterm → WebSocket (raw keystrokes = stdin, control = resize)
     const disposable = term.onData((data: string) => {
+      if (!activeRef.current) return;
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(new TextEncoder().encode(data));
@@ -305,7 +314,7 @@ export function TerminalPanel({
     });
     resizeObserver.observe(containerRef.current);
 
-    term.focus();
+    if (activeRef.current) term.focus();
 
     return () => {
       disposed = true;
@@ -333,11 +342,34 @@ export function TerminalPanel({
   }, []);
 
   useEffect(() => {
-    if (active) termRef.current?.focus();
+    const term = termRef.current;
+    if (active) {
+      try {
+        fitRef.current?.fit();
+        if (term) term.refresh(0, term.rows - 1);
+        const ws = wsRef.current;
+        if (term && ws?.readyState === WebSocket.OPEN) {
+          ws.send(
+            CONTROL_FRAME_PREFIX +
+              JSON.stringify({
+                type: 'resize',
+                cols: term.cols,
+                rows: term.rows,
+              }),
+          );
+        }
+      } catch {
+        // The panel may be changing visibility while it unmounts.
+      }
+      term?.focus();
+    } else {
+      term?.blur();
+    }
   }, [active]);
 
   return (
     <div
+      data-web-terminal
       style={{
         display: 'flex',
         flexDirection: 'column',

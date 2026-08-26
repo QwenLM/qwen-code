@@ -5301,6 +5301,29 @@ describe('App global shortcuts', () => {
       expect.anything(),
     );
   });
+
+  it('leaves terminal key chords to xterm', async () => {
+    renderApp();
+    const terminal = document.createElement('div');
+    terminal.dataset['webTerminal'] = '';
+    const input = document.createElement('textarea');
+    terminal.append(input);
+    document.body.append(terminal);
+    const event = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      key: 'o',
+    });
+
+    await act(async () => {
+      input.dispatchEvent(event);
+      await Promise.resolve();
+    });
+
+    expect(event.defaultPrevented).toBe(false);
+    terminal.remove();
+  });
 });
 
 describe('App plan todos', () => {

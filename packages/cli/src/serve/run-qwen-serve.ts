@@ -6589,22 +6589,11 @@ async function runQwenServeImpl(
         const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
           'stopScheduledTaskKeepaliveForWorkspace'
         ] as ((workspaceCwd: string) => void) | undefined;
-        const releaseWebTerminalsForWorkspace = app?.locals?.[
-          'releaseWebTerminalsForWorkspace'
-        ] as ((workspaceCwd: string) => void) | undefined;
         try {
           stopScheduledTaskKeepaliveForWorkspace?.(runtimeToDrain.workspaceCwd);
         } catch (err) {
           daemonLog.error(
             'workspace scheduled-task drain error',
-            err instanceof Error ? err : null,
-          );
-        }
-        try {
-          releaseWebTerminalsForWorkspace?.(runtimeToDrain.workspaceCwd);
-        } catch (err) {
-          daemonLog.error(
-            'workspace web-terminal drain error',
             err instanceof Error ? err : null,
           );
         }
@@ -6752,6 +6741,9 @@ async function runQwenServeImpl(
             const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
               'stopScheduledTaskKeepaliveForWorkspace'
             ] as ((workspaceCwd: string) => void) | undefined;
+            const releaseWebTerminalsForWorkspace = app?.locals?.[
+              'releaseWebTerminalsForWorkspace'
+            ] as ((workspaceCwd: string) => void) | undefined;
             try {
               stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
             } catch (err) {
@@ -6767,6 +6759,14 @@ async function runQwenServeImpl(
             } catch (err) {
               daemonLog.error(
                 'workspace scheduled-task cleanup error',
+                err instanceof Error ? err : null,
+              );
+            }
+            try {
+              releaseWebTerminalsForWorkspace?.(runtimeToDrain.workspaceCwd);
+            } catch (err) {
+              daemonLog.error(
+                'workspace web-terminal cleanup error',
                 err instanceof Error ? err : null,
               );
             }

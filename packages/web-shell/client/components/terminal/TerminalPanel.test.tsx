@@ -9,6 +9,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const workspace = vi.hoisted(() => ({ baseUrl: 'http://localhost' }));
+const fit = vi.hoisted(() => vi.fn());
 const terminal = vi.hoisted(() => ({
   options: {} as Record<string, unknown>,
   cols: 80,
@@ -19,16 +21,21 @@ const terminal = vi.hoisted(() => ({
   write: vi.fn(),
   writeln: vi.fn(),
   focus: vi.fn(),
+  blur: vi.fn(),
+  refresh: vi.fn(),
   dispose: vi.fn(),
   onData: vi.fn((_listener: (data: string) => void) => ({ dispose: vi.fn() })),
 }));
 
 vi.mock('@xterm/xterm', () => ({ Terminal: vi.fn(() => terminal) }));
 vi.mock('@xterm/addon-fit', () => ({
-  FitAddon: vi.fn(() => ({ fit: vi.fn() })),
+  FitAddon: vi.fn(() => ({ fit })),
 }));
 vi.mock('../../themeContext', () => ({ useTheme: () => 'light' }));
 vi.mock('../../config/daemon', () => ({ getDaemonToken: () => '' }));
+vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
+  useWorkspace: () => workspace,
+}));
 vi.mock('../../i18n', () => ({
   useI18n: () => ({
     t: (key: string, values?: Record<string, string>) =>
@@ -90,6 +97,7 @@ describe('TerminalPanel', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    workspace.baseUrl = 'http://localhost';
     FakeWebSocket.instances.length = 0;
     vi.stubGlobal('WebSocket', FakeWebSocket);
     vi.stubGlobal(
@@ -250,6 +258,15 @@ describe('TerminalPanel', () => {
     );
   });
 
+  it('uses the configured daemon origin and base path', () => {
+    workspace.baseUrl = 'https://daemon.example/qwen/';
+    const ws = render();
+    const url = new URL(ws.url);
+
+    expect(url.origin).toBe('wss://daemon.example');
+    expect(url.pathname).toBe('/qwen/terminal');
+  });
+
   it('does not reconnect after an exit control frame', async () => {
     const ws = render();
     act(() => ws.open());
@@ -265,8 +282,12 @@ describe('TerminalPanel', () => {
   });
 
   it('restores focus when its terminal tab becomes active', () => {
-    render(false);
+    const ws = render(false);
+    act(() => ws.open());
     terminal.focus.mockClear();
+    terminal.refresh.mockClear();
+    fit.mockClear();
+    ws.send.mockClear();
 
     act(() => {
       root.render(
@@ -275,5 +296,31 @@ describe('TerminalPanel', () => {
     });
 
     expect(terminal.focus).toHaveBeenCalledOnce();
+    expect(terminal.refresh).toHaveBeenCalledWith(0, 23);
+    expect(fit).toHaveBeenCalledOnce();
+    expect(ws.send).toHaveBeenCalledWith(
+      '\x00{"type":"resize","cols":80,"rows":24}',
+    );
+  });
+
+  it('blurs and suppresses input while its terminal tab is inactive', () => {
+    const ws = render();
+    act(() => ws.open());
+    const handleInput = terminal.onData.mock.calls.at(-1)?.[0];
+
+    act(() => {
+      root.render(
+        <TerminalPanel
+          terminalId="terminal:one"
+          cwd="/workspace"
+          active={false}
+        />,
+      );
+    });
+    ws.send.mockClear();
+    act(() => handleInput?.('hidden input'));
+
+    expect(terminal.blur).toHaveBeenCalledOnce();
+    expect(ws.send).not.toHaveBeenCalled();
   });
 });

@@ -52,7 +52,7 @@ function registryWithSnapshot(
     addOutputListener: vi.fn(() => vi.fn()),
     addExitListener: vi.fn(() => vi.fn()),
     resize: vi.fn(() => true),
-    write: vi.fn(() => true),
+    write: vi.fn(() => 'written'),
     release: vi.fn(),
     releaseWorkspace: vi.fn(),
   } as unknown as WebTerminalRegistry;
@@ -185,6 +185,10 @@ describe('terminal WebSocket route', () => {
     expect(sentOutput(ws)).toEqual(['done\r\n']);
     expect(ws.sent).toContain('\x00{"type":"exit","exitCode":7}');
     expect(ws.close).toHaveBeenCalledWith(4000, 'Terminal exited');
+    expect(registry.release).toHaveBeenCalledWith(
+      'terminal:manual-1',
+      '/workspace',
+    );
     expect(registry.write).not.toHaveBeenCalled();
   });
 
@@ -237,6 +241,10 @@ describe('terminal WebSocket route', () => {
 
     expect(ws.sent).toContain('\x00{"type":"exit","exitCode":9}');
     expect(ws.close).toHaveBeenCalledWith(4000, 'Terminal exited');
+    expect(registry.release).toHaveBeenCalledWith(
+      'terminal:manual-1',
+      '/workspace',
+    );
   });
 
   it('closes an active WebSocket when its workspace is released', async () => {
@@ -443,13 +451,13 @@ describe('terminal WebSocket route', () => {
     expect(registry.resize).toHaveBeenCalledWith('terminal:manual-1', 120, 40);
   });
 
-  it('closes and releases a session when PTY input backpressure is hit', async () => {
+  it('reconnects without releasing on PTY input backpressure', async () => {
     const registry = registryWithSnapshot({
       output: '',
       exited: false,
       workspaceCwd: '/workspace',
     });
-    vi.mocked(registry.write).mockReturnValueOnce(false);
+    vi.mocked(registry.write).mockReturnValueOnce('backpressure');
     const ws = new FakeWebSocket();
     await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
       ws as unknown as WebSocket,
@@ -458,11 +466,56 @@ describe('terminal WebSocket route', () => {
 
     ws.emit('message', Buffer.from('large paste'), true);
 
-    expect(registry.release).toHaveBeenCalledWith(
-      'terminal:manual-1',
-      '/workspace',
-    );
+    expect(registry.release).not.toHaveBeenCalled();
     expect(ws.close).toHaveBeenCalledWith(1013, 'Terminal input backpressure');
+  });
+
+  it('closes without retry when the terminal session is unavailable', async () => {
+    const registry = registryWithSnapshot({
+      output: '',
+      exited: false,
+      workspaceCwd: '/workspace',
+    });
+    vi.mocked(registry.write).mockReturnValueOnce('unavailable');
+    const ws = new FakeWebSocket();
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      request,
+    );
+
+    ws.emit('message', Buffer.from('input'), true);
+
+    expect(registry.release).not.toHaveBeenCalled();
+    expect(ws.close).toHaveBeenCalledWith(4002, 'Session unavailable');
+  });
+
+  it('allows live output while a maximum-size replay is buffered', async () => {
+    let output: ((data: string) => void) | undefined;
+    const registry = registryWithSnapshot({
+      output: 'x'.repeat(4 * 1024 * 1024),
+      exited: false,
+      workspaceCwd: '/workspace',
+    });
+    vi.mocked(registry.addOutputListener).mockImplementationOnce(
+      (_terminalId, listener) => {
+        output = listener;
+        return vi.fn();
+      },
+    );
+    const ws = new FakeWebSocket();
+    await createTerminalWsHandler(registry, resolveWorkspace).onConnection(
+      ws as unknown as WebSocket,
+      request,
+    );
+    ws.bufferedAmount = 4 * 1024 * 1024;
+
+    output?.('live');
+
+    expect(ws.close).not.toHaveBeenCalledWith(
+      1013,
+      'Terminal output backpressure',
+    );
+    expect(sentOutput(ws)).toContain('live');
   });
 
   it('detaches and closes a stalled output connection', async () => {
@@ -484,7 +537,7 @@ describe('terminal WebSocket route', () => {
       ws as unknown as WebSocket,
       request,
     );
-    ws.bufferedAmount = 1024 * 1024 + 1;
+    ws.bufferedAmount = 8 * 1024 * 1024 + 1;
 
     output?.('more output');
 

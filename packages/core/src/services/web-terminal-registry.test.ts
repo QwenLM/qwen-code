@@ -206,7 +206,7 @@ describe('WebTerminalRegistry', () => {
       exitCode: 7,
       workspaceCwd: '/workspace',
     });
-    expect(registry.write(terminalId, 'ignored')).toBe(false);
+    expect(registry.write(terminalId, 'ignored')).toBe('unavailable');
     expect(registry.resize(terminalId, 80, 24)).toBe(false);
   });
 
@@ -248,15 +248,35 @@ describe('WebTerminalRegistry', () => {
     const listener = vi.fn();
     registry.addOutputListener('terminal:io', listener);
 
-    expect(registry.write('terminal:io', 'x'.repeat(256 * 1024))).toBe(true);
-    expect(registry.write('terminal:io', 'x')).toBe(false);
+    expect(registry.write('terminal:io', 'x'.repeat(256 * 1024))).toBe(
+      'written',
+    );
+    expect(registry.write('terminal:io', 'x')).toBe('backpressure');
     expect(write).toHaveBeenCalledOnce();
     expect(registry.resize('terminal:io', 120, 40)).toBe(true);
     expect(resize).toHaveBeenCalledWith(120, 40);
 
     onData('ready');
     expect(listener).toHaveBeenCalledWith('ready');
-    expect(registry.write('terminal:io', 'x')).toBe(true);
+    expect(registry.write('terminal:io', 'x')).toBe('written');
+  });
+
+  it('does not count exited sessions against the live terminal limit', async () => {
+    const registry = new WebTerminalRegistry();
+    for (let i = 0; i < MAX_CONCURRENT_WEB_TERMINALS; i++) {
+      await registry.create({
+        terminalId: `terminal:exited-${i}`,
+        workspaceCwd: '/workspace',
+      });
+      onExit({ exitCode: 0 });
+    }
+
+    await expect(
+      registry.create({
+        terminalId: 'terminal:replacement',
+        workspaceCwd: '/workspace',
+      }),
+    ).resolves.toEqual({ terminalId: 'terminal:replacement' });
   });
 
   it('preserves a clean exit code in snapshots', async () => {

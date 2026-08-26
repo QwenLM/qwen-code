@@ -359,6 +359,13 @@ const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;
 const SUBAGENT_PANEL_ANIMATION_FALLBACK_MS = 700;
 const MIN_DOCKED_MESSAGE_AREA_WIDTH = 800;
 const DOCKED_ENVIRONMENT_PANEL_WIDTH = 332;
+
+function isWebTerminalTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element && target.closest('[data-web-terminal]') !== null
+  );
+}
+
 // The docked fullscreen surface contains Tab itself instead of going through
 // Radix FocusScope: FocusScope registers every mounted scope in a
 // module-global stack and pauses the current head even with trapped={false},
@@ -7079,7 +7086,12 @@ export function App({
 
   useEffect(() => {
     const onBtwShortcut = (e: KeyboardEvent) => {
-      if (interactionBlocked || pendingApproval) return;
+      if (
+        interactionBlocked ||
+        pendingApproval ||
+        isWebTerminalTarget(e.target)
+      )
+        return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
 
@@ -10867,7 +10879,7 @@ export function App({
 
   useEffect(() => {
     const onGlobalShortcut = (e: KeyboardEvent) => {
-      if (interactionBlocked) return;
+      if (interactionBlocked || isWebTerminalTarget(e.target)) return;
       if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         if (e.key === 'l') {
           e.preventDefault();
@@ -10954,7 +10966,13 @@ export function App({
     const onKeyDown = (e: KeyboardEvent) => {
       // keyCode 229: WebKit marks IME-owned keys this way while isComposing
       // is still false; the IME owns them exactly like composing keys.
-      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      if (
+        e.defaultPrevented ||
+        e.isComposing ||
+        e.keyCode === 229 ||
+        isWebTerminalTarget(e.target)
+      )
+        return;
       const live = escLiveRef.current;
 
       // The fullscreen right panel (artifacts/subagents) is the topmost

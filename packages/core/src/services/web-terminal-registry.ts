@@ -34,6 +34,8 @@ export interface CreateWebTerminalResult {
   terminalId: string;
 }
 
+export type WebTerminalWriteResult = 'written' | 'backpressure' | 'unavailable';
+
 /** Upper bound on replayed scrollback per PTY session (roughly 4 MB). */
 const MAX_BUFFER_CHUNKS = 4000;
 const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
@@ -129,10 +131,10 @@ export class WebTerminalRegistry {
         retryable: true,
       };
     }
-    if (
-      this.sessions.size + this.creating.size >=
-      MAX_CONCURRENT_WEB_TERMINALS
-    ) {
+    const liveSessions = [...this.sessions.values()].filter(
+      (session) => !session.exited,
+    ).length;
+    if (liveSessions + this.creating.size >= MAX_CONCURRENT_WEB_TERMINALS) {
       return { error: 'Web terminal limit reached', retryable: true };
     }
     this.creating.set(terminalId, options.workspaceCwd);
@@ -291,22 +293,22 @@ export class WebTerminalRegistry {
     };
   }
 
-  write(terminalId: string, data: string): boolean {
+  write(terminalId: string, data: string): WebTerminalWriteResult {
     const session = this.sessions.get(terminalId);
-    if (!session || session.exited) return false;
+    if (!session || session.exited) return 'unavailable';
     const bytes = Buffer.byteLength(data);
     if (
       session.unacknowledgedInputBytes + bytes >
       MAX_UNACKNOWLEDGED_INPUT_BYTES
     ) {
-      return false;
+      return 'backpressure';
     }
     try {
       session.pty.write(data);
       session.unacknowledgedInputBytes += bytes;
-      return true;
+      return 'written';
     } catch {
-      return false;
+      return 'unavailable';
     }
   }
 

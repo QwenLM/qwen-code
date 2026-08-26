@@ -13,7 +13,7 @@ const TERMINAL_WS_PATH = '/terminal';
 const CONTROL_FRAME_PREFIX = '\x00';
 const MAX_PENDING_INPUT_BYTES = 64 * 1024;
 const MAX_TERMINAL_DIMENSION = 1000;
-const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
+const MAX_SOCKET_BUFFERED_BYTES = 8 * 1024 * 1024;
 
 export interface WebTerminalWorkspaceContext {
   workspaceCwd: string;
@@ -205,6 +205,7 @@ export function createTerminalWsHandler(
       const finishExited = (exitCode: number | undefined) => {
         sendControl(ws, { type: 'exit', exitCode });
         cleanup();
+        registry.release(terminalId, workspace.workspaceCwd);
         ws.close(4000, 'Terminal exited');
       };
       const onMessage = (data: unknown, isBinary = false) => {
@@ -245,14 +246,22 @@ export function createTerminalWsHandler(
           ws.close(4002, 'Terminal workspace unavailable');
           return;
         }
-        if (!registry.write(terminalId, text)) {
+        const writeResult = registry.write(terminalId, text);
+        if (writeResult !== 'written') {
           sendControl(ws, {
             type: 'error',
-            message: 'Terminal input backpressure',
+            message:
+              writeResult === 'backpressure'
+                ? 'Terminal input backpressure'
+                : 'Session unavailable',
           });
           cleanup();
-          registry.release(terminalId, workspace.workspaceCwd);
-          ws.close(1013, 'Terminal input backpressure');
+          ws.close(
+            writeResult === 'backpressure' ? 1013 : 4002,
+            writeResult === 'backpressure'
+              ? 'Terminal input backpressure'
+              : 'Session unavailable',
+          );
         }
       };
 
