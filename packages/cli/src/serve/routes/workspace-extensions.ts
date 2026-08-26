@@ -81,7 +81,9 @@ const assertDaemonExtensionInstallSource = (
 ): void => {
   if (installMetadata.type === 'local') {
     if (!path.isAbsolute(source)) {
-      throw new Error('Local extension install paths must be absolute.');
+      throw new Error(
+        'Local extension sources must be absolute daemon-host paths; relative paths are not supported over the daemon endpoint.',
+      );
     }
     if (ref || autoUpdate) {
       throw new Error(

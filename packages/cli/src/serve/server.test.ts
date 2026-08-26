@@ -7667,7 +7667,7 @@ describe('createServeApp', () => {
 
         expect(res.status).toBe(400);
         expect(res.body.error).toBe(
-          'Local extension install paths must be absolute.',
+          'Local extension sources must be absolute daemon-host paths; relative paths are not supported over the daemon endpoint.',
         );
         expect(bridge.extensionEvents).toEqual([]);
       } finally {
@@ -7815,7 +7815,8 @@ describe('createServeApp', () => {
         await vi.waitFor(() => {
           expect(bridge.extensionEvents.at(-1)).toMatchObject({
             status: 'failed',
-            error: 'Local extension install paths must be absolute.',
+            error:
+              'Local extension sources must be absolute daemon-host paths; relative paths are not supported over the daemon endpoint.',
           });
         });
         expect(prepareCalled).toBe(false);

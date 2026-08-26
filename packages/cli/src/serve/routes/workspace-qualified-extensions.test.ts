@@ -1767,48 +1767,55 @@ describe('extension management v2 REST', () => {
         pollOperation(h.app, started.body.operationId),
       ).resolves.toMatchObject({
         status: 'failed',
-        error: 'Local extension install paths must be absolute.',
-      });
-      expect(prepareInstall).not.toHaveBeenCalled();
-    } finally {
-      await fsp.rm(h.scratch, { recursive: true, force: true });
-    }
-  });
-
-  it('does not install a daemon-local path with a ref through the global V2 route', async () => {
-    const h = await makeHarness();
-    mockExtensionManager();
-    const source = path.join(h.scratch, 'local-extension');
-    await fsp.mkdir(source);
-    const prepareInstall = vi.spyOn(
-      ExtensionManager.prototype,
-      'prepareExtensionInstall',
-    );
-    try {
-      const started = await auth(
-        request(h.app)
-          .post('/extensions/install')
-          .send({
-            source,
-            ref: 'v1',
-            consent: true,
-            activation: { scope: 'user' },
-          }),
-      );
-
-      expect(started.status).toBe(202);
-      await expect(
-        pollOperation(h.app, started.body.operationId),
-      ).resolves.toMatchObject({
-        status: 'failed',
         error:
-          '`ref` and `autoUpdate` are not applicable for local extensions.',
+          'Local extension sources must be absolute daemon-host paths; relative paths are not supported over the daemon endpoint.',
       });
       expect(prepareInstall).not.toHaveBeenCalled();
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
+
+  it.each([
+    { option: 'ref', installOptions: { ref: 'v1' } },
+    { option: 'autoUpdate', installOptions: { autoUpdate: true } },
+  ])(
+    'does not install a daemon-local path with $option through the global V2 route',
+    async ({ installOptions }) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      const source = path.join(h.scratch, 'local-extension');
+      await fsp.mkdir(source);
+      const prepareInstall = vi.spyOn(
+        ExtensionManager.prototype,
+        'prepareExtensionInstall',
+      );
+      try {
+        const started = await auth(
+          request(h.app)
+            .post('/extensions/install')
+            .send({
+              source,
+              ...installOptions,
+              consent: true,
+              activation: { scope: 'user' },
+            }),
+        );
+
+        expect(started.status).toBe(202);
+        await expect(
+          pollOperation(h.app, started.body.operationId),
+        ).resolves.toMatchObject({
+          status: 'failed',
+          error:
+            '`ref` and `autoUpdate` are not applicable for local extensions.',
+        });
+        expect(prepareInstall).not.toHaveBeenCalled();
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.each([
     { persistence: undefined, expected: 'one_time' as const },
