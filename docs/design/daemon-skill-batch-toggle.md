@@ -29,13 +29,16 @@ trimmed and deduplicated case-insensitively while preserving first-seen order.
 The daemon does not read or validate against runtime Skill status. It applies
 all resulting declaration changes in at most one locked settings write and,
 when anything changed, performs one live-session refresh. Enabling one removes
-a matching workspace `skills.disabled` entry and is otherwise a no-op, except
-for the existing `defaultDisabled` override behavior; disabling one writes
-`skills.disabled`. Unknown, non-user-invocable, inactive-Extension, and
-higher-scope-disabled names use the same settings path. Higher scopes still
-determine effective availability after settings merge, but do not prevent the
-workspace scope from recording its own declaration. Unexpected persistence and
-runtime-generation failures fail the whole request.
+a matching workspace `skills.disabled` entry, preserves and normalizes an
+existing workspace `skills.enabled` declaration, or records an opt-in for an
+effective `skills.defaultDisabled` entry. With no existing workspace
+declaration and no effective `skills.defaultDisabled` entry, enable is a no-op
+(`changed: false`). Disabling writes `skills.disabled`. Unknown,
+non-user-invocable, inactive-Extension, and higher-scope-disabled names use the
+same settings path. Higher scopes still determine effective availability after
+settings merge, but do not prevent the workspace scope from recording its own
+declaration. Unexpected persistence and runtime-generation failures fail the
+whole request.
 
 ```json
 {
@@ -65,7 +68,10 @@ runtime-generation failures fail the whole request.
 ```
 
 `results` preserves request order. `errors` remains present for wire
-compatibility and is empty for structurally valid names.
+compatibility and is empty for structurally valid names. Batch `activation`
+reflects child liveness and any required shared refresh independently from each
+result's `changed` flag; an all-no-op batch can therefore be `applied` or
+`deferred`, and no refresh occurs.
 
 Malformed requests still fail as a whole with HTTP 400. Workspace trust,
 authentication, client identity, and generation ownership use the same gates

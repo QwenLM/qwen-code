@@ -165,7 +165,7 @@ await client
   .setWorkspaceSkillsEnabled(['review', 'deploy'], true);
 ```
 
-`DaemonSkillBatchToggleResult` contains ordered `results`, a compatibility `errors` array, and batch-level activation/session-refresh counts. Current daemons process every structurally valid name in request order, persist all resulting declaration changes together in at most one locked settings write, refresh active sessions once, and return an empty `errors` array without consulting the loaded Skill catalog. Enabling a name with no existing workspace declaration and no effective `skills.defaultDisabled` entry returns `changed: false` and performs no write. The error item types remain available so the SDK can still decode responses from older daemons. The method throws on a non-200 response.
+`DaemonSkillBatchToggleResult` contains ordered `results`, a compatibility `errors` array, and batch-level activation/session-refresh counts. Current daemons process every structurally valid name in request order, persist all resulting declaration changes together in at most one locked settings write, refresh active sessions once when anything changed, and return an empty `errors` array without consulting the loaded Skill catalog. Enabling a name with no existing workspace declaration and no effective `skills.defaultDisabled` entry returns `changed: false` and performs no write. The error item types remain available so the SDK can still decode responses from older daemons. The method throws on a non-200 response.
 
 V2 Extension batch activation retains the asynchronous Extension operation model. Pre-flight `extension_batch_activation_v2`, submit a global default batch or a selected-workspace override batch, then poll it with the existing operation helper:
 
