@@ -1491,6 +1491,38 @@ describe('assertChannelWorkerDaemonUrlIsLocal', () => {
     ).toThrow(/does not name an address on this host/);
   });
 
+  // R18-1: the primary Host gate (auth.ts) answers only 127.0.0.1, localhost,
+  // and [::1] — the kernel routes every other 127.x.y.z to loopback too, and
+  // the certifier used to accept all of them, but a worker dialing such a
+  // spelling gets `403 Invalid Host header` from the daemon it is trying to
+  // reach: the first worker's failure exits the daemon, channels added later
+  // restart-loop while /health stays green. Refuse what the gate refuses,
+  // once, at boot.
+  it('refuses loopback spellings the Host gate answers 403', () => {
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal('http://127.0.0.2:8080', '127.0.0.2'),
+    ).toThrow(/is a loopback address the daemon's Host header gate refuses/);
+    for (const host of ['127.0.0.2', '127.0.1.1', '127.255.255.254']) {
+      expect(() =>
+        assertChannelWorkerDaemonUrlIsLocal(
+          formatChannelWorkerDaemonUrl(host, 4170, true),
+          host,
+        ),
+      ).toThrow(/Channels cannot start: --hostname/);
+    }
+  });
+
+  it('still accepts the loopback spellings the Host gate answers', () => {
+    for (const host of ['localhost', 'LOCALHOST', '127.0.0.1', '[::1]']) {
+      expect(() =>
+        assertChannelWorkerDaemonUrlIsLocal(
+          formatChannelWorkerDaemonUrl(host, 4170, true),
+          host,
+        ),
+      ).not.toThrow();
+    }
+  });
+
   // A zone-scoped link-local bind (`fe80::…%eth0`) is an address this host
   // answers on, but `formatHostForUrl` percent-encodes the zone into the
   // worker URL and WHATWG URL rejects zone IDs outright — so the parse

@@ -84,7 +84,7 @@ import {
   hostAssignsIpv6Loopback,
   isOwnInterfaceAddress,
 } from './local-bind-addresses.js';
-import { isLoopbackBind } from './loopback-binds.js';
+import { isHostGateLoopback, isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveServeToken } from './serve-token.js';
@@ -783,7 +783,20 @@ export function assertChannelWorkerDaemonUrlIsLocal(
         `a zone-less literal address of one of this machine's interfaces.`,
     );
   }
-  if (isLoopbackBind(host) || isOwnInterfaceAddress(host)) return;
+  if (isHostGateLoopback(host) || isOwnInterfaceAddress(host)) return;
+  if (isLoopbackBind(host)) {
+    // A wide 127/8 bind passes `isLoopbackBind` and the kernel routes it to
+    // loopback, but the primary Host gate answers only the spellings in
+    // `LOOPBACK_BINDS` — every other 127.x.y.z gets 403 before a route.
+    throw new Error(
+      `Channels cannot start: --hostname "${hostname}" is a loopback ` +
+        `address the daemon's Host header gate refuses (it answers only ` +
+        `127.0.0.1, localhost, and [::1]), so channel workers cannot reach ` +
+        `the daemon on it. Bind to one of those spellings, to the wildcard ` +
+        `(0.0.0.0 / ::), or to a literal address of one of this machine's ` +
+        `interfaces.`,
+    );
+  }
   throw new Error(
     `Channels cannot start: --hostname "${hostname}" is not a loopback bind ` +
       `and does not name an address on this host, so channel workers have no ` +

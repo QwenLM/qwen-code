@@ -64,7 +64,7 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
   type ChannelStartupReportMessage,
 } from '../../serve/channel-worker-startup-ipc.js';
-import { isLoopbackBind } from '../../serve/loopback-binds.js';
+import { isHostGateLoopback } from '../../serve/loopback-binds.js';
 import { isOwnInterfaceAddress } from '../../serve/local-bind-addresses.js';
 import { ChannelLoopMcpWorkerHost } from '../../serve/channel-loop-mcp-ipc.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -334,7 +334,7 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
   // host, a DNS name we would have to resolve to find out) stays refused.
   if (
     (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
-    (!isLoopbackBind(parsed.hostname) &&
+    (!isHostGateLoopback(parsed.hostname) &&
       !isOwnInterfaceAddress(parsed.hostname))
   ) {
     throw new Error(

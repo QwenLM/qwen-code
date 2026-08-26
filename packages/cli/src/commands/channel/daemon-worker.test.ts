@@ -1452,6 +1452,45 @@ describe('runChannelDaemonWorker', () => {
     expect(sdk.DaemonClient).not.toHaveBeenCalled();
   });
 
+  // R18-1: mirrors the boot certifier — the primary Host gate answers only
+  // 127.0.0.1, localhost, and [::1], so a worker aimed at any other 127/8
+  // spelling is refused by the daemon itself with 403 Invalid Host header.
+  // Reject it here too instead of letting it restart-loop.
+  it('rejects loopback spellings the daemon Host gate refuses', async () => {
+    const sdk = createSdk();
+
+    await expect(
+      runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.2:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }),
+    ).rejects.toThrow(
+      "QWEN_DAEMON_URL must use an http(s) loopback URL or a literal address of one of this machine's interfaces.",
+    );
+    expect(sdk.DaemonClient).not.toHaveBeenCalled();
+  });
+
+  it('still accepts the loopback spellings the Host gate answers', async () => {
+    const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://localhost:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(sdk.DaemonClient).toHaveBeenCalledWith({
+      baseUrl: 'http://localhost:4170',
+    });
+  });
+
   it('fails fast when no channels are configured', async () => {
     const sdk = createSdk();
     mockLoadChannelsConfig.mockReturnValueOnce({});
