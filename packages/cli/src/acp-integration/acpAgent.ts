@@ -5425,12 +5425,6 @@ class QwenAgent implements Agent {
               ) {
                 config.disableReasoning();
               } else if (effectiveValue !== REASONING_EFFORT_NONE) {
-                if (
-                  effectiveValue &&
-                  config.getReasoningPreference() === false
-                ) {
-                  config.setReasoningEffort(undefined);
-                }
                 config.setReasoningEffort(effectiveValue);
               }
             }
@@ -12500,8 +12494,10 @@ class QwenAgent implements Agent {
 
     const modelReasoning = this.getModelReasoningConfiguration(config);
     const currentModelEffort = config.getReasoningEffort?.();
-    const canDisableReasoning =
-      config.getContentGeneratorConfig().thinkingMandatory !== true;
+    const generation = config.getContentGeneratorConfig();
+    const canDisableReasoning = generation.thinkingMandatory !== true;
+    const reasoningDisabled =
+      canDisableReasoning && generation.reasoning === false;
     const genericCustomEffort =
       currentModelEffort &&
       currentModelEffort !== REASONING_EFFORT_DEFAULT &&
@@ -12510,7 +12506,7 @@ class QwenAgent implements Agent {
         : undefined;
     const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
       ? buildModelReasoningConfigOption(rawCurrentModelId, {
-          enabled: config.getContentGeneratorConfig().reasoning !== false,
+          enabled: generation.reasoning !== false,
           effort: currentModelEffort,
         })
       : undefined) ?? {
@@ -12519,10 +12515,9 @@ class QwenAgent implements Agent {
       description: 'How hard reasoning-capable models should think',
       category: 'thought_level',
       type: 'select' as const,
-      currentValue:
-        config.getContentGeneratorConfig().reasoning === false
-          ? REASONING_EFFORT_NONE
-          : (currentModelEffort ?? REASONING_EFFORT_DEFAULT),
+      currentValue: reasoningDisabled
+        ? REASONING_EFFORT_NONE
+        : (currentModelEffort ?? REASONING_EFFORT_DEFAULT),
       options: [
         ...(canDisableReasoning
           ? [

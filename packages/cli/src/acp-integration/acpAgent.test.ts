@@ -7935,7 +7935,6 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const mutable = reasoning as unknown as {
       efforts: Array<{ value: string; name: string }>;
     };
-    mutable.efforts.push({ value: 'ultra', name: 'Ultra thinking' });
 
     const sessionId = 'custom-reasoning-session';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -7951,6 +7950,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     const { agent, agentPromise } = await bootAcpAgent();
     try {
+      mutable.efforts.push({ value: 'ultra', name: 'Ultra thinking' });
       const session = (await agent.newSession({
         cwd: '/tmp',
         mcpServers: [],
@@ -8139,6 +8139,52 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
       ).rejects.toThrow('Reasoning cannot be disabled for this model');
       expect(generation.reasoning).toEqual({ effort: 'medium' });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('reports the effective default when persisted disable reaches a mandatory model', async () => {
+    const sessionId = 'mandatory-thinking-disabled-preference-session';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation = {
+      reasoning: false,
+      thinkingMandatory: true,
+    } as const;
+    innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
+    innerConfig.getContentGeneratorConfig = vi.fn(() => generation);
+    innerConfig.getReasoningPreference = vi.fn().mockReturnValue(false);
+    innerConfig.getReasoningEffort = vi.fn().mockReturnValue(undefined);
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as {
+        configOptions: Array<{
+          id: string;
+          currentValue: string;
+          options: Array<{ value: string }>;
+        }>;
+      };
+      const option = session.configOptions.find(
+        (item) => item.id === 'reasoning_effort',
+      );
+      expect(option?.currentValue).toBe('default');
+      expect(option?.options.map(({ value }) => value)).toContain('default');
+      expect(option?.options.map(({ value }) => value)).not.toContain('none');
+
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'none',
+        }),
+      ).rejects.toThrow('Reasoning cannot be disabled for this model');
+      expect(generation.reasoning).toBe(false);
+      expect(innerConfig.disableReasoning).not.toHaveBeenCalled();
     } finally {
       mockConnectionState.resolve();
       await agentPromise;
