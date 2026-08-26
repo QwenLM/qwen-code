@@ -249,6 +249,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [145. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…](#af-145)
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
+- [148. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.…](#af-148)
 
 ---
 
@@ -2764,10 +2765,14 @@ In `review-scan` · `Scan for PRs with new feedback`.
 ```text
 Delay-window fallback: a review run parked BEFORE its job
 starts (the 10-minute environment wait) has no review-pr
-check-run yet, but a push now would still cancel it via
-synchronize. Only pull_request_target runs are cancelable —
+check-run yet, but a push now would still supersede it (the
+review workflow's own supersede handling, #10110: a parked or
+pre-threshold run yields to the push — its work is discarded
+exactly as the old synchronize cancel did — and only a
+past-threshold run salvages; the hold keeps the loop from
+forcing either). Only pull_request_target runs are affected —
 comment/review-triggered runs use per-run concurrency groups
-that a synchronize never cancels, so holding the round for
+that a synchronize never touches, so holding the round for
 one would defer autofix for nothing (R2-1). Match against the
 scan's REVIEW_RUNS_JSON fetch — one page of the review
 workflow's runs, empty on lookup failure — by immutable head
@@ -3726,4 +3731,46 @@ wrapper: a translation quoting HTML is pathological (SKILL
 forbids HTML in failure.zh.md), but must not be able to open
 or close a <details>/<summary> that swallows the closing tag
 the workflow emits below.
+```
+
+<a id="af-148"></a>
+
+### 148. review-address · Report dry-run / failure — Hold the stale-base refresh while a review-pr is in flight on the PR.
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+The scan's dispatch gate (#8888/#8899) already refuses to start a round
+while review-pr is live, but the loop had one more head-moving write
+outside that hold: this step's stale-base retry calls update-branch at
+REPORT time, hours after the dispatch gate last looked. A review can
+start in that window — a human /review comment, a bot re-request, or a
+run the scan's fail-open probe missed — and the merge push would then
+supersede a lifecycle review run mid-flight (#10110; before the salvage
+threshold that discards its work exactly as the old cancel did), or
+invalidate a command run's posting: every review pins the head it
+reviews (QWEN_CI_REVIEW_EXPECTED_HEAD_SHA) and its guard blocks the
+final post when the head moved, so even the uncancellable per-run-group
+reviews lose their whole run to a head move.
+
+So the retry probes for a live review first, with the scan gate's exact
+probe pair: the statusCheckRollup filter (any live review-pr check from
+the review workflow, trigger-independent), then the runs-API fallback
+for pull_request_target runs still parked in the 10-minute delay window
+with no check-run yet. On a live review the update is DEFERRED, not
+skipped: the same 9999 sentinel MARK_TS the retry branch uses keeps the
+feedback live, the next scan re-runs the round (itself held while the
+review is still in flight), and that round's report step performs the
+refresh once the review has landed. One extra round of latency, bounded
+by MAX_ROUNDS, against hours of discarded review work.
+
+Fail-open on probe errors, deliberately: the probe is an optimization,
+and failing closed would wedge stale-base recovery — the path that
+un-sticks red PRs — on any transient API error. A probe error therefore
+reads as "no review live" and the update proceeds, which is exactly the
+pre-#10110 behavior. The deferred headline joins CONSEC_FAIL's
+streak-reset needles ("deferred a stale-base refresh"): like the
+updated-a-stale-base round it defers to, the round's failure is not
+evidence about the PR, and counting it toward the cap would park a PR
+for having been reviewed at the wrong moment.
 ```

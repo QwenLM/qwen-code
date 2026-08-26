@@ -2568,8 +2568,9 @@ jobs:
             if [[ "${REVIEW_PR_LIVE}" != "true" && -n "${REVIEW_WF_ID}" && -n "${PR_HEAD_OID}" ]]; then
               # Delay-window fallback: a review run parked BEFORE its job
               # starts (the 10-minute environment wait) has no review-pr
-              # check-run yet, but a push now would still cancel it via
-              # synchronize.
+              # check-run yet, but a push now would still supersede it
+              # (#10110: a parked or pre-threshold run yields to the push —
+              # its work is discarded exactly as a cancel did).
               # Full rationale → qwen-autofix.md#af-099
               REVIEW_RUN_STARTED_AT="$(jq -r --arg wf "${REVIEW_WF_ID}" --arg pr "${PR}" --arg head "${PR_HEAD_OID}" '
                 [ .workflow_runs[]?
@@ -5684,13 +5685,40 @@ jobs:
                 # generated checks complete after the conflict marker this
                 # same report posts — waking the very park it establishes.
                 # Full rationale → qwen-autofix.md#af-143
+                STALE_BASE_DEFERRED=false
                 if [[ "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
                   MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
                   if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
                     CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
-                    if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
-                      && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
-                      STALE_BASE_RETRY=true
+                    if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]]; then
+                      # Review-in-flight hold for the loop's OWN report-time
+                      # head move (#10110): same probe pair as the scan's
+                      # dispatch gate (#8888), fail-open on probe errors.
+                      # Full rationale → qwen-autofix.md#af-148
+                      ROLLUP_R="$(gh pr view "${PR}" --repo "${REPO}" --json statusCheckRollup --jq '.statusCheckRollup // []' 2> /dev/null || echo '[]')"
+                      REVIEW_LIVE_R="$(jq -r '
+                        [ .[]
+                          | select((((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED")) and ((.name // "") == "review-pr") and ((.workflowName // "") == "🧐 Qwen Pull Request Review"))) ]
+                        | length > 0
+                      ' <<< "${ROLLUP_R}" 2> /dev/null || echo '')"
+                      if [[ "${REVIEW_LIVE_R}" != 'true' ]]; then
+                        RWID_R="$(gh api "repos/${REPO}/actions/workflows/qwen-code-pr-review.yml" --jq '.id' 2> /dev/null || echo '')"
+                        LIVE_HEAD_R="$(jq -r '.headRefOid // ""' <<< "$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid 2> /dev/null || echo '{}')")"
+                        if [[ -n "${RWID_R}" ]]; then
+                          REVIEW_LIVE_R="$(gh api "repos/${REPO}/actions/workflows/${RWID_R}/runs?per_page=100" 2> /dev/null | jq -r --arg pr "${PR}" --arg head "${LIVE_HEAD_R}" '
+                            [ .workflow_runs[]?
+                              | select((.event // "") == "pull_request_target")
+                              | select((.status // "") | IN("queued", "waiting", "pending", "requested", "in_progress"))
+                              | select((($head != "") and ((.head_sha // "") == $head)) or any(.pull_requests[]?; (.number | tostring) == $pr)) ]
+                            | length > 0
+                          ' 2> /dev/null || echo '')"
+                        fi
+                      fi
+                      if [[ "${REVIEW_LIVE_R}" == 'true' ]]; then
+                        STALE_BASE_DEFERRED=true
+                      elif gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
+                        STALE_BASE_RETRY=true
+                      fi
                     fi
                   fi
                 fi
@@ -5702,6 +5730,13 @@ jobs:
                   MARK_TS='9999-12-31T23:59:59Z'
                   HEADLINE="🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind \`${DEFAULT_BRANCH:-main}\`, so it merged current main in via update-branch and will retry on the next scan. A stale base (a dependency or symbol main already changed) can fail the build without being the fix's fault; if it still fails once current, it hands off to a human."
                   HEADLINE_ZH="🤖 AutoFix 更新了一个过期的 base —— 修复未通过验证，但本 PR 落后于 \`${DEFAULT_BRANCH:-main}\`，因此已通过 update-branch 合入当前 main，并将在下次扫描时重试。过期的 base（main 已改动的依赖或符号）可能让构建失败而并非修复本身的错；若 base 更新后仍然失败，将移交人工处理。"
+                elif [[ "${STALE_BASE_DEFERRED}" == 'true' ]]; then
+                  # Same sentinel semantics as the retry branch: feedback stays
+                  # live, the next round re-runs, and ITS report step performs
+                  # the base refresh once the review has landed.
+                  MARK_TS='9999-12-31T23:59:59Z'
+                  HEADLINE="🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind \`${DEFAULT_BRANCH:-main}\`, but a review of this PR is still in flight, and merging main now would cancel it or invalidate its posting (#10110). The refresh and this item's retry move to the next scan."
+                  HEADLINE_ZH="🤖 AutoFix 暂缓了一次过期 base 刷新 —— 修复未通过验证且本 PR 落后于 \`${DEFAULT_BRANCH:-main}\`，但该 PR 上仍有一轮评审在运行，现在合入 main 会取消该评审或使其发布失效（#10110）。base 刷新与此项的重试推迟到下次扫描。"
                 else
                   # Say what actually happens next. The old "A human should
                   # take over this PR" read as a full release, but the loop
@@ -5758,7 +5793,7 @@ jobs:
 
             # Consecutive-failure circuit breaker, distinct from the round cap.
             # Full rationale → qwen-autofix.md#af-069
-            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && [[ "${STALE_BASE_RETRY:-false}" != 'true' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
+            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && [[ "${STALE_BASE_RETRY:-false}" != 'true' ]] && [[ "${STALE_BASE_DEFERRED:-false}" != 'true' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
               CONSEC_FAIL=1
               if [[ -f "${WORKDIR}/ic.json" ]]; then
                 COMMENTS_JSON="$(cat "${WORKDIR}/ic.json")"
@@ -5780,7 +5815,7 @@ jobs:
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do
                 [[ -n "${H}" ]] || continue
-                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* ]]; then
+                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* || "${H}" == *"deferred a stale-base refresh"* ]]; then
                   CONSEC_FAIL=1
                 else
                   CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))

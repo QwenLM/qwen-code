@@ -16256,7 +16256,7 @@ exit 1
     expect(timeoutCap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
-      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \[\[ "\$\{STALE_BASE_DEFERRED:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
     )?.[0];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
@@ -16274,6 +16274,8 @@ exit 1
       '🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback.';
     const STALE_BASE =
       '🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind `main`, so it merged current main in via update-branch and will retry on the next scan.';
+    const STALE_BASE_DEFER =
+      '🤖 AutoFix deferred a stale-base refresh — the fix did not pass verification and this PR is behind `main`, but a review of this PR is still in flight (#10110).';
 
     const run = (
       priorHeadlines,
@@ -16284,6 +16286,7 @@ exit 1
         apiErrorKind = '',
         prepareOutcome = 'success',
         staleBaseRetry = false,
+        staleBaseDeferred = false,
         agentTimeout = '',
       } = {},
     ) => {
@@ -16313,7 +16316,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\nSTALE_BASE_DEFERRED='${staleBaseDeferred}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -16427,6 +16430,18 @@ exit 1
     expect(
       run(Array(cap - 1).fill(FAIL), { staleBaseRetry: true }),
     ).toMatchObject({ terminal: false, headline: 'orig' });
+    // Same for a DEFERRED stale-base refresh (#10110): the round failed
+    // because the base is stale AND a review was in flight — the fix was
+    // never re-attempted on a fresh base, so the failure is not evidence
+    // about the PR. Current-round exemption and prior-headline streak reset
+    // both mirror the retry branch.
+    expect(
+      run(Array(cap - 1).fill(FAIL), { staleBaseDeferred: true }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(run([FAIL, FAIL, STALE_BASE_DEFER, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
     // Already-terminal rounds skip the circuit breaker entirely.
     expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
       terminal: true,
@@ -21531,5 +21546,122 @@ describe('stale sandbox container cleanup', () => {
     expect(r.failure).toContain('timeout (1200ms)');
     expect(r.failure).not.toContain('idle-timeout');
     expect(r.calls.split('\n')).toEqual(['rm -f -- qwen-code-9.9.9-9']);
+  });
+});
+
+describe('report-step stale-base hold while review-pr is in flight (#10110)', () => {
+  // The scan's dispatch gate (#8888) covers every push the SCAN can make,
+  // but the report step's stale-base retry calls update-branch hours after
+  // that gate last looked — the one loop-owned head move outside the hold.
+  // Full rationale → qwen-autofix.md#af-148.
+
+  it('probes for a live review before the report-step update-branch', () => {
+    const probeAt = reviewAddressReportStep.indexOf('REVIEW_LIVE_R=');
+    const updateAt = reviewAddressReportStep.indexOf(
+      'gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}"',
+    );
+    expect(probeAt).toBeGreaterThan(-1);
+    expect(updateAt).toBeGreaterThan(probeAt);
+    // Both probe layers, mirroring the scan gate: the rollup filter (any
+    // started review-pr check, trigger-independent) and the runs-API
+    // fallback for lifecycle runs still parked in the delay window with no
+    // check-run yet.
+    expect(reviewAddressReportStep).toContain('<<< "${ROLLUP_R}"');
+    expect(reviewAddressReportStep).toContain(
+      'actions/workflows/qwen-code-pr-review.yml',
+    );
+    // The update runs only on a falsy probe — fail-open: a probe error must
+    // not wedge stale-base recovery, so errors read as "no review live".
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${REVIEW_LIVE_R}" == \'true\' ]]; then\n                        STALE_BASE_DEFERRED=true\n                      elif gh api -X PUT',
+    );
+  });
+
+  it('defers with the retry branch sentinel and an exempted headline', () => {
+    // Deferred keeps the exact semantics of the retry branch minus the
+    // update: the 9999 sentinel keeps feedback live so the next round
+    // re-runs and ITS report step refreshes the base once the review landed.
+    const deferred = reviewAddressReportStep.match(
+      /elif \[\[ "\$\{STALE_BASE_DEFERRED\}" == 'true' \]\]; then[\s\S]*?(?=\n {16}else)/,
+    )?.[0];
+    expect(deferred).toBeTruthy();
+    expect(deferred).toContain("MARK_TS='9999-12-31T23:59:59Z'");
+    expect(deferred).toContain('deferred a stale-base refresh');
+    expect(deferred).toContain('#10110');
+    // The deferred headline joins the streak-reset needles: a round that
+    // failed because it was reviewed at the wrong moment is not evidence
+    // about the PR.
+    expect(reviewAddressReportStep).toContain(
+      '|| "${H}" == *"deferred a stale-base refresh"*',
+    );
+  });
+
+  it('detects a live review through the replayed rollup filter', () => {
+    const filter = reviewAddressReportStep.match(
+      /REVIEW_LIVE_R="\$\(jq -r '([\s\S]*?)' <<< "\$\{ROLLUP_R\}"/,
+    )?.[1];
+    expect(filter).toBeTruthy();
+    const probe = (checks) =>
+      execFileSync('jq', ['-r', filter], {
+        input: JSON.stringify(checks),
+        encoding: 'utf8',
+      }).trim();
+    const live = {
+      name: 'review-pr',
+      workflowName: '🧐 Qwen Pull Request Review',
+      status: 'IN_PROGRESS',
+    };
+    expect(probe([live])).toBe('true');
+    expect(probe([{ ...live, status: 'QUEUED' }])).toBe('true');
+    // A finished review does not hold, and neither does a live check that
+    // is not the review workflow's review-pr.
+    expect(
+      probe([{ ...live, status: 'COMPLETED', conclusion: 'SUCCESS' }]),
+    ).toBe('false');
+    expect(probe([{ ...live, workflowName: 'CI' }])).toBe('false');
+    expect(probe([{ ...live, name: 'lint' }])).toBe('false');
+    expect(probe([])).toBe('false');
+  });
+
+  it('detects a delay-parked lifecycle run through the replayed runs filter', () => {
+    const filter = reviewAddressReportStep.match(
+      /jq -r --arg pr "\$\{PR\}" --arg head "\$\{LIVE_HEAD_R\}" '([\s\S]*?)' 2> \/dev\/null \|\| echo/,
+    )?.[1];
+    expect(filter).toBeTruthy();
+    const probe = (runs, pr = '9729', head = 'sha-live') =>
+      execFileSync(
+        'jq',
+        ['-r', '--arg', 'pr', pr, '--arg', 'head', head, filter],
+        {
+          input: JSON.stringify({ workflow_runs: runs }),
+          encoding: 'utf8',
+        },
+      ).trim();
+    const parked = {
+      event: 'pull_request_target',
+      status: 'waiting',
+      head_sha: 'sha-live',
+      pull_requests: [],
+    };
+    expect(probe([parked])).toBe('true');
+    // Matches by PR number too (fork heads may not equal the fetched head).
+    expect(
+      probe([
+        { ...parked, head_sha: 'other', pull_requests: [{ number: 9729 }] },
+      ]),
+    ).toBe('true');
+    // Completed runs, non-lifecycle events, and unrelated runs do not hold.
+    expect(probe([{ ...parked, status: 'completed' }])).toBe('false');
+    expect(probe([{ ...parked, event: 'issue_comment' }])).toBe('false');
+    expect(
+      probe([{ ...parked, head_sha: 'other', pull_requests: [{ number: 1 }] }]),
+    ).toBe('false');
+    // An empty fetched head must not wildcard-match every run.
+    expect(probe([{ ...parked, head_sha: '' }], '9729', '')).toBe('false');
+  });
+
+  it('documents the hold in the design doc', () => {
+    expect(designDoc).toContain('<a id="af-148"></a>');
+    expect(designDoc).toContain('deferred a stale-base refresh');
   });
 });

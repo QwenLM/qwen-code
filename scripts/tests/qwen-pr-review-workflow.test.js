@@ -66,7 +66,10 @@ function retryLoopSource() {
 
 // Drive the extracted loop with a stub qwen whose stream-json `result` event is
 // scripted per attempt, plus stub timeout/sleep so the test is instant.
-function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
+function runScenario(
+  scenario,
+  { timeoutMinutes = 180, logPath, extraEnv = {} } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), 'review-retry-'));
   try {
     const bin = join(dir, 'bin');
@@ -163,6 +166,7 @@ function runScenario(scenario, { timeoutMinutes = 180, logPath } = {}) {
           ATT: attemptFile,
           DUR: durationFile,
           PRM: promptFile,
+          ...extraEnv,
         },
       });
     } catch (e) {
@@ -3853,5 +3857,199 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
     expect(r.posted).toBe('');
     expect(r.summary).toContain('deferring to the fallback-comment job');
+  });
+});
+
+describe('review supersede salvage (#10110)', () => {
+  // cancel-in-progress no longer fires on synchronize (that pin lives in the
+  // resolve suite next to the wrapper-guard replays); the supersede decision
+  // moved into the in-flight run. These tests pin the three moving parts:
+  // the watcher that decides KEEP vs CEDE, the retry loop's early exits, and
+  // the posting path for a salvaged run.
+  const doc = parse(workflow);
+  const run = runReviewStep();
+
+  it('arms the watcher only for automatic lifecycle reviews', () => {
+    // Explicit runs (/review, review_requested, dispatch) were never
+    // synchronize-cancellable; killing a review a human just asked for over
+    // a push would be a regression, so the watcher must stay AUTO-gated.
+    expect(run).toContain('supersede_watcher()');
+    expect(run).toContain(
+      'if [ "${AUTO_REVIEW:-false}" = "true" ]; then\n  supersede_watcher &',
+    );
+    // Defined and armed before the retry loop starts.
+    expect(run.indexOf('supersede_watcher()')).toBeLessThan(
+      run.indexOf('attempt=1'),
+    );
+  });
+
+  it('checks supersede and salvage-cede before classifying the attempt outcome', () => {
+    // A watcher kill surfaces as a non-zero qwen status; classified first it
+    // would read as fatal (job red, fallback machinery engaged) or retryable
+    // (a from-scratch re-review of a superseded head).
+    const call = run.indexOf('run_review_once "$attempt_timeout" "$PROMPT"');
+    const supersede = run.indexOf('if [ -f "${SUPERSEDE_FILE:-}" ]; then');
+    const cede = run.indexOf(
+      'if [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ]; then',
+    );
+    const success = run.indexOf('if [ "$OUTCOME" = "success" ]; then');
+    expect(call).toBeGreaterThan(-1);
+    expect(supersede).toBeGreaterThan(call);
+    expect(cede).toBeGreaterThan(supersede);
+    expect(success).toBeGreaterThan(cede);
+  });
+
+  it('decides KEEP vs CEDE with the extracted salvage_eligible', () => {
+    const fn = run.match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0];
+    expect(fn).toBeTruthy();
+    const eligible = (elapsed, budget, composeSeen, pct) => {
+      try {
+        execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -euo pipefail\n${fn}\nsalvage_eligible ${elapsed} ${budget} ${composeSeen} ${pct}`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // Compose done → always keep, however early.
+    expect(eligible(60, 21600, 'true', 50)).toBe(true);
+    // The motivating incident: PR #9729's 4h06m (14760s) review on a
+    // 360-minute (21600s) budget crosses the default 50% threshold.
+    expect(eligible(14760, 21600, 'false', 50)).toBe(true);
+    // Exactly at the threshold keeps; just below cedes.
+    expect(eligible(10800, 21600, 'false', 50)).toBe(true);
+    expect(eligible(10799, 21600, 'false', 50)).toBe(false);
+    // pct=100 keeps only a run that spent its whole budget (in practice:
+    // compose-signal only); pct=0 keeps always.
+    expect(eligible(21599, 21600, 'false', 100)).toBe(false);
+    expect(eligible(1, 21600, 'false', 0)).toBe(true);
+  });
+
+  it('ends a superseded attempt clean without retrying (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      writeFileSync(supersedeFile, 'head-b');
+      const r = runScenario('success', {
+        extraEnv: { SUPERSEDE_FILE: supersedeFile },
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).toContain('ceding to the replacement run (#10110)');
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('cedes instead of retrying when salvage armed but the attempt died (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const salvageFile = join(dir, 'salvage-ok');
+      writeFileSync(salvageFile, 'head-a');
+      // transient_persist normally burns the retry (2 attempts) and FAILs;
+      // with salvage armed the head has moved, so a retry would re-review a
+      // superseded head from scratch — one attempt, clean exit.
+      const r = runScenario('transient_persist', {
+        extraEnv: { QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile },
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.raw).toContain('Salvage-armed review attempt did not complete');
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('completes normally when salvage armed and the attempt succeeds (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const salvageFile = join(dir, 'salvage-ok');
+      writeFileSync(salvageFile, 'head-a');
+      const r = runScenario('success', {
+        extraEnv: { QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile },
+      });
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.attempts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the compose-artifact path to the CLI that writes it', () => {
+    // The watcher's strongest KEEP signal is the composed-verdict artifact;
+    // its name comes from composedNameFor in the review CLI. If either side
+    // renames, this cross-pin fails instead of the signal silently dying
+    // (the elapsed threshold would still salvage, but later than intended).
+    expect(run).toContain(
+      'COMPOSED_ARTIFACT="${GITHUB_WORKSPACE}/.qwen/tmp/qwen-review-pr-${PR_NUMBER}-composed.json"',
+    );
+    const cli = readFileSync('packages/cli/src/commands/review/run.ts', 'utf8');
+    expect(cli).toContain('`qwen-review-pr-${cls.number}-composed.json`');
+  });
+
+  it('bounds and scopes the watcher kill', () => {
+    // -U scopes to the runner user; the trailing ($|[^0-9]) keeps PR 123
+    // from matching PR 1234's URL; TERM first, KILL after a grace period.
+    expect(run).toContain(
+      'pkill -U "$(id -u)" -TERM -f "${REVIEW_URL}($|[^0-9])"',
+    );
+    expect(run).toContain(
+      'pkill -U "$(id -u)" -KILL -f "${REVIEW_URL}($|[^0-9])"',
+    );
+    // Self-bounded past the budget, and reaped on every exit path — a
+    // watcher outliving the step on a reused self-hosted runner could kill
+    // a later job's review of the same PR.
+    expect(run).toContain('BUDGET_SECONDS + 1800');
+    expect(run).toContain('[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}"');
+  });
+
+  it('wires the salvage outputs into the historical-head note step', () => {
+    expect(run).toContain('echo "salvaged=true"');
+    expect(run).toContain('salvage_moved_to=');
+    const note = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Report salvaged historical-head review',
+    );
+    expect(note).toBeTruthy();
+    expect(note.if).toContain("steps.review.outputs.salvaged == 'true'");
+    expect(note.if).toContain(
+      "steps.review.outputs.review_completed == 'true'",
+    );
+    // Docs-only medium never posts, so a "posted against" note would be
+    // false there.
+    expect(note.if).toContain(
+      "steps.review.outputs.docs_only_medium != 'true'",
+    );
+    expect(note.run).toContain('<!-- qwen-review-salvaged');
+  });
+
+  it('reads the salvage threshold from the repo variable with a 50 default', () => {
+    const env = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Run review',
+    ).env;
+    expect(env.SALVAGE_ELAPSED_PERCENT_VAR).toBe(
+      '${{ vars.QWEN_REVIEW_SALVAGE_ELAPSED_PERCENT }}',
+    );
+    expect(run).toContain('SALVAGE_ELAPSED_PERCENT=50');
+  });
+
+  it('skips a queued run whose event head went stale before review-pr spends setup', () => {
+    // With cancel-in-progress scoped to `closed`, a synchronize run can wait
+    // PENDING behind an in-flight review and outlive its own head; the delay
+    // job's re-check is the cheap exit before review-pr's runner setup.
+    const delay = doc.jobs['delay-automatic-review'].steps.find(
+      (s) => s.id === 'pr_state',
+    );
+    expect(delay.env.EVENT_HEAD_SHA).toBe(
+      '${{ github.event.pull_request.head.sha }}',
+    );
+    expect(delay.run).toContain('while this run queued');
+    expect(delay.run).toContain('should_review=false');
   });
 });

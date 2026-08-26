@@ -61,12 +61,21 @@ function runReviewGhWrapper(
   prState,
   currentHead,
   expectedHead = 'head-a',
+  // salvageContent: when set, a salvage marker file with that content is
+  // created and exported as QWEN_CI_REVIEW_SALVAGE_OK_FILE — the supersede
+  // watcher's past-threshold pin (#10110).
+  { salvageContent } = {},
 ) {
   const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-review-gh-'));
   try {
     const wrapperPath = path.join(tempDir, 'gh');
     const realGhPath = path.join(tempDir, 'real-gh');
     const ghLogPath = path.join(tempDir, 'gh.log');
+    let salvagePath = '';
+    if (salvageContent !== undefined) {
+      salvagePath = path.join(tempDir, 'salvage-ok');
+      writeFileSync(salvagePath, salvageContent);
+    }
     writeFileSync(wrapperPath, reviewGhWrapper(runStep));
     writeFileSync(
       realGhPath,
@@ -95,6 +104,7 @@ function runReviewGhWrapper(
         QWEN_CI_REVIEW_EXPECTED_HEAD_SHA: expectedHead,
         QWEN_CI_REVIEW_PR_NUMBER: '123',
         QWEN_CI_REVIEW_REPO: 'owner/repo',
+        ...(salvagePath ? { QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvagePath } : {}),
       },
     });
 
@@ -188,15 +198,22 @@ describe('qwen resolve workflow', () => {
     );
   });
 
-  it('keeps synchronize cancellation expression simple for workflow-level concurrency', () => {
+  it('cancels in progress on closed only — synchronize supersede is decided in-run (#10110)', () => {
     const concurrencyStart = workflow.indexOf('\nconcurrency:');
     const concurrency = workflow.slice(
       concurrencyStart,
       workflow.indexOf('\njobs:', concurrencyStart),
     );
 
+    // Verbatim: re-adding `synchronize` here silently reinstates the
+    // declarative cancel that discarded a 4h06m review minutes from posting
+    // (PR #9729, run 32726618419). A push now queues PENDING in the PR group
+    // while the in-flight run's supersede watcher decides KEEP (salvage past
+    // the threshold, post against the reviewed head) vs CEDE (end early);
+    // `closed` still cancels — a closed PR's review is pointless and its
+    // posting is blocked by the OPEN guard anyway.
     expect(concurrency).toContain(
-      "cancel-in-progress: \"${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}\"",
+      "cancel-in-progress: \"${{ github.event_name == 'pull_request_target' && github.event.action == 'closed' }}\"",
     );
   });
 
@@ -635,6 +652,56 @@ describe('qwen resolve workflow', () => {
       'Blocked PR write: PR #123 moved from head-a to head-b',
     );
     expect(staleSummary.ghLog).toBe('');
+  });
+
+  it('lets a salvage-armed run post against its reviewed head after a move (#10110)', () => {
+    const runStep = step(reviewJob, 'Run review');
+    // The marker content must equal the head this run reviewed
+    // (EXPECTED_HEAD_SHA): the supersede watcher pins it there, so a stale
+    // marker left by another run on the reused runner can never match.
+    const salvaged = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'OPEN',
+      'head-b',
+      'head-a',
+      { salvageContent: 'head-a' },
+    );
+    expect(salvaged.status).toBe(0);
+    expect(salvaged.stderr).toContain('PR write allowed (salvage)');
+    expect(salvaged.ghLog).toContain(
+      'api repos/owner/repo/pulls/123/reviews --input review.json',
+    );
+
+    // Wrong pin — a marker for some other head blocks exactly as before.
+    const wrongPin = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'OPEN',
+      'head-b',
+      'head-a',
+      { salvageContent: 'head-z' },
+    );
+    expect(wrongPin.status).toBe(90);
+    expect(wrongPin.stderr).toContain(
+      'Blocked PR write: PR #123 moved from head-a to head-b',
+    );
+    expect(wrongPin.ghLog).toBe('');
+
+    // Salvage never overrides the OPEN check: a closed PR stays blocked.
+    const closedSalvage = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'CLOSED',
+      'head-b',
+      'head-a',
+      { salvageContent: 'head-a' },
+    );
+    expect(closedSalvage.status).toBe(90);
+    expect(closedSalvage.stderr).toContain(
+      'Blocked PR write: PR #123 is CLOSED',
+    );
+    expect(closedSalvage.ghLog).toBe('');
   });
 
   it('allows wrapped gh review writes when the PR is still current', () => {

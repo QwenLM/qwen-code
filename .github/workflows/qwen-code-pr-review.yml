@@ -49,8 +49,9 @@ on:
         type: 'boolean'
 
 concurrency:
-  # PR lifecycle events share a PR-scoped group so new pushes restart the delay
-  # and closed PRs stop any in-flight lifecycle review. Every review_requested
+  # PR lifecycle events share a PR-scoped group so a closed PR stops any
+  # in-flight lifecycle review and a new push queues behind one instead of
+  # racing it. Every review_requested
   # run — the bot-directed one included — gets a per-run group: membership is
   # decided here, before `authorize` runs, but whether a bot request reviews
   # anything is `authorize`'s call on the REQUESTER's write permission. A
@@ -64,12 +65,29 @@ concurrency:
   # lands while the lifecycle run for the same head still queues: compute,
   # never a lost review. Comment/review events use per-run groups to avoid
   # cancelling active reviews.
+  #
+  # cancel-in-progress fires on `closed` ONLY (#10110). It used to fire on
+  # `synchronize` too, and that discarded whole reviews no matter how close
+  # to done they were: on PR #9729 a push cancelled run 32726618419 4h06m in,
+  # minutes from posting, and the replacement started the same work from
+  # zero (~7h41m of cancelled review time across that one PR). A declarative
+  # cancel cannot weigh the in-flight run's progress, so the supersede
+  # decision moves INTO the run: a synchronize run now queues PENDING in this
+  # group (the latest push replaces the pending slot) while the in-flight
+  # run's supersede watcher in "Run review" notices the head move and either
+  # ends the attempt early — little invested; the queued run reviews the new
+  # head from scratch — or, past the salvage threshold, finishes and posts
+  # against the head it reviewed as a historical-head review. Accepted cost:
+  # rapid pushes during the delay window now wait out the superseded run's
+  # remaining delay (~10 minutes) plus teardown instead of cancelling it
+  # instantly; the superseded run's review-pr exits on its stale-head guard
+  # without spending review budget.
   group: >-
     ${{ github.event_name == 'pull_request_target' &&
     github.event.action != 'review_requested' &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
-  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}"
+  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'closed' }}"
 
 env:
   # Dedup marker for the review-failure fallback comments. The in-job step
@@ -227,10 +245,11 @@ jobs:
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
+          EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
           set -euo pipefail
-          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
-          IFS=$'\t' read -r state is_draft <<< "$pr_data"
+          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,headRefOid --jq '[.state, .isDraft, .headRefOid] | @tsv')"
+          IFS=$'\t' read -r state is_draft current_head <<< "$pr_data"
 
           if [ "$state" != "OPEN" ]; then
             echo "Skipping delayed review: PR #${PR_NUMBER} is ${state}." >> "$GITHUB_STEP_SUMMARY"
@@ -239,6 +258,17 @@ jobs:
           fi
           if [ "$is_draft" = "true" ]; then
             echo "Skipping delayed review: PR #${PR_NUMBER} is draft." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # A lifecycle run can outlive its own head: with cancel-in-progress
+          # scoped to `closed` (#10110) a synchronize run waits PENDING in the
+          # PR group behind an in-flight review, and by the time it runs a
+          # newer push may have superseded its event head. Its successor run
+          # owns that newer head; skip here, before review-pr spends runner
+          # setup to reach the same conclusion at its own stale-head guard.
+          if [ -n "$EVENT_HEAD_SHA" ] && [ -n "$current_head" ] && [ "$current_head" != "$EVENT_HEAD_SHA" ]; then
+            echo "Skipping delayed review: PR #${PR_NUMBER} moved from ${EVENT_HEAD_SHA} to ${current_head} while this run queued." >> "$GITHUB_STEP_SUMMARY"
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -923,6 +953,13 @@ jobs:
           EVENT_NAME: '${{ github.event_name }}'
           EVENT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           MAX_TIMEOUT_MINUTES_VAR: '${{ vars.QWEN_REVIEW_MAX_TIMEOUT_MINUTES }}'
+          # Supersede-salvage tunable (#10110): percentage of the size-aware
+          # review budget an automatic review must have spent before a head
+          # move salvages (finishes and posts against the reviewed head)
+          # instead of ceding to the replacement run. Empty/non-numeric falls
+          # back to 50 in the step; 0 salvages always, 100 effectively only
+          # on the compose-artifact signal.
+          SALVAGE_ELAPSED_PERCENT_VAR: '${{ vars.QWEN_REVIEW_SALVAGE_ELAPSED_PERCENT }}'
         run: |-
           set -euo pipefail
           fail() {
@@ -943,7 +980,11 @@ jobs:
           LOG_PATH="${RUNNER_TEMP:-/tmp}/qwen-review-pr-${PR_NUMBER}.jsonl"
           # Set by configure_qwen_network once the wrapper dir exists.
           PROXY_BIN=""
-          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"' EXIT
+          # WATCHER_PID/SALVAGE_DIR are set once the supersede watcher exists.
+          # The trap must reap the watcher on EVERY exit path (fail() included):
+          # a background watcher outliving this step on the reused self-hosted
+          # runner could later kill a NEXT job's review of the same PR.
+          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"; [ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null; [ -z "${SALVAGE_DIR:-}" ] || rm -rf "${SALVAGE_DIR}"' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -1019,8 +1060,25 @@ jobs:
               exit 90
             fi
             if [ -n "$expected_head" ] && [ "$current_head" != "$expected_head" ]; then
-              echo "Blocked PR write: PR #${pr_number} moved from ${expected_head} to ${current_head}." >&2
-              exit 90
+              # Salvage escape (#10110): the supersede watcher arms this marker
+              # only past the salvage threshold (compose done, or the elapsed
+              # fraction crossed), pinning the head this run reviewed; content
+              # must equal that pin so a stale marker from another run never
+              # matches. The review then posts against the historical head —
+              # the CLI's own presubmit head-drift gate (classifyHeadDrift)
+              # annotates the body and caps the verdict — instead of
+              # discarding hours of finished work. This escape is a
+              # correctness gate, not a security boundary: the agent can read
+              # the marker path from its own environment, but forging it only
+              # lets it post to an old head — nothing it could not already
+              # post to the live one. The OPEN check above still applies.
+              if [ -n "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ] \
+                && [ "$(cat "${QWEN_CI_REVIEW_SALVAGE_OK_FILE}" 2>/dev/null)" = "$expected_head" ]; then
+                echo "PR write allowed (salvage): PR #${pr_number} moved from ${expected_head} to ${current_head} past the salvage threshold; posting against the reviewed head." >&2
+              else
+                echo "Blocked PR write: PR #${pr_number} moved from ${expected_head} to ${current_head}." >&2
+                exit 90
+              fi
             fi
           }
           guard_api_write() {
@@ -1280,6 +1338,45 @@ jobs:
             echo "effective_timeout_minutes=$EFFECTIVE_TIMEOUT_MINUTES"
           } >> "$GITHUB_OUTPUT"
 
+          # Supersede-salvage state (#10110). A private per-run dir, like
+          # PROXY_BIN above: RUNNER_TEMP survives across jobs on the shared
+          # self-hosted runner, so a fixed path could be pre-seeded or left
+          # over. The watcher writes; guard_pr_write and the paths below read.
+          SALVAGE_DIR="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-review-salvage.XXXXXX")"
+          export QWEN_CI_REVIEW_SALVAGE_OK_FILE="${SALVAGE_DIR}/salvage-ok"
+          SUPERSEDE_FILE="${SALVAGE_DIR}/superseded"
+          # The composed-verdict artifact the review skill writes when its
+          # compose step completes (`.qwen/tmp/qwen-review-pr-<n>-composed.json`,
+          # see composedNameFor in packages/cli/src/commands/review/run.ts —
+          # keep the two in sync). Its existence means the findings are final
+          # and posting is minutes out; the run's Step 9 cleanup sweeps it, so
+          # the watcher LATCHES the first sighting.
+          COMPOSED_ARTIFACT="${GITHUB_WORKSPACE}/.qwen/tmp/qwen-review-pr-${PR_NUMBER}-composed.json"
+          SALVAGE_ELAPSED_PERCENT="${SALVAGE_ELAPSED_PERCENT_VAR:-}"
+          case "$SALVAGE_ELAPSED_PERCENT" in
+            ''|*[!0-9]*) SALVAGE_ELAPSED_PERCENT=50 ;;
+          esac
+          if [ "$SALVAGE_ELAPSED_PERCENT" -gt 100 ]; then
+            SALVAGE_ELAPSED_PERCENT=100
+          fi
+          # KEEP vs CEDE for a superseded in-flight review, extracted for the
+          # workflow tests. KEEP (salvage) when compose already completed —
+          # posting is minutes out regardless of elapsed time — or when the
+          # run spent at least SALVAGE_ELAPSED_PERCENT of its size-aware
+          # budget. The default 50% approximates the issue's "80% of typical
+          # wall time": measured reviews land around 55-70% of their budget
+          # tier, so half the budget is ~80% of a typical run — e.g. the
+          # 4h06m run cancelled minutes from posting on PR #9729 (360-minute
+          # budget) crosses at 180 minutes, while a 90-minute-in run of the
+          # same budget restarts cheaply on the new head.
+          salvage_eligible() {
+            local elapsed="$1" budget="$2" compose_seen="$3" pct="$4"
+            if [ "$compose_seen" = "true" ]; then
+              return 0
+            fi
+            [ "$(( elapsed * 100 ))" -ge "$(( budget * pct ))" ]
+          }
+
           PROMPT="/review ${REVIEW_URL}"
           if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then
             PROMPT="${PROMPT} --effort medium"
@@ -1476,6 +1573,62 @@ jobs:
           RETRY_MIN_SECONDS=600
           MAX_ATTEMPTS=2
           START_TS="$(date +%s)"
+
+          # Supersede watcher (#10110): only automatic lifecycle reviews — the
+          # runs cancel-in-progress used to cancel on synchronize. It polls
+          # the live head; on a move it either arms the salvage marker (past
+          # salvage_eligible — the run finishes and posts against the head it
+          # reviewed) or writes SUPERSEDE_FILE and kills the review tree so
+          # the replacement run queued in the concurrency group starts within
+          # a poll interval instead of after the full budget. The kill matches
+          # this PR's review URL in the command line: the step shell and this
+          # watcher run the runner's script file (the URL is not in their
+          # argv), the runner executes one job at a time, and -U scopes to the
+          # runner user — so the pattern reaches exactly the qwen tree (the
+          # CLI relaunch wrapper included, which a recorded PID would miss).
+          # Explicit runs (/review, review_requested, dispatch) keep today's
+          # behavior: a human asked for this head's review, and no synchronize
+          # ever cancelled them. Self-bounded past the budget so a watcher
+          # leaked through a hard step kill cannot act on a later job.
+          SALVAGE_POLL_SECONDS=60
+          supersede_watcher() {
+            local live_head compose_seen elapsed
+            while sleep "$SALVAGE_POLL_SECONDS"; do
+              elapsed=$(( $(date +%s) - START_TS ))
+              if [ "$elapsed" -gt "$(( BUDGET_SECONDS + 1800 ))" ]; then
+                return 0
+              fi
+              if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -e "$COMPOSED_ARTIFACT" ]; then
+                : > "${SALVAGE_DIR}/compose-seen"
+              fi
+              live_head="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)" || continue
+              if [ -z "$live_head" ] || [ "$live_head" = "$EXPECTED_HEAD_SHA" ]; then
+                continue
+              fi
+              compose_seen=false
+              if [ -f "${SALVAGE_DIR}/compose-seen" ]; then
+                compose_seen=true
+              fi
+              if salvage_eligible "$elapsed" "$BUDGET_SECONDS" "$compose_seen" "$SALVAGE_ELAPSED_PERCENT"; then
+                printf '%s' "$live_head" > "${SALVAGE_DIR}/moved-to"
+                printf '%s' "$EXPECTED_HEAD_SHA" > "$QWEN_CI_REVIEW_SALVAGE_OK_FILE"
+                echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in (compose_seen=${compose_seen}) — finishing and posting against reviewed head ${EXPECTED_HEAD_SHA} (#10110)"
+                return 0
+              fi
+              printf '%s' "$live_head" > "$SUPERSEDE_FILE"
+              echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in, before the salvage threshold — ending this review so the queued replacement covers the new head (#10110)"
+              pkill -U "$(id -u)" -TERM -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
+              sleep 15
+              pkill -U "$(id -u)" -KILL -f "${REVIEW_URL}($|[^0-9])" 2>/dev/null || true
+              return 0
+            done
+          }
+          WATCHER_PID=""
+          if [ "${AUTO_REVIEW:-false}" = "true" ]; then
+            supersede_watcher &
+            WATCHER_PID=$!
+          fi
+
           attempt=1
           while :; do
             attempt_timeout=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
@@ -1483,6 +1636,28 @@ jobs:
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"
             fi
             run_review_once "$attempt_timeout" "$PROMPT"
+            # Checked BEFORE the outcome classification: a watcher kill
+            # surfaces as a non-zero qwen status that would otherwise read as
+            # a fatal (or retryable — and a retry would re-review the
+            # superseded head from scratch) failure. Ending clean here keeps
+            # the failure fallbacks silent; the queued replacement run owns
+            # the new head.
+            # ${VAR:-} defaults: the retry-loop replay in
+            # scripts/tests/qwen-pr-review-workflow.test.js extracts this loop
+            # verbatim and runs it under set -u without the salvage setup.
+            if [ -f "${SUPERSEDE_FILE:-}" ]; then
+              echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(cat "$SUPERSEDE_FILE" 2>/dev/null || echo unknown) before the salvage threshold; ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ]; then
+              # Salvage was armed but the attempt still died (API error,
+              # timeout). Retrying would re-review a head that is no longer
+              # current — the replacement run queued behind this one already
+              # covers the live head, so cede instead of retrying or
+              # announcing a failure the fallback guards would suppress anyway.
+              echo "Salvage-armed review attempt did not complete (${REASON:-unknown}); PR #${PR_NUMBER:-} head already moved — ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
             if [ "$OUTCOME" = "success" ]; then
               break
             fi
@@ -1495,6 +1670,21 @@ jobs:
             fi
             fail "$REASON" 1 "$KIND"
           done
+
+          # The review is done; the watcher must not fire past this point (a
+          # head move now is the NEXT run's business). The EXIT trap also
+          # reaps it on every early-exit path above.
+          if [ -n "$WATCHER_PID" ]; then
+            kill "$WATCHER_PID" 2>/dev/null || true
+            wait "$WATCHER_PID" 2>/dev/null || true
+            WATCHER_PID=""
+          fi
+          if [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ]; then
+            {
+              echo "salvaged=true"
+              echo "salvage_moved_to=$(cat "${SALVAGE_DIR}/moved-to" 2>/dev/null || echo unknown)"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
           if [ "$DOCS_ONLY_MEDIUM" = "true" ]; then
             # The review CLI's machine-readable completion contract — batch
@@ -1526,6 +1716,45 @@ jobs:
           # exit 0 without running Qwen (closed PR, stale head), and the
           # relay must not announce a review that never ran.
           echo "review_completed=true" >> "$GITHUB_OUTPUT"
+
+      # A salvaged review just posted against a head that is no longer
+      # current (#10110). The review body itself carries the CLI's head-drift
+      # annotation and verdict cap (classifyHeadDrift), but that gate samples
+      # the live head at presubmit — a push landing between that sample and
+      # the submit is only known here. This note names the anchor either way
+      # so a reader (and the autofix loop) knows why a review of an older
+      # head just appeared and where the next delta review starts from. Never
+      # fails the job: the review itself succeeded.
+      - name: 'Report salvaged historical-head review'
+        if: |-
+          steps.context.outputs.should_run == 'true' &&
+          steps.review.outcome == 'success' &&
+          steps.review.outputs.review_completed == 'true' &&
+          steps.review.outputs.salvaged == 'true' &&
+          steps.review.outputs.docs_only_medium != 'true' &&
+          steps.context.outputs.pr_number != ''
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+          EXPECTED_HEAD_SHA: '${{ steps.review.outputs.expected_head_sha }}'
+          MOVED_TO: '${{ steps.review.outputs.salvage_moved_to }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          BODY="$(printf '%s\n' \
+            "<!-- qwen-review-salvaged ${EXPECTED_HEAD_SHA} -->" \
+            '' \
+            "⏳ **Historical-head review** — head moved to \`${MOVED_TO}\` while this review was in flight (past the salvage threshold), so the run finished and posted against the head it reviewed: \`${EXPECTED_HEAD_SHA}\` (#10110). The next automatic review covers the delta from that anchor. Full log in the [workflow run](${RUN_URL})." \
+            '' \
+            '<details><summary>中文说明</summary>' \
+            '' \
+            "⏳ **历史 head 评审** —— 本次评审进行中 head 移动到了 \`${MOVED_TO}\`（已过 salvage 阈值），因此评审跑完并针对其实际评审的 head \`${EXPECTED_HEAD_SHA}\` 发布（#10110）。下一次自动评审将从该锚点起评审增量。完整日志见 [workflow 运行](${RUN_URL})。" \
+            '' \
+            '</details>')"
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "$BODY" \
+            || echo "::warning::salvage note could not be posted; the salvaged review itself is on the PR (reviewed head ${EXPECTED_HEAD_SHA})."
 
       - name: 'Report docs-only medium outcome'
         if: |-
@@ -2001,12 +2230,15 @@ jobs:
   # `needs`: a job-level timeout cancels review-pr ALONE — authorize and
   # delay-automatic-review completed long before — while a run-level cancel
   # sweeps the whole chain, so 'cancelled' opens the gate only when neither
-  # upstream job was itself cancelled. A run-level cancel landing AFTER the
-  # chain finished (mid-review) still opens the gate: the push-supersede
-  # flavor is then suppressed by the in-step head-moved guard, the close
-  # flavor (a `closed`-action run joining the PR-scoped group hours in, the
-  # head unchanged) by the in-step PR-state check, and a same-head twin
-  # cannot land that late — its cancel fires at run creation, seconds in.
+  # upstream job was itself cancelled. Run-level cancels are rarer since
+  # cancel-in-progress dropped `synchronize` (#10110: a push now supersedes
+  # in-run — the superseded step exits 0, never opening this gate); the ones
+  # left can still land AFTER the chain finished (mid-review) and still open
+  # the gate: the close flavor (a `closed`-action run joining the PR-scoped
+  # group hours in, the head unchanged) is suppressed by the in-step PR-state
+  # check, a manual push-adjacent cancel by the in-step head-moved guard, and
+  # a same-head twin cannot land that late — its cancel fires at run
+  # creation, seconds in.
   # A manual run-cancel during the delay window goes
   # silent under this rule (the person who cancelled does not need retry
   # guidance); a manual cancel of review-pr alone mid-review still posts,
