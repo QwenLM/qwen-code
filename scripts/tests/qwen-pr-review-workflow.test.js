@@ -3901,23 +3901,44 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
 
   it('wires the skip output into every review-spending step', () => {
     const doc = parse(workflow);
-    for (const name of [
-      'Setup Node.js for hosted review',
-      'Install Qwen CLI if missing',
-      'Install capture tools (tmux + freeze)',
-      'Run review',
-    ]) {
+    // Full expected expressions, not substrings: appending `|| true` to any
+    // guarded condition would still contain the substring while re-running
+    // the step on a skipped base-refresh synchronize.
+    const guarded =
+      "steps.context.outputs.should_run == 'true' && steps.base_refresh.outputs.skip != 'true'";
+    const expected = new Map([
+      [
+        'Setup Node.js for hosted review',
+        `${guarded} && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true')`,
+      ],
+      ['Install Qwen CLI if missing', guarded],
+      ['Install capture tools (tmux + freeze)', guarded],
+      ['Run review', guarded],
+    ]);
+    for (const [name, cond] of expected) {
       const step = doc.jobs['review-pr'].steps.find((s) => s.name === name);
-      expect(step.if, name).toContain(
-        "steps.base_refresh.outputs.skip != 'true'",
-      );
+      expect(step.if.replace(/\s+/g, ' ').trim(), name).toBe(cond);
     }
   });
 
   const LEDGER_BODY =
     'No issues found. LGTM! ✅\n\n<!-- qwen-review-ledger {"v":1,"round":3,"findings":[]} -->';
-  const reviewsFixture = (login, sha, body = LEDGER_BODY) =>
-    JSON.stringify([{ user: { login }, commit_id: sha, body }]);
+  // The gate may certify only submitted, currently-valid bot reviews, so
+  // entries default to that shape and invalid-state cases override it.
+  const reviewEntry = ({
+    login = 'qwen-code-ci-bot',
+    sha,
+    state = 'COMMENTED',
+    submittedAt = '2026-08-26T00:00:00Z',
+    body = LEDGER_BODY,
+  }) => ({
+    user: { login },
+    commit_id: sha,
+    state,
+    submitted_at: submittedAt,
+    body,
+  });
+  const reviewsFixture = (...entries) => JSON.stringify(entries);
 
   // Build an origin repo in the requested shape (R = last reviewed head,
   // pr tip = pushed head), publish refs/pull/9/head, clone the workspace the
@@ -3957,6 +3978,13 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       far_touch)
         git checkout -q main; write_f NINETEEN 19; git commit -qam far-touch
         git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
+      indentation_touch)
+        git checkout -q main; write_f '  12' 12; git commit -qam indent-context
+        git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
+      octopus_merge)
+        git checkout -qb s1 main; echo a > a.txt; git add a.txt; git commit -qm s1
+        git checkout -qb s2 main; echo b > b.txt; git add b.txt; git commit -qm s2
+        git checkout -q pr; git merge -q --no-edit s1 s2 >/dev/null ;;
       non_base_merge)
         git checkout -qb side "$(git rev-parse pr~1)"
         echo s > side.txt; git add side.txt; git commit -qm side
@@ -3995,7 +4023,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       const reviewsFile = join(dir, 'reviews.json');
       writeFileSync(
         reviewsFile,
-        reviewsFor ? reviewsFor(R, H) : reviewsFixture('qwen-code-ci-bot', R),
+        reviewsFor ? reviewsFor(R, H) : reviewsFixture(reviewEntry({ sha: R })),
       );
       const posted = join(dir, 'posted');
       writeFileSync(posted, '');
@@ -4032,7 +4060,10 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       const summary = join(dir, 'gss');
       writeFileSync(output, '');
       writeFileSync(summary, '');
-      const res = spawnSync('bash', [gateScriptPath], {
+      // Invoke the script directly, as the workflow does: a regressed
+      // non-executable checkout mode must fail here with EACCES, not pass
+      // because a test-side `bash` papers over it.
+      const res = spawnSync(gateScriptPath, [], {
         cwd: join(dir, 'workspace'),
         encoding: 'utf8',
         env: {
@@ -4147,6 +4178,28 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
   );
 
   it.skipIf(skipExecuted)(
+    'reviews an octopus merge — only two-parent base merges certify',
+    () => {
+      const r = runGate('octopus_merge');
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toMatch(/octopus merge/);
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'reviews when the base merge only re-indented the PR hunks',
+    () => {
+      // Whitespace is semantic: a whitespace-insensitive (patch-id-style)
+      // comparison certifies this shape and would wrongly skip the round.
+      const r = runGate('indentation_touch');
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe('the PR-side diff changed');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
     'reviews after a force-push retires the reviewed head',
     () => {
       const r = runGate('force_push');
@@ -4162,14 +4215,53 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
     'never certifies a head from another account or an unmarked review',
     () => {
       for (const reviewsFor of [
-        (R) => reviewsFixture('some-participant', R),
-        (R) => reviewsFixture('qwen-code-ci-bot', R, 'LGTM, no marker here.'),
+        (R) =>
+          reviewsFixture(reviewEntry({ login: 'some-participant', sha: R })),
+        (R) =>
+          reviewsFixture(
+            reviewEntry({ sha: R, body: 'LGTM, no marker here.' }),
+          ),
       ]) {
         const r = runGate('update_branch_only', { reviewsFor });
         expect(r.status).toBe(0);
         expect(r.out.skip).toBe('false');
         expect(r.out.reason).toBe('no completed automatic round on this PR');
       }
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'never certifies a pending or dismissed review; a valid review wins beside them',
+    () => {
+      // A PENDING draft was never submitted and a DISMISSED review was
+      // invalidated: alone, either must fail open.
+      for (const invalid of [
+        { state: 'PENDING', submittedAt: null },
+        { state: 'DISMISSED' },
+      ]) {
+        const r = runGate('update_branch_only', {
+          reviewsFor: (R) =>
+            reviewsFixture(reviewEntry({ sha: R, ...invalid })),
+        });
+        expect(r.status).toBe(0);
+        expect(r.out.skip).toBe('false');
+        expect(r.out.reason).toBe('no completed automatic round on this PR');
+      }
+      // A newer invalid entry must not hide the older valid review.
+      const r = runGate('update_branch_only', {
+        reviewsFor: (R) =>
+          reviewsFixture(
+            reviewEntry({ sha: R }),
+            reviewEntry({
+              sha: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+              state: 'PENDING',
+              submittedAt: null,
+            }),
+          ),
+      });
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('true');
+      expect(r.out.reviewed_sha).toBe(r.R);
     },
   );
 

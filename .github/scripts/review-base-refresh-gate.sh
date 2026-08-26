@@ -7,13 +7,16 @@
 # Two facts are certified before any review compute is spent: every
 # first-parent commit since the head the last completed automatic round
 # reviewed is a two-parent merge of the base branch, and the PR's own
-# three-dot diff kept the same patch-id — which ignores hunk offsets but
-# hashes content and context lines, so an upstream edit touching the PR's
-# own hunks (context included) fails the equality and the full round runs.
-# The reviewed head is the newest ledger-marked review posted by the
-# AUTHENTICATED account — resolved live via `gh api user`, same norm as the
-# fallback dedup — so a participant posting the marker text in their own
-# review can never certify a head this gate would skip.
+# three-dot diff kept the same canonical digest — every changed and
+# context byte is hashed after stripping only unstable diff metadata
+# (index lines, hunk offsets), so an upstream edit touching the PR's own
+# hunks (whitespace included) fails the equality and the full round runs.
+# The reviewed head is the newest SUBMITTED ledger-marked review
+# (APPROVED, CHANGES_REQUESTED, or COMMENTED, with a submitted_at) posted
+# by the AUTHENTICATED account — resolved live via `gh api user`, same
+# norm as the fallback dedup — so a participant posting the marker text
+# in their own review, a PENDING draft, or a DISMISSED review can never
+# certify a head this gate would skip.
 #
 # Fail-open contract: every probe error or unmatched shape records
 # skip=false and the full round runs, and the script never exits non-zero —
@@ -37,6 +40,19 @@ SKIP=false
 REVIEWED_SHA=''
 REASON=''
 
+# Canonical digest of the diff between two commits: every changed and
+# context byte is hashed, stripping only unstable metadata (index lines,
+# hunk offsets). `git patch-id` is whitespace-insensitive and would
+# certify an indentation-only rewrite of PR-owned lines.
+diff_digest() {
+  local diff
+  diff="$(git diff "$1" "$2" 2>/dev/null)" || return 1
+  [[ -n "${diff}" ]] || return 0
+  printf '%s\n' "${diff}" |
+    sed -E '/^index [0-9a-f]+\.\.[0-9a-f]+/d; /^@@ /d' |
+    git hash-object --stdin
+}
+
 decide() {
   REASON='pr head fetch failed'
   git fetch --no-tags --quiet origin "refs/pull/${PR_NUMBER}/head" || return
@@ -52,7 +68,16 @@ decide() {
   local bot_login reviews
   bot_login="$(gh api user --jq '.login')" && [[ -n "${bot_login}" ]] || return
   reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --method GET --paginate -F per_page=100)" || return
-  REVIEWED_SHA="$(printf '%s' "${reviews}" | jq -sr --arg login "${bot_login}" '[.[][] | select(.user.login == $login) | select(.body | contains("<!-- qwen-review-ledger"))] | last | .commit_id // empty')" || return
+  REVIEWED_SHA="$(
+    printf '%s' "${reviews}" | jq -sr --arg login "${bot_login}" '
+      [.[][]
+       | select(.user.login == $login)
+       | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED"
+                or .state == "COMMENTED")
+       | select(.submitted_at != null)
+       | select(.body | contains("<!-- qwen-review-ledger"))]
+      | last | .commit_id // empty'
+  )" || return
   REASON='no completed automatic round on this PR'
   [[ -n "${REVIEWED_SHA}" ]] || return
   REASON='reviewed head not in the fetched history'
@@ -80,17 +105,17 @@ decide() {
     git merge-base --is-ancestor "${p2}" "origin/${BASE_REF}" 2>/dev/null || return
   done
 
-  local mb_r mb_h pid_r pid_h
+  local mb_r mb_h digest_r digest_h
   REASON='merge-base resolution failed'
   mb_r="$(git merge-base "origin/${BASE_REF}" "${REVIEWED_SHA}" 2>/dev/null)" || return
   mb_h="$(git merge-base "origin/${BASE_REF}" "${EVENT_HEAD_SHA}" 2>/dev/null)" || return
-  REASON='patch-id computation failed'
-  pid_r="$(git diff "${mb_r}" "${REVIEWED_SHA}" 2>/dev/null | git patch-id --stable | cut -d' ' -f1)" || return
-  pid_h="$(git diff "${mb_h}" "${EVENT_HEAD_SHA}" 2>/dev/null | git patch-id --stable | cut -d' ' -f1)" || return
+  REASON='PR-side diff computation failed'
+  digest_r="$(diff_digest "${mb_r}" "${REVIEWED_SHA}")" || return
+  digest_h="$(diff_digest "${mb_h}" "${EVENT_HEAD_SHA}")" || return
   REASON='empty PR-side diff'
-  { [[ -n "${pid_r}" ]] && [[ -n "${pid_h}" ]]; } || return
+  { [[ -n "${digest_r}" ]] && [[ -n "${digest_h}" ]]; } || return
   REASON='the PR-side diff changed'
-  [[ "${pid_r}" = "${pid_h}" ]] || return
+  [[ "${digest_r}" = "${digest_h}" ]] || return
 
   REASON=''
   SKIP=true

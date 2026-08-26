@@ -679,8 +679,9 @@ jobs:
       # PR side — and a full automatic round costs hours (#10111: two base
       # refreshes on PR #9729 spent one full round plus one cancelled one).
       # The script certifies that shape deterministically (pure base-merge
-      # chain since the last ledger-marked reviewed head, PR-side diff
-      # unchanged by patch-id) and posts one marker-deduped note when it
+      # chain since the last submitted ledger-marked reviewed head,
+      # PR-side diff unchanged apart from hunk offsets and index lines)
+      # and posts one marker-deduped note when it
       # skips; its full contract lives in its header. Everything fails OPEN
       # into the full round — the script never exits non-zero (a step
       # failure would be misreported as a pipeline failure by the fallback
