@@ -129,10 +129,13 @@ resolve_and_reply_threads() {
   RESOLVED_BY_OTHERS_N=0
   ALREADY_RESOLVED_N=0
   if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-    # One spelling of the id grammar (optional rc: prefix, optional
-    # trailing CR, digits only, deduplicated), shared by the counter
-    # and the resolve loop below.
-    RESOLVED_IDS="$(sed 's/\r$//; s/^rc://' "${WORKDIR}/resolved-comments.txt" | grep -E '^[0-9]+$' | sort -u || true)"
+    # One spelling of the id grammar (optional rc: prefix, CR bytes
+    # stripped, digits only, deduplicated), shared by the counter and
+    # the classification + resolve loops below. CRs go through tr, not
+    # a sed \r escape: BSD sed on the macOS test lane does not
+    # interpret \r, and this block runs there unchanged (ci.yml records
+    # #9220 — this defect class — having shipped to main once).
+    RESOLVED_IDS="$(tr -d '\r' < "${WORKDIR}/resolved-comments.txt" | sed 's/^rc://' | grep -E '^[0-9]+$' | sort -u || true)"
     RESOLUTION_SELECTED_N="$(grep -c . <<< "${RESOLVED_IDS}" || true)"
     # Nothing selected resolves nothing, so the head guards below have
     # no resolution to gate — a malformed file (zero valid ids) must
@@ -225,20 +228,15 @@ resolve_and_reply_threads() {
       echo "::warning::a review thread carries more than 100 comments; a comment past that page is not mapped to its thread"
     fi
   fi
-  if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
-    read_thread_guard() {
-      gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
-        query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
-          repository(owner:$owner,name:$name){pullRequest(number:$pr){headRefOid}}
-          node(id:$threadId){... on PullRequestReviewThread{isResolved}}
-        }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
-    }
-    # A thread can carry more than one selected id — the feedback
-    # renderer lists a reply under a Critical root as its own finding —
-    # so the loop tracks the threads it already handled and counts
-    # THREADS, not ids: a second id of a handled thread must not
-    # re-resolve it nor read the loop's own resolution as "another
-    # actor".
+  # The counters above start in id space, but the note they feed counts
+  # THREADS — on every path, not just the resolving one. Classify every
+  # selected id against the fetched threads here: a guard-refused round
+  # or a mid-list break that skipped this would report id counts — two
+  # ids of ONE thread as two threads, and a thread already resolved
+  # before the fetch re-reported as left behind every round.
+  if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then
+    RESOLUTION_SELECTED_N=0
+    CLASSIFIED_PAIRS=''
     SEEN_THREAD_IDS=''
     while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
       # A file with no valid ids normalizes to an empty list; the
@@ -260,18 +258,40 @@ resolve_and_reply_threads() {
            | .[0].id // ""' <<< "${THREADS_JSON}")"
         if [[ -z "${thread_id}" ]]; then
           echo "::warning::comment ${rc_id} matched no open review thread"
+          RESOLUTION_SELECTED_N=$(( RESOLUTION_SELECTED_N + 1 ))
           continue
         fi
       fi
+      # A thread can carry more than one selected id — the feedback
+      # renderer lists a reply under a Critical root as its own finding
+      # — so its second id must not count a second thread nor reach
+      # the resolve loop as a re-resolve.
       if grep -qxF "${thread_id}" <<< "${SEEN_THREAD_IDS}"; then
-        RESOLUTION_SELECTED_N=$(( RESOLUTION_SELECTED_N - 1 ))
         continue
       fi
       SEEN_THREAD_IDS="${SEEN_THREAD_IDS}${thread_id}"$'\n'
+      RESOLUTION_SELECTED_N=$(( RESOLUTION_SELECTED_N + 1 ))
       if [[ "${thread_open}" == 'false' ]]; then
         ALREADY_RESOLVED_N=$(( ALREADY_RESOLVED_N + 1 ))
         continue
       fi
+      CLASSIFIED_PAIRS="${CLASSIFIED_PAIRS}${rc_id}"$'\t'"${thread_id}"$'\n'
+    done <<< "${RESOLVED_IDS}"
+  fi
+  if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
+    read_thread_guard() {
+      gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
+        query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
+          repository(owner:$owner,name:$name){pullRequest(number:$pr){headRefOid}}
+          node(id:$threadId){... on PullRequestReviewThread{isResolved}}
+        }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
+    }
+    # The classification above already mapped each id to its thread and
+    # counted each thread once, so this loop resolves each thread once
+    # and reads its own resolution as confirmed — never as "another
+    # actor" resolving it between the fetch and the guard.
+    while IFS=$'\t' read -r rc_id thread_id; do
+      [[ -n "${rc_id}" ]] || continue
       if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
         [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
         RESOLUTION_GUARD='live-head drift'
@@ -309,7 +329,7 @@ resolve_and_reply_threads() {
         echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
         break
       fi
-    done <<< "${RESOLVED_IDS}"
+    done <<< "${CLASSIFIED_PAIRS}"
     echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
   fi
   # One host-authored line for the round report (#10106): name the

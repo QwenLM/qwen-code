@@ -17688,6 +17688,13 @@ exit 1
       '[[ "${ROUND_PUSHED:-}" == \'true\' ]] || LIVE_HEAD_ATTEMPTS=1',
     );
     expect(block).toContain('if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then');
+    // R3-1: CRs go through tr, not a sed \r escape — BSD sed on the
+    // macOS test lane does not interpret \r, so a sed-spelled strip
+    // drops every CRLF-terminated id there and the fixture above goes
+    // red (ci.yml records #9220, this defect class, shipped to main).
+    expect(block).toContain(
+      "RESOLVED_IDS=\"$(tr -d '\\r' < \"${WORKDIR}/resolved-comments.txt\" | sed 's/^rc://' | grep -E '^[0-9]+$' | sort -u || true)\"",
+    );
 
     const movedBeforeMutation = runResolve({
       LIVE_HEAD_SEQUENCE: `${localHead},new-contributor-head`,
@@ -18061,8 +18068,9 @@ exit 1
       expect(result.status).toBe(0);
       return /NOTE<([\s\S]*)>$/.exec(result.stdout)?.[1] ?? '';
     };
-    // Every up-front guard names itself, and a full skip counts all three
-    // selected ids as left behind.
+    // Every up-front guard names itself. The skip path classifies like
+    // the resolve loop: three selected THREADS here, and the one already
+    // resolved before the fetch is subtracted from the residual.
     for (const [env, guard] of [
       [{ PUSH_RACE_MERGED: 'true' }, 'salvage merge'],
       [{ VERIFIED_HEAD: '' }, 'missing verified_head'],
@@ -18074,7 +18082,7 @@ exit 1
       expect(note).toContain('Review-thread resolution skipped');
       expect(note).toContain(`guard: \`${guard}\``);
       expect(note).toContain(
-        'resolved 0 of 3 selected thread(s), 3 left for a later round',
+        'resolved 0 of 3 selected thread(s), 2 left for a later round',
       );
     }
     // R2-3: a round that pushed nothing decides on ONE read — the note
@@ -18086,7 +18094,7 @@ exit 1
     expect(noopDriftNote).toContain('Review-thread resolution skipped');
     expect(noopDriftNote).toContain('guard: `live-head drift`');
     expect(noopDriftNote).toContain(
-      'resolved 0 of 3 selected thread(s), 3 left for a later round',
+      'resolved 0 of 3 selected thread(s), 2 left for a later round',
     );
     expect(readFileSync(headReadCount, 'utf8')).toBe('1');
     // …and an empty selection skips the head proof entirely: zero reads.
@@ -18095,6 +18103,36 @@ exit 1
       runNote({ LIVE_HEAD: 'new-contributor-head', ROUND_PUSHED: 'false' }),
     ).toBe('');
     expect(readFileSync(headReadCount, 'utf8')).toBe('0');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // R3-2: the skip and break paths must count THREADS like the resolve
+    // loop does — classification cannot live only inside the guarded loop,
+    // or exactly the refusing rounds this observability was built for
+    // report id counts: two ids of ONE thread as two threads, and a
+    // pre-fetch-resolved thread as work left behind forever.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const skipOneThreadTwoIds = runNote({ PUSH_RACE_MERGED: 'true' });
+    expect(skipOneThreadTwoIds).toContain('Review-thread resolution skipped');
+    expect(skipOneThreadTwoIds).toContain('guard: `salvage merge`');
+    expect(skipOneThreadTwoIds).toContain(
+      'resolved 0 of 1 selected thread(s), 1 left for a later round',
+    );
+    // A skip round that re-lists ONLY already-resolved ids converges to
+    // zero left instead of re-reporting a phantom residual every round.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '333\n');
+    expect(runNote({ PUSH_RACE_MERGED: 'true' })).toContain(
+      'resolved 0 of 1 selected thread(s), 0 left for a later round',
+    );
+    // A mid-list break reports the same-thread dedupe it broke past, too.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const brokeOneThreadTwoIds = runNote({
+      LIVE_HEAD_SEQUENCE: `${localHead},new-contributor-head`,
+    });
+    expect(brokeOneThreadTwoIds).toContain(
+      'Review-thread resolution stopped early',
+    );
+    expect(brokeOneThreadTwoIds).toContain(
+      'resolved 0 of 1 selected thread(s), 1 left for a later round',
+    );
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
     // A mid-list abort names its guard too, and carries the partial count.
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
