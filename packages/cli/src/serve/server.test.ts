@@ -7711,6 +7711,79 @@ describe('createServeApp', () => {
       }
     });
 
+    it('rejects refs for daemon-local extension paths', async () => {
+      const localExtensionDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-local-extension-ref-'),
+      );
+      const restore = mockExtensionManagerMethods();
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ source: localExtensionDir, consent: true, ref: 'v1' });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(
+          '`ref` and `autoUpdate` are not applicable for local extensions.',
+        );
+        expect(bridge.extensionEvents).toEqual([]);
+      } finally {
+        restore();
+        await fsp.rm(localExtensionDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects unsupported archive URL extension installs', async () => {
+      let prepareCalled = false;
+      const restore = mockExtensionManagerMethods({
+        async prepareExtensionInstall() {
+          prepareCalled = true;
+          return testExtension('archive-extension');
+        },
+      });
+      try {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({
+            source: 'https://example.com/extension.zip',
+            consent: true,
+          });
+
+        expect(res.status).toBe(202);
+        await vi.waitFor(() => {
+          expect(bridge.extensionEvents.at(-1)).toMatchObject({
+            status: 'failed',
+            error:
+              'Only GitHub, Git, npm, and absolute local path extension installs are supported over the daemon endpoint.',
+          });
+        });
+        expect(prepareCalled).toBe(false);
+      } finally {
+        restore();
+      }
+    });
+
     it('does not let an existing local path shadow owner/repo sources', async () => {
       const relativeSource = 'qwen-local-source-shadow/extension';
       const localSource = path.resolve(relativeSource);

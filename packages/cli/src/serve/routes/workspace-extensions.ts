@@ -36,6 +36,7 @@ import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { safeBody as safeBodyType } from '../server/request-helpers.js';
 import {
+  isPortableAbsolutePath,
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
@@ -1102,9 +1103,7 @@ export function registerWorkspaceExtensionRoutes(
           return;
         }
         const localSource =
-          path.isAbsolute(sourceValue) ||
-          /^[A-Za-z]:[\\/]/.test(sourceValue) ||
-          sourceValue.startsWith('.');
+          isPortableAbsolutePath(sourceValue) || sourceValue.startsWith('.');
         if (localSource) {
           try {
             const metadata = await parseInstallSource(sourceValue, {
