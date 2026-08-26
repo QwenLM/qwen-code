@@ -57,9 +57,12 @@ function toContents(contents: ContentListUnion): Content[] {
 
 function requestFunctionDeclarations(
   request: GenerateContentParameters,
-): FunctionDeclaration[] {
+): FunctionDeclaration[] | undefined {
   const declarations: FunctionDeclaration[] = [];
   for (const tool of request.config?.tools ?? []) {
+    if (typeof tool === 'object' && tool !== null && 'tool' in tool) {
+      return undefined;
+    }
     if (
       typeof tool === 'object' &&
       tool !== null &&
@@ -75,17 +78,21 @@ function requestFunctionDeclarations(
 function estimateToolCategories(
   request: GenerateContentParameters,
   config: Config,
-): {
-  builtinTools: number;
-  mcpTools: number;
-  skillTool: number;
-} {
+):
+  | {
+      builtinTools: number;
+      mcpTools: number;
+      skillTool: number;
+    }
+  | undefined {
   let builtinTools = 0;
   let mcpTools = 0;
   let skillTool = 0;
   const registry = config.getToolRegistry();
 
-  for (const declaration of requestFunctionDeclarations(request)) {
+  const declarations = requestFunctionDeclarations(request);
+  if (!declarations) return undefined;
+  for (const declaration of declarations) {
     const tokens = estimateContextTextTokens(JSON.stringify(declaration));
     if (declaration.name === ToolNames.SKILL) {
       skillTool += tokens;
@@ -133,6 +140,17 @@ function loadedSkillBodies(config: Config): Map<string, number> {
     typeof skillTool.getLoadedSkillNames !== 'function'
   ) {
     return new Map();
+  }
+
+  if (
+    'getLoadedSkillContents' in skillTool &&
+    typeof skillTool.getLoadedSkillContents === 'function'
+  ) {
+    return new Map(
+      [...(skillTool.getLoadedSkillContents() as ReadonlySet<string>)].map(
+        (content) => [content, estimateContextTextTokens(content)],
+      ),
+    );
   }
 
   const cachedSkills = config.getSkillManager()?.getCachedSkills();
@@ -208,6 +226,7 @@ export function createContextUsageSnapshot(
   const systemText = getCustomSystemPrompt(request.config?.systemInstruction);
   const memory = extractMemoryTokens(systemText, config);
   const tools = estimateToolCategories(request, config);
+  if (!tools) return undefined;
   const contents = toContents(request.contents);
   const attributedSkills = attributeLoadedSkillBodies(
     contents,

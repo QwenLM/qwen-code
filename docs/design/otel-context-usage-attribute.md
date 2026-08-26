@@ -128,6 +128,13 @@ Provider adapters may still normalize that request before the SDK call, so the
 breakdown describes Qwen Code's logical context rather than a provider's wire
 serialization or billing tokenizer.
 
+If a direct or custom caller supplies an unresolved `CallableTool`, Qwen Code
+omits the complete private attribute for that attempt. Resolving the callable
+would add asynchronous provider-adapter work to the synchronous snapshot path,
+while treating it as an empty declaration would silently misclassify its token
+cost. Normal Qwen Code request construction supplies materialized function
+declarations and is unaffected.
+
 | JSON field             | Source and attribution rule                                                                                                                                                                                                                   |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `window_size_tokens`   | The `ContentGeneratorConfig` owned by the wrapped generator, falling back to `DEFAULT_TOKEN_LIMIT`. This avoids accidentally using the main model's window for a fallback or side model.                                                      |
@@ -135,7 +142,7 @@ serialization or billing tokenizer.
 | `builtin_tools_tokens` | Tool declarations present in the logical request, excluding MCP declarations and the Skill tool declaration. Deferred tools that have not been revealed are absent because they are absent from the request.                                  |
 | `mcp_tools_tokens`     | Logical request declarations whose matching registry entries are `DiscoveredMCPTool` instances. No server or tool name is serialized.                                                                                                         |
 | `memory_files_tokens`  | `Config.getUserMemory()` and `Config.getAutoMemoryPrompt()` only when the corresponding text is present in the effective system instruction. This includes context files, memory, and auto memory without exposing paths or contents.         |
-| `skills_tokens`        | The Skill tool declaration plus loaded `SKILL.md` bodies that can be matched in the logical request messages from the committed SkillManager cache.                                                                                           |
+| `skills_tokens`        | The Skill tool declaration plus loaded `SKILL.md` bodies that exactly match immutable LLM-facing outputs retained when the Skill tool inserted them into request history.                                                                     |
 | `messages_tokens`      | User, assistant, and tool-result content in the request, excluding loaded skill bodies already attributed to `skills_tokens`. On finalization it becomes the residual after the fixed categories are normalized against provider input usage. |
 
 Memory attribution uses exact segment removal. For each non-empty value from
@@ -168,22 +175,21 @@ that difference when `messages_tokens` becomes the provider-total residual.
 The extracted helper has a distinct context-reporting name and must not replace
 `estimateContentTokens` in the compaction gate.
 
-The telemetry path never calls `SkillManager.listSkills()`. It uses
-`getLoadedSkillNames()` from the in-memory Skill tool to narrow candidates and
-`getCachedSkills()` so span creation cannot trigger filesystem discovery. With
-a warm cache, one pass over cached skills indexes only loaded candidates by the
-exact output of `buildSkillLlmContent`. One pass over request parts then matches
-only parts whose `functionResponse.name === "skill"`, comparing
-`functionResponse.response.output` exactly against that index. It does not
-stringify the whole part or match `parts[].text`. A matched output is counted
-once in `skills_tokens` and excluded from `messages_tokens`. This avoids
+The telemetry path never calls `SkillManager.listSkills()`. The in-memory Skill
+tool retains each exact `buildSkillLlmContent` output when it first inserts that
+body into request history, so later edits or cache reloads cannot rewrite
+historical attribution. One pass over request parts matches only parts whose
+`functionResponse.name === "skill"`, comparing
+`functionResponse.response.output` exactly against the retained outputs. It
+does not stringify the whole part or match `parts[].text`. A matched output is
+counted once in `skills_tokens` and excluded from `messages_tokens`. This avoids
 substring matches and per-skill scans of the full request. Subsequent
-already-loaded confirmations, microcompacted outputs, and cold-cache bodies do
-not match the indexed first-load body and remain in `messages_tokens`. When
-compaction has removed the exact body, no body tokens are added to
-`skills_tokens`; any remaining summary stays in `messages_tokens`. The
-attribute remains complete and non-blocking, while `estimated: true`
-communicates that attribution is approximate.
+already-loaded confirmations and microcompacted outputs do not match the
+indexed first-load body and remain in `messages_tokens`. When compaction has
+removed the exact body, no body tokens are added to `skills_tokens`; any
+remaining summary stays in `messages_tokens`. The attribute remains complete
+and non-blocking, while `estimated: true` communicates that attribution is
+approximate.
 
 ### Provider-total normalization
 
@@ -363,10 +369,10 @@ pre-allocate scalar aliases.
    or `LoggingContentGenerator`, so `session-tracing` cannot create a
    telemetry-to-tools dependency cycle.
 3. Keep request-source collection at the request wrapper boundary. Retain the
-   effective context-window size from the generator configuration in
-   `LoggingContentGenerator`, classify its request using `Config` and the tool
-   registry there, and pass only the resulting plain numeric snapshot to both
-   streaming and non-streaming span starts.
+   owning generator-configuration reference in `LoggingContentGenerator`, read
+   its effective context-window size at snapshot time, classify the request
+   using `Config` and the tool registry there, and pass only the resulting plain
+   numeric snapshot to both streaming and non-streaming span starts.
 4. Extend `StartLLMRequestSpanOptions` and the internal `SpanContext` with the
    structured snapshot. Serialize at start and overwrite after valid input
    usage is available in `endLLMRequestSpan`.
@@ -385,8 +391,8 @@ Unit tests for the context-usage module cover:
 - exact-match failure that leaves memory only in the system-prompt category;
 - built-in, revealed MCP, hidden deferred, and Skill tool attribution from the
   logical request;
-- loaded-skill attribution with a warm cache, no discovery on a cold cache,
-  and no stale body attribution after compaction;
+- loaded-skill attribution from the immutable inserted output, including cache
+  edits and no stale body attribution after compaction;
 - largest-remainder normalization, including deterministic ties, whose
   breakdown sum equals provider input;
 - cached provider input remaining in the full category sum while cache reads

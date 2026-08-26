@@ -174,19 +174,16 @@ export class LoggingContentGenerator implements ContentGenerator {
   private readonly generatorAuthType: ContentGeneratorConfig['authType'];
   private readonly genAiProviderName: string;
   private readonly genAiOperationName: 'chat' | 'generate_content';
-  private readonly contextWindowSize: number;
 
   constructor(
     private readonly wrapped: ContentGenerator,
     private readonly config: Config,
-    generatorConfig: ContentGeneratorConfig,
+    private readonly generatorConfig: ContentGeneratorConfig,
   ) {
     this.modalities = generatorConfig.modalities;
     this.splitToolMedia = generatorConfig.splitToolMedia;
     this.toolResultContentFormat = generatorConfig.toolResultContentFormat;
     this.generatorAuthType = generatorConfig.authType;
-    this.contextWindowSize =
-      generatorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
     this.genAiProviderName = resolveGenAiProviderName(
       generatorConfig,
       process.env['DASHSCOPE_PROXY_BASE_URL'],
@@ -219,7 +216,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       return createContextUsageSnapshot(
         request,
         this.config,
-        this.contextWindowSize,
+        this.generatorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT,
       );
     } catch (error) {
       debugLogger.warn(

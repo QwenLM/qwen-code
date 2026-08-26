@@ -99,6 +99,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }> = [];
   private hiddenSkillNames: Set<string> = new Set();
   private loadedSkillNames: Set<string> = new Set();
+  private loadedSkillContents: Set<string> = new Set();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
@@ -301,7 +302,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       this.config,
       this.skillManager,
       params,
-      (name: string) => this.loadedSkillNames.add(name),
+      (name: string, content?: string) => {
+        this.loadedSkillNames.add(name);
+        if (content !== undefined) this.loadedSkillContents.add(content);
+      },
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
       (name: string) => this.hiddenSkillNames.has(name),
@@ -327,12 +331,17 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     return this.loadedSkillNames;
   }
 
+  getLoadedSkillContents(): ReadonlySet<string> {
+    return this.loadedSkillContents;
+  }
+
   /**
    * Clears the loaded-skills tracking. Should be called when the session
    * is reset (e.g. /clear) so that stale body-token data is not shown.
    */
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
+    this.loadedSkillContents.clear();
   }
 
   /**
@@ -359,7 +368,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     private readonly config: Config,
     private readonly skillManager: SkillManager,
     params: SkillParams,
-    private readonly onSkillLoaded: (name: string) => void,
+    private readonly onSkillLoaded: (name: string, content?: string) => void,
     private readonly commandExecutor:
       | ((
           name: string,
@@ -612,7 +621,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         };
       }
 
-      this.onSkillLoaded(this.params.skill);
+      const baseDir = path.dirname(skill.filePath);
+      const llmContent = buildSkillLlmContent(baseDir, skill.body);
+      this.onSkillLoaded(this.params.skill, llmContent);
 
       // Auto-approve the skill's declared allowedTools for the rest of the session.
       applySkillAllowedTools(
@@ -656,8 +667,6 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         );
       }
 
-      const baseDir = path.dirname(skill.filePath);
-      const llmContent = buildSkillLlmContent(baseDir, skill.body);
       void this.recordAutoSkillUsageBestEffort(skill);
       recordSkillInvocation(this.config, {
         skillName: this.params.skill,

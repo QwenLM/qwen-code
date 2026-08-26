@@ -505,6 +505,44 @@ describe('LoggingContentGenerator', () => {
     });
   });
 
+  it('reads the live context window after a hot model switch', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp-context', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generatorConfig = {
+      model: 'test-model',
+      authType: AuthType.QWEN_OAUTH,
+      contextWindowSize: 1_000_000,
+    };
+    const generator = new LoggingContentGenerator(
+      wrapped,
+      createConfig(),
+      generatorConfig,
+    );
+    const request: GenerateContentParameters = {
+      model: 'test-model',
+      contents: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    };
+
+    await generator.generateContent(request, 'before-model-switch');
+    generatorConfig.contextWindowSize = 262_144;
+    await generator.generateContent(request, 'after-model-switch');
+
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[0]?.[2]?.contextUsage
+        ?.window_size_tokens,
+    ).toBe(1_000_000);
+    expect(
+      vi.mocked(startLLMRequestSpanWithContext).mock.calls[1]?.[2]?.contextUsage
+        ?.window_size_tokens,
+    ).toBe(262_144);
+  });
+
   it('snapshots context usage before a stream is iterated', async () => {
     const wrapped = createWrappedGenerator(
       vi.fn(),

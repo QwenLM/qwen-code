@@ -729,6 +729,25 @@ describe('session-tracing', () => {
       expect(normalized.available_before_compaction_tokens).toBe(77);
     });
 
+    it('owns the request-start snapshot across caller mutations', () => {
+      const mutableContextUsage = structuredClone(contextUsage);
+      const { span } = startLLMRequestSpanWithContext('m', 'p', {
+        contextUsage: mutableContextUsage,
+      });
+      const record = mockSpans[0]!;
+
+      mutableContextUsage.window_size_tokens = 1_000;
+      mutableContextUsage.breakdown.system_prompt_tokens = 50;
+      endLLMRequestSpan(span, { success: true, inputTokens: 10 });
+
+      const normalized = JSON.parse(
+        String(record.attributes[CONTEXT_USAGE_ATTRIBUTE]),
+      ) as ContextUsageV1;
+      expect(normalized.window_size_tokens).toBe(100);
+      expect(normalized.breakdown.system_prompt_tokens).toBe(1);
+      expect(normalized.available_before_compaction_tokens).toBe(70);
+    });
+
     it('keeps the request-start context snapshot on TTL cleanup', () => {
       startLLMRequestSpanWithContext('m', 'p', { contextUsage });
       const record = mockSpans[0]!;

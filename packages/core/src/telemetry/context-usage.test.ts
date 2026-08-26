@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  isValidContextUsage,
   normalizeContextUsage,
   serializeContextUsage,
   type ContextUsageV1,
@@ -82,6 +83,50 @@ describe('normalizeContextUsage', () => {
       ),
     ).toBe(3);
   });
+
+  it('keeps provider-total normalization exact near the safe-integer limit', () => {
+    const providerTotal = 7_499_999_999_999_871;
+    const normalized = normalizeContextUsage(
+      snapshot({
+        system_prompt_tokens: 1_500_000_000_000_000,
+        builtin_tools_tokens: 1_500_000_000_000_000,
+        mcp_tools_tokens: 1_500_000_000_000_000,
+        memory_files_tokens: 1_500_000_000_000_000,
+        skills_tokens: 1_500_000_000_000_000,
+        messages_tokens: 0,
+      }),
+      providerTotal,
+    );
+
+    expect(
+      Object.values(normalized.breakdown).reduce(
+        (sum, tokens) => sum + tokens,
+        0,
+      ),
+    ).toBe(providerTotal);
+  });
+
+  it('normalizes when individually safe categories have an unsafe sum', () => {
+    const providerTotal = 9_000_000_000_000_000;
+    const normalized = normalizeContextUsage(
+      snapshot({
+        system_prompt_tokens: 2_000_000_000_000_000,
+        builtin_tools_tokens: 2_000_000_000_000_000,
+        mcp_tools_tokens: 2_000_000_000_000_000,
+        memory_files_tokens: 2_000_000_000_000_000,
+        skills_tokens: 2_000_000_000_000_000,
+        messages_tokens: 0,
+      }),
+      providerTotal,
+    );
+
+    expect(
+      Object.values(normalized.breakdown).reduce(
+        (sum, tokens) => sum + tokens,
+        0,
+      ),
+    ).toBe(providerTotal);
+  });
 });
 
 describe('serializeContextUsage', () => {
@@ -110,5 +155,81 @@ describe('serializeContextUsage', () => {
         breakdown: { ...valid.breakdown, messages_tokens: -1 },
       }),
     ).toBeUndefined();
+  });
+
+  it('rejects missing or malformed nested shapes without throwing', () => {
+    for (const invalid of [
+      null,
+      {},
+      { version: 1, estimated: true },
+      { version: 1, estimated: true, breakdown: null },
+      { version: 1, estimated: true, breakdown: 1 },
+    ]) {
+      expect(isValidContextUsage(invalid)).toBe(false);
+      expect(serializeContextUsage(invalid)).toBeUndefined();
+    }
+  });
+
+  it('serializes only the fixed versioned schema keys', () => {
+    const value = {
+      version: 1,
+      window_size_tokens: 100,
+      breakdown: {
+        system_prompt_tokens: 1,
+        builtin_tools_tokens: 2,
+        mcp_tools_tokens: 3,
+        memory_files_tokens: 4,
+        skills_tokens: 5,
+        messages_tokens: 6,
+        debugPrompt: 'nested secret',
+      },
+      compaction_reserve_tokens: 10,
+      estimated: true,
+      debugPrompt: 'top-level secret',
+    };
+
+    const serialized = serializeContextUsage(value);
+    expect(serialized).toBeDefined();
+    expect(serialized).not.toContain('debugPrompt');
+    expect(serialized).not.toContain('secret');
+    expect(Object.keys(JSON.parse(serialized!))).toEqual([
+      'version',
+      'window_size_tokens',
+      'breakdown',
+      'compaction_reserve_tokens',
+      'estimated',
+    ]);
+  });
+
+  it('reads each canonical field only once before serializing', () => {
+    let windowSizeReads = 0;
+    let breakdownReads = 0;
+    const breakdown = {
+      system_prompt_tokens: 1,
+      builtin_tools_tokens: 2,
+      mcp_tools_tokens: 3,
+      memory_files_tokens: 4,
+      skills_tokens: 5,
+      messages_tokens: 6,
+    };
+    const value = {
+      version: 1,
+      get window_size_tokens() {
+        windowSizeReads++;
+        return windowSizeReads < 3 ? 100 : { debugPrompt: 'secret' };
+      },
+      get breakdown() {
+        breakdownReads++;
+        return breakdown;
+      },
+      compaction_reserve_tokens: 10,
+      estimated: true,
+    };
+
+    const serialized = serializeContextUsage(value);
+    expect(windowSizeReads).toBe(1);
+    expect(breakdownReads).toBe(1);
+    expect(serialized).toContain('"window_size_tokens":100');
+    expect(serialized).not.toContain('secret');
   });
 });

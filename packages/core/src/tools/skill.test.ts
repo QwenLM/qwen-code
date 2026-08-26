@@ -982,6 +982,7 @@ describe('SkillTool', () => {
       expect(result1.returnDisplay).toBe(
         'Specialized skill for reviewing code quality',
       );
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set([llmText1]));
 
       const invocation2 = (
         skillTool as SkillToolWithProtectedMethods
@@ -994,6 +995,7 @@ describe('SkillTool', () => {
       expect(result2.returnDisplay).toBe(
         'Skill "code-review" is already loaded in context.',
       );
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set([llmText1]));
     });
 
     it('still allows loading a different skill after one is already loaded', async () => {
@@ -1043,6 +1045,7 @@ describe('SkillTool', () => {
       await inv1.execute();
 
       skillTool.clearLoadedSkills();
+      expect(skillTool.getLoadedSkillContents()).toEqual(new Set());
 
       const inv2 = (
         skillTool as SkillToolWithProtectedMethods

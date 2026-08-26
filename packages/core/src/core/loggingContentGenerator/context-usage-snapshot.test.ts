@@ -29,6 +29,7 @@ function createConfig(options?: {
   autoMemory?: string;
   cachedSkills?: SkillConfig[] | null;
   loadedSkillNames?: ReadonlySet<string>;
+  loadedSkillContents?: ReadonlySet<string>;
   tools?: Map<string, unknown>;
   listSkills?: ReturnType<typeof vi.fn>;
   autoCompactThreshold?: number;
@@ -36,6 +37,11 @@ function createConfig(options?: {
   const listSkills = options?.listSkills ?? vi.fn();
   const skillTool = {
     getLoadedSkillNames: () => options?.loadedSkillNames ?? new Set<string>(),
+    ...(options?.loadedSkillContents === undefined
+      ? {}
+      : {
+          getLoadedSkillContents: () => options.loadedSkillContents,
+        }),
   };
   const tools = new Map(options?.tools ?? []);
   tools.set(ToolNames.SKILL, skillTool);
@@ -183,6 +189,22 @@ describe('createContextUsageSnapshot', () => {
     expect(serializeContextUsage(snapshot)).not.toContain('example-skill');
   });
 
+  it('omits the snapshot rather than resolving a CallableTool asynchronously', () => {
+    const tool = vi.fn().mockResolvedValue({
+      functionDeclarations: [{ name: 'callable_decl' }],
+    });
+    const request: GenerateContentParameters = {
+      model: 'test-model',
+      contents: [],
+      config: { tools: [{ tool } as unknown as CallableTool] },
+    };
+
+    expect(
+      createContextUsageSnapshot(request, createConfig(), 100_000),
+    ).toBeUndefined();
+    expect(tool).not.toHaveBeenCalled();
+  });
+
   it('keeps unmatched and duplicate Skill outputs in messages', () => {
     const skill = skillConfig();
     const skillOutput = buildSkillLlmContent(
@@ -234,6 +256,57 @@ describe('createContextUsageSnapshot', () => {
               },
             },
             contents[0]!.parts![1]!,
+          ],
+        },
+      ]),
+    );
+  });
+
+  it('attributes the immutable loaded output after the Skill cache changes', () => {
+    const loadedSkill = skillConfig();
+    const loadedOutput = buildSkillLlmContent(
+      '/skills/example-skill',
+      loadedSkill.body,
+    );
+    const editedSkill = { ...loadedSkill, body: '# Edited body' };
+    const request: GenerateContentParameters = {
+      model: 'test-model',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: ToolNames.SKILL,
+                response: { output: loadedOutput },
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const config = createConfig({
+      cachedSkills: [editedSkill],
+      loadedSkillNames: new Set([loadedSkill.name]),
+      loadedSkillContents: new Set([loadedOutput]),
+    });
+
+    const snapshot = createContextUsageSnapshot(request, config, 200_000);
+
+    expect(snapshot?.breakdown.skills_tokens).toBe(
+      estimateContextTextTokens(loadedOutput),
+    );
+    expect(snapshot?.breakdown.messages_tokens).toBe(
+      estimateContentTokens([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: ToolNames.SKILL,
+                response: { output: '' },
+              },
+            },
           ],
         },
       ]),

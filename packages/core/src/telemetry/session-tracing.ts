@@ -43,6 +43,7 @@ import { redactUrlCredentials } from '../extension/redaction.js';
 import type { ToolExecutionStatus } from '../core/turn.js';
 import { sessionIdContext } from '../utils/sessionIdContext.js';
 import {
+  cloneContextUsage,
   CONTEXT_USAGE_ATTRIBUTE,
   normalizeContextUsage,
   serializeContextUsage,
@@ -777,7 +778,8 @@ export function startLLMRequestSpanWithContext(
 
   const sessionId = resolveSessionId(parentCtx, options?.sessionId, ctx);
   const userId = resolveGenAiUserId(parentCtx, promptId, options?.userId);
-  const serializedContextUsage = serializeContextUsage(options?.contextUsage);
+  const contextUsage = cloneContextUsage(options?.contextUsage);
+  const serializedContextUsage = serializeContextUsage(contextUsage);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
     ...(sessionId ? { 'gen_ai.conversation.id': sessionId } : {}),
@@ -817,9 +819,7 @@ export function startLLMRequestSpanWithContext(
     span,
     startTime: Date.now(),
     ...(interactionParentCtx ? { interactionOwner: interactionParentCtx } : {}),
-    ...(serializedContextUsage && options?.contextUsage
-      ? { contextUsage: options.contextUsage }
-      : {}),
+    ...(serializedContextUsage && contextUsage ? { contextUsage } : {}),
     attributes: attributes as Record<string, string | number | boolean>,
     type: 'llm_request',
   };
