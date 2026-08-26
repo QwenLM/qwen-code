@@ -6,11 +6,6 @@
   color: var(--foreground);
 }
 
-.inspector button {
-  color: inherit;
-  font: inherit;
-}
-
 .inspector button:focus-visible,
 .inspector summary:focus-visible {
   outline: 2px solid var(--agent-blue-500);
@@ -49,7 +44,7 @@
   gap: 3px;
 }
 
-.summaryHeading span,
+.summaryHeading > div span,
 .sectionHeading > div > span {
   color: var(--muted-foreground);
   font-size: 11px;
