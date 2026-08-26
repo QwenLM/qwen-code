@@ -514,7 +514,21 @@ export abstract class ChannelBase {
       await this.pushProactive(target, text);
       return;
     }
-    await this.sendResponseMessage(target.chatId, text, sessionId);
+    await this.deliverBackgroundReply(target.chatId, text, sessionId);
+  }
+
+  /**
+   * Fallback delivery of a background response when proactive send is
+   * unavailable. Adapters whose turn replies bypass sendResponseMessage (to
+   * stay out of turn-scoped streaming state, for example) override only this
+   * step instead of re-implementing the whole dispatch flow.
+   */
+  protected async deliverBackgroundReply(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    await this.sendResponseMessage(chatId, text, sessionId);
   }
 
   async dispatchPermissionRequest(

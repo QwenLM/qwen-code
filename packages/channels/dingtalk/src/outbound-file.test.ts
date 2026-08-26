@@ -23,7 +23,6 @@ describe('OutboundFileProjector', () => {
         text: 'before\n\nafter',
         paths: ['/workspace/report.txt'],
       });
-      expect(projector.matches(input)).toBe(true);
     }
   });
 
@@ -81,12 +80,5 @@ describe('OutboundFileProjector', () => {
     expect(projected.invalidMarkers).toBe(1);
     expect(projected.text).not.toContain('/tmp/');
     expect(projected.text).not.toContain('x'.repeat(100));
-  });
-
-  it('detects a final response that differs from streamed bytes', () => {
-    const projector = new OutboundFileProjector();
-    projector.append('[FILE: /tmp/a.txt]');
-    projector.complete();
-    expect(projector.matches('[FILE: /tmp/b.txt]')).toBe(false);
   });
 });

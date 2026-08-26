@@ -589,6 +589,7 @@ const DIRECT_MSG_API =
 const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const REPLY_FETCH_TIMEOUT_MS = 15_000;
 // Extensions for generated media store names, keyed by the download's mime
 // type. The agent reads stored media via `read_file`, whose type detection is
 // extension-first: an extensionless name falls through to the binary content
@@ -717,6 +718,13 @@ export class DingtalkChannel extends ChannelBase {
     string,
     { projector: OutboundFileProjector; reportedMarkers: number }
   >();
+  // Sessions armed for block projection by onPromptStart and disarmed when
+  // the turn settles (or the session dies). A block send that finds NO
+  // projector state is only legitimate as a turn's FIRST block, which always
+  // lands while armed: late sends from an evicted (/clear) or dead session
+  // must be dropped, because recreating state would post the tail of a
+  // force-split [FILE: ...] marker verbatim.
+  private readonly blockProjectionArmed = new Set<string>();
 
   constructor(
     name: string,
@@ -1066,13 +1074,20 @@ export class DingtalkChannel extends ChannelBase {
     streamed?: OutboundFileProjector,
   ): string {
     const projection = projectFileText(text);
-    let notice = projection.markerCount > 0;
-    if (streamed) {
-      streamed.complete();
-      const streamedResult = streamed.result('');
-      notice ||= streamedResult.markerCount > 0 || !streamed.matches(text);
+    // Markers are counted when their opening bytes arrive, so the streamed
+    // count also fails closed when the final text no longer carries a marker
+    // the stream already delivered. Whole-turn hash comparison is NOT
+    // viable: the bridges return only post-last-boundary chunks as the final
+    // text, so any routine multi-tool turn would diverge by construction.
+    const streamedMarkers = streamed ? streamed.result('').markerCount : 0;
+    if (projection.markerCount === 0 && streamedMarkers === 0) {
+      return projection.text;
     }
-    if (!notice) return projection.text;
+    // Counts only — never paths — so a redaction event stays debuggable
+    // without leaking what was redacted.
+    process.stderr.write(
+      `[DingTalk:${this.name}] file markers redacted (final=${projection.markerCount}, streamed=${streamedMarkers})\n`,
+    );
     return withFileUnavailableNotice(projection.text);
   }
 
@@ -1164,11 +1179,23 @@ export class DingtalkChannel extends ChannelBase {
         ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
       };
 
-      const resp = await fetch(webhook, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
+      let resp: Response;
+      try {
+        resp = await fetch(webhook, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(REPLY_FETCH_TIMEOUT_MS),
+        });
+      } catch (err) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] sendMessage failed: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            300,
+          )}\n`,
+        );
+        throw err;
+      }
 
       if (isMention && process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
         const payload = (await resp
@@ -1586,6 +1613,7 @@ export class DingtalkChannel extends ChannelBase {
 
   /** Recall reactions left behind when a session dies without terminal lifecycle events. */
   override onSessionDied(sessionId: string): void {
+    this.blockProjectionArmed.delete(sessionId);
     this.blockFileProjectors.delete(sessionId);
     for (const [runId, state] of this.fileProjectors) {
       if (state.sessionId === sessionId) this.fileProjectors.delete(runId);
@@ -1719,6 +1747,7 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
+    this.blockProjectionArmed.add(sessionId);
     if (messageId) {
       this.bufferedMentionTargets.delete(messageId);
       this.untrackBufferedMentionTarget(sessionId, messageId);
@@ -1802,14 +1831,22 @@ export class DingtalkChannel extends ChannelBase {
    * onPromptEnd, so everything already appended belongs to this turn. Flush
    * the held candidate bytes (a trailing `[FILE:` prefix the stream never
    * completed) before deleting the entry — a later delete-without-settle
-   * would silently drop them from the delivered answer.
+   * would silently drop them from the delivered answer. Also disarm the
+   * session: /clear eviction and session death settle WITHOUT draining the
+   * turn's send chain, and any block that lands afterwards must be dropped
+   * rather than recreating projector state.
    */
   private settleBlockFileProjector(chatId: string, sessionId: string): void {
+    this.blockProjectionArmed.delete(sessionId);
     const state = this.blockFileProjectors.get(sessionId);
     if (!state) return;
     this.blockFileProjectors.delete(sessionId);
     const tail = state.projector.complete();
     if (!tail.trim()) return;
+    // Deliberately fire-and-forget: complete() can only return a strict
+    // prefix of '[FILE:' (at most 5 chars, no path bytes), so the worst case
+    // is a stray fragment landing out of order with the next turn — not a
+    // leak — and blocking settle on a delivery that may hang is worse.
     void this.sendReply(chatId, tail).catch((err) => {
       process.stderr.write(
         `[DingTalk:${this.name}] projector tail delivery failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -1822,26 +1859,15 @@ export class DingtalkChannel extends ChannelBase {
    * the session's block-streaming projector: a second sender interleaving with
    * mid-projection state can swallow the send or split a held marker.
    */
-  override async dispatchBackgroundResponse(
-    sessionId: string,
+  protected override async deliverBackgroundReply(
+    chatId: string,
     text: string,
+    sessionId: string,
   ): Promise<void> {
     if (this.config.blockStreaming !== 'on') {
-      return super.dispatchBackgroundResponse(sessionId, text);
+      return super.deliverBackgroundReply(chatId, text, sessionId);
     }
-    const target = this.router.getTarget(sessionId);
-    if (
-      !target ||
-      target.channelName !== this.name ||
-      text.trim().length === 0
-    ) {
-      return;
-    }
-    if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
-      await this.pushProactive(target, text);
-      return;
-    }
-    await this.sendReply(target.chatId, text);
+    await this.sendReply(chatId, text);
   }
 
   protected override async sendResponseMessage(
@@ -1873,6 +1899,9 @@ export class DingtalkChannel extends ChannelBase {
   ): { text: string; hasContent: boolean } {
     let state = this.blockFileProjectors.get(sessionId);
     if (!state) {
+      if (!this.blockProjectionArmed.has(sessionId)) {
+        return { text: '', hasContent: false };
+      }
       state = { projector: new OutboundFileProjector(), reportedMarkers: 0 };
       this.blockFileProjectors.set(sessionId, state);
     }
@@ -1883,6 +1912,9 @@ export class DingtalkChannel extends ChannelBase {
     if (result.markerCount > state.reportedMarkers) {
       outgoingText = withFileUnavailableNotice(safe);
       state.reportedMarkers = result.markerCount;
+      process.stderr.write(
+        `[DingTalk:${this.name}] file markers redacted in block stream (session ${sessionId}, markers=${result.markerCount})\n`,
+      );
     }
     return { text: outgoingText, hasContent };
   }

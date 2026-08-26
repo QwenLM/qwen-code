@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 const FILE_OPENING = '[FILE:';
 const MAX_FILE_PATH_CHARS = 4096;
 export const MAX_FILES_PER_RESPONSE = 5;
@@ -14,8 +12,6 @@ export interface FileProjection {
 }
 
 export class OutboundFileProjector {
-  private readonly hash = createHash('sha256');
-  private inputLength = 0;
   private candidate = '';
   private reserved = '';
   private reservedAtLineStart = false;
@@ -27,8 +23,6 @@ export class OutboundFileProjector {
   private markerCount = 0;
 
   append(chunk: string): string {
-    this.hash.update(chunk);
-    this.inputLength += chunk.length;
     let safe = '';
     for (const char of chunk) {
       if (this.reserved) {
@@ -75,14 +69,6 @@ export class OutboundFileProjector {
     return '';
   }
 
-  matches(text: string): boolean {
-    return (
-      text.length === this.inputLength &&
-      this.hash.digest('hex') ===
-        createHash('sha256').update(text).digest('hex')
-    );
-  }
-
   result(text: string): FileProjection {
     return {
       text,
@@ -117,6 +103,12 @@ export class OutboundFileProjector {
   }
 }
 
+/**
+ * Redacts [FILE: ...] markers from one complete outbound text. Detection
+ * deliberately scans the RAW text, unlike the image path's maskCode scan:
+ * FILE performs no upload, so a FILE-shaped example inside a code fence is
+ * over-redacted rather than risking a leaked path — security over fidelity.
+ */
 export function projectFileText(text: string): FileProjection {
   const projector = new OutboundFileProjector();
   const safe = projector.append(text) + projector.complete();

@@ -145,6 +145,36 @@ vi.mock('@qwen-code/channel-base', async () => {
         _messageIds: string[],
       ): void {}
       protected requestPromptRunCancellation = vi.fn().mockResolvedValue(false);
+      // Real base dispatch flow, delegated like logDebugPayload: the adapter
+      // override under test replaces only the final delivery step.
+      async dispatchBackgroundResponse(
+        sessionId: string,
+        text: string,
+      ): Promise<void> {
+        await (
+          real.ChannelBase.prototype as unknown as {
+            dispatchBackgroundResponse(
+              sessionId: string,
+              text: string,
+            ): Promise<void>;
+          }
+        ).dispatchBackgroundResponse.call(this, sessionId, text);
+      }
+      protected async deliverBackgroundReply(
+        chatId: string,
+        text: string,
+        sessionId: string,
+      ): Promise<void> {
+        await (
+          real.ChannelBase.prototype as unknown as {
+            deliverBackgroundReply(
+              chatId: string,
+              text: string,
+              sessionId: string,
+            ): Promise<void>;
+          }
+        ).deliverBackgroundReply.call(this, chatId, text, sessionId);
+      }
       protected supportsProactiveTarget(target: SessionTarget): boolean {
         return target.threadId === undefined;
       }
@@ -1842,6 +1872,52 @@ describe('DingtalkChannel status cards', () => {
       segmentId: 'segment-2',
     });
     expect(fetchSpy).toHaveBeenCalledOnce();
+    const fallbackBody = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(fallbackBody.markdown.text).toBe('second');
+  });
+
+  it('falls back to the reply delivery with the projected text when no presenter exists', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const context = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+
+    getChunkHook(channel)(
+      'cid-1',
+      '[FILE: /workspace/a.txt]\npartial answer',
+      'session-1',
+      context,
+    );
+    await getCompleteHook(channel)(
+      'cid-1',
+      'final answer',
+      'session-1',
+      context,
+    );
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const body = JSON.parse(
+      String((fetchSpy.mock.calls[0]![1] as RequestInit).body),
+    ) as { markdown: { text: string } };
+    expect(body.markdown.text).toContain('final answer');
+    expect(body.markdown.text).toContain('[File delivery unavailable]');
+    expect(body.markdown.text).not.toContain('/workspace/a.txt');
   });
 
   it('uploads a final status card image before closing output', async () => {
@@ -5866,6 +5942,7 @@ describe('DingtalkChannel outbound file projection', () => {
     async (_name, first, second) => {
       const channel = createChannel({ blockStreaming: 'on' });
       seedWebhook(channel, 'cid123');
+      getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
       const fetchSpy = vi
         .spyOn(globalThis, 'fetch')
         .mockResolvedValue(new Response('{}'));
@@ -5913,6 +5990,7 @@ describe('DingtalkChannel outbound file projection', () => {
   it('keeps the block projector across a segment reset so split markers stay redacted', async () => {
     const channel = createChannel({ blockStreaming: 'on' });
     seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}'));
@@ -5942,6 +6020,7 @@ describe('DingtalkChannel outbound file projection', () => {
   it('keeps a reserved line pending across blocks that end on an early "]"', async () => {
     const channel = createChannel({ blockStreaming: 'on' });
     seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}'));
@@ -5959,6 +6038,7 @@ describe('DingtalkChannel outbound file projection', () => {
   it('reports the unavailable notice once across later blocks', async () => {
     const channel = createChannel({ blockStreaming: 'on' });
     seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}'));
@@ -6008,6 +6088,7 @@ describe('DingtalkChannel outbound file projection', () => {
   it('delivers DM background responses without interleaving the block projector', async () => {
     const channel = createChannel({ blockStreaming: 'on' });
     seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
     seedSessionTarget(channel, 'session-1', {
       channelName: 'test-dingtalk',
       senderId: 'user-1',
@@ -6036,6 +6117,113 @@ describe('DingtalkChannel outbound file projection', () => {
     expect(bodies[1]!.markdown.text).toBe('Background notification');
     expect(JSON.stringify(bodies)).not.toContain('[FILE:');
     expect(JSON.stringify(bodies)).not.toContain('/workspace/report.txt');
+  });
+
+  it('delivers group background responses proactively, past the block projector', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedWebhook(channel, 'cid123');
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
+    await getResponseHook(channel)(
+      'cid123',
+      'Partial [FILE: /workspace/report.txt',
+      'session-1',
+    );
+
+    await channel.dispatchBackgroundResponse(
+      'session-1',
+      'Background notification',
+    );
+
+    expect(pushProactive).toHaveBeenCalledWith(
+      expect.objectContaining({ chatId: 'cidGroup==' }),
+      'Background notification',
+    );
+    // The notification bypassed sendReply entirely; only the turn's own
+    // block reached the webhook, and the held marker stayed in the projector.
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(
+      (channel as unknown as { blockFileProjectors: Map<string, unknown> })
+        .blockFileProjectors.size,
+    ).toBe(1);
+  });
+
+  it.each([
+    ['an unknown session', 'other-session', 'test-dingtalk'],
+    ['a foreign-channel target', 'session-1', 'other-channel'],
+  ])(
+    'silently drops a background response for %s',
+    async (_name, seededSession, channelName) => {
+      const channel = createChannel({ blockStreaming: 'on' });
+      seedSessionTarget(channel, seededSession, {
+        channelName,
+        senderId: 'user-1',
+        chatId: 'cidGroup==',
+        isGroup: true,
+      });
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}'));
+      const pushProactive = vi
+        .spyOn(
+          channel as unknown as {
+            pushProactive(target: SessionTarget, text: string): Promise<void>;
+          },
+          'pushProactive',
+        )
+        .mockResolvedValue(undefined);
+
+      await channel.dispatchBackgroundResponse(
+        'session-1',
+        'Background notification',
+      );
+
+      expect(pushProactive).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    },
+  );
+
+  it('silently drops an empty background response', async () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+    seedSessionTarget(channel, 'session-1', {
+      channelName: 'test-dingtalk',
+      senderId: 'user-1',
+      chatId: 'cidGroup==',
+      isGroup: true,
+    });
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+    const pushProactive = vi
+      .spyOn(
+        channel as unknown as {
+          pushProactive(target: SessionTarget, text: string): Promise<void>;
+        },
+        'pushProactive',
+      )
+      .mockResolvedValue(undefined);
+
+    await channel.dispatchBackgroundResponse('session-1', '   ');
+
+    expect(pushProactive).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('feeds status presentation only projected chunks and final text', async () => {
@@ -6074,7 +6262,47 @@ describe('DingtalkChannel outbound file projection', () => {
     );
   });
 
-  it('fails closed on final divergence and discards terminal segments', async () => {
+  it('adds no notice when a marker-free final text differs from the streamed prefix', async () => {
+    // A routine multi-tool turn: visible text streams, a response boundary
+    // resets the bridge's chunk accumulation, and the final text carries only
+    // the post-boundary bytes. The streamed projector saw MORE than the final
+    // text by construction — that alone must not fail closed.
+    const channel = createChannel();
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: {
+          appendOutput: () => void;
+          closeOutput: typeof closeOutput;
+        };
+      }
+    ).interactionPresenter = { appendOutput: () => {}, closeOutput };
+    const first = segment('segment-1');
+    getChunkHook(channel)(
+      'cid123',
+      'Sure, let me check that.',
+      'session-1',
+      first,
+    );
+    await getOutputSegmentEndHook(channel)(
+      'cid123',
+      'session-1',
+      first,
+      'response_boundary',
+    );
+    const next = { ...first, segmentId: 'segment-2' };
+    getChunkHook(channel)('cid123', 'The answer is 42.', 'session-1', next);
+    await getCompleteHook(channel)(
+      'cid123',
+      'The answer is 42.',
+      'session-1',
+      next,
+    );
+    // Call 0 is the response_boundary close; the final text lands in call 1.
+    expect(closeOutput.mock.calls[1]?.[1]).toBe('The answer is 42.');
+  });
+
+  it('keeps the notice when a streamed marker is absent from the final text', async () => {
     const channel = createChannel();
     const closeOutput = vi.fn().mockResolvedValue(true);
     (
@@ -6086,7 +6314,12 @@ describe('DingtalkChannel outbound file projection', () => {
       }
     ).interactionPresenter = { appendOutput: () => {}, closeOutput };
     const context = segment();
-    getChunkHook(channel)('cid123', 'streamed text', 'session-1', context);
+    getChunkHook(channel)(
+      'cid123',
+      '[FILE: /workspace/a.txt]\nstreamed text',
+      'session-1',
+      context,
+    );
     await getCompleteHook(channel)(
       'cid123',
       'different final text',
@@ -6096,11 +6329,17 @@ describe('DingtalkChannel outbound file projection', () => {
     expect(closeOutput.mock.calls[0]?.[1]).toBe(
       'different final text\n[File delivery unavailable]',
     );
+    expect(JSON.stringify(closeOutput.mock.calls)).not.toContain(
+      '/workspace/a.txt',
+    );
+  });
 
+  it('discards segment projectors on terminal segment ends', async () => {
+    const channel = createChannel();
     for (const [index, reason] of (
       ['cancelled', 'failed'] as const
     ).entries()) {
-      const ended = segment(`segment-${index + 2}`);
+      const ended = segment(`segment-${index + 1}`);
       getChunkHook(channel)(
         'cid123',
         '[FILE: /workspace/a.txt]',
@@ -6123,6 +6362,7 @@ describe('DingtalkChannel outbound file projection', () => {
   it('flushes the block projector held tail when the turn ends', async () => {
     const channel = createChannel({ blockStreaming: 'on' });
     seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}'));
@@ -6147,6 +6387,7 @@ describe('DingtalkChannel outbound file projection', () => {
   it('redacts an unfinished marker at turn end instead of leaking a fragment', async () => {
     const channel = createChannel({ blockStreaming: 'on' });
     seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}'));
@@ -6210,6 +6451,7 @@ describe('DingtalkChannel outbound file projection', () => {
   it('delivers the line after a marker line ending exactly on a block boundary', async () => {
     const channel = createChannel({ blockStreaming: 'on' });
     seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}'));
@@ -6235,6 +6477,7 @@ describe('DingtalkChannel outbound file projection', () => {
   it('drops the block projector when its session dies', async () => {
     const channel = createChannel({ blockStreaming: 'on' });
     seedWebhook(channel, 'cid123');
+    getPromptHook(channel, 'onPromptStart')('cid123', 'session-1');
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
 
     await getResponseHook(channel)('cid123', 'Answer text', 'session-1');
@@ -6305,6 +6548,44 @@ describe('DingtalkChannel outbound file projection', () => {
     expect(out).not.toContain('[FILE:');
     expect(out).not.toContain('/workspace/report.txt');
     expect(out).toContain('[Image delivery failed: missing.png]');
+  });
+});
+
+describe('DingtalkChannel reply delivery timeout', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('bounds the webhook POST with an abort timeout', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    const controller = new AbortController();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+    vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+      const signal = (init as RequestInit | undefined)?.signal;
+      return new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(signal.reason));
+      });
+    });
+
+    const send = channel.sendMessage('cid123', 'hello');
+    const outcome = await Promise.race([
+      send.then(
+        () => 'resolved',
+        (err: unknown) =>
+          `rejected: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve('pending'), 20),
+      ),
+    ]);
+    expect(outcome).toBe('pending');
+    expect(timeoutSpy).toHaveBeenCalledWith(15_000);
+
+    controller.abort(new Error('reply fetch timed out'));
+    await expect(send).rejects.toThrow('reply fetch timed out');
   });
 });
 
