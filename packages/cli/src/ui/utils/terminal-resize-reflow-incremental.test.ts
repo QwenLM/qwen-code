@@ -433,6 +433,51 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('recovers when the post-shrink bare frame lands after the handoff window', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    const dateNow = vi.spyOn(Date, 'now');
+    try {
+      let now = 1_000_000;
+      dateNow.mockImplementation(() => now);
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // Width shrink arms the bare-write handoff; the throttled re-render
+      // of the re-laid-out tree lands AFTER the window expires. The stale
+      // pre-shrink model (10 lines) and the post-shrink frame (14 wrapped
+      // lines) differ in height, so every later diff fails the head
+      // equation against the stale model unless the late frame is
+      // captured.
+      stdout.columns = 12;
+      stdout.emit('resize');
+      stdout.write(RETURN_PREFIX + ansiEscapes.eraseLines(10));
+      now += 100; // past the 50 ms handoff window
+      const redrawn = frameLines(8, 14).map((line) => `${line}-late`);
+      stdout.write(redrawn.join('\n'));
+      const next = redrawn.slice();
+      next[4] = 'LATE-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(redrawn, next, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).not.toBe(ansiEscapes.clearViewport);
+      expect(replay).toContain('LATE-UPDATE');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-13-');
+    } finally {
+      dateNow.mockRestore();
+      restore();
+    }
+  });
+
   it('anchors only the live frame when a reset carries <Static> transcript', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(
@@ -609,6 +654,45 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       expect(replay).toContain('AFTER-CURSOR-MOVE');
       expect(replay).toContain('line-0-');
       expect(replay).toContain('-rc');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not anchor a pending reset on a column-0 cursor-only sequence', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const reset = frameLines(20, 10).map((line) => `${line}-rco`);
+      publishResetFullscreen(stdout, false);
+      stdout.write(ansiEscapes.clearTerminal + reset.join('\n'));
+      // Ink's buildCursorOnlySequence with the composer at column 0:
+      // hide + return-to-bottom + cursorUp + cursorTo(0) + show. The
+      // trailing ESC[1G parses as a line-op start, but the write carries
+      // no frame — its moveUp count must not name the anchoring window.
+      stdout.write(
+        `${CURSOR_HIDE}${ESC}2B${CURSOR_TO_COL0}${ESC}2A${ESC}1G${CURSOR_SHOW}`,
+      );
+      const next = reset.slice();
+      next[6] = 'AFTER-CARET-MOVE';
+      stdout.write(
+        incrementalDiffFrame(reset, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('AFTER-CARET-MOVE');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-9-');
     } finally {
       restore();
     }

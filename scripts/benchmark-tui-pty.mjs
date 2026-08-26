@@ -20,11 +20,11 @@
  * the child), and keystroke-to-output latency for typing phases.
  *
  * Usage:
- *   node bundle/qwen.js ...        # first build the bundle under test
+ *   npm run bundle                 # first build the bundle under test
  *   node scripts/benchmark-tui-pty.mjs
  *
  * Environment variables:
- *   QWEN_BENCH_CMD='node bundle/qwen.js'   Command that starts the CLI under
+ *   QWEN_BENCH_CMD='node dist/cli.js'      Command that starts the CLI under
  *                                          test in the PTY (shell-split).
  *   QWEN_BENCH_PTY_COLS=100                PTY width.
  *   QWEN_BENCH_PTY_ROWS=32                 PTY height.
@@ -44,7 +44,7 @@
 
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -54,7 +54,7 @@ const require = createRequire(import.meta.url);
 // Root devDependency (same package the CLI's shell tooling uses).
 const pty = require('@lydell/node-pty');
 
-const CMD = process.env['QWEN_BENCH_CMD'] ?? 'node bundle/qwen.js';
+const CMD = process.env['QWEN_BENCH_CMD'] ?? 'node dist/cli.js';
 const COLS = parseInt(process.env['QWEN_BENCH_PTY_COLS'] ?? '100', 10);
 const ROWS = parseInt(process.env['QWEN_BENCH_PTY_ROWS'] ?? '32', 10);
 const PORT = parseInt(process.env['QWEN_BENCH_PORT'] ?? '4819', 10);
@@ -101,7 +101,8 @@ function startFakeProvider() {
       req.socket.on('close', () => clearInterval(timer));
     });
   });
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
     server.listen(PORT, '127.0.0.1', () => resolve(server));
   });
 }
@@ -143,18 +144,61 @@ function readEventLoopSamples(file) {
 }
 
 // ---------------------------------------------------------------------------
-// CPU time sampling (portable ps; cputime is [[HH:]MM:]SS[.ss])
+// CPU time sampling.
+//
+// Linux: clock ticks from /proc/<pid>/stat (utime + stime, fields 14+15)
+// scaled by CLK_TCK — 10 ms granularity at the usual CLK_TCK=100. ps
+// cputime/time only report whole seconds there, which cannot resolve the
+// sub-second CPU deltas in the Results tables.
+// Other platforms (macOS/BSD): `ps -o time=` ([[HH:]MM:]SS, whole seconds —
+// state this resolution when comparing sub-second deltas). `time` is the one
+// CPU-time keyword both procps-ng and BSD ps accept; cputime is
+// procps-ng-only. Unavailable (process gone, unsupported output) -> null,
+// which the Results table prints as n/a — never a fabricated 0.
+
+let clkTck;
+function getClkTck() {
+  if (clkTck === undefined) {
+    try {
+      clkTck = parseInt(execSync('getconf CLK_TCK').toString().trim(), 10);
+    } catch {
+      clkTck = NaN;
+    }
+    if (!Number.isFinite(clkTck) || clkTck <= 0) clkTck = 100;
+  }
+  return clkTck;
+}
+
+function linuxTicksCpuMs(pid) {
+  let stat;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+  } catch {
+    return null;
+  }
+  // comm (field 2) may contain spaces and parens, so split after the last
+  // ')': rest[0] is field 3, utime/stime are fields 14/15 -> rest[11/12].
+  const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  const ticks = Number(rest[11]) + Number(rest[12]);
+  if (!Number.isFinite(ticks)) return null;
+  return (ticks * 1000) / getClkTck();
+}
 
 function cpuTimeMs(pid) {
+  if (process.platform === 'linux') {
+    return Promise.resolve(linuxTicksCpuMs(pid));
+  }
   return new Promise((resolve) => {
-    const child = spawn('ps', ['-o', 'cputime=', '-p', String(pid)], {
+    const child = spawn('ps', ['-o', 'time=', '-p', String(pid)], {
       stdio: ['ignore', 'pipe', 'ignore'],
     });
     let out = '';
     child.stdout.on('data', (d) => (out += d));
     child.on('close', () => {
-      const parts = out.trim().split(':').map(Number);
-      if (parts.length === 0 || parts.some(Number.isNaN)) return resolve(null);
+      const trimmed = out.trim();
+      if (!trimmed) return resolve(null);
+      const parts = trimmed.split(':').map(Number);
+      if (parts.some(Number.isNaN)) return resolve(null);
       const [s, m = 0, h = 0] = [...parts].reverse();
       resolve(((h * 60 + m) * 60 + s) * 1000);
     });
@@ -297,8 +341,8 @@ async function main() {
     if (eq > 0) extraEnv[pair.slice(0, eq)] = pair.slice(eq + 1);
   }
   extraEnv['NODE_OPTIONS'] = [
-    process.env['NODE_OPTIONS'] ?? '',
-    `--require ${preload}`,
+    extraEnv['NODE_OPTIONS'] ?? process.env['NODE_OPTIONS'] ?? '',
+    `--require "${preload}"`,
   ]
     .filter(Boolean)
     .join(' ');

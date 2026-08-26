@@ -720,12 +720,26 @@ export function installTerminalResizeReflow(
           model.content = '';
         }
       } else if (expectFrame) {
-        if (Date.now() >= handoffUntil) {
+        const printable = stripAnsi(chunk).trim() !== '';
+        if (
+          barePrintableCount === 0 &&
+          Date.now() >= handoffUntil &&
+          !(isVP && printable && parseDiffHead(chunk) === null)
+        ) {
           // The commit's bare writes land in one synchronous render; a bare
           // write this late is a stray (notification bell, kitty APC image,
-          // tmux DCS), not the handoff.
+          // tmux DCS), not the handoff. VP exception: a printable write
+          // with no diff head is the post-shrink redraw delayed past the
+          // window (throttle + reconciliation of the re-laid-out tree);
+          // once the window has closed no incremental diff can re-anchor a
+          // frozen model, so keep the arm and capture it. Static mode
+          // self-heals on the next erase-prefixed redraw and keeps
+          // disarming strays. Once the burst has started (a printable
+          // write was captured) the clock no longer applies — follow-up
+          // writes are modeled exactly as inside the window.
           expectFrame = false;
-        } else if (stripAnsi(chunk).trim() !== '') {
+        }
+        if (expectFrame && printable) {
           // Bare redraw (or static append preceding it): model each printable
           // bare write, last one wins; the second printable bare write of a
           // commit is the live frame and replaces the model even below
@@ -760,17 +774,19 @@ export function installTerminalResizeReflow(
         // Incremental grow/same-height frame: apply it as a transform. After
         // a reset the anchor may still be pending — the diff's head count
         // names the synced live frame's height and validates the trailing
-        // window to anchor on. Whole-chunk cursor suffixes (log.sync after a
-        // reset write: cursorUp + cursorTo(0) + show when the composer sits
-        // at column 0) parse as a diff head followed by an `ESC[1G` line-op
-        // start, but carry no frame — anchoring on their moveUp count would
-        // slot a one-line window.
+        // window to anchor on. Cursor-only writes parse as a diff head
+        // followed by an `ESC[1G` line-op start but carry no frame: the
+        // log.sync suffix after a reset write, and Ink's
+        // buildCursorOnlySequence with the composer at column 0. Anchoring
+        // on their moveUp count would slot a one-line window, so reject
+        // them by what follows the head — a whole-chunk test misses
+        // sequences carrying a hide/return-to-bottom prefix.
         const diffHead = parseDiffHead(chunk);
         if (
           diffHead !== null &&
           pendingResetFrame !== '' &&
           startsWithLineOp(chunk, diffHead.pos) &&
-          !CURSOR_SUFFIX_ONLY_RE.test(chunk)
+          !CURSOR_SUFFIX_ONLY_RE.test(chunk.slice(diffHead.pos))
         ) {
           anchorPendingReset(diffHead.headCount);
         }
