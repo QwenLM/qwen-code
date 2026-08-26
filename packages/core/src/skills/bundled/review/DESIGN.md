@@ -876,7 +876,7 @@ Measured on a real 72-comment PR, a run burned 20+ model turns re-deriving exact
 
 ### The two-dot phantom regressions (PR #6626)
 
-On PR #6626 a review approved four files and then warned the author, publicly, that their branch carried "typo regressions in `ide-client.ts`" and should be rebased. The branch had done nothing: main had corrected `compatability` → `compatibility` after the fork point, and a two-dot diff showed the branch putting the typo back. The PR's real change set, `merge-base..head`, is four files and does not touch that file at all.
+On PR #6626 a review approved four files and then warned the author, publicly, that their branch carried "typo regressions in `ide-client.ts`" and should be rebased. The branch had done nothing: main had corrected `compatibility` → `compatibility` after the fork point, and a two-dot diff showed the branch putting the typo back. The PR's real change set, `merge-base..head`, is four files and does not touch that file at all.
 
 ### The paraphrased roster prompt
 
