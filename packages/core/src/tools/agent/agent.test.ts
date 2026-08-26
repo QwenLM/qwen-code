@@ -1822,6 +1822,8 @@ describe('AgentTool', () => {
         expect(spawnTeammate).toHaveBeenCalledWith(
           expect.objectContaining({
             name: 'reviewer',
+            // The pin resolves through path.resolve, so expect the
+            // platform-normalized spelling (backslashes on Windows).
             cwd: path.resolve('/test/project', '.qwen/tmp/review-pr-1'),
           }),
         );

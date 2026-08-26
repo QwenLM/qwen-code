@@ -32,7 +32,7 @@ import {
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
-import { CompactModeContext } from '../App';
+import { CompactModeContext } from '../WebShellContexts';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -785,7 +785,7 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
       }
-      return false;
+      return item.message.source === 'vision_bridge_notice';
     case 'user':
     case 'user_shell':
     case 'btw':

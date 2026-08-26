@@ -784,6 +784,7 @@ export type ToolResultDisplay =
   | AgentResultDisplay
   | TeamResultDisplay
   | TaskListResultDisplay
+  | FindingsResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData
   | McpAppResultDisplay
@@ -832,6 +833,52 @@ export interface DiffStat {
   user_removed_lines: number;
   user_added_chars: number;
   user_removed_chars: number;
+}
+
+/**
+ * One review finding as the `report_findings` tool hands it to clients.
+ *
+ * Field names and enum spellings deliberately match the `qwen review
+ * findings` artifact (`packages/cli/src/commands/review/findings.ts`) so the model
+ * copies values straight out of the artifact instead of translating them —
+ * a translation layer between two spellings of the same list is where
+ * severities have historically drifted.
+ */
+export interface ReportedFinding {
+  /** The findings artifact's id (`R<round>-<n>` / `D<round>-<n>`), when one exists. */
+  id?: string;
+  severity: 'Critical' | 'Suggestion' | 'Nice to have';
+  /** Verification confidence. Absent on an unverified (low-effort) pass. */
+  confidence?: 'high' | 'low';
+  /** Where the finding came from. */
+  source?: 'review' | 'build' | 'test' | 'probe' | 'lint';
+  file: string;
+  line?: number;
+  /** One sentence stating the defect. */
+  summary: string;
+  /** `summary` compressed to <= 60 characters, for a compact list UI. */
+  shortSummary: string;
+  /** The concrete trigger and wrong outcome. */
+  failureScenario: string;
+  /** Free-form kebab-case tag (`correctness`, `security`, …). */
+  category?: string;
+  /** Set only on a re-report after fixes were applied. */
+  outcome?: 'fixed' | 'skipped' | 'no_change_needed';
+  /** The fixer's reason — mainly for `skipped`. */
+  outcomeNote?: string;
+}
+
+export interface FindingsResultDisplay {
+  type: 'findings_list';
+  /** The review effort the findings came from. */
+  level?: 'low' | 'medium' | 'high';
+  findings: ReportedFinding[];
+  /**
+   * Set by history/recording compaction when the retained-display budget
+   * evicted the least severe tail of a larger list: how many findings were
+   * removed. The retained prefix keeps the most severe entries.
+   */
+  omittedFindings?: number;
 }
 
 export interface TodoResultDisplay {
