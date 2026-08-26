@@ -1798,22 +1798,28 @@ function readCoreSettingValues(
  * normalized exactly the way boot accepts them (parseApprovalModeValue
  * trims, lowercases, and maps the legacy `auto_edit`/`autoedit` aliases), so
  * reload convergence agrees with the settings file for every boot-accepted
- * spelling. A missing or unparseable key folds to AUTO — the same default
- * loadCliConfig derives when the key is absent. Restricted (safe/bare)
- * sessions ignore the file at boot entirely; the reload loop converges them
- * on DEFAULT separately. Folding (instead of skipping) is what lets a key
- * deletion or corruption reach live sessions on reload rather than pinning a
- * stale privileged mode until daemon restart.
+ * spelling. A MISSING key folds to AUTO — the same default loadCliConfig
+ * derives when the key is absent — so a key deletion reaches live sessions
+ * on reload instead of pinning a stale privileged mode until daemon restart.
+ * A PRESENT but unparseable value returns undefined: boot rejects that file
+ * outright (loadCliConfig has no catch around parseApprovalModeValue), so
+ * folding it to AUTO would silently escalate the approval gate for every
+ * live session; the reload loop keeps sessions on their current modes until
+ * the file is corrected. Restricted (safe/bare) sessions ignore the file at
+ * boot entirely; the reload loop converges them on DEFAULT separately.
  */
-function foldReloadApprovalMode(raw: unknown): ApprovalMode {
+function foldReloadApprovalMode(raw: unknown): ApprovalMode | undefined {
+  if (raw === undefined) {
+    return ApprovalMode.AUTO;
+  }
   if (typeof raw === 'string') {
     try {
       return parseApprovalModeValue(raw);
     } catch {
-      // Unparseable values fold to the fresh-session default below.
+      // Present but unparseable: boot would reject the file (see above).
     }
   }
-  return ApprovalMode.AUTO;
+  return undefined;
 }
 
 /**
@@ -11547,10 +11553,13 @@ class QwenAgent implements Agent {
           reloadedSessionWorkflow,
         );
 
-        // Fold a missing/invalid key to the fresh-session default (AUTO for
+        // Fold a missing key to the fresh-session default (AUTO for
         // unrestricted sessions; restricted sessions converge on DEFAULT per
-        // session below) so a key deletion reaches live sessions too, and
-        // compare the reloaded disk value against the daemon-held baseline —
+        // session below) so a key deletion reaches live sessions too. A
+        // present-but-invalid value folds to undefined instead: boot rejects
+        // that file, so reload must not converge live sessions on it either
+        // (folding it to AUTO would silently escalate the approval gate).
+        // Compare the reloaded disk value against the daemon-held baseline —
         // not against each session's live mode. Approval mode has
         // runtime-only writers (ExitPlanModeTool approved plan exits, ACP
         // session/set_mode, the sessionApprovalMode ext; core
@@ -11566,7 +11575,13 @@ class QwenAgent implements Agent {
         const reloadedApprovalMode = foldReloadApprovalMode(
           newMerged.tools?.approvalMode,
         );
+        if (reloadedApprovalMode === undefined) {
+          debugLogger.warn(
+            'reload: tools.approvalMode holds a value boot would reject; live sessions keep their current modes until the file is corrected',
+          );
+        }
         const approvalModeFileChanged =
+          reloadedApprovalMode !== undefined &&
           reloadedApprovalMode !== this.sessionApprovalModeFileValue;
 
         const sessions = [...this.sessions.entries()];
@@ -11637,16 +11652,19 @@ class QwenAgent implements Agent {
             // itself changed since the daemon last converged on it (see the
             // baseline derivation above); the per-session `!== previousMode`
             // guard keeps the apply idempotent for sessions already at the
-            // disk value. Restricted sessions ignore the file at boot
-            // (loadCliConfig pins them to DEFAULT), so reload must converge
-            // them on DEFAULT too — pushing the file value (or the AUTO fold
-            // of a missing/corrupted key) into a safe-mode session would
+            // disk value. An undefined fold (present-but-invalid file value)
+            // never changes the baseline comparison, so no session converges
+            // on a value boot would reject. Restricted sessions ignore the
+            // file at boot (loadCliConfig pins them to DEFAULT), so reload
+            // must converge them on DEFAULT too — pushing the file value (or
+            // the AUTO fold of a missing key) into a safe-mode session would
             // silently strip its approval restriction.
             const reloadedSessionMode = isRestrictedApprovalModeConfig(config)
               ? ApprovalMode.DEFAULT
               : reloadedApprovalMode;
             const previousMode = config.getApprovalMode();
             if (
+              reloadedSessionMode !== undefined &&
               approvalModeFileChanged &&
               reloadedSessionMode !== previousMode
             ) {
