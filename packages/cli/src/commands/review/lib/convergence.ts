@@ -145,11 +145,15 @@ export interface PrevRound {
   /** Its own round number; 0 when nothing was recovered. */
   round?: number;
   /**
-   * Whether it carried an incremental anchor. Read only by the
-   * mechanism-health check: two consecutive withholds mean every later round
-   * re-reads the whole diff until a round's marker carries an anchor again —
-   * which a clean close does not guarantee, because the marker also
-   * withholds on a missing fetched sha and on a model-identity drift.
+   * Whether it carried an incremental anchor THIS round can use — a grafted
+   * one whose certifier mismatches, or whose re-run this round's fetch
+   * refused or resolved to the head, does not count (Step 1 cannot scope to
+   * it, so the chain is still broken). Read only by the mechanism-health
+   * check: two consecutive withholds mean every later round re-reads the
+   * whole diff until a round's marker carries an anchor again or a graft
+   * lands that the round running it can use — which a clean close does not
+   * guarantee, because the marker also withholds on a missing fetched sha
+   * and on a model-identity drift.
    */
   anchored?: boolean;
 }
@@ -286,11 +290,10 @@ export interface MechanismHealth {
    * This round did not close cleanly — unproven scope, a dimension gap that
    * is not depth-only, or any verdict cap other than an unreviewable
    * dimension — which withholds the incremental anchor, and the round it
-   * recovered carried none either. Two
-   * consecutive withholds mean the next round re-reads the whole diff, and
-   * the round after that, until something clears it: the closed loop
-   * measured at 119 minutes and 34M tokens on a PR whose code had not
-   * changed a line.
+   * recovered carried none this round could use. Two consecutive withholds
+   * mean the next round re-reads the whole diff, and the round after that,
+   * until something clears it: the closed loop measured at 119 minutes and
+   * 34M tokens on a PR whose code had not changed a line.
    *
    * A stated limit: those are the only withholding legs visible from here.
    * The marker also withholds when the plan carries no fetched sha, when it
@@ -685,10 +688,10 @@ export function renderMechanismHealth(
   }
   if (h.anchorChainBroken) {
     en.push(
-      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had none either, so the next review re-reads the whole diff and will keep doing so until a round's marker carries an anchor again`,
+      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had no anchor this round could use either — none at all, one with no certifier, one certified by an identity other than the one this round runs under, or one this round's fetch refused or resolved to the head — so the next review re-reads the whole diff unless recovery grafts an earlier own anchor that the round running it can use onto the complete work list this round leaves behind, and keeps doing so until a round's marker carries an anchor again or a graft lands that the round running it can use`,
     );
     zh.push(
-      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有锚点，因此下一次评审将重读整个 diff——并会一直如此，直到某一轮的标记重新带上锚点`,
+      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有留下本轮可用的锚点——要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证、要么被本轮的获取拒绝或解析为头提交——因此下一次评审将重读整个 diff，除非恢复流程把本轮能使用的更早自有锚点嫁接到本轮留下的完整工作清单上；并会一直如此，直到某一轮的标记重新带上锚点，或落地的嫁接能被运行该轮的评审使用`,
     );
   }
   if (en.length === 0) return null;
