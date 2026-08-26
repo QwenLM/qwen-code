@@ -234,6 +234,24 @@ export {
   isRecordableDerivedChild,
 } from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
+export {
+  ReportFindingsTool,
+  FINDING_SEVERITIES,
+  FINDING_CONFIDENCES,
+  FINDING_OUTCOMES,
+  FINDING_SOURCES,
+  REPORT_FINDINGS_LEVELS,
+  compressFindingSummary,
+} from './tools/report-findings.js';
+export type {
+  ReportFindingsParams,
+  ReportFindingsFindingParams,
+  FindingSeverity,
+  FindingConfidence,
+  FindingOutcome,
+  FindingSource,
+  ReportFindingsLevel,
+} from './tools/report-findings.js';
 export { CreateSubSessionTool } from './tools/create-sub-session.js';
 export type {
   ArtifactPublisher,
@@ -241,6 +259,11 @@ export type {
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
+export type {
+  CurrentSessionScheduledTaskCreateRequest,
+  CurrentSessionScheduledTaskCreateResult,
+  CurrentSessionScheduledTaskCreator,
+} from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
@@ -569,6 +592,7 @@ export * from './core/environmentContext.js';
 export * from './utils/env.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
+export * from './utils/file-identity.js';
 export * from './utils/fileUtils.js';
 export * from './utils/filesearch/fileSearch.js';
 export * as crawlCache from './utils/filesearch/crawlCache.js';

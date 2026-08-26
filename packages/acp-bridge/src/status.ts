@@ -108,6 +108,7 @@ export class MissingCliEntryError extends Error {
 }
 
 export const SERVE_STATUS_EXT_METHODS = {
+  channelPing: 'qwen/status/channel/ping',
   workspaceMcp: 'qwen/status/workspace/mcp',
   workspaceMcpTools: 'qwen/status/workspace/mcp/tools',
   workspaceMcpResources: 'qwen/status/workspace/mcp/resources',
@@ -221,6 +222,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `first-turn` mode, which waits for the sub-session's first turn to finish).
    */
   createSubSession: 'qwen/control/create-sub-session',
+  createCurrentSessionScheduledTask:
+    'qwen/control/scheduled-task/create-current',
   liveCaptureScreenContext: 'qwen/control/live/capture-screen-context',
   liveTaskTool: 'qwen/control/live/task-tool',
   liveSpeakToUser: 'qwen/control/live/speak-to-user',

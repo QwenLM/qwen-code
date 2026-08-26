@@ -342,6 +342,9 @@ const TRUSTED_WORKSPACE_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/mcp/resources`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
+  `${QWEN_METHOD_NS}sessions/delete`,
+  `${QWEN_METHOD_NS}sessions/archive`,
+  `${QWEN_METHOD_NS}sessions/unarchive`,
   `${QWEN_METHOD_NS}workspace/agents/list`,
   `${QWEN_METHOD_NS}workspace/agents/get`,
   `${QWEN_METHOD_NS}workspace/agents/create`,
@@ -372,6 +375,9 @@ const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}file/edit`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
+  `${QWEN_METHOD_NS}sessions/delete`,
+  `${QWEN_METHOD_NS}sessions/archive`,
+  `${QWEN_METHOD_NS}sessions/unarchive`,
   `${QWEN_METHOD_NS}workspace/agents/create`,
   `${QWEN_METHOD_NS}workspace/agents/update`,
   `${QWEN_METHOD_NS}workspace/agents/delete`,
@@ -1209,6 +1215,15 @@ export class AcpDispatcher {
       );
     }
     return [...new Set(sessionIds as string[])];
+  }
+
+  private parseResolveConflicts(params: Record<string, unknown>): boolean {
+    const value = params['resolveConflicts'];
+    if (value === undefined) return false;
+    if (typeof value !== 'boolean') {
+      throw new AcpParamError('`resolveConflicts` must be a boolean');
+    }
+    return value;
   }
 
   private rejectActiveLiveSessionMutation(
@@ -4630,6 +4645,7 @@ export class AcpDispatcher {
                 service: svc,
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
+                assertCanMutate: assertGenerationOpen,
                 onError: ({ phase, sessionId, error }) => {
                   const safeSessionId = logSafe(sessionId.slice(0, 8));
                   const safeMessage = logSafe(error);
@@ -4639,12 +4655,14 @@ export class AcpDispatcher {
                 },
               }),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
 
         case `${QWEN_METHOD_NS}sessions/archive`: {
           const ids = this.parseSessionIds(params);
+          const resolveConflicts = this.parseResolveConflicts(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
@@ -4657,11 +4675,15 @@ export class AcpDispatcher {
                 service: svc,
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
+                resolveConflicts,
+                assertCanMutate: assertGenerationOpen,
               }),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             archived: result.archived,
             alreadyArchived: result.alreadyArchived,
+            resolvedConflicts: result.resolvedConflicts,
             notFound: result.notFound,
             errors: this.serializeSessionErrors(result.errors),
           } as unknown);
@@ -4670,6 +4692,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/unarchive`: {
           const ids = this.parseSessionIds(params);
+          const resolveConflicts = this.parseResolveConflicts(params);
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });
@@ -4680,11 +4703,15 @@ export class AcpDispatcher {
                 sessionIds: ids,
                 service: svc,
                 coordinator: this.archiveCoordinator,
+                resolveConflicts,
+                assertCanMutate: assertGenerationOpen,
               }),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             unarchived: result.unarchived,
             alreadyActive: result.alreadyActive,
+            resolvedConflicts: result.resolvedConflicts,
             notFound: result.notFound,
             errors: this.serializeSessionErrors(result.errors),
           } as unknown);

@@ -745,9 +745,12 @@ describe('updateConnectionFromDaemonEvent', () => {
   });
 
   it('carries limitKind through from the wire', () => {
-    // The client gates Resume on it: an evidence-limited Goal cannot be
-    // resumed, and dropping the field here leaves the UI offering a control the
-    // daemon always rejects.
+    // The mapper rebuilds the Goal record field-by-field after validating it,
+    // which is exactly how a newly added field gets dropped in silence. No
+    // client logic keys off `limitKind` any more (resumability is decided by
+    // status alone; the reducer resumes an evidence-limited Goal by restarting
+    // its window), but the wire copy is the client's only copy of the record
+    // -- the pin is that mapping does not quietly narrow it.
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
       {
@@ -784,6 +787,46 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.goalState?.goal).toMatchObject({
       status: 'usage_limited',
       limitKind: 'evidence_catalog',
+    });
+  });
+
+  it('carries a token_budget limitKind through from the wire', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'usage_limited',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  lastReason: 'The Goal spent its autonomous token budget.',
+                  limitKind: 'token_budget',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'token_budget',
     });
   });
 
