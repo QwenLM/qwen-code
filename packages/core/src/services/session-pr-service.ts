@@ -250,7 +250,8 @@ export function updateSessionPrStates(
       const fetched = states.get(entry.number);
       if (
         fetched === undefined ||
-        fetched.url !== entry.url ||
+        canonicalSessionPrUrl(fetched.url) !==
+          canonicalSessionPrUrl(entry.url) ||
         fetched.state === entry.state
       ) {
         return entry;

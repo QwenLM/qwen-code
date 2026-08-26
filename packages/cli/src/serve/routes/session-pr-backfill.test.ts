@@ -1275,6 +1275,60 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toEqual([99, 2, 3, 4, 5, 6, 7, 8, 10, 11]);
   });
 
+  it('keeps a foreign same-numbered binding out of the cap plan', async () => {
+    await seedSession(SESSION_A);
+    await seedTranscriptBranches(SESSION_A, 1, 9);
+    // The sidecar holds a dialog-created binding to ANOTHER repository's
+    // PR #5 (the metadata route validates number + url shape only, not
+    // repository membership) among unresolvable dialog bindings, while
+    // this run maps this repo's PRs #1-#9 — colliding on 5.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await fsp.mkdir(path.dirname(prPath), { recursive: true });
+    await fsp.writeFile(
+      prPath,
+      JSON.stringify({
+        prs: [
+          ...Array.from({ length: 8 }, (_, i) => ({
+            number: 101 + i,
+            url: `https://github.com/o/elsewhere/pull/${101 + i}`,
+            createdAt: '2026-08-01T00:00:00.000Z',
+          })),
+          {
+            number: 5,
+            url: 'https://github.com/other-org/other-repo/pull/5',
+            createdAt: '2026-08-01T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: Array.from({ length: 9 }, (_, i) =>
+        pr(i + 1, `b-${i + 1}`),
+      ),
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    // The foreign #5 is not the PR this run resolved for number 5, so it
+    // keeps its slot instead of being trimmed out of the plan — evicting
+    // it would let the next run silently flip the binding to this repo's
+    // same-numbered PR.
+    const prs = await readSessionPrs(prPath);
+    expect(prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+    expect(prs?.map((entry) => entry.number)).toEqual([
+      101, 102, 103, 104, 105, 106, 107, 108, 5, 9,
+    ]);
+    expect(prs?.find((entry) => entry.number === 5)?.url).toBe(
+      'https://github.com/other-org/other-repo/pull/5',
+    );
+    expect(result).toMatchObject({ bound: 1, alreadyBound: 0, overLimit: 8 });
+  });
+
   it('binds nothing when unresolvable bindings already fill the cap', async () => {
     await seedSession(SESSION_A);
     await seedTranscriptBranches(SESSION_A, 1, 1);

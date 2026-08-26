@@ -326,6 +326,28 @@ describe('updateSessionPrStates', () => {
     expect(persisted?.[0]?.state).toBe('open');
   });
 
+  it('refreshes a binding whose url is canonical-equivalent to the fetched one', async () => {
+    // Binding urls preserve the user's remote casing (backfill's remote
+    // fallback) or carry dialog spelling variants, while gh returns the
+    // server-canonical spelling; GitHub repo paths are case-insensitive,
+    // so a byte-unequal comparison skips the entry on every sweep — it
+    // can never reach the terminal merged state.
+    await writeSessionPrs(filePath, [
+      {
+        ...entry(100),
+        url: 'https://github.com/OWNER/REPO/pull/100/?v=2',
+        state: 'open',
+      },
+    ]);
+    const updated = await updateSessionPrStates(
+      filePath,
+      fetched(100, 'merged'),
+    );
+    expect(updated).toBe(1);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.[0]?.state).toBe('merged');
+  });
+
   it('does not resurrect a sidecar deleted between the queued read and the write commit', async () => {
     // Deletion and archive moves unlink the sidecar outside the mutation
     // queue. Force the race deterministically: the queued read captures the

@@ -18540,6 +18540,47 @@ describe('createServeApp', () => {
           listSessionsSpy.mockRestore();
         }
       });
+
+      it('renders sidecar prs for a live-only standalone row under its canonical id', async () => {
+        // A standalone session can enter the bridge under a non-canonical
+        // id spelling while its PR sidecar is stored under the canonical
+        // id; the live-only metadata row must be keyed canonically AND
+        // read the sidecar under the canonical id.
+        const canonicalId = standaloneId(12);
+        const service = new SessionService(WS_BOUND);
+        const sidecarPath = service.getPrSessionPathForArchiveState(
+          canonicalId,
+          'active',
+        );
+        await fsp.rm(sidecarPath, { force: true });
+        await upsertSessionPr(sidecarPath, {
+          number: 9729,
+          url: 'https://github.com/o/r/pull/9729',
+        });
+
+        const result = await listWorkspaceSessionsForResponse(
+          fakeBridge({
+            listImpl: () => [
+              {
+                sessionId: canonicalId.toUpperCase(),
+                workspaceCwd: WS_BOUND,
+                createdAt: '2026-05-17T12:00:00.000Z',
+                sourceType: 'standalone',
+                clientCount: 1,
+                hasActivePrompt: false,
+              },
+            ],
+          }),
+          WS_BOUND,
+          { conversationKind: 'standalone-top-level', size: 10 },
+        );
+
+        const row = result.sessions.find(
+          (session) => session.sessionId === canonicalId,
+        );
+        expect(row).toBeDefined();
+        expect(row?.prs?.map((pr) => pr.number)).toEqual([9729]);
+      });
     });
 
     describe('parentSessionId filter', () => {

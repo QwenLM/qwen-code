@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
 import {
   SESSION_PR_LIST_LIMIT,
+  canonicalSessionPrUrl,
   fetchGitHubPullRequests,
   getDefaultBranch,
   gitEnv,
@@ -389,10 +390,23 @@ export async function backfillWorkspaceSessionPrs(
         // ones are bindings this run never planned for and must keep. A
         // re-bind of a snapshot-held number commits with a fresh createdAt,
         // so it is no longer the entry this run planned for.
-        const plannedFor = (entry: SessionPr): boolean =>
-          droppable.has(entry.number) &&
-          existingNumbers.has(entry.number) &&
-          entry.createdAt < snapshotAt;
+        const plannedFor = (entry: SessionPr): boolean => {
+          // Same-PR identity is number + canonical url, as in
+          // upsertSessionPr: a binding to another repository's
+          // same-numbered PR is foreign to this plan and keeps its slot;
+          // trimming it would let a later run flip it to this repo's PR.
+          const resolved = numberToUrl.get(entry.number);
+          const samePr =
+            resolved === undefined ||
+            canonicalSessionPrUrl(entry.url) ===
+              canonicalSessionPrUrl(resolved);
+          return (
+            droppable.has(entry.number) &&
+            existingNumbers.has(entry.number) &&
+            entry.createdAt < snapshotAt &&
+            samePr
+          );
+        };
         const foreignCount = fresh.filter((entry) => !plannedFor(entry)).length;
         const slots = Math.max(0, SESSION_PR_LIST_LIMIT - foreignCount);
         let plan = numbers.filter((number) => droppable.has(number));
