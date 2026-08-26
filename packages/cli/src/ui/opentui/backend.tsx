@@ -150,6 +150,7 @@ import {
   type RestoreOption,
   type RewindTurn,
 } from './session-rewind.js';
+import { rewindApiCutPoint } from './session-rewind-model.js';
 import { OpenTuiDialogMount } from './dialog-mount.js';
 import { OpenTuiFolderTrustGate } from './folder-trust-gate.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
@@ -2580,7 +2581,31 @@ function App({
       try {
         const needsConversation =
           option === 'conversation' || option === 'both';
-        // File restore first ('both' validates conversation below).
+        // Validate the conversation cut point before touching anything
+        // (ink parity): a rewind whose API-history cut point cannot be
+        // located positionally (e.g. the turn was compressed) must fail
+        // closed instead of restoring files against a conversation that
+        // then stays intact.
+        const rewindClient = needsConversation
+          ? config.getGeminiClient?.()
+          : undefined;
+        const rewindable = rewindTurns.filter((t) => isRewindableTurn(t));
+        const rewindIndex = rewindable.findIndex((t) => t.id === turn.id);
+        let rewindCut = -1;
+        if (needsConversation) {
+          const apiHistory = rewindClient?.getHistoryShallow?.() ?? [];
+          rewindCut = rewindApiCutPoint(apiHistory, rewindIndex + 1);
+          if (rewindClient && rewindCut < 0) {
+            applyEvent({
+              type: 'text',
+              delta:
+                'Cannot rewind conversation: the target turn could not be located in the model history (it may have been compressed). Nothing was rewound.',
+            });
+            applyEvent({ type: 'done' });
+            return;
+          }
+        }
+        // File restore first ('both' validated the conversation above).
         let hasRestoreFailure = false;
         if (option === 'code' || option === 'both') {
           const fileHistoryService = config.getFileHistoryService?.();
@@ -2614,32 +2639,15 @@ function App({
           applyEvent({ type: 'done' });
           return;
         }
-        // Conversation rewind: truncate the transcript before the turn.
+        // Conversation rewind: the cut point was validated above; truncate
+        // the transcript and the API history together so the UI and the
+        // model never desync silently.
         const turnItemIndex = items.findIndex((i) => i.id === turn.id);
         setItems((prev) => {
           const idx = prev.findIndex((p) => p.id === turn.id);
           return idx >= 0 ? prev.slice(0, idx) : prev;
         });
-        // Truncate the API history at the user content matching this turn
-        // (N-th occurrence — duplicate prompts stay unambiguous).
-        const rewindable = rewindTurns.filter((t) => isRewindableTurn(t));
-        const rewindIndex = rewindable.findIndex((t) => t.id === turn.id);
-        const client = config.getGeminiClient?.();
-        const apiHistory = client?.getHistoryShallow?.() ?? [];
-        const occurrence = rewindIndex + 1;
-        let seen = 0;
-        let cut = -1;
-        apiHistory.forEach((content, idx) => {
-          if (content.role !== 'user' || cut >= 0) return;
-          const text = (content.parts ?? [])
-            .map((p) => (typeof p.text === 'string' ? p.text : ''))
-            .join('');
-          if (text.trim() === turn.text.trim()) {
-            seen += 1;
-            if (seen === occurrence) cut = idx;
-          }
-        });
-        if (cut >= 0) client?.truncateHistory(cut);
+        if (rewindCut >= 0) rewindClient?.truncateHistory(rewindCut);
         // Re-root the recording chain (best-effort) so resume skips the
         // abandoned branch, then pre-populate the composer like ink.
         try {

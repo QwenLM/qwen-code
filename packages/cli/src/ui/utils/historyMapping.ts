@@ -39,7 +39,7 @@ export function isRealUserTurn(
  * Checks if a Content entry is a user-initiated text prompt
  * as opposed to a tool result (functionResponse).
  */
-function isUserTextContent(content: Content): boolean {
+export function isUserTextContent(content: Content): boolean {
   if (content.role !== 'user') return false;
   if (!content.parts || content.parts.length === 0) return false;
 

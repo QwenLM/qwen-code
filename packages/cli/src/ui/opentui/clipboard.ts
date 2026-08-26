@@ -43,6 +43,10 @@ function platformCopy(text: string): Promise<void> {
       child.on('exit', (code) =>
         code === 0 ? resolve() : reject(new Error(`exit ${code}`)),
       );
+      // A fast-failing helper (e.g. xclip without a display) leaves queued
+      // writes behind; without a listener the resulting EPIPE crashes the
+      // CLI instead of failing this copy.
+      child.stdin.on('error', () => {});
       child.stdin.write(text);
       child.stdin.end();
     } catch (e) {

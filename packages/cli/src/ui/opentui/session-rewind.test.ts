@@ -12,6 +12,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import type { Content, Part } from '@google/genai';
+import {
+  SYSTEM_REMINDER_OPEN,
+  SYSTEM_REMINDER_CLOSE,
+} from '@qwen-code/qwen-code-core';
 import {
   isRewindableTurn,
   rewindableTurns,
@@ -19,6 +24,7 @@ import {
   buildRestoreOptions,
   createRewindState,
   rewindReducer,
+  rewindApiCutPoint,
   REWIND_MAX_VISIBLE_ITEMS,
   type RewindTurn,
 } from './session-rewind-model.js';
@@ -243,5 +249,69 @@ describe('session-rewind state machine', () => {
         fileCheckpointingEnabled: true,
       }),
     ).toEqual(state);
+  });
+});
+
+function userPrompt(text: string): Content {
+  return { role: 'user', parts: [{ text } as Part] };
+}
+
+function imagePrompt(text: string): Content {
+  return {
+    role: 'user',
+    parts: [
+      { text } as Part,
+      {
+        inlineData: { mimeType: 'image/png', data: 'AAA=' },
+      } as unknown as Part,
+    ],
+  };
+}
+
+function toolResult(): Content {
+  return {
+    role: 'user',
+    parts: [
+      {
+        functionResponse: { name: 'tool', response: { result: 'ok' } },
+      } as unknown as Part,
+    ],
+  };
+}
+
+function startupContext(): Content {
+  return userPrompt(
+    `${SYSTEM_REMINDER_OPEN}\nEnvironment context...\n${SYSTEM_REMINDER_CLOSE}`,
+  );
+}
+
+describe('rewindApiCutPoint (positional, text-independent)', () => {
+  it('locates the N-th real user prompt regardless of transcript text', () => {
+    // The UI transcript projects an image turn as `${text} 📎1`, but the
+    // API entry carries raw parts — matching must not depend on text.
+    const api: Content[] = [
+      userPrompt('first'),
+      { role: 'model', parts: [{ text: 'reply' } as Part] },
+      imagePrompt('second'),
+    ];
+    expect(rewindApiCutPoint(api, 1)).toBe(0);
+    expect(rewindApiCutPoint(api, 2)).toBe(2);
+  });
+
+  it('skips startup-context and tool-result entries', () => {
+    const api: Content[] = [
+      startupContext(),
+      userPrompt('first'),
+      toolResult(),
+      userPrompt('second'),
+    ];
+    expect(rewindApiCutPoint(api, 1)).toBe(1);
+    expect(rewindApiCutPoint(api, 2)).toBe(3);
+  });
+
+  it('returns -1 when the history holds fewer prompts (compressed turn)', () => {
+    const api: Content[] = [userPrompt('first')];
+    expect(rewindApiCutPoint(api, 2)).toBe(-1);
+    expect(rewindApiCutPoint([], 1)).toBe(-1);
   });
 });

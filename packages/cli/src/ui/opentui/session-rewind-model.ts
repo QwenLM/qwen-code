@@ -13,6 +13,9 @@
 
 import { t } from '../../i18n/index.js';
 import { isSlashCommand } from '../utils/commandUtils.js';
+import { isUserTextContent } from '../utils/historyMapping.js';
+import { getStartupContextLength } from '@qwen-code/qwen-code-core';
+import type { Content } from '@google/genai';
 
 export const REWIND_MAX_VISIBLE_ITEMS = 7;
 
@@ -32,6 +35,31 @@ export function isRewindableTurn(turn: RewindTurn): boolean {
 
 export function rewindableTurns(turns: readonly RewindTurn[]): RewindTurn[] {
   return turns.filter(isRewindableTurn);
+}
+
+/**
+ * Locates the API-history cut point for conversation rewind positionally
+ * (ink `computeApiTruncationIndex` parity): the index of the
+ * `occurrence`-th real user prompt, skipping startup-context and
+ * tool-result entries. Never matches on text, so projected-transcript
+ * decorations (attachment suffixes, compression) cannot break the match.
+ * Returns -1 when the history holds fewer real user prompts than
+ * requested (e.g. the turn was absorbed by chat compression).
+ */
+export function rewindApiCutPoint(
+  apiHistory: Content[],
+  occurrence: number,
+): number {
+  const startIndex = getStartupContextLength(apiHistory, {
+    includeCompressed: true,
+  });
+  let seen = 0;
+  for (let idx = startIndex; idx < apiHistory.length; idx++) {
+    if (!isUserTextContent(apiHistory[idx]!)) continue;
+    seen += 1;
+    if (seen === occurrence) return idx;
+  }
+  return -1;
 }
 
 export interface RewindScrollWindow {
