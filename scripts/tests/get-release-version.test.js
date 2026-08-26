@@ -672,6 +672,7 @@ describe('assertVersionUnreleased', () => {
       '@qwen-code/audio-capture',
       '@qwen-code/channel-base',
       '@qwen-code/channel-dingtalk',
+      '@qwen-code/channel-dws',
       '@qwen-code/channel-feishu',
       '@qwen-code/channel-github',
       '@qwen-code/channel-qqbot',

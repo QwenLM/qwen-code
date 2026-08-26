@@ -65,7 +65,7 @@ import {
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
-import { TodoTimelineContext } from '../../App';
+import { TodoTimelineContext } from '../../WebShellContexts';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,
@@ -1811,89 +1811,88 @@ export const ToolGroup = memo(function ToolGroup({
             aria-hidden="true"
           />
         </button>
-        <div
-          className={
-            chatExpanded
-              ? styles.chatSummaryContentClip
-              : `${styles.chatSummaryContentClip} ${styles.chatSummaryContentCollapsed}`
-          }
-        >
-          <div className={styles.chatSummaryContentInner}>
-            <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
-              {tools.map((tool) => {
-                if (groupedAgentCallIds.has(tool.callId)) return null;
-                const parallelAgents = parallelAgentsByFirstCallId.get(
-                  tool.callId,
-                );
-                return (
-                  <Fragment key={tool.callId}>
-                    {thoughts
-                      ?.filter(
-                        (thought) => thought.beforeToolCallId === tool.callId,
-                      )
-                      .map((thought, index) => (
-                        <ThoughtLine
-                          key={`thought-${tool.callId}-${index}`}
-                          content={thought.content}
-                          isStreaming={thought.isStreaming}
-                          generateContent={generateContent}
-                        />
-                      ))}
-                    {parallelAgents ? (
-                      <>
-                        <div
-                          className={styles.chatSummaryParallelAgents}
-                          data-testid="compact-parallel-agents"
-                        >
-                          <ParallelAgentsGroup
-                            agents={parallelAgents}
-                            pendingApproval={pendingApproval}
+        {(chatExpanded || hasMcpApp) && (
+          <div
+            className={styles.chatSummaryContentClip}
+            style={chatExpanded ? undefined : { display: 'none' }}
+          >
+            <div className={styles.chatSummaryContentInner}>
+              <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
+                {tools.map((tool) => {
+                  if (groupedAgentCallIds.has(tool.callId)) return null;
+                  const parallelAgents = parallelAgentsByFirstCallId.get(
+                    tool.callId,
+                  );
+                  return (
+                    <Fragment key={tool.callId}>
+                      {thoughts
+                        ?.filter(
+                          (thought) => thought.beforeToolCallId === tool.callId,
+                        )
+                        .map((thought, index) => (
+                          <ThoughtLine
+                            key={`thought-${tool.callId}-${index}`}
+                            content={thought.content}
+                            isStreaming={thought.isStreaming}
+                            generateContent={generateContent}
                           />
-                        </div>
-                        {parallelAgents
-                          .slice(1)
-                          .flatMap((agent) =>
-                            thoughts
-                              ?.filter(
-                                (thought) =>
-                                  thought.beforeToolCallId === agent.callId,
-                              )
-                              .map((thought, index) => (
-                                <ThoughtLine
-                                  key={`thought-${agent.callId}-${index}`}
-                                  content={thought.content}
-                                  isStreaming={thought.isStreaming}
-                                  generateContent={generateContent}
-                                />
-                              )),
-                          )}
-                      </>
-                    ) : (
-                      <ToolLine
-                        tool={tool}
-                        approval={pendingApproval}
-                        workspaceCwd={workspaceCwd}
-                        summaryOnly={!singleTool || compactToolLines}
-                        forceExpanded={!!singleTool && !compactToolLines}
-                        hideHeader={!!singleTool && !compactToolLines}
-                      />
-                    )}
-                  </Fragment>
-                );
-              })}
-              {thoughts
-                ?.filter((thought) => thought.beforeToolCallId === undefined)
-                .map((thought, index) => (
-                  <ThoughtLine
-                    key={`thought-trailing-${index}`}
-                    content={thought.content}
-                    isStreaming={thought.isStreaming}
-                    generateContent={generateContent}
-                  />
-                ))}
+                        ))}
+                      {parallelAgents ? (
+                        <>
+                          <div
+                            className={styles.chatSummaryParallelAgents}
+                            data-testid="compact-parallel-agents"
+                          >
+                            <ParallelAgentsGroup
+                              agents={parallelAgents}
+                              pendingApproval={pendingApproval}
+                            />
+                          </div>
+                          {parallelAgents
+                            .slice(1)
+                            .flatMap((agent) =>
+                              thoughts
+                                ?.filter(
+                                  (thought) =>
+                                    thought.beforeToolCallId === agent.callId,
+                                )
+                                .map((thought, index) => (
+                                  <ThoughtLine
+                                    key={`thought-${agent.callId}-${index}`}
+                                    content={thought.content}
+                                    isStreaming={thought.isStreaming}
+                                    generateContent={generateContent}
+                                  />
+                                )),
+                            )}
+                        </>
+                      ) : (
+                        <ToolLine
+                          tool={tool}
+                          approval={pendingApproval}
+                          workspaceCwd={workspaceCwd}
+                          summaryOnly={!singleTool || compactToolLines}
+                          forceExpanded={!!singleTool && !compactToolLines}
+                          hideHeader={!!singleTool && !compactToolLines}
+                        />
+                      )}
+                    </Fragment>
+                  );
+                })}
+                {thoughts
+                  ?.filter((thought) => thought.beforeToolCallId === undefined)
+                  .map((thought, index) => (
+                    <ThoughtLine
+                      key={`thought-trailing-${index}`}
+                      content={thought.content}
+                      isStreaming={thought.isStreaming}
+                      generateContent={generateContent}
+                    />
+                  ))}
+              </div>
             </div>
           </div>
-        </div>
+        )}
       </div>
     );
   }

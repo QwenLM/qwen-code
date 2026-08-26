@@ -324,8 +324,9 @@ run_deferred_upsert() {
   if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
     echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
   fi
-  # The child's output is agent-reachable content, so a line-start
-  # `::` is neutralized before it reaches this step's stdout.
+  # The child's output is agent-reachable content, so both workflow-command
+  # syntaxes are neutralized before it reaches this step's stdout (`##[`
+  # parses mid-line too — #9761).
   while IFS= read -r _upsert_line; do
     # Wrapper-authored lines carry a marker and are emitted
     # VERBATIM so they still render as GitHub annotations; the
@@ -335,7 +336,10 @@ run_deferred_upsert() {
     elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
       printf '%s\n' "${_upsert_line#__upsert_trusted__}"
     else
-      printf '%s\n' "${_upsert_line//::/;;}"
+      # The canonical two-expression neutralizer, identical to every other
+      # echo site — one spelling for the whole family, so a syntax change
+      # cannot drift across two implementations.
+      printf '%s\n' "${_upsert_line}" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
     fi
   done <<< "${UPSERT_OUT}"
 }

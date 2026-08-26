@@ -21,7 +21,7 @@
 // real); this owns only the bookkeeping that follows from the counts.
 
 import type { CommandModule } from 'yargs';
-import { roundModelIdFrom } from './lib/round-model.js';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -459,6 +459,7 @@ export function criticalFloorKind(
   severityFloor: unknown,
   contextUnavailable: boolean,
   prevRound: number,
+  signalEngaged?: boolean,
 ): CriticalFloorKind | undefined {
   // The REPORTING reading, and it folds an absent or unrecognisable floor
   // into `auto` the way `composeReviewBody` already does ("A floor the
@@ -489,7 +490,12 @@ export function criticalFloorKind(
       : absent
         ? 'auto'
         : undefined;
-  return floorResolvesCritical(floor, contextUnavailable, prevRound);
+  return floorResolvesCritical(
+    floor,
+    contextUnavailable,
+    prevRound,
+    signalEngaged,
+  );
 }
 
 /**
@@ -509,12 +515,14 @@ export function criticalFloorInEffect(
   severityFloor: unknown,
   contextUnavailable: boolean,
   prevRound: number,
+  signalEngaged?: boolean,
 ): boolean {
   return (
     floorResolvesCritical(
       normalizeSeverityFloor(severityFloor),
       contextUnavailable,
       prevRound,
+      signalEngaged,
     ) !== undefined
   );
 }
@@ -524,6 +532,7 @@ function floorResolvesCritical(
   floor: string | undefined,
   contextUnavailable: boolean,
   prevRound: number,
+  signalEngaged?: boolean,
 ): CriticalFloorKind | undefined {
   // `prevRound` is the PREVIOUS posted round, so the review being composed
   // is `prevRound + 1` — spelled out because the equivalent `prevRound >= 5`
@@ -533,6 +542,17 @@ function floorResolvesCritical(
   if (floor === 'critical') return 'explicit';
   if (floor === 'auto' && !contextUnavailable && thisRound >= 6) {
     return 'auto-resolved';
+  }
+  // The signal-driven early trigger (#9903): the convergence diagnosis's
+  // own not-falling trend, sustained for the streak's bar of consecutive
+  // rounds, engages the floor ahead of the round-6 schedule — the tool
+  // acting on the `stem-surface` advice it already prints. Same fail-open
+  // shape as the schedule arm: the round unknowable (context-unavailable)
+  // disengages it, and it lives ONLY in the `auto` arm — an explicit
+  // `suggestion` floor is the operator turning the posture off, streak or
+  // no streak.
+  if (floor === 'auto' && !contextUnavailable && signalEngaged === true) {
+    return 'auto-signaled';
   }
   return undefined;
 }
@@ -551,11 +571,13 @@ function floorResolvesCritical(
  * exists as code, here, where the drafts are already in hand.
  *
  * Enforcement fires ONLY where the deferral licence already holds: an
- * explicit `critical` floor at any round, or `auto` at round ≥ 6 with the
- * round knowable. Everything else fails OPEN exactly as the posture itself
- * does — an unrecognisable floor, `auto` before round 6, `auto` in the
- * context-unavailable state (the round is unknowable), `--severity-floor
- * suggestion` (posture off): a posting bar in doubt posts. The rounds-2–5
+ * explicit `critical` floor at any round, `auto` at round ≥ 6, or `auto`
+ * with the flat-trend streak at its bar (#9903) — the `auto` arms only
+ * with the round knowable. Everything else fails OPEN exactly as the
+ * posture itself does — an unrecognisable floor, `auto` before round 6 with
+ * the streak below its bar, `auto` in the context-unavailable state (the
+ * round is unknowable), `--severity-floor suggestion` (posture off): a
+ * posting bar in doubt posts. The rounds-2–5
  * code-age rule stays model-side on purpose — it needs the worktree git
  * checks this module does not have.
  *
@@ -572,8 +594,16 @@ export function floorEnforcedReroute(
   contextUnavailable: boolean,
   prevRound: number,
   drafted: ReadonlyArray<{ path?: unknown; line?: unknown; body?: unknown }>,
+  signalEngaged?: boolean,
 ): { indices: number[]; entries: DeferredEntry[] } {
-  if (!criticalFloorInEffect(severityFloor, contextUnavailable, prevRound)) {
+  if (
+    !criticalFloorInEffect(
+      severityFloor,
+      contextUnavailable,
+      prevRound,
+      signalEngaged,
+    )
+  ) {
     return { indices: [], entries: [] };
   }
   const indices: number[] = [];
@@ -678,8 +708,10 @@ export interface ComposeReviewInput {
   suggestionsDroppedAsDuplicates?: string[];
   /**
    * The findings the convergence posture deferred — Step 6's round-aware
-   * posting discipline (from round 6, or under an explicit `--severity-floor
-   * critical`, and the rounds-2-5 code-age rule). TYPED entries — see
+   * posting discipline (from round 6 — or earlier once the flat-trend
+   * streak engages the floor, #9903 — or under an explicit
+   * `--severity-floor critical`, and the rounds-2-5 code-age rule). TYPED
+   * entries — see
    * `DeferredEntry`: only otherwise-postable high-confidence Suggestions
    * belong here (a `Critical` is relocated into the body Criticals, a
    * `Nice to have` is refused; low-confidence findings stay terminal-only and
@@ -1400,7 +1432,7 @@ export function composeReview(
   // one review. The approach baseline and the previous volume ride out of
   // the same read for the same reason — a marker pairing one round's number
   // with another's baseline or count is a record nobody can read back.
-  const prevFacts = prevLedgerFacts(input.planPath);
+  const prevFacts = prevLedgerFacts(input.planPath, runtimeModelId);
   const prevRound = prevFacts.round;
   // The convergence verdict, decided HERE — beside the one side-file read
   // that owns `prevRound` — and never inside the body composer, so this
@@ -1481,6 +1513,97 @@ export function composeReview(
           Math.min(prevRound + 1, LEDGER_MAX_ROUND),
         )
       : null;
+  // The previous round as the convergence signal reads it. Hoisted out of
+  // the `composeReviewBody` call because TWO consumers read it now — the
+  // floor's early trigger below and the rendered diagnosis — and two
+  // hand-built copies of one recovery is the drift class this file's header
+  // exists to prevent.
+  const prevForConvergence = {
+    ...(prevFacts.posted === undefined ? {} : { posted: prevFacts.posted }),
+    findings: prevFacts.findings,
+    truncated: prevFacts.truncated,
+    complete: prevRound > 0 && !prevFacts.truncated,
+    round: prevRound,
+    anchored: prevFacts.anchored,
+    foreign: prevFacts.foreign,
+    merged: prevFacts.merged,
+    ...(prevFacts.floor === undefined ? {} : { floor: prevFacts.floor }),
+    ...(prevFacts.fresh === undefined ? {} : { fresh: prevFacts.fresh }),
+  };
+  // The flat-trend streak (#9903): does this round's first-time-finding
+  // rate fall? Measured through the ONE `diagnoseConvergence` statement —
+  // the same function the body renders from, never a restated predicate —
+  // over the PRE-reroute drafts. Every round that can ADVANCE the streak
+  // ran its predecessor under an open floor (a `c` predecessor trips the
+  // trend's own `floorChanged` guard), so on the advancing rounds no
+  // reroute was in flight there either — the measurement and the rendered
+  // diagnosis share one basis. The one round where the two differ is the
+  // ENGAGING round itself: this measurement still sees the full draft set,
+  // while enforcement strips it before the body renders — and the
+  // `floorChanged` guard then keeps the rendered trend silent, so the
+  // difference never publishes a number it could contradict.
+  //
+  // Three states, deliberately simpler than the churn streak's: a firing
+  // round ADVANCES, any other round RESETS — there is no
+  // carry-on-unmeasured, because the cheap error here is a wiped streak
+  // (one delayed engagement), never a false one (Suggestions silently
+  // deferred on insufficient evidence). The trend is computed with this
+  // round's floor as OPEN: the trigger is what may close it, so its own
+  // `floorChanged` guard must compare against the pre-trigger posture —
+  // and a predecessor that posted CLOSED genuinely is not a comparable
+  // point, which the guard then says on its own.
+  //
+  // Past the bar the streak is PINNED, not re-measured: the floor it
+  // engaged moves fresh Suggestions into the deferral channel, so the
+  // posted-set trend goes quiet precisely because the floor is working —
+  // re-measuring would release it the round after it engaged, and the
+  // guard's posture comparison would flap it at period two. The pin is the
+  // latch: engagement holds on the recorded streak until the round-6 rule
+  // takes over anyway. A context-unavailable round measures nothing here
+  // (its recovered ledger could not be re-vouched), so it neither advances
+  // nor — while pinned — releases: the latch survives the blip, and the
+  // floor's own context-unavailable arm stays disengaged for that round.
+  const prevFlat = prevFacts.flatRounds;
+  const flatLatched = prevFlat >= FLAT_STREAK_TO_ENGAGE;
+  // The measurement is gated where the arm is gated: the trigger lives ONLY
+  // in the `auto` arm, and a round the operator ran under an explicit floor
+  // is not a measurement the auto posture licensed. `suggestion` turns the
+  // posture off, and `critical` suppresses the posted set the trend reads —
+  // yet the measurement below cannot see either, because it computes the
+  // trend as this round's floor were open and the marker vocabulary has no
+  // letter for `suggestion` (both stamp `o`, and the trend's `floorChanged`
+  // guard compares only what the markers recorded). Left ungated, such a
+  // round advances the streak and the latch then engages off rounds the
+  // operator had explicitly taken out of the posture — the false-engagement
+  // direction the error asymmetry above excludes. Absence folds to `auto`
+  // exactly as `criticalFloorKind` does; an unrecognisable floor is a
+  // posture this module cannot read and advances nothing — fail open.
+  const foldedFloor = normalizeSeverityFloor(input.severityFloor);
+  const floorIsAuto =
+    foldedFloor === 'auto' ||
+    (foldedFloor === undefined &&
+      (input.severityFloor === undefined || input.severityFloor === null));
+  const flatFires =
+    !flatLatched &&
+    input.contextUnavailable !== true &&
+    floorIsAuto &&
+    diagnoseConvergence({
+      round: Math.min(prevRound + 1, LEDGER_MAX_ROUND),
+      // Only the trend matters below; the diagnosis's display volume is
+      // filled from the posting set inside `composeReviewBody`.
+      posted: Array.isArray(input.draftedComments)
+        ? input.draftedComments.length
+        : 0,
+      prev: prevForConvergence,
+      drafts: draftedFindingsOf(input.draftedComments),
+      floor: 'o',
+    })?.volumeNotShrinking === true;
+  const flatRounds = flatLatched
+    ? prevFlat
+    : flatFires
+      ? Math.min(prevFlat + 1, LEDGER_MAX_ROUND)
+      : 0;
+  const signalEngaged = flatRounds >= FLAT_STREAK_TO_ENGAGE;
   // The floor, enforced before anything is composed or counted: everything
   // downstream — the counts, the body, the ledger marker — must describe
   // the set that actually posts. `contextUnavailable` is read leniently
@@ -1492,6 +1615,7 @@ export function composeReview(
     input.contextUnavailable === true,
     prevRound,
     Array.isArray(input.draftedComments) ? input.draftedComments : [],
+    signalEngaged,
   );
   // The one resolution, read by the enforcement above and reported by the
   // diagnosis below — and stamped into this round's marker, so the NEXT round
@@ -1500,6 +1624,7 @@ export function composeReview(
     input.severityFloor,
     input.contextUnavailable === true,
     prevRound,
+    signalEngaged,
   );
   let effective = input;
   if (reroute.indices.length > 0) {
@@ -1552,18 +1677,7 @@ export function composeReview(
     prevFacts.src0,
     reroute,
     {
-      prev: {
-        ...(prevFacts.posted === undefined ? {} : { posted: prevFacts.posted }),
-        findings: prevFacts.findings,
-        truncated: prevFacts.truncated,
-        complete: prevRound > 0 && !prevFacts.truncated,
-        round: prevRound,
-        anchored: prevFacts.anchored,
-        foreign: prevFacts.foreign,
-        merged: prevFacts.merged,
-        ...(prevFacts.floor === undefined ? {} : { floor: prevFacts.floor }),
-        ...(prevFacts.fresh === undefined ? {} : { fresh: prevFacts.fresh }),
-      },
+      prev: prevForConvergence,
       // Read from the same input `floorEnforcedReroute` just acted on, through
       // the one predicate both share — so the advice cannot recommend a floor
       // the enforcement above already applied, nor name it a way the
@@ -1574,7 +1688,11 @@ export function composeReview(
         input.severityFloor,
         input.contextUnavailable === true,
         prevRound,
+        signalEngaged,
       ),
+      // The streak the trigger just resolved, so the deferral header can
+      // say WHY the floor engaged ahead of the round-6 schedule.
+      flatRounds,
     },
     nonConvergence,
   );
@@ -1619,6 +1737,7 @@ export function composeReview(
       complete: prevRound > 0 && !prevFacts.truncated,
     },
     churnRounds,
+    flatRounds,
   );
   // `postedInline` came out of the body composer on the same input, so only
   // the predecessor's volume — which only this scope read — is added here.
@@ -1657,6 +1776,19 @@ export const CHURN_MIN_FRESH = 4;
  * makes for the volume trend.
  */
 export const CHURN_STREAK_TO_FILE = 2;
+
+/**
+ * How many consecutive rounds of a not-falling first-time-finding rate
+ * engage the severity floor ahead of the round-6 schedule (#9903).
+ *
+ * Two, for the argument `CHURN_STREAK_TO_FILE` above states: one flat round
+ * is a step, two is the shortest window in which "the rate is not falling"
+ * is an observation. The bar is read off the ledger's `flatRounds` streak,
+ * which a round advances when its OWN measured trend fires and resets when
+ * it falls — so reaching it always takes two measured firing rounds; a
+ * carried or pinned streak never adds.
+ */
+export const FLAT_STREAK_TO_ENGAGE = 2;
 
 /**
  * This round's census, or null when it cannot be read as one.
@@ -1780,6 +1912,7 @@ const EMPTY_PREV_FACTS = {
   round: 0,
   src0: 0,
   churnRounds: 0,
+  flatRounds: 0,
   findings: [] as LedgerFinding[],
   truncated: false,
   foreign: false,
@@ -1811,8 +1944,22 @@ const EMPTY_PREV_FACTS = {
  * account switch that loses the side file therefore reads as round 1 and
  * disarms the approach signal rather than misreporting it. That direction is
  * deliberate: the signal is advisory, so its failure mode should be silence.
+ *
+ * `runtimeModelId` is the identity this round runs under. A GRAFTED anchor
+ * (the side file carries `anchorFromRound` — `pr-context` carried it
+ * forward from an earlier own marker because the previous round closed
+ * without one) is usable only when THIS round could actually scope to it:
+ * the same-model contract must hold (when the certifier mismatches, Step
+ * 1's gate refuses), and the re-run the graft licensed must not have been
+ * refused by the fetch or resolved to the head (the plan's recorded
+ * `incremental` outcome). When either leg fails, the round re-reads the
+ * full diff and the chain is still broken, and the self-check below must
+ * still say so.
  */
-function prevLedgerFacts(planPath: string | undefined): {
+function prevLedgerFacts(
+  planPath: string | undefined,
+  runtimeModelId?: string,
+): {
   round: number;
   src0: number;
   posted?: number;
@@ -1838,13 +1985,29 @@ function prevLedgerFacts(planPath: string | undefined): {
    * names no usable predecessor.
    */
   churnRounds: number;
-  /** Whether it carried an incremental anchor at all. */
+  /**
+   * Its flat-trend streak — how many consecutive rounds the first-time
+   * finding rate did not fall, the claim the floor's early trigger reads
+   * (#9903). Same zero rule as the churn streak.
+   */
+  flatRounds: number;
+  /**
+   * Whether it carried an incremental anchor THIS round can use — a
+   * grafted one whose certifier mismatches, or whose recorded re-run this
+   * round's fetch refused or resolved to the head, does not count (Step 1
+   * cannot scope to it, so the chain is still broken).
+   */
   anchored: boolean;
 } {
   try {
     if (!planPath) return EMPTY_PREV_FACTS;
     const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
       prNumber?: unknown;
+      /**
+       * This run's incremental ruling, recorded by the `--since` re-run
+       * (`fetch-pr`) when one happened; absent when no anchor was passed.
+       */
+      incremental?: unknown;
     };
     const pr = plan?.prNumber;
     if (!isPositivePrNumber(pr)) return EMPTY_PREV_FACTS;
@@ -1856,7 +2019,11 @@ function prevLedgerFacts(planPath: string | undefined): {
       // `foreign` is a side-file field, not a marker field: it records how
       // THIS machine obtained the list, which is nothing the marker riding a
       // public body could be trusted to state about itself.
-    ) as Ledger & { foreign?: unknown; merged?: unknown };
+    ) as Ledger & {
+      foreign?: unknown;
+      merged?: unknown;
+      anchorFromRound?: unknown;
+    };
     const round =
       Number.isInteger(prev.round) && prev.round > 0 ? prev.round : 0;
     const src0 =
@@ -1885,6 +2052,18 @@ function prevLedgerFacts(planPath: string | undefined): {
     // posted ordinal ("the 10000th round…") after a single counted one.
     const churnRounds =
       round === 0 ? 0 : Math.min(streakOf(prev.churnRounds) ?? 0, round);
+    // Same read, same travel-with-round rule as the churn streak it rides
+    // beside — the side file is the same untrusted shape, and an unclamped
+    // flat streak would engage the floor off rounds the pull request never
+    // ran. Clamped TIGHTER than the churn streak, to the HONEST maximum:
+    // the signal that advances it gates on round >= 3, so at round N no
+    // honest run carries more than N - 2, and a planted file claiming more
+    // names rounds the signal could never have measured — engaging the
+    // floor a round ahead of the earliest honest engagement.
+    const flatRounds =
+      round === 0
+        ? 0
+        : Math.min(streakOf(prev.flatRounds) ?? 0, Math.max(round - 2, 0));
     // Through the ledger's OWN admission test, not a local restatement of
     // two of its checks. The side file is the same untrusted shape as a
     // marker, arriving by a different route: a file written before the id
@@ -1909,11 +2088,31 @@ function prevLedgerFacts(planPath: string | undefined): {
     // `persistRecoveredLedger` keeps that list across anonymous and
     // recovery-threw runs.
     const rejected = rawFindings.length - findings.length;
+    // A GRAFTED anchor's usability has a second witness beside the
+    // same-model gate: what THIS round's fetch recorded about the re-run
+    // the graft licensed. A fail-closed winner never posts a sha, so the
+    // graft re-derives identically every later round — when the recorded
+    // outcome is a refusal (`incremental.effective: false`, e.g.
+    // `not-an-ancestor`) or a head-resolution (`upToDate: true`), every
+    // later round re-derives the same unusable anchor and re-reads the
+    // full diff, so the chain is still broken and the self-check below
+    // must keep saying so. An absent outcome keeps the same-model gate as
+    // the only witness: no recorded re-run means nothing here can say the
+    // graft was unusable.
+    let graftRefusedThisRound = false;
+    if (typeof plan.incremental === 'object' && plan.incremental !== null) {
+      const inc = plan.incremental as {
+        effective?: unknown;
+        upToDate?: unknown;
+      };
+      graftRefusedThisRound = inc.effective === false || inc.upToDate === true;
+    }
 
     return {
       round,
       src0,
       churnRounds,
+      flatRounds,
       ...(posted === undefined || round === 0 ? {} : { posted }),
       // Gated on the round for the same reason the volume is: a work list
       // travels WITH the round that produced it or not at all. A side file
@@ -1938,10 +2137,29 @@ function prevLedgerFacts(planPath: string | undefined): {
       // rendering says so rather than publishing the citation bare.
       foreign: round !== 0 && prev.foreign === true,
       merged: round !== 0 && prev.merged === true,
-      // The previous round's anchor, as a yes/no. Two consecutive withholds
-      // are the shape the self-check discloses; the sha itself is Step 1's
-      // business, not this read's.
-      anchored: round !== 0 && typeof prev.sha === 'string' && prev.sha !== '',
+      // The previous round's anchor, as a yes/no THIS round can use. Two
+      // consecutive withholds are the shape the self-check discloses; the
+      // sha itself is Step 1's business, not this read's. A CERTIFIED
+      // anchor counts on presence alone. A GRAFTED one (the side file
+      // records `anchorFromRound` — carried forward from an earlier own
+      // marker because the previous round closed without one) counts only
+      // when this round could actually use it: its certifier must match
+      // the identity this round runs under (the same-model gate), AND this
+      // round's fetch must not have refused it or resolved it to the head
+      // (`graftRefusedThisRound`). Either leg failing means the round
+      // re-read the full diff and the next round re-derives the same
+      // unusable graft, so the chain is still broken and the disclosure
+      // must not be silenced by a sha the round cannot use.
+      anchored:
+        round !== 0 &&
+        typeof prev.sha === 'string' &&
+        prev.sha !== '' &&
+        (typeof prev.anchorFromRound !== 'number' ||
+          (certifierMatchesRound(
+            typeof prev.model === 'string' ? prev.model : undefined,
+            runtimeModelId ?? '',
+          ) &&
+            !graftRefusedThisRound)),
       // Travels with the volume it qualifies, and with the round, for the
       // same reason both of those do.
       ...(round === 0 ||
@@ -2006,6 +2224,7 @@ function ledgerMarkerFor(
   floorKind: CriticalFloorKind | undefined,
   carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
   churnRounds: number,
+  flatRounds: number,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -2204,6 +2423,9 @@ function ledgerMarkerFor(
       // The part of that volume the trend is about — see `Ledger.fresh`.
       fresh: freshInline,
       ...(churnRounds > 0 ? { churnRounds } : {}),
+      // The floor trigger's streak rides beside the churn streak — same
+      // rung, same zero-omission; see the field's own note in `Ledger`.
+      ...(flatRounds > 0 ? { flatRounds } : {}),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
@@ -2351,6 +2573,14 @@ function composeReviewBody(
      * fails open. That gap is a mechanism fact, not a loop fact.
      */
     floorEnforcementEngaged?: boolean;
+    /**
+     * The flat-trend streak the floor's early trigger resolved to this
+     * round (#9903). Read only by the deferral header: when the floor
+     * engaged as `auto-signaled`, the header names the streak so an
+     * engagement ahead of the round-6 schedule does not read as an
+     * unexplained posture change.
+     */
+    flatRounds?: number;
   } | null = null,
   /**
    * The non-convergence body Critical this round files, or null. Passed in
@@ -3372,12 +3602,17 @@ function composeReviewBody(
     // running, so a pre-engagement round degrades open to silence. The
     // ENFORCEMENT reading, not the reporting one beside it — the claim is
     // about Suggestions actually having been moved out of the posting set,
-    // not about the posture the round describes itself as running.
-    floorEngaged: criticalFloorInEffect(
-      input.severityFloor,
-      input.contextUnavailable === true,
-      prevRound,
-    ),
+    // not about the posture the round describes itself as running. Taken
+    // from the caller's one computation, signal trigger included (#9903):
+    // re-derived here it would miss the early engagement, and the advisory
+    // would claim the floor cannot converge a loop it is already stemming.
+    floorEngaged:
+      convergence?.floorEnforcementEngaged ??
+      criticalFloorInEffect(
+        input.severityFloor,
+        input.contextUnavailable === true,
+        prevRound,
+      ),
     thisCriticals: criticalsInline + bodyCriticals.length,
     // The FRESH counts, not the posting totals — the number this file's own
     // `postedFresh` docstring calls "the number the convergence trend runs
@@ -4401,12 +4636,25 @@ function composeReviewBody(
     MAX_DEFERRED_SUGGESTION_LINES,
   );
   const enforcedOverflow = reroute.entries.length - enforcedShown;
+  // Why the floor engaged, when it engaged ahead of the round-6 schedule:
+  // the signal-driven trigger (#9903) is the one posture change the round's
+  // own prose never announced, so an unexplained critical floor at round 4
+  // would read as a pipeline fault. Stated with the streak that armed it;
+  // absent under every other kind, whose causes the operator either set
+  // (explicit) or can derive from the round number (auto-resolved).
+  const signalFloorNote =
+    convergence?.criticalFloorKind === 'auto-signaled'
+      ? {
+          en: ` — the floor engaged early: the first-time-finding rate has not fallen for ${convergence.flatRounds ?? 0} consecutive round(s)`,
+          zh: `——发布下限因首次发现速率连续 ${convergence.flatRounds ?? 0} 轮未下降而提前生效`,
+        }
+      : { en: '', zh: '' };
   const floorEnforcedNote: Bi[] =
     reroute.entries.length > 0
       ? [
           {
-            en: `${reroute.entries.length} Suggestion(s) were drafted inline past the resolved critical posting floor; the CLI moved them into the deferral list below (floor enforcement${enforcedOverflow > 0 ? ` — ${enforcedShown} listed, ${enforcedOverflow} more inside the overflow count` : ''}).`,
-            zh: `${reroute.entries.length} 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论；CLI 已将其移入下方延后清单（下限强制执行${enforcedOverflow > 0 ? `——列出 ${enforcedShown} 条，其余 ${enforcedOverflow} 条计入溢出计数` : ''}）。`,
+            en: `${reroute.entries.length} Suggestion(s) were drafted inline past the resolved critical posting floor${signalFloorNote.en}; the CLI moved them into the deferral list below (floor enforcement${enforcedOverflow > 0 ? ` — ${enforcedShown} listed, ${enforcedOverflow} more inside the overflow count` : ''}).`,
+            zh: `${reroute.entries.length} 条 Suggestion 在已解析的 critical 发布下限之外被起草为行内评论${signalFloorNote.zh}；CLI 已将其移入下方延后清单（下限强制执行${enforcedOverflow > 0 ? `——列出 ${enforcedShown} 条，其余 ${enforcedOverflow} 条计入溢出计数` : ''}）。`,
           },
         ]
       : [];
@@ -4420,12 +4668,12 @@ function composeReviewBody(
           // (rank -1) goes before it — and the artifact and the terminal
           // report keep every entry whole.
           trim: 1,
-          en: `Deferred under the convergence posture (round ${deferredRound}, not a blocker) — recorded, not requested in this round:\n\n${deferredShown
+          en: `Deferred under the convergence posture (round ${deferredRound}, not a blocker)${signalFloorNote.en} — recorded, not requested in this round:\n\n${deferredShown
             .map((entry) => `- ${mdField(entry)}`)
             .join(
               '\n',
             )}${deferredMore > 0 ? `\n- …and ${deferredMore} more (see the run report)` : ''}`,
-          zh: `收敛姿态下延后（第 ${deferredRound} 轮，非阻断）——已记录，本轮不要求修改：共 ${deferredSuggestions.length} 条（原文未翻译，列表见上方英文部分）。`,
+          zh: `收敛姿态下延后（第 ${deferredRound} 轮，非阻断）${signalFloorNote.zh}——已记录，本轮不要求修改：共 ${deferredSuggestions.length} 条（原文未翻译，列表见上方英文部分）。`,
         },
       ]
     : [];
@@ -6218,8 +6466,9 @@ export function verdictLine(r: ComposeReviewResult): string {
   // existed must render its line, not throw over a feature it predates.
   if ((r.floorEnforced?.length ?? 0) > 0) {
     // "RESOLVED critical floor", like both sibling disclosure surfaces: the
-    // enforcement also fires under `auto` from round 6, where no literal
-    // critical floor exists in the invocation — the round resolved to one.
+    // enforcement also fires under `auto` from round 6 — and earlier once
+    // the flat-trend streak engages the floor (#9903) — where no literal
+    // critical floor exists in the invocation; the round resolved to one.
     line += ` — ${r.floorEnforced.length} of those moved by CLI floor enforcement (drafted inline past the resolved critical floor)`;
   }
   // Last, and phrased so the terminal line alone carries the ask: this is the
