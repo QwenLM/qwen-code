@@ -1632,6 +1632,8 @@ const EN: Messages = {
   'skilldesc.dataviz': 'Design guidance for charts and data visualizations',
   'skilldesc.extensionCreator':
     'Create, test, and customize Qwen Code extensions',
+  'skilldesc.goalDraft':
+    'Turn a fuzzy intention into a verifiable /goal objective',
   'skilldesc.loop': 'Run a prompt on a schedule or self-paced wakeups',
   'skilldesc.newApp': 'Workflow for building a new app from scratch',
   'skilldesc.qcHelper': 'Answer questions about using Qwen Code',
@@ -2114,7 +2116,8 @@ const EN: Messages = {
   'goals.newHint':
     'The goal starts in a new session and runs until its condition holds.',
   'goals.condition': 'Condition',
-  'goals.conditionPlaceholder': 'e.g. all tests pass and the lint is clean',
+  'goals.conditionPlaceholder':
+    'e.g. `npm test` exits 0 and `npm run lint` reports no warnings (paste the output); do not modify test files; stop as blocked after 20 turns',
   'goals.cancel': 'Cancel',
   'goals.create': 'Set goal',
   'goals.creating': 'Starting…',
@@ -4653,6 +4656,7 @@ const ZH: Messages = {
   'skilldesc.batch': '并行批量处理多个文件',
   'skilldesc.dataviz': '图表与数据可视化设计指南',
   'skilldesc.extensionCreator': '创建、测试和定制 Qwen Code 扩展',
+  'skilldesc.goalDraft': '将模糊意图改写为可验证的 /goal 目标',
   'skilldesc.loop': '按计划或自定节奏循环运行提示词',
   'skilldesc.newApp': '从零构建新应用的工作流',
   'skilldesc.qcHelper': '解答 Qwen Code 使用相关问题',
@@ -5095,7 +5099,8 @@ const ZH: Messages = {
   'goals.new': '新建目标',
   'goals.newHint': '目标会在一个新会话中启动，并持续运行直到条件满足。',
   'goals.condition': '条件',
-  'goals.conditionPlaceholder': '例如：所有测试通过且 lint 无告警',
+  'goals.conditionPlaceholder':
+    '例如：`npm test` 退出码为 0 且 `npm run lint` 无告警（贴出输出）；不得修改测试文件；20 轮内未达成则以 blocked 结束',
   'goals.cancel': '取消',
   'goals.create': '设置目标',
   'goals.creating': '正在启动…',
