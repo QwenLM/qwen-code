@@ -257,9 +257,7 @@ export function sendBridgeError(
   }
   const skillError = mapWorkspaceSkillToggleError(err);
   if (skillError) {
-    res
-      .status(skillError.code === 'skill_not_found' ? 404 : 409)
-      .json(skillError);
+    res.status(404).json(skillError);
     return;
   }
   if (err instanceof InvalidSessionTranscriptCursorError) {

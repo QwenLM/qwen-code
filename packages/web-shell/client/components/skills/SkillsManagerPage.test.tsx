@@ -29,7 +29,7 @@ const { skillsState, workspaceState } = vi.hoisted(() => ({
   workspaceState: {
     current: {
       capabilities: {
-        features: ['workspace_skill_toggle'],
+        features: ['workspace_skill_settings_toggle'],
       },
     },
   },
@@ -118,6 +118,9 @@ beforeEach(() => {
   skillsState.current.setEnabled.mockReset().mockResolvedValue(undefined);
   skillsState.current.install.mockReset();
   skillsState.current.remove.mockReset();
+  workspaceState.current.capabilities.features = [
+    'workspace_skill_settings_toggle',
+  ];
 });
 
 afterEach(() => {
@@ -126,6 +129,39 @@ afterEach(() => {
 });
 
 describe('SkillsManagerPage', () => {
+  it('does not treat the retired Skill toggle capability as settings support', async () => {
+    workspaceState.current.capabilities.features = ['workspace_skill_toggle'];
+    skillsState.current.skills = [
+      {
+        kind: 'skill',
+        status: 'disabled',
+        name: 'review',
+        description: 'Review code',
+        level: 'user',
+        modelInvocable: true,
+        disabledReason: 'default',
+      },
+    ];
+
+    await renderPage();
+    await openDisabledSkill('review');
+
+    const actions = container.querySelector<HTMLElement>(
+      '[data-testid="skill-actions"]',
+    );
+    expect(actions).not.toBeNull();
+    await act(async () => {
+      actions!.dispatchEvent(
+        new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+
+    const enable = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.trim() === 'Enable');
+    expect(enable?.hasAttribute('data-disabled')).toBe(true);
+  });
+
   it('shows the authoritative enabled state after a normal toggle', async () => {
     const disabledSkill: DaemonWorkspaceSkillStatus = {
       kind: 'skill',

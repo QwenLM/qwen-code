@@ -161,10 +161,7 @@ import { isValidSessionId } from '../config/config.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 import { getRateLimiter } from './rate-limit.js';
-import {
-  WorkspaceSkillNotToggleableError,
-  type DaemonWorkspaceService,
-} from './workspace-service/types.js';
+import type { DaemonWorkspaceService } from './workspace-service/types.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   createWorkspaceGenerationGuard,
@@ -613,8 +610,8 @@ const EXPECTED_STAGE1_FEATURES = [
   // init scaffold, and MCP server restart).
   'session_approval_mode_control',
   'workspace_tool_toggle',
-  'workspace_skill_toggle',
-  'workspace_skill_batch_toggle',
+  'workspace_skill_settings_toggle',
+  'workspace_skill_settings_batch_toggle',
   'extension_batch_activation_v2',
   'workspace_skill_manage',
   'workspace_permissions',
@@ -23112,34 +23109,6 @@ describe('createServeApp', () => {
         true,
         undefined,
       );
-    });
-
-    it('passes through a legacy persistence lock error', async () => {
-      const app = createServeApp(tokenOpts, undefined, {
-        bridge: fakeBridge({
-          workspaceSkillsImpl: async () => ({
-            v: 1,
-            workspaceCwd: WS_BOUND,
-            initialized: true,
-            skills: [reviewSkill],
-          }),
-        }),
-        persistDisabledSkills: vi
-          .fn()
-          .mockRejectedValue(
-            new WorkspaceSkillNotToggleableError('review', 'locked', 'user'),
-          ),
-        primaryWorkspaceTrusted: true,
-      });
-      const res = await auth(
-        request(app).post('/workspace/skills/review/enable'),
-      ).send({ enabled: true });
-      expect(res.status).toBe(409);
-      expect(res.body).toMatchObject({
-        code: 'skill_not_toggleable',
-        reason: 'locked',
-        lockedScope: 'user',
-      });
     });
 
     it('rejects writes to an untrusted primary workspace', async () => {

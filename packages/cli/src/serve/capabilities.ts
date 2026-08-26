@@ -188,8 +188,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unregistered — the toggle takes effect on the next ACP child spawn
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
-  workspace_skill_toggle: { since: 'v1' },
-  workspace_skill_batch_toggle: { since: 'v1' },
+  workspace_skill_settings_toggle: { since: 'v1' },
+  workspace_skill_settings_batch_toggle: { since: 'v1' },
   extension_batch_activation_v2: { since: 'v1' },
   workspace_skill_manage: { since: 'v1' },
   workspace_settings: { since: 'v1' },

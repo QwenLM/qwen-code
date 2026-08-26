@@ -152,9 +152,9 @@ await client
   .setWorkspaceSkillEnabled('review', true, { clientId: 'dashboard-1' });
 ```
 
-Pre-flight `capabilities.features.includes('workspace_skill_toggle')`. The typed `DaemonSkillToggleResult` reports the trimmed requested `skillName`, whether disk state `changed`, activation state (`applied`, `deferred`, or `partial`), and refreshed/failed session counts. The write is settings-only and does not require the name to appear in `DaemonWorkspaceSkillStatus`; that status type's optional false-only `userInvocable` field remains useful for rendering the live catalog but does not gate persistence.
+Pre-flight `capabilities.features.includes('workspace_skill_settings_toggle')`. The typed `DaemonSkillToggleResult` reports the trimmed requested `skillName`, whether disk state `changed`, activation state (`applied`, `deferred`, or `partial`), and refreshed/failed session counts. The write is settings-only and does not require the name to appear in `DaemonWorkspaceSkillStatus`; that status type's optional false-only `userInvocable` field remains useful for rendering the live catalog but does not gate persistence. The retired `workspace_skill_toggle` tag described the earlier catalog-validated behavior and is not advertised for this contract.
 
-For batch changes, pre-flight `workspace_skill_batch_toggle` and call either client shape with the same contract:
+For batch changes, pre-flight `workspace_skill_settings_batch_toggle` and call either client shape with the same contract. The routes and request bodies are unchanged:
 
 ```ts
 await client.setWorkspaceSkillsEnabled(['review', 'deploy'], false, {

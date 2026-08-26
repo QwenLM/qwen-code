@@ -173,8 +173,9 @@ export function SkillsManagerPage({
     remove,
   } = useSkills({ autoLoad: true });
   const canToggleSkills =
-    workspace.capabilities?.features.includes('workspace_skill_toggle') ===
-    true;
+    workspace.capabilities?.features.includes(
+      'workspace_skill_settings_toggle',
+    ) === true;
   const canManageSkills =
     workspace.capabilities?.features.includes('workspace_skill_manage') ===
     true;

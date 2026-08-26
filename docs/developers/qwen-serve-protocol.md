@@ -198,8 +198,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
  'workspace_file_upload',
- 'session_approval_mode_control', 'workspace_tool_toggle', 'workspace_skill_toggle',
- 'workspace_skill_batch_toggle',
+ 'session_approval_mode_control', 'workspace_tool_toggle',
+ 'workspace_skill_settings_toggle', 'workspace_skill_settings_batch_toggle',
  'extension_batch_activation_v2',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
  'session_recap', 'session_generation', 'session_btw', 'session_shell_command',
@@ -270,7 +270,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_info` advertises `GET /workspace/:id/session-info` and its `/workspaces/:workspace/session-info` twin. The response aggregates persisted active and archived session counts without hydrating list metadata. It is an explicit O(n) disk scan and must not be polled; clients should treat `truncated: true` as a lower-bound result.
 
-`session_approval_mode_control`, `workspace_tool_toggle`, `workspace_skill_toggle`, `workspace_skill_batch_toggle`, `extension_batch_activation_v2`, `workspace_init`, and `workspace_mcp_restart` advertise the mutation control routes documented below. They are strict-gated by the mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
+`session_approval_mode_control`, `workspace_tool_toggle`, `workspace_skill_settings_toggle`, `workspace_skill_settings_batch_toggle`, `extension_batch_activation_v2`, `workspace_init`, and `workspace_mcp_restart` advertise the mutation control routes documented below. They are strict-gated by the mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance. The settings-specific Skill tags replace the retired `workspace_skill_toggle` and `workspace_skill_batch_toggle` tags, whose catalog-validated behavior is a different contract; the route paths and request bodies did not change.
 
 `mcp_guardrails` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14) covers the MCP budget surface: the `clientCount` / `clientBudget` / `budgetMode` / `budgets[]` fields on `GET /workspace/mcp`, the `disabledReason` field on per-server cells, and the `--mcp-client-budget` / `--mcp-budget-mode` CLI flags. Older daemons omit the new fields entirely; SDK clients pre-flight this tag before relying on `budgets[]` semantics. The registry descriptor also carries `modes: ['warn', 'enforce']` for future feature-modes exposure — for now, clients infer mode from the snapshot's `budgetMode` field. Server refusal under `enforce` mode is deterministic by `Object.entries(mcpServers)` declaration order; a future scope-precedence layer (if qwen-code adopts one) would shift this to "lowest-precedence first" to mirror claude-code's `plugin < user < project < local` convention.
 
@@ -2816,7 +2816,7 @@ SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originato
 
 #### `POST /workspace/skills/:name/enable`
 
-Capability tag: `workspace_skill_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
+Capability tag: `workspace_skill_settings_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
 
 Update the workspace Skill settings for a name without consulting the loaded Skill catalog. The trimmed request name is passed to persistence and returned in the response. Enabling a `skills.defaultDisabled` Skill adds a workspace `skills.enabled` opt-in; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. Higher-scope settings remain authoritative for effective availability, but they do not prevent the workspace scope from recording or removing its own declaration.
 
@@ -2853,7 +2853,7 @@ The mutation reuses the workspace-scoped `settings_changed` event for each chang
 
 #### `POST /workspace/skills/enable`
 
-Capability tag: `workspace_skill_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
+Capability tag: `workspace_skill_settings_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
 
 Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. The daemon does not consult the loaded Skill catalog. It persists all names in one locked settings write and refreshes active sessions once. Unexpected persistence or runtime-generation failures fail the whole request.
 

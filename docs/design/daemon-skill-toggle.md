@@ -10,7 +10,7 @@ Expose workspace Skill settings writes through daemon REST and the TypeScript SD
 - `POST /workspaces/:workspace/skills/:name/enable`
 - Request body: `{ "enabled": boolean }`
 - SDK: `DaemonClient.setWorkspaceSkillEnabled` and `WorkspaceDaemonClient.setWorkspaceSkillEnabled`
-- Capability: `workspace_skill_toggle`
+- Capability: `workspace_skill_settings_toggle`
 
 The response contains the trimmed requested name, requested state, whether persistence changed, activation state, and session refresh counts. `applied` means every active session refreshed, `deferred` means no ACP child was running, and `partial` means at least one session failed to refresh after persistence committed.
 

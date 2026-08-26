@@ -69,7 +69,6 @@ import {
 } from '../workspace-skill-management.js';
 
 import {
-  mapWorkspaceSkillToggleError,
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
   WorkspaceSettingsPartialPersistError,
@@ -119,7 +118,6 @@ export type {
 export {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
-  WorkspaceSkillNotToggleableError,
   mapWorkspaceSkillToggleError,
 } from './types.js';
 
@@ -947,7 +945,6 @@ export function createDaemonWorkspaceService(
         ]),
       );
       const results: WorkspaceSkillBatchToggleResult['results'] = [];
-      const errors: WorkspaceSkillBatchToggleResult['errors'] = [];
       for (const skillName of skillNames) {
         const outcome = persistedByName.get(skillName.toLowerCase());
         if (!outcome) {
@@ -955,17 +952,11 @@ export function createDaemonWorkspaceService(
             `Missing persisted Skill batch outcome: ${skillName}`,
           );
         }
-        if ('error' in outcome) {
-          const error = mapWorkspaceSkillToggleError(outcome.error);
-          if (!error) throw outcome.error;
-          errors.push(error);
-        } else {
-          results.push({
-            skillName: outcome.skillName,
-            enabled,
-            changed: outcome.changed,
-          });
-        }
+        results.push({
+          skillName: outcome.skillName,
+          enabled,
+          changed: outcome.changed,
+        });
       }
 
       const changed = results.some((result) => result.changed);
@@ -1033,7 +1024,7 @@ export function createDaemonWorkspaceService(
         sessionsRefreshed,
         sessionsFailed,
         results,
-        errors,
+        errors: [],
       };
     },
 

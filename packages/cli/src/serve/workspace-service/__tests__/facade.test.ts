@@ -115,7 +115,6 @@ import {
 import { WorkspaceVoiceError } from '../../../services/voice-service.js';
 import {
   WorkspacePermissionRulesSessionRequiredError,
-  WorkspaceSkillNotToggleableError,
   WorkspaceSettingsPartialPersistError,
 } from '../types.js';
 import type {
@@ -2275,12 +2274,12 @@ describe('createDaemonWorkspaceService', () => {
       });
       const persistDisabledSkillsBatch = vi.fn().mockResolvedValue({
         outcomes: [
-          { skillName: 'Review', changed: true },
-          { skillName: 'missing', changed: true },
-          { skillName: 'hidden', changed: true },
-          { skillName: 'inactive', changed: true },
-          { skillName: 'locked', changed: true },
           { skillName: 'deploy', changed: true },
+          { skillName: 'locked', changed: true },
+          { skillName: 'inactive', changed: true },
+          { skillName: 'hidden', changed: true },
+          { skillName: 'missing', changed: true },
+          { skillName: 'Review', changed: true },
         ],
         settingsChanges: [
           {
@@ -2370,57 +2369,6 @@ describe('createDaemonWorkspaceService', () => {
           sessionsFailed: 0,
         }),
       );
-    });
-
-    it('orders results and legacy errors by request targets', async () => {
-      const svc = createDaemonWorkspaceService(
-        makeDeps({
-          queryWorkspaceStatus: vi.fn().mockResolvedValue({
-            v: 1,
-            workspaceCwd: '/workspace',
-            initialized: true,
-            skills,
-          }),
-          persistDisabledSkillsBatch: vi.fn().mockResolvedValue({
-            outcomes: [
-              { skillName: 'deploy', changed: true },
-              {
-                skillName: 'locked',
-                error: new WorkspaceSkillNotToggleableError(
-                  'locked',
-                  'locked',
-                  'user',
-                ),
-              },
-              { skillName: 'review', changed: true },
-              { skillName: 'missing', changed: true },
-            ],
-            settingsChanges: [],
-          }),
-          isChannelLive: () => false,
-        }),
-      );
-
-      const result = await svc.setWorkspaceSkillsEnabled(
-        makeCtx(),
-        ['review', 'locked', 'missing', 'deploy'],
-        false,
-      );
-
-      expect(result.results).toEqual([
-        { skillName: 'review', enabled: false, changed: true },
-        { skillName: 'missing', enabled: false, changed: true },
-        { skillName: 'deploy', enabled: false, changed: true },
-      ]);
-      expect(result.errors).toEqual([
-        {
-          skillName: 'locked',
-          code: 'skill_not_toggleable',
-          error: 'Skill locked is locked by user settings',
-          reason: 'locked',
-          lockedScope: 'user',
-        },
-      ]);
     });
 
     it('fails the whole batch when persistence fails unexpectedly', async () => {

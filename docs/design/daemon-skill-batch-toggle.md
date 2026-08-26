@@ -71,11 +71,13 @@ as the single-Skill route.
 
 ## Compatibility
 
-Advertise `workspace_skill_batch_toggle` separately from
-`workspace_skill_toggle`. Clients must pre-flight the new capability before
-calling the collection route. The single-Skill route now follows the same
-settings-only contract and returns the trimmed request name because there is no
-catalog lookup from which to obtain a canonical spelling. The collection
-routes are HTTP-only: the ACP
+Advertise `workspace_skill_settings_batch_toggle` separately from
+`workspace_skill_settings_toggle`. These tags replace the retired
+`workspace_skill_batch_toggle` and `workspace_skill_toggle` tags, whose
+catalog-validated contract is incompatible with settings-only writes. Clients
+must pre-flight the settings capability before calling the unchanged route.
+The single-Skill route returns the trimmed request name because there is no
+catalog lookup from which to obtain a canonical spelling. The collection routes
+are HTTP-only: the ACP
 `_qwen/workspace/skills` dispatch surface stays read-only, matching the
 single-Skill toggle.
