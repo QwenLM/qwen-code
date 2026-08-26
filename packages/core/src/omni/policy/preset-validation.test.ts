@@ -16,6 +16,10 @@ import { OmniExtractKeyframesTool } from './tools/extract-keyframes.js';
 import { OmniExtractAudioTool } from './tools/extract-audio.js';
 import { OmniTranscribeAudioTool } from './tools/transcribe-audio.js';
 import { OmniOcrImageTool } from './tools/ocr-image.js';
+import { OmniClipVideoTool } from './tools/clip-video.js';
+import { OmniClipAudioTool } from './tools/clip-audio.js';
+import { OmniUnderstandVideoSegmentsTool } from './tools/understand-video-segments.js';
+import { OmniCaptionImageTool } from './tools/caption-image.js';
 
 /**
  * Guards the shipped fixedPolicy preset
@@ -41,6 +45,10 @@ describe('omni-fixed-policies-preset.json', () => {
       new OmniExtractAudioTool(),
       new OmniTranscribeAudioTool(),
       new OmniOcrImageTool(),
+      new OmniClipVideoTool(),
+      new OmniClipAudioTool(),
+      new OmniUnderstandVideoSegmentsTool(),
+      new OmniCaptionImageTool(),
     ];
     const lookup = {
       getTool: (name: string) => tools.find((t) => t.name === name),

@@ -139,6 +139,21 @@ describe('defaultModalities', () => {
       expect(m.audio).toBeUndefined();
     });
 
+    it('returns full multimodal for qwen omni models', () => {
+      for (const model of [
+        'qwen3.5-omni-plus',
+        'qwen3-omni-flash',
+        'qwen-omni-turbo',
+      ]) {
+        expect(defaultModalities(model)).toEqual({
+          image: true,
+          pdf: true,
+          audio: true,
+          video: true,
+        });
+      }
+    });
+
     it('returns image + video for qwen3.7-plus', () => {
       const m = defaultModalities('qwen3.7-plus');
       expect(m.image).toBe(true);

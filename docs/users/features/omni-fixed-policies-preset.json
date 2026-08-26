@@ -192,16 +192,46 @@
       // ---- 工具级配套:ASR 链的超时放大(30 分钟不足以转写长片)----------
       // transcribe 的 settings.maxInputBytes 放大到 100MB,与链内 downsample
       // 分支的 100MB 阈值一致(默认 10MB 会在第二步就拒绝)。
+      //
+      // modelAccess.enabled: 默认所有 policy 工具对模型隐藏(只能被
+      // fixedPolicies 触发)。打开后模型可以基于已投递媒体的 resourceId
+      // 自行调用——即"渐进式理解":先看降级产物,需要细节时自己裁剪/
+      // 抽帧/转写更高保真证据。系统提示会列出已开放的工具。
+      // 只开放"取证"类工具;纯降级工具(downsample/downscale)保持
+      // operator-only,模型没有主动降低证据质量的理由。
       "policyTools": {
         "omni_transcribe_audio": {
           "settings": { "maxInputBytes": 104857600 },
-          "runtime": { "timeoutMs": 1800000 }
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
         },
         "omni_extract_audio": {
-          "runtime": { "timeoutMs": 1800000 }
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
         },
         "omni_downsample_audio": {
           "runtime": { "timeoutMs": 1800000 }
+        },
+        "omni_clip_video": {
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
+        },
+        "omni_clip_audio": {
+          "modelAccess": { "enabled": true }
+        },
+        "omni_extract_keyframes": {
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
+        },
+        "omni_understand_video_segments": {
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
+        },
+        "omni_ocr_image": {
+          "modelAccess": { "enabled": true }
+        },
+        "omni_caption_image": {
+          "modelAccess": { "enabled": true }
         }
       },
 
