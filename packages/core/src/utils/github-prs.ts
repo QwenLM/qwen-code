@@ -520,6 +520,7 @@ export type BranchPullRequestSnapshot =
  */
 export function fetchCurrentBranchPullRequest(
   cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<BranchPullRequestSnapshot> {
   const gitRoot = findGitRoot(cwd);
   // No repo proves nothing about a branch's PR — the command may CREATE
@@ -536,7 +537,7 @@ export function fetchCurrentBranchPullRequest(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(),
+        env: gitEnv(env),
       },
       (error, stdout, stderr) => {
         if (error) {
