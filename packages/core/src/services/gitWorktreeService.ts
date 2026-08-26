@@ -1588,7 +1588,10 @@ export class GitWorktreeService {
    *   `agent-1234567` would be silently deleted after 30 days along
    *   with any work it contained.
    */
-  static validateUserWorktreeSlug(slug: string): string | null {
+  static validateUserWorktreeSlug(
+    slug: string,
+    options?: { allowPrBackedShape?: boolean },
+  ): string | null {
     if (typeof slug !== 'string' || slug.length === 0) {
       return 'Worktree name must be a non-empty string.';
     }
@@ -1601,7 +1604,10 @@ export class GitWorktreeService {
     if (slug.includes('..') || slug.startsWith('.') || slug.startsWith('-')) {
       return 'Worktree name must not start with "." or "-" or contain "..".';
     }
-    if (/^pr-[1-9]\d{0,8}$/.test(slug)) {
+    if (
+      /^pr-[1-9]\d{0,8}$/.test(slug) &&
+      options?.allowPrBackedShape !== true
+    ) {
       // `--worktree=#<N>` launches own this shape; a user-chosen slug with
       // it would bind the session to PR N (and take the sweep's state
       // stamps) although the session never touched that PR.
@@ -1643,9 +1649,16 @@ export class GitWorktreeService {
   async createUserWorktree(
     slug: string,
     baseBranch?: string,
-    options?: { symlinkDirectories?: readonly string[] },
+    options?: {
+      symlinkDirectories?: readonly string[];
+      /** The caller owns the pr-<N> shape (PR-backed startup). */
+      prBacked?: boolean;
+    },
   ): Promise<CreateWorktreeResult> {
-    const validationError = GitWorktreeService.validateUserWorktreeSlug(slug);
+    const validationError = GitWorktreeService.validateUserWorktreeSlug(
+      slug,
+      options?.prBacked === true ? { allowPrBackedShape: true } : undefined,
+    );
     if (validationError) {
       debugLogger.warn(
         `createUserWorktree: invalid slug ${slug}: ${validationError}`,

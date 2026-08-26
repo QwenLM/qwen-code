@@ -291,6 +291,7 @@ export async function setupStartupWorktree(
   const baseRef = isPullRequest ? pullRequestHeadSha! : originalBranch;
   const result = await service.createUserWorktree(slug, baseRef, {
     symlinkDirectories: options?.symlinkDirectories,
+    prBacked: isPullRequest,
   });
   if (!result.success || !result.worktree) {
     return {

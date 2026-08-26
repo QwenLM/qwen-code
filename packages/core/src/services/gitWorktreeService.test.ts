@@ -773,5 +773,19 @@ describe('GitWorktreeService', () => {
         GitWorktreeService.validateUserWorktreeSlug('my-pr-42'),
       ).toBeNull();
     });
+
+    it('allows the pr-<number> shape for PR-backed creators only', () => {
+      expect(
+        GitWorktreeService.validateUserWorktreeSlug('pr-42', {
+          allowPrBackedShape: true,
+        }),
+      ).toBeNull();
+      // The other slug rules still apply.
+      expect(
+        GitWorktreeService.validateUserWorktreeSlug('pr-42/..', {
+          allowPrBackedShape: true,
+        }),
+      ).toMatch(/may only contain/);
+    });
   });
 });
