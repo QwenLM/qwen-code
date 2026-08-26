@@ -453,6 +453,14 @@ describe('Session', () => {
     refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+    beginManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    consumeManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    recordCompletedToolCall: ReturnType<typeof vi.fn>;
+  };
+  let mockMemoryManager: {
+    scheduleExtract: ReturnType<typeof vi.fn>;
+    scheduleDream: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
     abortAll: ReturnType<typeof vi.fn>;
@@ -660,6 +668,14 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      beginManagedAutoMemoryRecall: vi.fn(),
+      consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      finishManagedAutoMemoryRecall: vi.fn(),
+      recordCompletedToolCall: vi.fn(),
+    };
+    mockMemoryManager = {
+      scheduleExtract: vi.fn().mockResolvedValue(undefined),
+      scheduleDream: vi.fn().mockResolvedValue(undefined),
     };
     mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
@@ -838,6 +854,8 @@ describe('Session', () => {
       // `skipLoopDetection ?? true`): heuristics off unless a test opts in.
       getSkipLoopDetection: vi.fn().mockReturnValue(true),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getGoalRuntime: vi.fn().mockReturnValue(mockGoalRuntime),
       getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
       getGoalRuntimePrepared: vi.fn().mockResolvedValue(mockGoalRuntime),
@@ -859,6 +877,8 @@ describe('Session', () => {
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      setCurrentSessionScheduledTaskCreator: vi.fn(),
+      getCurrentSessionScheduledTaskCreator: vi.fn(),
       getExtensions: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
@@ -919,6 +939,7 @@ describe('Session', () => {
     mockClient = undefined as unknown as AgentSideConnection;
     mockSettings = undefined as unknown as LoadedSettings;
     mockGeminiClient = undefined as unknown as typeof mockGeminiClient;
+    mockMemoryManager = undefined as unknown as typeof mockMemoryManager;
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
@@ -2061,6 +2082,152 @@ describe('Session', () => {
         titleSource: 'auto',
       },
     );
+  });
+
+  describe('managed auto-memory', () => {
+    it('recalls before the initial send and schedules background work after a successful turn', async () => {
+      const memoryPrompt = '<system-reminder>remember this</system-reminder>';
+      const finalHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ];
+      mockGeminiClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce({
+        prompt: memoryPrompt,
+        selectedDocs: [],
+        strategy: 'heuristic',
+      });
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(finalHistory);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockGeminiClient.beginManagedAutoMemoryRecall,
+      ).toHaveBeenCalledWith('hello', expect.any(AbortSignal));
+      expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        sessionId: 'test-session-id',
+        history: finalHistory,
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        sessionId: 'test-session-id',
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+      expect(
+        mockGeminiClient.finishManagedAutoMemoryRecall,
+      ).toHaveBeenCalledOnce();
+    });
+
+    it('delivers refined recall after tool responses and records the completed tool', async () => {
+      const memoryPrompt = '<system-reminder>refined memory</system-reminder>';
+      mockGeminiClient.consumeManagedAutoMemoryRecall
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          prompt: memoryPrompt,
+          selectedDocs: [],
+          strategy: 'model',
+        });
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute,
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'read file' }],
+      });
+
+      const followUpRequest = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1]?.[1] as { message: Part[] };
+      const followUp = followUpRequest.message;
+      expect(followUp[0]?.functionResponse).toBeDefined();
+      expect(textParts(followUp)).toEqual([memoryPrompt]);
+      expect(
+        mockGeminiClient.consumeManagedAutoMemoryRecall,
+      ).toHaveBeenNthCalledWith(2, 'tool_result');
+      expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        'read_file',
+        { path: '/tmp/test.txt' },
+      );
+    });
+
+    it('does not run managed memory for retries or failed turns', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'retry' }],
+        retry: true,
+      } as PromptRequest);
+
+      expect(
+        mockGeminiClient.beginManagedAutoMemoryRecall,
+      ).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('provider failed'));
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'new request' }],
+        }),
+      ).rejects.toThrow('provider failed');
+
+      expect(
+        mockGeminiClient.beginManagedAutoMemoryRecall,
+      ).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      expect(
+        mockGeminiClient.finishManagedAutoMemoryRecall,
+      ).toHaveBeenCalledOnce();
+    });
   });
 
   it('rejects writer loss before mutating an existing ACP turn', async () => {
@@ -7666,6 +7833,7 @@ describe('Session', () => {
 
       delete process.env['QWEN_CODE_SERVE'];
       vi.mocked(mockConfig.setSubSessionSpawner).mockClear();
+      vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator).mockClear();
       const standalone = new Session(
         'standalone-acp-session',
         mockConfig,
@@ -7674,6 +7842,89 @@ describe('Session', () => {
       );
       expect(standalone).toBeDefined();
       expect(mockConfig.setSubSessionSpawner).not.toHaveBeenCalled();
+      expect(
+        mockConfig.setCurrentSessionScheduledTaskCreator,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('uses the trusted daemon prompt id for a current-session task', async () => {
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        id: 'cron-1',
+        cron: '5 9 * * *',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+      expect(create).toBeTypeOf('function');
+
+      await expect(
+        core.runWithInvocationContext(
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-prompt-id',
+          },
+          () =>
+            create?.({
+              cron: '5 9 * * *',
+              prompt: 'continue',
+              recurring: true,
+              promptId: 'test-session-id########1',
+            }),
+        ),
+      ).resolves.toEqual({ id: 'cron-1', cron: '5 9 * * *' });
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        'qwen/control/scheduled-task/create-current',
+        {
+          callerSessionId: 'test-session-id',
+          promptId: 'daemon-prompt-id',
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+        },
+      );
+    });
+
+    it('reports an explicit unavailable error for an older daemon bridge', async () => {
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32601,
+        message: 'Method not found',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+
+      await expect(
+        create?.({
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toThrow(/current_session_scheduling_unavailable/);
+    });
+
+    it('surfaces structured daemon rejections to the current-session tool', async () => {
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32602,
+        message: 'Invalid params',
+        data: {
+          errorKind: 'session_busy',
+          status: 409,
+          hint: 'The caller session has a pending interaction',
+        },
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+
+      await expect(
+        create?.({
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toThrow(
+        'session_busy: The caller session has a pending interaction',
+      );
     });
 
     it('drops oldest background notifications when the queue reaches its cap', () => {
@@ -15408,6 +15659,69 @@ describe('Session', () => {
           ['continued final'],
         ]);
         expect(capture.writeToSpan).toHaveBeenCalledWith(agentTelemetry.span);
+      });
+
+      it('does not extract a fresh channel turn stopped by loop protection in a Stop continuation', async () => {
+        const messageBus = {
+          request: vi.fn().mockResolvedValue({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Continue after Stop hook',
+            },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(true);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'stop-loop-1',
+                      name: 'read_file',
+                      args: { path: 'a' },
+                    },
+                    {
+                      id: 'stop-loop-2',
+                      name: 'read_file',
+                      args: { path: 'b' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'channel task' }],
+            _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            loop_type: core.LoopType.TURN_TOOL_CALL_CAP,
+          }),
+          {},
+        );
+        expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+        expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
       });
 
       it('keeps continuation retry text in the delivered prompt final', async () => {
@@ -23236,6 +23550,10 @@ describe('Session', () => {
 
           expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
           expect(result.stopReason).toBe('end_turn');
+          expect(
+            mockGeminiClient.beginManagedAutoMemoryRecall,
+          ).not.toHaveBeenCalled();
+          expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
         });
 
         it('wraps additionalContext in the reserved tag before sending', async () => {
@@ -23276,6 +23594,9 @@ describe('Session', () => {
             core.isUserPromptSubmitContextPartText(textParts(sent).at(-1)!),
           ).toBe(true);
           expect(textParts(sent).at(-1)).toContain('extra hook context');
+          expect(
+            mockGeminiClient.beginManagedAutoMemoryRecall,
+          ).toHaveBeenCalledWith('hello', expect.any(AbortSignal));
         });
       });
 
