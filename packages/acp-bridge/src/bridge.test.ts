@@ -27359,7 +27359,11 @@ describe('createAcpSessionBridge', () => {
       const dir = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'bridge-pr-reconcile-'),
       );
-      const sidecarPath = path.join(dir, `${session.sessionId}.pr.json`);
+      // Not `${session.sessionId}.pr.json`: the bridge id is `sess:<cwd>`,
+      // so on Windows the filename carries a drive colon and separators and
+      // the sidecar's `mkdir(dirname)` fails with ENOENT. Production paths
+      // come from sessionService and key off the persisted UUID instead.
+      const sidecarPath = path.join(dir, 'session.pr.json');
       try {
         // The finding's shape: the created PR at position 0, nine reviews.
         const seeded: SessionPr[] = [
