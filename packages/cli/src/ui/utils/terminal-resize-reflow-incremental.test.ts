@@ -35,6 +35,11 @@ const CURSOR_HIDE = `${ESC}?25l`;
 // input cursor was shown (the normal prompt state with a TextInput).
 const RETURN_PREFIX = `${CURSOR_HIDE}${ESC}2B${CURSOR_TO_COL0}`;
 
+// The patched Ink publishes its reset-write fullscreen decision under this
+// key (patches/ink+7.0.3.patch); reset fixtures set it the way Ink does so
+// the deferred anchor is tested against the production slot authority.
+const INK_RESET_FULLSCREEN = Symbol.for('qwen.ink.resetFullscreen');
+
 function frameLines(width: number, rows: number): string[] {
   return Array.from(
     { length: rows },
@@ -95,6 +100,13 @@ class FakeStdout extends EventEmitter {
     return true;
   }
 }
+
+// Mirrors the patched Ink: renderInteractiveFrame publishes its fullscreen
+// decision on the stream immediately before writing a clearTerminal reset.
+const publishResetFullscreen = (stdout: FakeStdout, isFullscreen: boolean) => {
+  (stdout as unknown as Record<symbol, unknown>)[INK_RESET_FULLSCREEN] =
+    isFullscreen;
+};
 
 describe('installTerminalResizeReflow (VP incremental rendering)', () => {
   beforeEach(() => {
@@ -355,6 +367,8 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
       // Fullscreen reset (45 lines >= 40 viewport rows): Ink syncs without
       // a trailing-newline slot and the next diff's cursorUp reflects that.
+      // Deliberately no published decision: this pins the wrapped-height
+      // classifier fallback for reset writers that do not publish one.
       const reset = frameLines(60, 45);
       stdout.write(ansiEscapes.clearTerminal + reset.join('\n'));
       const next = reset.slice();
@@ -434,6 +448,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       // frame).
       const transcript = ['committed-a', 'committed-b', 'committed-c'];
       const reset = frameLines(20, 10).map((line) => `${line}-r2`);
+      publishResetFullscreen(stdout, false);
       stdout.write(
         ansiEscapes.clearTerminal +
           transcript.join('\n') +
@@ -484,7 +499,10 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       // The reply collapses below the viewport: Ink writes clearTerminal +
       // the frame WITHOUT the trailing '\n' it hands to log.sync(), so the
       // next same-height diff carries cursorUp(lines), not cursorUp(lines-1).
+      // The new frame is sub-viewport, so Ink publishes non-fullscreen and
+      // syncs the slot.
       const reset = frameLines(20, 30).map((line) => `${line}-r3`);
+      publishResetFullscreen(stdout, false);
       stdout.write(ansiEscapes.clearTerminal + reset.join('\n'));
       const next = reset.slice();
       next[2] = 'COLLAPSED-UPDATE';
@@ -516,6 +534,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
       const transcript = ['committed-x', 'committed-y'];
       const reset = frameLines(20, 10).map((line) => `${line}-r5`);
+      publishResetFullscreen(stdout, false);
       stdout.write(
         ansiEscapes.clearTerminal +
           transcript.join('\n') +
@@ -568,6 +587,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       const prev = frameLines(20, 10);
       stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
       const reset = frameLines(20, 10).map((line) => `${line}-rc`);
+      publishResetFullscreen(stdout, false);
       stdout.write(ansiEscapes.clearTerminal + reset.join('\n'));
       // Cursor-only update (output unchanged): carries a leading cursorUp
       // but no line ops, so it must not trigger the deferred anchor.
@@ -594,6 +614,42 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('does not anchor a pending reset on the log.sync cursor suffix', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      const reset = frameLines(20, 10).map((line) => `${line}-r7`);
+      publishResetFullscreen(stdout, false);
+      stdout.write(ansiEscapes.clearTerminal + reset.join('\n'));
+      // log.sync's cursor suffix follows the reset write; with the composer
+      // at column 0 it parses as a diff head plus an `ESC[1G` line-op start,
+      // but its moveUp count must not name the anchoring window.
+      stdout.write(`${ESC}1A${ESC}1G${CURSOR_SHOW}`);
+      const next = reset.slice();
+      next[4] = 'POST-SYNC-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(reset, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('POST-SYNC-UPDATE');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('-r7');
+    } finally {
+      restore();
+    }
+  });
+
   it('does not anchor a pending reset on an erase write without line ops', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(
@@ -604,6 +660,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       const prev = frameLines(20, 10);
       stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
       const reset = frameLines(20, 10).map((line) => `${line}-re`);
+      publishResetFullscreen(stdout, false);
       stdout.write(ansiEscapes.clearTerminal + reset.join('\n'));
       // Erase-prefixed write with a cursorUp head but no line ops: the
       // deferred anchor must not fire, leaving the last good model.
@@ -876,6 +933,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       // The bottom composited row is blank (e.g. a height-constrained dialog
       // padding shorter content); a reset write carries no slot to pop it.
       live[9] = '';
+      publishResetFullscreen(stdout, false);
       stdout.write(
         ansiEscapes.clearTerminal +
           transcript.join('\n') +
@@ -913,6 +971,7 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
       const transcript = ['committed-s'];
       const live = frameLines(20, 10).map((line) => `${line}-rs`);
+      publishResetFullscreen(stdout, false);
       stdout.write(
         ansiEscapes.clearTerminal +
           transcript.join('\n') +
@@ -990,6 +1049,130 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
       expect(replay).toContain('SLOTTED-SHRINK');
       expect(replay).toContain('line-6-');
       expect(replay).not.toContain('line-9-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('anchors a boundary-height reset by the published decision, not the classifier', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // A frame at exactly viewport height resets fullscreen (slotless), but
+      // the one-line-short slotted candidate packs below the viewport, so the
+      // wrapped-height classifier accepts it and drops the top frame line.
+      const transcript = ['committed-b1', 'committed-b2'];
+      const live = frameLines(20, 40);
+      publishResetFullscreen(stdout, true);
+      stdout.write(
+        ansiEscapes.clearTerminal +
+          transcript.join('\n') +
+          '\n' +
+          live.join('\n'),
+      );
+      const next = live.slice();
+      next[5] = 'BOUNDARY-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(live, next, {
+          trailingNewline: false,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('BOUNDARY-UPDATE');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-39-');
+      expect(replay).not.toContain('committed-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not let literal tabs flip a sub-viewport reset to slotless', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // Tab-indented lines pack into more physical rows than stringWidth
+      // sees (tab stops vs width 0), so the classifier calls this 24-line
+      // frame fullscreen; Ink's logical height says it is not.
+      const transcript = ['committed-c1', 'committed-c2'];
+      const live = Array.from(
+        { length: 24 },
+        (_, i) => `T-line-${i}` + '\t'.repeat(16),
+      );
+      publishResetFullscreen(stdout, false);
+      stdout.write(
+        ansiEscapes.clearTerminal +
+          transcript.join('\n') +
+          '\n' +
+          live.join('\n'),
+      );
+      const next = live.slice();
+      next[20] = 'UPDATED-TAB-20';
+      stdout.write(
+        incrementalDiffFrame(live, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('UPDATED-TAB-20');
+      expect(replay).toContain('T-line-0');
+      expect(replay).toContain('T-line-23');
+      expect(replay).not.toContain('committed-');
+    } finally {
+      restore();
+    }
+  });
+
+  it('anchors a leaving-fullscreen reset despite width drift before the diff', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    try {
+      const prev = frameLines(20, 45);
+      stdout.write(ansiEscapes.eraseLines(45) + prev.join('\n'));
+      // The new frame is sub-viewport: Ink publishes non-fullscreen and
+      // syncs the slot, then the width shrinks before the anchoring diff.
+      // Re-wrapping the candidate at the drifted width flips the decision;
+      // the published marker must win.
+      const reset = frameLines(20, 30).map((line) => `${line}-r3`);
+      publishResetFullscreen(stdout, false);
+      stdout.write(ansiEscapes.clearTerminal + reset.join('\n'));
+      stdout.columns = 8;
+      stdout.emit('resize');
+      const next = reset.slice();
+      next[2] = 'COLLAPSED-UPDATE';
+      stdout.write(
+        incrementalDiffFrame(reset, next, {
+          trailingNewline: true,
+          prevTrailingNewline: true,
+          returnPrefix: RETURN_PREFIX,
+        }),
+      );
+      stdout.written.length = 0;
+      repaint!();
+      const replay = stdout.written[0]!;
+      expect(replay).toContain('COLLAPSED-UPDATE');
+      expect(replay).toContain('line-0-');
+      expect(replay).toContain('line-29-');
     } finally {
       restore();
     }

@@ -290,6 +290,19 @@ index ef659f3..767d861 100644
          const hasStaticOutput = staticOutput !== '';
          const isTty = this.options.stdout.isTTY;
          // Detect fullscreen: output fills or exceeds terminal height.
+@@ -705,7 +724,12 @@ export default class Ink {
+         if (shouldClearTerminal) {
+             const sync = this.shouldSync();
+             if (sync) {
+                 this.options.stdout.write(bsu);
+             }
++            // qwen(reflow): publish this frame's fullscreen decision for the
++            // resize-reflow interceptor's deferred reset anchor — it must slot
++            // the pending window the way log.sync() will, not re-derive it
++            // from re-wrapped bytes.
++            this.options.stdout[Symbol.for('qwen.ink.resetFullscreen')] = isFullscreen;
+             this.options.stdout.write(ansiEscapes.clearTerminal + this.fullStaticOutput + output);
+             this.lastOutput = output;
 diff --git a/node_modules/ink/build/log-update.js b/node_modules/ink/build/log-update.js
 index cdb5fc4..89925ea 100644
 --- a/node_modules/ink/build/log-update.js

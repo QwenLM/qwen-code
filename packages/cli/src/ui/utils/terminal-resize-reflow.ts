@@ -65,6 +65,14 @@ const VP_ERASE_LINES_RE = /(?:\u001B\[2K\u001B\[1A)*\u001B\[2K\u001B\[G/;
 // redraws) must not be mistaken for a frame and clobber the model.
 const MIN_FRAME_LINES = 8;
 
+// The patched Ink publishes its reset-write fullscreen decision on the stream
+// under this key right before writing a clearTerminal reset (see
+// patches/ink+7.0.3.patch). That decision — outputHeight >= viewportRows at
+// the payload's render width — is what fixes log.sync()'s trailing-newline
+// slot; re-deriving it by re-wrapping the stored bytes at the current width
+// diverges on width drift, boundary heights, and literal tabs.
+const INK_RESET_FULLSCREEN = Symbol.for('qwen.ink.resetFullscreen');
+
 // Physical rows a logical line occupies once the terminal soft-wraps it at
 // `columns`. Wide (2-cell) characters that do not fit a row's remaining
 // cells wrap and waste a cell, so rows are greedy-packed per character
@@ -455,6 +463,9 @@ export function installTerminalResizeReflow(
   // trailing-newline slot Ink syncs for non-fullscreen frames — hold it and
   // anchor the trailing live-frame window the next diff's head count names.
   let pendingResetFrame = '';
+  // Ink's fullscreen decision for the pending reset write, when published
+  // (patched Ink); undefined falls back to the wrapped-height classifier.
+  let pendingResetFullscreen: boolean | undefined;
   // Printable bare writes seen in the current armed burst; the second one is
   // the live frame following a static append and bypasses MIN_FRAME_LINES.
   let barePrintableCount = 0;
@@ -471,6 +482,7 @@ export function installTerminalResizeReflow(
   const modelFrame = (content: string, bypassMin = false) => {
     if (!bypassMin && content.split('\n').length < MIN_FRAME_LINES) return;
     pendingResetFrame = '';
+    pendingResetFullscreen = undefined;
     model.content = content;
     model.columns = stdout.columns ?? lastWidth;
     // Ink appends the cursor suffix AFTER the frame's trailing newline, so
@@ -498,21 +510,33 @@ export function installTerminalResizeReflow(
     };
     let anchor: string[] | null = null;
     let trailing = false;
-    // The two candidates differ by the synced trailing-newline slot; classify
-    // with Ink's fullscreen rule (wrapped height >= viewport), trying the
-    // slotted window first: on the boundary a one-line-short anchor rejects
-    // later diffs instead of corrupting kept lines.
-    for (const isTrailing of [true, false]) {
-      const lines = candidate(isTrailing);
-      if (lines === null) continue;
-      const isFullscreen = packedRowCount(lines.map(stripAnsi), width) >= rows;
-      if (isTrailing ? isFullscreen : !isFullscreen) continue;
-      anchor = lines;
-      trailing = isTrailing;
-      break;
+    if (pendingResetFullscreen !== undefined) {
+      // Ink published its actual fullscreen decision for this reset write:
+      // the synced slot state is exactly its negation. The head equation
+      // cannot break the tie itself (an N-line slotless frame and an
+      // (N-1)-line slotted frame emit identical cursorUp counts), so without
+      // this the wrong candidate transforms instead of being rejected.
+      trailing = !pendingResetFullscreen;
+      anchor = candidate(trailing);
+    } else {
+      // No published decision (synthetic writer, unpatched Ink): classify
+      // with Ink's fullscreen rule (wrapped height >= viewport), trying the
+      // slotted window first: on the boundary a one-line-short anchor rejects
+      // later diffs instead of corrupting kept lines.
+      for (const isTrailing of [true, false]) {
+        const lines = candidate(isTrailing);
+        if (lines === null) continue;
+        const isFullscreen =
+          packedRowCount(lines.map(stripAnsi), width) >= rows;
+        if (isTrailing ? isFullscreen : !isFullscreen) continue;
+        anchor = lines;
+        trailing = isTrailing;
+        break;
+      }
     }
     if (anchor === null) return false;
     pendingResetFrame = '';
+    pendingResetFullscreen = undefined;
     model.content = anchor.join('\n') + (trailing ? '\n' : '');
     model.columns = width;
     model.trailingNewline = trailing;
@@ -674,7 +698,21 @@ export function installTerminalResizeReflow(
             // head count validates the trailing live-frame window; the last
             // good model stays the fallback replay meanwhile.
             pendingResetFrame = after;
-            debugLogger.debug('reset', { pending: true });
+            // Ink publishes the fullscreen decision for exactly this write;
+            // consume it so the deferred anchor slots the window the way
+            // log.sync() did (a later reset re-publishes its own).
+            const marker = (stdout as unknown as Record<symbol, unknown>)[
+              INK_RESET_FULLSCREEN
+            ];
+            pendingResetFullscreen =
+              typeof marker === 'boolean' ? marker : undefined;
+            delete (stdout as unknown as Record<symbol, unknown>)[
+              INK_RESET_FULLSCREEN
+            ];
+            debugLogger.debug('reset', {
+              pending: true,
+              markerKnown: pendingResetFullscreen !== undefined,
+            });
           } else {
             model.content = '';
           }
@@ -722,12 +760,17 @@ export function installTerminalResizeReflow(
         // Incremental grow/same-height frame: apply it as a transform. After
         // a reset the anchor may still be pending — the diff's head count
         // names the synced live frame's height and validates the trailing
-        // window to anchor on.
+        // window to anchor on. Whole-chunk cursor suffixes (log.sync after a
+        // reset write: cursorUp + cursorTo(0) + show when the composer sits
+        // at column 0) parse as a diff head followed by an `ESC[1G` line-op
+        // start, but carry no frame — anchoring on their moveUp count would
+        // slot a one-line window.
         const diffHead = parseDiffHead(chunk);
         if (
           diffHead !== null &&
           pendingResetFrame !== '' &&
-          startsWithLineOp(chunk, diffHead.pos)
+          startsWithLineOp(chunk, diffHead.pos) &&
+          !CURSOR_SUFFIX_ONLY_RE.test(chunk)
         ) {
           anchorPendingReset(diffHead.headCount);
         }
