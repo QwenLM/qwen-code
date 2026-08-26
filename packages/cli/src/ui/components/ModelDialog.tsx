@@ -37,7 +37,10 @@ import {
   isSelectableVoiceModel,
 } from '../voice/voice-model.js';
 import type { HistoryItemWithoutId } from '../types.js';
-import { isAdvisorModelEligible } from '../../config/advisor-model.js';
+import {
+  allowsFastOnlyAdvisorModel,
+  isAdvisorModelEligible,
+} from '../../config/advisor-model.js';
 
 function formatModalities(modalities?: InputModalities): string {
   if (!modalities) return t('text-only');
@@ -317,6 +320,21 @@ export function ModelDialog({
 
   const availableModelEntries = useMemo(() => {
     const allModels = config ? config.getAllConfiguredModels() : [];
+    const advisorModel = config?.getAdvisorModel?.();
+    const advisorContext = config ? buildModelIdContext(config) : {};
+    let advisorSelector: ReturnType<typeof resolveModelId> | undefined;
+    if (isAdvisorModelMode && advisorModel) {
+      try {
+        advisorSelector = resolveModelId(advisorModel, advisorContext);
+      } catch {
+        advisorSelector = undefined;
+      }
+    }
+    const allowAdvisorFastOnly = allowsFastOnlyAdvisorModel(
+      advisorModel,
+      advisorSelector,
+      advisorContext,
+    );
 
     // Separate runtime models from registry models
     const runtimeModels =
@@ -337,12 +355,11 @@ export function ModelDialog({
           authType === AuthType.QWEN_OAUTH) &&
         isSelectableImageModel &&
         (isFastModelMode ||
-          (isAdvisorModelMode && config?.getAdvisorModel?.() === 'fast') ||
+          (isAdvisorModelMode && allowAdvisorFastOnly) ||
           !m.fastOnly) &&
         (isVoiceModelMode || !m.voiceOnly) &&
         (isVisionModelMode || isImageModelMode || !m.visionOnly) &&
-        (!isAdvisorModelMode ||
-          isAdvisorModelEligible(m, config?.getAdvisorModel?.() === 'fast'))
+        (!isAdvisorModelMode || isAdvisorModelEligible(m, allowAdvisorFastOnly))
       );
     });
 

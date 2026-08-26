@@ -261,6 +261,40 @@ describe('<ModelDialog />', () => {
     expect(select.initialIndex).toBe(1);
   });
 
+  it('keeps the persisted fast-only Advisor model listed and highlighted', () => {
+    renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(
+          () => `${AuthType.USE_OPENAI}:fast-advisor-model`,
+        ),
+        getFastModel: vi.fn(() => `${AuthType.USE_OPENAI}:fast-advisor-model`),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'fast-advisor-model',
+            label: 'Fast Advisor Model',
+            authType: AuthType.USE_OPENAI,
+            fastOnly: true,
+          },
+          {
+            id: 'regular-advisor-model',
+            label: 'Regular Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.items.map((item) => item.value)).toEqual([
+      '$advisor-off',
+      `${AuthType.USE_OPENAI}::fast-advisor-model`,
+      `${AuthType.USE_OPENAI}::regular-advisor-model`,
+    ]);
+    expect(select.initialIndex).toBe(1);
+  });
+
   it('caps visible model options to the available dialog height', () => {
     renderComponent(
       { availableTerminalHeight: 20 },

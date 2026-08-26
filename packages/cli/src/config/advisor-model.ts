@@ -11,7 +11,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 
-interface AdvisorModelContext {
+export interface AdvisorModelContext {
   fastModel?: string;
   currentModel?: string;
   currentAuthType?: AuthType;
@@ -43,6 +43,17 @@ function resolvesToSameModel(
   } catch {
     return false;
   }
+}
+
+export function allowsFastOnlyAdvisorModel(
+  modelName: string | undefined,
+  selector: ReturnType<typeof resolveModelId> | undefined,
+  context: AdvisorModelContext,
+): boolean {
+  return (
+    modelName === 'fast' ||
+    resolvesToSameModel(context.fastModel, selector, context)
+  );
 }
 
 export function isAdvisorModelEligible(
@@ -77,9 +88,11 @@ export function checkAdvisorModelAvailability(
   } catch {
     selector = undefined;
   }
-  const allowFastOnly =
-    modelName === 'fast' ||
-    resolvesToSameModel(context.fastModel, selector, context);
+  const allowFastOnly = allowsFastOnlyAdvisorModel(
+    modelName,
+    selector,
+    context,
+  );
 
   const availableModels = config
     .getAllConfiguredModels(
