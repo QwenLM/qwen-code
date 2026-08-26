@@ -385,6 +385,9 @@ describe('no-AK integration CI wiring', () => {
       windowsJob,
       'Point temp at a short-alias-free directory',
     );
+    expect(redirectTemp).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
+    );
     for (const key of ['TEMP', 'TMP']) {
       expect(redirectTemp).toContain(
         `"${key}=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
@@ -393,6 +396,9 @@ describe('no-AK integration CI wiring', () => {
     const verifyTemp = getWorkflowStep(
       windowsJob,
       'Verify temp paths carry no short alias',
+    );
+    expect(verifyTemp).toContain(
+      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
     );
     expect(verifyTemp).toContain("for(const key of ['TEMP','TMP'])");
     expect(verifyTemp).toContain('fs.realpathSync(value)');

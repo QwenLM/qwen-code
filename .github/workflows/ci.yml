@@ -1029,14 +1029,10 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/configure-windows-runner'
 
-      # The runner profile directory is exposed through an 8.3 short alias
-      # (C:\Users\RUNNER~1), so %TEMP% yields short-name paths while
-      # fs.realpath resolves the long form of the same directory — tests that
-      # compare path strings then fail (~200 cases). Point TEMP/TMP at a
-      # sibling of the workspace after self-hosted tuning so this value wins,
-      # and before setup-node / npm install so every later step uses it.
+      # Hosted runners expose TEMP through an 8.3 short alias. Self-hosted
+      # runners keep their configured, alias-free RUNNER_TEMP path.
       - name: 'Point temp at a short-alias-free directory'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}"
         shell: 'powershell'
         run: |-
           $temp = Join-Path $env:RUNNER_WORKSPACE 'qwen-code-temp'
