@@ -14,7 +14,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, resolve } from 'node:path';
 
 const BRAND_ID_RE = /^[a-z][a-z0-9-]*$/;
@@ -85,7 +85,7 @@ function loadConfig(path) {
   if (!brandId || !BRAND_ID_RE.test(brandId)) {
     fail(`brandId must match ${BRAND_ID_RE}`);
   }
-  if (!logo || !existsSync(logo)) {
+  if (!logo || !existsSync(logo) || !statSync(logo).isFile()) {
     fail(`logo must be an existing file path, got: ${input.logo}`);
   }
 

@@ -143,7 +143,9 @@ npx tauri build --target aarch64-apple-darwin   # explicit macOS arm64
 
 For `target: all`, run only targets supported by the current machine or CI
 environment. Do not claim cross-platform artifacts were produced unless the
-files exist. Artifacts land under `packages/desktop-shell/src-tauri/target/release/bundle/`.
+files exist. Artifacts land under `packages/desktop-shell/src-tauri/target/release/bundle/`
+for the host target, or `src-tauri/target/<triple>/release/bundle/` when
+`--target <triple>` is used.
 
 ## Signing and Updates
 
@@ -159,6 +161,7 @@ After packaging:
 
 1. Confirm the expected artifact exists under
    `packages/desktop-shell/src-tauri/target/release/bundle/`
+   (or `src-tauri/target/<triple>/release/bundle/` for cross-compile targets)
    (`dmg/`, `nsis/`, `appimage/`, or `deb/`).
 2. Compute `sha256sum` or `shasum -a 256` for each artifact.
 3. On macOS, run `hdiutil verify` for generated DMG files.
