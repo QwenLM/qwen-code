@@ -35,6 +35,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
+import { provisionSourceOf } from './dep-provision.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
 
@@ -1298,6 +1299,16 @@ export function exposeDependencies(
   }
   const containment = {
     rootNm,
+    // A dependency root that was itself provisioned from the host cache
+    // (issue #10108) holds a farm of links RESOLVING INTO that cache — paths
+    // outside every `node_modules` this containment otherwise admits. Without
+    // this root, a scratch tree farmed from a provisioned worktree counted
+    // every borrowed package as an escape and started with no dependencies at
+    // all. `provisionSourceOf` validates the recorded path before it is
+    // trusted (absolute, resolvable, OUTSIDE the dependency root, carrying
+    // the population step's completeness marker), because the marker file it
+    // reads lives in gitignored space a PR can force-add.
+    provisionRoot: provisionSourceOf(dependencyRoot),
     selfLinks: new Set<string>(
       memberSources.flatMap((m) => (m.source === null ? [] : [m.source])),
     ),
@@ -1541,6 +1552,20 @@ function containedIn(root: string, dir: string): string | null {
  */
 const FARM_MARKER = '.qwen-review-farm';
 
+/** What a farm entry's symlink is allowed to resolve into. */
+interface FarmContainment {
+  /** The dependency root's own `node_modules`, resolved. */
+  rootNm: string | null;
+  /**
+   * The host-cache entry a provisioned dependency root borrows from, when
+   * its farm marker names one that validates. Null on every unprovisioned
+   * tree, which keeps the pre-#10108 containment exactly.
+   */
+  provisionRoot: string | null;
+  /** Resolved workspace member directories — npm's self-link targets. */
+  selfLinks: ReadonlySet<string>;
+}
+
 /**
  * Where a farm entry's symlink may resolve.
  *
@@ -1560,10 +1585,19 @@ const FARM_MARKER = '.qwen-review-farm';
 function farmLinkVerdict(
   real: string,
   sourceNm: string,
-  containment: { rootNm: string | null; selfLinks: ReadonlySet<string> },
+  containment: FarmContainment,
 ): 'internal' | 'self' | null {
   if (insideDir(sourceNm, real)) return 'internal';
   if (containment.rootNm !== null && insideDir(containment.rootNm, real)) {
+    return 'internal';
+  }
+  // A provisioned dependency root borrows its packages from the host cache
+  // entry its farm marker names (validated — see the containment build):
+  // links resolving there are the borrowed dependencies themselves.
+  if (
+    containment.provisionRoot !== null &&
+    insideDir(containment.provisionRoot, real)
+  ) {
     return 'internal';
   }
   for (const member of containment.selfLinks) {
@@ -1616,7 +1650,7 @@ function farmNodeModules(
   sourceDir: string,
   targetDir: string,
   done: DependencyFarm,
-  containment: { rootNm: string | null; selfLinks: ReadonlySet<string> },
+  containment: FarmContainment,
   rebuild = false,
 ): void {
   const source = join(sourceDir, 'node_modules');

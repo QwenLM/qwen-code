@@ -19,6 +19,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { parse } from 'yaml';
@@ -3853,5 +3854,281 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
     expect(r.posted).toBe('');
     expect(r.summary).toContain('deferring to the fallback-comment job');
+  });
+});
+
+// The dependency-cache step (issue #10108): the load-bearing behaviours — the
+// warm-path no-install, the atomic completeness-marker-last snapshot, the
+// lockfile-hash keying `fetch-pr` selects entries by, the LRU prune, the
+// never-fail contract — live in the shell, not the YAML. Extract the step's
+// REAL bash and run it against a fixture workspace with a stubbed npm.
+const DEPS_LOCK = '{"name":"fixture","lockfileVersion":3}\n';
+const depsLockHash = createHash('sha256').update(DEPS_LOCK).digest('hex');
+
+function depsCacheSource() {
+  const doc = parse(workflow);
+  const step = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Provision review dependency cache',
+  );
+  expect(step).toBeDefined();
+  // The YAML half of the never-fails promise; the bash half is `set +e` plus
+  // the trailing exit 0, exercised below.
+  expect(step['continue-on-error']).toBe(true);
+  // continue-on-error bounds failure, not duration: a hung registry would
+  // otherwise eat the review's own job budget.
+  expect(step['timeout-minutes']).toBe(30);
+  return step.run;
+}
+
+function runDepsCacheStep({ stubs = {}, prepare = null } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'deps-cache-'));
+  try {
+    const bin = join(dir, 'bin');
+    const homeDir = join(dir, 'home');
+    const work = join(dir, 'work');
+    const ghEnv = join(dir, 'github_env');
+    const calls = join(dir, 'calls');
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(ghEnv, '');
+    writeFileSync(calls, '');
+    const write = (name, body) => {
+      const p = join(bin, name);
+      writeFileSync(p, `#!/bin/bash\necho "${name} $*" >> "$CALLS"\n${body}\n`);
+      chmodSync(p, 0o755);
+    };
+    // Default stub: `npm ci` succeeds. The step snapshots whatever tree the
+    // fixture holds, so the stub does not need to build one — the fixture
+    // below IS the "installed" workspace.
+    write('npm', 'exit 0');
+    // Deterministic disk headroom: the gate reads the REAL host filesystem
+    // otherwise, and a developer machine (or this CI runner) under 10G free
+    // would flip every population scenario into the skip branch.
+    write(
+      'df',
+      'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/x 1 1 999999999 1% /"',
+    );
+    for (const [name, body] of Object.entries(stubs)) {
+      write(name, body);
+    }
+    // The fixture workspace: a base checkout after a successful install —
+    // root and nested node_modules, a member dist, and the root bundle
+    // output the snapshot must NOT take (regenerated per release, useless to
+    // a test run).
+    mkdirSync(join(work, '.git'), { recursive: true });
+    writeFileSync(join(work, 'package-lock.json'), DEPS_LOCK);
+    mkdirSync(join(work, 'node_modules', 'dep-a'), { recursive: true });
+    writeFileSync(join(work, 'node_modules', 'dep-a', 'index.js'), 'a\n');
+    writeFileSync(join(work, 'node_modules', '.package-lock.json'), '{}');
+    mkdirSync(join(work, 'packages', 'x', 'node_modules', 'nested'), {
+      recursive: true,
+    });
+    mkdirSync(join(work, 'packages', 'x', 'dist'), { recursive: true });
+    writeFileSync(join(work, 'packages', 'x', 'dist', 'out.js'), 'built\n');
+    mkdirSync(join(work, 'dist'), { recursive: true });
+    writeFileSync(join(work, 'dist', 'cli.js'), 'bundle\n');
+    if (prepare) prepare({ work, homeDir });
+    const harness = [
+      `export HOME="${homeDir}"`,
+      `export GITHUB_ENV="${ghEnv}"`,
+      `export CALLS="${calls}"`,
+      depsCacheSource(),
+    ].join('\n');
+    let status = 0;
+    let stdout = '';
+    try {
+      // `bash -e -o pipefail` mirrors the runner's default shell for `run:`
+      // blocks — the mode under which one unguarded failure kills a step.
+      stdout = execFileSync('bash', ['-e', '-o', 'pipefail', '-c', harness], {
+        encoding: 'utf8',
+        cwd: work,
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      });
+    } catch (e) {
+      status = e.status ?? 1;
+      stdout = `${e.stdout ?? ''}${e.stderr ?? ''}`;
+    }
+    const cacheRoot = join(homeDir, '.qwen-review-deps');
+    const entry = join(cacheRoot, depsLockHash);
+    return {
+      status,
+      stdout,
+      calls: readFileSync(calls, 'utf8'),
+      envContent: readFileSync(ghEnv, 'utf8'),
+      cacheRoot,
+      entry,
+      // Hex-named entries only: the prune's own view of the cache.
+      entries: existsSync(cacheRoot)
+        ? readdirSync(cacheRoot).filter((e) => /^[0-9a-f]{64}$/.test(e))
+        : [],
+      stages: existsSync(cacheRoot)
+        ? readdirSync(cacheRoot).filter((e) => e.startsWith('.stage.'))
+        : [],
+      entryComplete: existsSync(join(entry, '.qwen-review-deps-complete')),
+      entryLock: existsSync(join(entry, 'package-lock.json'))
+        ? readFileSync(join(entry, 'package-lock.json'), 'utf8')
+        : null,
+      entryRootPkg: existsSync(
+        join(entry, 'node_modules', 'dep-a', 'index.js'),
+      ),
+      entryNpmMarker: existsSync(
+        join(entry, 'node_modules', '.package-lock.json'),
+      ),
+      entryNestedNm: existsSync(
+        join(entry, 'packages', 'x', 'node_modules', 'nested'),
+      ),
+      entryMemberDist: existsSync(
+        join(entry, 'packages', 'x', 'dist', 'out.js'),
+      ),
+      entryRootDist: existsSync(join(entry, 'dist')),
+      workspaceNm: existsSync(join(work, 'node_modules')),
+      workspaceDist: existsSync(join(work, 'dist')),
+      workspaceMemberDist: existsSync(join(work, 'packages', 'x', 'dist')),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe('dependency-cache step (real bash, stubbed npm)', () => {
+  it('populates a cold cache: keyed by lockfile hash, marker present, root bundle excluded', () => {
+    const r = runDepsCacheStep();
+    expect(r.status).toBe(0);
+    expect(r.calls).toContain('npm ci');
+    expect(r.entryComplete).toBe(true);
+    // The entry is selected by `fetch-pr` hashing the WORKTREE's lockfile,
+    // so the name must be the sha256 of the exact bytes...
+    expect(r.entries).toEqual([depsLockHash]);
+    // ...and the byte-compare inside `fetch-pr` reads this copy.
+    expect(r.entryLock).toBe(DEPS_LOCK);
+    expect(r.entryRootPkg).toBe(true);
+    // npm's completeness marker is what the provisioner hands the worktree
+    // so build-test skips its install.
+    expect(r.entryNpmMarker).toBe(true);
+    expect(r.entryNestedNm).toBe(true);
+    expect(r.entryMemberDist).toBe(true);
+    expect(r.entryRootDist).toBe(false);
+    // No torn stage left behind.
+    expect(r.stages).toEqual([]);
+    // The built state moved to the cache; the workspace is left lean so the
+    // next job's checkout clean does not crawl it.
+    expect(r.workspaceNm).toBe(false);
+    expect(r.workspaceDist).toBe(false);
+    expect(r.workspaceMemberDist).toBe(false);
+  });
+
+  it('exports the cache root for fetch-pr — the literal the CLI reads', () => {
+    // KEEP IN SYNC with DEPS_CACHE_ENV in
+    // packages/cli/src/commands/review/lib/dep-provision.ts: the CLI reads
+    // exactly this variable, and a renamed export silently disables
+    // provisioning with every test still green but this one.
+    const r = runDepsCacheStep();
+    expect(r.envContent).toContain(`QWEN_REVIEW_DEPS_CACHE=${r.cacheRoot}`);
+  });
+
+  it('keeps the completeness-marker literal the CLI validates entries by', () => {
+    // KEEP IN SYNC with DEPS_COMPLETE_MARKER in dep-provision.ts — the
+    // provisioner refuses any entry without this exact file.
+    expect(depsCacheSource()).toContain('.qwen-review-deps-complete');
+  });
+
+  it('warm path: installs nothing and leaves the workspace alone', () => {
+    const r = runDepsCacheStep({
+      prepare: ({ homeDir }) => {
+        const entry = join(homeDir, '.qwen-review-deps', depsLockHash);
+        mkdirSync(entry, { recursive: true });
+        writeFileSync(join(entry, '.qwen-review-deps-complete'), '');
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('dependency cache warm');
+    expect(r.calls).not.toContain('npm');
+    // The warm path never installed, so there is nothing to strip.
+    expect(r.workspaceNm).toBe(true);
+    expect(r.workspaceDist).toBe(true);
+  });
+
+  it('a failed npm ci degrades without an entry — and still exports the root', () => {
+    // An OLDER entry can still serve a PR based before a lockfile bump, so
+    // the export must not be gated on this run's own population succeeding.
+    const r = runDepsCacheStep({ stubs: { npm: 'exit 1' } });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('npm ci failed');
+    expect(r.entries).toEqual([]);
+    expect(r.envContent).toContain('QWEN_REVIEW_DEPS_CACHE=');
+  });
+
+  it('a workspace without a lockfile is a no-op, not a failure', () => {
+    const r = runDepsCacheStep({
+      prepare: ({ work }) => rmSync(join(work, 'package-lock.json')),
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('no package-lock.json');
+    expect(r.calls).not.toContain('npm');
+  });
+
+  it('the disk gate skips the install, never the job', () => {
+    const r = runDepsCacheStep({
+      stubs: {
+        df: 'echo "Filesystem 1024-blocks Used Available Capacity Mounted on"; echo "/dev/x 1 1 1024 1% /"',
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('free under');
+    expect(r.calls).not.toContain('npm');
+  });
+
+  it('prunes to the newest three entries, never touching stage dirs', () => {
+    const older = ['0'.repeat(64), '1'.repeat(64), '2'.repeat(64)];
+    const r = runDepsCacheStep({
+      prepare: ({ homeDir }) => {
+        const cacheRoot = join(homeDir, '.qwen-review-deps');
+        older.forEach((name, i) => {
+          const d = join(cacheRoot, name);
+          mkdirSync(d, { recursive: true });
+          // Staggered OLD mtimes, oldest first, all older than the entry the
+          // run is about to create.
+          execFileSync('touch', ['-d', `@${1600000000 + i}`, d]);
+        });
+        // A live stage dir (recent mtime) the age-gated sweep must spare.
+        mkdirSync(join(cacheRoot, '.stage.live'), { recursive: true });
+      },
+    });
+    expect(r.status).toBe(0);
+    // Newest three: the fresh entry plus the two youngest of the old ones.
+    expect([...r.entries].sort()).toEqual(
+      [depsLockHash, older[1], older[2]].sort(),
+    );
+    expect(r.stages).toContain('.stage.live');
+  });
+});
+
+describe('dependency-cache step wiring', () => {
+  it('runs on the persistent pool only, when the review runs', () => {
+    // ubuntu-latest fallback runners have no persistent $HOME to cache in,
+    // and a non-review firing must not install anything. The expression
+    // mirrors the job's runs-on pool selector; loosened, the hosted path
+    // pays an npm ci per run for a cache the next run cannot see.
+    const doc = parse(workflow);
+    const step = doc.jobs['review-pr'].steps.find(
+      (s) => s.name === 'Provision review dependency cache',
+    );
+    expect(step.if).toBe(
+      "steps.context.outputs.should_run == 'true' && github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'",
+    );
+  });
+
+  it('provisions after PR context and before the review that consumes it', () => {
+    // GITHUB_ENV entries only reach LATER steps: below 'Run review' the
+    // export is invisible to fetch-pr; above 'Resolve PR context' the if:
+    // reads an output that does not exist yet and the step silently skips.
+    const provision = workflow.indexOf(
+      "- name: 'Provision review dependency cache'",
+    );
+    expect(provision).toBeGreaterThan(-1);
+    expect(provision).toBeGreaterThan(
+      workflow.indexOf("- name: 'Resolve PR context'"),
+    );
+    expect(provision).toBeLessThan(workflow.indexOf("- name: 'Run review'"));
   });
 });

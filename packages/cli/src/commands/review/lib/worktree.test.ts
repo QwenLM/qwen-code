@@ -31,6 +31,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
+import { DEPS_COMPLETE_MARKER } from './dep-provision.js';
 import {
   discardWorktree,
   exposeDependencies,
@@ -1628,6 +1629,60 @@ describe('exposeDependencies', () => {
       alreadyPresent: false,
       selfLinked: 0,
     });
+  });
+
+  it('farms a PROVISIONED dependency root — links into the host cache are borrowed, not escapes', () => {
+    // A worktree provisioned from the host dependency cache (#10108) holds a
+    // farm of links resolving into that cache — outside every `node_modules`
+    // the containment otherwise admits. Before `provisionRoot`, a scratch
+    // tree farmed from such a worktree counted every borrowed package as an
+    // escape and started with no dependencies at all.
+    const cacheEntry = tmp('expose-cache-');
+    const root = tmp('expose-prov-root-');
+    const probe = tmp('expose-prov-probe-');
+    mkdirSync(join(cacheEntry, 'node_modules', 'cached-pkg'), {
+      recursive: true,
+    });
+    writeFileSync(join(cacheEntry, DEPS_COMPLETE_MARKER), '');
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', '.qwen-review-farm'), cacheEntry);
+    symlinkSync(
+      join(cacheEntry, 'node_modules', 'cached-pkg'),
+      join(root, 'node_modules', 'cached-pkg'),
+      'dir',
+    );
+
+    const got = exposeDependencies(probe, root, { rebuild: true });
+
+    expect(got).toMatchObject({ linked: 1, failed: 0 });
+    expect(
+      lstatSync(join(probe, 'node_modules', 'cached-pkg')).isSymbolicLink(),
+    ).toBe(true);
+  });
+
+  it('still COUNTS a cache-shaped link when the marker names no valid entry', () => {
+    // The farm marker lives in gitignored space a PR can force-add, so what
+    // it names is validated, not believed: a directory without the population
+    // step's completeness marker widens nothing, and the link into it stays
+    // the escape it always was.
+    const notAnEntry = tmp('expose-notentry-');
+    const root = tmp('expose-badmark-root-');
+    const probe = tmp('expose-badmark-probe-');
+    mkdirSync(join(notAnEntry, 'node_modules', 'planted'), {
+      recursive: true,
+    });
+    mkdirSync(join(root, 'node_modules'), { recursive: true });
+    writeFileSync(join(root, 'node_modules', '.qwen-review-farm'), notAnEntry);
+    symlinkSync(
+      join(notAnEntry, 'node_modules', 'planted'),
+      join(root, 'node_modules', 'planted'),
+      'dir',
+    );
+
+    const got = exposeDependencies(probe, root, { rebuild: true });
+
+    expect(got).toMatchObject({ linked: 0, failed: 1 });
+    expect(existsSync(join(probe, 'node_modules', 'planted'))).toBe(false);
   });
 });
 

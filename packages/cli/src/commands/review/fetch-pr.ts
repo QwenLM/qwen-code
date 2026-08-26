@@ -101,6 +101,11 @@ import {
   clearRoundStamps,
 } from './lib/deadline.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
+import {
+  DEPS_CACHE_ENV,
+  provisionWorktreeDependencies,
+  type WorktreeDependencyProvision,
+} from './lib/dep-provision.js';
 
 interface PrMetadata {
   headRefName: string;
@@ -181,6 +186,17 @@ type FetchPrResult = PlanReport & {
   baseRefName: string;
   headRefName: string;
   isCrossRepository: boolean;
+  /**
+   * What the host dependency cache did to the worktree, when the environment
+   * names one (`QWEN_REVIEW_DEPS_CACHE`, set on CI's persistent runners —
+   * issue #10108). `provisioned: true` means the worktree already resolves
+   * its dependencies (a link farm into the cache, npm's completeness marker
+   * in place, prebuilt sibling `dist` copied in), so `build-test` skips its
+   * install and probes can run tests without one. Anything else carries the
+   * `reason` and the review behaves exactly as it did before the cache
+   * existed. Absent entirely when no cache is configured (every local run).
+   */
+  dependencies?: WorktreeDependencyProvision;
   diffStat: { files: number; additions: number; deletions: number };
   /**
    * The merge-base diff is EMPTY: the branch tree is byte-identical to its
@@ -989,6 +1005,45 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
 
+    // 4b. Provision the worktree's dependencies from the host cache, when the
+    //     environment names one (CI's persistent runners do — issue #10108).
+    //     A link farm takes seconds where the install it replaces does not
+    //     fit an agent's tool budget, and it runs HERE so every agent —
+    //     probes and verifiers included, not just Agent 7 — finds the tree
+    //     already installed. Best-effort by contract: the provisioner
+    //     records a reason instead of throwing, and the guard below exists
+    //     only for the throw it promises not to make — a fetch that built a
+    //     perfectly good worktree must not die on a cache fault whose
+    //     fallback (the disclosed read-only round) is the pre-cache status
+    //     quo. Absent from the report entirely when no cache is configured,
+    //     so local reviews read the plan they always did.
+    const depsCacheRoot = process.env[DEPS_CACHE_ENV];
+    let dependencies: WorktreeDependencyProvision | undefined;
+    if (depsCacheRoot) {
+      try {
+        dependencies = provisionWorktreeDependencies(wt, depsCacheRoot);
+      } catch (err) {
+        dependencies = {
+          provisioned: false,
+          source: null,
+          reason: `provisioning threw: ${(err as Error).message}`,
+          linked: 0,
+          failed: 0,
+          selfLinked: 0,
+          distCopied: 0,
+        };
+      }
+      writeStderrLine(
+        dependencies.provisioned
+          ? `Dependencies provisioned from ${dependencies.source}: ` +
+              `${dependencies.linked} packages linked ` +
+              `(${dependencies.selfLinked} workspace self-links), ` +
+              `${dependencies.distCopied} prebuilt dist trees copied.`
+          : `Dependencies NOT provisioned (${dependencies.reason}); ` +
+              `build-test installs on its own path as before.`,
+      );
+    }
+
     mkdirSync(REVIEW_TMP_DIR, { recursive: true });
 
     // 5. Capture the diff to a file and partition it. The capture is decoded
@@ -1610,6 +1665,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       baseRefName: meta.baseRefName,
       headRefName: meta.headRefName,
       isCrossRepository: meta.isCrossRepository,
+      ...(dependencies ? { dependencies } : {}),
       // Two gates, because the SKILL acts on this by recommending the PR be
       // closed as superseded — the one ruling here that is expensive to get
       // wrong. `diffPath` (set only on a SUCCESSFUL capture): a capture that
