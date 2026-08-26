@@ -1174,7 +1174,17 @@ function stripLeadingVariableAssignments(command: string): string {
       firstCommandToken++;
     }
 
-    return tokens.slice(firstCommandToken).join(' ');
+    // Environment assignments are part of the execution semantics. A concrete
+    // Bash allow rule must not silently widen from `cmd` to arbitrary
+    // `NAME=value cmd` invocations, because runtimes and applications may
+    // interpret those variables before the trusted command runs. Preserve the
+    // original command whenever such a prefix is present so the rule must
+    // explicitly include it.
+    if (firstCommandToken > 0) {
+      return trimmed;
+    }
+
+    return tokens.join(' ');
   } catch {
     return trimmed;
   }
