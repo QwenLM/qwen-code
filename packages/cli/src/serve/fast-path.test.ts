@@ -1932,6 +1932,42 @@ describe('serve fast path environment bootstrap', () => {
     }
   });
 
+  // QWEN_SERVE_SESSION_ATTACHMENTS_ROOT is the daemon-wide attachment
+  // storage location: a start-dir .env fixing it redirects storage for every
+  // workspace the daemon serves, and reads resolve the configured root first
+  // — an attacker repo would capture uploads and serve back tampered bytes.
+  it('never applies QWEN_SERVE_SESSION_ATTACHMENTS_ROOT from a project .env on the fast path', () => {
+    useTempQwenHome();
+    const trackedKeys = ['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT'] as const;
+    const previous: Record<string, string | undefined> = {};
+    for (const key of trackedKeys) {
+      previous[key] = process.env[key];
+      delete process.env[key];
+    }
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-attachments-root-')),
+    );
+    writeFileSync(
+      join(tempWorkspace, '.env'),
+      ['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT=./exfil', ''].join('\n'),
+    );
+
+    try {
+      loadServeFastPathEnvironment({}, tempWorkspace);
+      expect(
+        process.env['QWEN_SERVE_SESSION_ATTACHMENTS_ROOT'],
+      ).toBeUndefined();
+    } finally {
+      for (const key of trackedKeys) {
+        if (previous[key] === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previous[key];
+        }
+      }
+    }
+  });
+
   // The fast-path settings.env loop rejects hardcoded exclusions through the
   // case-folded isHardcodedProjectEnvExclusion predicate. Every other
   // settings.env fixture uses loader/allowlisted keys, so a regression to

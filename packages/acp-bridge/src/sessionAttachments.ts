@@ -648,13 +648,22 @@ export class SessionAttachmentStore {
       this.pendingNames.clear();
       this.resolvePendingDrainWaiters();
     }
-    // Fallback first, mirroring remove(): if the legacy root cannot be
-    // removed, the authoritative primary copy must stay intact.
+    // Fallback removal is best-effort here (unlike remove()): the caller
+    // removes the persisted session row first (deleteDaemonSessions), so a
+    // legacy-volume fault must not skip the configured root's cleanup — a
+    // retry would throw SessionNotFoundError and orphan the configured
+    // bytes for good. A fallback failure still rejects after the primary
+    // is removed.
+    let fallbackError: unknown;
     if (this.persistentFallbackDirectory) {
-      await this.removeDirectoryWithTombstone(
-        this.persistentFallbackDirectory,
-        options.assertCanCommit,
-      );
+      try {
+        await this.removeDirectoryWithTombstone(
+          this.persistentFallbackDirectory,
+          options.assertCanCommit,
+        );
+      } catch (error) {
+        fallbackError = error;
+      }
     }
     const directory =
       this.persistentDirectory ??
@@ -665,6 +674,7 @@ export class SessionAttachmentStore {
         options.assertCanCommit,
       );
     }
+    if (fallbackError !== undefined) throw fallbackError;
   }
 
   /**

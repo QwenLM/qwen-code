@@ -1513,7 +1513,7 @@ describe('SessionAttachmentStore', () => {
       ).rejects.toMatchObject({ code: 'ENOENT' });
     });
 
-    it('keeps the primary directory intact when the fallback removal fails', async () => {
+    it('still clears the primary directory when the fallback removal fails', async () => {
       const { main, fallback } = await createRoots();
       const store = new SessionAttachmentStore(main, sessionId, fallback);
       await writeIn(main, 'current.txt', 'primary data');
@@ -1530,12 +1530,16 @@ describe('SessionAttachmentStore', () => {
           return realRename(from, to);
         });
       try {
-        // delete() removes the fallback root first so a failure there keeps
-        // the authoritative primary copy intact.
+        // Session deletion removes the persisted row first, so a legacy
+        // fault must not skip the configured root's cleanup: the primary
+        // directory is removed and the fallback failure still rejects.
         await expect(store.delete()).rejects.toMatchObject({ code: 'EROFS' });
-        expect(
-          await fs.readFile(path.join(main, sessionDir, 'current.txt'), 'utf8'),
-        ).toBe('primary data');
+        await expect(
+          fs.readdir(path.join(main, sessionDir)),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(await fs.readdir(path.join(fallback, sessionDir))).toEqual([
+          'legacy.txt',
+        ]);
       } finally {
         rename.mockRestore();
         await store.close();
