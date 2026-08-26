@@ -288,6 +288,27 @@ describe('ProcessRegistry', () => {
     expect(registry.activeProcessCount).toBe(0);
   });
 
+  it('fails at the total deadline when an owned group survives', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    setAsyncProcessTable('1234 1 1234 S 1');
+    const registry = new ProcessRegistry();
+    const tracked = registry
+      .reserve()
+      .attach(fakeChild(1234), { ownsProcessTree: true });
+    vi.spyOn(process, 'kill').mockReturnValue(true);
+
+    const terminating = tracked.terminate().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await expect(terminating).resolves.toMatchObject({
+      message: expect.stringContaining(
+        'did not exit with its owned process groups within 10000ms',
+      ),
+    });
+    expect(registry.activeProcessCount).toBe(1);
+  });
+
   it('does not expand ownership from a reused root pid after root exit', async () => {
     vi.useFakeTimers();
     setPlatform('linux');
@@ -556,6 +577,41 @@ describe('ProcessRegistry', () => {
     expect(killSpy).toHaveBeenCalledWith(-1236, 'SIGKILL');
     expect(killSpy).toHaveBeenCalledWith(-1234, 'SIGKILL');
     expect(killSpy).toHaveBeenCalledWith(-2234, 'SIGKILL');
+  });
+
+  it('keeps an exited root reachable by registry synchronous teardown', async () => {
+    vi.useFakeTimers();
+    setPlatform('linux');
+    setAsyncProcessTable(['1234 1 1234', '1236 1234 1236'].join('\n'));
+    const registry = new ProcessRegistry();
+    const child = fakeChild(1234);
+    const tracked = registry.reserve().attach(child, { ownsProcessTree: true });
+    const aliveGroups = new Set([1234, 1236]);
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((
+      pid: number,
+      signal?: NodeJS.Signals | number,
+    ) => {
+      const group = -pid;
+      if (signal === 0) {
+        if (!aliveGroups.has(group)) throw errno('ESRCH');
+        return true;
+      }
+      if (signal === 'SIGKILL') aliveGroups.delete(group);
+      return true;
+    }) as typeof process.kill);
+
+    const terminating = tracked.terminate();
+    await vi.advanceTimersByTimeAsync(0);
+    child.emit('exit', 0, null);
+
+    registry.killAllSync();
+    await vi.advanceTimersByTimeAsync(50);
+    await terminating;
+
+    expect(mockSpawnSync).not.toHaveBeenCalled();
+    expect(killSpy).toHaveBeenCalledWith(-1236, 'SIGKILL');
+    expect(killSpy).toHaveBeenCalledWith(-1234, 'SIGKILL');
+    expect(registry.activeProcessCount).toBe(0);
   });
 
   it('rejects a non-leader root in the shared synchronous snapshot', () => {

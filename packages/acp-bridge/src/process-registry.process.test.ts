@@ -32,8 +32,12 @@ process.on('SIGTERM', () => {});
 setInterval(() => {}, 1000);
 `;
 
-function spawnTree(): ChildProcess {
-  return spawn(process.execPath, ['-e', ROOT_SCRIPT], {
+const ROOT_EXITS_FIRST_SCRIPT = `${ROOT_SCRIPT}
+setTimeout(() => process.exit(0), 100);
+`;
+
+function spawnTree(script = ROOT_SCRIPT): ChildProcess {
+  return spawn(process.execPath, ['-e', script], {
     detached: true,
     stdio: ['ignore', 'pipe', 'inherit'],
   });
@@ -146,5 +150,29 @@ describe.skipIf(process.platform === 'win32')(
         await cleanupTree(rootPid, tree);
       }
     });
+
+    it('limits unexpected root-exit cleanup to the known root group', async () => {
+      const child = spawnTree(ROOT_EXITS_FIRST_SCRIPT);
+      const rootPid = child.pid;
+      if (!rootPid) throw new Error('test root has no pid');
+      const registry = new ProcessRegistry();
+      const tracked = registry
+        .reserve()
+        .attach(child, { ownsProcessTree: true });
+      let tree: TreePids | undefined;
+      try {
+        tree = await readTreePids(child);
+
+        await tracked.exited;
+
+        await waitForGone(tree.ordinary);
+        expect(isAlive(tree.detached)).toBe(true);
+        await expect
+          .poll(() => registry.activeProcessCount, { timeout: 3_000 })
+          .toBe(0);
+      } finally {
+        await cleanupTree(rootPid, tree);
+      }
+    }, 15_000);
   },
 );
