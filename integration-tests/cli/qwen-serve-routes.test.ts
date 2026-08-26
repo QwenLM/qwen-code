@@ -413,6 +413,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_qualified_rest_core',
       'extension_management_v2',
       'extension_git_credentials',
+      'extension_local_path_install',
       'workspace_persisted_transcript',
       'workspace_session_export',
       'workspace_archived_session_export',
