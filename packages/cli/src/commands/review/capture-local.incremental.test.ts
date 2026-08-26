@@ -685,6 +685,29 @@ describe('capture-local — the decided stops are machine-readable', () => {
     );
   });
 
+  it('refuses the anchor when a cached path is UNMEASURABLE, not gone', () => {
+    // R19-3: `vanishedStillOnDisk` folded every lstat failure into
+    // "genuinely gone", so a cached path under an unmeasurable ancestor
+    // read as a deletion and the round ended at a DECIDED stop over bytes
+    // no round captured. ENOTDIR stages it as root: the cached untracked
+    // file's parent directory is replaced by a regular FILE — the cached
+    // path can no longer be proven absent, and unmeasurable is
+    // uncertifiable: the anchor refuses at the cost of a full round.
+    seedDirtyTree();
+    write('sub/u.ts', 'export const u = 1;\n');
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    rmSync(join(repo, 'sub'), { recursive: true, force: true });
+    write('sub', '// a regular file where the directory was\n');
+
+    stderrLines.length = 0;
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second['incremental']).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('still on disk');
+  });
+
   it('publishes the stop at a name the PARENT can predict', () => {
     // `--out` is the orchestrator's to choose — it must be, because the
     // CLI-derived target token does not exist yet at Step 1 — so a parent

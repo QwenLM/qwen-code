@@ -89,6 +89,32 @@ describe('invisibleTrackedPaths — the check-rules arms real git cannot stage',
     expect(invisibleTrackedPaths(repo)).toEqual(['sub/out.ts']);
   });
 
+  it('an UNMEASURABLE out-of-rules path keeps flagging — only ENOENT is absence', () => {
+    // R19-2: every lstat failure used to fold into "absent", so a PRESENT
+    // flagged path under an unreadable ancestor was exempted and the oracle
+    // read clean while `git diff` was blind to its bytes. ENOTDIR stages
+    // the unmeasurable shape deterministically (EACCES needs a non-root
+    // runner): the path runs through a regular FILE, so it cannot be
+    // proven absent — and unmeasurable is uncertifiable.
+    script.lsFiles = 'S f/x.ts\0';
+    script.sparseBool = 'true';
+    script.checkRules = ''; // out of the rules — exempt IF it were absent
+    writeFileSync(join(repo, 'f'), 'a regular file, not a directory\n');
+    expect(invisibleTrackedPaths(repo)).toEqual(['f/x.ts']);
+  });
+
+  it('an undecodable name is never exempted — U+FFFD cannot be measured', () => {
+    // R19-1: the utf8 decode folds invalid bytes to U+FFFD; lstat on the
+    // mangled spelling misses the PRESENT file and check-rules is fed a
+    // name git never knew — both halves of the exemption run on a name
+    // that is not the path's. The discipline hashWorktreeFiles and
+    // revisionIdentities already apply lands here too: flagged, always.
+    script.lsFiles = 'h b\uFFFD.dat\0';
+    script.sparseBool = 'true';
+    script.checkRules = '';
+    expect(invisibleTrackedPaths(repo)).toEqual(['b\uFFFD.dat']);
+  });
+
   it('a PRESENT out-of-rules path keeps flagging — a file can hide an edit', () => {
     // Out-of-rules but materialized: whatever put the file there, its bytes
     // are invisible to `git diff` while the bit stands — the exemption is

@@ -184,8 +184,16 @@ function vanishedStillOnDisk(
     if (Object.hasOwn(currentHashes, p)) continue;
     try {
       lstatSync(join(repoRoot, p));
-    } catch {
-      continue; // genuinely gone — the symmetric difference owns it
+    } catch (err) {
+      // Only ENOENT proves deletion. Any other failure — EACCES under an
+      // unreadable ancestor, ELOOP, EIO — is a path that may well still
+      // hold the cached bytes, and folding it into "gone" let the round end
+      // at a DECIDED scope-emptied stop over bytes no round captured
+      // (R19-3). Unmeasurable is uncertifiable: it stays in the on-disk
+      // set, whose downstream is a refusal at the cost of a full round.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        continue; // genuinely gone — the symmetric difference owns it
+      }
     }
     onDisk.push(p);
   }
