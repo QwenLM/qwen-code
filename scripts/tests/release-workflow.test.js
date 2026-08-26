@@ -81,6 +81,117 @@ describe('CUA release workflow', () => {
   });
 });
 
+// The canonical wipe + user-state neutralization script shared by all five
+// 'Restore workspace ownership' copies in release.yml. The full wipe (vs
+// serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
+// checkouts carry CI_BOT_PAT and the npm OIDC id-token, so no pre-existing
+// repo state may survive into them. Pin the WHOLE body by equality, the way
+// review-worktree-cleanup-workflow.test.js pins its sweep copies: a
+// commented-out find, an inserted early exit, or a uniformly dropped
+// ownership ladder all ship green under substring pins, and each of those
+// mutants reopens the incident class this step exists for.
+const canonicalWipe = `set -uo pipefail
+RUNNER_UID="$(id -u)"
+RUNNER_GID="$(id -g)"
+if [ "$RUNNER_UID" != "0" ]; then
+  chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+fi
+chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+# Release jobs do not need cross-job workspace reuse: remove every
+# persisted entry, including planted .git config/hooks/attributes,
+# before actions/checkout runs with release credentials. The full
+# wipe — rather than keeping and scrubbing .git like serve-ab.yml —
+# is deliberate: these checkouts run with CI_BOT_PAT and the npm
+# OIDC id-token, so no pre-existing repo state may survive into
+# them; the accepted cost is re-fetching full history each run.
+#
+# Guards ported from serve-ab.yml's wipe (#9220, #9265): under a
+# mangled env even \`/home\` or an empty string reached the rm. A
+# wipe pointed at the wrong path is far worse than a skipped wipe,
+# so canonicalize, strip trailing slashes, denylist the known
+# roots, and require the target to sit inside the runner workspace
+# before any rm.
+WS="\${GITHUB_WORKSPACE:?}"
+while [ "\${WS%/}" != "$WS" ]; do WS="\${WS%/}"; done
+RWS="\${RUNNER_WORKSPACE:?}"
+RWS="$(realpath -m -- "$RWS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${RUNNER_WORKSPACE}"; exit 1; }
+while [ "\${RWS%/}" != "$RWS" ]; do RWS="\${RWS%/}"; done
+if [ -z "$RWS" ]; then echo "::error::refusing to wipe: runner workspace resolved to /"; exit 1; fi
+case "$RWS" in
+  ..|../*|*/..|*/../*) echo "::error::refusing runner workspace path containing '..': \${RWS}"; exit 1 ;;
+esac
+# Heal a workspace a previous job replaced with a symlink (or any
+# non-directory) BEFORE canonicalizing it: afterwards the path
+# resolves to the link's target, the containment below refuses it,
+# and every later job on this runner would die here permanently on
+# corruption that is itself inside the runner workspace and safe
+# to unlink.
+if [ -L "$WS" ] || [ ! -d "$WS" ]; then
+  # Judge the PARENT, canonicalized: the kernel resolves
+  # intermediate components too, so a raw containment match is not
+  # enough. Never resolve $WS itself — that would resolve through
+  # the very link being removed.
+  HEAL_PARENT="$(realpath -m -- "$(dirname -- "$WS")" 2>/dev/null)" || { echo "::error::refusing to heal: realpath unavailable, cannot canonicalize the parent of \${WS}"; exit 1; }
+  case "$HEAL_PARENT" in
+    "$RWS"|"$RWS"/*) ;;
+    *) echo "::error::refusing to heal workspace outside the runner workspace: \${WS} (parent: \${HEAL_PARENT}, runner workspace: \${RWS})"; exit 1 ;;
+  esac
+  if [ -L "$WS" ]; then
+    # The link target is bytes a PREVIOUS job chose — on this pool
+    # that job may have run contributor code — and the runner
+    # parses \`::\` at the start of any stdout line as a workflow
+    # command: keep untrusted bytes off the command line itself,
+    # strip the line breaks that could start a new one, and cap
+    # the length.
+    heal_target="$(readlink -- "$WS" 2>/dev/null || printf '%s' '<unreadable>')"
+    heal_target="$(printf '%s' "$heal_target" | tr -d '\\r\\n' | cut -c1-200)"
+    echo "::warning::healing workspace \${WS}: it was a symlink"
+    printf 'heal: %s pointed at %s\\n' "$WS" "$heal_target"
+  else
+    echo "::warning::healing workspace \${WS}: it was not a directory"
+  fi
+  # \`rm -f\` on the RAW path removes the link itself and never
+  # follows it. Both legs fail closed: a swallowed failure here
+  # would leave the wipe running against a corrupt path.
+  rm -f -- "$WS" || { echo "::error::refusing to continue: could not remove \${WS}"; exit 1; }
+  mkdir -- "$WS" || { echo "::error::refusing to continue: could not recreate \${WS}"; exit 1; }
+fi
+WS="$(realpath -m -- "$WS" 2>/dev/null)" || { echo "::error::refusing to wipe: realpath unavailable, cannot canonicalize \${GITHUB_WORKSPACE}"; exit 1; }
+while [ "\${WS%/}" != "$WS" ]; do WS="\${WS%/}"; done
+case "$WS" in
+  ..|../*|*/..|*/../*) echo "::error::refusing to wipe path containing '..': \${WS}"; exit 1 ;;
+esac
+case "$WS" in
+  /|/home|/root|/usr*|/etc*|/var|"") echo "::error::refusing to wipe suspicious workspace path: \${WS}"; exit 1 ;;
+esac
+# A denylist can only enumerate known roots — the allowlist closes
+# every other one (/tmp, /opt, ...): only a directory inside the
+# runner workspace may be wiped.
+case "$WS" in
+  "$RWS"/*) ;;
+  *) echo "::error::refusing to wipe workspace outside the runner workspace: \${WS} (runner workspace: \${RWS})"; exit 1 ;;
+esac
+find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+# The workspace wipe cannot see the runner user's HOME, which
+# survives across jobs on this pool: a planted ~/.npmrc
+# script-shell wraps every verdict-determining \`npm run\` in an
+# attacker shell (and can redirect \`npm publish\`), and global git
+# config exec knobs (core.hooksPath, filter.*, url.*.insteadOf,
+# include.*) govern this job's checkout and credential-bearing
+# git steps. Remove the npmrc outright — publish's setup-node
+# recreates the registry config it needs after this step — and
+# strip the git exec keys with the same denylist as
+# qwen-autofix.yml's pre-checkout sanitize and
+# .github/scripts/resanitize-git-config.sh (the inline form is the
+# pre-checkout doctrine: the script file does not exist on disk
+# before checkout). No-op on a fresh hosted runner.
+rm -f -- "\${HOME:?}/.npmrc"
+for global_file in "\${HOME}/.gitconfig" "\${XDG_CONFIG_HOME:-\${HOME}/.config}/git/config"; do
+  { GIT_CONFIG_GLOBAL="\${global_file}" git config --global --name-only --list 2>/dev/null || true; } \\
+    | { grep -iE '^(core\\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\\.external$|diff\\..+\\.(command|textconv)$|merge\\..+\\.driver$|filter\\.|alias\\.|pager\\.|difftool\\.|mergetool\\.|interactive\\.difffilter$|sequence\\.editor$|gpg\\.(.+\\.)?program$|init\\.templatedir$|remote\\..+\\.(uploadpack|receivepack)$|submodule\\..+\\.update$|url\\..+\\.(insteadof|pushinsteadof)$|http\\.(.+\\.)?(sslverify|sslcainfo)$|include\\.|includeif\\.|protocol\\.(ext\\.)?allow$)' || true; } \\
+    | while IFS= read -r key; do GIT_CONFIG_GLOBAL="\${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+done`;
+
 describe('release workflow', () => {
   it('cleans every shared ECS workspace before checkout', () => {
     const checkoutJobs = Object.entries(releaseYaml.jobs).filter(([, job]) =>
@@ -88,7 +199,6 @@ describe('release workflow', () => {
         String(step.uses ?? '').includes('actions/checkout'),
       ),
     );
-    const cleanupCopies = [];
 
     expect(checkoutJobs.map(([id]) => id)).toEqual([
       'prepare',
@@ -98,22 +208,22 @@ describe('release workflow', () => {
       'publish',
     ]);
     for (const [id, job] of checkoutJobs) {
-      const checkoutIndex = job.steps.findIndex((step) =>
-        String(step.uses ?? '').includes('actions/checkout'),
-      );
       const restoreIndex = job.steps.findIndex(
         (step) => step.name === 'Restore workspace ownership',
       );
-      const cleanup = job.steps[restoreIndex]?.run;
-      expect(restoreIndex, id).toBeGreaterThanOrEqual(0);
-      expect(restoreIndex, id).toBeLessThan(checkoutIndex);
-      expect(cleanup, id).toContain(
-        'find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +',
+      // The step must stay FIRST: it is the only defence between
+      // cross-job-persistent state and every later state read in the job,
+      // so a demotion must fail even while it remains ahead of checkout.
+      expect(restoreIndex, id).toBe(0);
+      const checkoutIndex = job.steps.findIndex((step) =>
+        String(step.uses ?? '').includes('actions/checkout'),
       );
-      cleanupCopies.push(cleanup);
-    }
-    for (const copy of cleanupCopies.slice(1)) {
-      expect(copy).toBe(cleanupCopies[0]);
+      expect(checkoutIndex, id).toBeGreaterThan(0);
+      // Full-string equality against the shared constant: commenting out
+      // the find, inserting an early exit, or dropping the chown/chmod
+      // ladder uniformly from all five copies keeps every substring and
+      // equality-across-copies pin green while reopening the incident.
+      expect(job.steps[restoreIndex]?.run, id).toBe(canonicalWipe);
     }
   });
 
@@ -127,7 +237,16 @@ describe('release workflow', () => {
     );
     expect(preflightIndex).toBeGreaterThanOrEqual(0);
     expect(preflightIndex).toBeLessThan(checkoutIndex);
-    expect(steps[preflightIndex].run).toContain('docker info');
+    // Pin the full fail-closed form, not just a substring: deleting
+    // 'exit 1' degrades the preflight to a warning (a dead daemon proceeds
+    // into checkout and dies deep in the docker tests), inverting the guard
+    // fails every healthy runner, and discarding docker's own output leaves
+    // the oncall unable to tell dockerd-down from socket-permission
+    // failures without first reaching the runner — all mutants probed
+    // green under the old substring pin.
+    expect(steps[preflightIndex].run).toMatch(
+      /^if ! docker_info_output="\$\(docker info 2>&1\)"; then\n {2}echo "::error::docker daemon is not reachable on this runner; docker integration tests cannot run\."\n {2}printf '%s\\n' "\$docker_info_output"\n {2}exit 1\nfi$/,
+    );
   });
 
   it('bounds shared-pool jobs and skips redundant remote npm caches', () => {
