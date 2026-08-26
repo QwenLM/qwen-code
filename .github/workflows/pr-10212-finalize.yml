@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: fix/10197-env-prefix-bash-rules
-          fetch-depth: 0
+          fetch-depth: 1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -28,13 +28,19 @@ jobs:
 
           rp = Path('packages/core/src/permissions/rule-parser.ts')
           s = rp.read_text()
+          old_call = 'const normalizedCommand = stripLeadingVariableAssignments(command);'
+          if old_call not in s:
+              raise SystemExit('normalization call not found')
           s = s.replace(
-              'const normalizedCommand = stripLeadingVariableAssignments(command);',
+              old_call,
               'const normalizedCommand = normalizeCommandForPermissionMatch(command);',
               1,
           )
+          old_name = 'function stripLeadingVariableAssignments(command: string): string {'
+          if old_name not in s:
+              raise SystemExit('normalization helper not found')
           s = s.replace(
-              'function stripLeadingVariableAssignments(command: string): string {',
+              old_name,
               'function normalizeCommandForPermissionMatch(command: string): string {',
               1,
           )
@@ -43,20 +49,17 @@ jobs:
               // `NAME=value cmd` invocations, because runtimes and applications may
               // interpret those variables before the trusted command runs. Preserve the
               // original command whenever such a prefix is present so the rule must
-              // explicitly include it.
-          '''
+              // explicitly include it.'''
           new_comment = '''    // Environment assignments are part of the execution semantics. Any
               // command-specific Bash pattern (exact, prefix, or glob) must not silently
               // widen from `cmd` to arbitrary `NAME=value cmd` invocations, because
               // runtimes and applications may interpret those variables before the
               // trusted command runs. Preserve the original command whenever such a
               // prefix is present so the rule must explicitly include it. The lone `*`
-              // rule is handled above as the intentional allow-all case.
-          '''
+              // rule is the intentional allow-all case.'''
           if old_comment not in s:
-              raise SystemExit('rule-parser comment anchor not found')
-          s = s.replace(old_comment, new_comment, 1)
-          rp.write_text(s)
+              raise SystemExit('normalization comment not found')
+          rp.write_text(s.replace(old_comment, new_comment, 1))
 
           pm = Path('packages/core/src/permissions/permission-manager.test.ts')
           x = pm.read_text()
@@ -67,8 +70,7 @@ jobs:
                     'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
                   ),
                 ).toBe(true);
-              });
-          '''
+              });'''
           new_test = '''    it('does not let env assignments inherit a glob Bash rule', async () => {
                 expect(
                   matchesCommandPattern(
@@ -76,14 +78,12 @@ jobs:
                     'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
                   ),
                 ).toBe(false);
-              });
-          '''
+              });'''
           if old_test not in x:
-              raise SystemExit('existing env compatibility test anchor not found')
+              raise SystemExit('existing env compatibility test not found')
           pm.write_text(x.replace(old_test, new_test, 1))
 
-          test = Path('packages/core/src/permissions/rule-parser.env-prefix.test.ts')
-          test.write_text(r'''/**
+          Path('packages/core/src/permissions/rule-parser.env-prefix.test.ts').write_text(r'''/**
            * @license
            * Copyright 2025 Qwen team
            * SPDX-License-Identifier: Apache-2.0
@@ -108,15 +108,11 @@ jobs:
           describe('matchesCommandPattern environment prefixes', () => {
             it('keeps plain commands matching', () => {
               expect(matchesCommandPattern('npm --version', 'npm --version')).toBe(true);
-              expect(matchesCommandPattern('python3 *', 'python3 -c "print(1)"')).toBe(
-                true,
-              );
+              expect(matchesCommandPattern('python3 *', 'python3 -c "print(1)"')).toBe(true);
             });
 
             it('does not let static env prefixes inherit exact, prefix, or glob rules', () => {
-              expect(
-                matchesCommandPattern('npm --version', 'FOO=bar npm --version'),
-              ).toBe(false);
+              expect(matchesCommandPattern('npm --version', 'FOO=bar npm --version')).toBe(false);
               expect(matchesCommandPattern('npm', 'FOO=bar npm --version')).toBe(false);
               expect(
                 matchesCommandPattern(
@@ -180,12 +176,10 @@ jobs:
             it('fails closed end-to-end when only the unprefixed Bash command is allowed', async () => {
               const pm = new PermissionManager(makeConfig(['Bash(npm --version)']));
               pm.initialize();
-
               await expect(
                 pm.evaluate({
                   toolName: 'run_shell_command',
-                  command:
-                    'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+                  command: 'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
                   cwd: '/repo',
                 }),
               ).resolves.toBe('ask');
@@ -196,12 +190,10 @@ jobs:
                 makeConfig(['Bash(cat /repo/file)', 'Read']),
               );
               pm.initialize();
-
               await expect(
                 pm.evaluate({
                   toolName: 'run_shell_command',
-                  command:
-                    'NODE_OPTIONS=--require=/tmp/preload.cjs cat /repo/file',
+                  command: 'NODE_OPTIONS=--require=/tmp/preload.cjs cat /repo/file',
                   cwd: '/repo',
                 }),
               ).resolves.toBe('ask');
