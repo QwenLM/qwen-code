@@ -38,7 +38,11 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { sanitizedGitEnv, untrustedGitfile } from './lib/worktree.js';
+import {
+  sanitizedGitEnv,
+  untrustedGitfile,
+  untrustedRepositoryFrom,
+} from './lib/worktree.js';
 import { mountRootFor } from './lib/sandboxed-exec.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
@@ -1006,7 +1010,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // stood there, and a tree that does not exist has no pointer to
       // distrust. In the nested geometry `mountRootFor` itself documents, the
       // outer review's containerized phase can rewrite exactly this one.
-      const freshUntrusted = untrustedGitfile(process.cwd(), mountRootFor);
+      const freshUntrusted = untrustedRepositoryFrom(
+        process.cwd(),
+        mountRootFor,
+      );
       if (freshUntrusted !== null) {
         throw new Error(
           `refusing to create a review worktree: ${freshUntrusted}`,

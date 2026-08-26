@@ -111,6 +111,51 @@ const GIT_ENV_EXEC = [
 ];
 
 /**
+ * The same location question, asked from a directory that need not be a
+ * worktree ROOT.
+ *
+ * `untrustedGitfile` demands `<tree>/.git`, which is right for the trees this
+ * pipeline builds and wrong for the directory a command was launched from: any
+ * subdirectory of a checkout has no `.git` of its own, and git finds the
+ * repository by walking up. Requiring one there refused every worktree
+ * creation whose cwd sat inside a review temp dir without being its root — the
+ * nested/dogfood geometry this pipeline runs in, and 77 tests in one suite.
+ *
+ * So this asks git the same question `worktree add` will ask, from the same
+ * place, and judges only WHERE the answer lives. No shape check: the shape
+ * belongs to the tree, and this is not one.
+ */
+export function untrustedRepositoryFrom(
+  cwd: string,
+  mountRoot: (dir: string) => string | null,
+): string | null {
+  if (mountRoot(cwd) === null) return null;
+  if (!existsSync(cwd)) return null;
+  const resolved = spawnSync(
+    'git',
+    [
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
+      '-c',
+      'core.fsmonitor=',
+      'rev-parse',
+      '--absolute-git-dir',
+    ],
+    { cwd, encoding: 'utf8', timeout: 30_000, env: sanitizedGitEnv() },
+  );
+  if (resolved.error || resolved.status !== 0 || !resolved.stdout) {
+    // Not a repository from here at all — the caller's own error path owns
+    // that, and refusing would answer a question nobody asked.
+    return null;
+  }
+  const target = resolved.stdout.replace(/\r?\n$/, '');
+  if (adminEntryInsideReviewTmp(target, mountRoot, cwd)) {
+    return `${cwd} resolves to an admin entry inside the review temp dir, where the reviewed code can rewrite it`;
+  }
+  return null;
+}
+
+/**
  * Why a tree's own gitfile cannot be trusted to resolve a host-side git write.
  *
  * Returns a refusal, or null when there is nothing to police. Every host-side

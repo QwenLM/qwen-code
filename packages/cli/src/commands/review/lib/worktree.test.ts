@@ -35,6 +35,7 @@ import { isolateHostGitConfig } from './test-utils.js';
 import {
   adminEntryInsideReviewTmp,
   untrustedGitfile,
+  untrustedRepositoryFrom,
   discardWorktree,
   exposeDependencies,
   sanitizedGitEnv,
@@ -1997,6 +1998,22 @@ describe('untrustedGitfile', () => {
       writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
 
       expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
+    },
+  );
+
+  itWhereContainmentExists(
+    'lets a SUBDIRECTORY of a mounted checkout resolve the way git does',
+    () => {
+      // The geometry my own checkout hid: a review running inside a review
+      // worktree launches from, say, `<tree>/packages/cli`, which has no
+      // `.git` of its own — git walks up. Demanding one there refused every
+      // worktree creation in that geometry, and a repository NOT under
+      // `.qwen/tmp` (mine) never reaches the question at all, so the suite
+      // stayed green while the pipeline's own dogfood lane broke.
+      const { tree, mount } = pipelineTree();
+      const sub = join(tree, 'packages', 'cli');
+      mkdirSync(sub, { recursive: true });
+      expect(untrustedRepositoryFrom(sub, mount)).toBeNull();
     },
   );
 
