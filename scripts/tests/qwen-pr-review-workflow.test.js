@@ -5,7 +5,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -3139,6 +3139,21 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(run.trim()).toMatch(/exit "\$status"$/);
   });
 
+  // The repair path names its canary with GNU `mktemp -u` (print-only):
+  // BSD mktemp's `-u` still tries to create the file, so in the unwritable
+  // directory the repair case breaks it exits nonzero with an empty name
+  // and the post-repair touch can never succeed. The health probe only
+  // runs on Linux runners (the review pool is Linux-only, same as the
+  // realpath case above), so the defect cannot exist in production; probe
+  // the host, not the platform — a BSD host with GNU coreutils fronting
+  // PATH keeps the coverage.
+  const hasGnuMktemp =
+    spawnSync(
+      'mktemp',
+      ['-u', join(tmpdir(), 'qwen-no-such-dir', '.probe-XXXXXX')],
+      { stdio: 'ignore' },
+    ).status === 0;
+
   // Executed shape for the health probe: run the step's REAL bash against
   // a fake runner tree with a stub sudo, so the repair-vs-fail-fast
   // decision is exercised, not just textually pinned.
@@ -3211,13 +3226,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.stdout).not.toContain('repaired');
   });
 
-  it('repairs a single unwritable directory instead of failing fast', () => {
-    // Mutant control: a status=1 right after the first failed touch would
-    // abort this repairable runner (exit 1) — a false fail-fast.
-    const r = runHealthProbe({ breakDir: 'home' });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('repaired write access');
-  });
+  it.skipIf(!hasGnuMktemp)(
+    'repairs a single unwritable directory instead of failing fast',
+    () => {
+      // Mutant control: a status=1 right after the first failed touch would
+      // abort this repairable runner (exit 1) — a false fail-fast.
+      const r = runHealthProbe({ breakDir: 'home' });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('repaired write access');
+    },
+  );
 
   it('fails fast when repair is impossible', () => {
     // Mutant control: dropping the post-repair re-probe would report this
