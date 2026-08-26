@@ -148,9 +148,9 @@ export function validateDnsResolutionOrder(
 function getNodeMemoryArgs(isDebugMode: boolean): string[] {
   // Bun accepts --max-old-space-size but it is a no-op (Bun's heap limit
   // starts small and adapts dynamically instead of honouring the flag).
-  // Relaunching just to apply a flag that does nothing wastes a process hop
-  // (autoConfigureMemory users would relaunch on every startup), so skip the
-  // memory-flag relaunch entirely under Bun.
+  // The one-process relaunch below happens unconditionally, so under Bun
+  // this only stops forwarding a flag that does nothing into the
+  // relaunch/sandbox child.
   if ('bun' in process.versions) {
     return [];
   }

@@ -967,7 +967,15 @@ export const AppContainer = (props: AppContainerProps) => {
         );
       }
       setStartupWarnings((currentWarnings) =>
-        mergeStartupWarnings(currentWarnings, config.getWarnings()),
+        mergeStartupWarnings(
+          currentWarnings,
+          goalRuntimeReady
+            ? config.getWarnings()
+            : [
+                ...config.getWarnings(),
+                `Goal features are degraded: the goal runtime did not settle within ${GOAL_RUNTIME_STARTUP_TIMEOUT_MS}ms at startup.`,
+              ],
+        ),
       );
       profileCheckpoint('config_initialize_end');
       setConfigInitialized(true);
