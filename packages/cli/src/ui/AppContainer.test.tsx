@@ -68,6 +68,7 @@ import {
   type Config,
   makeFakeConfig,
   SendMessageType,
+  ToolNames,
   type GeminiClient,
   type GoalTurnHost,
   type SubagentManager,
@@ -456,12 +457,16 @@ describe('AppContainer State Management', () => {
       mockGeminiClient as GeminiClient,
     );
 
-    // Mock SubagentManager to prevent errors during AgentTool initialization
+    // Mock SubagentManager to prevent errors during AgentTool initialization.
+    // getAvailableModelGrades must be present: the mount effect runs the real
+    // config.initialize() in an un-awaited IIFE, which constructs AgentTool
+    // against this mock, and refreshSubagents reads the grades there.
     const mockSubagentManager: Partial<SubagentManager> = {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
       createSubagent: vi.fn(),
+      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,
@@ -488,6 +493,23 @@ describe('AppContainer State Management', () => {
       shouldOpenAuthDialog: false,
       geminiMdFileCount: 0,
     } as InitializationResult;
+  });
+
+  it('gives the Agent tool the full SubagentManager surface during initialization', async () => {
+    // AppContainer's mount effect runs config.initialize() in an un-awaited
+    // IIFE; the real initialize warms the tool registry, constructing
+    // AgentTool against this mock. A SubagentManager mock missing a method
+    // AgentTool reads rejects refreshSubagents there and surfaces as an
+    // unhandled rejection that fails the whole run, so pin the surface here,
+    // where a missing method fails this test instead of leaking.
+    await mockConfig.initialize();
+    const agentTool = mockConfig
+      .getToolRegistry()
+      ?.getTool(ToolNames.AGENT) as unknown as
+      | { refreshSubagents: () => Promise<void> }
+      | undefined;
+    expect(agentTool).toBeDefined();
+    await expect(agentTool!.refreshSubagents()).resolves.toBeUndefined();
   });
 
   describe('speculative tool results', () => {
