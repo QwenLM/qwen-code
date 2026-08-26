@@ -1265,6 +1265,99 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
+  it('an ANONYMOUS whole-write records the adoption machine-readably', () => {
+    // The anonymous whole-write adopts a stranger's list `foreign: false`
+    // — right for the disclosure caveat (an UNKNOWN identity is not a
+    // foreign author) — but compose-review's closure mint is a second
+    // consumer of that stamp and cannot tell the adopted list from this
+    // account's own. The flag is the record the mint's honesty leg reads,
+    // and it rides only on this branch: this is the one write where the
+    // adoption happened.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, round: 4 },
+          commitId: null,
+          reviewId: 40,
+          foreign: true,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.anonymousAdoption).toBe(true);
+      expect(written.foreign).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an identity-known write clears the adoption flag — an anonymous advance keeps it', () => {
+    // The flag describes the list the file carries. An identity-KNOWN
+    // recovery replaces the file with a list the union vouched — the
+    // adoption is over, the flag must not ride along. An anonymous
+    // counter-advance keeps the file's findings verbatim, so the flag
+    // describing them sticks exactly like `foreign` does.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({
+          ...ledger,
+          round: 5,
+          reviewId: 50,
+          foreign: false,
+          merged: false,
+          anonymousAdoption: true,
+        }),
+      );
+      // Anonymous higher round: the kept list is still the adopted one.
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 6,
+            findings: [{ id: 'R6-1', sev: 'S', file: 'x.ts', title: 'theirs' }],
+          },
+          commitId: null,
+          reviewId: 60,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: false },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).anonymousAdoption).toBe(
+        true,
+      );
+      // Identity-known recovery: the union vouches the list again.
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 7,
+            findings: [{ id: 'R7-1', sev: 'S', file: 'own.ts', title: 'own' }],
+          },
+          commitId: null,
+          reviewId: 70,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(
+        JSON.parse(readFileSync(side, 'utf8')).anonymousAdoption,
+      ).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the src0 baseline through the recovered write', () => {
     // compose-review's approach signal reads src0 from this side file; this
     // writer is the joint in the marker→parse→persist→read chain the

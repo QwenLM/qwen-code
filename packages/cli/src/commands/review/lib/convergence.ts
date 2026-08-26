@@ -1049,6 +1049,20 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
         : `上一轮的数据来自并非本账号发布的标记，${what.zh}可能不属于本账号`,
     );
   }
+  // The chain's newest generation is fresh-stamped BY CONSTRUCTION — the
+  // fresh scan admits no carried id — and a re-voice of a still-open claim
+  // whose readback lost its id is textually indistinguishable from a new
+  // Critical. Blanket suppression cannot separate that shape from the
+  // legitimate rebound the signal exists for, so the note discloses the
+  // identity gap instead of asserting the generation is new.
+  if (d.successorChains.length > 0) {
+    caveatsEn.push(
+      `the chain's newest generation carries ids stamped this round — a still-open claim re-voiced without its carried id reads the same there as a new Critical`,
+    );
+    caveatsZh.push(
+      `链条最新一代携带的 id 由本轮铸造——一个未解决断言若在不携带原 id 的情况下被重新表述，在那里与新的 Critical 无法区分`,
+    );
+  }
   const caveatEn =
     caveatsEn.length > 0 ? ` (Evidence: ${caveatsEn.join('; ')}.)` : '';
   const caveatZh =

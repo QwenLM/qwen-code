@@ -13235,6 +13235,35 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     ]);
   });
 
+  it("discloses the fresh generation's identity gap on the divergence note", () => {
+    // The chain's new generation carries ids THIS round stamped — the
+    // fresh scan admits no carried id by construction — and a re-voice of
+    // a still-open claim whose readback lost its carried id is textually
+    // indistinguishable from a new Critical: the shape a blanket
+    // suppression cannot separate from the legitimate rebound. The note
+    // discloses the gap instead of asserting the generation is new.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/mechanism.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(r.body).toContain('⚠️ Divergence:');
+    expect(r.body).toContain(
+      "the chain's newest generation carries ids stamped this round",
+    );
+  });
+
   it('stays silent on the first rebound — one closure generation is normal', () => {
     const r = composeReview({
       planPath: coveredPrev({
@@ -13413,6 +13442,58 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       ],
     });
     expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
+    ]);
+  });
+
+  it('mints no closures over an ANONYMOUSLY ADOPTED previous list', () => {
+    // The pure-foreign honesty leg reads `foreign` off the side file's
+    // stamp — but the anonymous whole-write persists a stranger's adopted
+    // list `foreign: false` (an UNKNOWN identity is not a foreign author,
+    // deliberate for the disclosure caveat). The mint is a second consumer
+    // of that stamp the rationale never addressed: recovered under a
+    // `getCurrentUser()` blip with no readable side file, a stranger's
+    // Criticals walk through the mint as own, and the positional diff mints
+    // closures over entries this round never engaged — where absence means
+    // "never ruled on", not "ruled fixed". The persist seam records the
+    // unverifiable adoption machine-readably, and this leg reads it like
+    // pure-foreign.
+    const adopted = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        anonymousAdoption: true,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(adopted.body)?.closed).toBeUndefined();
+    // Control: the identical list WITHOUT the adoption stamp mints as
+    // before — the leg reads the recorded adoption, not a shape every
+    // pre-telemetry predecessor also has.
+    const own = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-2', sev: 'C', file: 'src/mechanism.ts', title: 'gen 2' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/mechanism.ts', line: 9, body: '**[Critical]** gen 3' },
+      ],
+    });
+    expect(parseLedger(own.body)?.closed).toEqual([
       { r: 11, id: 'R10-2', f: 'src/mechanism.ts' },
     ]);
   });
@@ -13909,6 +13990,85 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(parseLedger(r.body)?.closed).toEqual([
       { r: 11, id: 'R10-2', f: 'src/f.ts' },
+    ]);
+  });
+
+  it('fails closed for a deferral re-file whose carried id is absent from the previous list', () => {
+    // The id join's membership leg: an entry bearing an id the recovered
+    // previous list never held — a renumbered or re-minted id — proves
+    // nothing about which claim it re-posts, and shields nothing: the
+    // still-standing claim it actually re-posts is absent from
+    // `postedIds`, from `repostedIds` (wrong id), and from
+    // `standingClaims`, so it mints a closure in the very round that
+    // re-posts it open. `buildLedger`'s `isCarry` applies exactly this
+    // membership test to the same class of model-written ids, calling a
+    // non-member a stray; the re-post join now agrees. The mint's gate
+    // already requires `carriedWorkList.complete`, so absence from the
+    // previous id space is provable whenever the mint runs.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/auth.ts',
+            title: 'auth bypass in the login flow',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/auth.ts',
+          line: 88,
+          source: 'test',
+          severity: 'Critical',
+          title: 'R11-1: auth bypass',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints the vanished closure beside a deferral re-file carrying a listed id', () => {
+    // The membership leg's control arm: an id the previous list DID hold
+    // still joins — the re-filed claim stands by it, and only the truly
+    // vanished sibling closes.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/auth.ts',
+            title: 'auth bypass in the login flow',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/auth.ts',
+          line: 88,
+          source: 'test',
+          severity: 'Critical',
+          title: 'R10-1: auth bypass in the login flow',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/auth.ts' },
     ]);
   });
 

@@ -1690,7 +1690,11 @@ export function composeReview(
   // sibling `openCriticals` gate applies to the identical inference: a
   // PARTIAL previous list (a vanished id may be the byte budget, not a
   // ruling) and a PURE-FOREIGN list whose entries are a stranger's, not a
-  // shortened version of this account's (#9526). The anchor's fail-closed
+  // shortened version of this account's (#9526), and an ANONYMOUSLY ADOPTED
+  // list — the persist seam's machine-readable record that the file's
+  // findings were adopted with no identity to vouch them, which walks
+  // through this inference exactly like a pure-foreign one. The anchor's
+  // fail-closed
   // predicate — `anchorFailsClosed(cappedBy, scopeUnproven, …)` — binds the
   // closures too, at the diagnosis and the marker where `cappedBy` and
   // `scopeUnproven` are known (this function returns before the body
@@ -1746,13 +1750,21 @@ export function composeReview(
   let repostUnidentified = false;
   for (const e of repostEntries) {
     const carried = LEDGER_ID_READBACK.exec(e.title)?.[1];
-    if (carried === undefined) repostUnidentified = true;
+    // The same membership test `isCarry` applies in the build: an id the
+    // complete previous list never held is a stray — a renumbered or
+    // re-minted token, not a carry — and reading it as one would shield a
+    // claim the entry does not name while the claim it actually re-posts
+    // mints a closure. Over a partial list the mint is already silent, so
+    // the verdict this leg reaches there is inert.
+    if (carried === undefined || !carriedWorkList.ids.has(carried))
+      repostUnidentified = true;
     else repostedIds.add(carried);
   }
   const closuresThisRound: LedgerClosure[] =
     carriedWorkList.complete &&
     postedLedger !== null &&
     !(prevFacts.foreign === true && prevFacts.merged !== true) &&
+    prevFacts.anonymousAdoption !== true &&
     !repostUnidentified
       ? prevFacts.findings
           .filter(
@@ -2023,6 +2035,7 @@ const EMPTY_PREV_FACTS = {
   truncated: false,
   foreign: false,
   merged: false,
+  anonymousAdoption: false,
   anchored: false,
 };
 
@@ -2088,6 +2101,12 @@ function prevLedgerFacts(
   foreign: boolean;
   /** That marker was merged over this account's own findings. */
   merged: boolean;
+  /**
+   * Its findings were adopted by an ANONYMOUS whole-write — recovery ran
+   * with no identity to vouch them, so the closure mint reads the list
+   * like a pure-foreign one. Absent on files a pre-telemetry writer made.
+   */
+  anonymousAdoption: boolean;
   /** The posting floor it ran under, when its marker recorded one. */
   floor?: 'c' | 'o';
   /** How many of its comments were findings reported for the first time. */
@@ -2135,6 +2154,7 @@ function prevLedgerFacts(
     ) as Ledger & {
       foreign?: unknown;
       merged?: unknown;
+      anonymousAdoption?: unknown;
       anchorFromRound?: unknown;
     };
     const round =
@@ -2269,6 +2289,9 @@ function prevLedgerFacts(
       // rendering says so rather than publishing the citation bare.
       foreign: round !== 0 && prev.foreign === true,
       merged: round !== 0 && prev.merged === true,
+      // Travels with the findings it qualifies and the round, for the same
+      // reason both of those do.
+      anonymousAdoption: round !== 0 && prev.anonymousAdoption === true,
       // The previous round's anchor, as a yes/no THIS round can use. Two
       // consecutive withholds are the shape the self-check discloses; the
       // sha itself is Step 1's business, not this read's. A CERTIFIED

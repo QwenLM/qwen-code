@@ -1316,7 +1316,10 @@ export function persistedAnchorSha(sideFilePath: string): string | null {
  *   the next review (the healthy foreign-winner path strips it at the
  *   recovery seam for the same reason). A same-round anonymous winner
  *   changes nothing. With no readable file there is nothing to protect,
- *   and the anonymous recovery is written whole, exactly as before.
+ *   and the anonymous recovery is written whole, exactly as before —
+ *   stamped `anonymousAdoption: true`, the machine-readable record the
+ *   closure mint's honesty leg reads, because `foreign: false` there is
+ *   right for the disclosure caveat but cannot vouch the findings.
  *
  * Every write is write-temp-then-rename: a failure mid-write must leave the
  * previous file intact, never a truncated one that parses as no round and
@@ -1650,6 +1653,16 @@ export function persistRecoveredLedger(
               (!recovered.foreign &&
                 existing?.['merged'] === true &&
                 recovered.ledger.findings.length > 0),
+            // The unverifiable adoption, recorded machine-readably for the
+            // one consumer the `foreign` rationale above never addressed:
+            // compose-review's closure mint, which reads that stamp to
+            // decide whether absence can mean "ruled fixed". An anonymously
+            // adopted stranger's list carries `foreign: false` — right for
+            // the caveat — and would walk through the mint as own without
+            // this flag. Rides ONLY on this branch: it is the one write
+            // where the adoption happened, and an identity-KNOWN whole
+            // write replaces the file with a list the union vouched.
+            ...(!identityKnown ? { anonymousAdoption: true } : {}),
           },
           null,
           2,
