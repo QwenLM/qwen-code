@@ -5185,6 +5185,12 @@ export class Session implements SessionContext {
             let strippedOrphanEntries: Content[] | null = null;
             let resubmittedPromptIdentity: string | undefined;
             let orphanPushCountSnapshot = 0;
+            // The chat instance the pair was captured on (R13-19): a
+            // locally-handled /clear inside the pre-send region swaps in a
+            // fresh GeminiChat, and the finally restore below must not
+            // re-inject the orphan into the cleared session. Set at every
+            // site that sets orphanPushCountSnapshot.
+            let orphanSourceChat: GeminiChat | undefined;
             // The send-time capture for the push-count restore gate (R10-7):
             // compression during the resend can swap in a fresh chat whose
             // counter starts at 0, so the gate must compare the SAME
@@ -5240,8 +5246,9 @@ export class Session implements SessionContext {
                   promptIdentities.length === 1
                     ? promptIdentities[0]
                     : undefined;
+                orphanSourceChat = this.#getCurrentChat();
                 orphanPushCountSnapshot =
-                  this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+                  orphanSourceChat.getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
               } else {
                 continuationParts = recoveryPlan.continuation.parts;
@@ -5281,8 +5288,9 @@ export class Session implements SessionContext {
                 // continuations (on success the resend advances the push
                 // counter past the snapshot, so no double-restore).
                 strippedOrphanEntries = strippedRetryEntries;
+                orphanSourceChat = this.#getCurrentChat();
                 orphanPushCountSnapshot =
-                  this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+                  orphanSourceChat.getUserContentPushCount?.() ?? 0;
               } else if (strippedRetryEntries.length > 0) {
                 // No adoptable identity (orphan-less strips are handled by
                 // the fresh record below): the resend re-pushes ONLY the
@@ -5339,8 +5347,9 @@ export class Session implements SessionContext {
                   // On success the resend advances the push counter past
                   // the snapshot, so the gate prevents a double-restore.
                   strippedOrphanEntries = [lastStrippedEntry];
+                  orphanSourceChat = this.#getCurrentChat();
                   orphanPushCountSnapshot =
-                    this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+                    orphanSourceChat.getUserContentPushCount?.() ?? 0;
                 } else {
                   for (const entry of strippedRetryEntries) {
                     this.#getCurrentChat().addHistory(entry);
@@ -5682,12 +5691,25 @@ export class Session implements SessionContext {
                 // (pushes happen only inside the send loop), so the gate
                 // always passes on these exits — it is kept verbatim with
                 // the catch's for symmetry and defense.
+                const restoreChat = this.#getCurrentChat();
+                // R13-19: a locally-handled /clear inside this wrapped
+                // region swaps in a fresh GeminiChat (clearCommand →
+                // resetChat → startChat). Restoring into the replacement
+                // would re-inject the orphan into the cleared session —
+                // the model would see stale content after 'Context cleared'
+                // and the new session's rewind gates would face a marked
+                // turn with no recording pairing. Skip the restore when the
+                // instance was swapped; the orphan's record stays in the
+                // OLD session's recording, where it belongs. (The R10-7
+                // catch mirror solves the same hazard for the send-loop
+                // path with the orphanSendChat capture.)
                 if (
-                  (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) <=
-                  orphanPushCountSnapshot
+                  restoreChat === orphanSourceChat &&
+                  (restoreChat.getUserContentPushCount?.() ?? 0) <=
+                    orphanPushCountSnapshot
                 ) {
                   for (const entry of strippedOrphanEntries) {
-                    this.#getCurrentChat().addHistory(entry);
+                    restoreChat.addHistory(entry);
                   }
                   strippedOrphanEntries = null;
                 }

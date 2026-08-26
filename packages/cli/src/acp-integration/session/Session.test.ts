@@ -2528,6 +2528,50 @@ describe('Session', () => {
     expect(restored).toBeDefined();
   });
 
+  it('does not restore the stripped orphan into a chat swapped by a retried /clear', async () => {
+    // R13-19: a locally-handled /clear inside the pre-send region swaps in
+    // a fresh GeminiChat (clearCommand → resetChat → startChat). The
+    // push-count gate alone would pass on the FRESH chat (its counter
+    // starts at 0) and re-inject the orphan into the cleared session —
+    // the model would see stale content after 'Context cleared'. The
+    // restore must be skipped when the instance was swapped.
+    const orphan: Content = {
+      role: 'user',
+      parts: [{ text: 'failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphan, 'original-prompt');
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphan]);
+    const clearedChat = {
+      addHistory: vi.fn(),
+      getUserContentPushCount: vi.fn(() => 0),
+      sendMessageStream: vi.fn(),
+    } as unknown as GeminiChat;
+    vi.mocked(
+      nonInteractiveCliCommands.handleSlashCommand,
+    ).mockImplementationOnce(async () => {
+      // /clear swaps the live chat before the local return.
+      vi.mocked(mockGeminiClient.getChat).mockReturnValue(clearedChat);
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: 'Conversation cleared.',
+      };
+    });
+
+    const result = await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: '/clear' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    expect(result.stopReason).toBe('end_turn');
+    // Neither the cleared session nor the abandoned chat gets the orphan.
+    expect(clearedChat.addHistory).not.toHaveBeenCalled();
+    expect(mockChat.addHistory).not.toHaveBeenCalled();
+  });
+
   it('re-adds every stripped entry a no-adoption retry does not re-push', async () => {
     // Two stacked failed attempts leave two marked orphans; the retry
     // strips BOTH and fails closed on adoption (length !== 1). The resend
