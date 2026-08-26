@@ -73,7 +73,15 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       "split the cache's still-open findings by their CITED PATHS",
     );
-    expect(body).toContain(
+    // R17-2: presence is NOT the key — a discarded change leaves the file
+    // present with the cited bytes gone, and no other channel names those
+    // paths. The capture publishes the machine-readable split key and the
+    // bullet must route through it, both membership directions.
+    expect(body).toContain('`incremental.scope.supersededPaths`');
+    expect(body).toContain('a discarded change leaves the file present');
+    expect(body).toContain('IS IN `supersededPaths`');
+    expect(body).toContain('NOT in the list sits byte-identical');
+    expect(body).not.toContain(
       'A finding whose cited file is STILL PRESENT in the tree',
     );
     // The old routing, which sent the branch down the verbatim-standing
@@ -1333,6 +1341,19 @@ describe('bundled review skill', () => {
       'The incremental scope kept nothing to review, but untracked files were not enumerated (--no-untracked)',
     );
   });
+  it('checks the candidate is this round\u2019s own before promoting', () => {
+    // R17-4: the candidate path is stable per target and local/file reviews
+    // take no lease, so a concurrent same-target run overwrites the file
+    // mid-round — indistinguishable by path. The capture publishes the
+    // written candidate's stateId beside the path, and Step 8 must compare
+    // before promoting; a mismatch is a withheld candidate, said out loud.
+    const body = skillBody();
+    expect(body).toContain('`cacheCandidateStateId`');
+    expect(body).toContain(
+      'A mismatch (or an absent `cacheCandidateStateId` field on a plan that published a path) is treated exactly like a withheld candidate',
+    );
+  });
+
   it('keys the local cache write to the marker\u2019s withholding conditions', () => {
     // R8-2: the local fail-closed LIST was "completed" three times and a
     // fourth shape walked through it each time — the last one an Uncoverable

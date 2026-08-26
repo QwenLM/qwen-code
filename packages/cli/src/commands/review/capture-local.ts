@@ -108,6 +108,16 @@ type CaptureLocalResult = PlanReport & {
    */
   cacheCandidatePath?: string;
   /**
+   * The written candidate's own `stateId`, for Step 8 to CHECK before
+   * promoting. The candidate path is stable per target and local/file
+   * reviews take no lease, so a concurrent same-target run overwrites the
+   * file mid-round — indistinguishable by path, mtime or shape. A candidate
+   * whose stateId no longer matches this field is another run's: treat it
+   * exactly like a withheld candidate and say so (R17-4). Absent when the
+   * candidate was withheld.
+   */
+  cacheCandidateStateId?: string;
+  /**
    * Where this target's review cache lives — resolved here, not predicted.
    *
    * Every ledger read and the Step 8 write name `<target>.json`, and
@@ -847,6 +857,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       // `IncrementalBlock`. Written flat here once, which rendered no
       // incremental frame on any local round while the diff was sliced
       // regardless, so nothing looked wrong.
+      const removedFromSlice = stateChanged.filter(
+        (p) => !planPaths.includes(p),
+      );
       incremental = {
         scope: {
           anchor: cache!.stateId,
@@ -857,14 +870,20 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
           contextFileCount: candidates.filter((p) => !interaction.has(p))
             .length,
           fullDiffPath,
+          // The scope-emptied split key — see IncrementalScope. Computed
+          // here, not re-derived by the orchestrator: file PRESENCE cannot
+          // answer it (a discarded change leaves the file present with the
+          // cited bytes gone), and no other published channel names these
+          // paths at all.
+          ...(removedFromSlice.length > 0
+            ? { supersededPaths: removedFromSlice }
+            : {}),
         },
       };
       // Paths that vanished since the cached round have no diff section and
       // no deltaFiles entry — say they existed, or a deletion-only round
       // reads as if nothing drove its scope.
-      const removedCount = stateChanged.filter(
-        (p) => !planPaths.includes(p),
-      ).length;
+      const removedCount = removedFromSlice.length;
       // The stop condition is the SYMMETRIC set: a deleted-since-cache
       // path with no diff section left is still a change, and "no
       // changes" must not be claimed over it.
@@ -918,8 +937,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
                 `path(s) re-reviewed every round (never certified), `
               : '') +
             (removedCount > 0
-              ? `${removedCount} cached path(s) no longer present ` +
-                `(treated as changes for the widening), `
+              ? `${removedCount} cached path(s) whose recorded change is ` +
+                `gone from this capture (deleted, or discarded — named in ` +
+                `the plan's supersededPaths), `
               : '') +
             `${incremental.scope!.contextFileCount} clean file(s) left out of ` +
             `scope.`,
@@ -1101,7 +1121,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // `srclink/foo.ts` predicted `srclink_foo.ts.json`, found nothing, and
     // ruled on zero ledger entries over a Critical that still stood.
     cachePath: cachePathFor(target, sourcePath),
-    ...(cacheCandidatePath ? { cacheCandidatePath } : {}),
+    ...(cacheCandidatePath
+      ? { cacheCandidatePath, cacheCandidateStateId: candidate.stateId }
+      : {}),
     ...planEffortField(args.effort),
   };
 

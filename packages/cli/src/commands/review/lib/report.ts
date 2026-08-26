@@ -313,6 +313,18 @@ export interface IncrementalScope {
    * point at yet and omits the field.
    */
   fullDiffPath?: string | null;
+  /**
+   * Cached paths whose RECORDED change is gone from this capture — the file
+   * deleted, or the change discarded back to the diff base — while no diff
+   * section survives for them. The scope-emptied stop's split key: a cache
+   * finding citing one of these is SUPERSEDED (the bytes it cited no longer
+   * exist), and one citing any other path sits byte-identical to the round
+   * that recorded it. Published as a LIST because the split is per cited
+   * path and file presence cannot answer it — a discarded change leaves the
+   * file present with the cited bytes gone. Bounded by the cache's file
+   * count; absent when empty.
+   */
+  supersededPaths?: string[];
 }
 
 /**
