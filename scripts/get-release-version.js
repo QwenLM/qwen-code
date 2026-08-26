@@ -351,7 +351,7 @@ function listExistingStableTags() {
   return output
     .split('\n')
     .map((line) => line.trim())
-    .filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag))
+    .filter((tag) => /^v\d+\.\d+\.\d+$/.test(tag) && semver.valid(tag))
     .sort(semver.rcompare);
 }
 

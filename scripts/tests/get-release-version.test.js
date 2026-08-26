@@ -280,6 +280,30 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
+    it('should skip unparseable tags (e.g. leading zeros) when resolving the previous release tag', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.6.2';
+        if (command.includes("git tag -l 'v*'"))
+          return 'v01.2.3\nv0.6.0\nv0.6.1';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should sort tags by semver order, not lexicographic order', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) return 'v0.9.0\nv0.10.0';
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      // semver descending: v0.10.0 > v0.9.0 (lexicographic would pick v0.9.0)
+      expect(result.previousReleaseTag).toBe('v0.10.0');
+    });
+
     it('should keep the npm-derived previous tag when git tag listing fails', () => {
       vi.mocked(execSync).mockImplementation((command) => {
         if (command.includes("git tag -l 'v*'")) {
