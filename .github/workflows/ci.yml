@@ -1029,16 +1029,18 @@ jobs:
       # (C:\Users\RUNNER~1), so %TEMP% yields short-name paths while
       # fs.realpath resolves the long form of the same directory — tests that
       # compare path strings then fail (~200 cases). Point TEMP/TMP at a
-      # sibling of the workspace, which has no short alias, for every later
-      # step. Runs before setup-node / npm install so they use it too.
+      # directory inside the workspace, which has no short alias, for every
+      # later step. Hosted lane only: the self-hosted lane redirects TEMP/TMP
+      # to RUNNER_TEMP in configure-windows-runner, and that later env-file
+      # write wins. Runs before setup-node / npm install so they use it too.
       - name: 'Point temp at a short-alias-free directory'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}"
         shell: 'powershell'
         run: |-
           $temp = Join-Path $env:RUNNER_WORKSPACE 'qwen-code-temp'
           New-Item -ItemType Directory -Force -Path $temp | Out-Null
-          "TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "TEMP set to $temp"
 
       - name: 'Configure self-hosted Windows test environment'

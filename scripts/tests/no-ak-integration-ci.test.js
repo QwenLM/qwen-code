@@ -381,6 +381,25 @@ describe('no-AK integration CI wiring', () => {
     expect(configure).toContain(
       "uses: './.github/actions/configure-windows-runner'",
     );
+
+    // The short-alias TEMP redirect serves the hosted fallback lane only: on
+    // self-hosted machines configure-windows-runner appends
+    // TEMP/TMP=$env:RUNNER_TEMP afterwards, and the runner's last env-file
+    // write wins. The writes carry -Encoding utf8 because `shell:
+    // 'powershell'` is PowerShell 5.1, whose Out-File default is UTF-16LE.
+    const tempRedirect = getWorkflowStep(
+      windowsJob,
+      'Point temp at a short-alias-free directory',
+    );
+    expect(tempRedirect).toContain(
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment != 'self-hosted' }}\"",
+    );
+    for (const line of ['"TEMP=$temp"', '"TMP=$temp"']) {
+      expect(tempRedirect).toContain(
+        `${line} | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
+      );
+    }
+
     const configureAction = readFileSync(
       path.join(ROOT, CONFIGURE_ACTION_PATH),
       'utf8',
