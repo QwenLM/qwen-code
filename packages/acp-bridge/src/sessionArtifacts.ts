@@ -3124,6 +3124,8 @@ async function getWorkspaceStatus(
       if (!isSameFile(preOpenStat, await handle.stat({ bigint: true }))) {
         return { status: 'missing', escaped: true };
       }
+      // The identity fstat cannot be reused here: bigint stats return BigInt
+      // fields and truncate mtimeMs, breaking the Number comparisons below.
       const stat = await handle.stat();
       if (!stat.isFile()) {
         throw new Error('path is not a regular file');

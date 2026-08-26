@@ -2056,8 +2056,9 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
     () => `X='git reset --hard'; cd ${cmdPath(outsideRepo)}; $X`,
     () => `X=git; Y='-C ${outsideRepo} reset --hard'; $X $Y`,
     () =>
-      `eval 'GIT_WORK_TREE=${outsideRepo}'; export GIT_WORK_TREE; git reset --hard`,
-    () => `GIT_WORK_TREE=${outsideRepo}; export $NAME; git reset --hard`,
+      `eval 'GIT_WORK_TREE=${cmdPath(outsideRepo)}'; export GIT_WORK_TREE; git reset --hard`,
+    () =>
+      `GIT_WORK_TREE=${cmdPath(outsideRepo)}; export $NAME; git reset --hard`,
   ])('resolves a relocation through shell variables %#', async (build) => {
     const guard = createDaemonToolGuard();
 
@@ -2454,9 +2455,10 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
       () => `echo "$'$(GIT_DIR=${plainOutside}/.git git reset --hard HEAD~1)'"`,
       // The export attribute sticks to the name, so a LATER assignment to it
       // reaches the git subprocess.
-      () => `export GIT_DIR; GIT_DIR=${plainOutside}; git reset --hard`,
       () =>
-        `export GIT_WORK_TREE; GIT_WORK_TREE=${plainOutside}; git reset --hard`,
+        `export GIT_DIR; GIT_DIR=${cmdPath(plainOutside)}; git reset --hard`,
+      () =>
+        `export GIT_WORK_TREE; GIT_WORK_TREE=${cmdPath(plainOutside)}; git reset --hard`,
       // Both sides of a pipe run in subshells: the parent stays outside.
       () => `cd ${plainOutside}; echo x | cd ${effectiveCwd}; git commit -m x`,
       // A bare digit before a spaced redirect is a real argv word.
