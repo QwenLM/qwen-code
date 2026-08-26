@@ -406,15 +406,18 @@ export interface QueryOptions {
    * Separately, `permissions.allow` in settings.json (requires restart)
    * activates a registry-level allowlist: when at least one valid allow
    * rule is configured there (malformed entries do not count), built-in
-   * tools not covered by any allow or ask rule are not registered either
-   * (MCP tools, the `--json-schema` `structured_output` contract, the
-   * plan-mode lifecycle tools, `task_stop`, `tool_search`, and the
-   * `computer_use__*` family are exempt) (#9827). The SDK `allowedTools`
-   * parameter cannot activate the allowlist on its own, but while the
-   * allowlist is active its rules are merged into the effective allow set
-   * and count toward coverage, keeping covered built-ins registered.
-   * Aliases like 'Read', 'Edit', and 'Bash' also work but resolve to single
-   * tools. Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
+   * tools not covered by any allow or ask rule are demoted to deferred —
+   * they stay registered and loadable via `tool_search`, but their schemas
+   * are not sent in the eager model request and a call still goes through
+   * the normal approval flow (MCP tools, the `--json-schema`
+   * `structured_output` contract, the plan-mode lifecycle tools,
+   * `task_stop`, `tool_search`, and the `computer_use__*` family are
+   * exempt) (#9827, #10075). The SDK `allowedTools` parameter cannot
+   * activate the allowlist on its own, but while the allowlist is active
+   * its rules are merged into the effective allow set and count toward
+   * coverage, keeping covered built-ins eagerly registered. Aliases like
+   * 'Read', 'Edit', and 'Bash' also work but resolve to single tools.
+   * Specifiers like 'Bash(git *)' are stripped; `coreTools` restricts
    * tool registration, not invocation.
    * @example ['read_file', 'edit', 'run_shell_command']
    */
@@ -453,10 +456,12 @@ export interface QueryOptions {
    *   CLI `--allowed-tools` flag and cannot activate the registry allowlist
    *   by itself. While a settings-provided `permissions.allow` allowlist is
    *   active, however, these rules are merged into the effective allow set
-   *   and count toward coverage, so covered built-ins stay registered
-   *   (#9827). To hide unlisted built-in tools from the model request, set
-   *   `permissions.allow` in settings.json (requires restart); that key
-   *   activates the registry allowlist
+   *   and count toward coverage, so covered built-ins stay eagerly
+   *   registered (#9827). To keep unlisted built-in tool schemas out of
+   *   the eager model request, set `permissions.allow` in settings.json
+   *   (requires restart); that key activates the registry allowlist, which
+   *   demotes unlisted tools to deferred (still registered and loadable
+   *   via `tool_search`, #10075)
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`
@@ -477,10 +482,10 @@ export interface QueryOptions {
   /**
    * Authentication type for the AI service.
    * - 'openai': Use OpenAI-compatible authentication
+   * - 'anthropic': Use Anthropic-compatible authentication
    * - 'qwen-oauth': Legacy Qwen OAuth authentication
-   *
-   * Qwen OAuth free tier was discontinued on 2026-04-15. New SDK setups should
-   * use OpenAI-compatible authentication or another supported provider.
+   * - 'gemini': Use Gemini authentication
+   * - 'vertex-ai': Use Vertex AI authentication
    */
   authType?: AuthType;
 
