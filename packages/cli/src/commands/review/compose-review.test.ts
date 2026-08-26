@@ -7981,9 +7981,10 @@ describe('the ledger marker reaches the POSTED body', () => {
 
   it('withholds the anchor when a dimension gap is about LINES, not depth', () => {
     // The distinction the exemption turns on, and the one a live review of
-    // this change had to restore: Agent 7 is the only role whose brief sets
-    // `readsDiff: false`, so only its gap says nothing about which lines were
-    // read. Any other dimension in that field is a whiffed lens — a claim
+    // this change had to restore: Agent 7 is the only ROSTER role whose brief
+    // sets `readsDiff: false` (the post-verdict fix auditor is the other, and
+    // never reaches this field), so only its gap says nothing about which
+    // lines were read. Any other dimension in that field is a whiffed lens — a claim
     // about lines that no machine detector produces.
     const withLensGap = composeReview({
       planPath: coveredPlan(['verify', 'reverse-audit'], {

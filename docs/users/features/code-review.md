@@ -92,6 +92,8 @@ Step 5:  Iterative reverse audit, fanned out per chunk;
 Step 6:  Present findings + verdict (high; low pass: findings only)
          Canonicalize findings -> .qwen/tmp/...-findings.json
 Step 6B: Apply findings + record per-finding outcomes  (--fix only)
+         + fix audit: one agent over the applied hunks,
+           reports unpinned new assumptions (no verdict)  [1 call]
 Step 7:  Submit PR review (inline comments, if requested; high only)
 Step 8:  Save report + incremental cache (cache: high only)
 Step 9:  Clean up (remove worktree + temp files)
@@ -229,6 +231,8 @@ After the review, each finding is applied with the `edit` tool and then **accoun
 A finding is skipped when its fix would change intended behavior, would need changes well outside the reviewed diff, or turns out on a second look to be a false positive.
 
 **Every finding gets an outcome, and this is enforced rather than requested.** The ledger goes through `qwen review findings --outcomes`, which refuses a set that does not cover all of them — a fixer that applies six of nine findings and reports six has not lied about any one of them, it has silently shortened the list, and you would have no way to see the three that fell off.
+
+**The applied fix is then audited — by one agent, and not by re-reviewing your tree.** The review does not re-run itself over code it just edited (that would be a new review of different code, wearing this one's verdict). Instead it records your working tree before the first edit (`qwen review fix-delta --snapshot`, through a throwaway index — your own index and stash are never touched), diffs the tree against that record afterwards (`fix-delta --since`), and hands exactly those hunks, together with the `fixed` findings each claims to close, to a single `fix-audit` agent. That agent never sees the reviewed diff and files no findings. It answers one question per hunk: what does this edit newly assume — a bound, a key, a lifetime, a shared resource, an ordering — and does anything in the tree pin it (a test that goes red, a type, a single source the value derives from)? Only the unpinned ones come back, each with what would pin it. They are reported in a **Fix audit** block in the terminal and as the affected finding's outcome note; they are not findings, change no verdict, and are left for you to act on — the measured reason this exists is that a third of a multi-round review's later findings were introduced by the fix immediately before them, and the two Criticals a real fix round shipped were exactly assumptions of this kind that a mutation probe of the intended fix sites could not reach. If nothing was `fixed`, the audit is skipped and says so.
 
 ## Resuming an interrupted review (`--resume`)
 

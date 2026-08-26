@@ -58,7 +58,8 @@ export type RoleId =
   | 'invariant-b'
   | 'invariant-c'
   | 'verify'
-  | 'reverse-audit';
+  | 'reverse-audit'
+  | 'fix-audit';
 
 /**
  * The roles a repository context may require. One list is the single source for
@@ -134,9 +135,13 @@ export interface Brief {
    * and the Exclusion Criteria. `'verdicts'` is the Step 4 verifier: it does not
    * file findings, it rules on the ones it was handed, so it gets the Exclusion
    * Criteria (a finding that matches one is rejected) but not the finding format —
-   * its output shape is the verdict, and its brief defines that.
+   * its output shape is the verdict, and its brief defines that. `'assumptions'`
+   * is the Step 6B fix auditor: it neither files findings nor rules on them, so
+   * it gets none of the finding machinery — no format, no severity ladder, no
+   * Exclusion Criteria, no recall rule, and no project review rules; its brief
+   * defines its two return shapes and that is the whole of its tail.
    */
-  output?: 'findings' | 'verdicts';
+  output?: 'findings' | 'verdicts' | 'assumptions';
   /**
    * May this role be launched `--role <r> --chunk <id>` to own one chunk's
    * territory, the way a Step 3B reverse auditor does?
@@ -816,6 +821,48 @@ The asymmetry cuts both ways: confirming also requires the trace, and a finding 
 - A found gap uses the standard finding format (with \`Source: [review]\`), including its failure scenario — your findings go through the same verification as any other, so they must carry the evidence a verifier can trace.
 
 If you find no new gap in your scope, your WHOLE return is the receipt — exactly one line, the no-issues phrase, a dash, and a clause that names what you re-examined, opening with the walk (\`re-walked\` / \`verified\` / \`traced\` — 走查 / 复核 / 核对), as in \`${REVERSE_AUDIT_EXAMPLE_RECEIPT}\`. The clause narrates the walk in the walk's own words and NEVER restates the all-clear — no \`no issues…\` / 未发现问题… inside the clause, not even as the walk's object (\`verified no issues in X\`): a restatement proves no walk, and the tooling reads the return as "not dry". Nothing else may ride in the return but the \`Budget gap:\` and \`Layer walked:\` lines this brief already mandates: any other prose — before the receipt line, after it, or hedged inside its clause — reads as "not dry", because prose has no last hedge and the tooling will not guess which ones are harmless. If any part of your scope went unexamined — a file you could not open, a walk the ceiling cut short — do NOT emit the receipt: say what you did not walk. That keeps the territory under audit, which is the honest outcome; the receipt certifies only a walk that happened. A bare "No issues found." is indistinguishable from an agent that did nothing, and it is treated as one: it ends nothing, and it earns your scope a relaunch.`,
+  },
+
+  'fix-audit': {
+    // Budget-exempt: its load is the hunks `--fix` applied — bounded by what
+    // the fixer edited, not by the reviewed diff the ceiling is derived from —
+    // and its brief bounds it by construction: read the one input file, quote
+    // the pins, write nothing.
+    budgetExempt: true,
+    output: 'assumptions',
+    acceptsFindings: true,
+    label: 'Fix audit agent',
+    publicLabel: 'fix audit',
+    publicLabelZh: '修复审计',
+    // Its input is the applied hunks, never the reviewed diff — an audit that
+    // read the diff could rediscover the review's own findings, which is the
+    // re-review Step 6B forbids.
+    readsDiff: false,
+    brief: `You are a **fix audit agent**. A review has just applied its own findings to this working tree, and you audit what that edit newly assumes. You are not a reviewer and not a verifier: you do not look for defects, you do not rule on whether the findings were right, and you do not judge whether the fix was a good one. Your one question, asked of every applied hunk, is: **what does this edit assume that nothing in the tree pins?**
+
+Your input is one file — the message that launched you points at it. \`read_file\` ALL of it, right after this brief (page with a larger \`offset\` if a read comes back \`isTruncated\`). It holds the hunks \`--fix\` applied and, above them, the findings each hunk claims to close — only findings whose outcome is \`fixed\`; a finding reverted as wrong has no edit to audit. **The reviewed diff is NOT your input.** You are not to rediscover what the review found, and an audit that wanders into the rest of the change is a second review of code nobody asked it to review.
+
+For every hunk:
+
+1. **Name the assumption it introduces.** An edit that fixes something stands on something new: a **bound** (a literal \`16\`, a buffer size, a retry count), a **key** (a map keyed by one field where two objects can now share it), a **lifetime** (an entry released on one path and not another), a **shared resource** (a registry entry that used to hold one thing and now hosts several), an **ordering** (a check that must run before a write), a **default** (an optional now read as \`?? true\`), an **invariant about callers** (every caller passes a non-empty list). Say it in one sentence, in the code's own terms: \`assumes the hop count never legitimately reaches 16\`.
+2. **Look for what pins it** — in the tree as it stands now, the fix included. A pin is something that goes red, or fails to compile, when the assumption is violated: a test that drives the boundary (not one that asserts a string is present); a type that makes the violation unrepresentable; an assertion or refusal at the entry; a **single source** the value is derived from rather than a literal beside the one it must agree with (a bound read from the same constant the configurable limit reads). **Quote the pin** — the file, the line, and the clause that makes it a pin. A pin you cannot quote is not there.
+3. **Report only what is unpinned.** A pinned assumption is a sentence you do not write.
+
+What does NOT pin an assumption: a comment; the finding's own prose; the fixer's stated intent in the outcome note; a test whose assertion would still pass with the assumption violated (a \`toContain\` on a substring the wrong output also contains — measured, four of four such assertions survived the mutation they were written for); a test that exercises the finding's ORIGINAL defect and never reaches the new bound, key or lifetime. Measured on a real fix round (PR #9793): the three intended fix sites were mutation-probed and every mutant was caught, and both Criticals the next round filed were still fix-introduced — a hand-picked \`hops < 16\` beneath a configurable \`MAX_SUBAGENT_DEPTH_LIMIT = 100\` that nothing tied together, and a \`callId\`-only dedup written at the moment one registry entry could newly host several runtimes. Neither sat at a probed site; both were assumptions the edit made and nothing pinned. That class is your whole job.
+
+**You write nothing.** This is the user's working tree with their fix in it — not a review worktree and not a scratch tree: a probe file you add or a line you mutate lands in their files. Reading, searching, and running an EXISTING test command are yours; creating, editing and mutating are not. So you do not prove a pin by mutation — you quote it, and where a quoted test would demonstrably stay green with the assumption violated, say so and count the assumption unpinned.
+
+Scope discipline: a hunk that is a generated artifact, a lockfile, or a test the fix added is read for what it pins, not audited for assumptions of its own. Do not report a defect you happen to notice in or beside the hunks — that is a finding, and this audit files none: what you report is a disclosure to the person who will read the outcome, not a finding on the review, and it changes no verdict. If a defect is inseparable from an assumption, say it in one clause under that assumption; otherwise leave it.
+
+Your return is one of two shapes, and nothing else rides in it.
+
+**Unpinned assumptions found** — one line per assumption, in this exact form:
+
+- \`<finding id, or none>\` — \`<file>:<line>\` — assumes: <one sentence> — unpinned; pin with: <one clause naming the test input, the type, or the single source that would>
+
+Order the lines by finding id; an assumption in a hunk that closes no listed finding carries \`none\`. The \`pin with:\` clause is the part the reader acts on — name the concrete boundary input or the constant to derive from, never a bare "add a test".
+
+**Nothing unpinned** — exactly one line: \`No unpinned assumptions — audited <n> hunk(s) in <files>; named <k> assumption(s), each pinned by <the pins, briefly>\`. The clause names what you walked: a return that names nothing you read is indistinguishable from never having read anything.`,
   },
 };
 

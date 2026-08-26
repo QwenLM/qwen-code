@@ -3403,10 +3403,12 @@ function composeReviewBody(
   // Is every dimension gap the orchestrator disclosed about DEPTH rather than
   // about which lines were read?
   //
-  // Only one dimension can answer yes, and it is not a judgement call: Agent 7
-  // is the single role whose brief declares `readsDiff: false` (agent-briefs).
-  // Its gap — "the integration suite CI skipped did not run locally" — says
-  // nothing about the diff, because that agent never reads the diff.
+  // Only a role that never reads the diff can answer yes, and it is not a
+  // judgement call: the set is derived from the briefs that declare
+  // `readsDiff: false` (agent-briefs). On the roster that is Agent 7, whose
+  // gap — "the integration suite CI skipped did not run locally" — says
+  // nothing about the diff; the Step 6B fix auditor declares it too, but runs
+  // after this verdict is composed and never appears in this field.
   //
   // Every OTHER entry is a line-coverage claim wearing dimension prose, and
   // the machine cannot see it: a whole-diff lens that made tool calls, opened

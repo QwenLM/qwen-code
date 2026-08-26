@@ -61,6 +61,7 @@ import {
   buildRoleLaunchPrompt,
   findingsSection,
   agentPromptCommand,
+  renderFixAuditInput,
 } from './agent-prompt.js';
 import {
   BRIEFS,
@@ -6512,7 +6513,7 @@ describe('the tool budget in the briefs', () => {
       ),
     );
     const exempt = roles.filter((r) => BRIEFS[r].budgetExempt).sort();
-    expect(exempt).toEqual(['0', '7', 'verify']);
+    expect(exempt).toEqual(['0', '7', 'fix-audit', 'verify']);
   });
 
   it.each([
@@ -7157,4 +7158,285 @@ describe('incremental-scope briefs', () => {
     );
     expect(p).toContain('src/caller.ts (imports src/changed.ts)');
   });
+});
+
+describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => {
+  // The audit's whole design is what it is NOT handed: not the reviewed diff
+  // (it could rediscover the review's own findings), not the finding format
+  // or the severity ladder (it files nothing), not the project review rules
+  // (they tell a reviewer what to check). Each absence is pinned here,
+  // because each is a line a later "make it consistent with the other roles"
+  // edit would add back.
+  const artifact = (
+    outcomes: Record<string, 'fixed' | 'skipped' | 'no_change_needed' | null>,
+  ) =>
+    Object.entries(outcomes).map(([id, outcome]) => ({
+      id,
+      severity: 'Critical',
+      summary: `${id}: the retry counter is never reset`,
+      failureScenario: `${id}: a request that fails twice leaves attempts at 2`,
+      file: `src/${id}.ts`,
+      line: 42,
+      ...(outcome ? { outcome } : {}),
+      ...(outcome === 'skipped' ? { outcomeNote: 'out of scope' } : {}),
+    }));
+  const HUNKS =
+    'diff --git a/src/f1.ts b/src/f1.ts\n' +
+    '--- a/src/f1.ts\n+++ b/src/f1.ts\n@@ -40,3 +40,3 @@\n' +
+    '-  if (hops < 16) {\n+  if (hops < MAX_SUBAGENT_DEPTH_LIMIT) {\n';
+
+  function setup(opts: {
+    outcomes?: Record<string, 'fixed' | 'skipped' | 'no_change_needed' | null>;
+    hunks?: string;
+    rawFindings?: string;
+  }): { plan: string; findings: string; hunks: string; dir: string } {
+    const dir = mkdtempSync(join(tmpdir(), 'ap-fixaudit-'));
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(PLAN));
+    const findings = join(dir, 'findings.json');
+    writeFileSync(
+      findings,
+      opts.rawFindings ??
+        JSON.stringify({
+          findings: artifact(
+            opts.outcomes ?? { f1: 'fixed', f2: 'skipped', f3: 'fixed' },
+          ),
+        }),
+    );
+    const hunks = join(dir, 'hunks.diff');
+    writeFileSync(hunks, opts.hunks ?? HUNKS);
+    return { plan, findings, hunks, dir };
+  }
+  const handler = agentPromptCommand.handler as (a: unknown) => void;
+
+  beforeEach(() => {
+    (writeStdoutLine as unknown as Mock).mockClear();
+  });
+
+  it('the brief carries the audit method and none of the finder machinery', () => {
+    const rules = 'Never merge without a changeset entry.';
+    const brief = buildRoleBrief(PLAN, 'fix-audit', { rules });
+    // The method: name the assumption, quote the pin, report only the unpinned.
+    expect(brief).toContain(
+      'what does this edit assume that nothing in the tree pins?',
+    );
+    expect(brief).toContain('**Quote the pin**');
+    expect(brief).toContain('**Report only what is unpinned.**');
+    // The two return shapes, and the read-only rule for the user's tree.
+    expect(brief).toContain('pin with:');
+    expect(brief).toContain('No unpinned assumptions — audited');
+    expect(brief).toContain('**You write nothing.**');
+    // The measured class it exists for (PR #9793).
+    expect(brief).toContain('hops < 16');
+    expect(brief).toContain('callId');
+    // NOT handed: the diff (readsDiff false), the finding format, the
+    // severity ladder, the Exclusion Criteria, the recall rule, the tool
+    // budget, and the project rules — even when rules were passed.
+    expect(BRIEFS['fix-audit'].readsDiff).toBe(false);
+    expect(brief).not.toContain(PLAN.diffPathAbsolute);
+    expect(brief).not.toContain('**Anchor:**');
+    expect(brief).not.toContain('What is NOT a finding');
+    expect(brief).not.toContain('Tool budget');
+    expect(brief).not.toContain('## Project rules');
+    expect(brief).not.toContain(rules);
+    // The verifier's tail, by contrast, does carry the Exclusion Criteria —
+    // so the absence above is the assumptions branch, not a broken tail().
+    expect(buildRoleBrief(PLAN, 'verify')).toContain('What is NOT a finding');
+  });
+
+  it('the launch prompt hands it no diff range', () => {
+    const p = buildRoleLaunchPrompt(PLAN, 'fix-audit', '/b/fix-audit.brief.md');
+    expect(p).toContain('You are review agent `fix-audit` — Fix audit agent.');
+    expect(p).toContain('read_file(file_path="/b/fix-audit.brief.md")');
+    expect(p).not.toContain('The code is a file too — the diff');
+    expect(p).not.toContain(PLAN.diffPathAbsolute);
+  });
+
+  it('renders only the fixed findings above the hunks, into one digest-keyed list file, and records the printed block', () => {
+    const { plan, findings, hunks, dir } = setup({});
+    try {
+      handler({ plan, role: 'fix-audit', findings, hunks });
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed.startsWith('You are review agent `fix-audit`')).toBe(true);
+      expect(printed).toContain('## What you are auditing');
+      expect(printed).toContain('the reviewed diff is not');
+      expect(printed).toContain('does not replace the brief; read it first');
+      // Nothing of the list rides in the block itself.
+      expect(printed).not.toContain('hops < 16');
+      expect(printed).not.toContain('f1: the retry counter');
+      const m = /^read_file\(file_path="([^"]*\.findings\.md)"\)$/m.exec(
+        printed,
+      );
+      expect(m).not.toBeNull();
+      const list = readFileSync(m![1], 'utf8');
+      // The `fixed` subset — and ONLY it: a skipped finding has no edit.
+      expect(list).toContain('2 with outcome `fixed`');
+      expect(list).toContain('### f1 — [Critical] src/f1.ts:42');
+      expect(list).toContain('### f3 — [Critical] src/f3.ts:42');
+      expect(list).not.toContain('f2');
+      expect(list).toContain(
+        'Failure scenario: f1: a request that fails twice',
+      );
+      // The hunks, verbatim, fenced by the markers the brief reads for.
+      expect(list).toContain('----- applied hunks begin -----');
+      expect(list).toContain('+  if (hops < MAX_SUBAGENT_DEPTH_LIMIT) {');
+      expect(list).toContain('----- applied hunks end -----');
+      // The record: keyed like every findings role, and exactly the block.
+      const recorded = readRecordedPrompts(plan);
+      const keys = [...recorded.keys()];
+      expect(keys).toHaveLength(1);
+      expect(keys[0]).toMatch(/^fix-audit--[0-9a-f]{12}$/);
+      expect(recorded.get(keys[0])).toBe(printed);
+      expect(wasDeliveredVerbatim(printed, recorded.get(keys[0])!)).toBe(true);
+      expect(readFileSync(briefPath(plan, keys[0]), 'utf8')).toContain(
+        '**You write nothing.**',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a different set of hunks is a different launch — the key follows the content', () => {
+    const a = setup({});
+    const b = setup({ hunks: HUNKS.replace('hops', 'depth') });
+    try {
+      handler({
+        plan: a.plan,
+        role: 'fix-audit',
+        findings: a.findings,
+        hunks: a.hunks,
+      });
+      handler({
+        plan: a.plan,
+        role: 'fix-audit',
+        findings: b.findings,
+        hunks: b.hunks,
+      });
+      expect([...readRecordedPrompts(a.plan).keys()]).toHaveLength(2);
+    } finally {
+      rmSync(a.dir, { recursive: true, force: true });
+      rmSync(b.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('carries the fix witness and the fixer note when the artifact has them, and the extra locations count', () => {
+    const rendered = (renderFixAuditInput as (a: unknown, h: string) => string)(
+      [
+        {
+          id: 'c1',
+          severity: 'Critical',
+          summary: 'dedup keyed by callId only',
+          failureScenario: 'two runtimes on one entry answer the wrong agent',
+          locations: [
+            { file: 'src/registry.ts', line: 10 },
+            { file: 'src/registry.ts', line: 30 },
+            { file: 'src/route.ts' },
+          ],
+          fixWitness: 'registry.test.ts › two runtimes, one callId',
+          outcome: 'fixed',
+          outcomeNote: 'keyed by (callId, runtimeId)',
+        },
+      ],
+      HUNKS,
+    );
+    expect(rendered).toContain(
+      '### c1 — [Critical] src/registry.ts:10 (+2 more location(s))',
+    );
+    expect(rendered).toContain(
+      'Fix witness: registry.test.ts › two runtimes, one callId',
+    );
+    expect(rendered).toContain("Fixer's note: keyed by (callId, runtimeId)");
+  });
+
+  it.each([
+    [
+      'an artifact whose outcomes were never recorded',
+      { outcomes: { f1: 'fixed', f2: null } as const },
+      /carry no outcome[\s\S]*f2[\s\S]*review findings --outcomes/,
+    ],
+    [
+      'an artifact with no fixed finding',
+      { outcomes: { f1: 'skipped', f2: 'no_change_needed' } as const },
+      /no finding has outcome `fixed`[\s\S]*Skip the audit/,
+    ],
+    [
+      'an empty hunks file beside a ledger that says something was fixed',
+      { hunks: '\n' },
+      /--hunks is empty, but the ledger marks 2 finding\(s\) fixed \(f1, f3\)[\s\S]*a claim, not an edit/,
+    ],
+    [
+      'a findings file that is not the artifact',
+      { rawFindings: '- **[Critical]** x.ts:1 — a prose list' },
+      /must be the findings artifact/,
+    ],
+  ])('refuses %s', (_name, opts, message) => {
+    const { plan, findings, hunks, dir } = setup(opts);
+    try {
+      expect(() =>
+        handler({ plan, role: 'fix-audit', findings, hunks }),
+      ).toThrow(message);
+      expect(readRecordedPrompts(plan).size).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts the bare findings array as well as the wrapper', () => {
+    const { plan, findings, hunks, dir } = setup({
+      rawFindings: JSON.stringify(artifact({ f1: 'fixed' })),
+    });
+    try {
+      expect(() =>
+        handler({ plan, role: 'fix-audit', findings, hunks }),
+      ).not.toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [
+      '--role fix-audit without --hunks',
+      { role: 'fix-audit', findings: '/f' },
+      /--role fix-audit needs --hunks <file>/,
+    ],
+    [
+      '--hunks on a role that does not take it',
+      { role: 'verify', findings: '/f', hunks: '/h' },
+      /--hunks hands the applied hunks to a --role fix-audit block; role "verify"/,
+    ],
+    [
+      '--hunks with no role',
+      { hunks: '/h' },
+      /--hunks hands the applied hunks to a --role fix-audit block; it needs that role/,
+    ],
+    [
+      '--hunks with --roster',
+      { roster: true, hunks: '/h' },
+      /--roster builds every prompt[\s\S]*--hunks/,
+    ],
+    [
+      '--hunks with --whole-diff',
+      { 'whole-diff': true, hunks: '/h' },
+      /--whole-diff builds the diff-reading block alone[\s\S]*--hunks/,
+    ],
+    [
+      '--chunk on the fix auditor',
+      { role: 'fix-audit', findings: '/f', hunks: '/h', chunk: 13 },
+      /does not take --chunk/,
+    ],
+  ])(
+    'rules on the flag combination at the boundary: %s',
+    (_name, args, message) => {
+      const dir = mkdtempSync(join(tmpdir(), 'ap-fixaudit-guard-'));
+      try {
+        const plan = join(dir, 'plan.json');
+        writeFileSync(plan, JSON.stringify(PLAN));
+        expect(() => handler({ plan, ...args })).toThrow(message);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });

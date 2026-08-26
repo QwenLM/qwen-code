@@ -775,6 +775,60 @@ describe('bundled review skill', () => {
     expect(body).toContain('Never assemble an Aone link yourself');
   });
 
+  it('pins the Step 6B fix audit as a scoped disclosure, not a re-review', () => {
+    const body = coreBody();
+    const step = body.slice(
+      body.indexOf('### Step 6B: Apply the findings (`--fix`)'),
+      body.indexOf('## Step 7: Submit PR review'),
+    );
+    expect(step.length).toBeGreaterThan(0);
+    // The ordering the audit's correctness turns on: the snapshot is taken
+    // BEFORE the first edit, the outcomes are recorded BEFORE the audit (it
+    // reads them off the rebuilt artifact), and the audit runs BEFORE the
+    // report_findings re-issue (its notes ride that call).
+    const at = (needle: string) => {
+      const i = step.indexOf(needle);
+      expect(i, `Step 6B lost: ${needle}`).toBeGreaterThanOrEqual(0);
+      return i;
+    };
+    expect(at('review fix-delta --snapshot')).toBeLessThan(
+      at('Apply each finding to the working tree'),
+    );
+    expect(
+      at('--outcomes .qwen/tmp/qwen-review-{target}-outcomes.json'),
+    ).toBeLessThan(at('review fix-delta \\\n  --since'));
+    expect(at('--role fix-audit')).toBeLessThan(
+      at('**Then re-issue the `report_findings` call, outcomes on it.**'),
+    );
+    // The audit's inputs are the rebuilt artifact and the applied hunks —
+    // never the reviewed diff, never findings-in.json.
+    expect(step).toContain(
+      '--findings .qwen/tmp/qwen-review-{target}-findings.json',
+    );
+    expect(step).toContain(
+      '--hunks .qwen/tmp/qwen-review-{target}-fix-hunks.diff',
+    );
+    expect(step).toContain('never the reviewed diff');
+    // The four constraints that keep it from being the forbidden re-review,
+    // and the disclosure-not-finding rule that closes the back door.
+    expect(step).toContain('one agent, and not a re-review');
+    expect(step).toContain('It produces no verdict and files no finding.');
+    expect(step).toContain(
+      '**An unpinned assumption is a disclosure, not a finding.**',
+    );
+    expect(step).toContain('It never enters `findings-in.json`');
+    expect(step).toContain('never counts toward `fresh` or `induced`');
+    expect(step).toContain('Fix audit: not run — <why>');
+    // The rule it sits beside survives, and says why the audit is not it.
+    expect(step).toContain('**Do not re-run Steps 1–6**');
+    expect(step).toContain('precisely so that it is not one');
+    // Scope: fixed outcomes only, and the interactive path gets the same audit.
+    expect(step).toContain('only when the ledger holds no `fixed` outcome');
+    expect(step).toContain('it gets the same audit');
+    // The subagent type mandate reaches this launch too.
+    expect(step).toContain('`subagent_type: "review-agent"`');
+  });
+
   it('pins the fix-witness mandate in all three of its halves', () => {
     // The reviewer-side half of #9578. Three clauses have to survive together or
     // the rule goes inert in a way the suite would not notice:

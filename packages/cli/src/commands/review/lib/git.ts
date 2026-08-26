@@ -53,6 +53,30 @@ export function git(...args: string[]): string {
 }
 
 /**
+ * Run `git` with extra environment on top of the sanitised one. Returns
+ * stdout, trimmed.
+ *
+ * Exists for the one variable the sanitiser strips on purpose and a command
+ * still legitimately needs: `GIT_INDEX_FILE`. `fix-delta` snapshots the
+ * working tree through a throwaway index so the user's own index is never
+ * touched, and the redirect is exactly what `sanitizedGitEnv` deletes — so it
+ * is re-added here, after the sanitising, never by pointing at `process.env`.
+ */
+export function gitWithEnv(
+  extraEnv: Record<string, string>,
+  args: string[],
+): string {
+  const opts = gitOpts();
+  return execFileSync('git', args, {
+    ...opts,
+    env: { ...opts.env, ...extraEnv },
+    encoding: 'utf8',
+  })
+    .replace(/\r\n/g, '\n')
+    .trim();
+}
+
+/**
  * Run `git` with `input` on its stdin. Returns stdout, trimmed.
  *
  * Exists so a command can be fed an empty stdin without naming a null device:
