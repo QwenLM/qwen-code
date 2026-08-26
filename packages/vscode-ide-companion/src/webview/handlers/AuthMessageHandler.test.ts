@@ -570,6 +570,161 @@ describe('AuthMessageHandler', () => {
   // protocol pick, free-form URL input + scheme validation, API key,
   // comma-split model IDs + empty-input guard, and advanced config.
 
+  it('claims a deselected attributable baseUrl-less legacy model for a merge provider (R46-1)', async () => {
+    // An attributable baseUrl-less entry is seeded into the models field;
+    // when the user deselects it, its id must still be recorded in
+    // migratedLegacyModelIds so buildInstallPlan's id-collision clause owns
+    // the stored original — before the fix the claim recording filtered on
+    // the selection first, so the deselection silently no-oped forever and
+    // every reconnect re-showed and re-ignored it.
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const defaults = [
+      'k3-256k',
+      'k3',
+      'kimi-for-coding',
+      'kimi-for-coding-highspeed',
+    ];
+    const legacyModel = {
+      id: 'my-model',
+      name: '[Kimi Code] my-model',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'kimi' })
+      .mockResolvedValueOnce({ value: codingUrl });
+    mockShowInputBox
+      .mockResolvedValueOnce('sk-kimi')
+      // The seeded field carries my-model; the user deselects it.
+      .mockResolvedValueOnce(defaults.join(','));
+
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+      () => ({
+        openai: [
+          ...defaults.map((id) => ({
+            id,
+            name: `[Kimi Code] ${id}`,
+            baseUrl: codingUrl,
+            envKey: 'KIMI_CODE_API_KEY',
+          })),
+          legacyModel,
+        ],
+      }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    // Seeded: the baseUrl-less id was visible in the models field.
+    expect(mockShowInputBox.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        value: [...defaults, 'my-model'].join(','),
+      }),
+    );
+    const inputs = authInteractiveHandler.mock.calls[0][1] as {
+      modelIds: string[];
+      preserveModels?: Array<Record<string, unknown>>;
+      migratedLegacyModelIds?: string[];
+    };
+    // Deselected, yet claimed: the stored original must be owned and
+    // removed by the install plan.
+    expect(inputs.migratedLegacyModelIds).toEqual(['my-model']);
+    expect(inputs.preserveModels ?? []).toEqual([]);
+  });
+
+  it('claims an explicitly typed stale-stamped model id for a merge provider (R46-2)', async () => {
+    // A stamped entry whose baseUrl matches NO preset option is never
+    // seeded by this surface (the restored endpoint must equal a QuickPick
+    // option URL). Typing its id into the models field must re-stamp it at
+    // the submission endpoint and record it in migratedLegacyModelIds so
+    // buildInstallPlan's stale-stamped clause collapses the stored original
+    // — without the channel the connect wrote a fresh stamped copy beside
+    // the unclaimed original, a permanent duplicate.
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const staleCustom = {
+      id: 'stale-custom',
+      name: '[Kimi Code] stale-custom',
+      baseUrl: 'https://stale.example/v1',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const defaults = [
+      'k3-256k',
+      'k3',
+      'kimi-for-coding',
+      'kimi-for-coding-highspeed',
+    ];
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'kimi' })
+      .mockResolvedValueOnce({ value: codingUrl });
+    mockShowInputBox
+      .mockResolvedValueOnce('sk-kimi')
+      .mockResolvedValueOnce([...defaults, 'stale-custom'].join(','));
+
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+      () => ({ openai: [staleCustom] }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    // The stale id is invisible in the seed (defaults only).
+    expect(mockShowInputBox.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ value: defaults.join(',') }),
+    );
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        baseUrl: codingUrl,
+        preserveModels: [
+          expect.objectContaining({
+            id: 'stale-custom',
+            baseUrl: codingUrl,
+            envKey: 'KIMI_CODE_API_KEY',
+            generationConfig: { contextWindowSize: 12345 },
+          }),
+        ],
+        migratedLegacyModelIds: ['stale-custom'],
+      }),
+    );
+
+    // Control: an untyped stale id is never claimed (fail closed) — the
+    // endpoint-scoped merge leaves the stored original untouched.
+    vi.clearAllMocks();
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'kimi' })
+      .mockResolvedValueOnce({ value: codingUrl });
+    mockShowInputBox
+      .mockResolvedValueOnce('sk-kimi')
+      .mockResolvedValueOnce(defaults.join(','));
+    const secondHandler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+      () => ({ openai: [staleCustom] }),
+    );
+    const secondInteractive = vi.fn().mockResolvedValue(undefined);
+    secondHandler.setAuthInteractiveHandler(secondInteractive);
+    await secondHandler.handle({ type: 'auth' });
+    const secondInputs = secondInteractive.mock.calls[0][1] as {
+      preserveModels?: Array<Record<string, unknown>>;
+      migratedLegacyModelIds?: string[];
+    };
+    expect(secondInputs.migratedLegacyModelIds).toBeUndefined();
+    expect(secondInputs.preserveModels ?? []).toEqual([]);
+  });
+
   it('drives custom provider through protocol + url + key + models + advanced', async () => {
     const customUrl = 'https://my-proxy.example.com/v1';
     // 1) Provider pick → custom (custom-openai-compatible)

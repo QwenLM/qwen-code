@@ -1995,4 +1995,272 @@ describe('useProviderSetupFlow', () => {
       }),
     );
   });
+
+  it('carries a non-merge array provider.s restored-endpoint defaults across an endpoint switch (R46-6)', async () => {
+    // For non-merge array-baseUrl providers (moonshot/minimax/zai/alibaba-
+    // standard: static env key, UNSCOPED ownsModel) computePreservedModels
+    // used to exclude the restored endpoint's DEFAULT entries from
+    // preserveModels on the assumption a same-endpoint submit regenerates
+    // them. When the user switched endpoint before submitting, nothing
+    // regenerated them and the unscoped remove-owned merge deleted the
+    // previously-connected endpoint's stored models.
+    const standardUrl = 'https://api.z.ai/api/paas/v4';
+    const codingUrl = 'https://api.z.ai/api/coding/paas/v4';
+    const zaiDefaults = getDefaultModelIds(zaiProvider, standardUrl);
+    const savedEntries: ProviderModelConfig[] = zaiDefaults.map((id) => ({
+      id,
+      name: `[Z.AI] ${id}`,
+      baseUrl: standardUrl,
+      envKey: 'ZAI_API_KEY',
+    }));
+    const saved = { [AuthType.USE_OPENAI]: savedEntries };
+    const setup = getExistingProviderSetup(zaiProvider, saved);
+    const protocolSetups = getProtocolSetups(zaiProvider, saved);
+    // Non-merge array provider: restored-endpoint defaults are carried
+    // regardless of default status.
+    expect(setup.preserveModels).toEqual(savedEntries);
+
+    let modelProviders: ModelProvidersConfig = {
+      [AuthType.USE_OPENAI]: [...savedEntries],
+    };
+    const onSubmit = vi.fn(async (_config, inputs) => {
+      const plan = buildInstallPlan(zaiProvider, inputs);
+      await applyProviderInstallPlan(plan, {
+        settings: {
+          getValue: vi.fn(),
+          setValue: vi.fn(),
+          getModelProviders: () => modelProviders,
+          persist: vi.fn(),
+        },
+        reloadModelProviders: (next) => {
+          modelProviders = next;
+        },
+        doRefreshAuth: false,
+      });
+    });
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        zaiProvider,
+        setup.initialProtocol,
+        { ZAI_API_KEY: 'sk-zai' },
+        setup.customModelIds,
+        setup.initialBaseUrl,
+        setup.trimmedDefaultModelIds,
+        setup.modelIdsByBaseUrl,
+        setup.preserveModels,
+        protocolSetups.modelIdsByBaseUrlByProtocol,
+        protocolSetups.preserveModelsByProtocol,
+        protocolSetups.baseUrlByProtocol,
+        setup.migratedLegacyModelIds,
+        protocolSetups.migratedLegacyModelIdsByProtocol,
+      );
+    });
+    expect(result.current.state.baseUrl).toBe(standardUrl);
+
+    act(() => {
+      result.current.selectBaseUrl(codingUrl);
+    });
+    await act(async () => {
+      result.current.submit();
+    });
+
+    // The restored endpoint's stored defaults survive the switch+submit;
+    // the new endpoint's models are installed beside them.
+    const atStandard = modelProviders[AuthType.USE_OPENAI]?.filter(
+      (model) => model.baseUrl === standardUrl,
+    );
+    expect(atStandard).toHaveLength(zaiDefaults.length);
+    expect(atStandard?.map((model) => model.id)).toEqual(zaiDefaults);
+    expect(
+      modelProviders[AuthType.USE_OPENAI]?.some(
+        (model) => model.baseUrl === codingUrl,
+      ),
+    ).toBe(true);
+  });
+
+  it('seeds the resolved endpoint.s own bucket when the first saved model is a stale stamp (mixed storage)', async () => {
+    // start() used to seed the models field from the flat view's
+    // stale-scoped pair: trimmedDefaultModelIds snapped via resolveBaseUrl
+    // to the first option's defaults while restoredModelIds stayed scoped
+    // to the stale URL, so every genuinely-saved default of the resolved
+    // endpoint rendered UNCHECKED and a plain submit deleted it. Seed from
+    // the resolved endpoint's own bucket when the endpoints diverge.
+    const staleUrl = 'https://stale.example/v1';
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const staleOriginal: ProviderModelConfig = {
+      id: 'kimi-k3',
+      name: '[Kimi API] kimi-k3',
+      baseUrl: staleUrl,
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const codingSavedDefault: ProviderModelConfig = {
+      id: 'kimi-for-coding',
+      name: '[Kimi Code] kimi-for-coding',
+      baseUrl: codingUrl,
+      envKey: 'KIMI_CODE_API_KEY',
+    };
+    const saved = {
+      [AuthType.USE_OPENAI]: [staleOriginal, codingSavedDefault],
+    };
+    const setup = getExistingProviderSetup(kimiProvider, saved);
+    const protocolSetups = getProtocolSetups(kimiProvider, saved);
+
+    let modelProviders: ModelProvidersConfig = {
+      [AuthType.USE_OPENAI]: [staleOriginal, codingSavedDefault],
+    };
+    const onSubmit = vi.fn(async (_config, inputs) => {
+      const plan = buildInstallPlan(kimiProvider, inputs);
+      await applyProviderInstallPlan(plan, {
+        settings: {
+          getValue: vi.fn(),
+          setValue: vi.fn(),
+          getModelProviders: () => modelProviders,
+          persist: vi.fn(),
+        },
+        reloadModelProviders: (next) => {
+          modelProviders = next;
+        },
+        doRefreshAuth: false,
+      });
+    });
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        kimiProvider,
+        setup.initialProtocol,
+        { MOONSHOT_API_KEY: 'sk-moon', KIMI_CODE_API_KEY: 'sk-code' },
+        setup.customModelIds,
+        setup.initialBaseUrl,
+        setup.trimmedDefaultModelIds,
+        setup.modelIdsByBaseUrl,
+        setup.preserveModels,
+        protocolSetups.modelIdsByBaseUrlByProtocol,
+        protocolSetups.preserveModelsByProtocol,
+        protocolSetups.baseUrlByProtocol,
+        setup.migratedLegacyModelIds,
+        protocolSetups.migratedLegacyModelIdsByProtocol,
+      );
+    });
+
+    // The submission endpoint snaps to the first option, while the field
+    // shows the resolved endpoint's OWN saved selection — kimi-for-coding
+    // checked — plus the prefilled stale id.
+    expect(result.current.state.baseUrl).toBe(codingUrl);
+    expect(result.current.state.modelIds).toContain('kimi-for-coding');
+    expect(result.current.state.modelIds).toContain('kimi-k3');
+
+    await act(async () => {
+      result.current.submit();
+    });
+
+    // The genuinely-saved default survives the plain submit.
+    const codingEntries = modelProviders[AuthType.USE_OPENAI]?.filter(
+      (model) => model.id === 'kimi-for-coding',
+    );
+    expect(codingEntries).toHaveLength(1);
+    expect(codingEntries?.[0].baseUrl).toBe(codingUrl);
+    // The prefilled stale entry collapses to one re-stamped copy.
+    const k3Entries = modelProviders[AuthType.USE_OPENAI]?.filter(
+      (model) => model.id === 'kimi-k3',
+    );
+    expect(k3Entries).toHaveLength(1);
+    expect(k3Entries?.[0].baseUrl).toBe(codingUrl);
+  });
+
+  it('fails closed for a never-surfaced stale entry instead of claiming it (R46-4)', async () => {
+    // The stale-stamped branch used to claim EVERY stale entry in
+    // preserveModelsRef as an informed deselection, but the views prefill
+    // only the RESTORED endpoint's ids. A stale entry at any other stale
+    // URL never reaches the models field; claiming it let a routine
+    // reconnect delete a custom model that was never displayed. Claim only
+    // surfaced ids; carry the rest through unchanged.
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const staleUrl = `${codingUrl}/v0`; // matches no preset option
+    const codingSavedDefault: ProviderModelConfig = {
+      id: 'kimi-for-coding',
+      name: '[Kimi Code] kimi-for-coding',
+      baseUrl: codingUrl,
+      envKey: 'KIMI_CODE_API_KEY',
+    };
+    const staleCustom: ProviderModelConfig = {
+      id: 'my-custom',
+      name: '[Kimi Code] my-custom',
+      baseUrl: staleUrl,
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 24680 },
+    };
+    const saved = { [AuthType.USE_OPENAI]: [codingSavedDefault, staleCustom] };
+    const setup = getExistingProviderSetup(kimiProvider, saved);
+    const protocolSetups = getProtocolSetups(kimiProvider, saved);
+    // computePreservedModels still carries the stale entry (fail closed),
+    // and the field seeds only the restored endpoint's id.
+    expect(setup.preserveModels).toEqual([staleCustom]);
+    expect(setup.customModelIds).toEqual([]);
+
+    let modelProviders: ModelProvidersConfig = {
+      [AuthType.USE_OPENAI]: [codingSavedDefault, staleCustom],
+    };
+    const onSubmit = vi.fn(async (_config, inputs) => {
+      const plan = buildInstallPlan(kimiProvider, inputs);
+      await applyProviderInstallPlan(plan, {
+        settings: {
+          getValue: vi.fn(),
+          setValue: vi.fn(),
+          getModelProviders: () => modelProviders,
+          persist: vi.fn(),
+        },
+        reloadModelProviders: (next) => {
+          modelProviders = next;
+        },
+        doRefreshAuth: false,
+      });
+    });
+    const { result } = renderHook(() => useProviderSetupFlow(onSubmit));
+
+    act(() => {
+      result.current.start(
+        kimiProvider,
+        setup.initialProtocol,
+        { KIMI_CODE_API_KEY: 'sk-code' },
+        setup.customModelIds,
+        setup.initialBaseUrl,
+        setup.trimmedDefaultModelIds,
+        setup.modelIdsByBaseUrl,
+        setup.preserveModels,
+        protocolSetups.modelIdsByBaseUrlByProtocol,
+        protocolSetups.preserveModelsByProtocol,
+        protocolSetups.baseUrlByProtocol,
+        setup.migratedLegacyModelIds,
+        protocolSetups.migratedLegacyModelIdsByProtocol,
+      );
+    });
+    // The stale id is invisible in the models field.
+    expect(result.current.state.modelIds).toContain('kimi-for-coding');
+    expect(result.current.state.modelIds).not.toContain('my-custom');
+
+    await act(async () => {
+      result.current.submit();
+    });
+
+    const inputs = onSubmit.mock.calls[0][1];
+    // Never surfaced -> never claimed, and left out of the plan (the
+    // endpoint-scoped ownsModel writes it back untouched; carrying it
+    // would persist a second copy).
+    expect(inputs.migratedLegacyModelIds ?? []).not.toContain('my-custom');
+    expect(inputs.preserveModels ?? []).toEqual(
+      expect.not.arrayContaining([
+        expect.objectContaining({ id: 'my-custom' }),
+      ]),
+    );
+    // The stored custom model survives byte-identical at its stale URL.
+    expect(
+      modelProviders[AuthType.USE_OPENAI]?.filter(
+        (model) => model.id === 'my-custom',
+      ),
+    ).toEqual([staleCustom]);
+  });
 });

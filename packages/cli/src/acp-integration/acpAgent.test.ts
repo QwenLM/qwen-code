@@ -14680,6 +14680,145 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('qwen/providers/connect claims a stale-stamped entry seeded at a stale restored endpoint (R46-3)', async () => {
+    // When the FIRST saved owned model is stale-stamped (baseUrl matching no
+    // preset option), readExistingProviderConfig restores the stale URL and
+    // seeds its id in top-level modelIds; the desktop client echoes the seed
+    // back as an explicit selection. readProviderSetupInputs used to drop the
+    // entry (URL ≠ the snapped selected endpoint) and recorded no claim, so
+    // the connect wrote a fresh stamped copy while the stale original stayed
+    // unowned — a permanent duplicate kept at models[0] via
+    // retainCurrentModelAcrossEndpoints. The stale-stamped branch now
+    // re-stamps the requested id at the selected endpoint and records it in
+    // migratedLegacyModelIds. A stale entry no seeding surface exposed is
+    // never claimed (surfacing gate).
+    const staleUrl = 'https://stale.example/v1';
+    const otherStaleUrl = 'https://other-stale.example/v1';
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const staleOriginal = {
+      id: 'my-model',
+      name: '[Kimi API] my-model',
+      baseUrl: staleUrl,
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const otherStaleOriginal = {
+      id: 'other-custom',
+      name: '[Kimi Code] other-custom',
+      baseUrl: otherStaleUrl,
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [staleOriginal, otherStaleOriginal] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    // The mocked core module's ALL_PROVIDERS carries only deepseek, so the
+    // Kimi provider is injected for the list-time seed (mirrors the R42-1
+    // test's fixture).
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    providers.push({
+      id: 'kimi',
+      label: 'Kimi',
+      description: 'Choose Kimi Code or a regional Kimi API endpoint',
+      protocol: 'openai',
+      baseUrl: [
+        {
+          id: 'coding-plan',
+          label: 'Coding Plan',
+          url: codingUrl,
+          models: [{ id: 'k3-256k' }],
+        },
+        {
+          id: 'api-international',
+          label: 'API Key (International)',
+          url: 'https://api.moonshot.ai/v1',
+          models: [{ id: 'kimi-k3' }],
+        },
+      ],
+      envKey: (_protocol: string, baseUrl: string) =>
+        baseUrl === codingUrl ? 'KIMI_CODE_API_KEY' : 'MOONSHOT_API_KEY',
+      models: [{ id: 'k3-256k' }, { id: 'kimi-k3' }],
+      modelsEditable: true,
+      mergeModelsByIdentity: true,
+      modelNamePrefix: (baseUrl: string) =>
+        baseUrl === codingUrl ? 'Kimi Code' : 'Kimi API',
+      ownsModel: (model: { envKey?: string; name?: string }) =>
+        (model.envKey === 'KIMI_CODE_API_KEY' &&
+          model.name?.startsWith('[Kimi Code] ') === true) ||
+        (model.envKey === 'MOONSHOT_API_KEY' &&
+          model.name?.startsWith('[Kimi API] ') === true),
+      uiGroup: 'third-party',
+    });
+
+    try {
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      // The list-time seed exposes the stale id at the restored (stale)
+      // endpoint; a stale entry at any OTHER stale URL surfaces nowhere.
+      const listed = (await agent.extMethod('qwen/providers/list', {})) as {
+        providers: Array<{
+          id: string;
+          existingConfig?: Record<string, unknown>;
+        }>;
+      };
+      const kimi = listed.providers.find((p) => p.id === 'kimi');
+      expect(kimi?.existingConfig?.['modelIds']).toContain('my-model');
+      expect(kimi?.existingConfig?.['modelIds']).not.toContain('other-custom');
+
+      // The client echoes the seed back at the restored (stale) endpoint.
+      vi.mocked(buildInstallPlan).mockClear();
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'kimi',
+          baseUrl: staleUrl,
+          apiKey: 'sk-moon',
+          modelIds: ['my-model'],
+        }),
+      ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+      // The stale original is claimed and re-stamped at the endpoint the
+      // submission resolves to (the first option), collapsing the pair.
+      expect(buildInstallPlan).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'kimi' }),
+        expect.objectContaining({
+          migratedLegacyModelIds: expect.arrayContaining(['my-model']),
+          preserveModels: [
+            expect.objectContaining({
+              id: 'my-model',
+              baseUrl: codingUrl,
+              envKey: 'KIMI_CODE_API_KEY',
+            }),
+          ],
+        }),
+      );
+      // The never-exposed stale entry at another stale URL is never claimed.
+      expect(buildInstallPlan).not.toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'kimi' }),
+        expect.objectContaining({
+          migratedLegacyModelIds: expect.arrayContaining(['other-custom']),
+        }),
+      );
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('qwen/providers/connect adopts a colliding floating original only when the explicit selection requests it (R39-3 × R39-7)', async () => {
     // The R39-7 collapse branch used to push a FLOATING (unattributable)
     // baseUrl-less entry's id into adoptedFloatingModelIds even without an

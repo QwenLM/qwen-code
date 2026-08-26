@@ -239,6 +239,19 @@ function computePreservedModels(
     );
     const shouldPreserve =
       (!providerConfig.mergeModelsByIdentity && belongsToAnotherEndpoint) ||
+      // A non-merge ARRAY-baseUrl provider owns every endpoint under one
+      // unscoped ownsModel, so the restored endpoint's DEFAULT entries must
+      // be carried too: when the user switches endpoint before submitting,
+      // nothing regenerates them and the remove-owned merge deletes them
+      // (the sibling-carry branch in buildCurrentInputs can only carry what
+      // reaches preserveModelsRef). Same-endpoint submits stay unchanged —
+      // buildCurrentInputs' final branch still drops default ids there, so
+      // they are regenerated from the field. String-baseUrl providers keep
+      // the replace-on-move semantics (no sibling endpoints exist; the
+      // update path rebuilds them the same way). Merge providers are
+      // unaffected (endpoint-scoped ownsModel never deletes a sibling).
+      (!providerConfig.mergeModelsByIdentity &&
+        Array.isArray(providerConfig.baseUrl)) ||
       // Custom models of every saved endpoint are carried: submitting at a
       // sibling endpoint must rebuild its models from these rich entries,
       // otherwise their stored generationConfig is silently reset. Sibling

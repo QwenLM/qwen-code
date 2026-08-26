@@ -2181,6 +2181,48 @@ function readProviderSetupInputs(
       }
       return [];
     }
+    if (
+      Array.isArray(config.baseUrl) &&
+      !config.baseUrl.some(
+        (option) =>
+          normalizeBaseUrlForMatching(option.url) ===
+          normalizeBaseUrlForMatching(model.baseUrl),
+      )
+    ) {
+      // A STALE-STAMPED entry: its URL matches no preset option (hand-edited
+      // settings, an earlier iteration's endpoint URL). The plan's
+      // endpoint-match clause can never own it, and without a claim the
+      // connect writes a fresh stamped copy beside it — a permanent
+      // duplicate kept at models[0] by retainCurrentModelAcrossEndpoints.
+      // The list-time seed exposes these ids when the restored endpoint
+      // itself is stale (top-level modelIds → roundTrippedSet), so a
+      // requested id re-stamps at the selected endpoint and an exposed-but-
+      // omitted id is an informed deselection — both recorded in
+      // migratedLegacyModelIds so buildInstallPlan's stale-stamped clause
+      // collapses the stored original. An entry no seeding surface exposed
+      // is never claimed and survives the endpoint-scoped merge — the
+      // surfacing gate the CLI dialog applies via surfacedStaleModelIds
+      // (R46-3; absence is never intent on an implicit reconnect, R38-1).
+      if (requestedModelIdSet.has(model.id)) {
+        migratedLegacyModelIds.push(model.id);
+        if (stampedIdsAtSelectedEndpoint.has(model.id)) {
+          // A stamped twin at the selected endpoint wins (R39-7 twin
+          // collapse): claim the stale original, carry no second copy.
+          return [];
+        }
+        return [
+          {
+            ...model,
+            baseUrl,
+            ...(migrateEnvKey ? { envKey: migrateEnvKey } : {}),
+          },
+        ];
+      }
+      if (hasExplicitModelIds && roundTrippedSet.has(model.id)) {
+        migratedLegacyModelIds.push(model.id);
+      }
+      return [];
+    }
     const selectedByEditableFreeForm = requestedModelIdSet.has(preserved.id);
     const shouldPreserve =
       !defaultModelIdSet.has(preserved.id) &&

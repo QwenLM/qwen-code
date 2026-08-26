@@ -2065,6 +2065,41 @@ export function buildProviderSetupInputs(
       }
       return [];
     }
+    if (
+      Array.isArray(provider.baseUrl) &&
+      !provider.baseUrl.some(
+        (option) =>
+          helpers.normalizeBaseUrlForMatching?.(option.url) ===
+          helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl),
+      )
+    ) {
+      // A STALE-STAMPED entry: its URL matches no preset option, so the
+      // plan's endpoint-match clause can never own it. This route seeds
+      // nothing (roundTrippedLegacyModelIds: []), so only an EXPLICIT
+      // selection requesting the id adopts it — re-stamped at the selected
+      // endpoint and recorded in migratedLegacyModelIds so buildInstallPlan's
+      // stale-stamped clause collapses the stored original; without the
+      // claim the plan writes a fresh stamped copy beside it, a permanent
+      // duplicate (twin of the ACP/VS Code surfaces, R46-3). Never-surfaced
+      // and never-requested entries stay unclaimed and survive the
+      // endpoint-scoped merge.
+      if (hasExplicitModelIds && requestedIds.has(model.id)) {
+        migratedLegacyModelIds.push(model.id);
+        if (stampedIdsAtSelectedEndpoint.has(model.id)) {
+          // A stamped twin at the selected endpoint wins (R39-7 twin
+          // collapse): claim the stale original, carry no second copy.
+          return [];
+        }
+        return [
+          {
+            ...model,
+            baseUrl,
+            ...(migrateEnvKey ? { envKey: migrateEnvKey } : {}),
+          },
+        ];
+      }
+      return [];
+    }
     const selectedModel =
       helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) ===
       selectedEndpoint;

@@ -60,6 +60,29 @@ function providerEnvKey(
     : config.envKey;
 }
 
+/**
+ * Ids of STALE-STAMPED entries the dialog views prefill at the restored
+ * endpoint. For array-baseUrl providers whose restored URL matches no preset
+ * option, the per-endpoint maps key those entries under their OWN URL (the
+ * R43 stale guard), so that bucket is exactly the prefilled stale ids. A
+ * stale entry at any OTHER stale URL is keyed inert under its own URL and
+ * never reaches the models field — the submit path's stale-stamped branch
+ * must not claim it as an informed deselection (R46-4).
+ */
+function deriveSurfacedStaleIds(
+  config: ProviderConfig,
+  restoredBaseUrl: string | undefined,
+  modelIdsByBaseUrl: ReadonlyMap<string, readonly string[]> | undefined,
+): readonly string[] {
+  if (!restoredBaseUrl || !Array.isArray(config.baseUrl)) return [];
+  const restoredKey = normalizeBaseUrlForMatching(restoredBaseUrl);
+  const restoredIsStale = !config.baseUrl.some(
+    (option) => normalizeBaseUrlForMatching(option.url) === restoredKey,
+  );
+  if (!restoredIsStale) return [];
+  return modelIdsByBaseUrl?.get(restoredKey) ?? [];
+}
+
 // ---------------------------------------------------------------------------
 // State type
 // ---------------------------------------------------------------------------
@@ -148,6 +171,14 @@ export function useProviderSetupFlow(
   // stored originals and the pairs collapse instead of duplicating. Swapped
   // per protocol alongside preserveModelsRef.
   const migratedLegacyModelIdsRef = useRef<string[]>([]);
+  // STALE-STAMPED ids the dialog views actually prefilled (stale entries at
+  // the restored endpoint, threaded from getExistingProviderSetup /
+  // getProtocolSetups). The stale-stamped branch in buildCurrentInputs may
+  // claim ONLY these ids as informed selections/deselections — a stale entry
+  // at any other stale URL never reaches the models field, so claiming it
+  // would delete a custom model the user was never shown. Swapped per
+  // protocol alongside preserveModelsRef.
+  const surfacedStaleModelIdsRef = useRef(new Set<string>());
   // FLOATING baseUrl-less legacy entries (env key names NO endpoint): never
   // seeded and never stamped by the views, but when the user explicitly
   // types one of their ids into the models field the submit adopts it —
@@ -191,6 +222,7 @@ export function useProviderSetupFlow(
         baseUrl: string;
         preserveModels: readonly ProviderModelConfig[];
         migratedLegacyModelIds: readonly string[];
+        surfacedStaleModelIds: readonly string[];
       }
     >(),
   );
@@ -278,6 +310,13 @@ export function useProviderSetupFlow(
           migratedLegacyModelIds ??
           []),
       ];
+      surfacedStaleModelIdsRef.current = new Set(
+        deriveSurfacedStaleIds(
+          config,
+          initialBaseUrl,
+          existingModelIdsByBaseUrl,
+        ),
+      );
       floatingModelsByProtocolRef.current = new Map(
         floatingLegacyModelsByProtocol ?? [],
       );
@@ -311,10 +350,39 @@ export function useProviderSetupFlow(
         );
       }
       const normalizedResolved = normalizeBaseUrlForMatching(resolved);
-      customModelIdsByBaseUrlRef.current.set(normalizedResolved, customIds);
-      trimmedDefaultModelIdsRef.current.set(normalizedResolved, [
-        ...trimmedDefaultIds,
-      ]);
+      // The flat view's custom/trim pair scopes to the RESTORED endpoint,
+      // which normally IS the resolved one. When they diverge — an array
+      // provider whose first saved model is a STALE stamp (URL matching no
+      // preset option), so resolveBaseUrl snapped to the first option — the
+      // pair is internally inconsistent: trimmedDefaultModelIds was computed
+      // against the snapped (resolved) defaults while restoredModelIds was
+      // scoped to the stale URL, so every genuinely-saved default of the
+      // resolved endpoint rendered deselected and a plain submit deleted it.
+      // Seed from the resolved endpoint's own bucket in that case, plus the
+      // surfaced stale ids so the prefill contract survives (R46-5).
+      const restoredDiverged =
+        !!initialBaseUrl &&
+        normalizeBaseUrlForMatching(initialBaseUrl) !== normalizedResolved;
+      let seedCustomIds = customIds;
+      let seedTrimmedDefaultIds = [...trimmedDefaultIds];
+      if (restoredDiverged) {
+        const resolvedBucket =
+          existingModelIdsByBaseUrl?.get(normalizedResolved) ?? [];
+        const resolvedBucketSet = new Set(resolvedBucket);
+        const resolvedDefaultSet = new Set(defaultIds);
+        seedCustomIds = [
+          ...resolvedBucket.filter((id) => !resolvedDefaultSet.has(id)),
+          ...surfacedStaleModelIdsRef.current,
+        ];
+        seedTrimmedDefaultIds = defaultIds.filter(
+          (id) => !resolvedBucketSet.has(id),
+        );
+      }
+      customModelIdsByBaseUrlRef.current.set(normalizedResolved, seedCustomIds);
+      trimmedDefaultModelIdsRef.current.set(
+        normalizedResolved,
+        seedTrimmedDefaultIds,
+      );
       // Seed the per-protocol stashes from the settings buckets so switching
       // protocol restores that protocol's own saved endpoint model maps,
       // models field, and preserveModels (R34-2/R35-12) instead of the first
@@ -347,11 +415,19 @@ export function useProviderSetupFlow(
           preserveModels: preserveModelsByProtocol?.get(protoKey) ?? [],
           migratedLegacyModelIds:
             migratedLegacyModelIdsByProtocol?.get(protoKey) ?? [],
+          surfacedStaleModelIds: deriveSurfacedStaleIds(
+            config,
+            baseUrlByProtocol?.get(protoKey),
+            idsByBaseUrl,
+          ),
         });
       }
+      const seedTrimmedSet = new Set(seedTrimmedDefaultIds);
       const initialModelIds = [
-        ...defaultIds.filter((id) => !trimmedDefaultIds.has(id)),
-        ...customIds,
+        ...new Set([
+          ...defaultIds.filter((id) => !seedTrimmedSet.has(id)),
+          ...seedCustomIds,
+        ]),
       ].join(', ');
       setModelIds(initialModelIds);
       protocolDraftsRef.current.set(proto, {
@@ -379,6 +455,7 @@ export function useProviderSetupFlow(
     committedBaseUrlRef.current = '';
     preserveModelsRef.current = [];
     migratedLegacyModelIdsRef.current = [];
+    surfacedStaleModelIdsRef.current = new Set();
     floatingModelsRef.current = [];
     floatingModelsByProtocolRef.current.clear();
     customModelIdsByBaseUrlRef.current.clear();
@@ -449,6 +526,10 @@ export function useProviderSetupFlow(
           ...(savedModelStateByProtocolRef.current.get(selectedProtocol)
             ?.migratedLegacyModelIds ?? []),
         ];
+        surfacedStaleModelIdsRef.current = new Set(
+          savedModelStateByProtocolRef.current.get(selectedProtocol)
+            ?.surfacedStaleModelIds ?? [],
+        );
         floatingModelsRef.current = [
           ...(floatingModelsByProtocolRef.current.get(selectedProtocol) ?? []),
         ];
@@ -761,15 +842,25 @@ export function useProviderSetupFlow(
           // A STALE-STAMPED entry: its URL matches no preset option (hand-
           // edited settings, an earlier iteration's endpoint URL), so the
           // plan's endpoint-match clause can never own the stored original.
-          // The dialog prefilled its id (the views key it like any saved
-          // custom model), so the submission either re-stamps it at the
-          // submission endpoint — carry it stamped there so it folds into
-          // the regenerated copy with its rich generationConfig — or the
-          // user removed the id: an informed deselection. Record the id in
-          // migratedLegacyModelIds either way so buildInstallPlan's stale-
-          // stamped clause claims the original; omitting it left the stale
-          // entry beside the copy forever (a permanent duplicate spanning
-          // two env keys).
+          // When the views prefilled its id (surfacedStaleModelIdsRef), the
+          // submission either re-stamps it at the submission endpoint —
+          // carry it stamped there so it folds into the regenerated copy
+          // with its rich generationConfig — or the user removed the id: an
+          // informed deselection. Record the id in migratedLegacyModelIds
+          // either way so buildInstallPlan's stale-stamped clause claims the
+          // original; omitting it left the stale entry beside the copy
+          // forever (a permanent duplicate spanning two env keys).
+          if (!surfacedStaleModelIdsRef.current.has(model.id)) {
+            // A stale entry the views never prefilled (its URL is not the
+            // restored endpoint): absence from the field carries no
+            // deselection intent, so claiming it deleted a custom model the
+            // user was never shown. Fail closed — leave it out of the plan
+            // entirely: the endpoint-scoped ownsModel never owns it, so the
+            // remove-owned merge writes it back untouched. Carrying it
+            // through instead persisted a second copy beside the preserved
+            // original (R46-4).
+            return [];
+          }
           staleStampedMigratedIds.push(model.id);
           if (!selectedModelIdSet.has(model.id)) return [];
           return [

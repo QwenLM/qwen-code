@@ -421,18 +421,18 @@ export class AuthMessageHandler extends BaseMessageHandler {
           : model.baseUrl === undefined ||
               normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint;
       };
-      const restoredModels = (
+      // Admitted entries BEFORE the id dedup: the claim channel below must
+      // record every attributable baseUrl-less entry even when a stamped
+      // twin precedes it in storage and the dedup keeps the twin instead.
+      const admittedModels = (
         existing?.models.filter(isSelectedEndpointModel) ?? []
-      )
-        .filter(
-          (model) =>
-            model.baseUrl !== undefined || namesSelectedEndpoint(model),
-        )
-        .filter(
-          (model, index, models) =>
-            models.findIndex((candidate) => candidate.id === model.id) ===
-            index,
-        );
+      ).filter(
+        (model) => model.baseUrl !== undefined || namesSelectedEndpoint(model),
+      );
+      const restoredModels = admittedModels.filter(
+        (model, index, models) =>
+          models.findIndex((candidate) => candidate.id === model.id) === index,
+      );
       const restoredIds = [...new Set(restoredModels.map((model) => model.id))];
       const seededModelIds = [
         ...defaults,
@@ -465,7 +465,22 @@ export class AuthMessageHandler extends BaseMessageHandler {
       }
       const selectedIdSet = new Set(modelIds);
       if (provider.mergeModelsByIdentity) {
-        const migrated: string[] = [];
+        // Record the claim for EVERY attributable baseUrl-less entry the
+        // seed admitted — selected or not — mirroring computePreservedModels
+        // and the ACP route: a deselected entry must be removed like any
+        // other omission, and a default-id entry regenerates stamped while
+        // the claim collapses the pair. Without the channel the stored
+        // original was never owned and survived prepend-and-remove-owned —
+        // every reconnect re-showed and re-ignored the deselection (R46-1).
+        // Collected ahead of the twin dedup so an original whose stamped
+        // twin precedes it in storage is still claimed.
+        const migrated: string[] = [
+          ...new Set(
+            admittedModels
+              .filter((model) => model.baseUrl === undefined)
+              .map((model) => model.id),
+          ),
+        ];
         const restoredPreserved = restoredModels
           .filter(
             (model) =>
@@ -476,16 +491,46 @@ export class AuthMessageHandler extends BaseMessageHandler {
           // the non-merge branch below and the CLI/ACP/serve surfaces).
           // restoredModels carries only ATTRIBUTABLE baseUrl-less entries
           // (gated above), so stamping one migrates it to the selected
-          // endpoint: record its id so buildInstallPlan claims the stored
-          // original and collapses the pair instead of persisting both
-          // (R45-5).
-          .map((model) => {
-            if (model.baseUrl === undefined) {
+          // endpoint: its id was recorded above so buildInstallPlan claims
+          // the stored original and collapses the pair instead of
+          // persisting both (R45-5).
+          .map((model) =>
+            model.baseUrl === undefined ? { ...model, baseUrl } : model,
+          );
+        // STALE-STAMPED adoption (twin of the CLI dialog's stale-stamped
+        // branch): a stamped entry whose baseUrl matches no preset option is
+        // never seeded by this surface, so only an explicitly typed id
+        // claims it — re-stamped at the submission endpoint and recorded in
+        // migratedLegacyModelIds so the plan's stale-stamped clause
+        // collapses the stored original instead of persisting a permanent
+        // duplicate beside it. An untyped stale entry is never claimed and
+        // survives the endpoint-scoped merge (R46-2).
+        const baseUrlOptions = Array.isArray(provider.baseUrl)
+          ? provider.baseUrl
+          : undefined;
+        const staleAdoptedModels = baseUrlOptions
+          ? (existing?.models ?? []).flatMap((model) => {
+              if (
+                model.baseUrl === undefined ||
+                !selectedIdSet.has(model.id) ||
+                baseUrlOptions.some(
+                  (option) =>
+                    normalizeBaseUrlForMatching(option.url) ===
+                    normalizeBaseUrlForMatching(model.baseUrl),
+                )
+              ) {
+                return [];
+              }
               migrated.push(model.id);
-              return { ...model, baseUrl };
-            }
-            return model;
-          });
+              return [
+                {
+                  ...model,
+                  baseUrl,
+                  ...(endpointEnvKey ? { envKey: endpointEnvKey } : {}),
+                },
+              ];
+            })
+          : [];
         // Floating adoption: a baseUrl-less entry whose env key names NO
         // endpoint never passes the attribution gate above, so it is never
         // seeded — but when the user explicitly types its id into the
@@ -518,8 +563,14 @@ export class AuthMessageHandler extends BaseMessageHandler {
             },
           ];
         });
-        preserveModels = [...restoredPreserved, ...adoptedModels];
-        if (migrated.length > 0) migratedLegacyModelIds = migrated;
+        preserveModels = [
+          ...restoredPreserved,
+          ...adoptedModels,
+          ...staleAdoptedModels,
+        ];
+        if (migrated.length > 0) {
+          migratedLegacyModelIds = [...new Set(migrated)];
+        }
         if (adopted.length > 0) adoptedFloatingModelIds = [...new Set(adopted)];
       } else {
         preserveModels = existing?.models.flatMap((model) => {
