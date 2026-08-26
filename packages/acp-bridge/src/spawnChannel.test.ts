@@ -70,6 +70,21 @@ function createFakeChildProcess(): ChildProcess {
   }) as unknown as ChildProcess;
 }
 
+beforeEach(() => {
+  vi.spyOn(process, 'kill').mockImplementation(((pid: number) => {
+    if (pid < 0) {
+      throw Object.assign(new Error('missing fake process group'), {
+        code: 'ESRCH',
+      });
+    }
+    return true;
+  }) as typeof process.kill);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('createSpawnChannelFactory env policy', () => {
   const originalArgv1 = process.argv[1];
   let originalSimple: string | undefined;
@@ -131,9 +146,14 @@ describe('createSpawnChannelFactory env policy', () => {
     });
 
     const spawnOptions = mockSpawn.mock.calls[0]?.[2] as
-      | { env?: NodeJS.ProcessEnv; windowsHide?: boolean }
+      | {
+          detached?: boolean;
+          env?: NodeJS.ProcessEnv;
+          windowsHide?: boolean;
+        }
       | undefined;
     expect(spawnOptions?.windowsHide).toBe(true);
+    expect(spawnOptions?.detached).toBe(process.platform !== 'win32');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_CODE_SIMPLE');
     expect(spawnOptions?.env).not.toHaveProperty('QWEN_SERVER_TOKEN');
     expect(spawnOptions?.env).not.toHaveProperty(
