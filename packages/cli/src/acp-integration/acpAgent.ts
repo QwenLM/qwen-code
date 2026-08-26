@@ -11572,6 +11572,7 @@ class QwenAgent implements Agent {
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
+        let approvalModeApplyFailed = false;
 
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
@@ -11658,6 +11659,7 @@ class QwenAgent implements Agent {
                   session.clearActiveTodoPlanRevision();
                 }
               } catch (err) {
+                approvalModeApplyFailed = true;
                 debugLogger.warn(
                   `reload: setApprovalMode failed for session ${id}: ${err}`,
                 );
@@ -11692,11 +11694,19 @@ class QwenAgent implements Agent {
           }
         }
 
-        // The daemon has now converged every idle live session on this file
-        // value; advance the baseline so a no-edit reload stays a no-op and
-        // runtime-only transitions made after this reload survive until the
-        // file itself changes again.
-        this.sessionApprovalModeFileValue = reloadedApprovalMode;
+        // Advance the baseline only when every live session actually
+        // converged on this file value. A busy session the loop skipped, a
+        // setApprovalMode that threw (e.g. TrustGateError), or a session
+        // whose reload rejected never received the mode; advancing anyway
+        // would make every later no-edit reload compute no change and
+        // strand those sessions on the stale mode until the file changes
+        // again or the daemon restarts. Leaving the baseline behind keeps
+        // approvalModeFileChanged true, so the next reload re-attempts and
+        // the per-session `!== previousMode` guard applies the value only
+        // to the sessions still missing it.
+        if (skipped.length === 0 && !approvalModeApplyFailed) {
+          this.sessionApprovalModeFileValue = reloadedApprovalMode;
+        }
 
         return {
           env: envResult,
