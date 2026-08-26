@@ -372,6 +372,43 @@ describe('computeApiTruncationIndex', () => {
       ];
       expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
     });
+
+    it('fails closed for a non-first turn absorbed by marker-less compression', () => {
+      // R13-15: the identity scan must start past the compressed prefix,
+      // like the ACP twin (#getRewindTurnProjection). The summary entry is
+      // counted by isUserTextContent yet never carries an identity, so a
+      // whole-history scan keeps historyFullyIdentified permanently false
+      // and an absorbed-turn target falls through to the positional walk —
+      // silently truncating at a live turn the UI no longer shows. Every
+      // post-prefix prompt below is marked, so the target must fail loud.
+      const ui: HistoryItem[] = [
+        userItem(1, 'old one', undefined, 'prompt-t0'),
+        geminiItem(2),
+        userItem(3, 'old two', undefined, 'prompt-t1'),
+        geminiItem(4),
+        userItem(5, 'new one', undefined, 'prompt-2'),
+        geminiItem(6),
+        userItem(7, 'new two', undefined, 'prompt-3'),
+        geminiItem(8),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('new one'),
+        modelContent('response new one'),
+        userContent('new two'),
+        modelContent('response new two'),
+      ];
+      markApiHistoryPrompt(api[3]!, 'prompt-2');
+      markApiHistoryPrompt(api[5]!, 'prompt-3');
+
+      // 'prompt-t1' was absorbed by the compression: not in API history.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+      // A surviving marked target still resolves by identity.
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(3);
+      expect(computeApiTruncationIndex(ui, 7, api)).toBe(5);
+    });
   });
 
   describe('with fast (non-summarizing) compression markers', () => {

@@ -157,6 +157,19 @@ export function computeApiTruncationIndex(
   if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
 
   const target = uiHistory[targetIndex]!;
+  // The identity scan must skip the startup/compressed prefix exactly like
+  // the ACP twin (#getRewindTurnProjection in
+  // acp-integration/session/Session.ts starts its identity-less check at
+  // this same offset): the summarizing-compression summary entry is
+  // counted by isUserTextContent yet never carries an identity (freshly
+  // synthesized; the compression promptIds are all null), so scanning the
+  // ENTIRE apiHistory would make historyFullyIdentified permanently false
+  // in every compressed session and the fail-closed arm below would never
+  // fire there — an absorbed-turn rewind would fall through to the
+  // positional walk and truncate at a shape-based guess (R13-15).
+  const startIndex = getStartupContextLength(apiHistory, {
+    includeCompressed: true,
+  });
   if (isRealUserTurn(target) && target.promptId) {
     const identifiedIndex = findApiHistoryPromptIndex(
       apiHistory,
@@ -194,8 +207,10 @@ export function computeApiTruncationIndex(
     const historyFullyIdentified =
       apiPromptIndexes.length > 0 &&
       apiHistory.every(
-        (content) =>
-          !isUserTextContent(content) || !!getApiHistoryPromptId(content),
+        (content, index) =>
+          index < startIndex ||
+          !isUserTextContent(content) ||
+          !!getApiHistoryPromptId(content),
       );
     if (historyFullyIdentified) {
       return -1;
@@ -214,11 +229,6 @@ export function computeApiTruncationIndex(
       uiUserTurnCount++;
     }
   }
-
-  // Determine the starting index in the API history (skip startup context)
-  const startIndex = getStartupContextLength(apiHistory, {
-    includeCompressed: true,
-  });
 
   if (uiUserTurnCount === 0) {
     // Marker-less auto-compaction (entrance 3): the API history carries a
