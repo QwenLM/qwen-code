@@ -975,6 +975,9 @@ export interface AgentsCollabSettings {
   };
 }
 
+/** `goals.modelProposed`: whether the model may propose a Goal for approval. */
+export type ModelProposedGoalsMode = 'alwaysAsk' | 'disabled';
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -1194,6 +1197,8 @@ export interface ConfigParameters {
   lsToolEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
+  /** Consent gate for the propose_goal tool; see ProposeGoalTool. */
+  modelProposedGoals?: ModelProposedGoalsMode;
   artifactEnabled?: boolean;
   artifactAutoOpen?: boolean;
   artifactPublisher?: 'local' | 'host' | 'oss';
@@ -2192,6 +2197,7 @@ export class Config {
   private readonly artifactHost?: ArtifactHostConfig;
   private readonly artifactOss?: ArtifactOssConfig;
   private workflowsEnabled = false;
+  private readonly modelProposedGoals: ModelProposedGoalsMode;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
@@ -2481,6 +2487,7 @@ export class Config {
     this.artifactHost = params.artifactHost;
     this.artifactOss = params.artifactOss;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
+    this.modelProposedGoals = params.modelProposedGoals ?? 'alwaysAsk';
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
@@ -7431,6 +7438,16 @@ export class Config {
   }
 
   /**
+   * Whether the model may propose a session Goal through `propose_goal`.
+   * Read from user/system settings only (see WORKSPACE_RESTRICTED_SETTINGS
+   * in the CLI): a workspace must not be able to switch on a tool that asks
+   * the user to start an autonomous loop.
+   */
+  getModelProposedGoals(): ModelProposedGoalsMode {
+    return this.modelProposedGoals;
+  }
+
+  /**
    * P5 T7: read the `skipWorkflowUsageWarning` setting. When `true`, the
    * `Workflow` tool suppresses the one-time banner that announces the
    * `QWEN_CODE_MAX_TOKENS_PER_WORKFLOW` env knob. The registry-side
@@ -8902,6 +8919,18 @@ export class Config {
         const { UpdateGoalTool } = await import('../goals/goal-tools.js');
         return new UpdateGoalTool(this);
       });
+      // propose_goal only exists where its approval dialog can be shown and
+      // the user has not switched model-proposed Goals off. Headless runs
+      // keep the text hand-off (`/goal set …`) that /goal-draft prints.
+      if (
+        this.getModelProposedGoals() !== 'disabled' &&
+        resolveInteractionMode(this) !== 'headless'
+      ) {
+        await registerLazy(ToolNames.PROPOSE_GOAL, async () => {
+          const { ProposeGoalTool } = await import('../goals/goal-tools.js');
+          return new ProposeGoalTool(this);
+        });
+      }
     };
 
     if (this.getBareMode()) {

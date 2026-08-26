@@ -15,6 +15,7 @@ import {
   Storage,
   SessionIdCaseConflictError,
 } from '@qwen-code/qwen-code-core';
+import { normalizeModelProposedGoals } from './config.js';
 import {
   isValidSessionId,
   loadCliConfig,
@@ -5444,5 +5445,17 @@ describe('loadCliConfig skills.disabledLevels', () => {
     const config = await loadCliConfig(settings, argv);
 
     expect(config.getDisabledSkillLevels()).toEqual(new Set());
+  });
+});
+
+describe('normalizeModelProposedGoals', () => {
+  it('passes the two known modes through and drops anything else', () => {
+    expect(normalizeModelProposedGoals('alwaysAsk')).toBe('alwaysAsk');
+    expect(normalizeModelProposedGoals('disabled')).toBe('disabled');
+    // An unknown value must not reach core as a third mode; the core
+    // default (alwaysAsk) applies instead.
+    expect(normalizeModelProposedGoals('auto')).toBeUndefined();
+    expect(normalizeModelProposedGoals(undefined)).toBeUndefined();
+    expect(normalizeModelProposedGoals(true)).toBeUndefined();
   });
 });

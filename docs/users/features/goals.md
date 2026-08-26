@@ -51,8 +51,14 @@ Keep it to one objective and roughly under 1,200 characters. `/goal set` and `/g
 
 ## Let `/goal-draft` write it
 
-`/goal-draft <what you want done>` is a bundled skill that does the above for you. It checks whether the request is a Goal at all, reads the workspace for the real test and lint commands instead of guessing, asks at most one round of multiple-choice questions when the answer changes the check or the scope, drafts the objective in the format above, runs the self-check, and prints a `/goal set …` line you can run as-is. It never starts the work itself and never sets the Goal on your behalf.
+`/goal-draft <what you want done>` is a bundled skill that does the above for you. It checks whether the request is a Goal at all, reads the workspace for the real test and lint commands instead of guessing, asks at most one round of multiple-choice questions when the answer changes the check or the scope, drafts the objective in the format above, runs the self-check, and hands it over: in an interactive session it proposes the objective through the `propose_goal` approval dialog described below, otherwise it prints a `/goal set …` line you can run as-is. It never starts the work itself, and nothing is set without your approval.
 
 Pass an existing objective to tighten it: `/goal-draft all tests pass and the lint is clean`.
+
+### Approve a Goal the model proposes
+
+In an interactive session (TUI, Web Shell, or an ACP client) the model has a `propose_goal` tool. When `/goal-draft` finishes, or when you ask for an outcome that spans several turns, it can propose the objective instead of printing a `/goal set …` line for you to copy. The proposal appears as an approval dialog showing the full objective; approving it sets the Goal exactly as `/goal set` would, and declining sets nothing — the model is told only that the Goal was not set, and must not propose it again. No permission rule or approval mode (including YOLO) skips this dialog, and the tool refuses while another Goal is active, in plan mode, in subagents, and in untrusted folders. It is not available in headless runs, where the printed `/goal set` line remains the hand-off.
+
+Turn it off with `goals.modelProposed: "disabled"` in your user settings. Because the setting decides whether the model may ask you to start an autonomous loop, it is honored only from user and system scope; a workspace `.qwen/settings.json` value is ignored with a warning.
 
 The skill is instructed to be read-only, and only its non-mutating tools are auto-approved (`get_goal`, `read_file`, `glob`, `grep_search`). `ask_user_question` is deliberately not auto-approved, so its question dialog is shown before the skill drafts from your answers. Like other bundled skills, a project or personal skill named `goal-draft` overrides it, and `skills.disabled` can turn it off. See [Skills](./skills.md) for how bundled skills are discovered.

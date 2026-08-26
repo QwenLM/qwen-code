@@ -17,9 +17,19 @@ import {
 import {
   type GetGoalToolParams,
   GetGoalTool,
+  PROPOSE_GOAL_NOT_APPROVED_MESSAGE,
+  PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS,
+  PROPOSE_GOAL_PLAN_MODE_MESSAGE,
+  PROPOSE_GOAL_UNAVAILABLE_MESSAGE,
+  PROPOSE_GOAL_UNTRUSTED_MESSAGE,
+  ProposeGoalTool,
+  type ProposeGoalToolConfig,
   UpdateGoalTool,
   type GoalToolConfig,
 } from './goal-tools.js';
+import { ApprovalMode } from '../config/config.js';
+import { ToolConfirmationOutcome } from '../tools/tools.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 import { goalTurnContext } from './goal-turn-context.js';
 import {
   emptyGoalSnapshot,
@@ -1508,5 +1518,207 @@ describe('UpdateGoalTool', () => {
 
     expect(dispatch).not.toHaveBeenCalled();
     expect(runtime.getSnapshot().goal?.status).toBe('active');
+  });
+});
+
+describe('ProposeGoalTool', () => {
+  const objective =
+    'Outcome: auth tests pass. Done when: 1) `npm test` exits 0 (paste the summary line). Must not: edit test files. Budget: stop as blocked after 20 turns. On block: report the blocker.';
+
+  function proposeConfig(
+    runtime: Partial<GoalRuntime> | (() => never),
+    overrides: Partial<ProposeGoalToolConfig> = {},
+  ): ProposeGoalToolConfig {
+    return {
+      getGoalRuntime:
+        typeof runtime === 'function'
+          ? runtime
+          : vi.fn(() => runtime as GoalRuntime),
+      isTrustedFolder: () => true,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      ...overrides,
+    };
+  }
+
+  function idleRuntime() {
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    const host = fakeHost();
+    runtime.bindHost(host);
+    return { runtime, host };
+  }
+
+  async function confirm(
+    tool: ProposeGoalTool,
+    outcome: ToolConfirmationOutcome,
+    params = { objective },
+  ) {
+    const invocation = tool.build(params);
+    const details = await invocation.getConfirmationDetails(
+      new AbortController().signal,
+    );
+    await details.onConfirm(outcome);
+    return { invocation, details };
+  }
+
+  it('uses the canonical name, stays visible, and always goes through the dialog', async () => {
+    const tool = new ProposeGoalTool(proposeConfig(idleRuntime().runtime));
+    expect(tool.name).toBe(ToolNames.PROPOSE_GOAL);
+    expect(tool.displayName).toBe(ToolDisplayNames.PROPOSE_GOAL);
+    expect(tool.shouldDefer).toBe(false);
+
+    const invocation = tool.build({ objective });
+    // Consent for an autonomous loop cannot come from a rule or an approval
+    // mode; YOLO and AUTO_EDIT would otherwise approve an `info` dialog.
+    expect(invocation.requiresUserInteraction?.()).toBe(true);
+    expect(await invocation.getDefaultPermission()).toBe('ask');
+    expect(invocation.getDescription()).toContain(objective);
+  });
+
+  it('validates the objective', () => {
+    const tool = new ProposeGoalTool(proposeConfig(idleRuntime().runtime));
+    expect(tool.validateToolParams({ objective: '   ' })).not.toBeNull();
+    expect(
+      tool.validateToolParams({
+        objective: 'x'.repeat(PROPOSE_GOAL_OBJECTIVE_MAX_CHARACTERS + 1),
+      }),
+    ).not.toBeNull();
+    expect(tool.validateToolParams({ objective })).toBeNull();
+  });
+
+  it('shows the objective in a plain-text info dialog and sets the Goal on approval', async () => {
+    const { runtime, host } = idleRuntime();
+    const tool = new ProposeGoalTool(proposeConfig(runtime));
+
+    const { invocation, details } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    expect(details.type).toBe('info');
+    if (details.type !== 'info') return;
+    expect(details.renderPromptAsPlainText).toBe(true);
+    expect(details.prompt).toContain('Set this as the session Goal?');
+    expect(details.prompt).toContain(objective);
+
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    const payload = JSON.parse(result.llmContent as string);
+    expect(payload.goalSet).toBe(true);
+    expect(payload.objective).toBe(objective);
+    expect(payload.replacedGoalId).toBeUndefined();
+    expect(payload.next).toContain('end this turn');
+
+    const goal = runtime.getSnapshot().goal;
+    expect(goal?.goalId).toBe(payload.goalId);
+    expect(goal?.status).toBe('active');
+    expect(goal?.objective).toBe(objective);
+    // The runtime, not the tool, drives the first Goal turn.
+    expect(host.started).toHaveLength(1);
+    expect(result.returnDisplay).toContain('Goal set');
+  });
+
+  it('sets nothing when the dialog was cancelled', async () => {
+    const { runtime, host } = idleRuntime();
+    const tool = new ProposeGoalTool(proposeConfig(runtime));
+
+    const { invocation } = await confirm(tool, ToolConfirmationOutcome.Cancel);
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(result.llmContent).toBe(PROPOSE_GOAL_NOT_APPROVED_MESSAGE);
+    expect(runtime.getSnapshot().goal).toBeNull();
+    expect(host.started).toHaveLength(0);
+  });
+
+  it('refuses before the dialog in plan mode, in an untrusted folder, and without persistence', async () => {
+    const { runtime } = idleRuntime();
+    const signal = new AbortController().signal;
+
+    await expect(
+      new ProposeGoalTool(
+        proposeConfig(runtime, { getApprovalMode: () => ApprovalMode.PLAN }),
+      )
+        .build({ objective })
+        .getConfirmationDetails(signal),
+    ).rejects.toThrow(PROPOSE_GOAL_PLAN_MODE_MESSAGE);
+
+    await expect(
+      new ProposeGoalTool(
+        proposeConfig(runtime, { isTrustedFolder: () => false }),
+      )
+        .build({ objective })
+        .getConfirmationDetails(signal),
+    ).rejects.toThrow(PROPOSE_GOAL_UNTRUSTED_MESSAGE);
+
+    await expect(
+      new ProposeGoalTool(
+        proposeConfig(() => {
+          throw new Error('no persistence');
+        }),
+      )
+        .build({ objective })
+        .getConfirmationDetails(signal),
+    ).rejects.toThrow(PROPOSE_GOAL_UNAVAILABLE_MESSAGE);
+
+    expect(runtime.getSnapshot().goal).toBeNull();
+  });
+
+  it('refuses to replace an active Goal and points at /goal edit', async () => {
+    const { runtime } = await activeRuntime();
+    const tool = new ProposeGoalTool(proposeConfig(runtime));
+
+    await expect(
+      tool
+        .build({ objective })
+        .getConfirmationDetails(new AbortController().signal),
+    ).rejects.toThrow('/goal edit');
+    expect(runtime.getSnapshot().goal?.objective).toBe('Ship Goal v3');
+  });
+
+  it('replaces a stopped Goal on approval', async () => {
+    const { runtime, host } = idleRuntime();
+    await runtime.dispatch({ action: 'create', objective: 'Ship Goal v3' });
+    const paused = runtime.getSnapshot().goal!;
+    await runtime.dispatch({
+      action: 'pause',
+      expectedGoalId: paused.goalId,
+      expectedRevision: paused.revision,
+    });
+    expect(runtime.getSnapshot().goal?.status).toBe('paused');
+    const startedBefore = host.started.length;
+    const tool = new ProposeGoalTool(proposeConfig(runtime));
+
+    const { invocation, details } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    if (details.type !== 'info') throw new Error('expected info');
+    expect(details.prompt).toContain('Replace the paused Goal');
+
+    const result = await invocation.execute(new AbortController().signal);
+    const payload = JSON.parse(result.llmContent as string);
+    expect(payload.replacedGoalId).toBe(paused.goalId);
+    expect(payload.goalId).not.toBe(paused.goalId);
+    const goal = runtime.getSnapshot().goal;
+    expect(goal?.goalId).toBe(payload.goalId);
+    expect(goal?.status).toBe('active');
+    expect(goal?.objective).toBe(objective);
+    expect(host.started.length).toBe(startedBefore + 1);
+  });
+
+  it('does not set a Goal that changed while the dialog was open', async () => {
+    const { runtime } = idleRuntime();
+    const tool = new ProposeGoalTool(proposeConfig(runtime));
+    const { invocation } = await confirm(
+      tool,
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    // The user typed `/goal set …` while the proposal dialog was up.
+    await runtime.dispatch({ action: 'create', objective: 'Typed by hand' });
+
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(result.llmContent).toContain('already active');
+    expect(runtime.getSnapshot().goal?.objective).toBe('Typed by hand');
   });
 });
