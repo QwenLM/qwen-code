@@ -4941,6 +4941,16 @@ describe('goal runtime', () => {
   describe('objective-updated notice', () => {
     const flagsOf = (host: ReturnType<typeof fakeGoalTurnHost>) =>
       host.inputs.map((input) => input.objectiveUpdated ?? false);
+    // Real hosts mark a continuation delivered when they send its prompt;
+    // the fake host records the hand-off and nothing else, so tests that
+    // mean "the model saw this turn" say so before finishing it.
+    const finishDelivered = async (
+      runtime: ReturnType<typeof createGoalRuntime>,
+      permit: GoalTurnPermit,
+    ) => {
+      runtime.markTurnDelivered(`goal-runtime:${permit.turnId}`);
+      await runtime.finishTurn(permit);
+    };
 
     it('stays off for a Goal whose objective never changed', async () => {
       const journal = fakeGoalJournal();
@@ -4948,8 +4958,8 @@ describe('goal runtime', () => {
       const runtime = createGoalRuntime({ journal });
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
-      await runtime.finishTurn(host.started[0]!);
-      await runtime.finishTurn(host.started[1]!);
+      await finishDelivered(runtime, host.started[0]!);
+      await finishDelivered(runtime, host.started[1]!);
 
       // Including the very first continuation: a new Goal supersedes nothing.
       expect(flagsOf(host)).toEqual([false, false, false]);
@@ -4961,14 +4971,14 @@ describe('goal runtime', () => {
       const runtime = createGoalRuntime({ journal });
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
-      await runtime.finishTurn(host.started[0]!);
+      await finishDelivered(runtime, host.started[0]!);
       await runtime.dispatch({
         action: 'edit',
         objective: 'ship the rest',
         expectedGoalId: runtime.getSnapshot().goal!.goalId,
         expectedRevision: 1,
       });
-      await runtime.finishTurn(host.started.at(-1)!);
+      await finishDelivered(runtime, host.started.at(-1)!);
 
       // create, continuation, edit -> notice, next continuation -> quiet.
       expect(flagsOf(host)).toEqual([false, false, true, false]);
@@ -4981,7 +4991,7 @@ describe('goal runtime', () => {
       const runtime = createGoalRuntime({ journal });
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
-      await runtime.finishTurn(host.started[0]!);
+      await finishDelivered(runtime, host.started[0]!);
       await runtime.dispatch({
         action: 'replace',
         objective: 'ship something else',
@@ -5036,7 +5046,7 @@ describe('goal runtime', () => {
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
       const goalId = runtime.getSnapshot().goal!.goalId;
-      await runtime.finishTurn(started[0]!);
+      await finishDelivered(runtime, started[0]!);
 
       // The edit's continuation is refused by the host, so the notice it
       // carried never reached the model. Marking it announced there would
@@ -5063,7 +5073,7 @@ describe('goal runtime', () => {
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
       const goalId = runtime.getSnapshot().goal!.goalId;
-      await runtime.finishTurn(host.started[0]!);
+      await finishDelivered(runtime, host.started[0]!);
       await runtime.dispatch({
         action: 'edit',
         objective: 'ship the rest',
@@ -5089,7 +5099,7 @@ describe('goal runtime', () => {
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
       const goalId = runtime.getSnapshot().goal!.goalId;
-      await runtime.finishTurn(host.started[0]!);
+      await finishDelivered(runtime, host.started[0]!);
       await runtime.dispatch({
         action: 'edit',
         objective: 'ship the rest',
@@ -5097,7 +5107,7 @@ describe('goal runtime', () => {
         expectedRevision: 1,
       });
       await runtime.releaseTurn(`goal-runtime:${host.started.at(-1)!.turnId}`);
-      await runtime.finishTurn(host.started.at(-1)!);
+      await finishDelivered(runtime, host.started.at(-1)!);
 
       // The redelivered notice landed; the continuation after it is quiet.
       expect(flagsOf(host)).toEqual([false, false, true, true, false]);
@@ -5134,7 +5144,7 @@ describe('goal runtime', () => {
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
       const goalId = runtime.getSnapshot().goal!.goalId;
-      await runtime.finishTurn(host.started[0]!);
+      await finishDelivered(runtime, host.started[0]!);
       await runtime.dispatch({
         action: 'edit',
         objective: 'ship the rest',
@@ -5156,7 +5166,7 @@ describe('goal runtime', () => {
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
       const goalId = runtime.getSnapshot().goal!.goalId;
-      await runtime.finishTurn(host.started[0]!);
+      await finishDelivered(runtime, host.started[0]!);
       await runtime.dispatch({
         action: 'edit',
         objective: 'ship the rest',
@@ -5187,7 +5197,7 @@ describe('goal runtime', () => {
       const runtime = createGoalRuntime({ journal });
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
-      await runtime.finishTurn(host.started[0]!);
+      await finishDelivered(runtime, host.started[0]!);
       await runtime.dispatch({
         action: 'clear',
         expectedGoalId: runtime.getSnapshot().goal!.goalId,
@@ -5223,7 +5233,7 @@ describe('goal runtime', () => {
         reason: 'Delivered',
         evidenceRefs: ['assistant-evidence'],
       });
-      await runtime.finishTurn(permit);
+      await finishDelivered(runtime, permit);
 
       // Replace directly over the completed Goal -- no clear in between, so
       // only the accept-time reset keeps the old announcement from firing.
@@ -5258,7 +5268,7 @@ describe('goal runtime', () => {
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
       const goalId = runtime.getSnapshot().goal!.goalId;
-      await runtime.finishTurn(started[0]!);
+      await finishDelivered(runtime, started[0]!);
 
       // The edit's continuation is refused by the host; a user turn queued
       // behind it is promoted by the failure settlement. The refused turn's
@@ -5274,7 +5284,7 @@ describe('goal runtime', () => {
       await new Promise((resolve) => setImmediate(resolve));
       const userPermit = runtime.permitForTurn('user-turn-1');
       expect(userPermit).toBeDefined();
-      await runtime.finishTurn(userPermit!);
+      await finishDelivered(runtime, userPermit!);
       runtime.bindHost(host);
 
       // Editing back to the original text hands the model nothing new.
@@ -5296,7 +5306,7 @@ describe('goal runtime', () => {
       runtime.bindHost(host);
       await runtime.dispatch({ action: 'create', objective: 'ship' });
       const goalId = runtime.getSnapshot().goal!.goalId;
-      await runtime.finishTurn(host.started[0]!);
+      await finishDelivered(runtime, host.started[0]!);
 
       await runtime.dispatch({
         action: 'edit',
@@ -5322,6 +5332,134 @@ describe('goal runtime', () => {
         expectedRevision: 3,
       });
       expect(host.inputs.at(-1)?.objectiveUpdated).toBe(true);
+    });
+
+    it('keeps the notice owed when a turn finishes under the permit without the prompt', async () => {
+      // A system message or a direct user query can claim a queued
+      // continuation's permit and send its own text under it; the turn then
+      // finishes normally without the continuation prompt ever being sent.
+      // Finishing is not delivery: the next continuation still owes the
+      // notice.
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      await finishDelivered(runtime, host.started[0]!);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+
+      await runtime.finishTurn(host.started.at(-1)!);
+
+      expect(flagsOf(host)).toEqual([false, false, true, true]);
+    });
+
+    it('ignores a delivery mark carrying a stale turn key', async () => {
+      // The mark names the turn it is about; a mark for an earlier turn
+      // must not flip the in-flight one to delivered, or a release would
+      // commit an announcement the model never received.
+      const journal = fakeGoalJournal();
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const goalId = runtime.getSnapshot().goal!.goalId;
+      const first = host.started[0]!;
+      await finishDelivered(runtime, first);
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'ship the rest',
+        expectedGoalId: goalId,
+        expectedRevision: 1,
+      });
+      const inFlight = host.started.at(-1)!;
+
+      runtime.markTurnDelivered(`goal-runtime:${first.turnId}`);
+      await runtime.releaseTurn(`goal-runtime:${inFlight.turnId}`);
+
+      expect(flagsOf(host)).toEqual([false, false, true, true]);
+    });
+
+    it('fires after an edit made while the Goal was blocked', async () => {
+      // A blocked Goal is suspended, not ended: the model still holds the
+      // objective it was given, so an edit followed by resume is exactly
+      // the change the notice exists for -- same as pause -> edit -> resume.
+      const journal = fakeGoalJournal();
+      let records: readonly RuntimeRecord[] = [];
+      const evidenceSource = fakeEvidenceSource(() => records);
+      const verifier: GoalVerifier = vi.fn(async () => ({
+        decision: 'accept' as const,
+        reason: 'User authority is required',
+      }));
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+      const permit = host.started[0]!;
+      records = verifierUserEvidenceRecords(
+        permit,
+        runtime.getSnapshot().goal!.evidenceCursor.recordId!,
+      );
+      runtime.recordTerminalProposal(permit, {
+        status: 'blocked',
+        blockerKind: 'authority',
+        reason: 'Needs sign-off',
+        evidenceRefs: ['user-evidence'],
+      });
+      await finishDelivered(runtime, permit);
+      expect(runtime.getSnapshot().goal?.status).toBe('blocked');
+
+      await runtime.dispatch({
+        action: 'edit',
+        objective: 'deliver the other result',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      });
+      await runtime.dispatch({
+        action: 'resume',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision + 1,
+      });
+
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBe(true);
+    });
+
+    it('stays off for a Goal created after a completed one was cleared', async () => {
+      const journal = fakeGoalJournal();
+      let records: readonly RuntimeRecord[] = [];
+      const evidenceSource = fakeEvidenceSource(() => records);
+      const verifier: GoalVerifier = vi.fn(async () => ({
+        decision: 'accept' as const,
+        reason: 'Evidence satisfies the objective',
+      }));
+      const host = fakeGoalTurnHost();
+      const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+      runtime.bindHost(host);
+      await runtime.dispatch({ action: 'create', objective: 'deliver result' });
+      const permit = host.started[0]!;
+      const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+      records = verifierEvidenceRecords(permit, cursorId);
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['assistant-evidence'],
+      });
+      await finishDelivered(runtime, permit);
+      expect(runtime.getSnapshot().goal?.status).toBe('complete');
+
+      await runtime.dispatch({
+        action: 'clear',
+        expectedGoalId: permit.goalId,
+        expectedRevision: permit.revision,
+      });
+      await runtime.dispatch({ action: 'create', objective: 'next goal' });
+
+      expect(host.inputs.at(-1)?.objectiveUpdated).toBeFalsy();
     });
   });
 });

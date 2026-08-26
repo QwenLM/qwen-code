@@ -790,9 +790,15 @@ export function createGoalRuntime(
         continuationQueued = false;
         nextVerifierFeedback = undefined;
         currentTurnFeedback = undefined;
-        // The Goal ended holding the objective the model has; a fresh Goal
-        // is a new work item, not a replacement of it.
-        announcedObjective = undefined;
+        // A completed Goal ended holding the objective the model has; a
+        // fresh Goal after it is a new work item, not a replacement. A
+        // blocked Goal is suspended, not ended: it resumes with the objective
+        // the model already holds, so its announcement stays, exactly as a
+        // usage-limited Goal's does -- otherwise blocked -> edit -> resume
+        // would send no notice for a real change.
+        if (attempt.proposal.status === 'complete') {
+          announcedObjective = undefined;
+        }
         snapshot = structuredClone(terminalSnapshot);
         broadcast(attempt.proposal.status);
         return undefined;
@@ -1510,7 +1516,12 @@ export function createGoalRuntime(
           if (!isCurrentPermit(permit) || !snapshot.goal) {
             throw new Error(STALE_GOAL_TURN_MESSAGE);
           }
-          settleCurrentTurnAnnouncement(true);
+          // Finishing proves the permit was used, not that the continuation
+          // prompt was sent under it: a system message or a direct user
+          // query can claim a queued continuation's permit and send its own
+          // text instead. Only the host's delivery mark says the model saw
+          // the objective; without it the notice stays owed.
+          settleCurrentTurnAnnouncement(currentTurnDelivered);
           const recordUuid = randomUUID();
           const finishedWindDown = windDownTurnId === permit.turnId;
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
