@@ -205,10 +205,48 @@ describe('validateFindings', () => {
     ).toThrow(/location 0 has an invalid "line"/);
   });
 
-  it('rejects a top-level input that is not an array', () => {
-    expect(() => validateFindings({ findings: [] })).toThrow(
+  it('rejects a top-level input that is neither an array nor a findings wrapper', () => {
+    expect(() => validateFindings({ findings: 'not-an-array' })).toThrow(
       /must be a JSON array/,
     );
+    expect(() => validateFindings({ verdict: 'approve' })).toThrow(
+      /must be a JSON array/,
+    );
+  });
+
+  it('accepts the saved-artifact and report wrappers the recovery path feeds it', () => {
+    // Step 9 cleanup deletes the findings-in.json side file a later-session
+    // outcome path needs; the saved artifact (Step 8) and this command's own
+    // report survive it, and both wrap the array. `--input` must recover
+    // from that surviving state instead of dying on the missing side file.
+    const canonical = validateFindings([
+      { ...base, id: 'R1-1' },
+      { ...base, id: 'R1-2', severity: 'Suggestion' },
+    ]);
+    const report = buildReport(canonical);
+    const fromReport = validateFindings(report);
+    expect(fromReport.map((f) => f.id)).toEqual(['R1-1', 'R1-2']);
+
+    // The ReviewArtifactV1 shape: the same array under review metadata.
+    const artifact = {
+      schemaVersion: 1,
+      reviewId: 'review-1',
+      findings: report.findings,
+      counts: report.counts,
+    };
+    const fromArtifact = validateFindings(artifact);
+    expect(fromArtifact.map((f) => f.id)).toEqual(['R1-1', 'R1-2']);
+
+    // The wrapper round-trips the outcome merge end to end: outcomes apply
+    // to the unwrapped list exactly as they would to the bare array.
+    const withOutcomes = applyOutcomes(
+      validateFindings(report),
+      validateOutcomes([
+        { id: 'R1-1', outcome: 'fixed' },
+        { id: 'R1-2', outcome: 'skipped', note: 'intended behaviour' },
+      ]),
+    );
+    expect(withOutcomes.map((f) => f.outcome)).toEqual(['fixed', 'skipped']);
   });
 });
 
@@ -424,6 +462,24 @@ describe('validateOutcomes', () => {
     expect(() => validateOutcomes([{ outcome: 'fixed' }])).toThrow(
       /index 0 is missing a string "id"/,
     );
+  });
+
+  it('rejects a skipped outcome with no note', () => {
+    // `skipped` keeps the finding on the reader's plate and the note is the
+    // reader's only handle on it — and the report_findings contract refuses
+    // a skipped outcome that carries none, so the ledger feeding it must not
+    // accept one either.
+    expect(() => validateOutcomes([{ id: 'f1', outcome: 'skipped' }])).toThrow(
+      /"skipped" with no note/,
+    );
+    expect(() =>
+      validateOutcomes([{ id: 'f1', outcome: 'skipped', note: '   ' }]),
+    ).toThrow(/"skipped" with no note/);
+    expect(
+      validateOutcomes([
+        { id: 'f1', outcome: 'skipped', note: 'needs a product call' },
+      ]),
+    ).toEqual([{ id: 'f1', outcome: 'skipped', note: 'needs a product call' }]);
   });
 });
 
