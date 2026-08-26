@@ -7,10 +7,8 @@ import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import type { TodoItem } from '../../adapters/types';
 import { todoStateKey, type TodoDetail } from '../../utils/todos';
 
-// PlanMessage's expanded list reads TodoTimelineContext and (via TodoFullList)
-// TodoDetailContext from App; mock both so the unit test doesn't pull the whole
-// application graph.
-vi.mock('../../App', async () => {
+// Mock the todo contexts so the unit test controls their provider values.
+vi.mock('../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     TodoTimelineContext: createContext(new Map()),
@@ -19,7 +17,9 @@ vi.mock('../../App', async () => {
 });
 
 const { PlanMessage } = await import('./PlanMessage');
-const { TodoDetailContext, TodoTimelineContext } = await import('../../App');
+const { TodoDetailContext, TodoTimelineContext } = await import(
+  '../../WebShellContexts'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }

@@ -68,7 +68,7 @@ import {
   useTranscriptRenderMode,
   type TranscriptRenderMode,
 } from '../../transcriptRenderMode';
-import { TodoTimelineContext } from '../../App';
+import { TodoTimelineContext } from '../../WebShellContexts';
 import {
   type ToolHeaderExtraRenderInfo,
   type ToolHeaderKind,

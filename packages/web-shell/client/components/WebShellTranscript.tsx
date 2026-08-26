@@ -9,11 +9,7 @@ import {
   type ReactElement,
 } from 'react';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
-import {
-  CompactModeContext,
-  TodoDetailContext,
-  TodoTimelineContext,
-} from '../App';
+import { CompactModeContext, TodoContextsProvider } from '../WebShellContexts';
 import {
   WebShellCustomizationProvider,
   type AssistantTurnFooterRenderer,
@@ -247,38 +243,42 @@ function WebShellTranscriptContent({
           <WebShellPortalRootContext.Provider value={portalRoot}>
             <TranscriptRenderModeProvider value={renderMode}>
               <WebShellCustomizationProvider value={customization}>
-                <TodoTimelineContext.Provider value={todoTimeline}>
-                  <TodoDetailContext.Provider value={todoDetails}>
-                    <CompactModeContext.Provider value={false}>
+                <TodoContextsProvider
+                  timeline={todoTimeline}
+                  details={todoDetails}
+                >
+                  {/* Embedded read-only transcript API (not the main chat):
+                      keep tool groups unmerged so hosts see the full record,
+                      independent of the main app's always-on compact view. */}
+                  <CompactModeContext.Provider value={false}>
+                    <div
+                      ref={rootRef}
+                      className={rootClassName}
+                      style={rootStyle}
+                      data-web-shell-root
+                      data-web-shell-shadcn
+                      data-transcript-render-mode={renderMode}
+                      lang={resolvedLanguage}
+                    >
                       <div
-                        ref={rootRef}
-                        className={rootClassName}
-                        style={rootStyle}
-                        data-web-shell-root
-                        data-web-shell-shadcn
-                        data-transcript-render-mode={renderMode}
-                        lang={resolvedLanguage}
+                        className={`${styles.content} ${styles.contentHasMessages}`}
                       >
-                        <div
-                          className={`${styles.content} ${styles.contentHasMessages}`}
-                        >
-                          <MessageList
-                            messages={messages}
-                            pendingApproval={null}
-                            isResponding={false}
-                            workspaceCwd={workspaceCwd}
-                            virtualScrollThreshold={
-                              documentMode
-                                ? Number.MAX_SAFE_INTEGER
-                                : virtualScrollThreshold
-                            }
-                            hideSessionTimeline={documentMode}
-                          />
-                        </div>
+                        <MessageList
+                          messages={messages}
+                          pendingApproval={null}
+                          isResponding={false}
+                          workspaceCwd={workspaceCwd}
+                          virtualScrollThreshold={
+                            documentMode
+                              ? Number.MAX_SAFE_INTEGER
+                              : virtualScrollThreshold
+                          }
+                          hideSessionTimeline={documentMode}
+                        />
                       </div>
-                    </CompactModeContext.Provider>
-                  </TodoDetailContext.Provider>
-                </TodoTimelineContext.Provider>
+                    </div>
+                  </CompactModeContext.Provider>
+                </TodoContextsProvider>
               </WebShellCustomizationProvider>
             </TranscriptRenderModeProvider>
           </WebShellPortalRootContext.Provider>

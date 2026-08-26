@@ -8,10 +8,8 @@ import { WebShellCustomizationProvider } from '../../../customization';
 import { TranscriptRenderModeProvider } from '../../../transcriptRenderMode';
 import { formatTimestamp } from '../../MessageTimestamp';
 
-// SubAgentPanel pulls in ToolGroup, which imports App for TodoTimelineContext;
-// loading the real App module would drag the whole application graph into this
-// unit test.
-vi.mock('../../../App', async () => {
+// SubAgentPanel pulls in ToolGroup, which reads both todo contexts.
+vi.mock('../../../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return {
     TodoTimelineContext: createContext(new Map()),

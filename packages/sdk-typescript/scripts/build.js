@@ -117,7 +117,8 @@ const rootDir = join(__dirname, '..');
 // avoid complete Web Shell projection on every streamed text update.
 // Bumped from 208KB to 209KB after merging stable transcript identity and safe
 // preview projection with those change summaries.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 209 * 1024;
+// Bumped from 209KB to 210KB after merging the latest daemon SDK surface.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 210 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't
