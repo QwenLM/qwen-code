@@ -574,7 +574,10 @@ export class PermissionController extends BaseController {
       const behavior = String(payload['behavior'] || '').toLowerCase();
 
       if (behavior === 'allow') {
-        if (requiresUserInteraction) {
+        if (
+          requiresUserInteraction &&
+          toolCall.request.name === ToolNames.EXIT_PLAN_MODE
+        ) {
           await toolCall.confirmationDetails.onConfirm(
             ToolConfirmationOutcome.ProceedOnce,
           );
