@@ -535,6 +535,11 @@ describe('package scripts', () => {
         'publish-sdk',
         'Publish immutable SDK tarball',
       ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-node-repl',
+        'Publish immutable Node REPL tarball',
+      ],
       ['.github/workflows/cd-mobile-mcp.yml', 'build-and-publish', 'Publish'],
     ]) {
       const publishJob = getWorkflowJob(readWorkflow(workflowPath), jobName);
@@ -563,6 +568,7 @@ describe('package scripts', () => {
       'packages/channels/weixin',
       'packages/cua-driver/typescript',
       'packages/mobile-mcp',
+      'packages/node-repl',
       'packages/sdk-typescript',
     ]) {
       const packageJson = JSON.parse(
