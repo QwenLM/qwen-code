@@ -3421,17 +3421,27 @@ class QwenAgent implements Agent {
   private readonly initializingConfigs = new Set<Config>();
   private sessionWorkflowEnabledOverride: boolean | undefined;
   /**
-   * The last file-derived approval mode the daemon converged its live
-   * sessions on (seeded from the boot settings). `workspaceReload` compares
-   * the reloaded disk value against this baseline — not against each
-   * session's live mode — because approval mode has runtime-only writers
-   * (`ExitPlanModeTool` approved plan exits, ACP `session/set_mode`, the
-   * `sessionApprovalMode` ext) that never persist, so a live session
-   * legitimately diverges from the file mid-workflow and an unchanged file
-   * must not clobber those transitions. The baseline lives on the daemon so
-   * it survives a `this.settings` cache swap.
+   * The last file-derived approval mode each live session actually
+   * converged on, seeded with the session's boot-derived mode at
+   * publication. `workspaceReload` compares the reloaded disk value against
+   * this — not against each session's live mode — because approval mode has
+   * runtime-only writers (`ExitPlanModeTool` approved plan exits, ACP
+   * `session/set_mode`, the `sessionApprovalMode` ext) that never persist,
+   * so a live session legitimately diverges from the file mid-workflow and
+   * an unchanged file must not clobber those transitions. The record lives
+   * on the daemon so it survives a `this.settings` cache swap, and per
+   * session because one daemon-wide baseline cannot represent a partially
+   * applied convergence: while a session skipped mid-flip still waits for
+   * its value, the file can round-trip back to the old baseline and strand
+   * the already-flipped sessions on the intermediate mode. An entry advances
+   * only when that session successfully converges, so skipped sessions and
+   * failed applies retry on the next reload, and an unparseable file value
+   * (undefined fold) is never recorded.
    */
-  private sessionApprovalModeFileValue: ApprovalMode | undefined;
+  private readonly sessionApprovalModeConverged = new Map<
+    string,
+    ApprovalMode
+  >();
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
@@ -4044,6 +4054,7 @@ class QwenAgent implements Agent {
       cleanupErrors.push(error);
     }
     this.sessions.delete(sessionId);
+    this.sessionApprovalModeConverged.delete(sessionId);
     // A Session missing from the next snapshot is how the daemon learns the
     // child released it — including when it never saw our close response.
     this.activeWorkReporter?.notifyChanged();
@@ -4430,18 +4441,6 @@ class QwenAgent implements Agent {
         budget: this.workspaceMcpBudget,
       });
     }
-    // Seed the file-derived approval-mode baseline from the boot settings so
-    // a `workspaceReload` with an unchanged file never re-applies the disk
-    // value: sessions created at boot derive this same value from the same
-    // merged settings, and any later divergence is a runtime-only transition
-    // (approved plan exit, ACP session/set_mode) the reload must preserve.
-    // Restricted daemons (safe/bare) ignore the file at boot and derive
-    // DEFAULT, so the baseline mirrors that instead of the file value.
-    this.sessionApprovalModeFileValue = isRestrictedApprovalModeConfig(
-      this.config,
-    )
-      ? ApprovalMode.DEFAULT
-      : foldReloadApprovalMode(this.settings.merged.tools?.approvalMode);
   }
 
   private runWithPinnedRuntimeBaseDir<T>(
@@ -12111,20 +12110,8 @@ class QwenAgent implements Agent {
         // session below) so a key deletion reaches live sessions too. A
         // present-but-invalid value folds to undefined instead: boot rejects
         // that file, so reload must not converge live sessions on it either
-        // (folding it to AUTO would silently escalate the approval gate).
-        // Compare the reloaded disk value against the daemon-held baseline —
-        // not against each session's live mode. Approval mode has
-        // runtime-only writers (ExitPlanModeTool approved plan exits, ACP
-        // session/set_mode, the sessionApprovalMode ext; core
-        // Config.setApprovalMode never persists), so a live session
-        // legitimately diverges from the file
-        // mid-workflow, and re-applying the disk value whenever it merely
-        // differs from the live mode would flip an approved-plan session
-        // back into PLAN between turns and destroy its bound revision.
-        // Comparing against the baseline still delivers a genuine disk flip
-        // even after `this.settings` was swapped for a fresh loadSettings
-        // instance (the baseline lives on the daemon, not the settings
-        // object), while an unchanged file leaves runtime transitions intact.
+        // (folding it to AUTO would silently escalate the approval gate),
+        // and the undefined is never recorded as converged.
         const reloadedApprovalMode = foldReloadApprovalMode(
           newMerged.tools?.approvalMode,
         );
@@ -12133,14 +12120,10 @@ class QwenAgent implements Agent {
             'reload: tools.approvalMode holds a value boot would reject; live sessions keep their current modes until the file is corrected',
           );
         }
-        const approvalModeFileChanged =
-          reloadedApprovalMode !== undefined &&
-          reloadedApprovalMode !== this.sessionApprovalModeFileValue;
 
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
-        let approvalModeApplyFailed = false;
 
         const results = await Promise.allSettled(
           sessions.map(async ([id, session]) => {
@@ -12201,39 +12184,48 @@ class QwenAgent implements Agent {
               config.setDisabledTools(new Set(disabled));
             }
 
-            // Apply the reloaded approval mode only when the file value
-            // itself changed since the daemon last converged on it (see the
-            // baseline derivation above); the per-session `!== previousMode`
-            // guard keeps the apply idempotent for sessions already at the
-            // disk value. An undefined fold (present-but-invalid file value)
-            // never changes the baseline comparison, so no session converges
-            // on a value boot would reject. Restricted sessions ignore the
-            // file at boot (loadCliConfig pins them to DEFAULT), so reload
-            // must converge them on DEFAULT too — pushing the file value (or
-            // the AUTO fold of a missing key) into a safe-mode session would
-            // silently strip its approval restriction.
+            // Apply the reloaded approval mode only when it differs from
+            // what this session last converged on (see the record's
+            // derivation above); the `!== previousMode` guard keeps the
+            // apply idempotent for sessions already at the disk value while
+            // the record still advances, so a later round-trip of the file
+            // re-converges exactly the sessions that moved. An undefined
+            // fold (present-but-invalid file value) is neither applied nor
+            // recorded, so no session converges on a value boot would
+            // reject. Restricted sessions ignore the file at boot
+            // (loadCliConfig pins them to DEFAULT), so reload must converge
+            // them on DEFAULT too — pushing the file value (or the AUTO fold
+            // of a missing key) into a safe-mode session would silently
+            // strip its approval restriction.
             const reloadedSessionMode = isRestrictedApprovalModeConfig(config)
               ? ApprovalMode.DEFAULT
               : reloadedApprovalMode;
             const previousMode = config.getApprovalMode();
+            const convergedMode = this.sessionApprovalModeConverged.get(id);
             if (
               reloadedSessionMode !== undefined &&
-              approvalModeFileChanged &&
-              reloadedSessionMode !== previousMode
+              reloadedSessionMode !== convergedMode
             ) {
-              try {
-                config.setApprovalMode(reloadedSessionMode);
-                if (reloadedSessionMode === 'plan') {
-                  session.clearActiveTodoPlanRevision();
-                  session.clearTodoStopGuardTrust();
-                } else if (previousMode === 'plan') {
-                  session.clearActiveTodoPlanRevision();
+              if (reloadedSessionMode !== previousMode) {
+                try {
+                  config.setApprovalMode(reloadedSessionMode);
+                  if (reloadedSessionMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
+                    session.clearTodoStopGuardTrust();
+                  } else if (previousMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
+                  }
+                  this.sessionApprovalModeConverged.set(
+                    id,
+                    reloadedSessionMode,
+                  );
+                } catch (err) {
+                  debugLogger.warn(
+                    `reload: setApprovalMode failed for session ${id}: ${err}`,
+                  );
                 }
-              } catch (err) {
-                approvalModeApplyFailed = true;
-                debugLogger.warn(
-                  `reload: setApprovalMode failed for session ${id}: ${err}`,
-                );
+              } else {
+                this.sessionApprovalModeConverged.set(id, reloadedSessionMode);
               }
             }
 
@@ -12263,20 +12255,6 @@ class QwenAgent implements Agent {
             );
             skipped.push(sessions[i]![0]);
           }
-        }
-
-        // Advance the baseline only when every live session actually
-        // converged on this file value. A busy session the loop skipped, a
-        // setApprovalMode that threw (e.g. TrustGateError), or a session
-        // whose reload rejected never received the mode; advancing anyway
-        // would make every later no-edit reload compute no change and
-        // strand those sessions on the stale mode until the file changes
-        // again or the daemon restarts. Leaving the baseline behind keeps
-        // approvalModeFileChanged true, so the next reload re-attempts and
-        // the per-session `!== previousMode` guard applies the value only
-        // to the sessions still missing it.
-        if (skipped.length === 0 && !approvalModeApplyFailed) {
-          this.sessionApprovalModeFileValue = reloadedApprovalMode;
         }
 
         return {
@@ -13024,6 +13002,13 @@ class QwenAgent implements Agent {
         );
       }
       this.sessions.set(sessionId, session);
+      // The session boots converged on the mode its settings derived; later
+      // reloads track convergence from here. Restricted sessions derive
+      // DEFAULT, mirroring the fold the reload loop applies to them.
+      this.sessionApprovalModeConverged.set(
+        sessionId,
+        config.getApprovalMode(),
+      );
       published = true;
       // The Session set itself is part of the snapshot: publish so the daemon
       // learns about this Session from a report rather than inferring it.

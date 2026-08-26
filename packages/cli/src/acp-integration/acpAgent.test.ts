@@ -23904,6 +23904,236 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('keeps an approved plan exit intact when an invalid value round-trips the file', async () => {
+    // The file pins plan; an approved exit_plan_mode legitimately drops the
+    // live session to default without persisting. A hand edit / dotfile
+    // sync then briefly writes a value boot would reject: the reload must
+    // neither apply it nor record it as converged. Recording the undefined
+    // fold corrupted the convergence record, so restoring the file to
+    // exactly 'plan' afterwards computed a change and snapped the session
+    // back into PLAN between turns — destroying the approved exit via an
+    // edit cycle that left the file byte-identical.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let approvalMode = 'plan';
+    const setApprovalMode = vi.fn((mode: string) => {
+      approvalMode = mode;
+    });
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-invalid-roundtrip'),
+      getApprovalMode: vi.fn(() => approvalMode),
+      setApprovalMode,
+      setDisabledTools: vi.fn(),
+      isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+    const clearTodoStopGuardTrust = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-invalid-roundtrip'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust,
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // Runtime-only transition: an approved plan exit drops the session to
+    // default between turns while the file still says plan.
+    approvalMode = 'default';
+
+    // A transient invalid value (typo, mid-save dotfile sync) applies
+    // nothing...
+    mergedSettings = { tools: { approvalMode: 'bogus' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+
+    // ...and restoring the file byte-identical to 'plan' must not snap the
+    // session back into PLAN: the invalid value never poisoned the
+    // convergence record.
+    mergedSettings = { tools: { approvalMode: 'plan' } };
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(approvalMode).toBe('default');
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+    expect(clearTodoStopGuardTrust).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('re-converges flipped sessions when the file round-trips before a retry completes', async () => {
+    // A partially applied convergence retries until every session holds the
+    // file value. If the file round-trips back to the old value before the
+    // retry completes, the sessions that already flipped must flip back:
+    // one daemon-wide baseline still equal to the round-tripped value
+    // computed "no change" and stranded them on the intermediate mode until
+    // an unrelated file edit or daemon restart.
+    let mergedSettings: Record<string, unknown> = {
+      tools: { approvalMode: 'plan' },
+    };
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    const approvalModes = new Map<string, string>([
+      ['s-roundtrip-a', 'plan'],
+      ['s-roundtrip-b', 'plan'],
+    ]);
+    const busySessionIds = new Set<string>();
+    const setApprovalModeCalls: Array<[string, string]> = [];
+    function makeReloadSession(id: string) {
+      const clearActiveTodoPlanRevision = vi.fn();
+      const clearTodoStopGuardTrust = vi.fn();
+      const cfg = makeConfig({
+        getSessionId: vi.fn().mockReturnValue(id),
+        getApprovalMode: vi.fn(() => approvalModes.get(id)),
+        setApprovalMode: vi.fn((mode: string) => {
+          setApprovalModeCalls.push([id, mode]);
+          approvalModes.set(id, mode);
+        }),
+        setDisabledTools: vi.fn(),
+        isSessionWorkflowEnabled: vi.fn().mockReturnValue(false),
+      });
+      const session = {
+        getId: vi.fn().mockReturnValue(id),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        isIdle: vi.fn(() => !busySessionIds.has(id)),
+        clearActiveTodoPlanRevision,
+        clearTodoStopGuardTrust,
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
+        startCronScheduler: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+      return { cfg, session, clearActiveTodoPlanRevision };
+    }
+    const reloadSessions = new Map(
+      ['s-roundtrip-a', 's-roundtrip-b'].map((id) => [
+        id,
+        makeReloadSession(id),
+      ]),
+    );
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    let configsServed = 0;
+    vi.mocked(loadCliConfig).mockImplementation(async (...args) => {
+      const argv = args[1] as { sessionId?: string } | undefined;
+      if (argv?.sessionId === 'workspace-mcp-discovery') {
+        return reloadSessions.get('s-roundtrip-a')!.cfg as unknown as Config;
+      }
+      const id = configsServed++ === 0 ? 's-roundtrip-a' : 's-roundtrip-b';
+      return reloadSessions.get(id)!.cfg as unknown as Config;
+    });
+    let sessionsSpawned = 0;
+    vi.mocked(Session).mockImplementation(() => {
+      const id = sessionsSpawned++ === 0 ? 's-roundtrip-a' : 's-roundtrip-b';
+      return reloadSessions.get(id)!.session;
+    });
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // The file flips plan->auto while s-roundtrip-b is mid-turn: only A
+    // converges and the reload reports B as skipped.
+    mergedSettings = { tools: { approvalMode: 'auto' } };
+    busySessionIds.add('s-roundtrip-b');
+    const partial = await agent.extMethod(
+      SERVE_CONTROL_EXT_METHODS.workspaceReload,
+      {},
+    );
+    expect(setApprovalModeCalls).toEqual([['s-roundtrip-a', 'auto']]);
+    expect(partial).toMatchObject({ sessionsSkipped: ['s-roundtrip-b'] });
+
+    // Before B's retry can run, the file round-trips back to plan. A must
+    // flip back; B still holds plan and stays untouched.
+    mergedSettings = { tools: { approvalMode: 'plan' } };
+    busySessionIds.clear();
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalModeCalls).toEqual([
+      ['s-roundtrip-a', 'auto'],
+      ['s-roundtrip-a', 'plan'],
+    ]);
+    expect(approvalModes.get('s-roundtrip-a')).toBe('plan');
+    expect(approvalModes.get('s-roundtrip-b')).toBe('plan');
+    expect(
+      reloadSessions.get('s-roundtrip-a')!.clearActiveTodoPlanRevision,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      reloadSessions.get('s-roundtrip-b')!.clearActiveTodoPlanRevision,
+    ).not.toHaveBeenCalled();
+
+    // Every session converged again: a no-edit reload is a per-session
+    // no-op.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setApprovalModeCalls).toEqual([
+      ['s-roundtrip-a', 'auto'],
+      ['s-roundtrip-a', 'plan'],
+    ]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('converges reload with the boot parser for aliased approval-mode spellings', async () => {
     // Boot accepts legacy alias spellings (parseApprovalModeValue trims,
     // lowercases, and maps auto_edit/autoedit to AUTO_EDIT), so reload
