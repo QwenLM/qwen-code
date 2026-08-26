@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
 import {
+  GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_CHECKPOINT_CLAIM_LIMIT,
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_CHECKPOINT_STALL_LIMIT,
@@ -625,6 +626,82 @@ describe('goal runtime', () => {
       }),
       expect.any(AbortSignal),
     );
+  });
+
+  it('accepts an evidenced infeasible blocker on its first turn, with the next step spelled out', async () => {
+    const journal = fakeGoalJournal();
+    let records: readonly RuntimeRecord[] = [];
+    const evidenceSource = fakeEvidenceSource(() => records);
+    const verifier: GoalVerifier = vi.fn(async () => ({
+      decision: 'accept' as const,
+      reason: 'The named branch does not exist',
+    }));
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal, evidenceSource, verifier });
+    runtime.bindHost(host);
+    await runtime.dispatch({
+      action: 'create',
+      objective: 'Rebase onto the v9 branch',
+    });
+    const permit = host.started[0]!;
+    const cursorId = runtime.getSnapshot().goal!.evidenceCursor.recordId!;
+    const base = verifierEvidenceRecords(permit, cursorId, 'probe');
+    records = [
+      base[0]!,
+      {
+        ...base[1]!,
+        type: 'tool_result',
+        provenance: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'shell',
+                response: { output: "fatal: branch 'v9' not found" },
+              },
+            },
+          ],
+        },
+      },
+    ];
+
+    // No three-turn streak: the whole point is to stop before the budget
+    // does, and the evidence bar (an external fact) is what earns that.
+    const receipt = runtime.recordTerminalProposal(permit, {
+      status: 'blocked',
+      blockerKind: 'infeasible',
+      reason:
+        'Checked the remote: no v9 branch exists, so nothing in scope can rebase onto it.',
+      evidenceRefs: ['probe'],
+    });
+    expect(receipt).toEqual({ recorded: true, readyForVerification: true });
+
+    await runtime.finishTurn(permit);
+
+    expect(verifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proposal: expect.objectContaining({ blockerKind: 'infeasible' }),
+        blockedPolicy: expect.stringContaining(
+          'An infeasible blocker may also be accepted immediately',
+        ),
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(journal.appended.map((payload) => payload.cause)).toEqual([
+      'create',
+      'turn_finished',
+      'verifier_accept',
+      'blocked',
+    ]);
+    expect(runtime.getSnapshot()).toMatchObject({
+      activity: 'idle',
+      goal: {
+        status: 'blocked',
+        lastReason: `The named branch does not exist ${GOAL_INFEASIBLE_NEXT_STEP}`,
+      },
+    });
+    expect(host.started).toHaveLength(1);
   });
 
   it('rejects an invalid evidence reference without calling the verifier', async () => {

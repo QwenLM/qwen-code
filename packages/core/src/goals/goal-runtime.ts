@@ -28,6 +28,7 @@ import {
   GOAL_CHECKPOINT_STALLED_REASON,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_STATE_VERSION,
   goalTokenBudgetReason,
   isGoalTokenBudgetSpent,
@@ -614,7 +615,7 @@ export function createGoalRuntime(
       ...base,
       proposal: { ...attempt.proposal, status: 'blocked' },
       blockedPolicy:
-        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
+        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An infeasible blocker may also be accepted immediately, only when cited external_fact evidence shows the objective cannot be satisfied as written: it contradicts itself, it names a target that verifiably does not exist, or it requires an action outside what the tools can perform; reject it when the obstacle is difficulty, uncertainty, information the model could still obtain, or a preference to ask. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
     };
   };
 
@@ -665,7 +666,10 @@ export function createGoalRuntime(
           ...snapshot.goal,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
-          lastReason: outcome.result.reason,
+          lastReason:
+            attempt.proposal.blockerKind === 'infeasible'
+              ? `${outcome.result.reason} ${GOAL_INFEASIBLE_NEXT_STEP}`
+              : outcome.result.reason,
         };
         const acceptedSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,
