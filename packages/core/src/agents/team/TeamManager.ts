@@ -476,6 +476,12 @@ export class TeamManager {
       // an explicit spawn-time override — in the team file and join event.
       member.model = config.model ?? subagentModel;
 
+      // The definition's resolved route is applied only when the leader
+      // did not override the model at spawn time. Computed once so the
+      // authOverrides build below and the post-spawn route verification
+      // cannot drift apart (#10071).
+      const dedicatedRoute = !config.model ? subagentModelRoute : undefined;
+
       // Build spawn config for the backend.
       const spawnConfig: AgentSpawnConfig = {
         agentId,
@@ -503,10 +509,9 @@ export class TeamManager {
           // definition's model ID over the leader's route. Skipped when
           // the leader overrode the model at spawn time — the definition
           // does not vouch for the route of a model it did not select.
-          authOverrides:
-            subagentModelRoute && !config.model
-              ? { authType: subagentModelRoute.authType }
-              : undefined,
+          authOverrides: dedicatedRoute
+            ? { authType: dedicatedRoute.authType }
+            : undefined,
           runtimeConfig: {
             promptConfig: {
               systemPrompt,
@@ -556,14 +561,30 @@ export class TeamManager {
       // dedicated generator exists and fail loudly so `rollback` tears
       // the teammate down, matching the ordinary-subagent path, which
       // surfaces the same failure as a spawn error.
-      if (subagentModelRoute && !config.model) {
-        const routeGenerator = this.backend.getAgentContentGenerator?.(agentId);
+      if (dedicatedRoute) {
+        // A backend that omits the accessor cannot prove the route
+        // materialized. Fail loudly with the real cause instead of
+        // treating a missing method like a generator-creation failure
+        // (which would send maintainers hunting for a missing API key)
+        // or, worse, letting the teammate join on the leader's
+        // generator — the silent misrouting this PR fixes (#10071).
+        if (typeof this.backend.getAgentContentGenerator !== 'function') {
+          throw new Error(
+            `Teammate "${name}" failed to start: the active backend ` +
+              `does not support dedicated per-agent ContentGenerators ` +
+              `required by model "${dedicatedRoute.modelId}" ` +
+              `(${dedicatedRoute.authType})`,
+          );
+        }
+        const routeGenerator = this.backend.getAgentContentGenerator(agentId);
         if (!routeGenerator) {
+          const cause = this.backend.getAgentContentGeneratorError?.(agentId);
           throw new Error(
             `Teammate "${name}" failed to start: could not create a ` +
               `dedicated ContentGenerator for model ` +
-              `"${subagentModelRoute.modelId}" ` +
-              `(${subagentModelRoute.authType})`,
+              `"${dedicatedRoute.modelId}" ` +
+              `(${dedicatedRoute.authType})` +
+              (cause ? `: ${cause}` : ''),
           );
         }
       }

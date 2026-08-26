@@ -192,9 +192,21 @@ export interface Backend {
    * per-agent route. Lets spawn callers verify a requested route
    * actually materialized instead of silently falling back to the
    * parent's generator. PTY-based backends run each agent in its own
-   * process and may omit this method.
+   * process and may omit this method; note that TeamManager fails the
+   * spawn of a model-selecting definition on a backend that omits it,
+   * because absence makes the route unverifiable.
    */
   getAgentContentGenerator?(agentId: string): ContentGenerator | undefined;
+
+  /**
+   * Get why the dedicated ContentGenerator could not be created for an
+   * agent, when the backend swallowed the creation failure and fell
+   * back to the parent's generator. Lets spawn callers surface the
+   * underlying cause (missing API key, bad base URL, ...) instead of a
+   * bare "route did not materialize". PTY-based backends may omit this
+   * method.
+   */
+  getAgentContentGeneratorError?(agentId: string): string | undefined;
 
   /**
    * Stop all running agents.

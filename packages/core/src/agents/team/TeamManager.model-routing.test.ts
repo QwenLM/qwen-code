@@ -20,6 +20,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { TeamManager } from './TeamManager.js';
 import { InProcessBackend } from '../backends/InProcessBackend.js';
+import type { Backend } from '../backends/types.js';
 import { AgentStatus } from '../runtime/agent-types.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { Config } from '../../config/config.js';
@@ -392,13 +393,19 @@ describe('TeamManager teammate model routing (#10071)', () => {
       new Error('The API key for Anthropic is not set'),
     );
 
+    // The swallowed creation failure must surface in the spawn error:
+    // the ordinary-subagent path reports the provider's message, and
+    // the debug log that used to be the only trace is a no-op without
+    // QWEN_DEBUG_LOG_FILE.
     await expect(
       teamManager.spawnTeammate({
         name: 'w6',
         agentType: 'unroutable-worker',
         cwd: projectDir,
       }),
-    ).rejects.toThrow(/could not create a dedicated ContentGenerator/);
+    ).rejects.toThrow(
+      /could not create a dedicated ContentGenerator for model "claude-worker" \(anthropic\): The API key for Anthropic is not set/,
+    );
 
     // Rollback must run: no member persisted, and the spawned agent was
     // stopped (the backend keeps the handle until its exit watcher drops
@@ -409,5 +416,53 @@ describe('TeamManager teammate model routing (#10071)', () => {
     if (stopped) {
       expect(stopped.getStatus()).toBe(AgentStatus.CANCELLED);
     }
+  });
+
+  it('fails loudly on a backend that omits getAgentContentGenerator', async () => {
+    // PTY-style backends may omit getAgentContentGenerator (types.ts
+    // allows it). A model-selecting definition on such a backend must
+    // fail with the real cause — not with a missing-generator error
+    // that looks like a missing API key, and not by silently joining
+    // on the leader's generator (#10071).
+    await writeAgentDefinition(projectDir, 'routed-worker.md', {
+      name: 'routed-worker',
+      description: 'A worker with a custom model route',
+      model: 'anthropic:claude-worker',
+    });
+
+    const ptyStyleBackend = {
+      type: 'tmux',
+      init: vi.fn().mockResolvedValue(undefined),
+      spawnAgent: vi.fn().mockResolvedValue(undefined),
+      stopAgent: vi.fn(),
+      getAgent: vi.fn().mockReturnValue({
+        getStatus: vi.fn().mockReturnValue(AgentStatus.IDLE),
+        getError: vi.fn().mockReturnValue(undefined),
+      }),
+      stopAll: vi.fn(),
+      cleanup: vi.fn().mockResolvedValue(undefined),
+      setOnAgentExit: vi.fn(),
+      // getAgentContentGenerator intentionally omitted.
+    } as unknown as Backend;
+
+    const localTeamManager = new TeamManager(
+      ptyStyleBackend,
+      await writeTeamFileFixture(),
+      new SubagentManager(leaderConfig),
+    );
+
+    await expect(
+      localTeamManager.spawnTeammate({
+        name: 'w7',
+        agentType: 'routed-worker',
+        cwd: projectDir,
+      }),
+    ).rejects.toThrow(
+      /does not support dedicated per-agent ContentGenerators required by model "claude-worker" \(anthropic\)/,
+    );
+
+    // Rollback must run: no member persisted.
+    expect(localTeamManager.getTeamFile().members).toHaveLength(0);
+    await localTeamManager.cleanup();
   });
 });
