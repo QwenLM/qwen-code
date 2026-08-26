@@ -363,6 +363,20 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.llmContent).not.toContain('use `to:');
   });
 
+  it('returns error for non-existent task without an active team', async () => {
+    const noTeamTool = new SendMessageTool(
+      makeTeamConfig({ registry, teamManager: null }),
+    );
+    const result = await noTeamTool.validateBuildAndExecute(
+      { task_id: 'nope', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('No background task found');
+    expect(result.llmContent).not.toContain('use `to:');
+  });
+
   it('suggests the teammate destination for a matching task ID', async () => {
     const result = await tool.validateBuildAndExecute(
       { task_id: 'QA Reviewer', message: 'hello' },
