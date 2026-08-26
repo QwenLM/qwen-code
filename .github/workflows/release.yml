@@ -606,8 +606,15 @@ jobs:
         working-directory: 'packages/channels'
         run: |-
           # Explicit allowlist: new channel workspaces require release approval.
+          # `dws` is deliberately absent: the package does not exist on npm yet
+          # and the release automation token cannot CREATE a new package under
+          # the @qwen-code org (the PUT 404'd and failed every release since
+          # v0.22.1). The channel loads via a tolerated dynamic import
+          # (channel-registry Promise.allSettled), so an unpublished dws breaks
+          # nothing. Re-add `dws` once the npm org grants package creation (or
+          # the package is pre-created and the CI user added as maintainer).
           PUBLISH_MARKER="$(mktemp)"
-          for channel in dingtalk dws feishu github qqbot telegram wecom weixin; do
+          for channel in dingtalk feishu github qqbot telegram wecom weixin; do
             echo "::group::Publishing @qwen-code/channel-${channel}"
             (
               cd "${channel}"
