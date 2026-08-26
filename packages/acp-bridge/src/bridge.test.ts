@@ -13710,6 +13710,86 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('reads attachments from the fallback root when the primary misses', async () => {
+      const mainRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-main-'),
+      );
+      const fallbackRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-fallback-'),
+      );
+      const bridge = makeBridge({
+        sessionAttachmentsRoot: mainRoot,
+        sessionAttachmentsFallbackRoot: fallbackRoot,
+        channelFactory: async () => makeChannel({}).channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const sessionDir = `session-${encodeURIComponent(session.sessionId)}`;
+        await fsp.mkdir(path.join(fallbackRoot, sessionDir), {
+          recursive: true,
+        });
+        await fsp.writeFile(
+          path.join(fallbackRoot, sessionDir, 'notes.txt'),
+          'legacy attachment',
+        );
+
+        const read = await bridge.readSessionAttachment(
+          session.sessionId,
+          'notes.txt',
+          { clientId: session.clientId },
+        );
+        expect(read?.data.toString()).toBe('legacy attachment');
+        expect(read?.mimeType).toBe('text/plain');
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(mainRoot, { recursive: true, force: true });
+        await fsp.rm(fallbackRoot, { recursive: true, force: true });
+      }
+    });
+
+    it('deleteSessionAttachments clears both roots for a non-live session', async () => {
+      const mainRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-main-'),
+      );
+      const fallbackRoot = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-fallback-'),
+      );
+      const bridge = makeBridge({
+        sessionAttachmentsRoot: mainRoot,
+        sessionAttachmentsFallbackRoot: fallbackRoot,
+        channelFactory: async () => makeChannel({}).channel,
+      });
+      try {
+        const sessionId = 'sess:unknown';
+        const sessionDir = `session-${encodeURIComponent(sessionId)}`;
+        await fsp.mkdir(path.join(mainRoot, sessionDir), { recursive: true });
+        await fsp.writeFile(
+          path.join(mainRoot, sessionDir, 'current.txt'),
+          'current',
+        );
+        await fsp.mkdir(path.join(fallbackRoot, sessionDir), {
+          recursive: true,
+        });
+        await fsp.writeFile(
+          path.join(fallbackRoot, sessionDir, 'notes.txt'),
+          'legacy',
+        );
+
+        await bridge.deleteSessionAttachments(sessionId);
+
+        await expect(
+          fsp.readdir(path.join(mainRoot, sessionDir)),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        await expect(
+          fsp.readdir(path.join(fallbackRoot, sessionDir)),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await bridge.shutdown();
+        await fsp.rm(mainRoot, { recursive: true, force: true });
+        await fsp.rm(fallbackRoot, { recursive: true, force: true });
+      }
+    });
+
     it('resolves text and binary file attachment references for ACP', async () => {
       const prompts: PromptRequest[] = [];
       const bridge = makeBridge({

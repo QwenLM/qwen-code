@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
@@ -15,6 +15,18 @@ import {
   SessionAttachmentStore,
   withAttachmentDegradationMarker,
 } from './sessionAttachments.js';
+
+// `node:fs` is a sealed ESM namespace: vi.spyOn cannot redefine `statSync`
+// (which the store imports by name). Mock the module and delegate to the real
+// implementation by default; only the stat-fault tests override it. Everything
+// else (`promises`, the remaining sync exports) stays real via importOriginal.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    statSync: vi.fn(actual.statSync),
+  };
+});
 
 describe('SessionAttachmentStore', () => {
   it('does not append the attachment degradation marker twice', () => {
@@ -1092,5 +1104,360 @@ describe('SessionAttachmentStore', () => {
       write.mockRestore();
       await store.close();
     }
+  });
+
+  describe('fallback root', () => {
+    const sessionId = 's-1';
+    const sessionDir = `session-${encodeURIComponent(sessionId)}`;
+
+    async function createRoots(): Promise<{
+      main: string;
+      fallback: string;
+    }> {
+      const main = await fs.mkdtemp(
+        path.join(tmpdir(), 'qwen-attachments-main-'),
+      );
+      const fallback = await fs.mkdtemp(
+        path.join(tmpdir(), 'qwen-attachments-fallback-'),
+      );
+      return { main, fallback };
+    }
+
+    async function writeIn(
+      root: string,
+      name: string,
+      data: string,
+    ): Promise<void> {
+      const directory = path.join(root, sessionDir);
+      await fs.mkdir(directory, { recursive: true });
+      await fs.writeFile(path.join(directory, name), data);
+    }
+
+    it('reads from the fallback root when the primary misses', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        await writeIn(fallback, 'notes.txt', 'from fallback');
+
+        expect(await store.read('notes.txt')).toEqual({
+          data: Buffer.from('from fallback'),
+          mimeType: 'text/plain',
+        });
+        expect(() =>
+          store.assertReference({
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 13,
+          }),
+        ).not.toThrow();
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('prefers the primary root over the fallback', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        const reference = await store.putAttachment(
+          new TextEncoder().encode('primary'),
+          'text/plain',
+          'notes.txt',
+        );
+        await writeIn(fallback, 'notes.txt', 'stale fallback');
+
+        expect(await store.read(reference.attachmentId)).toEqual({
+          data: Buffer.from('primary'),
+          mimeType: 'text/plain',
+        });
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('does not shadow a fallback name with a new upload', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        await writeIn(fallback, 'notes.txt', 'stale fallback');
+
+        const reference = await store.putAttachment(
+          new TextEncoder().encode('fresh upload'),
+          'text/plain',
+          'notes.txt',
+        );
+
+        expect(reference.attachmentId).not.toBe('notes.txt');
+        expect(await store.read(reference.attachmentId)).toEqual({
+          data: Buffer.from('fresh upload'),
+          mimeType: 'text/plain',
+        });
+        // The pre-switch attachment is still reachable under its own ID.
+        expect(await store.read('notes.txt')).toEqual({
+          data: Buffer.from('stale fallback'),
+          mimeType: 'text/plain',
+        });
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('surfaces a fallback stat error instead of shadowing the name', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      const stat = vi.mocked(statSync).mockImplementationOnce(() => {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      });
+      try {
+        await writeIn(fallback, 'notes.txt', 'stale fallback');
+
+        // A temporarily-unreadable fallback must not be treated as "name
+        // free": failing the upload is safer than shadowing the old file.
+        await expect(
+          store.putAttachment(
+            new TextEncoder().encode('fresh upload'),
+            'text/plain',
+            'notes.txt',
+          ),
+        ).rejects.toMatchObject({ code: 'EACCES' });
+      } finally {
+        stat.mockRestore();
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('still degrades reference validation when the fallback stat fails', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      const stat = vi.mocked(statSync).mockImplementationOnce(() => {
+        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+      });
+      try {
+        await writeIn(fallback, 'notes.txt', 'stale fallback');
+
+        // Reference validation must degrade to session_attachment_gone, not
+        // surface the raw stat error and abort the prompt.
+        expect(() =>
+          store.assertReference({
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 13,
+          }),
+        ).toThrowError(
+          expect.objectContaining({ code: 'session_attachment_gone' }),
+        );
+      } finally {
+        stat.mockRestore();
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('returns undefined when neither root holds the attachment', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        expect(await store.read('missing.txt')).toBeUndefined();
+        expect(await store.remove('missing.txt')).toBe(false);
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('removes a fallback attachment when the primary misses', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        await writeIn(fallback, 'notes.txt', 'from fallback');
+
+        expect(await store.remove('notes.txt')).toBe(true);
+        expect(await fs.readdir(path.join(fallback, sessionDir))).toEqual([]);
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('removes both copies when both roots hold the same name', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        await writeIn(main, 'notes.txt', 'from primary');
+        await writeIn(fallback, 'notes.txt', 'stale fallback copy');
+
+        expect(await store.remove('notes.txt')).toBe(true);
+        expect(await store.read('notes.txt')).toBeUndefined();
+        expect(await fs.readdir(path.join(main, sessionDir))).toEqual([]);
+        expect(await fs.readdir(path.join(fallback, sessionDir))).toEqual([]);
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps the primary readable when the fallback unlink fails', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      const unlink = vi
+        .spyOn(fs, 'unlink')
+        .mockRejectedValueOnce(
+          Object.assign(new Error('read-only volume'), { code: 'EROFS' }),
+        );
+      try {
+        await writeIn(main, 'notes.txt', 'from primary');
+        await writeIn(fallback, 'notes.txt', 'stale fallback copy');
+
+        // The fallback copy cannot be removed; remove() must fail cleanly and
+        // leave the authoritative primary copy readable instead of deleting it
+        // and resurrecting stale fallback bytes on the next read.
+        await expect(store.remove('notes.txt')).rejects.toThrow(
+          'read-only volume',
+        );
+        expect(await store.read('notes.txt')).toEqual({
+          data: Buffer.from('from primary'),
+          mimeType: 'text/plain',
+        });
+      } finally {
+        unlink.mockRestore();
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('delete clears both the primary and fallback directories', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      await store.putAttachment(
+        new TextEncoder().encode('primary'),
+        'text/plain',
+        'notes.txt',
+      );
+      await writeIn(fallback, 'old.txt', 'from fallback');
+
+      await store.delete();
+
+      await expect(
+        fs.readdir(path.join(main, sessionDir)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(
+        fs.readdir(path.join(fallback, sessionDir)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('delete clears the fallback directory when only it holds data', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      await writeIn(fallback, 'old.txt', 'from fallback');
+
+      await store.delete();
+
+      await expect(
+        fs.readdir(path.join(main, sessionDir)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(
+        fs.readdir(path.join(fallback, sessionDir)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('delete tombstones both roots so a recreated session dir survives', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      await writeIn(main, 'old.txt', 'from primary');
+      await writeIn(fallback, 'old.txt', 'from fallback');
+      // For every tombstone rename (primary and fallback), a successor
+      // re-creates the session directory at its original path — the tombstone
+      // removal must not sweep that fresh directory up.
+      const realRename = fs.rename.bind(fs);
+      const rename = vi
+        .spyOn(fs, 'rename')
+        .mockImplementation(async (from, to) => {
+          await realRename(from, to);
+          await fs.mkdir(String(from), { recursive: true });
+          await fs.writeFile(
+            path.join(String(from), 'successor.txt'),
+            'new owner',
+          );
+        });
+      try {
+        await store.delete();
+        expect(
+          await fs.readFile(
+            path.join(main, sessionDir, 'successor.txt'),
+            'utf8',
+          ),
+        ).toBe('new owner');
+        expect(
+          await fs.readFile(
+            path.join(fallback, sessionDir, 'successor.txt'),
+            'utf8',
+          ),
+        ).toBe('new owner');
+      } finally {
+        rename.mockRestore();
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('copyFrom merges fallback-held attachments with primary winning on conflicts', async () => {
+      const { main, fallback } = await createRoots();
+      const source = new SessionAttachmentStore(main, sessionId, fallback);
+      const targetRoot = await fs.mkdtemp(
+        path.join(tmpdir(), 'qwen-attachments-target-'),
+      );
+      const target = new SessionAttachmentStore(targetRoot, sessionId);
+      try {
+        await source.putAttachment(
+          new TextEncoder().encode('primary file'),
+          'text/plain',
+          'primary.txt',
+        );
+        await source.putAttachment(
+          new TextEncoder().encode('primary version'),
+          'text/plain',
+          'conflict.txt',
+        );
+        await writeIn(fallback, 'legacy.txt', 'legacy');
+        await writeIn(fallback, 'conflict.txt', 'fallback version');
+
+        await target.copyFrom(source);
+
+        expect(await target.read('primary.txt')).toEqual({
+          data: Buffer.from('primary file'),
+          mimeType: 'text/plain',
+        });
+        expect(await target.read('legacy.txt')).toEqual({
+          data: Buffer.from('legacy'),
+          mimeType: 'text/plain',
+        });
+        expect(await target.read('conflict.txt')).toEqual({
+          data: Buffer.from('primary version'),
+          mimeType: 'text/plain',
+        });
+      } finally {
+        await source.close();
+        await target.delete();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+        await fs.rm(targetRoot, { recursive: true, force: true });
+      }
+    });
   });
 });

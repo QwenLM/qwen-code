@@ -6035,6 +6035,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       attachments: new SessionAttachmentStore(
         opts.sessionAttachmentsRoot,
         sessionId,
+        opts.sessionAttachmentsFallbackRoot,
       ),
       recordingDegraded: false,
       closing: false,
@@ -9556,6 +9557,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             const branchAttachments = new SessionAttachmentStore(
               opts.sessionAttachmentsRoot,
               result.newSessionId,
+              opts.sessionAttachmentsFallbackRoot,
             );
             try {
               await branchAttachments.copyFrom(entry.attachments);
@@ -11220,7 +11222,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async deleteSessionAttachments(sessionId, options) {
       const store =
         byId.get(sessionId)?.attachments ??
-        new SessionAttachmentStore(opts.sessionAttachmentsRoot, sessionId);
+        new SessionAttachmentStore(
+          opts.sessionAttachmentsRoot,
+          sessionId,
+          opts.sessionAttachmentsFallbackRoot,
+        );
       await store.delete(options);
     },
 

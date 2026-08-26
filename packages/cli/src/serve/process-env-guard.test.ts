@@ -172,6 +172,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/session-attachments-root.ts',
+    {
+      reason:
+        'The session-attachment storage root is a process-scoped daemon setting read once at bridge construction.',
+      accesses: { 'computed:SESSION_ATTACHMENTS_ROOT_ENV': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/sandbox.ts',
     {
       reason:

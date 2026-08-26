@@ -123,6 +123,7 @@ import {
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
 import { createRequestedSessionIdAdmission } from './session-id-admission.js';
+import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
@@ -1026,14 +1027,16 @@ export function createServeApp(
     ? createWorkspaceSessionOwnerIndex()
     : undefined;
   const acpChildArgs = acpChildExtraArgs(opts);
+  const attachmentsRoots = sessionAttachmentsRoots(
+    boundWorkspace,
+    Storage.getRuntimeBaseDir(),
+  );
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
-      sessionAttachmentsRoot: path.join(
-        new Storage(boundWorkspace).getProjectTempDir(),
-        'attachments',
-      ),
+      sessionAttachmentsRoot: attachmentsRoots.root,
+      sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
       maxSessions: opts.maxSessions,
       ...(totalSessionAdmission
         ? { freshSessionAdmission: totalSessionAdmission.admit }
