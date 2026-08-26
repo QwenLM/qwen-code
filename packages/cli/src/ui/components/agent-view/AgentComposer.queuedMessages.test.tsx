@@ -1,0 +1,224 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Regression tests for #10069 — a follow-up accepted and shown as queued
+ * while a teammate is busy must survive teammate tab switches. The layout
+ * renders AgentComposer with `key={activeView}`, so switching tabs unmounts
+ * the composer; any queue held only in local component state is discarded
+ * and the message is never delivered.
+ */
+
+import { render } from 'ink-testing-library';
+import { useEffect } from 'react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  AgentStatus,
+  ApprovalMode,
+  type AgentInteractive,
+} from '@qwen-code/qwen-code-core';
+import {
+  AgentViewProvider,
+  useAgentViewActions,
+  useAgentViewState,
+} from '../../contexts/AgentViewContext.js';
+import { useConfig } from '../../contexts/ConfigContext.js';
+import { useAgentStreamingState } from '../../hooks/useAgentStreamingState.js';
+import { usePreferredEditor } from '../../hooks/usePreferredEditor.js';
+import { useTerminalSize } from '../../hooks/useTerminalSize.js';
+import { StreamingState } from '../../types.js';
+import { useTextBuffer } from '../shared/text-buffer.js';
+import { AgentComposer } from './AgentComposer.js';
+
+// Captures the onSubmit handler of the most recently rendered composer
+// input so tests can submit messages without driving real keypresses.
+const submitCapture = vi.hoisted(() => ({
+  current: undefined as ((text: string) => void) | undefined,
+}));
+
+vi.mock('../../contexts/ConfigContext.js');
+vi.mock('../../hooks/useAgentStreamingState.js');
+vi.mock('../../hooks/useKeypress.js');
+vi.mock('../../hooks/usePreferredEditor.js');
+vi.mock('../../hooks/useTerminalSize.js');
+vi.mock('../shared/text-buffer.js');
+vi.mock('../BaseTextInput.js', () => ({
+  BaseTextInput: (props: { onSubmit: (text: string) => void }) => {
+    submitCapture.current = props.onSubmit;
+    return null;
+  },
+}));
+vi.mock('../LoadingIndicator.js', () => ({ LoadingIndicator: () => null }));
+vi.mock('./AgentFooter.js', () => ({ AgentFooter: () => null }));
+
+const BUSY = {
+  status: AgentStatus.RUNNING,
+  streamingState: StreamingState.Responding,
+  isInputActive: true,
+  elapsedTime: 0,
+  lastPromptTokenCount: 0,
+};
+
+const IDLE = {
+  status: AgentStatus.IDLE,
+  streamingState: StreamingState.Idle,
+  isInputActive: true,
+  elapsedTime: 0,
+  lastPromptTokenCount: 0,
+};
+
+/** Let ink flush scheduled effects/state updates. */
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+function makeFakeAgent(): AgentInteractive {
+  return {
+    enqueueMessage: vi.fn(),
+    cancelCurrentRound: vi.fn(),
+    getError: vi.fn(),
+    getLastRoundError: vi.fn(),
+    getCore: () => ({
+      runtimeContext: {
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        setApprovalMode: vi.fn(),
+      },
+    }),
+  } as unknown as AgentInteractive;
+}
+
+describe('AgentComposer queued follow-ups (#10069)', () => {
+  let agentA: AgentInteractive;
+  let agentB: AgentInteractive;
+  const streamingByAgent = new Map<AgentInteractive, typeof IDLE>();
+
+  // Mirrors DefaultAppLayout: AgentComposer is keyed by the active view,
+  // so switching tabs unmounts and remounts the composer from scratch.
+  function Harness({ view }: { view: string }) {
+    const { agents } = useAgentViewState();
+    const { registerAgent } = useAgentViewActions();
+
+    useEffect(() => {
+      if (!agents.has('agent-a')) {
+        registerAgent('agent-a', agentA, 'qwen', 'cyan');
+      }
+      if (!agents.has('agent-b')) {
+        registerAgent('agent-b', agentB, 'qwen', 'blue');
+      }
+    }, [agents, registerAgent]);
+
+    return agents.has(view) ? (
+      <AgentComposer key={view} agentId={view} />
+    ) : null;
+  }
+
+  const view = (name: string) => (
+    <AgentViewProvider>
+      <Harness view={name} />
+    </AgentViewProvider>
+  );
+
+  const renderWithView = async (name: string) => {
+    const app = render(view(name));
+    await tick();
+    await tick();
+    return app;
+  };
+
+  const switchTo = async (
+    app: ReturnType<typeof render>,
+    name: string,
+  ): Promise<void> => {
+    app.rerender(view(name));
+    await tick();
+    await tick();
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    streamingByAgent.clear();
+    submitCapture.current = undefined;
+    agentA = makeFakeAgent();
+    agentB = makeFakeAgent();
+
+    vi.mocked(useConfig).mockReturnValue({
+      getContentGeneratorConfig: () => undefined,
+    } as never);
+    vi.mocked(usePreferredEditor).mockReturnValue(undefined);
+    vi.mocked(useTerminalSize).mockReturnValue({ columns: 80, rows: 24 });
+    vi.mocked(useTextBuffer).mockReturnValue({
+      text: '',
+      allVisualLines: [''],
+      visualCursor: [0, 0],
+    } as never);
+    vi.mocked(useAgentStreamingState).mockImplementation(
+      (agent: AgentInteractive | undefined) =>
+        (agent && streamingByAgent.get(agent)) || IDLE,
+    );
+  });
+
+  it('keeps a queued follow-up across tab switches and delivers it exactly once', async () => {
+    streamingByAgent.set(agentA, BUSY);
+    const app = await renderWithView('agent-a');
+
+    // Submit while agent-a is busy — accepted and shown as queued.
+    expect(submitCapture.current).toBeDefined();
+    submitCapture.current!('follow-up for later');
+    await switchTo(app, 'agent-a');
+    expect(app.lastFrame()).toContain('follow-up for later');
+    expect(agentA.enqueueMessage).not.toHaveBeenCalled();
+
+    // Switch to teammate B, then back to A (layout key remounts composer).
+    await switchTo(app, 'agent-b');
+    await switchTo(app, 'agent-a');
+
+    // The accepted message must still be queued for agent-a.
+    expect(app.lastFrame()).toContain('follow-up for later');
+    expect(agentA.enqueueMessage).not.toHaveBeenCalled();
+
+    // Agent-a settles to idle — the queued message is delivered once.
+    streamingByAgent.set(agentA, IDLE);
+    await switchTo(app, 'agent-a');
+    expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
+    expect(agentA.enqueueMessage).toHaveBeenCalledWith('follow-up for later');
+    expect(app.lastFrame()).not.toContain('follow-up for later');
+
+    // A later re-render must not re-deliver the message.
+    await switchTo(app, 'agent-a');
+    expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('joins multiple queued follow-ups into one prompt after a tab switch', async () => {
+    streamingByAgent.set(agentA, BUSY);
+    const app = await renderWithView('agent-a');
+
+    submitCapture.current!('first follow-up');
+    await switchTo(app, 'agent-a');
+    submitCapture.current!('second follow-up');
+    await switchTo(app, 'agent-a');
+    expect(app.lastFrame()).toContain('first follow-up');
+    expect(app.lastFrame()).toContain('second follow-up');
+
+    await switchTo(app, 'agent-b');
+    await switchTo(app, 'agent-a');
+
+    streamingByAgent.set(agentA, IDLE);
+    await switchTo(app, 'agent-a');
+    expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
+    expect(agentA.enqueueMessage).toHaveBeenCalledWith(
+      'first follow-up\nsecond follow-up',
+    );
+  });
+
+  it('still enqueues immediately when the teammate is idle', async () => {
+    streamingByAgent.set(agentA, IDLE);
+    const app = await renderWithView('agent-a');
+
+    submitCapture.current!('hello');
+    await switchTo(app, 'agent-a');
+    expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
+    expect(agentA.enqueueMessage).toHaveBeenCalledWith('hello');
+    expect(app.lastFrame()).not.toContain('hello');
+  });
+});

@@ -12,7 +12,7 @@ const MAX_DISPLAYED_QUEUED_MESSAGES = 3;
 const NUM_TIMES_QUEUE_HINT_SHOWN = 3;
 
 export interface QueuedMessageDisplayProps {
-  messageQueue: string[];
+  messageQueue: readonly string[];
 }
 
 export const QueuedMessageDisplay = ({

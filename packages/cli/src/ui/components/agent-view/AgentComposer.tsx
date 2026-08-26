@@ -18,7 +18,7 @@
  */
 
 import { Box, Text, useStdin } from 'ink';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import {
   AgentStatus,
   isTerminalStatus,
@@ -55,13 +55,23 @@ interface AgentComposerProps {
 
 // ─── Component ──────────────────────────────────────────────
 
+// Shared empty queue identity so unregistered agents don't allocate on
+// every render.
+const EMPTY_MESSAGE_QUEUE: readonly string[] = [];
+
 export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
-  const { agents, agentTabBarFocused, agentShellFocused, agentApprovalModes } =
-    useAgentViewState();
+  const {
+    agents,
+    agentTabBarFocused,
+    agentShellFocused,
+    agentApprovalModes,
+    agentMessageQueues,
+  } = useAgentViewState();
   const {
     setAgentInputBufferText,
     setAgentTabBarFocused,
     setAgentApprovalMode,
+    setAgentMessageQueue,
   } = useAgentViewActions();
   const agent = agents.get(agentId);
   const interactiveAgent = agent?.interactiveAgent;
@@ -188,8 +198,13 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   );
 
   // ── Message queue (accumulate while streaming, flush as one prompt on idle) ──
+  //
+  // The queue lives in AgentViewContext (keyed by agentId), not in local
+  // state: the layout keys this component by the active view, so switching
+  // teammate tabs unmounts it and a local queue would be silently dropped
+  // before the flush below ever runs (#10069).
 
-  const [messageQueue, setMessageQueue] = useState<string[]>([]);
+  const messageQueue = agentMessageQueues.get(agentId) ?? EMPTY_MESSAGE_QUEUE;
 
   // When agent becomes idle (and not terminal), flush queued messages.
   useEffect(() => {
@@ -200,10 +215,17 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       !isTerminalStatus(status)
     ) {
       const combined = messageQueue.join('\n');
-      setMessageQueue([]);
+      setAgentMessageQueue(agentId, []);
       interactiveAgent?.enqueueMessage(combined);
     }
-  }, [streamingState, messageQueue, interactiveAgent, status]);
+  }, [
+    streamingState,
+    messageQueue,
+    interactiveAgent,
+    status,
+    agentId,
+    setAgentMessageQueue,
+  ]);
 
   const handleSubmit = useCallback(
     (text: string) => {
@@ -212,10 +234,16 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       if (streamingState === StreamingState.Idle) {
         interactiveAgent.enqueueMessage(trimmed);
       } else {
-        setMessageQueue((prev) => [...prev, trimmed]);
+        setAgentMessageQueue(agentId, [...messageQueue, trimmed]);
       }
     },
-    [interactiveAgent, streamingState],
+    [
+      interactiveAgent,
+      streamingState,
+      agentId,
+      messageQueue,
+      setAgentMessageQueue,
+    ],
   );
 
   // ── Render ──

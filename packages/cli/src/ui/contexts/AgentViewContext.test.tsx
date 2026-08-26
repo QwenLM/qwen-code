@@ -170,3 +170,68 @@ describe('AgentViewProvider in-process bridges', () => {
     expect(lastFrame()).toContain('main:false');
   });
 });
+
+describe('AgentViewProvider per-agent message queues', () => {
+  it('stores queues per agent and clears them when emptied or unregistered', async () => {
+    const config = makeConfig();
+    const interactiveAgent = {
+      getCore: () => ({
+        runtimeContext: { getApprovalMode: () => ApprovalMode.DEFAULT },
+      }),
+    } as AgentInteractive;
+
+    const probeActions: {
+      registerAgent?: (
+        agentId: string,
+        agent: AgentInteractive,
+        modelId: string,
+        color: string,
+      ) => void;
+      unregisterAgent?: (agentId: string) => void;
+      setAgentMessageQueue?: (agentId: string, queue: string[]) => void;
+    } = {};
+
+    function Probe() {
+      const state = useAgentViewState();
+      const actions = useAgentViewActions();
+      probeActions.registerAgent = actions.registerAgent;
+      probeActions.unregisterAgent = actions.unregisterAgent;
+      probeActions.setAgentMessageQueue = actions.setAgentMessageQueue;
+      const queueA = state.agentMessageQueues.get('agent-a') ?? [];
+      const queueB = state.agentMessageQueues.get('agent-b') ?? [];
+      return (
+        <Text>
+          a:[{queueA.join(',')}] b:[{queueB.join(',')}]
+        </Text>
+      );
+    }
+
+    const { lastFrame } = render(
+      <AgentViewProvider config={config}>
+        <Probe />
+      </AgentViewProvider>,
+    );
+
+    await act(async () => {
+      probeActions.setAgentMessageQueue?.('agent-a', ['m1', 'm2']);
+      probeActions.setAgentMessageQueue?.('agent-b', ['x']);
+    });
+    expect(lastFrame()).toContain('a:[m1,m2]');
+    expect(lastFrame()).toContain('b:[x]');
+
+    // Emptying a queue removes it; other agents keep theirs.
+    await act(async () => {
+      probeActions.setAgentMessageQueue?.('agent-a', []);
+    });
+    expect(lastFrame()).toContain('a:[]');
+    expect(lastFrame()).toContain('b:[x]');
+
+    // Unregistering an agent drops its pending queue, so a future agent
+    // registered under the same id never inherits stale messages.
+    await act(async () => {
+      probeActions.registerAgent?.('agent-b', interactiveAgent, 'm', 'c');
+      probeActions.unregisterAgent?.('agent-b');
+    });
+    expect(lastFrame()).toContain('b:[]');
+  });
+});
