@@ -1071,10 +1071,18 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
 
+      # Compare case-insensitively: Windows paths are case-insensitive and
+      # realpathSync returns the on-disk casing, so a drive-letter or
+      # directory-case difference is the SAME directory under one spelling,
+      # not the 8.3 alias this guards. A strict !== there would fail the
+      # self-hosted lane too — it runs this step against the runner's
+      # pre-existing RUNNER_TEMP — for a reason unrelated to the alias. The
+      # alias case (RUNNER~1 -> runneradmin) differs by more than casing and
+      # still fails; a casing-only difference warns so it stays visible.
       - name: 'Verify temp paths carry no short alias'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
-          node -e "const fs=require('node:fs');for(const key of ['TEMP','TMP']){const value=process.env[key];const real=fs.realpathSync(value);if(real!==value){console.error(key+' carries a short alias: '+value+' -> '+real);process.exitCode=1}}"
+          node -e "const fs = require('node:fs'); for (const key of ['TEMP', 'TMP']) { const value = process.env[key]; if (!value) { console.error(key + ' is not set'); process.exitCode = 1; continue; } const real = fs.realpathSync(value); if (real === value) continue; if (real.toLowerCase() === value.toLowerCase()) { console.log('::warning::' + key + ' differs from its real path only by casing: ' + value + ' -> ' + real); continue; } console.error(key + ' carries a short alias: ' + value + ' -> ' + real); process.exitCode = 1; }"
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
