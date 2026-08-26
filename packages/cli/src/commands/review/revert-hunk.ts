@@ -48,6 +48,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -392,17 +393,34 @@ function gitApply(cwd: string, args: string[]): GitApplyResult {
  * while a non-existent tree or a missing git binary still falls through to the
  * apply path's spawn-error classification (`could not run git`).
  */
-function gitTreeState(tree: string): 'repo' | 'not-repo' | 'unrunnable' {
-  const r = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
+function gitTreeState(
+  tree: string,
+): 'root' | 'subdir' | 'not-repo' | 'unrunnable' {
+  // `--show-toplevel` does double duty: it fails (exit 128) in a bare repo, a
+  // `.git` dir, or a non-repo — the work-tree check — AND, inside a work tree,
+  // prints the ROOT. `git apply` from a SUBDIRECTORY resolves -p1 paths against
+  // the toplevel but silently SKIPS any path outside the cwd subtree and exits
+  // 0, so a subdir --tree would report applied:true over an untouched file.
+  // Comparing the printed root to the tree's realpath catches that too.
+  const r = spawnSync('git', ['rev-parse', '--show-toplevel'], {
     cwd: tree,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
     timeout: 60_000,
   });
   if (r.error) return 'unrunnable';
-  // `true` only inside a real work tree; a bare clone or a `.git` dir answers
-  // `false` (still exit 0), which refuses here instead of at the apply.
-  return r.status === 0 && r.stdout.trim() === 'true' ? 'repo' : 'not-repo';
+  if (r.status !== 0) return 'not-repo';
+  const top = (r.stdout ?? '').trim();
+  if (top === '') return 'not-repo';
+  // realpath both sides: `--show-toplevel` prints the canonical path, while the
+  // tree arg may reach it through a symlink (macOS /var → /private/var).
+  let real: string;
+  try {
+    real = realpathSync(tree);
+  } catch {
+    return 'unrunnable';
+  }
+  return real === top ? 'root' : 'subdir';
 }
 
 export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
@@ -467,9 +485,12 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   const entry = listHunks(diffText).find(
     (h) => h.path === sel.path && h.n === sel.n,
   )!;
-  const rawSection = diffText
-    .split('\n')
-    .slice(file.diffStart - 1, file.hunks[0].diffStart - 1);
+  const allLines = diffText.split('\n');
+  const rawSection = allLines.slice(
+    file.diffStart - 1,
+    file.hunks[0].diffStart - 1,
+  );
+  const sectionBody = allLines.slice(file.hunks[0].diffStart - 1, file.diffEnd);
   if (
     rawSection.some(
       (l) =>
@@ -487,13 +508,19 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
         // harness class is the safe direction; admitting the section lets
         // apply -R exit 0 without moving the pointer — a false applied:true.
         /^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ 160000/.test(l),
-    )
+    ) ||
+    // A DIRTY submodule (locally modified content, UNCHANGED pointer) carries
+    // NO mode or index line — git emits only `Subproject commit <sha>` body
+    // lines. git apply -R still exits 0 without touching the gitlink, so
+    // applied:true would be a false witness. This body marker is the robust
+    // one: it covers pointer change, add, delete, and dirty alike.
+    sectionBody.some((l) => /^[-+ ]Subproject commit [0-9a-fA-F]{40}/.test(l))
   ) {
     return {
       applied: false,
       hunk: entry,
       harnessFailure: true,
-      note: `hunk ${args.hunk} is a gitlink/submodule (mode 160000) change — git apply -R reports success without moving the submodule pointer, so applied:true would be a false witness. Reverting a submodule needs index/submodule semantics this command does not implement; nothing was changed.`,
+      note: `hunk ${args.hunk} is a gitlink/submodule change (mode 160000 and/or a Subproject commit body line) — git apply -R reports success without moving the submodule, so applied:true would be a false witness. Reverting a submodule needs index/submodule semantics this command does not implement; nothing was changed.`,
     };
   }
   const unsafe = sectionUnsafeToRevert(diffText, file);
@@ -516,12 +543,21 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
   // fact. A non-existent tree or a missing git binary is left to the apply
   // path's spawn-error classification below, so this changes only the
   // exists-but-no-work-tree case.
-  if (gitTreeState(tree) === 'not-repo') {
+  const treeState = gitTreeState(tree);
+  if (treeState === 'not-repo') {
     return {
       applied: false,
       hunk: entry,
       harnessFailure: true,
-      note: `--tree ${JSON.stringify(args.tree)} is not inside a git repository work tree (git rev-parse --is-inside-work-tree did not answer true there) — a plain directory, a bare clone, or a .git metadata dir has no work-tree files to revert in, and git apply there would mutate the wrong place or refuse in a way that reads as a fact about the hunk. Point --tree at the scratch worktree; nothing was changed.`,
+      note: `--tree ${JSON.stringify(args.tree)} is not inside a git repository work tree (git rev-parse --show-toplevel did not name one there) — a plain directory, a bare clone, or a .git metadata dir has no work-tree files to revert in, and git apply there would mutate the wrong place or refuse in a way that reads as a fact about the hunk. Point --tree at the scratch worktree; nothing was changed.`,
+    };
+  }
+  if (treeState === 'subdir') {
+    return {
+      applied: false,
+      hunk: entry,
+      harnessFailure: true,
+      note: `--tree ${JSON.stringify(args.tree)} is a SUBDIRECTORY of a work tree, not its root — git apply resolves the patch's paths against the toplevel and silently SKIPS any that fall outside this subdirectory, exiting 0 without touching them, so applied:true would be a false witness over an unchanged file. Point --tree at the work-tree root (the scratch worktree); nothing was changed.`,
     };
   }
   // mkdtemp, not a pid-keyed name: a predictable path in the shared temp dir

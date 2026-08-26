@@ -313,6 +313,28 @@ describe('runAbDrive, harnessed', () => {
     for (const t of targets) expect(t.startsWith('=')).toBe(true);
   });
 
+  it('kills readiness probes with SIGKILL so an untrusted probe cannot outlast the budget', () => {
+    // spawnSync's timeout kill is a single SIGTERM, which PR-controlled probe
+    // code can trap — then the probe blocks past --ready-timeout forever and
+    // the finally never runs. Probes must be killed with the unignorable
+    // SIGKILL. Assert every readiness-probe spawn carries it.
+    const killSignals: Array<NodeJS.Signals | undefined> = [];
+    const h = harness({ server: `t-kill-${process.pid}` });
+    const exec = (
+      cmd: string,
+      a: string[],
+      input?: string,
+      timeoutMs?: number,
+      killSignal?: NodeJS.Signals,
+    ): ExecResult => {
+      if (cmd === 'bash') killSignals.push(killSignal);
+      return h.exec(cmd, a);
+    };
+    runAbDrive(baseArgs({ ready: 'true', exec }));
+    expect(killSignals.length).toBeGreaterThan(0); // a probe really ran
+    for (const s of killSignals) expect(s).toBe('SIGKILL');
+  });
+
   // POSIX-only: on Windows Node resolves the temp dir from TMP/TEMP/
   // USERPROFILE and never reads TMPDIR, so this mutation is a no-op there and
   // the run completes (repo precedent gates TMPDIR mutations the same way,

@@ -145,6 +145,7 @@ export interface AbDriveArgs {
     args: string[],
     input?: string,
     timeoutMs?: number,
+    killSignal?: NodeJS.Signals,
   ) => ExecResult;
 }
 
@@ -341,7 +342,15 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     '/dev/null',
   );
   if (keeper.status !== 0) {
-    rmSync(runDir, { recursive: true, force: true });
+    // Best-effort, like the finally: a degraded TMPDIR (EROFS/EIO/EACCES) can
+    // make this unlink throw, and an unguarded throw here escapes into the
+    // handler catch as exit 1 with no JSON — discarding the structured fail
+    // report this branch exists to return.
+    try {
+      rmSync(runDir, { recursive: true, force: true });
+    } catch {
+      /* best effort */
+    }
     return fail(
       `tmux could not start a session: ${keeper.stderr.trim() || 'no error text'} — an environment gap, not a finding`,
       { killedStale },
@@ -457,9 +466,13 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
     const cmd = `${envPrefix(arm, envRoot)}cd ${shellQuote(cdDir)} && (${probe})`;
     // Bound one probe by the caller's remaining readiness budget: a hanging
     // probe must not consume the fixed 30s subprocess timeout when
-    // --ready-timeout is shorter.
+    // --ready-timeout is shorter. SIGKILL, not the default SIGTERM: the probe
+    // is disposable and PR-controlled (it may invoke untrusted code that traps
+    // TERM), so the budget must be an unignorable kill or it defeats
+    // --ready-timeout entirely.
     return (
-      exec('bash', ['-lc', cmd], undefined, Math.max(1, budgetMs)).status === 0
+      exec('bash', ['-lc', cmd], undefined, Math.max(1, budgetMs), 'SIGKILL')
+        .status === 0
     );
   };
   const pollReady = (

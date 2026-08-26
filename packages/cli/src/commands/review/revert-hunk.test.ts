@@ -19,6 +19,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -925,6 +926,64 @@ describe('runRevertHunk', () => {
       expect(r.harnessFailure).toBe(true);
       expect(r.note).toContain('gitlink/submodule');
     }
+  });
+
+  it('refuses a DIRTY submodule hunk (modified content, unchanged pointer)', () => {
+    // A submodule with locally modified tracked content but an UNCHANGED
+    // pointer carries no mode or index line — only `Subproject commit <sha>`
+    // body lines (the `+` side gains a `-dirty` suffix). None of the mode/index
+    // markers fire, yet git apply -R exits 0 without touching the gitlink, so
+    // applied:true would be a false witness. The body marker catches it.
+    const dir = tempDir('rh-subdirty-');
+    const diffPath = join(dir, 'sub.diff');
+    writeFileSync(
+      diffPath,
+      [
+        'diff --git a/sub b/sub',
+        '--- a/sub',
+        '+++ b/sub',
+        '@@ -1 +1 @@',
+        '-Subproject commit 020f6ef0000000000000000000000000000000aa',
+        '+Subproject commit 020f6ef0000000000000000000000000000000aa-dirty',
+        '',
+      ].join('\n'),
+    );
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: 'sub:1' });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.note).toContain('gitlink/submodule');
+  });
+
+  it('refuses a SUBDIRECTORY --tree, not just a non-repo one', () => {
+    // git apply from a subdirectory resolves -p1 paths against the toplevel and
+    // silently SKIPS paths outside the subtree, exiting 0 — so a subdir --tree
+    // reports applied:true over an untouched file. Require the work-tree ROOT.
+    const { diffPath } = twoHunkFixture();
+    const dir = tempDir('rh-subdir-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    writeFileSync(join(dir, 'anchor.txt'), 'x\n');
+    mkdirSync(join(dir, 'sub', 'deep'), { recursive: true });
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    const r = runRevertHunk({
+      diff: diffPath,
+      tree: join(dir, 'sub', 'deep'),
+      hunk: 'f.txt:1',
+    });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.conflict).toBeUndefined();
+    expect(r.note).toContain('SUBDIRECTORY');
+    // Control: the work-tree ROOT of the same repo is not refused for the
+    // subdir reason (a real revert there is a different fixture).
+    const atRoot = runRevertHunk({
+      diff: diffPath,
+      tree: dir,
+      hunk: 'f.txt:1',
+    });
+    expect(atRoot.note ?? '').not.toContain('SUBDIRECTORY');
   });
 
   it('refuses a section mixing rename/copy metadata with a /dev/null side', () => {

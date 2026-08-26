@@ -160,6 +160,7 @@ export interface DriveArgs {
     args: string[],
     input?: string,
     timeoutMs?: number,
+    killSignal?: NodeJS.Signals,
   ) => ExecResult;
   /** Test seam — production derives it from `server`. */
   logPath?: string;
@@ -448,11 +449,17 @@ export function spawnExec(
   args: string[],
   input?: string,
   timeoutMs = 30_000,
+  killSignal?: NodeJS.Signals,
 ): ExecResult {
   const r = spawnSync(cmd, args, {
     encoding: 'utf8',
     input,
     timeout: timeoutMs,
+    // spawnSync's timeout kill defaults to SIGTERM, which untrusted code can
+    // trap — a probe that ignores it would block past its budget forever.
+    // Callers running disposable, untrusted work (readiness probes) pass
+    // SIGKILL so the budget is hard.
+    ...(killSignal ? { killSignal } : {}),
     maxBuffer: 64 * 1024 * 1024,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
