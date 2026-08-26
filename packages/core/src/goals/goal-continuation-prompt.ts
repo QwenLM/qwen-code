@@ -6,6 +6,7 @@
 
 import type { Part } from '@google/genai';
 import type { GoalTurnPermit } from './goal-protocol.js';
+import { escapeJsonTagCharacters } from '../utils/formatters.js';
 
 /**
  * The prompt a host sends when `runtime.finishTurn` schedules another Goal
@@ -50,14 +51,12 @@ const SUPERSEDES_LINE =
  * open one of its own.
  */
 function serializeGoalData(input: GoalContinuationPromptInput): string {
-  return JSON.stringify({
-    goalId: input.goalId,
-    revision: input.revision,
-    objective: input.objective,
-  }).replace(
-    /[<>&]/g,
-    (character) =>
-      `\\u00${character.charCodeAt(0).toString(16).padStart(2, '0')}`,
+  return escapeJsonTagCharacters(
+    JSON.stringify({
+      goalId: input.goalId,
+      revision: input.revision,
+      objective: input.objective,
+    }),
   );
 }
 
