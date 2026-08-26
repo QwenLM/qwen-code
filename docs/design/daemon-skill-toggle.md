@@ -12,7 +12,7 @@ Expose workspace Skill settings writes through daemon REST and the TypeScript SD
 - SDK: `DaemonClient.setWorkspaceSkillEnabled` and `WorkspaceDaemonClient.setWorkspaceSkillEnabled`
 - Capability: `workspace_skill_settings_toggle`
 
-The response contains the trimmed requested name, requested state, whether persistence changed, activation state, and session refresh counts. `activation` reflects child liveness and any required refresh independently from `changed`: `applied` means a child was live and any required refresh succeeded, `deferred` means no ACP child was running, and `partial` means at least one required refresh failed after persistence committed. A no-op can therefore be `applied` or `deferred` while `changed` remains false.
+The response contains the trimmed requested name, requested state, whether persistence changed, activation state, and session refresh counts. `activation` reflects child liveness and any required refresh independently from `changed`: `applied` means a child was live and any required refresh succeeded, `deferred` means no child was live at the liveness check or a changed request lost its child/session during the required refresh, and `partial` means at least one other required refresh failed after persistence committed. A no-op can therefore be `applied` or `deferred` while `changed` remains false.
 
 ## Semantics
 
