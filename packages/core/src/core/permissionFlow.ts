@@ -71,11 +71,19 @@ export async function evaluatePermissionFlow(
 
   // ── L4: PermissionManager override ──────────────────────────────────
   const pm = config.getPermissionManager?.();
+  const toolRegistry = config.getToolRegistry?.();
+  const permissionAliases =
+    toolName.startsWith('mcp__') && invocation.permissionAliases && toolRegistry
+      ? toolRegistry.getUnambiguousMcpPermissionAliases(
+          toolName,
+          invocation.permissionAliases,
+        )
+      : invocation.permissionAliases;
   const pmCtx = buildPermissionCheckContext(
     toolName,
     toolParams,
     config.getTargetDir?.() ?? '',
-    invocation.permissionAliases,
+    permissionAliases,
   );
   const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
     pm,

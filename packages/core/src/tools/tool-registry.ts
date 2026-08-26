@@ -192,6 +192,42 @@ Signal: Signal number or \`(none)\` if no signal was received.
   }
 }
 
+export interface McpPermissionAliasOwner {
+  name: string;
+  permissionAliases: readonly string[];
+}
+
+/**
+ * Keep a legacy MCP permission alias only when exactly one currently
+ * registered MCP tool owns it. This preserves backwards compatibility
+ * for unique legacy/truncated names while preventing a lossy alias from
+ * authorizing two modern collision-resistant tool identities.
+ */
+export function filterUnambiguousMcpPermissionAliases(
+  toolName: string,
+  aliases: readonly string[],
+  tools: Iterable<McpPermissionAliasOwner>,
+): string[] {
+  if (aliases.length === 0) return [];
+
+  const owners = new Map<string, Set<string>>();
+  for (const tool of tools) {
+    for (const alias of tool.permissionAliases) {
+      let aliasOwners = owners.get(alias);
+      if (!aliasOwners) {
+        aliasOwners = new Set<string>();
+        owners.set(alias, aliasOwners);
+      }
+      aliasOwners.add(tool.name);
+    }
+  }
+
+  return aliases.filter((alias) => {
+    const aliasOwners = owners.get(alias);
+    return aliasOwners?.size === 1 && aliasOwners.has(toolName);
+  });
+}
+
 export class ToolRegistry {
   // The tools keyed by tool name as seen by the LLM.
   private tools: Map<string, AnyDeclarativeTool> = new Map();
@@ -341,6 +377,20 @@ export class ToolRegistry {
       return;
     }
     this.tools.set(tool.name, tool);
+  }
+
+  /**
+   * Returns only legacy MCP permission aliases that identify this tool
+   * uniquely among the MCP tools registered in this registry.
+   */
+  getUnambiguousMcpPermissionAliases(
+    toolName: string,
+    aliases: readonly string[],
+  ): readonly string[] {
+    const mcpTools = [...this.tools.values()].filter(
+      (tool): tool is DiscoveredMCPTool => tool instanceof DiscoveredMCPTool,
+    );
+    return filterUnambiguousMcpPermissionAliases(toolName, aliases, mcpTools);
   }
 
   /**

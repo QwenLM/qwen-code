@@ -1411,13 +1411,45 @@ export function matchesDomainPattern(
  *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
  *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
  */
+const PROVIDER_HASH_SUFFIX = /_[0-9a-z]{7}$/;
+
+/**
+ * Match a raw MCP prefix against a provider-safe registered name.
+ * Unsafe legacy prefixes are accepted only when the registered
+ * name's stable hash proves they belong to that exact identity.
+ */
+function matchesNormalizedMcpPrefix(
+  rawPrefix: string,
+  toolName: string,
+): boolean {
+  if (toolName.startsWith(rawPrefix)) {
+    return true;
+  }
+
+  const sanitizedPrefix = sanitizeToolNameForProvider(rawPrefix);
+  if (!toolName.startsWith(sanitizedPrefix)) {
+    return false;
+  }
+
+  const hashSuffix = toolName.match(PROVIDER_HASH_SUFFIX)?.[0];
+  if (!hashSuffix) {
+    return false;
+  }
+
+  const normalizedBody = toolName.slice(0, -hashSuffix.length);
+  if (normalizedBody.length < sanitizedPrefix.length) {
+    return false;
+  }
+
+  const candidate = rawPrefix + normalizedBody.slice(sanitizedPrefix.length);
+  return normalizeMcpToolName(candidate) === toolName;
+}
+
 export function matchesMcpPattern(pattern: string, toolName: string): boolean {
   if (pattern === toolName) {
     return true;
   }
 
-  // Exact rules persisted before provider-safe MCP names were introduced
-  // should continue matching their deterministic normalized registration.
   if (
     !pattern.endsWith('*') &&
     pattern.split('__').length >= 3 &&
@@ -1426,26 +1458,18 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     return true;
   }
 
-  // Wildcard: patterns ending with "*" match by prefix.
-  // e.g. "mcp__server__*" matches all tools from that server,
-  //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
-    const prefix = sanitizeToolNameForProvider(pattern.slice(0, -1));
-    return sanitizeToolNameForProvider(toolName).startsWith(prefix);
+    return matchesNormalizedMcpPrefix(pattern.slice(0, -1), toolName);
   }
 
-  // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
-  // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+
   const patternParts = pattern.split('__');
   const toolParts = toolName.split('__');
   if (
     patternParts.length === 2 &&
     toolParts.length >= 3 &&
-    patternParts[0] === toolParts[0] &&
-    sanitizeToolNameForProvider(patternParts[1]) ===
-      sanitizeToolNameForProvider(toolParts[1])
+    patternParts[0] === toolParts[0]
   ) {
-    return true;
+    return matchesNormalizedMcpPrefix(`${pattern}__`, toolName);
   }
 
   return false;
