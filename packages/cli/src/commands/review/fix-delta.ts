@@ -17,13 +17,13 @@
 //
 // The record is a git tree object, written through a THROWAWAY index: read
 // HEAD into it, `add -A` the working tree, `write-tree`. The user's own index
-// is never read or written (a `--fix` review runs in their checkout, and their
-// staging state is theirs), the stash stack is never touched (it is shared
-// across worktrees and other sessions), and nothing is checked out or reset.
-// The tree object is unreferenced garbage after the review — the same thing
-// `git stash create` leaves behind — and `add -A` is what decides what counts:
-// modified, deleted and untracked-unignored files, which is exactly the set a
-// fix's test file lands in.
+// is never written (a `--fix` review runs in their checkout, and their staging
+// state is theirs), the stash stack is never touched (it is shared across
+// worktrees and other sessions), and nothing is checked out or reset. The tree
+// object is unreferenced garbage after the review — the same thing `git stash
+// create` leaves behind — and `add -A` is what decides what counts: modified,
+// deleted and untracked-unignored files, which is exactly the set a fix's test
+// file lands in.
 //
 // The review's own side files are excluded from the diff by pathspec, not by
 // hoping they are ignored: the ledger, the artifact and the snapshot itself are
@@ -49,6 +49,13 @@ export interface FixSnapshot {
   root: string;
   /** The tree object recording the working tree at snapshot time. */
   tree: string;
+  /**
+   * Submodules already holding invisible edits at snapshot time. Dirt that
+   * predates the fix is not the fix's doing: a no-op fix in such a repository
+   * must still hear "nothing was applied", not a claim that invisible edits
+   * exist.
+   */
+  dirtySubmodules: string[];
 }
 
 /**
@@ -146,13 +153,6 @@ function filesBetweenTrees(
   return raw.split('\0').filter((name) => name !== '');
 }
 
-/** The diff from a snapshot tree to the working tree now, review side files excluded. */
-export function diffSinceSnapshot(root: string, snapshotTree: string): string {
-  const now = snapshotWorkingTree(root);
-  if (now === snapshotTree) return '';
-  return patchBetweenTrees(root, snapshotTree, now);
-}
-
 /**
  * Submodules holding edits a superproject tree cannot record. A submodule
  * enters the tree as its gitlink alone: an edit inside it that is not
@@ -160,14 +160,26 @@ export function diffSinceSnapshot(root: string, snapshotTree: string): string {
  * while the fix is on disk. Porcelain-v2 names them — a changed submodule
  * entry carries a 4-char state token after the XY pair, `S` plus a
  * new-commits flag, a modified-content flag and an untracked-content flag,
- * `.` where none (probed shapes: `SC..`, `S.M.`, `SCMU`) — and the last two
- * flags are the invisible content. A new-commits flag alone is visible (the
- * gitlink moved) and not reported.
+ * `.` where none (probed shapes: `SC..`, `S.M.`, `SCMU`, `S..U`) — and the
+ * last two flags are the invisible content. A new-commits flag alone is
+ * visible (the gitlink moved) and not reported. The HEAD-side mode field is
+ * `000000` for a submodule staged but never committed — the ordinary
+ * `git submodule add` interim state — so it is not pinned to `160000`.
  */
 function dirtySubmodulePaths(root: string): string[] {
+  // `--no-optional-locks`: plain `status` opportunistically rewrites the
+  // user's index to refresh its stat cache — a write this command promises
+  // never to make. `-c status.showUntrackedFiles=all`: the untracked-content
+  // flag is computed by a status run INSIDE each submodule reading the user's
+  // config; with `showUntrackedFiles=no` there, a submodule whose only
+  // invisible edit is untracked content emits no entry at all, and only a
+  // `-c` override (not `--untracked-files`) propagates to that inner run.
   const status = git(
     '-C',
     root,
+    '-c',
+    'status.showUntrackedFiles=all',
+    '--no-optional-locks',
     'status',
     '--porcelain=v2',
     '--ignore-submodules=none',
@@ -175,7 +187,7 @@ function dirtySubmodulePaths(root: string): string[] {
   const dirty: string[] = [];
   for (const line of status.split('\n')) {
     const m =
-      /^1 \S\S S[CMU?.]([CMU?.])([CMU?.]) 160000 160000 160000 [0-9a-f]+ [0-9a-f]+ (.+)$/.exec(
+      /^1 \S\S S[CMU?.]([CMU?.])([CMU?.]) (?:000000|160000) 160000 160000 [0-9a-f]+ [0-9a-f]+ (.+)$/.exec(
         line,
       );
     if (m && (m[1] !== '.' || m[2] !== '.')) {
@@ -183,6 +195,33 @@ function dirtySubmodulePaths(root: string): string[] {
     }
   }
   return dirty;
+}
+
+/** The blind-spot warning, phrased for an empty or an under-reporting hunks file. */
+function submoduleBlindSpot(dirty: string[], hunksEmpty: boolean): string {
+  const one = dirty.length === 1;
+  return (
+    `fix-delta: ${one ? 'submodule' : 'submodules'} ${dirty.join(', ')} ` +
+    `${one ? 'holds' : 'hold'} uncommitted edits this command cannot see — ` +
+    'a snapshot records only the superproject tree, and a submodule enters ' +
+    'it as its gitlink alone, so edits inside a submodule are outside this ' +
+    'model until they are committed there. ' +
+    (hunksEmpty
+      ? 'The hunks file stays empty; the audit cannot see the edit.'
+      : 'The hunks file does not show them; the audit cannot see those edits.')
+  );
+}
+
+/** Pre-existing submodule dirt, named so the silence is not read as oversight. */
+function preExistingDirtNote(dirty: string[]): string {
+  const one = dirty.length === 1;
+  const them = one ? 'it' : 'them';
+  return (
+    `fix-delta: ${one ? 'submodule' : 'submodules'} ${dirty.join(', ')} ` +
+    'already held uncommitted content at snapshot time — pre-existing dirt, ' +
+    `not reported as a blind spot because nothing newly dirtied ${them}. ` +
+    `Edits inside ${them} since remain invisible to this command.`
+  );
 }
 
 export interface FixDeltaArgs {
@@ -203,7 +242,11 @@ export function runFixDelta(args: FixDeltaArgs): void {
 
   if (args.snapshot) {
     const tree = snapshotWorkingTree(root);
-    const snapshot: FixSnapshot = { root, tree };
+    const snapshot: FixSnapshot = {
+      root,
+      tree,
+      dirtySubmodules: dirtySubmodulePaths(root),
+    };
     writeFileSync(resolve(args.out), `${JSON.stringify(snapshot, null, 2)}\n`);
     writeStderrLine(`fix-delta: snapshot ${tree.slice(0, 12)} of ${root}`);
     return;
@@ -214,6 +257,7 @@ export function runFixDelta(args: FixDeltaArgs): void {
     const raw = JSON.parse(readFileSync(args.since as string, 'utf8')) as {
       root?: unknown;
       tree?: unknown;
+      dirtySubmodules?: unknown;
     };
     if (
       typeof raw.root !== 'string' ||
@@ -221,7 +265,13 @@ export function runFixDelta(args: FixDeltaArgs): void {
     ) {
       throw new Error('not a fix-delta snapshot ({root, tree})');
     }
-    snapshot = { root: raw.root, tree: raw.tree as string };
+    snapshot = {
+      root: raw.root,
+      tree: raw.tree as string,
+      dirtySubmodules: Array.isArray(raw.dirtySubmodules)
+        ? raw.dirtySubmodules.filter((p): p is string => typeof p === 'string')
+        : [],
+    };
   } catch (err) {
     throw new Error(
       `fix-delta: cannot read the snapshot ${args.since}: ${(err as Error).message}. ` +
@@ -247,22 +297,24 @@ export function runFixDelta(args: FixDeltaArgs): void {
   const diff =
     now === snapshot.tree ? '' : patchBetweenTrees(root, snapshot.tree, now);
   writeFileSync(resolve(args.out), diff);
+  // Edits inside a submodule never move its gitlink, so the tree comparison
+  // is blind to them whether or not the superproject diff is empty — probe
+  // in both cases. Dirt recorded at snapshot time is not the fix's doing;
+  // only NEW dirt names a blind spot.
+  const dirtyNow = dirtySubmodulePaths(root);
+  const freshDirt = dirtyNow.filter(
+    (p) => !snapshot.dirtySubmodules.includes(p),
+  );
+  const preExisting = dirtyNow.filter((p) =>
+    snapshot.dirtySubmodules.includes(p),
+  );
   if (diff.trim() === '') {
-    // The superproject tree is unchanged — but a fix inside a submodule is
-    // invisible to this model (the gitlink never moves), and "nothing was
-    // applied" would be a lie over there. Name the blind spot instead.
-    const dirty = dirtySubmodulePaths(root);
-    if (dirty.length > 0) {
-      writeStderrLine(
-        `fix-delta: ${dirty.length === 1 ? 'submodule' : 'submodules'} ` +
-          `${dirty.join(', ')} ${dirty.length === 1 ? 'holds' : 'hold'} ` +
-          'uncommitted edits this command cannot see — a snapshot records only ' +
-          'the superproject tree, and a submodule enters it as its gitlink ' +
-          'alone, so edits inside a submodule are outside this model until ' +
-          'they are committed there. The hunks file stays empty; the audit ' +
-          'cannot see the edit.',
-      );
+    if (freshDirt.length > 0) {
+      writeStderrLine(submoduleBlindSpot(freshDirt, true));
     } else {
+      if (preExisting.length > 0) {
+        writeStderrLine(preExistingDirtNote(preExisting));
+      }
       writeStderrLine(
         'fix-delta: the tree is unchanged since the snapshot — nothing was applied ' +
           '(or the snapshot was taken after the edits).',
@@ -276,6 +328,9 @@ export function runFixDelta(args: FixDeltaArgs): void {
     `fix-delta: ${files.length} file(s) changed since the snapshot — ${shown}` +
       (files.length > 8 ? `, and ${files.length - 8} more` : ''),
   );
+  if (freshDirt.length > 0) {
+    writeStderrLine(submoduleBlindSpot(freshDirt, false));
+  }
 }
 
 export const fixDeltaCommand: CommandModule = {
@@ -283,7 +338,7 @@ export const fixDeltaCommand: CommandModule = {
   describe:
     'Record the working tree before `--fix` edits it (--snapshot), then diff ' +
     'the tree against that record after the edits (--since): the hunks the fix ' +
-    'applied, and nothing else, for the Step 6B fix audit. Never touches the ' +
+    'applied, and nothing else, for the Step 6B fix audit. Never writes the ' +
     "user's index or the stash.",
   builder: (yargs) =>
     yargs

@@ -23,6 +23,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -46,12 +48,46 @@ describe('fix-delta', () => {
   let out: string;
   let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
   let cwdBefore: string;
-  const git = (...args: string[]) =>
-    execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+  const gitAt = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  const git = (...args: string[]) => gitAt(repo, ...args);
   const snapshotFile = () => join(out, 'fix-snapshot.json');
   const hunksFile = () => join(out, 'fix-hunks.diff');
   const stderr = () =>
     (writeStderrLine as unknown as Mock).mock.calls.map((c) => c[0] as string);
+
+  /** A scratch repository to add as a submodule: one committed file. */
+  function makeSubmoduleSource(): string {
+    const subSrc = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-subsrc-')),
+    );
+    gitAt(subSrc, 'init', '-q', '-b', 'main');
+    gitAt(subSrc, 'config', 'user.email', 't@t.t');
+    gitAt(subSrc, 'config', 'user.name', 't');
+    writeFileSync(join(subSrc, 'f.txt'), 'before\n');
+    gitAt(subSrc, 'add', '-A');
+    gitAt(subSrc, 'commit', '-qm', 'init');
+    return subSrc;
+  }
+
+  /** `makeSubmoduleSource`, plus added AND committed at `sub` in the fixture. */
+  function plantCommittedSubmodule(): string {
+    const subSrc = makeSubmoduleSource();
+    git(
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      subSrc,
+      'sub',
+    );
+    gitAt(join(repo, 'sub'), 'config', 'user.email', 't@t.t');
+    gitAt(join(repo, 'sub'), 'config', 'user.name', 't');
+    git('add', '-A');
+    git('commit', '-qm', 'add submodule');
+    return subSrc;
+  }
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
@@ -118,18 +154,33 @@ describe('fix-delta', () => {
     // no gitlink — the superproject tree, which is all a snapshot records, is
     // byte-identical. The command must name that blind spot, not print
     // "nothing was applied" and steer the orchestrator at a correct ledger.
-    const subSrc = realpathSync(
-      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-subsrc-')),
-    );
-    const run = (cwd: string, ...args: string[]) =>
-      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    const subSrc = plantCommittedSubmodule();
     try {
-      run(subSrc, 'init', '-q', '-b', 'main');
-      run(subSrc, 'config', 'user.email', 't@t.t');
-      run(subSrc, 'config', 'user.name', 't');
-      writeFileSync(join(subSrc, 'f.txt'), 'before\n');
-      run(subSrc, 'add', '-A');
-      run(subSrc, 'commit', '-qm', 'init');
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      // The fix lands inside the submodule, uncommitted there.
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the fix\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const last = stderr().at(-1) ?? '';
+      expect(last).toContain('submodule');
+      // `/\bsub\b/`, not `toContain('sub')`: any message containing
+      // 'submodule' already contains 'sub', so the weaker form cannot pin
+      // that the warning names WHICH submodule is the blind spot.
+      expect(last).toMatch(/\bsub\b/);
+      expect(last).not.toContain('nothing was applied');
+      expect(last).not.toContain('the tree is unchanged since the snapshot');
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('names the blind spot for a submodule staged in the index but not in HEAD', () => {
+    // `git submodule add` stages the gitlink without committing it; the
+    // HEAD-side mode of that interim state prints 000000, and the probe must
+    // match it exactly like the committed shape.
+    const subSrc = makeSubmoduleSource();
+    try {
       git(
         '-c',
         'protocol.file.allow=always',
@@ -139,11 +190,6 @@ describe('fix-delta', () => {
         subSrc,
         'sub',
       );
-      run(join(repo, 'sub'), 'config', 'user.email', 't@t.t');
-      run(join(repo, 'sub'), 'config', 'user.name', 't');
-      git('add', '-A');
-      git('commit', '-qm', 'add submodule');
-
       runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
       // The fix lands inside the submodule, uncommitted there.
       writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the fix\n');
@@ -151,10 +197,135 @@ describe('fix-delta', () => {
 
       expect(readFileSync(hunksFile(), 'utf8')).toBe('');
       const last = stderr().at(-1) ?? '';
-      expect(last).toContain('submodule');
-      expect(last).toContain('sub');
+      expect(last).toMatch(/\bsub\b/);
+      expect(last).toContain('cannot see');
       expect(last).not.toContain('nothing was applied');
-      expect(last).not.toContain('the tree is unchanged since the snapshot');
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('discloses the blind spot beside a non-empty diff too', () => {
+    // A fix editing both a regular file and the inside of a submodule must
+    // not let the hunks silently under-report the edit set: the probe runs
+    // regardless of diff emptiness.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      writeFileSync(join(repo, 'a.ts'), 'export const x = 42;\n');
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the fix\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toContain(
+        '+export const x = 42;',
+      );
+      const lines = stderr();
+      expect(lines.at(-2)).toBe(
+        'fix-delta: 1 file(s) changed since the snapshot — a.ts',
+      );
+      expect(lines.at(-1)).toMatch(/\bsub\b/);
+      expect(lines.at(-1)).toContain('cannot see');
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('does not blame dirt a submodule already held at snapshot time', () => {
+    // Pre-existing dirt and fix dirt are structurally indistinguishable; the
+    // snapshot records the baseline, and only NEW dirt names a blind spot —
+    // a no-op fix in a repository with a dirty submodule must still hear
+    // "nothing was applied".
+    const subSrc = plantCommittedSubmodule();
+    try {
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'pre-existing dirt\n');
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const lines = stderr();
+      expect(lines.at(-1)).toContain(
+        'the tree is unchanged since the snapshot',
+      );
+      expect(lines.at(-1)).not.toContain('cannot see');
+      // …and the pre-existing dirt is still disclosed, and named, as such.
+      expect(
+        lines.some((l) => l.includes('pre-existing') && /\bsub\b/.test(l)),
+      ).toBe(true);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it('never reports a submodule whose only change is new commits', () => {
+    // A new-commits flag means the gitlink moved — the edit IS visible in
+    // the tree comparison, so reporting "invisible edits" would steer the
+    // orchestrator away from a correct ledger.
+    const subSrc = plantCommittedSubmodule();
+    const sub = join(repo, 'sub');
+    try {
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      // Advance the submodule HEAD AFTER the snapshot: the moved gitlink is
+      // a visible change, reported as the one changed file it is.
+      writeFileSync(join(sub, 'f.txt'), 'advanced\n');
+      gitAt(sub, 'add', '-A');
+      gitAt(sub, 'commit', '-qm', 'advance');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      expect(stderr().at(-1)).toBe(
+        'fix-delta: 1 file(s) changed since the snapshot — sub',
+      );
+      expect(stderr().some((l) => l.includes('cannot see'))).toBe(false);
+
+      // The same shape with the move already recorded — snapshot taken after
+      // the commit inside: nothing applied, nothing invisible.
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      expect(stderr().at(-1)).toContain(
+        'the tree is unchanged since the snapshot',
+      );
+      expect(stderr().some((l) => l.includes('cannot see'))).toBe(false);
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the user's index byte-identical even against a stale stat cache", () => {
+    // A bare `git status` opportunistically rewrites .git/index to refresh a
+    // stale stat cache — a write this command promises never to make. BOTH
+    // modes run a status (the snapshot records the submodule baseline), so
+    // the bytes are captured before EITHER mode, over an unchanged tree.
+    // Touch a tracked file's mtime without touching its content, so the
+    // cache entry is stale when the probes run.
+    const file = join(repo, 'a.ts');
+    const st = statSync(file);
+    utimesSync(file, st.atime, new Date(st.mtimeMs + 5000));
+    const indexBefore = readFileSync(join(repo, '.git', 'index'));
+    runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+    runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+    expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+    expect(readFileSync(join(repo, '.git', 'index')).equals(indexBefore)).toBe(
+      true,
+    );
+  });
+
+  it('sees untracked-only submodule dirt when the user hides untracked files', () => {
+    // `status.showUntrackedFiles=no` is git's documented performance setting
+    // for large repos; the submodule's untracked flag is computed by a run
+    // inside the submodule reading that config, so the probe overrides it.
+    const subSrc = plantCommittedSubmodule();
+    try {
+      writeFileSync(
+        join(gitIsolation.home, '.gitconfig'),
+        '[status]\n\tshowUntrackedFiles = no\n',
+      );
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      writeFileSync(join(repo, 'sub', 'new-file.txt'), 'untracked inside\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const last = stderr().at(-1) ?? '';
+      expect(last).toMatch(/\bsub\b/);
+      expect(last).toContain('cannot see');
     } finally {
       rmSync(subSrc, { recursive: true, force: true });
     }
