@@ -552,7 +552,7 @@ function setupAcpTest(
       });
       expect(
         initialReasoningOption?.options.map((option) => option.value),
-      ).toEqual(['default', 'low', 'medium', 'high', 'xhigh', 'max']);
+      ).toContain('none');
 
       // Test: Set mode using set_config_option
       const setModeResult = (await sendRequest('session/set_config_option', {
@@ -627,7 +627,7 @@ function setupAcpTest(
         {
           sessionId: newSession.sessionId,
           configId: 'reasoning_effort',
-          value: 'xhigh',
+          value: 'ultra',
         },
       )) as {
         configOptions: Array<{ id: string; currentValue: string }>;
@@ -636,7 +636,7 @@ function setupAcpTest(
         setReasoningResult.configOptions.find(
           (opt) => opt.id === 'reasoning_effort',
         )?.currentValue,
-      ).toBe('xhigh');
+      ).toBe('ultra');
 
       const resetReasoningResult = (await sendRequest(
         'session/set_config_option',
@@ -658,13 +658,12 @@ function setupAcpTest(
         sendRequest('session/set_config_option', {
           sessionId: newSession.sessionId,
           configId: 'reasoning_effort',
-          value: 'ultra',
+          value: '   ',
         }),
       ).rejects.toMatchObject({
         response: {
           code: -32602,
-          message:
-            'Invalid params: Unknown reasoning effort: ultra. Choose one of: default, low, medium, high, xhigh, max',
+          message: 'Invalid params: Reasoning effort cannot be blank',
         },
       });
     } catch (e) {

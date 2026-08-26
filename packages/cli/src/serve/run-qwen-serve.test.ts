@@ -3811,8 +3811,29 @@ describe('runQwenServe telemetry validation', () => {
       );
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         permissionPolicy: 'local-only',
+        publishGlobalWorkspaceEvent: expect.any(Function),
         sessionRestoreTimeoutMs: 90_000,
       });
+      expect(createBridge.mock.calls[1]?.[0].publishGlobalWorkspaceEvent).toBe(
+        createBridge.mock.calls[0]?.[0].publishGlobalWorkspaceEvent,
+      );
+      const settingsChangedEvent = {
+        type: 'settings_changed' as const,
+        data: {
+          key: 'model.reasoningEffort',
+          value: 'high',
+          scope: 'user',
+        },
+      };
+      createBridge.mock.calls[1]?.[0].publishGlobalWorkspaceEvent?.(
+        settingsChangedEvent,
+      );
+      expect(
+        createBridge.mock.results[0]?.value.publishWorkspaceEvent,
+      ).toHaveBeenCalledWith(settingsChangedEvent);
+      expect(
+        createBridge.mock.results[1]?.value.publishWorkspaceEvent,
+      ).toHaveBeenCalledWith(settingsChangedEvent);
       // The dynamically attached workspace's bridge must carry the same
       // adaptive-growth pool as the boot bridge — the budget here is
       // host-derived, so assert parity, not a fixed figure.
@@ -4167,6 +4188,7 @@ describe('runQwenServe telemetry validation', () => {
         sessionRestoreTimeoutMs: 90_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
+        publishGlobalWorkspaceEvent: expect.any(Function),
       });
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         compactedReplayMaxBytes: 1024,
@@ -4174,7 +4196,11 @@ describe('runQwenServe telemetry validation', () => {
         sessionRestoreTimeoutMs: 90_000,
         permissionPolicy: 'local-only',
         onChannelDelivery: expect.any(Function),
+        publishGlobalWorkspaceEvent: expect.any(Function),
       });
+      expect(createBridge.mock.calls[1]?.[0].publishGlobalWorkspaceEvent).toBe(
+        createBridge.mock.calls[0]?.[0].publishGlobalWorkspaceEvent,
+      );
       const settingsChangedEvent = {
         type: 'settings_changed' as const,
         data: {

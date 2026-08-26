@@ -7246,6 +7246,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const getReasoningPreference = vi.fn(
       (): false | string | undefined => undefined,
     );
+    let thinkingMandatory = false;
     mockConfig = {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
@@ -7262,6 +7263,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           ? {
               generationConfig: {
                 reasoning: { effort: 'provider.Ultra' },
+                thinkingMandatory,
               },
             }
           : undefined,
@@ -7375,6 +7377,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(overriddenStable?.configOptions).toMatchObject([
       { id: 'reasoning_effort', currentValue: 'medium' },
     ]);
+
+    thinkingMandatory = true;
+    const mandatory = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceProviders,
+      {},
+    );
+    const mandatoryStable = (
+      mandatory['providers'] as Array<{
+        models: Array<{
+          baseModelId: string;
+          isRuntime: boolean;
+          configOptions?: unknown[];
+        }>;
+      }>
+    )
+      .flatMap((provider) => provider.models)
+      .find(
+        (model) =>
+          model.baseModelId === 'qwen3.8-max' && model.isRuntime === false,
+      );
+    expect(mandatoryStable?.configOptions).toBeUndefined();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -7805,6 +7828,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const innerConfig = await setupSessionMocks(sessionId);
     const generation: {
       reasoning?: false | { effort?: string };
+      thinkingMandatory?: boolean;
     } = { reasoning: false };
     let preference: false | string | undefined = false;
     innerConfig.getModel = vi.fn().mockReturnValue('qwen3.8-max');
@@ -7865,6 +7889,25 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         'default',
       );
 
+      generation.thinkingMandatory = true;
+      lastSessionMock!.persistReasoningEffort.mockReturnValueOnce({
+        scope: SettingScope.Workspace,
+        effectiveValue: 'none',
+      });
+      const mandatoryInherited = (await agent.setSessionConfigOption({
+        sessionId,
+        configId: 'reasoning_effort',
+        value: 'default',
+        _meta: { 'qwenCode/persistReasoningEffort': true },
+      })) as SetSessionConfigOptionResponse;
+
+      expect(innerConfig.disableReasoning).not.toHaveBeenCalled();
+      expect(generation.reasoning).toEqual({ effort: 'provider-default' });
+      expect(mandatoryInherited._meta).toEqual({
+        [REASONING_EFFORT_PERSISTENCE_META_KEY]: { scope: 'workspace' },
+      });
+
+      generation.thinkingMandatory = false;
       lastSessionMock!.persistReasoningEffort.mockReturnValueOnce({
         scope: SettingScope.Workspace,
         effectiveValue: 'none',

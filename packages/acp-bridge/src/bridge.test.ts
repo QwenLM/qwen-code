@@ -22302,6 +22302,7 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('broadcasts a cleared persisted reasoning value as null', async () => {
+      const publishGlobalWorkspaceEvent = vi.fn();
       const handle = makeChannel({
         setSessionConfigOptionImpl: () => ({
           configOptions: [],
@@ -22310,7 +22311,10 @@ describe('createAcpSessionBridge', () => {
           },
         }),
       });
-      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        publishGlobalWorkspaceEvent,
+      });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await bridge.setSessionConfigOption(session.sessionId, {
@@ -22333,6 +22337,48 @@ describe('createAcpSessionBridge', () => {
           },
         }),
       );
+      expect(publishGlobalWorkspaceEvent).not.toHaveBeenCalled();
+      await bridge.shutdown();
+    });
+
+    it.each([
+      {
+        name: 'missing persistence metadata',
+        response: { configOptions: [] },
+      },
+      {
+        name: 'an invalid persistence scope',
+        response: {
+          configOptions: [],
+          _meta: {
+            [REASONING_EFFORT_PERSISTENCE_META_KEY]: { scope: 'system' },
+          },
+        },
+      },
+    ])('does not broadcast after $name', async ({ response }) => {
+      const publishGlobalWorkspaceEvent = vi.fn();
+      const handle = makeChannel({
+        setSessionConfigOptionImpl: () => response,
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        publishGlobalWorkspaceEvent,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.setSessionConfigOption(session.sessionId, {
+        sessionId: session.sessionId,
+        configId: 'reasoning_effort',
+        value: 'medium',
+        _meta: { [PERSIST_REASONING_EFFORT_META_KEY]: true },
+      });
+
+      expect(publishGlobalWorkspaceEvent).not.toHaveBeenCalled();
+      expect(
+        bridge
+          .getSessionReplaySnapshot(session.sessionId)
+          ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+      ).toEqual([]);
       await bridge.shutdown();
     });
 

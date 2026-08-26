@@ -5419,9 +5419,12 @@ class QwenAgent implements Agent {
             );
             if (selected === REASONING_EFFORT_DEFAULT) {
               const effectiveValue = persistence.effectiveValue;
-              if (effectiveValue === REASONING_EFFORT_NONE) {
+              if (
+                effectiveValue === REASONING_EFFORT_NONE &&
+                canDisableReasoning
+              ) {
                 config.disableReasoning();
-              } else {
+              } else if (effectiveValue !== REASONING_EFFORT_NONE) {
                 if (
                   effectiveValue &&
                   config.getReasoningPreference() === false
@@ -6681,19 +6684,21 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
-        const reasoningDefault = config.getResolvedModelConfig?.(
+        const resolvedGeneration = config.getResolvedModelConfig?.(
           model.authType,
           model.id,
           model.registryBaseUrl,
-        )?.generationConfig.reasoning;
+        )?.generationConfig;
         const configOptions =
-          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+          model.isRuntimeModel ||
+          modelId.startsWith(ACP_ROUTE_ID_PREFIX) ||
+          resolvedGeneration?.thinkingMandatory === true
             ? undefined
             : buildModelReasoningConfigPreview(
                 model.id,
                 resolveReasoningPreviewState(
                   reasoningPreference,
-                  reasoningDefault,
+                  resolvedGeneration?.reasoning,
                 ),
               );
         const providerModel: ServeWorkspaceProviderModel = {
