@@ -685,7 +685,13 @@ export async function runForkedAgent(
           : false;
     if (completesEarly && !executionController.signal.aborted) {
       completedAfterWrite = true;
-      executionController.abort();
+      // Defer the abort out of this emitter handler: agent-core emits a
+      // parallel batch's TOOL_RESULT events one by one, and aborting
+      // synchronously re-enters its onAbort mid-emission, which replaces
+      // the still-unemitted real successes of the same batch with
+      // synthetic cancellation failures — truncating filesWritten below
+      // the writes that actually landed on disk.
+      setImmediate(() => executionController.abort());
     }
   });
 

@@ -432,6 +432,107 @@ describe('runForkedAgent (AgentHeadless path) bound-tool isolation', () => {
     }
   });
 
+  it('defers the early-completion abort until the current batch finishes emitting', async () => {
+    // agent-core emits a parallel batch's TOOL_RESULT events one by one,
+    // synchronously. Aborting synchronously from inside the first result's
+    // handler re-enters agent-core's onAbort mid-emission, which replaces
+    // the still-unemitted real successes of the same batch with synthetic
+    // cancellation failures — so filesWritten under-reports writes that
+    // actually landed on disk. The abort must be deferred out of the
+    // emitter handler; the rest of the batch still has to emit real
+    // results.
+    const parent = new ConfigImpl(baseParams);
+    const parentRegistry = await parent.createToolRegistry(undefined, {
+      skipDiscovery: true,
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (parent as any).toolRegistry = parentRegistry;
+
+    let executeSignal: AbortSignal | undefined;
+    let abortedMidBatch: boolean | undefined;
+    const spy = vi.spyOn(AgentHeadless, 'create').mockImplementation(
+      async (
+        _name,
+        _config,
+        _promptConfig,
+        _modelConfig,
+        _runConfig,
+        _toolConfig,
+        eventEmitter,
+      ) =>
+        ({
+          execute: vi.fn().mockImplementation(async (_context, signal) => {
+            executeSignal = signal;
+            const emitter = eventEmitter as AgentEventEmitter;
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-a',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/a.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_CALL, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-b',
+              name: ToolNames.WRITE_FILE,
+              args: { file_path: '/repo/.qwen/memories/b.md' },
+              description: 'write',
+              timestamp: Date.now(),
+            });
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-a',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            abortedMidBatch = signal.aborted;
+            emitter.emit(AgentEventType.TOOL_RESULT, {
+              subagentId: 'fork',
+              round: 1,
+              callId: 'write-b',
+              name: ToolNames.WRITE_FILE,
+              success: true,
+              timestamp: Date.now(),
+            });
+            await new Promise((resolve) => setImmediate(resolve));
+          }),
+          getTerminateMode: vi
+            .fn()
+            .mockReturnValue(AgentTerminateMode.CANCELLED),
+          getFinalText: vi.fn().mockReturnValue(''),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        }) as any,
+    );
+
+    try {
+      const result = await runForkedAgent({
+        name: 'test-fork',
+        systemPrompt: 'You are a test fork.',
+        taskPrompt: 'write two files',
+        config: parent,
+        completeAfterFirstSuccessfulWrite: true,
+      });
+
+      // Mid-batch the run must not be aborted synchronously, and the
+      // deferred abort must land once the batch emission is over.
+      expect(abortedMidBatch).toBe(false);
+      expect(executeSignal?.aborted).toBe(true);
+      expect(result.status).toBe('completed');
+      expect(result.terminateReason).toBe(AgentTerminateMode.GOAL);
+      expect(result.filesWritten).toEqual([
+        '/repo/.qwen/memories/a.md',
+        '/repo/.qwen/memories/b.md',
+      ]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('keeps running past successful writes the early-completion predicate excludes', async () => {
     const parent = new ConfigImpl(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {
