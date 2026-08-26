@@ -91,14 +91,36 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
 
+    // #10073: both fields used to silently prefer task_id and drop `to`.
+    if (this.params.task_id && this.params.to) {
+      const msg =
+        'Provide exactly one destination: "to" for a teammate or ' +
+        '"task_id" for a background task, not both.';
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
     // Route 1: background task by task_id.
     if (this.params.task_id) {
       const registry = this.config.getBackgroundTaskRegistry();
       const entry = registry.get(this.params.task_id);
 
       if (!entry) {
+        const teammate = this.config
+          .getTeamManager()
+          ?.getTeamFile()
+          .members.find((member) => member.name === this.params.task_id);
+        const hint = teammate
+          ? ` "${this.params.task_id}" is a teammate name — to message a ` +
+            `teammate, set "to": "${this.params.task_id}" instead of "task_id".`
+          : '';
         return {
-          llmContent: `Error: No background task found with ID "${this.params.task_id}".`,
+          llmContent:
+            `Error: No background task found with ID "${this.params.task_id}".` +
+            hint,
           returnDisplay: 'Task not found.',
           error: {
             message: `Task not found: ${this.params.task_id}`,
@@ -276,7 +298,8 @@ export class SendMessageTool extends BaseDeclarativeTool<
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send a message to a teammate (use "to") or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
+      'Send a message to a teammate (use "to") or to a running, paused, or completed background task (use "task_id"); specify exactly one of the two. ' +
+        'Completed tasks are revived. ' +
         'For teams, set "to" to a bare teammate name (no @) or "*" to broadcast. ' +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
         'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +

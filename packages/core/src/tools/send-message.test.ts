@@ -493,3 +493,48 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.returnDisplay).toContain('Search for auth code');
   });
 });
+
+describe('SendMessageTool — destination validation (#10073)', () => {
+  it('rejects calls that specify both "to" and "task_id"', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: { sendMessage, broadcast: vi.fn() },
+      }),
+    );
+
+    const invocation = tool.build({
+      to: 'alice',
+      task_id: 'agent-1',
+      message: 'hello',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('exactly one destination');
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('suggests "to" when a failed task_id matches a teammate name', async () => {
+    const config = {
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({
+        getTeamFile: () => ({
+          members: [{ agentId: 'qa-reviewer@team', name: 'qa-reviewer' }],
+        }),
+      }),
+    } as unknown as Config;
+    const tool = new SendMessageTool(config);
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'qa-reviewer', message: 'hello' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('No background task found');
+    expect(result.llmContent).toContain('teammate');
+    expect(result.llmContent).toContain('"to"');
+  });
+});
