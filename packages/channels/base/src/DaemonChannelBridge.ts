@@ -589,6 +589,10 @@ export class DaemonChannelBridge
         }
       }
       prompt.push({ type: 'text', text });
+      if (controller.signal.aborted) {
+        rollbackUploadedAttachments = true;
+        controller.signal.throwIfAborted();
+      }
       // Always presented: the daemon validates it for the channel-turn
       // classification as well as the display projection, and channel
       // prompts without display text still need the classification.
