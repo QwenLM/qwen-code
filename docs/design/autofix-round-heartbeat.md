@@ -84,11 +84,21 @@ orphan loops unacceptable):
    `/tmp` on the same path and runs as the same user, so branch code the
    agent executes can plant any value there. The on-disk
    `${WORKDIR}/heartbeat.pid` survives for diagnostics and the loop's own
-   self-checks only.
-3. `Finalize autofix status comment` touches `heartbeat-stop` and kills
-   **before** its own PATCH (avoids racing the terminal text), then sleeps
-   past one PATCH round-trip so an already-dispatched tick cannot land
-   after the terminal text server-side.
+   self-checks only. Every kill is additionally **lifecycle-confirmed**:
+   the launch records the loop's start time (`heartbeat_start_ticks`,
+   field 22 of `/proc/<pid>/stat`) and a killer signals only a pid whose
+   stat still carries exactly that value — a pid reused between launch
+   and kill carries a different start time and a dead pid has no stat,
+   so a failed check kills nothing.
+3. `Finalize autofix status comment` touches `heartbeat-stop`, kills
+   (lifecycle-confirmed), and **drains the in-flight stamp before** its
+   own PATCH: each tick stamps `heartbeat-tick-inflight` with its start
+   epoch around its gh call (bounded to 60s) and removes it after, and
+   finalize waits until the stamp is absent or older than the 65s
+   completion bound. Killing the client cannot cancel a PATCH the server
+   already accepted — the fixed 2s sleep this replaced was
+   probe-refuted: a stale WORKING committed after the terminal text and
+   flipped the comment back to live-looking.
 4. `Clean up autofix workdir` (`always()`) kills again as belt-and-braces.
 5. `Reset autofix workspace` does NOT kill: a cross-run pid would have to
    come from the untrusted file class. Wiping `WORKDIR` removes the pid
@@ -232,7 +242,10 @@ comment is never worse than today.
 - **Liveness-signal integrity.** The sandbox can delete or overwrite
   `heartbeat.pid` (ending the pulse early via the identity self-check),
   touch `heartbeat-stop`, or bump `agent.log`'s mtime to forge "agent
-  active 0 min ago". The attacker can only mislabel or silence their own
+  active 0 min ago". It can also plant or delete
+  `heartbeat-tick-inflight` — costing finalize at most the 65s drain
+  bound, or reopening the cosmetic terminal-overwrite race the drain
+  closes. The attacker can only mislabel or silence their own
   round's progress — no token, no execution, no kill reach — so this is
   accepted rather than engineered around.
 - **Post-gate silence.** After the gate kills the loop, the comment holds

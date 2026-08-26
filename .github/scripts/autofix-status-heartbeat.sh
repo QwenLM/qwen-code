@@ -33,7 +33,18 @@
 # (coreutils timeout default) under the loop's setsid session, so a
 # group/pid kill alone leaves it alive holding the PAT for up to 60s. The
 # round's verification gate kills the loop before running any branch code
-# on the host; finalize and the always() cleanup kill again.
+# on the host; finalize and the always() cleanup kill again. Every killer
+# confirms the pid's LIFECYCLE before signaling: the launch also records
+# the loop's start time (heartbeat_start_ticks), and a pid reused between
+# launch and kill belongs to a different process — a killer signals only
+# a pid whose /proc/<pid>/stat start time still matches the launch
+# capture, and kills nothing otherwise (a dead pid has no stat and a
+# reused one a different start time, so a failed check always means the
+# loop is already gone). Each tick additionally stamps
+# heartbeat-tick-inflight with its start epoch around its gh call and
+# removes it after: finalize drains that stamp before its terminal PATCH,
+# because killing the client cannot cancel a request the server already
+# accepted.
 #
 # PAT note: the loop holds the bot PAT in its environment. Its lifetime is
 # bounded to the sandboxed agent phase — the agent executes PR content only
@@ -209,11 +220,28 @@ run_loop() {
     if command -v timeout > /dev/null 2>&1; then
       GH_PATCH=(timeout 60 gh)
     fi
+    # In-flight stamp for finalize's drain: killing this loop ends the
+    # client, but a PATCH the server already ACCEPTED still commits (the
+    # race that flipped a terminal comment back to "working"), so
+    # finalize must wait the last tick's request out before writing the
+    # terminal text. The stamp carries the tick's start epoch; the
+    # bounded call above gives finalize the 65s completion bound it
+    # drains against. The write is bounded like the pid-identity read:
+    # WORKDIR is sandbox-writable, and a planted FIFO at this path would
+    # otherwise block the loop inside the tick, past the age cap. A
+    # failed stamp degrades to the pre-drain race, never stalls the
+    # pulse.
+    if command -v timeout > /dev/null 2>&1; then
+      timeout 5 bash -c 'date +%s > "$0"' "${HB_WORKDIR}/heartbeat-tick-inflight" 2> /dev/null || true
+    else
+      date +%s > "${HB_WORKDIR}/heartbeat-tick-inflight" 2> /dev/null || true
+    fi
     if ! GH_CONFIG_DIR="${gh_config_dir}" "${GH_PATCH[@]}" api --method PATCH \
       "repos/${HB_REPO}/issues/comments/${HB_COMMENT_ID}" \
       -f body="${body}" > /dev/null 2>&1; then
       echo "$(date -u +%FT%TZ) PATCH failed; continuing"
     fi
+    rm -f "${HB_WORKDIR}/heartbeat-tick-inflight" 2> /dev/null || true
     rm -rf "${gh_config_dir}"
   done
 }

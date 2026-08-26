@@ -4866,6 +4866,7 @@ jobs:
           # WORKDIR is sandbox-writable, so no WORKDIR file is ever read
           # as a kill target. Full rationale → qwen-autofix.md#af-148
           HEARTBEAT_PID=''
+          HEARTBEAT_START_TICKS=''
           # Re-verify immediately before THIS launch (R8-1): the check above
           # is separated from this second, PAT-holding execution by the two
           # gh round-trips of the comment upsert — a live swap window in the
@@ -4880,10 +4881,22 @@ jobs:
               setsid bash --norc "${RUNNER_TEMP}/autofix-status-heartbeat.sh" loop &
             HEARTBEAT_PID=$!
             disown 2> /dev/null || true
+            # Lifecycle pin for the killers: between this launch and
+            # the later kills the pid above can be REUSED by the
+            # runner, so every killer confirms the pid's start time
+            # (field 22 of /proc/<pid>/stat — index 19 after stripping
+            # through the LAST ')', since comm can carry spaces)
+            # against this capture before signaling.
+            # Full rationale → qwen-autofix.md#af-148
+            HB_STAT="$(cat "/proc/${HEARTBEAT_PID}/stat" 2>/dev/null)" || HB_STAT=''
+            HB_REST="${HB_STAT##*) }"
+            HB_FIELDS=(${HB_REST})
+            HEARTBEAT_START_TICKS="${HB_FIELDS[19]:-}"
           fi
           # Hand the id to the finalize step so it does not repeat this scan.
           echo "comment_id=${STATUS_ID}" >> "${GITHUB_OUTPUT}"
           echo "heartbeat_pid=${HEARTBEAT_PID}" >> "${GITHUB_OUTPUT}"
+          echo "heartbeat_start_ticks=${HEARTBEAT_START_TICKS}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Triage and address'
         id: 'address'
@@ -5061,7 +5074,24 @@ jobs:
           # Full rationale → qwen-autofix.md#af-148
           /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
+          HB_START_TICKS="${{ steps.post_status.outputs.heartbeat_start_ticks }}"
+          # Lifecycle-confirmed shutdown: this kill can land the whole
+          # agent phase after the launch recorded HB_PID, and a pid
+          # that old can already be REUSED — TERMing it would kill an
+          # unrelated process, its group and session. Signal only
+          # after /proc/<pid>/stat still shows the start time this
+          # round's launch captured: a reused pid carries a different
+          # start time, a dead pid has no stat — a failed check means
+          # the loop is gone and killing nothing is right. The parse
+          # is syntax-only plus /usr/bin/cat, per this shell's
+          # shadowing doctrine. Full rationale → qwen-autofix.md#af-148
+          HB_FIELDS=()
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
+            HB_STAT="$(/usr/bin/cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''
+            HB_REST="${HB_STAT##*) }"
+            HB_FIELDS=(${HB_REST})
+          fi
+          if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then
             /usr/bin/kill -- -"${HB_PID}" 2> /dev/null || true
             /usr/bin/kill "${HB_PID}" 2> /dev/null || true
             /usr/bin/pkill -TERM -s "${HB_PID}" 2> /dev/null || true
@@ -6247,6 +6277,7 @@ jobs:
             RUNNER_TEMP="${RUNNER_TEMP}" \
             WORKDIR="${WORKDIR}" \
             HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}" \
+            HB_START_TICKS="${{ steps.post_status.outputs.heartbeat_start_ticks }}" \
             STATUS_ID="${STATUS_ID}" \
             PUSH_REPORTED="${PUSH_REPORTED}" \
             OUTCOME="${OUTCOME}" \
@@ -6257,25 +6288,49 @@ jobs:
             PR="${PR}" \
             bash --norc -c '
               set -uo pipefail
-              # Stop the round heartbeat BEFORE flipping this comment to
-              # its terminal text: a tick landing after the finalize would
-              # overwrite it with a live-looking "working" line. The gate
-              # already killed the loop before the host-side branch code;
-              # this is the belt to its braces (a missed kill there must
-              # not outlive the round). The session kill covers a kill
-              # landing mid-tick (the timeout/gh subtree of a tick sits
-              # in its own process group under the session of the loop).
-              # The stop marker ends the loop on its next self-check even
-              # if the kills miss, and the sleep lets an already-
-              # dispatched tick PATCH land before the terminal text goes
-              # up. Full rationale → qwen-autofix.md#af-148
+              # Stop the round heartbeat BEFORE flipping this comment
+              # to its terminal text, and DRAIN it first: killing the
+              # client cannot cancel a PATCH the server already
+              # ACCEPTED, so the terminal PATCH must wait the last
+              # in-flight tick request out (the stamp drain below).
+              # The kill is lifecycle-confirmed: the gate killed this
+              # loop long before this step, and by now the pid
+              # recorded at launch can be REUSED — TERMing it would
+              # kill an unrelated process, its group and session. A
+              # failed check means the loop is already gone, so
+              # killing nothing is right; the stop marker ends it on
+              # its next self-check even if the kills miss.
+              # Full rationale → qwen-autofix.md#af-148
               /usr/bin/touch "${WORKDIR}/heartbeat-stop" 2> /dev/null || true
+              HB_FIELDS=()
               if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
+                HB_STAT="$(cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''
+                HB_REST="${HB_STAT##*) }"
+                HB_FIELDS=(${HB_REST})
+              fi
+              if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS:-}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then
                 builtin kill -- -"${HB_PID}" 2>/dev/null || true
                 builtin kill "${HB_PID}" 2>/dev/null || true
                 /usr/bin/pkill -TERM -s "${HB_PID}" 2>/dev/null || true
-                /usr/bin/sleep 2
               fi
+              # Drain the last in-flight tick before the terminal
+              # PATCH: each tick stamps its start epoch around its gh
+              # call (bounded to 60s), so a stamp older than 65s
+              # proves its request committed or died, and no stamp
+              # means nothing is in flight. The loop is dead by here,
+              # so no new stamp can appear. The read is bounded (a
+              # planted FIFO must not stall this step); a planted
+              # fresh stamp costs at most the 65s bound, a planted
+              # deletion reopens only the cosmetic overwrite.
+              DRAIN_END=$(( $(date +%s) + 65 ))
+              while :; do
+                NOW_S="$(date +%s)"
+                (( NOW_S >= DRAIN_END )) && break
+                STAMP="$(timeout 5 cat "${WORKDIR}/heartbeat-tick-inflight" 2> /dev/null)" || STAMP=''
+                [[ "${STAMP}" =~ ^[0-9]+$ ]] || break
+                (( STAMP + 65 <= NOW_S )) && break
+                sleep 1
+              done
               # Hermetic gh config, the upsert twin'"'"'s shape: pinning
               # HOME'"'"'s PATH does not sanitize its CONTENTS, which the
               # gate-phase host-side branch code (same UID) can write
@@ -6341,11 +6396,21 @@ jobs:
         run: |-
           # Last heartbeat kill (the gate and finalize already did this on
           # their paths) from the expression-context pid — never from a
-          # WORKDIR file, which is sandbox-writable. The session kill
-          # covers the mid-tick subtree, same as its twins.
+          # WORKDIR file, which is sandbox-writable. Lifecycle-confirmed
+          # like its twins and stalest of all: signal only a pid whose
+          # /proc/<pid>/stat start time still matches the launch
+          # capture, kill nothing otherwise. The session kill covers
+          # the mid-tick subtree, same as its twins.
           # Full rationale → qwen-autofix.md#af-148
           HB_PID="${{ steps.post_status.outputs.heartbeat_pid }}"
+          HB_START_TICKS="${{ steps.post_status.outputs.heartbeat_start_ticks }}"
+          HB_FIELDS=()
           if [[ "${HB_PID:-}" =~ ^[0-9]+$ ]]; then
+            HB_STAT="$(cat "/proc/${HB_PID}/stat" 2>/dev/null)" || HB_STAT=''
+            HB_REST="${HB_STAT##*) }"
+            HB_FIELDS=(${HB_REST})
+          fi
+          if [[ "${#HB_FIELDS[@]}" -gt 19 && -n "${HB_START_TICKS}" && "${HB_FIELDS[19]}" == "${HB_START_TICKS}" ]]; then
             kill -- -"${HB_PID}" 2>/dev/null || true
             kill "${HB_PID}" 2>/dev/null || true
             pkill -TERM -s "${HB_PID}" 2>/dev/null || true

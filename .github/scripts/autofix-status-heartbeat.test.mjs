@@ -51,6 +51,13 @@ function fakeGhBin(dir) {
       'set -u',
       'n=$(( $(ls -1 "${GH_RECORD_DIR}" | wc -l) + 1 ))',
       'for a in "$@"; do printf \'%s\\0\' "$a"; done > "${GH_RECORD_DIR}/call-${n}"',
+      '# The in-flight stamp witness: record, FROM INSIDE the bounded',
+      '# window, whether heartbeat-tick-inflight brackets this call.',
+      'if [ -f "${HB_WORKDIR:-/nonexistent}/heartbeat-tick-inflight" ]; then',
+      '  printf \'INFLIGHT=yes CONTENT=%s\\n\' "$(cat "${HB_WORKDIR}/heartbeat-tick-inflight" 2>/dev/null)" >> "${GH_RECORD_DIR}/stamp.log"',
+      'else',
+      '  printf \'INFLIGHT=no CONTENT=\\n\' >> "${GH_RECORD_DIR}/stamp.log"',
+      'fi',
       "printf 'GH_HOST=%s GH_CONFIG_DIR=%s CFG_EXISTS=%s CFG_ENTRIES=%s GITHUB_TOKEN=%s GH_TOKEN=%s GH_ENTERPRISE_TOKEN=%s\\n' \\",
       '  "${GH_HOST:-}" "${GH_CONFIG_DIR:-}" \\',
       '  "$([ -d "${GH_CONFIG_DIR:-/nonexistent}" ] && echo yes || echo no)" \\',
@@ -439,6 +446,17 @@ describe('autofix-status-heartbeat loop', () => {
         pidRead.some((a) => a.endsWith('heartbeat.pid')),
         `the bounded read must target heartbeat.pid: ${pidRead.join(' ')}`,
       );
+      // The in-flight stamp WRITE is bounded the same way: a planted
+      // FIFO at heartbeat-tick-inflight must not block the redirect
+      // open inside every tick (the twin guard above pins the same
+      // doctrine for the pid-file read).
+      const stampWrite = timeoutCalls.find(
+        (c) =>
+          c[0] === '5' &&
+          c[1] === 'bash' &&
+          c.some((a) => a.endsWith('heartbeat-tick-inflight')),
+      );
+      assert.ok(stampWrite, 'the stamp write must run under timeout 5');
     } finally {
       killGroup(child);
     }
@@ -776,6 +794,49 @@ describe('autofix-status-heartbeat loop', () => {
     }
   });
 
+  it('stamps each tick in flight around the gh call and clears it after', async () => {
+    // finalize's drain relies on heartbeat-tick-inflight bracketing
+    // every gh call: the fake gh observes the stamp FROM INSIDE the
+    // bounded window (present, with a numeric epoch), and the stamp
+    // must not outlive a clean loop exit — a stale stamp would make
+    // finalize wait the full bound for a request that already ended.
+    const dir = freshTmp();
+    const gh = fakeGhBin(dir);
+    const { env, workdir } = loopEnv(dir, gh);
+    const child = startLoop(env);
+    try {
+      const ok = await waitFor(
+        () =>
+          readCalls(gh.records).length >= 2 &&
+          existsSync(join(gh.records, 'stamp.log')) &&
+          readFileSync(join(gh.records, 'stamp.log'), 'utf8').trim().split('\n')
+            .length >= 2,
+        8000,
+      );
+      assert.ok(
+        ok,
+        'expected at least two PATCH calls with stamp observations',
+      );
+      const stamps = readFileSync(join(gh.records, 'stamp.log'), 'utf8')
+        .trim()
+        .split('\n');
+      for (const line of stamps) {
+        assert.ok(line.startsWith('INFLIGHT=yes CONTENT='), line);
+        assert.match(line.split('CONTENT=')[1], /^\d+$/, line);
+      }
+      // End the loop cleanly; the stamp must be gone afterwards.
+      rmSync(join(workdir, 'heartbeat.pid'));
+      const code = await awaitExit(child, 8000);
+      assert.equal(code, 0, 'the loop must end cleanly on pid removal');
+      assert.ok(
+        !existsSync(join(workdir, 'heartbeat-tick-inflight')),
+        'the stamp must not outlive the loop',
+      );
+    } finally {
+      killGroup(child);
+    }
+  });
+
   // The mid-tick kill-topology witness needs coreutils `timeout` (which
   // gives the tick its own process group) and procps pkill/pgrep (the
   // session kill and its oracle); hosts without them still carry the
@@ -883,6 +944,41 @@ describe('autofix-status-heartbeat loop', () => {
         );
         const logText = readFileSync(join(workdir, 'heartbeat.log'), 'utf8');
         assert.match(logText, /self-exit: pid file removed or replaced/);
+      } finally {
+        killGroup(child);
+      }
+    },
+  );
+
+  it(
+    'a planted FIFO at heartbeat-tick-inflight cannot block the loop past the bounded write',
+    {
+      skip: haveSessionKillTools
+        ? false
+        : 'requires coreutils timeout (the bounded-write guard)',
+    },
+    async () => {
+      // WORKDIR is sandbox-writable, so a FIFO planted at the stamp
+      // path would block an unguarded `date > file` redirect open
+      // inside EVERY tick — stalling the loop past the age cap. The
+      // bounded `timeout 5 bash -c` write must give up, and the tick
+      // must proceed to its PATCH (degrading to the pre-drain race,
+      // never stopping the pulse). Real coreutils timeout runs here —
+      // no shim on PATH in this test.
+      const dir = freshTmp();
+      const gh = fakeGhBin(dir);
+      const { env, workdir } = loopEnv(dir, gh);
+      spawnSync('mkfifo', [join(workdir, 'heartbeat-tick-inflight')]);
+      const child = startLoop(env);
+      try {
+        // 1s interval + the 5s write bound: the first PATCH lands
+        // around 6-7s in.
+        const ok = await waitFor(
+          () => readCalls(gh.records).length >= 1,
+          20000,
+        );
+        assert.ok(ok, 'the bounded stamp write must not stall the tick');
+        assert.ok(child.exitCode === null, 'the loop must keep pulsing');
       } finally {
         killGroup(child);
       }

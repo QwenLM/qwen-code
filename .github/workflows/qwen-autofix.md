@@ -3787,6 +3787,29 @@ ever executed in a PAT-bearing or post-agent context, and
 the gate's own kill uses absolute-path/builtin command
 words per that step's shadowing doctrine.
 
+LIFECYCLE CONFIRMATION on every kill: the pid recorded at
+launch can be REUSED between the launch and a kill — the
+gate lands up to a whole agent phase after post_status
+recorded the id, and finalize and the always() cleanup run
+hours later still; by then the runner may have recycled
+the number. The blind form was probe-verified fatal:
+mapped to an unrelated detached session, the stale pid's
+kill block terminated it (pid, group AND session TERM).
+Every killer therefore confirms the pid's start time
+before signaling: post_status also records the loop's
+start time (heartbeat_start_ticks — field 22 of
+/proc/<pid>/stat, clock ticks since boot; index 19 after
+stripping through the LAST ')' of the parenthesized
+comm), and a killer signals only a pid whose stat still
+carries exactly that value. A reused pid necessarily
+carries a different start time and a dead pid carries no
+stat at all, so a failed check proves the loop is gone
+and killing nothing is right — the confirmation can only
+ever SUPPRESS a kill, never admit a wrong one (its
+residual is the narrow stat-read→signal window, the same
+residual the decimal check it replaces carried for its
+whole lifetime).
+
 PAT TRADE, chosen deliberately within that lifetime: the
 loop holds the bot PAT in env — a temporal overlap the
 "THIS step holds no PAT" rule (af-126) otherwise avoids.
@@ -3876,10 +3899,25 @@ connection cannot stall the loop past the cap. Killers that
 run in-round touch the stop marker BEFORE killing so a
 missed kill still ends the loop at its next self-check — a
 tick landing after the terminal text would overwrite it
-with a live-looking "working" line — and finalize
-additionally sleeps past one PATCH
-round-trip so an already-dispatched tick cannot land after
-the terminal text server-side.
+with a live-looking "working" line. The terminal text is
+additionally DRAINED, not slept past: the fixed 2s sleep
+proved wrong on probe — killing the client cannot cancel a
+PATCH the server already ACCEPTED (reproduced: WORKING
+accepted 1.67s in, TERMINAL submitted 3.80s in, the stale
+WORKING committed 6.67s in and flipped the comment back to
+live-looking). Each tick therefore stamps its start epoch
+into heartbeat-tick-inflight around its gh call and
+removes it after; finalize waits until the stamp is ABSENT
+or older than the 65s completion bound (the tick's 60s
+gh timeout plus margin) BEFORE its terminal PATCH — every
+request started before that bound has committed or died
+by the time the terminal text goes up. The stamp is a
+wait input, never a kill target: a planted fresh stamp
+costs at most the bound in finalize delay, a planted
+deletion reopens only the cosmetic overwrite (nothing
+rides the stamp but the comment text), and finalize's
+read is bounded like the loop's pid-file read so a
+planted FIFO cannot stall it.
 ```
 
 <a id="af-149"></a>
