@@ -399,6 +399,28 @@ describe('no-AK integration CI wiring', () => {
         `${line} | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
       );
     }
+    // Pin the redirect's remaining load-bearing lines too: the target must
+    // stay inside RUNNER_WORKSPACE (no 8.3 short alias), the directory must
+    // be created before use, and the step must run under PowerShell 5.1 for
+    // the -Encoding utf8 rationale above to hold.
+    expect(tempRedirect).toContain(
+      "$temp = Join-Path $env:RUNNER_WORKSPACE 'qwen-code-temp'",
+    );
+    expect(tempRedirect).toContain(
+      'New-Item -ItemType Directory -Force -Path $temp | Out-Null',
+    );
+    expect(tempRedirect).toContain("shell: 'powershell'");
+    // GITHUB_ENV writes only reach later steps, so the redirect must precede
+    // every step it is meant to serve.
+    const tempRedirectIndex = windowsJob.indexOf(
+      "name: 'Point temp at a short-alias-free directory'",
+    );
+    expect(tempRedirectIndex).toBeLessThan(
+      windowsJob.indexOf("name: 'Set up Node.js 22.x (hosted)'"),
+    );
+    expect(tempRedirectIndex).toBeLessThan(
+      windowsJob.indexOf("name: 'Install dependencies'"),
+    );
 
     const configureAction = readFileSync(
       path.join(ROOT, CONFIGURE_ACTION_PATH),
