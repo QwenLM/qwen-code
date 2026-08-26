@@ -547,6 +547,27 @@ export class TeamManager {
         throw new Error(`Teammate "${name}" failed to start: ${reason}`);
       }
 
+      // A healthy spawn is not proof the requested route materialized:
+      // InProcessBackend swallows per-agent ContentGenerator creation
+      // failures into a debug log and falls back to the leader's
+      // generator (#10071). Without this check the teammate would join
+      // while streaming the definition's model ID over the leader's
+      // route — the exact misrouting this PR fixes. Verify the
+      // dedicated generator exists and fail loudly so `rollback` tears
+      // the teammate down, matching the ordinary-subagent path, which
+      // surfaces the same failure as a spawn error.
+      if (subagentModelRoute && !config.model) {
+        const routeGenerator = this.backend.getAgentContentGenerator?.(agentId);
+        if (!routeGenerator) {
+          throw new Error(
+            `Teammate "${name}" failed to start: could not create a ` +
+              `dedicated ContentGenerator for model ` +
+              `"${subagentModelRoute.modelId}" ` +
+              `(${subagentModelRoute.authType})`,
+          );
+        }
+      }
+
       this.setupEventBridge(agentId, name);
       eventBridgeAttached = true;
 

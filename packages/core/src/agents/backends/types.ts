@@ -12,6 +12,7 @@
  */
 
 import type { Content } from '@google/genai';
+import type { ContentGenerator } from '../../core/contentGenerator.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
 import type {
   AgentStatus,
@@ -184,6 +185,16 @@ export interface Backend {
    * a handle and may omit this method.
    */
   getAgent?(agentId: string): TeamAgentHandle | undefined;
+
+  /**
+   * Get the dedicated ContentGenerator an in-process agent was spawned
+   * with, when the backend created one for an explicitly requested
+   * per-agent route. Lets spawn callers verify a requested route
+   * actually materialized instead of silently falling back to the
+   * parent's generator. PTY-based backends run each agent in its own
+   * process and may omit this method.
+   */
+  getAgentContentGenerator?(agentId: string): ContentGenerator | undefined;
 
   /**
    * Stop all running agents.
