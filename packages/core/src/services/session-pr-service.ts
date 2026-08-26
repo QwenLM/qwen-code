@@ -149,11 +149,16 @@ export async function writeSessionPrs(
 // `gh pr create` must START a command segment: a search like
 // `grep -rn 'gh pr create'` mentions the phrase as an argument and must not
 // count, while `cd /w && gh pr create` or `FOO=bar gh pr create | tee log`
-// do. This is only the execution gate — it cannot attribute any printed URL
-// to gh's own run, so callers must verify the binding with gh itself before
-// persisting it.
+// do. Wrapper prefixes (sudo/env/nohup/command with up to two flags),
+// path-qualified binaries (`/usr/bin/gh`, `~/bin/gh.cmd`) and the `pr new`
+// alias are verified-real creation shapes; quote-awareness stays
+// approximate because the shell-aware tokenizer lives in tools/shell.ts
+// and cannot be imported here without pulling it into the serve bundle
+// closure. This is only the execution gate — it cannot attribute a printed
+// URL to gh's own run, so callers must verify the binding with gh itself
+// before persisting it.
 const GH_PR_CREATE_SEGMENT_PATTERN =
-  /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*gh(?:\.exe)?\s+pr\s+create\b/;
+  /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:(?:sudo|env|nohup|command)\s+(?:-\S+(?:\s+\S+)?\s+|[A-Za-z_][A-Za-z0-9_]*=\S+\s+){0,3})?(?:[/~][^\s]*[/])?gh(?:\.exe|\.cmd|\.bat)?\s+pr\s+(?:create|new)\b/;
 
 export function commandRunsGhPrCreate(command: string): boolean {
   return (

@@ -673,6 +673,20 @@ describe('commandRunsGhPrCreate', () => {
     ).toBe(true);
   });
 
+  it('matches wrapper prefixes, path-qualified binaries, and the new alias', () => {
+    expect(commandRunsGhPrCreate('sudo gh pr create --fill')).toBe(true);
+    expect(commandRunsGhPrCreate('sudo -u runner gh pr create --fill')).toBe(
+      true,
+    );
+    expect(
+      commandRunsGhPrCreate('env GITHUB_TOKEN=x gh pr create --fill'),
+    ).toBe(true);
+    expect(commandRunsGhPrCreate('nohup gh pr create --fill')).toBe(true);
+    expect(commandRunsGhPrCreate('/usr/bin/gh pr create --fill')).toBe(true);
+    expect(commandRunsGhPrCreate('~/bin/gh.cmd pr create --fill')).toBe(true);
+    expect(commandRunsGhPrCreate('gh pr new --fill')).toBe(true);
+  });
+
   it('returns false when the command is not gh pr create', () => {
     expect(commandRunsGhPrCreate('gh pr view 1')).toBe(false);
     expect(commandRunsGhPrCreate('git commit -m gh')).toBe(false);
