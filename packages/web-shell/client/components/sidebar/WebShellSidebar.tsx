@@ -894,6 +894,9 @@ export function WebShellSidebar({
   );
   const [sessionSource, setSessionSource] =
     useState<SidebarSessionSource>('default');
+  useEffect(() => {
+    if (!showSessionSourceSwitch) setSessionSource('default');
+  }, [showSessionSourceSwitch]);
   const selectedSessionSource = sourceMetadataEnabled
     ? showSessionSourceSwitch
       ? sessionSource

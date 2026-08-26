@@ -3573,6 +3573,12 @@ describe('WebShellSidebar session source switch', () => {
           options?.archiveState === 'active' && options.group !== 'pinned',
       )?.[0]?.sourceType,
     ).toBe('default');
+
+    renderSidebar();
+    const tasksTab = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    ).find((button) => button.textContent?.trim() === 'Tasks');
+    expect(tasksTab?.getAttribute('data-state')).toBe('active');
   });
 
   it('never renders primary sessions from the inactive source', async () => {
