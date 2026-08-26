@@ -1,0 +1,137 @@
+name: Apply fix for issue 10192
+
+on:
+  push:
+    branches:
+      - fix/10192-env-assignment-substitution
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply env-assignment substitution fix and regressions
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          from textwrap import dedent
+
+          source = Path('packages/core/src/permissions/rule-parser.ts')
+          text = source.read_text()
+
+          import_anchor = "import { isNodeError } from '../utils/errors.js';\n"
+          import_line = "import { hasShellSubstitution } from '../utils/shell-utils.js';\n"
+          if import_line not in text:
+              if import_anchor not in text:
+                  raise SystemExit('rule-parser import anchor not found')
+              text = text.replace(import_anchor, import_anchor + import_line, 1)
+
+          old = "  const normalizedCommand = stripLeadingVariableAssignments(command);\n"
+          new = dedent('''\
+            // Leading environment assignments are compatibility-normalized so a
+            // static `FOO=bar npm --version` can match `Bash(npm --version)`.
+            // Never apply that widening when the raw command carries shell
+            // substitution: stripping the assignment would hide execution that
+            // happens before the trusted main command (#10192).
+            const normalizedCommand = hasShellSubstitution(command)
+              ? command.trim()
+              : stripLeadingVariableAssignments(command);
+          ''')
+          if old not in text:
+              raise SystemExit('normalizedCommand anchor not found')
+          text = text.replace(old, new, 1)
+          source.write_text(text)
+
+          test = Path('packages/core/src/permissions/env-assignment-substitution.test.ts')
+          test.write_text(dedent('''\
+            /**
+             * @license
+             * Copyright 2026 Qwen
+             * SPDX-License-Identifier: Apache-2.0
+             */
+
+            import { describe, expect, it } from 'vitest';
+            import { PermissionManager } from './permission-manager.js';
+            import type { PermissionManagerConfig } from './permission-manager.js';
+            import { matchesCommandPattern } from './rule-parser.js';
+
+            function makeConfig(allow: string[]): PermissionManagerConfig {
+              return {
+                getPermissionsAllow: () => allow,
+                getPermissionsAsk: () => [],
+                getPermissionsDeny: () => [],
+                getProjectRoot: () => '/repo',
+                getCwd: () => '/repo',
+                getApprovalMode: () => 'default',
+              };
+            }
+
+            describe('leading env assignment substitution permissions (#10192)', () => {
+              it('keeps static env-prefix compatibility', () => {
+                expect(
+                  matchesCommandPattern(
+                    'npm --version',
+                    'FOO=bar npm --version',
+                  ),
+                ).toBe(true);
+                expect(
+                  matchesCommandPattern(
+                    'npm --version',
+                    "FOO='$(literal)' npm --version",
+                  ),
+                ).toBe(true);
+              });
+
+              it.each([
+                'X=$(printf hidden) npm --version',
+                'X=`printf hidden` npm --version',
+                'X="$(printf hidden)" npm --version',
+              ])('does not strip an env prefix containing substitution: %s', (command) => {
+                expect(matchesCommandPattern('npm --version', command)).toBe(false);
+              });
+
+              it('does not let a saved Bash allow downgrade substitution to allow', async () => {
+                const pm = new PermissionManager(
+                  makeConfig(['Bash(npm --version)']),
+                );
+                pm.initialize();
+
+                await expect(
+                  pm.evaluate({
+                    toolName: 'run_shell_command',
+                    command: 'X=$(printf hidden) npm --version',
+                    cwd: '/repo',
+                  }),
+                ).resolves.toBe('ask');
+              });
+            });
+          '''))
+          PY
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run focused tests
+        run: npx vitest run packages/core/src/permissions/env-assignment-substitution.test.ts packages/core/src/permissions/permission-manager.test.ts packages/core/src/utils/shell-utils.test.ts
+
+      - name: Commit fix
+        shell: bash
+        run: |
+          git config user.name "SLP-DEV1"
+          git config user.email "298325363+SLP-DEV1@users.noreply.github.com"
+          git rm .github/workflows/apply-fix-10192.yml
+          git add packages/core/src/permissions/rule-parser.ts packages/core/src/permissions/env-assignment-substitution.test.ts
+          git commit -m "fix(permissions): preserve substitution-bearing env prefixes"
+          git push origin HEAD
