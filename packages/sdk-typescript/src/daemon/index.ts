@@ -598,6 +598,7 @@ export type {
   DaemonSessionTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionStatsModelMetrics,
+  DaemonSessionStatsSource,
   DaemonSessionStatsToolByName,
   DaemonUsageRange,
   DaemonUsageDashboard,

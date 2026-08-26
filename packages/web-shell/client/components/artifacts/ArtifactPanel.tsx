@@ -17,6 +17,7 @@ import {
   CirclePlusIcon,
   Code2Icon,
   EyeIcon,
+  GaugeIcon,
   ImageIcon,
   Maximize2Icon,
   MessageCirclePlusIcon,
@@ -88,6 +89,7 @@ import styles from './ArtifactPanel.module.css';
 import { CodeReviewArtifactDetail } from './CodeReviewArtifactDetail';
 import { SubagentDetail } from './SubagentDetail';
 import { SideTaskPanel } from './SideTaskPanel';
+import { TokenUsagePanel } from './TokenUsagePanel';
 import {
   useArtifactWorkspaceTarget,
   type ArtifactWorkspaceActions,
@@ -197,6 +199,14 @@ export type ArtifactPanelTab =
       workspaceCwd?: string;
       nameFromFirstPrompt?: boolean;
       initialPrompt?: string;
+    }
+  | {
+      id: string;
+      kind: 'token_usage';
+      title: string;
+      sessionId?: string;
+      sessionActions?: DaemonSessionActions;
+      closeWithPane?: boolean;
     };
 
 type WorkspaceScopedArtifactPanelTab = Extract<
@@ -447,6 +457,11 @@ export function ArtifactPanel({
                       />
                     ) : tab.kind === 'image' ? (
                       <ImageIcon
+                        className={styles.tabIconSvg}
+                        strokeWidth={1.6}
+                      />
+                    ) : tab.kind === 'token_usage' ? (
+                      <GaugeIcon
                         className={styles.tabIconSvg}
                         strokeWidth={1.6}
                       />
@@ -826,6 +841,12 @@ export function ArtifactPanel({
               <DownloadIcon size={16} strokeWidth={1.8} />
             </a>
           </div>
+        ) : activeTab.kind === 'token_usage' ? (
+          <TokenUsagePanel
+            key={activeTab.id}
+            sessionActions={activeTab.sessionActions}
+            sessionId={activeTab.sessionId}
+          />
         ) : (
           <ScheduledTaskDetail
             key={activeTab.id}
