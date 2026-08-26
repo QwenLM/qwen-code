@@ -150,6 +150,7 @@ export type {
   DaemonSessionContextUsage,
   DaemonSessionContextUsageStatus,
   DaemonSessionStatsModelMetrics,
+  DaemonSessionStatsSource,
   DaemonSessionStatsStatus,
   DaemonSessionStatsToolByName,
   DaemonSessionSummary,
