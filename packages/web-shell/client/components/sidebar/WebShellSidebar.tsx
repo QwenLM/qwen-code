@@ -3972,15 +3972,16 @@ export function WebShellSidebar({
       const isCurrent = isCurrentSession(session);
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
-      const attentionLabel = session.isWaitingForPermission
-        ? t('sidebar.waitingForApproval')
+      const attention = session.isWaitingForPermission
+        ? {
+            full: t('sidebar.waitingForApproval'),
+            short: t('sidebar.waitingForApprovalShort'),
+          }
         : needsUserInput
-          ? t('sidebar.userInputNeeded')
-          : null;
-      const attentionShortLabel = session.isWaitingForPermission
-        ? t('sidebar.waitingForApprovalShort')
-        : needsUserInput
-          ? t('sidebar.userInputNeededShort')
+          ? {
+              full: t('sidebar.userInputNeeded'),
+              short: t('sidebar.userInputNeededShort'),
+            }
           : null;
       const showPin = canOrganizeSession(session, 'pin');
       const showArchive =
@@ -4080,15 +4081,15 @@ export function WebShellSidebar({
                     : undefined
                 }
               >
-                {attentionLabel && (
+                {attention && (
                   <span
                     className={cx(
                       styles.sessionAttention,
                       needsUserInput && styles.sessionAttentionUserInput,
                     )}
-                    aria-label={attentionLabel}
+                    aria-label={attention.full}
                   >
-                    {attentionShortLabel}
+                    {attention.short}
                   </span>
                 )}
                 {session.hasActivePrompt ? (
@@ -4096,7 +4097,7 @@ export function WebShellSidebar({
                     className={styles.sessionLoading}
                     aria-label={t('sidebar.running')}
                   />
-                ) : !attentionLabel && gitIcon ? (
+                ) : !attention && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
                 ) : null}
                 {(showPin ||
