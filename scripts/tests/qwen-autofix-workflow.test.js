@@ -10772,21 +10772,36 @@ exit 1
     // in the same loop — one preamble shape, one edit site: a planted
     // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
     // collaborator-permission lookups into a local socket.
-    for (const [step, firstGh] of [
-      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
-      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
-      [prepareStep, 'PR_LIVE="$(gh pr view'],
-      [routeStep, 'gh api "repos/${REPO}/collaborators'],
-      [reviewScanJob, 'gh pr view'],
+    for (const [step, firstGh, guardedMint] of [
+      [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', false],
+      [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user', false],
+      [prepareStep, 'PR_LIVE="$(gh pr view', false],
+      [routeStep, 'gh api "repos/${REPO}/collaborators', true],
+      [reviewScanJob, 'gh pr view', true],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
       expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
       // GH_CONFIG_DIR is PINNED to a fresh throwaway (unsetting it falls
       // back to the attacker-writable ~/.config/gh with http_unix_socket).
-      expect(step).toContain(
-        'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
-      );
+      // route and review-scan additionally guard the mint itself: `export
+      // VAR="$(mktemp ...)"` reports export's status, not the
+      // substitution's, so a failing mktemp would sail through bash -e with
+      // an empty value — gh's unset fallback — unless the assignment is
+      // checked before export. The behavioural witness below turns red when
+      // the guard goes; the heavy jobs' older preambles predate the guard
+      // and are pinned in their current shape.
+      if (guardedMint) {
+        const guard =
+          'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then';
+        expect(step).toContain(guard);
+        expect(step).toMatch(/exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/);
+        expect(step.indexOf(guard)).toBeLessThan(step.indexOf(firstGh));
+      } else {
+        expect(step).toContain(
+          'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
+        );
+      }
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
     }
@@ -11007,6 +11022,111 @@ exit 1
       }).stdout,
     ).not.toContain('xdg-evil');
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('aborts route and review-scan before any gh call when the gh config dir cannot be minted', () => {
+    // Behavioural witness for the guarded-mint pin above: without the guard,
+    // `export VAR="$(mktemp ...)"` reports export's status, not the
+    // substitution's, so a failing mktemp sails through bash -e with an
+    // empty GH_CONFIG_DIR and the step calls gh against the shared
+    // ~/.config/gh fallback — the reroute hole the preamble closes. Run each
+    // step under a mktemp that refuses ONLY the gh-config template (later
+    // plain mktemp calls must keep working so the unguarded mutant provably
+    // reaches gh) and a gh stub that records every call: the step must fail
+    // loud before the first record. Probed: restoring the unguarded export
+    // makes both cases record a gh call and drop the ::error abort.
+    const realMktemp = spawnSync('bash', ['-c', 'command -v mktemp'], {
+      encoding: 'utf8',
+    }).stdout.trim();
+    const cases = [
+      {
+        name: 'route',
+        // The managed-PR review lane reaches the collaborator-permission
+        // lookup (the first gh call) fastest.
+        block: routeStep.match(/run: \|-\n([\s\S]*)$/)?.[1],
+        env: {
+          EVENT_NAME: 'pull_request_review',
+          REPO: 'QwenLM/qwen-code',
+          PR_BASE_REF: 'main',
+          PR_HEAD_REPO: 'QwenLM/qwen-code',
+          PR_AUTHOR: 'qwen-code-dev-bot',
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+          REVIEW_BOT: 'qwen-code-ci-bot',
+          SENDER_LOGIN: 'qqqys',
+        },
+      },
+      {
+        name: 'review-scan',
+        // A forced PR reaches `gh pr view` through read_forced_pr_meta.
+        block: reviewScanJob.match(
+          /- name: 'Scan for PRs with new feedback'[\s\S]*?run: \|-\n([\s\S]*?)(?=\n {6}- name: ')/,
+        )?.[1],
+        env: {
+          EVENT_NAME: 'schedule',
+          FORCED_PR: '1234',
+          REPO: 'QwenLM/qwen-code',
+          GITHUB_TOKEN: 'pat',
+        },
+      },
+    ];
+    for (const { name, block, env } of cases) {
+      expect(block, name).toBeTruthy();
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-ghcfg-'));
+      try {
+        const bin = join(dir, 'bin');
+        mkdirSync(bin);
+        writeFileSync(
+          join(bin, 'mktemp'),
+          [
+            '#!/bin/bash',
+            'for a in "$@"; do',
+            '  case "$a" in *autofix-gh-config*) echo "mktemp: simulated failure: $a" >&2; exit 1 ;; esac',
+            'done',
+            `exec '${realMktemp}' "$@"`,
+            '',
+          ].join('\n'),
+        );
+        const callsFile = join(dir, 'gh-calls');
+        writeFileSync(
+          join(bin, 'gh'),
+          `#!/bin/bash\nprintf '%s\\n' "$*" >> '${callsFile}'\nexit 0\n`,
+        );
+        chmodSync(join(bin, 'mktemp'), 0o755);
+        chmodSync(join(bin, 'gh'), 0o755);
+        const proc = spawnSync(
+          'bash',
+          [
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            // The scan's forced-PR retry loop sleeps between attempts on the
+            // mutant path; keep the probe fast without touching the block.
+            `sleep() { :; }\n${block.replace(/^ {10}/gm, '')}`,
+          ],
+          {
+            env: {
+              PATH: `${bin}:${process.env.PATH}`,
+              RUNNER_TEMP: dir,
+              WORKDIR: join(dir, 'workdir'),
+              GITHUB_OUTPUT: join(dir, 'github-output'),
+              ...env,
+            },
+            encoding: 'utf8',
+          },
+        );
+        expect(proc.stdout, name).toContain(
+          '::error::could not create gh config dir',
+        );
+        expect(proc.status, name).not.toBe(0);
+        expect(
+          existsSync(callsFile),
+          `${name} called gh after a failed gh-config mktemp`,
+        ).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   it('runs both verification gates under a throwaway global git config', () => {

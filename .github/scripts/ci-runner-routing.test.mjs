@@ -448,14 +448,16 @@ describe('qwen-autofix.yml scan-lane runner routing', () => {
   for (const jobName of ['route', 'review-scan']) {
     const runsOn = String(autofixDoc.jobs[jobName]['runs-on']);
 
-    it(`${jobName} reaches the persistent pool on schedule, dispatch, and issue_comment`, () => {
-      // issue_comment is route's /takeover and /retry lane — pin it beside
-      // the cron and dispatch triggers so a later event-allowlist narrowing
-      // of the pool clause cannot silently demote it back to hosted.
+    it(`${jobName} reaches the persistent pool on schedule, dispatch, issue_comment, and issues`, () => {
+      // issue_comment is route's /takeover and /retry lane, issues its
+      // label/assign trigger lane for issue-autofix — pin both beside the
+      // cron and dispatch triggers so a later event-allowlist narrowing of
+      // the pool clause cannot silently demote either back to hosted.
       for (const eventName of [
         'schedule',
         'workflow_dispatch',
         'issue_comment',
+        'issues',
       ]) {
         assert.deepEqual(
           evalRunsOn(runsOn, {

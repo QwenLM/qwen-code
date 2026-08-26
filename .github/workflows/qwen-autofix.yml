@@ -267,7 +267,15 @@ jobs:
           # Mirrors the heavy jobs' preamble. Full rationale → qwen-autofix.md#af-148
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step, not continue
+          # with an empty GH_CONFIG_DIR that gh treats as unset — falling back
+          # to the shared ~/.config/gh this preamble closes.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
           DO_ISSUE=false
           DO_REVIEW=false
           TAKEOVER_ACK=''
@@ -2109,7 +2117,15 @@ jobs:
           # Full rationale → qwen-autofix.md#af-148
           export GH_HOST=github.com
           unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
+          # `export VAR="$(...)"` reports export's status, not the
+          # substitution's: a failing mktemp must abort the step, not continue
+          # with an empty GH_CONFIG_DIR that gh treats as unset — falling back
+          # to the shared ~/.config/gh this preamble closes.
+          if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
+            echo "::error::could not create gh config dir; refusing to run gh without reroute hardening"
+            exit 1
+          fi
+          export GH_CONFIG_DIR
 
           # Every lane that reaches this scan is supposed to hold the PAT:
           # route now declines the one event GitHub is known to run without
