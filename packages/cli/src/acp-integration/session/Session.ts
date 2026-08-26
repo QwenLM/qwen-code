@@ -216,6 +216,7 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
+  AUTO_REJECT_APPROVAL_PAYLOAD,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -2718,10 +2719,7 @@ export class Session implements SessionContext {
         runId,
         approval.approvalId,
         ToolConfirmationOutcome.Cancel,
-        {
-          cancelMessage:
-            'Workflow approval was cancelled before it could be answered.',
-        },
+        AUTO_REJECT_APPROVAL_PAYLOAD,
       );
       await this.#finishWorkflowApprovalToolCall(
         approval,

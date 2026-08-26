@@ -148,7 +148,7 @@ export function isTerminalWorkflowStatus(
 export const MAX_PENDING_WORKFLOW_APPROVALS = 32;
 export const MAX_WORKFLOW_APPROVAL_DISPLAY_CHARS = 64 * 1024;
 
-const AUTO_REJECT_APPROVAL_PAYLOAD: ToolConfirmationPayload = {
+export const AUTO_REJECT_APPROVAL_PAYLOAD: ToolConfirmationPayload = {
   cancelMessage: 'Workflow approval was cancelled before it could be answered.',
 };
 

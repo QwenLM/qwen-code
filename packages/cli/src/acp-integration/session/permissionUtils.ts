@@ -14,6 +14,22 @@ import type {
   ToolCallContent,
 } from '@agentclientprotocol/sdk';
 import { DAEMON_PERMISSION_CANCEL_REASON_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
+import type { PermissionResolution } from '@qwen-code/acp-bridge';
+
+type DaemonPermissionCancelReason = Extract<
+  PermissionResolution,
+  { kind: 'cancelled' }
+>['reason'];
+
+function isDaemonPermissionCancelReason(
+  reason: string,
+): reason is DaemonPermissionCancelReason {
+  return (
+    reason === 'timeout' ||
+    reason === 'session_closed' ||
+    reason === 'agent_cancelled'
+  );
+}
 
 const basicPermissionOptions = [
   {
@@ -130,9 +146,11 @@ export function interactionMetaFields(
 
 export function permissionCancelReasonFromResponse(
   response: RequestPermissionResponse,
-): string | undefined {
+): DaemonPermissionCancelReason | undefined {
   const reason = response._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
-  return typeof reason === 'string' && reason.length > 0 ? reason : undefined;
+  return typeof reason === 'string' && isDaemonPermissionCancelReason(reason)
+    ? reason
+    : undefined;
 }
 
 export function permissionCancelMessageFromResponse(
@@ -140,8 +158,6 @@ export function permissionCancelMessageFromResponse(
 ): string | undefined {
   const reason = permissionCancelReasonFromResponse(response);
   switch (reason) {
-    case 'approval_ui_unavailable':
-      return 'Permission request was cancelled because the approval UI was unavailable.';
     case 'timeout':
       return 'Permission request timed out before the user answered.';
     case 'session_closed':

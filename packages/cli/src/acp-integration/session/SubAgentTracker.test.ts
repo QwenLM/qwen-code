@@ -578,7 +578,7 @@ describe('SubAgentTracker', () => {
       requestPermissionSpy.mockResolvedValue({
         outcome: { outcome: 'cancelled' },
         _meta: {
-          'qwen.daemon.permissionCancelReason': 'approval_ui_unavailable',
+          'qwen.daemon.permissionCancelReason': 'timeout',
         },
       });
       tracker.setup(eventEmitter, abortController.signal);
@@ -599,7 +599,7 @@ describe('SubAgentTracker', () => {
           {
             answers: undefined,
             cancelMessage:
-              'Permission request was cancelled because the approval UI was unavailable.',
+              'Permission request timed out before the user answered.',
           },
         );
       });
