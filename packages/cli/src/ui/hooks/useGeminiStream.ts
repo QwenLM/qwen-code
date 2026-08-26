@@ -4535,7 +4535,11 @@ export const useGeminiStream = (
                                 parts,
                                 userMessageTimestamp,
                               )
-                            : { parts, preOverrideParts: undefined };
+                            : {
+                                parts,
+                                preOverrideParts: undefined,
+                                mediaRouted: undefined,
+                              };
                         return {
                           queryToSend: gated.parts,
                           shouldProceed,
