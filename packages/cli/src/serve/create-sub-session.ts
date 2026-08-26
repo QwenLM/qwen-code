@@ -53,7 +53,7 @@ import type {
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX } from '../runtime/scheduled-task-run.js';
+import { isScheduledTaskRunSource } from '@qwen-code/acp-bridge';
 
 const log = createDebugLogger('SUB_SESSION');
 
@@ -809,13 +809,11 @@ export function createSubSessionLauncher(
 
       try {
         bridge.updateSessionMetadata(sessionId, {
+          // A per-run scheduled task child is titled like its manual-run
+          // sibling (see the scheduled-task route): flat, no thread glyph.
           displayName: subSessionName(
             info.name ?? info.prompt,
-            !(
-              info.sourceType === 'default' &&
-              info.sourceId?.startsWith(SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX) ===
-                true
-            ),
+            !isScheduledTaskRunSource(info),
           ),
         });
       } catch (err) {

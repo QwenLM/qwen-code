@@ -2594,6 +2594,68 @@ describe('Session', () => {
     expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('runs a per-run scheduled task in the task session when the daemon cannot create a fresh one', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            prompt: 'review the next PR',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockRejectedValueOnce(
+      new Error('Method not found'),
+    );
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        // Untitled task: the child is named from the task prompt, never from
+        // the execution-context header.
+        expect.objectContaining({ name: 'review the next PR' }),
+      );
+    });
+    // The fire is not lost: it runs here, and the run record says so.
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+        sessionId: 'test-session-id',
+        dispatchFailed: true,
+      });
+    });
+    await vi.waitFor(() => {
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls[0]),
+    ).toContain('review the next PR');
+    expect(
+      JSON.stringify(vi.mocked(mockChat.sendMessageStream).mock.calls[0]),
+    ).not.toContain('Scheduled task:');
+  });
+
   it('does not resume automatic turns until an aborted prompt settles', async () => {
     let resolvePromptCompletion!: () => void;
     const promptCompletion = new Promise<void>((resolve) => {

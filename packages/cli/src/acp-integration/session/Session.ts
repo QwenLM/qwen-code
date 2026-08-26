@@ -204,6 +204,7 @@ import {
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
   buildGoalContinuationParts,
+  type CronRunSessionOutcome,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -7555,15 +7556,34 @@ export class Session implements SessionContext {
     });
   }
 
+  /**
+   * Runs a per-run scheduled fire in a fresh child session created through the
+   * daemon. The scheduler has already booked the run; this attributes it to the
+   * child that accepted it. If the daemon cannot create the child, the fire
+   * falls back to this (persistent) session so it is not lost — a consumed
+   * one-shot has no scheduled retry — and the run record keeps the failure
+   * marker alongside the session it actually ran in.
+   */
   async #dispatchCronToFreshSession(job: CronFire): Promise<void> {
     const scheduler = this.config.getCronScheduler();
+    const taskId = job.id ?? 'unknown';
+    const record = async (outcome: CronRunSessionOutcome): Promise<void> => {
+      if (!job.id || job.lastFiredAt === undefined) return;
+      await scheduler
+        .annotateRunSession(job.id, job.lastFiredAt, outcome)
+        .catch((error) => {
+          debugLogger.warn(
+            `Scheduled task ${taskId} could not record its run session: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+    };
     let sessionId: string;
     try {
       const response = await this.client.extMethod(
         SERVE_CONTROL_EXT_METHODS.createSubSession,
         {
           prompt: buildScheduledTaskRunPrompt({
-            id: job.id ?? 'unknown',
+            id: taskId,
             name: job.name,
             cron: job.cronExpr ?? '',
             prompt: job.prompt,
@@ -7571,7 +7591,9 @@ export class Session implements SessionContext {
             trigger: 'scheduled',
           }),
           completion: 'sent',
-          ...(job.name ? { name: job.name } : {}),
+          // Title the child from the task, not from the built prompt whose
+          // first line is the execution-context header.
+          name: job.name ?? job.prompt,
           ...(job.id
             ? {
                 sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
@@ -7589,31 +7611,22 @@ export class Session implements SessionContext {
         throw new Error('bridge returned a missing session id');
       }
       sessionId = responseSessionId;
-      this.relatedAgentIds.add(sessionId);
     } catch (error) {
       debugLogger.warn(
-        `Scheduled task ${job.id ?? 'unknown'} could not create a fresh session: ${error instanceof Error ? error.message : String(error)}`,
+        `Scheduled task ${taskId} could not create a fresh session, running it in the task session instead: ${error instanceof Error ? error.message : String(error)}`,
       );
-      if (job.id && job.lastFiredAt !== undefined) {
-        await scheduler
-          .annotateRunSession(job.id, job.lastFiredAt, { failed: true })
-          .catch((persistError) => {
-            debugLogger.warn(
-              `Scheduled task ${job.id} could not record its session dispatch failure: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
-            );
-          });
-      }
+      await record({ sessionId: this.sessionId, dispatchFailed: true });
+      this.#enqueueCronPrompt({
+        prompt: job.prompt,
+        source: 'cron',
+        ...(job.id ? { taskId: job.id } : {}),
+        ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
+      });
+      void this.#drainCronQueue();
       return;
     }
-    if (job.id && job.lastFiredAt !== undefined) {
-      await scheduler
-        .annotateRunSession(job.id, job.lastFiredAt, { sessionId })
-        .catch((persistError) => {
-          debugLogger.warn(
-            `Scheduled task ${job.id} could not record its fresh session ${sessionId}: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
-          );
-        });
-    }
+    this.relatedAgentIds.add(sessionId);
+    await record({ sessionId });
   }
 
   #startCronSchedulerInRuntime(): Promise<void> {

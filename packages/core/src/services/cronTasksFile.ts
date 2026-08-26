@@ -131,6 +131,35 @@ export interface DurableCronTask {
  * that predates the field. Shared by every scheduler persist site so the cap
  * is enforced in exactly one place.
  */
+/** How a per-run fire's fresh-session dispatch ended: the session the run
+ * actually executes in, and whether creating a fresh one failed first. */
+export interface CronRunSessionOutcome {
+  sessionId?: string;
+  dispatchFailed?: boolean;
+}
+
+/**
+ * Stamps a fresh-session dispatch outcome onto the run recorded at `firedAt`.
+ * Returns the task unchanged when no such run exists (one-shots are deleted on
+ * fire, and a run whose write has not landed yet has nothing to annotate).
+ */
+export function annotateCronRunSession(
+  task: DurableCronTask,
+  firedAt: number,
+  outcome: CronRunSessionOutcome,
+): DurableCronTask {
+  const index = task.runs?.findIndex((run) => run.at === firedAt) ?? -1;
+  if (index < 0 || !task.runs) return task;
+  const run: CronTaskRun = { ...task.runs[index]! };
+  delete run.sessionId;
+  delete run.sessionDispatchFailed;
+  if (outcome.sessionId) run.sessionId = outcome.sessionId;
+  if (outcome.dispatchFailed) run.sessionDispatchFailed = true;
+  const runs = [...task.runs];
+  runs[index] = run;
+  return { ...task, runs };
+}
+
 export function appendCronRun(
   runs: CronTaskRun[] | undefined,
   entry: CronTaskRun,

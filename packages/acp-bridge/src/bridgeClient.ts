@@ -72,7 +72,10 @@ import {
 } from './bridgeOptions.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
-import { parseSessionSource } from './session-source.js';
+import {
+  isScheduledTaskRunSource,
+  parseSessionSource,
+} from './session-source.js';
 // Narrowed from the concrete `MultiClientPermissionMediator` to the
 // sub-interface this class actually uses (`request` only). Structural
 // typing lets the bridge factory pass the full mediator instance
@@ -99,7 +102,12 @@ import {
 
 const MAX_SCHEDULED_TASK_CRON_CHARS = 200;
 const MAX_SCHEDULED_TASK_PROMPT_CHARS = 100_000;
-const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
+/**
+ * A per-run scheduled task prompt is the task's own prompt (already capped at
+ * the same ceiling by the scheduled-task REST route) plus a short execution
+ * context header. Allow that header on top of the ceiling so a task written at
+ * the limit still dispatches.
+ */
 const SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS = 1024;
 
 /**
@@ -1827,12 +1835,9 @@ export class BridgeClient implements Client {
     if ('error' in source) {
       throw RequestError.invalidParams(undefined, source.error);
     }
-    const promptLimit =
-      source.sourceType === 'default' &&
-      source.sourceId?.startsWith(SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX)
-        ? MAX_SUB_SESSION_PROMPT_CHARS +
-          SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS
-        : MAX_SUB_SESSION_PROMPT_CHARS;
+    const promptLimit = isScheduledTaskRunSource(source)
+      ? MAX_SUB_SESSION_PROMPT_CHARS + SCHEDULED_TASK_RUN_CONTEXT_HEADROOM_CHARS
+      : MAX_SUB_SESSION_PROMPT_CHARS;
     // The child is a separate process; this is a trust boundary. Without a cap
     // it can hand the daemon a multi-MB string to deserialize, copy for the
     // display name, and dispatch into a new session. Same ceiling the

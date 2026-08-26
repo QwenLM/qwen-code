@@ -12,9 +12,14 @@ import { matches, nextFireTime, parseCron } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { CronTaskDelivery, DurableCronTask } from './cronTasksFile.js';
+import type {
+  CronRunSessionOutcome,
+  CronTaskDelivery,
+  DurableCronTask,
+} from './cronTasksFile.js';
 import {
   addCronTask,
+  annotateCronRunSession,
   CRON_TASKS_DISPLAY_PATH,
   appendCronRun,
   generateCronTaskId,
@@ -1255,12 +1260,12 @@ export class CronScheduler {
     return true;
   }
 
-  /** Attributes an already-persisted per-run fire to the fresh session that
-   * accepted it, or marks session creation as failed. */
+  /** Attributes an already-persisted per-run fire to the session it ran in,
+   * and/or marks its fresh-session creation as failed. */
   async annotateRunSession(
     taskId: string,
     firedAt: number,
-    outcome: { sessionId: string } | { failed: true },
+    outcome: CronRunSessionOutcome,
   ): Promise<void> {
     if (!this.projectRoot) return;
     // The onFire callback runs before tick() queues its run-history write.
@@ -1268,22 +1273,11 @@ export class CronScheduler {
     await Promise.resolve();
     await this.pendingPersist;
     await updateCronTasks(this.projectRoot, (tasks) =>
-      tasks.map((task) => {
-        if (task.id !== taskId || !task.runs) return task;
-        const index = task.runs.findIndex((run) => run.at === firedAt);
-        if (index < 0) return task;
-        const runs = [...task.runs];
-        const run = { ...runs[index]! };
-        if ('sessionId' in outcome) {
-          run.sessionId = outcome.sessionId;
-          delete run.sessionDispatchFailed;
-        } else {
-          delete run.sessionId;
-          run.sessionDispatchFailed = true;
-        }
-        runs[index] = run;
-        return { ...task, runs };
-      }),
+      tasks.map((task) =>
+        task.id === taskId
+          ? annotateCronRunSession(task, firedAt, outcome)
+          : task,
+      ),
     );
   }
 

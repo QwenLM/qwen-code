@@ -37,6 +37,7 @@ import {
   updateCronTasks,
   generateCronTaskId,
   appendCronRun,
+  annotateCronRunSession,
   taskHasLegacyCondition,
   parseCron,
   nextFireTime,
@@ -45,6 +46,7 @@ import {
   Storage,
   stripTerminalControlSequences,
   MAX_JOBS,
+  type CronRunSessionOutcome,
   type CronTaskDelivery,
   type DurableCronTask,
   type CronTaskRun,
@@ -129,22 +131,14 @@ export interface ScheduledTasksSessionBridge {
 // prompt (which can be up to MAX_PROMPT_LENGTH).
 const MAX_SESSION_NAME_LENGTH = 60;
 
-/** Builds a readable session name for a task from its name (or prompt). Strips
- * terminal control sequences (C0/C1/DEL/ANSI) — the bridge's title guard REJECTS
+/** Builds a readable session name for a task — or one of its per-run child
+ * sessions — from its name (or prompt). Strips terminal control sequences (C0/C1/DEL/ANSI) — the bridge's title guard REJECTS
  * them, so an unsanitized control char would silently drop the whole rename and
  * leave a bare-id session — plus Unicode Bidi_Control marks (ALM/LRM/RLM,
  * embedding/override, isolates) as a Trojan-Source-style reordering defense for
  * the session list — and truncates on a code-point boundary so slicing can't
  * leave a lone surrogate rendered as `�`. */
 export function scheduledTaskSessionName(label: string): string {
-  return scheduledTaskNamedSession(label);
-}
-
-function scheduledTaskRunSessionName(label: string): string {
-  return scheduledTaskNamedSession(label);
-}
-
-function scheduledTaskNamedSession(label: string): string {
   const cleaned = stripTerminalControlSequences(label)
     // Unicode Bidi_Control marks: ALM (U+061C), LRM/RLM (U+200E/200F), the
     // embedding/override set (U+202A..U+202E), and the isolates (U+2066..U+2069).
@@ -481,7 +475,7 @@ async function dispatchTaskToFreshSession(
   );
   try {
     bridge.updateSessionMetadata(child.sessionId, {
-      displayName: scheduledTaskRunSessionName(task.name ?? task.prompt),
+      displayName: scheduledTaskSessionName(task.name ?? task.prompt),
     });
   } catch {
     // The prompt can still run with the generated session id as its label.
@@ -661,27 +655,6 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     runs: Array.isArray(task.runs) ? task.runs : [],
     ...(task.delivery !== undefined ? { delivery: task.delivery } : {}),
   };
-}
-
-function annotateTaskRunSession(
-  task: DurableCronTask,
-  firedAt: number,
-  outcome: { sessionId: string } | { failed: true },
-): DurableCronTask {
-  if (!task.runs) return task;
-  const index = task.runs.findIndex((run) => run.at === firedAt);
-  if (index < 0) return task;
-  const runs = [...task.runs];
-  const run = { ...runs[index]! };
-  if ('sessionId' in outcome) {
-    run.sessionId = outcome.sessionId;
-    delete run.sessionDispatchFailed;
-  } else {
-    delete run.sessionId;
-    run.sessionDispatchFailed = true;
-  }
-  runs[index] = run;
-  return { ...task, runs };
 }
 
 // Same validation cron_create runs: parseCron rejects malformed syntax,
@@ -1699,9 +1672,7 @@ function registerScheduledTaskCrudRoutes(
         return;
       }
       if (updated.sessionMode === 'per_run') {
-        const persistOutcome = async (
-          outcome: { sessionId: string } | { failed: true },
-        ) => {
+        const persistOutcome = async (outcome: CronRunSessionOutcome) => {
           if (!updated!.recurring) return;
           await runWithScheduledTaskTarget(target, () =>
             updateCronTasks(
@@ -1709,7 +1680,7 @@ function registerScheduledTaskCrudRoutes(
               (tasks) =>
                 tasks.map((task) =>
                   task.id === id
-                    ? annotateTaskRunSession(task, now, outcome)
+                    ? annotateCronRunSession(task, now, outcome)
                     : task,
                 ),
               { assertCanCommit: target.assertGenerationOpen },
@@ -1720,9 +1691,11 @@ function registerScheduledTaskCrudRoutes(
         try {
           childSessionId = await dispatchTaskToFreshSession(target, updated);
         } catch (error) {
-          updated = annotateTaskRunSession(updated, now, { failed: true });
+          updated = annotateCronRunSession(updated, now, {
+            dispatchFailed: true,
+          });
           if (updated.recurring) {
-            await persistOutcome({ failed: true }).catch(() => {});
+            await persistOutcome({ dispatchFailed: true }).catch(() => {});
           } else {
             // The mutation above consumed this one-shot before dispatch so it
             // could not race its scheduled slot. A synchronous admission
@@ -1744,7 +1717,7 @@ function registerScheduledTaskCrudRoutes(
           });
           return;
         }
-        updated = annotateTaskRunSession(updated, now, {
+        updated = annotateCronRunSession(updated, now, {
           sessionId: childSessionId,
         });
         await persistOutcome({ sessionId: childSessionId }).catch((error) => {

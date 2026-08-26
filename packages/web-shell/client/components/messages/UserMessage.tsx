@@ -74,6 +74,9 @@ interface ScheduledTaskRunContent {
   prompt: string;
 }
 
+// Mirrors `SCHEDULED_TASK_RUN_INSTRUCTION` in cli/src/runtime/scheduled-task-run.ts
+// (the client cannot import that package): the header `buildScheduledTaskRunPrompt`
+// puts ahead of the task's own instructions. Change both together.
 const SCHEDULED_TASK_RUN_INSTRUCTION =
   'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.';
 

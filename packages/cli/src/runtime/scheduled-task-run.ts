@@ -5,13 +5,18 @@
  */
 
 import { stripTerminalControlSequences } from '@qwen-code/qwen-code-core';
+import { SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX } from '@qwen-code/acp-bridge';
 
-export const SCHEDULED_TASK_RUN_SOURCE_TYPE = 'default';
-export const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
+export { SCHEDULED_TASK_RUN_SOURCE_TYPE } from '@qwen-code/acp-bridge';
 
 export function scheduledTaskRunSourceId(taskId: string): string {
   return `${SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX}${taskId}`;
 }
+
+/** Model-facing control sentence. The web-shell client matches it literally
+ * to render the run context as a card, so change both together. */
+export const SCHEDULED_TASK_RUN_INSTRUCTION =
+  'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.';
 
 function cleanMetadataLine(value: string): string {
   return stripTerminalControlSequences(value)
@@ -38,7 +43,7 @@ export function buildScheduledTaskRunPrompt(input: {
     `Trigger: ${input.trigger}`,
     'Session: new chat for this run',
     '',
-    'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.',
+    SCHEDULED_TASK_RUN_INSTRUCTION,
     '',
     input.prompt,
   ].join('\n');
