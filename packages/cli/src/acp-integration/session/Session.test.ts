@@ -491,6 +491,7 @@ describe('Session', () => {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
+    registerPermissionDeferredFactory: ReturnType<typeof vi.fn>;
     revealDeferredTool: ReturnType<typeof vi.fn>;
     pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
@@ -779,6 +780,7 @@ describe('Session', () => {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       registerTool: vi.fn(),
+      registerPermissionDeferredFactory: vi.fn(),
       revealDeferredTool: vi.fn(),
       pinDeferredToolReveal: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
@@ -8197,17 +8199,19 @@ describe('Session', () => {
       // rule, must keep it out of the declarations too — advertising a tool
       // whose every call ends in EXECUTION_DENIED is the pollution the
       // daemon-only gate exists to remove.
-      const isToolEnabled = vi.fn().mockResolvedValue(false);
+      const getToolRegistrationStatus = vi.fn().mockResolvedValue('disabled');
       mockConfig.getPermissionManager = vi
         .fn()
-        .mockReturnValue({ isToolEnabled });
+        .mockReturnValue({ getToolRegistrationStatus });
       mockConfig.getSubSessionSpawner = vi
         .fn()
         .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
 
       await registerCreateSubSessionTool(mockConfig);
 
-      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(getToolRegistrationStatus).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
       expect(mockToolRegistry.registerTool).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: 'create_sub_session' }),
       );
@@ -8217,23 +8221,45 @@ describe('Session', () => {
       // The PM-present path must consult the manager and then register: a
       // gate that skips whenever a manager exists would drop the tool from
       // every daemon session that runs with permission management on.
-      const isToolEnabled = vi.fn().mockResolvedValue(true);
+      const getToolRegistrationStatus = vi.fn().mockResolvedValue('registered');
       mockConfig.getPermissionManager = vi
         .fn()
-        .mockReturnValue({ isToolEnabled });
+        .mockReturnValue({ getToolRegistrationStatus });
       mockConfig.getSubSessionSpawner = vi
         .fn()
         .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
 
       await registerCreateSubSessionTool(mockConfig);
 
-      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(getToolRegistrationStatus).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
       expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'create_sub_session' }),
       );
       expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
         'create_sub_session',
       );
+    });
+
+    it('keeps permission-deferred create_sub_session behind ToolSearch', async () => {
+      const getToolRegistrationStatus = vi.fn().mockResolvedValue('deferred');
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue({ getToolRegistrationStatus });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(
+        mockToolRegistry.registerPermissionDeferredFactory,
+      ).toHaveBeenCalledWith('create_sub_session', expect.any(Function));
+      expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(mockToolRegistry.revealDeferredTool).not.toHaveBeenCalled();
+      expect(mockToolRegistry.pinDeferredToolReveal).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setTools).toHaveBeenCalledTimes(1);
     });
 
     it('wires the sub-session spawner only on daemon-backed sessions', () => {
@@ -19582,6 +19608,7 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          windDown: true,
           verifierFeedback: 'Need independent evidence',
         });
 
@@ -19610,6 +19637,11 @@ describe('Session', () => {
               expect.objectContaining({
                 text: expect.stringContaining(
                   'not evidence that the user supplied it',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'The autonomous token budget for this Goal window is spent.',
                 ),
               }),
               expect.objectContaining({
