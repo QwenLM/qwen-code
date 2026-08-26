@@ -1103,6 +1103,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
+      await moveDownAndWaitForSelection(stdin, lastFrame, 'Grok (xAI) API Key');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
       await pressEnterAndWaitFor(
         stdin,
