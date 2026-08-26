@@ -1029,6 +1029,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onNewSession?: () => Promise<boolean> | boolean;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onOpenAddWorkspace?: () => void;
+      showSessionSourceSwitch?: boolean;
     }) => {
       // Expose the Daemon Status / Session Overview openers so tests can
       // exercise those activePanel branches (neither has a slash command).
@@ -1037,6 +1038,9 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
         {
           'data-testid': 'sidebar',
           'data-collapsed': String(Boolean(props.collapsed)),
+          'data-show-session-source-switch': String(
+            props.showSessionSourceSwitch,
+          ),
         },
         React.createElement(
           'button',
@@ -17633,6 +17637,28 @@ describe('App session callbacks', () => {
     expect(panel).not.toBeNull();
     // The panelHost aria-label distinguishes which panel is up.
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
+  });
+
+  it('forwards the session-source switch customization to the sidebar', async () => {
+    const { container, rerender } = renderApp({
+      sidebar: { enabled: true, showSessionSourceSwitch: false },
+    });
+    await flush();
+
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-show-session-source-switch'),
+    ).toBe('false');
+
+    rerender({ sidebar: true });
+    await flush();
+
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-show-session-source-switch'),
+    ).toBe('true');
   });
 
   it('opens the split view from the sidebar', async () => {
