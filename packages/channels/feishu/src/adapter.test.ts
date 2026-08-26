@@ -633,6 +633,88 @@ describe('FeishuChannel', () => {
     });
   });
 
+  it('resolves reply-to-bot status before group mention gating', async () => {
+    const bridge = createMockBridge();
+    const channel = new FeishuChannel('test', createConfig(), bridge);
+    Object.assign(channel as unknown as Record<string, unknown>, {
+      tokenCache: {
+        token: 'test_token',
+        expiresAt: Date.now() + 3_600_000,
+      },
+    });
+    const fetchSpy = vi.spyOn(global, 'fetch').mockImplementation((input) => {
+      const url = String(input);
+      if (url.includes('/im/v1/messages/om_parent?')) {
+        return Promise.resolve(
+          jsonResponse({
+            data: {
+              items: [
+                {
+                  msg_type: 'text',
+                  body: {
+                    content: JSON.stringify({ text: 'previous bot reply' }),
+                  },
+                  sender: { sender_type: 'app' },
+                },
+              ],
+            },
+          }),
+        );
+      }
+      if (url.includes('/im/v1/messages/om_user_parent?')) {
+        return Promise.resolve(
+          jsonResponse({
+            data: {
+              items: [
+                {
+                  msg_type: 'text',
+                  body: { content: JSON.stringify({ text: 'user reply' }) },
+                  sender: { sender_type: 'user' },
+                },
+              ],
+            },
+          }),
+        );
+      }
+      return Promise.resolve(jsonResponse({ code: 0 }));
+    });
+    const reply = feishuGroupMessage('message_reply');
+    (reply['message'] as Record<string, unknown>)['parent_id'] = 'om_parent';
+
+    try {
+      getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+        channel,
+        reply,
+      );
+
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        'session-1',
+        expect.stringContaining('previous bot reply'),
+        expect.anything(),
+      );
+
+      const userReply = feishuGroupMessage('message_user_reply');
+      (userReply['message'] as Record<string, unknown>)['parent_id'] =
+        'om_user_parent';
+      getPrivateMethod<(data: unknown) => void>(channel, 'onMessage').call(
+        channel,
+        userReply,
+      );
+      await vi.waitFor(() =>
+        expect(
+          fetchSpy.mock.calls.filter(([input]) =>
+            String(input).includes('/im/v1/messages/om_user_parent?'),
+          ),
+        ).toHaveLength(1),
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   describe('observed contact enrichment', () => {
     it('resolves labels once and reuses them on later observations', async () => {
       const observe = vi.fn();

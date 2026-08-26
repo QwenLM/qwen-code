@@ -492,7 +492,7 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 - `/session new <name>` — Create and select a shared-workspace task
 - `/session new <name> --worktree` — Recognized but deferred to Part 4
 - `/session use <name>` — Select an open task or reopen a closed task
-- `/session cancel [<name>]` — Recognized but deferred to Part 3; use `/cancel` for the selected task
+- `/session cancel [<name>]` — Recognized but deferred to Part 3. Wait for the selected task to finish before switching; Telegram users can use `/cancel` for the selected task
 - `/session close <name>` — Close a task without deleting its transcript
 - `/loop add "<cron>" <prompt>` — Create a persistent scheduled channel loop
 - `/loop list` — List loops for the current chat
@@ -501,7 +501,7 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 
 All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent. Named-task commands are registered only when the mode is enabled, so `/sessions` remains agent-visible for existing configurations.
 
-These commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub), although loop creation also requires proactive delivery support for the current adapter and target.
+Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub). `/cancel` is currently registered only by Telegram, and loop creation requires proactive delivery support for the current adapter and target.
 
 ## Running
 

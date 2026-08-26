@@ -3148,7 +3148,7 @@ export abstract class ChannelBase {
           await this.sendThreadMessage(
             envelope.chatId,
             envelope.threadId,
-            'Named task cancellation is not available in Part 2 yet. Use /cancel for the selected task.',
+            'Named task cancellation is not available in Part 2 yet. Wait for the selected task to finish before switching; Telegram users can use /cancel.',
           );
           return true;
         default:

@@ -4111,6 +4111,9 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ text: '/session new review' }));
         await ch.handleInbound(envelope({ text: '/session new feature' }));
         await ch.handleInbound(envelope({ text: '/session close review' }));
+        expect(ch.sent.at(-1)!.text).toBe(
+          'Closed task "review". Selected "feature".',
+        );
         await ch.handleInbound(envelope({ text: '/session use review' }));
         expect(bridge.loadSession).toHaveBeenCalledWith(
           's-1',
@@ -4128,6 +4131,20 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ text: '/session current' }));
         expect(ch.sent.at(-1)!.text).toContain('Current task: review');
         expect(bridge.loadSession).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
+    it('reports the Part 2 cancellation boundary without promising /cancel on every adapter', async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), 'qwen-channel-named-'));
+      const ch = createChannel({ multiSession: true }, { stateDir });
+      try {
+        await ch.handleInbound(envelope({ text: '/session cancel' }));
+
+        expect(ch.sent.at(-1)!.text).toBe(
+          'Named task cancellation is not available in Part 2 yet. Wait for the selected task to finish before switching; Telegram users can use /cancel.',
+        );
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }

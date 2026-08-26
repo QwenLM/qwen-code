@@ -66,7 +66,9 @@ task timestamps advance monotonically even when several selections occur in
 one clock tick. Changes are committed by writing a unique same-directory
 temporary file followed by an atomic rename. A malformed or unsupported
 registry prevents the enabled channel from starting instead of silently
-replacing the ownership catalog.
+replacing the ownership catalog. A structurally valid catalog from a previous
+channel working directory is archived as stale and reset; legacy routes that
+point outside the current working directory are forgotten instead of adopted.
 
 ### Router primitives
 
@@ -118,8 +120,9 @@ cancellation and cleanup path for the retired session.
   messages ask the user to create or reopen a task.
 - `/session new <name> --worktree` is recognized but rejected with an
   actionable Part 4 message.
-- `/session cancel [<name>]` is recognized but deferred to Part 3. The existing
-  `/cancel` continues to cancel the selected task.
+- `/session cancel [<name>]` is recognized but deferred to Part 3. Telegram's
+  existing `/cancel` continues to cancel the selected task; other adapters
+  require the task to finish before switching.
 
 The first catalog operation or normal message adopts an existing legacy route
 as `default` without loading a replacement or changing its transcript. If no

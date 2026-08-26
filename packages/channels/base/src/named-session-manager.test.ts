@@ -100,7 +100,7 @@ describe('NamedSessionManager', () => {
     expect(bridge.loadSession).not.toHaveBeenCalled();
   });
 
-  it('refuses to adopt a legacy route outside the channel workspace', async () => {
+  it('forgets a legacy route outside the channel workspace', async () => {
     const legacyId = await router.createManagedSession(
       {
         channelName: 'channel-a',
@@ -119,10 +119,14 @@ describe('NamedSessionManager', () => {
       '/other-workspace',
     );
 
-    await expect(manager().list(alice, false)).rejects.toThrow(
-      'Invalid named-session registry update',
-    );
-    expect(readdirSync(dir)).toEqual([]);
+    const named = manager();
+    await expect(named.list(alice, false)).resolves.toEqual([]);
+    expect(bridge.discardSession).toHaveBeenCalledWith(legacyId);
+    expect(router.getSession('channel-a', 'alice', 'group-1')).toBeUndefined();
+
+    const freshSessionId = await named.resolve(alice);
+    expect(freshSessionId).not.toBe(legacyId);
+    expect(router.getSessionCwd(freshSessionId!)).toBe('/workspace');
   });
 
   it('does not adopt a legacy route owned by a colliding sender and chat', async () => {
@@ -314,17 +318,32 @@ describe('NamedSessionManager', () => {
     expect(() => manager()).toThrow('Invalid named-session registry');
   });
 
-  it('rejects a registry task outside the channel workspace', async () => {
+  it('archives the registry after the channel workspace changes', async () => {
     const named = manager();
     await named.create(alice, 'review');
     const filePath = join(dir, 'named-sessions.json');
-    const registry = JSON.parse(readFileSync(filePath, 'utf8')) as {
-      owners: Array<{ tasks: Array<{ cwd: string }> }>;
-    };
-    registry.owners[0]!.tasks[0]!.cwd = '/other-workspace';
-    writeFileSync(filePath, JSON.stringify(registry));
 
-    expect(() => manager()).toThrow('Invalid named-session registry');
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const restarted = new NamedSessionManager({
+        channelName: 'channel-a',
+        cwd: '/other-workspace',
+        filePath,
+        router,
+        isBusy: () => false,
+      });
+      await expect(restarted.list(alice, true)).resolves.toEqual([]);
+      expect(readdirSync(dir)).toEqual([
+        expect.stringMatching(/^named-sessions\.json\.stale-/u),
+      ]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('working directory changed'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('serializes concurrent changes for one owner and leaves no temp files', async () => {
