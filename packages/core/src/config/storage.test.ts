@@ -416,6 +416,18 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
     expect(storage.getProjectDir()).toContain(path.join(customDir, 'projects'));
   });
 
+  it('getGeneratedWorkflowsDir sits under the project workflow runs dir', () => {
+    const customDir = path.resolve('custom');
+    Storage.setRuntimeBaseDir(customDir);
+    const storage = new Storage('/tmp/project');
+    expect(storage.getGeneratedWorkflowsDir()).toBe(
+      path.join(storage.getWorkflowRunsDir(), 'generated'),
+    );
+    expect(storage.getGeneratedWorkflowsDir()).toContain(
+      path.join(customDir, 'projects'),
+    );
+  });
+
   it('getProjectTempDir uses custom runtime base dir', () => {
     const customDir = path.resolve('custom');
     Storage.setRuntimeBaseDir(customDir);

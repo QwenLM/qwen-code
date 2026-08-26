@@ -34,7 +34,7 @@ import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 // reset between cases. Without this, the module-level `created` array
 // accumulated across tests, so a later test could pass by coincidence.
 //
-// FIX-C8 (TST-2-I2): record the full 9-arg signature of AgentHeadless.create
+// FIX-C8 (TST-2-I2): record the full signature of AgentHeadless.create
 // and the (ctx, signal?) shape of execute so any drift between the production
 // call site and the real AgentHeadless surface becomes a test failure.
 const {
@@ -54,6 +54,8 @@ const {
     runConfig?: { max_turns?: number; max_time_minutes?: number };
     toolConfig?: { tools?: string[]; disallowedTools?: string[] };
     agentId?: string | null;
+    taskName?: string;
+    subagentId?: string;
   }>,
   nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): the production dispatch checks getTerminateMode() and
@@ -177,6 +179,8 @@ vi.mock('./agent-headless.js', () => ({
       _eventEmitter?: unknown,
       _hooks?: unknown,
       _runtimeView?: unknown,
+      taskName?: string,
+      subagentId?: string,
     ) => ({
       execute: async (
         ctx: { get: (k: string) => unknown },
@@ -192,6 +196,8 @@ vi.mock('./agent-headless.js', () => ({
           runConfig,
           toolConfig,
           agentId: getCurrentAgentId(),
+          taskName,
+          subagentId,
         });
         if (
           !promptConfig.systemPrompt?.includes('subagent spawned by a workflow')
@@ -2017,6 +2023,8 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.name).toBe('h1');
     expect(created[0]!.prompt).toBe('hello');
     expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(created[0]!.taskName).toBe('hello');
+    expect(created[0]!.subagentId).toBe(created[0]!.agentId);
   });
 
   it('does not suppress env bootstrap with an empty initial history', async () => {
@@ -2912,7 +2920,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     runtimeTargetDir?: string;
     runtimeIgnoreFiles?: string;
     runtimeContext: Config;
-    options?: { runConfigOverrides?: unknown };
+    options?: {
+      runConfigOverrides?: unknown;
+      taskName?: string;
+      subagentId?: string;
+    };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
   };
@@ -2995,7 +3007,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
             disallowedTools?: string[];
           },
           runtimeContext: Config,
-          options?: { eventEmitter?: unknown; runConfigOverrides?: unknown },
+          options?: {
+            eventEmitter?: unknown;
+            runConfigOverrides?: unknown;
+            taskName?: string;
+            subagentId?: string;
+          },
         ) => {
           const call: StubSubagentCall = {
             config: subagentConfig,
@@ -3005,7 +3022,11 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
               .getFileService?.()
               .getQwenIgnoreFileNamesDisplay(),
             runtimeContext,
-            options: { runConfigOverrides: options?.runConfigOverrides },
+            options: {
+              runConfigOverrides: options?.runConfigOverrides,
+              taskName: options?.taskName,
+              subagentId: options?.subagentId,
+            },
             eventEmitterAttached: options?.eventEmitter !== undefined,
           };
           calls.push(call);
@@ -3104,6 +3125,8 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
+    expect(calls[0].options?.taskName).toBe('find foo');
+    expect(calls[0].options?.subagentId).toBe(calls[0].executeAgentId);
     // Workflow floor [AskUserQuestion, SendMessage, Monitor, EnterPlanMode,
     // ExitPlanMode, Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(

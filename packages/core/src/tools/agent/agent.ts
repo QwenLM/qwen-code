@@ -1624,6 +1624,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private async createForkSubagent(
     agentConfig: Config,
     eventEmitter: AgentEventEmitter = this.eventEmitter,
+    subagentId?: string,
   ): Promise<{
     subagent: AgentHeadless;
     initialMessages?: Content[];
@@ -1803,6 +1804,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      this.params.description,
+      subagentId,
     );
 
     return { subagent, initialMessages, taskPrompt, toolConfig };
@@ -2960,6 +2965,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const fork = await this.createForkSubagent(
           agentConfig,
           backgroundEventEmitter,
+          hookOpts.agentId,
         );
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
@@ -2971,6 +2977,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentConfig,
           {
             eventEmitter: backgroundEventEmitter ?? this.eventEmitter,
+            taskName: this.params.description,
+            subagentId: hookOpts.agentId,
             ...(shouldRunInBackground && subagentModelId
               ? { modelConfigOverrides: { model: subagentModelId } }
               : {}),
