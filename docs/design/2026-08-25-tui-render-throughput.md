@@ -36,6 +36,7 @@ After measuring the two changes together, evaluate whether streaming content can
 - Variants: the pre-change base build (control) versus this PR built and bundled from commit `712ea6d50a` (candidate), both from the same lockfile.
 - Host: macOS, idle system. Paired runs were collected serially. Hook-off runs were the authoritative source for CPU, stdout volume, event-loop lag, and input latency; React instrumentation perturbs timing and ran separately.
 - Driver: the bundled CLI in a deterministic 100×32 PTY against a local fake OpenAI-compatible SSE provider emitting 180 Markdown chunks at 10 ms intervals. Workloads: burst paste, 213 paced input characters, streamed Markdown, 24 PageUp/PageDown keys, 200 SGR wheel events, and 112 paced characters after the long response was visible.
+- Driver script: [`scripts/benchmark-tui-pty.mjs`](../../scripts/benchmark-tui-pty.mjs) implements this protocol (PTY driver, fake SSE provider, workload phases, and the per-phase metric collection) so paired re-runs — including the deferred-work acceptance criterion below — have a shared reference to execute against. The tables in this document record the original paired runs.
 
 ### Paired PTY results
 
