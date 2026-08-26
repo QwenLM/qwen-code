@@ -235,9 +235,11 @@ export class PermissionManager {
     // An explicitly configured empty list is still an active allowlist: it
     // disables every registered tool — core and non-core (MCP, Skill,
     // Agent, synthetic system tools) alike (see `isToolEnabled`).
-    // `undefined` alone means no restriction.
+    // Only an array activates the allowlist: `undefined`, `null`, or any
+    // non-array value (e.g. `"tools": { "core": null }`, the common JSON
+    // idiom for clearing this deprecated key) means no restriction.
     const rawCoreTools = this.config.getCoreTools?.();
-    if (rawCoreTools !== undefined) {
+    if (Array.isArray(rawCoreTools)) {
       this.coreToolsAllowList = new Set(
         rawCoreTools.map((t) => parseRule(t).toolName),
       );
@@ -810,7 +812,7 @@ export class PermissionManager {
     // An explicitly empty coreTools allowlist means no tools. Apply this before
     // the historical non-core exemption so `tools.core: []` is an actual
     // tool-free configuration rather than silently sending every schema.
-    if (this.coreToolsAllowList?.size === 0) {
+    if (this.isCoreToolsAllowListEmpty()) {
       return false;
     }
 
@@ -847,13 +849,15 @@ export class PermissionManager {
 
   /**
    * Whether the coreTools allowlist is explicitly empty (`tools.core: []`
-   * in settings or a bare/valueless `--core-tools` resolved to a list).
-   * When true, `isToolEnabled()` rejects EVERY tool — core and non-core
-   * alike — so user-facing remediation advice must name this knob instead
-   * of promising re-enablement through other gates (e.g. adding a
-   * `permissions.allow` rule can never satisfy an empty coreTools
-   * allowlist, #10065). `undefined` coreTools (no restriction) and
-   * non-empty allowlists both return false.
+   * in settings). A bare/valueless `--core-tools` never produces this
+   * state — `loadCliConfig` treats an argv-sourced empty list as absent —
+   * and neither do `null`/non-array values, which `initialize()` treats
+   * as no restriction. When true, `isToolEnabled()` rejects EVERY tool —
+   * core and non-core alike — so user-facing remediation advice must name
+   * this knob instead of promising re-enablement through other gates
+   * (e.g. adding a `permissions.allow` rule can never satisfy an empty
+   * coreTools allowlist, #10065). `undefined`/`null`/non-array coreTools
+   * (no restriction) and non-empty allowlists both return false.
    */
   isCoreToolsAllowListEmpty(): boolean {
     return (

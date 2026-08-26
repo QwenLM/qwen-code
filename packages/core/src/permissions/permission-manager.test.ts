@@ -2583,6 +2583,28 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('agent')).toBe(true);
     });
 
+    it('null or non-array coreTools is unrestricted, not an empty allowlist', async () => {
+      // `"tools": { "core": null }` is the common JSON idiom for clearing
+      // the deprecated key, and settings loading performs no type
+      // validation, so null (or any non-array value) reaches
+      // `initialize()` raw. It must not throw and must behave like "no
+      // allowlist", not like the tool-disabling explicit `[]`.
+      pm = new PermissionManager(
+        makeConfig({ coreTools: null as unknown as string[] }),
+      );
+      expect(() => pm.initialize()).not.toThrow();
+      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+      expect(await pm.isToolEnabled('agent')).toBe(true);
+
+      pm = new PermissionManager(
+        makeConfig({ coreTools: {} as unknown as string[] }),
+      );
+      expect(() => pm.initialize()).not.toThrow();
+      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
+      expect(await pm.isToolEnabled('read_file')).toBe(true);
+    });
+
     it('coreTools allowlist + deny rule: deny takes precedence for listed tools', async () => {
       pm = new PermissionManager(
         makeConfig({
