@@ -594,6 +594,15 @@ export class DaemonChannelBridge
       // prompts without display text still need the classification.
       const promptAuthorization = this.options.promptAuthorization;
 
+      // Aborted after the uploads settled but before admission: the SDK
+      // rejects an already-aborted signal with a pre-request AbortError that
+      // isDefinitePromptAdmissionRejection does not match, so the uploads
+      // would leak. Non-admission is certain at this point; roll back.
+      if (controller.signal.aborted) {
+        rollbackUploadedAttachments = true;
+        throw controller.signal.reason;
+      }
+
       let result: { stopReason?: string; [key: string]: unknown };
       try {
         result = await session.prompt(

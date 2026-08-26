@@ -3096,6 +3096,59 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('removes uploaded channel images when cancelled before prompt admission', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    let resolveUpload: (attachment: Record<string, unknown>) => void = () => {};
+    const upload = new Promise<Record<string, unknown>>((resolve) => {
+      resolveUpload = resolve;
+    });
+    session.uploadAttachment.mockReturnValueOnce(upload);
+    let promptAdmissions = 0;
+    session.prompt.mockImplementation(
+      async (_req: unknown, signal?: AbortSignal) => {
+        // Mirrors DaemonSessionClient.prompt: an already-aborted signal is
+        // rejected before any admission request reaches the daemon.
+        signal?.throwIfAborted();
+        promptAdmissions += 1;
+        return {};
+      },
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      sessionAttachments: true,
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const promptPromise = bridge.prompt('session-1', 'describe', {
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+    await waitFor(() =>
+      expect(session.uploadAttachment).toHaveBeenCalledOnce(),
+    );
+    // Attached after the bridge's own reaction on the upload promise, so
+    // the cancellation runs once the upload fulfills but before the bridge
+    // resumes into session.prompt.
+    void upload.then(() => bridge.cancelSession('session-1'));
+    resolveUpload({
+      type: 'image',
+      attachmentId: 'image.png',
+      mimeType: 'image/png',
+      size: 12,
+    });
+
+    await expect(promptPromise).rejects.toMatchObject({ name: 'AbortError' });
+    expect(promptAdmissions).toBe(0);
+    expect(session.removeAttachment).toHaveBeenCalledOnce();
+    expect(session.removeAttachment).toHaveBeenCalledWith('image.png');
+
+    events.close();
+    bridge.stop();
+  });
+
   it('forwards a distinct user-facing prompt text in daemon metadata', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
