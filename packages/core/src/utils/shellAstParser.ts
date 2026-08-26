@@ -1118,6 +1118,7 @@ function localGitConfigMakesCommandUnsafe(
   let changedDirectory = false;
   let usesDiff = false;
   let usesStatus = false;
+  let usesTextconvConsumer = false;
 
   for (const command of collectDescendants(root, new Set(['command']))) {
     const name = getCommandName(command);
@@ -1129,15 +1130,20 @@ function localGitConfigMakesCommandUnsafe(
     const subcommand = stripOuterQuotes(
       getArgumentNodes(command)[0]?.text ?? '',
     ).toLowerCase();
-    if (subcommand !== 'diff' && subcommand !== 'status') continue;
+    if (!['diff', 'log', 'show', 'status'].includes(subcommand)) continue;
     if (changedDirectory) return true;
     usesDiff ||= subcommand === 'diff';
     usesStatus ||= subcommand === 'status';
+    usesTextconvConsumer ||= ['diff', 'log', 'show'].includes(subcommand);
   }
 
-  if (!usesDiff && !usesStatus) return false;
+  if (!usesDiff && !usesStatus && !usesTextconvConsumer) return false;
   const risk = getLocalGitConfigRisk(cwd);
-  return (usesDiff && risk.diffExternal) || (usesStatus && risk.fsmonitor);
+  return (
+    (usesDiff && (risk.diffExternal || risk.diffDriverCommand)) ||
+    (usesTextconvConsumer && risk.diffDriverTextconv) ||
+    (usesStatus && risk.fsmonitor)
+  );
 }
 
 function fallbackGitConfigMakesCommandUnsafe(
@@ -1147,7 +1153,12 @@ function fallbackGitConfigMakesCommandUnsafe(
   if (/\b(?:cd|pushd)\b[\s\S]*\bgit\b/i.test(command)) return true;
   if (!/\bgit\b/i.test(command)) return false;
   const risk = getLocalGitConfigRisk(cwd);
-  return risk.diffExternal || risk.fsmonitor;
+  return (
+    risk.diffExternal ||
+    risk.diffDriverCommand ||
+    risk.diffDriverTextconv ||
+    risk.fsmonitor
+  );
 }
 
 async function classifyInternal(

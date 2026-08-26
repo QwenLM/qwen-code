@@ -9,15 +9,21 @@ import { statSync } from 'node:fs';
 
 interface LocalGitConfigRisk {
   diffExternal: boolean;
+  diffDriverCommand: boolean;
+  diffDriverTextconv: boolean;
   fsmonitor: boolean;
 }
 
 const NO_RISK: LocalGitConfigRisk = {
   diffExternal: false,
+  diffDriverCommand: false,
+  diffDriverTextconv: false,
   fsmonitor: false,
 };
 const PROBE_FAILED: LocalGitConfigRisk = {
   diffExternal: true,
+  diffDriverCommand: true,
+  diffDriverTextconv: true,
   fsmonitor: true,
 };
 
@@ -38,7 +44,7 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       '--show-scope',
       '--null',
       '--get-regexp',
-      '^diff\\.external$|^core\\.fsmonitor$',
+      '^diff\\.external$|^core\\.fsmonitor$|^diff\\..*\\.command$|^diff\\..*\\.textconv$',
     ],
     {
       encoding: 'utf8',
@@ -71,11 +77,21 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       ? entry.value.trim()
       : undefined;
   };
+  const hasLocalValueMatching = (pattern: RegExp): boolean =>
+    [...effective.entries()].some(
+      ([key, entry]) =>
+        pattern.test(key) &&
+        (entry.scope === 'local' || entry.scope === 'worktree') &&
+        entry.value.trim() !== '',
+    );
+
   const diffExternal = localValue('diff.external');
   const fsmonitor = localValue('core.fsmonitor');
 
   return {
     diffExternal: diffExternal !== undefined && diffExternal !== '',
+    diffDriverCommand: hasLocalValueMatching(/^diff\..+\.command$/i),
+    diffDriverTextconv: hasLocalValueMatching(/^diff\..+\.textconv$/i),
     fsmonitor:
       fsmonitor !== undefined &&
       fsmonitor !== '' &&
