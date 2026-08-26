@@ -742,36 +742,34 @@ export class ToolRegistry {
       // register each function as a tool
       //
       // The same PermissionManager gate that createToolRegistry applies to
-      // built-ins (via registerLazy) applies here too — but with one
-      // deliberate difference: a discovered tool the active allowlist does
-      // not cover is DROPPED, not demoted to deferred. Discovered tools are
-      // dynamic (their schemas are only known after the discovery command
-      // runs), so keeping an uncovered one registered-and-deferred would
-      // still advertise it in the deferred-tools reminder and let ToolSearch
-      // re-add its schema on demand — defeating the #9827 schema-shrink
-      // guarantee for exactly the tools the allowlist was configured to
-      // exclude. Gating at registration keeps both sides of the gate
-      // consistent: an uncovered tool is hidden from the model instead of
-      // always failing (#9827). Whole-tool deny rules benefit from the same
-      // consistency ("a whole-tool deny rule also removes the tool from the
-      // registry", settings.md). Deny rules still apply at runtime
-      // regardless.
+      // built-ins (via registerLazy) applies here too, with the same
+      // three-state outcome. A discovered tool the `tools.eager` allowlist
+      // omits is DEFERRED, not dropped: its schema stays out of the eager
+      // model request (the #9827 guarantee) while the tool remains listed
+      // in `/tools` and loadable on demand via ToolSearch. Dropping it
+      // instead would recreate exactly the silent-disappearance bug that
+      // #10075 reported for built-ins, just under a different knob.
+      // Whole-tool deny rules still remove the tool outright ("a whole-tool
+      // deny rule also removes the tool from the registry", settings.md),
+      // and deny rules still apply at runtime regardless.
       const permissionManager = this.config.getPermissionManager?.();
       for (const func of functions) {
         if (!func.name) {
           debugLogger.warn('Discovered a tool with no name. Skipping.');
           continue;
         }
+        let deferred = false;
         if (permissionManager) {
           const status = await permissionManager.getToolRegistrationStatus(
             func.name,
           );
-          if (status !== 'registered') {
+          if (status === 'disabled') {
             debugLogger.info(
-              `Discovered tool "${func.name}" skipped: not covered by the permission manager (permissions.allow registry allowlist or whole-tool deny rule, #9827).`,
+              `Discovered tool "${func.name}" skipped: removed by a whole-tool deny rule or the legacy coreTools allowlist.`,
             );
             continue;
           }
+          deferred = status === 'deferred';
         }
         const parameters =
           func.parametersJsonSchema &&
@@ -787,6 +785,12 @@ export class ToolRegistry {
             parameters as Record<string, unknown>,
           ),
         );
+        // Mark AFTER registerTool so every deferred-hiding decision
+        // (getFunctionDeclarations / isDeferredAndHidden /
+        // getDeferredToolSummary) treats it like a `shouldDefer` tool.
+        if (deferred) {
+          this.permissionDeferred.add(func.name);
+        }
       }
     } catch (e) {
       debugLogger.error(`Tool discovery command "${discoveryCmd}" failed:`, e);

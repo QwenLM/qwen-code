@@ -115,10 +115,7 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
-import {
-  parseRule,
-  toolMatchesRuleToolName,
-} from '../permissions/rule-parser.js';
+import { parseRule } from '../permissions/rule-parser.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -1055,6 +1052,17 @@ export interface ConfigParameters {
    */
   visibleTools?: string[];
   /**
+   * Tool names whose schemas ride in the EAGER model request. When
+   * non-empty, every other built-in is demoted to deferred — still
+   * registered, still listed in `/tools`, still loadable via `tool_search`
+   * — so constrained-decoding backends never have to compile the schemas
+   * they cannot handle (#9827). Sourced from `settings.tools.eager`.
+   *
+   * Deliberately separate from `permissions.allow`, which is pure
+   * auto-approval and never affects registration (#10075).
+   */
+  eagerTools?: string[];
+  /**
    * Percentage of the model's context window used as the session-start
    * budget for preloading deferred tools. When the combined estimated
    * schema size of every deferred tool — bundled built-ins and MCP alike
@@ -1069,21 +1077,6 @@ export interface ConfigParameters {
     allow?: string[];
     ask?: string[];
     deny?: string[];
-    /**
-     * The subset of `allow` that comes from `settings.permissions.allow`
-     * (never `--allowed-tools`, the SDK `allowedTools` param, or the
-     * legacy `tools.allowed` key). When it contains at least one valid
-     * rule, the registry-level allowlist activates: built-in tools not
-     * covered by any allow or ask rule are excluded from registration, so
-     * their schemas are never sent to the model (MCP tools, the
-     * `--json-schema` `structured_output` contract, the plan-mode
-     * lifecycle tools, and the `computer_use__*` family are exempt)
-     * (#9827). Only this subset can ACTIVATE the allowlist; while it is
-     * active, `--allowed-tools` / SDK `allowedTools` rules are merged
-     * into the effective allow set and still count toward coverage,
-     * keeping covered built-ins registered.
-     */
-    registryAllowList?: string[];
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
@@ -2016,11 +2009,11 @@ export class Config {
   // self-consistent.
   private disabledTools: ReadonlySet<string>;
   private readonly visibleTools: ReadonlySet<string>;
+  private readonly eagerTools: readonly string[];
   private readonly toolSearchThreshold: number;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
-  private readonly permissionsRegistryAllowList: string[];
   private readonly permissionsAutoMode: AutoModeSettings;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
@@ -2359,13 +2352,16 @@ export class Config {
         (name): name is string => typeof name === 'string',
       ),
     );
+    this.eagerTools = Object.freeze(
+      (params.eagerTools ?? []).filter(
+        (name): name is string => typeof name === 'string',
+      ),
+    );
     this.toolSearchThreshold =
       params.toolSearchThreshold ?? DEFAULT_TOOL_SEARCH_THRESHOLD;
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
-    this.permissionsRegistryAllowList =
-      params.permissions?.registryAllowList || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
@@ -5807,14 +5803,12 @@ export class Config {
   }
 
   /**
-   * Returns the allow rules that come from `settings.permissions.allow`
-   * only — never `--allowed-tools` / the SDK `allowedTools` param (merged
-   * into `getPermissionsAllow()` above) nor the legacy `tools.allowed`
-   * key. Consumed by `PermissionManager` to decide whether the
-   * registry-level allowlist is active (#9827).
+   * Returns the `settings.tools.eager` allowlist: the tool names whose
+   * schemas ride in the eager model request. Empty means "no restriction".
+   * Consumed by `PermissionManager.getToolRegistrationStatus` (#9827).
    */
-  getRegistryAllowList(): string[] {
-    return this.permissionsRegistryAllowList;
+  getEagerTools(): readonly string[] {
+    return this.eagerTools;
   }
 
   /**
@@ -7260,73 +7254,20 @@ export class Config {
   /**
    * Whether the built-in `list_directory` tool is enabled. Opt-in: the tool
    * is disabled by default and turns on through the
-   * `tools.listDirectory.enabled` setting, by being explicitly listed in the
-   * `coreTools` allowlist, or by being covered by an allow OR ask rule while
-   * the `permissions.allow` registry allowlist is active (#9827). Coverage
-   * scans the merged allow set (`getPermissionsAllow()` — settings +
-   * `--allowed-tools` + SDK `allowedTools` + legacy `tools.allowed`) so it
-   * counts exactly what `PermissionManager.isToolEnabled()` counts, while
-   * activation still comes only from `settings.permissions.allow` rules
-   * (`getRegistryAllowList()`), ignoring empty/whitespace-only entries the
-   * same way `PermissionManager.initialize`'s `parseRules` does (and
-   * skipping non-string entries, which settings load never type-validates).
-   * Entries are
-   * normalised with `parseRule` — the same parser `PermissionManager` uses —
-   * so alias forms (`ListFiles`) and specifier forms (`list_directory(/src)`)
-   * match; the check honours meta-categories (`Read`) via
-   * `toolMatchesRuleToolName`, matching the coverage semantics of the
-   * registry gate itself (`isCoveredByAllowOrAskRule`, which counts ask
-   * rules too).
+   * `tools.listDirectory.enabled` setting or by being explicitly listed in
+   * the `coreTools` allowlist.
+   *
+   * Permission rules deliberately do NOT enable it. `permissions.allow` is
+   * pure auto-approval and does not decide what gets registered (#10075),
+   * and `tools.eager` only demotes unlisted tools to deferred — it never
+   * promotes a disabled tool into existence.
    */
   isLsToolEnabled(): boolean {
     if (this.lsToolEnabled) return true;
-    if (
+    return (
       this.getCoreTools()?.some(
         (name) => parseRule(name).toolName === ToolNames.LS,
-      ) ??
-      false
-    ) {
-      return true;
-    }
-    // `permissions.allow` registry allowlist (#9827): without these branches
-    // an allowlisted tool passes `PermissionManager.isToolEnabled()` but the
-    // registry never registers it, so it silently vanishes from `/tools` and
-    // the model request while calls to it fail with TOOL_NOT_REGISTERED.
-    const coveredByPermissionRule = (raw: string): boolean => {
-      // Mirror the `parseRules` guard: settings load performs no
-      // element-type validation (the schema declares only `type: 'array'`),
-      // so a stray non-string/empty entry must be skipped here, never
-      // crash registry construction (#9827).
-      if (typeof raw !== 'string' || raw.trim() === '') return false;
-      const rule = parseRule(raw);
-      return (
-        !rule.invalid && toolMatchesRuleToolName(rule.toolName, ToolNames.LS)
-      );
-    };
-    // Activation comes only from settings `permissions.allow` rules and
-    // requires at least one non-empty valid entry — exactly how
-    // `PermissionManager.initialize` computes it (`parseRules` filters empty
-    // entries before parsing, and `parseRule('')` carries no `invalid` flag),
-    // so a degenerate `[""]` leaves the allowlist inactive in both places.
-    // The `typeof` guard mirrors that filter for non-string entries too:
-    // `PermissionManager.initialize` tolerates them in the same settings
-    // file, so this gate must not become a new startup crash (#9827).
-    const allowListActive = this.getRegistryAllowList().some(
-      (raw) =>
-        typeof raw === 'string' && raw.trim() !== '' && !parseRule(raw).invalid,
-    );
-    if (!allowListActive) return false;
-    // Coverage mirrors `PermissionManager.isToolEnabled`: the merged allow
-    // set and ask rules both count while the allowlist is active, so a tool
-    // the permission system reports as enabled is genuinely offered to
-    // `registerLazy` (#9827). Ask-only coverage counts for exactly the same
-    // reason it counts in `PermissionManager.isCoveredByAllowOrAskRule` —
-    // otherwise the ask rule could never fire and arriving calls would fail
-    // TOOL_NOT_REGISTERED. Gating both on the allowlist actually being
-    // active keeps the default opt-in behaviour when it is not.
-    return (
-      this.getPermissionsAllow().some(coveredByPermissionRule) ||
-      this.getPermissionsAsk().some(coveredByPermissionRule)
+      ) ?? false
     );
   }
 
@@ -8842,11 +8783,11 @@ export class Config {
       factory: ToolFactory,
     ): Promise<void> => {
       // PermissionManager handles the coreTools allowlist, deny rules, and
-      // the `permissions.allow` registry allowlist in a single check. A tool
-      // the active allowlist does not cover comes back `deferred`, not
-      // `disabled`: it is still registered — listed in `/tools` and loadable
-      // via ToolSearch — but its schema stays out of the eager model request
-      // (#9827) without the tool silently disappearing (#10075).
+      // the `tools.eager` allowlist in a single check. A tool the active
+      // eager allowlist omits comes back `deferred`, not `disabled`: it is
+      // still registered — listed in `/tools` and loadable via ToolSearch —
+      // but its schema stays out of the eager model request (#9827) without
+      // the tool silently disappearing (#10075).
       let status: ToolRegistrationStatus = 'registered';
       try {
         status = this.permissionManager

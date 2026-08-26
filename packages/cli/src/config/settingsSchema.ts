@@ -2792,6 +2792,17 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
+      eager: {
+        type: 'array',
+        label: 'Eager Tool Schemas',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tool names whose schemas are sent in the initial model request. When set, every other built-in tool is deferred instead: still registered and listed in /tools, still callable, but discovered on demand via tool_search. Use this to shrink the tool schemas sent to constrained-decoding backends (llama.cpp, Docker Model Runner). Differs from tools.disabled, which removes tools entirely, and from permissions.allow, which only auto-approves and never hides a tool.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
       approvalMode: {
         type: 'enum',
         label: 'Tool Approval Mode',

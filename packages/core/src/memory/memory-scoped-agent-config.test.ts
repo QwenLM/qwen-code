@@ -580,32 +580,6 @@ describe('createMemoryScopedAgentConfig', () => {
       }),
     ).resolves.toBe('deny');
   });
-
-  it('delegates isPermissionsAllowListActive to the base PM so the scheduler message branch never throws (#9827)', () => {
-    // The scheduler's permission-denied message branch calls
-    // `isPermissionsAllowListActive()` on whatever
-    // `getPermissionManager()` returns. Before this shim exposed the
-    // method, a shim-rejected call under an active allowlist threw
-    // `TypeError: pm.isPermissionsAllowListActive is not a function`
-    // instead of producing the designed permission error.
-    const basePm: Pick<PermissionManager, 'isPermissionsAllowListActive'> = {
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
-    };
-    const active = permissionManager(
-      createMemoryScopedAgentConfig(
-        {
-          getPermissionManager: () => basePm as PermissionManager,
-        } as Config,
-        projectRoot,
-      ),
-    );
-    expect(active.isPermissionsAllowListActive()).toBe(true);
-
-    const withoutBase = permissionManager(
-      createMemoryScopedAgentConfig({} as Config, projectRoot),
-    );
-    expect(withoutBase.isPermissionsAllowListActive()).toBe(false);
-  });
 });
 
 describe('isAllowedMemoryPath with a symlinked project root', () => {

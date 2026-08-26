@@ -1836,6 +1836,13 @@ export async function loadCliConfig(
     bareMode || safeMode
       ? []
       : normalizeDisabledToolList(settings.tools?.visible);
+  // `tools.eager` restricts which schemas ride in the initial model request
+  // (#9827). Unlisted tools stay registered and reachable via tool_search —
+  // it is a schema-size knob, not an availability knob (#10075).
+  const eagerTools =
+    bareMode || safeMode
+      ? []
+      : normalizeDisabledToolList(settings.tools?.eager);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -2199,6 +2206,7 @@ export async function loadCliConfig(
             .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
+    eagerTools: eagerTools.length > 0 ? eagerTools : undefined,
     toolSearchThreshold:
       bareMode || safeMode ? 0 : settings.tools?.toolSearch?.threshold,
     // New unified permissions (PermissionManager source of truth).
@@ -2206,16 +2214,6 @@ export async function loadCliConfig(
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
-      // Only `settings.permissions.allow` (never `--allowed-tools` nor the
-      // legacy `tools.allowed` key, which stay pure auto-approval grants)
-      // activates the registry-level allowlist that hides unlisted built-in
-      // tools from the model request (#9827).
-      registryAllowList:
-        bareMode || safeMode
-          ? undefined
-          : settings.permissions?.allow?.length
-            ? settings.permissions.allow
-            : undefined,
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },

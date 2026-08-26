@@ -8425,244 +8425,6 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
-    it.each([
-      { label: 'an alias', entry: 'ListFiles' },
-      { label: 'the canonical name', entry: ToolNames.LS },
-      { label: 'a path specifier', entry: `${ToolNames.LS}(/src)` },
-      { label: 'the Read meta-category', entry: 'Read' },
-    ])(
-      'registers list_directory when covered by permissions.allow via $label (#9827)',
-      async ({ entry }) => {
-        const settingsAllow = [entry];
-        const config = new Config({
-          ...baseParams,
-          coreTools: undefined,
-          permissions: {
-            allow: settingsAllow,
-            registryAllowList: settingsAllow,
-          },
-        });
-        await config.initialize();
-
-        const registerToolMock = (
-          (await vi.importMock('../tools/tool-registry')) as {
-            ToolRegistry: { prototype: { registerFactory: Mock } };
-          }
-        ).ToolRegistry.prototype.registerFactory;
-        expect(
-          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-        ).toContain(ToolNames.LS);
-      },
-    );
-
-    it('does not register list_directory when an active permissions.allow does not cover it (#9827)', async () => {
-      // `edit` does not cover list_directory (it is not the Read
-      // meta-category), so the opt-in gate must stay closed even though the
-      // allowlist is active.
-      const settingsAllow = [ToolNames.EDIT];
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).not.toContain(ToolNames.LS);
-    });
-
-    it('registers list_directory when covered only by an ask rule under an active allowlist (#9827)', async () => {
-      // Probe scenario: allow:['edit'] activates the allowlist, and
-      // ask:['ListFiles'] is the ONLY coverage for list_directory.
-      // `PermissionManager.isToolEnabled('list_directory')` returns true
-      // (membership counts ask rules — see isCoveredByAllowOrAskRule), so
-      // the opt-in gate must offer the tool to registerLazy too; otherwise
-      // the schema is never sent, the ask rule can never fire, and arriving
-      // calls fail TOOL_NOT_REGISTERED.
-      const settingsAllow = [ToolNames.EDIT];
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: settingsAllow,
-          registryAllowList: settingsAllow,
-          ask: ['ListFiles'],
-        },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toContain(ToolNames.LS);
-    });
-
-    it('does not register list_directory for an ask rule when the allowlist is inactive (#9827)', async () => {
-      // Ask coverage only gates registration while the registry allowlist
-      // is active; without it list_directory stays opt-in, so an ask rule
-      // alone must not change the default-disabled behaviour.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: { ask: ['ListFiles'] },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).not.toContain(ToolNames.LS);
-    });
-
-    it('registers list_directory when covered only by a merged (non-settings) allow rule under an active allowlist (#9827)', async () => {
-      // CLI-shaped wiring: settings `permissions.allow: ['Edit']` activates
-      // the allowlist, while `--allowed-tools ListFiles` (or the SDK
-      // `allowedTools` param) lands only in the merged allow set
-      // (`getPermissionsAllow()`), never in `getRegistryAllowList()`.
-      // `PermissionManager.isToolEnabled('list_directory')` returns true
-      // because it counts the merged set, so the opt-in gate must offer the
-      // tool to registerLazy too — otherwise it silently vanishes from
-      // `/tools` and the model request while arriving calls fail
-      // TOOL_NOT_REGISTERED.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: [ToolNames.EDIT, 'ListFiles'],
-          registryAllowList: [ToolNames.EDIT],
-        },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toContain(ToolNames.LS);
-    });
-
-    it('does not register list_directory when only the merged allow set covers it but no settings allow rule activates the allowlist (#9827)', async () => {
-      // `--allowed-tools ListFiles` alone reaches `getPermissionsAllow()`
-      // but not `getRegistryAllowList()`; only settings
-      // `permissions.allow` rules can ACTIVATE the allowlist, so without
-      // one the opt-in gate must stay closed and the default-disabled
-      // behaviour holds.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: { allow: ['ListFiles'], registryAllowList: [] },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).not.toContain(ToolNames.LS);
-    });
-
-    it('does not register list_directory when the settings allow list holds only empty entries (#9827)', async () => {
-      // `permissions.allow: ['']` is schema-valid but degenerate.
-      // `PermissionManager.initialize` computes activation through
-      // `parseRules`, which filters empty entries before parsing, so the
-      // allowlist stays inactive; the opt-in gate must agree — otherwise
-      // the ask branch would register list_directory while the permission
-      // system reports the allowlist inactive.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: [''],
-          registryAllowList: [''],
-          ask: ['ListFiles'],
-        },
-      });
-      await config.initialize();
-
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).not.toContain(ToolNames.LS);
-    });
-
-    it('does not crash when permissions arrays hold non-string entries (#9827)', async () => {
-      // Settings load performs no element-type validation (the schema
-      // declares only `type: 'array'`), and `PermissionManager.initialize`'s
-      // `parseRules` tolerates falsy entries like `[null]` in the same
-      // settings file. The opt-in gate scans the same arrays during
-      // `createToolRegistry`, so it must skip non-string entries the same
-      // way instead of throwing a `TypeError` and crashing startup.
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: [null, ToolNames.EDIT] as unknown as string[],
-          registryAllowList: [null, ToolNames.EDIT] as unknown as string[],
-          ask: [undefined, 'ListFiles'] as unknown as string[],
-        },
-      });
-      await expect(config.initialize()).resolves.not.toThrow();
-      // The valid entries still take effect: the settings rule activates
-      // the allowlist and the ask rule (after the non-string entry is
-      // skipped) covers list_directory.
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).toContain(ToolNames.LS);
-    });
-
-    it('keeps the gate closed when the settings allow list holds only non-string entries (#9827)', async () => {
-      // `[null]` alone carries no valid rule: `parseRules` filters it out,
-      // so `PermissionManager.initialize` reports the allowlist inactive —
-      // the opt-in gate must agree (and must not throw on the entry).
-      const config = new Config({
-        ...baseParams,
-        coreTools: undefined,
-        permissions: {
-          allow: [null] as unknown as string[],
-          registryAllowList: [null] as unknown as string[],
-          ask: ['ListFiles'],
-        },
-      });
-      await expect(config.initialize()).resolves.not.toThrow();
-      const registerToolMock = (
-        (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
-        }
-      ).ToolRegistry.prototype.registerFactory;
-      expect(
-        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
-      ).not.toContain(ToolNames.LS);
-    });
-
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
@@ -9001,7 +8763,7 @@ describe('Server Config (config.ts)', () => {
 
     // ── #9827 / #10075: permissions.allow keeps unlisted schemas out of the
     // eager model request, but demotes (not removes) the unlisted tools ──
-    it('registers allowlisted tools eagerly and demotes unlisted tools to deferred (#9827, #10075)', async () => {
+    it('registers tools.eager entries eagerly and demotes the rest to deferred (#9827, #10075)', async () => {
       const settingsAllow = [
         'ReadFile',
         'WriteFile',
@@ -9016,9 +8778,10 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         useRipgrep: false,
         coreTools: undefined,
-        // Mirrors the CLI wiring: merged allow list + the settings-sourced
-        // subset that activates the registry allowlist.
-        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
+        // Mirrors the CLI wiring. `permissions.allow` is deliberately left
+        // unset: the eager/deferred split is driven solely by tools.eager
+        // (#10075).
+        eagerTools: settingsAllow,
       };
       const config = new Config(params);
       await config.initialize();
@@ -9102,15 +8865,14 @@ describe('Server Config (config.ts)', () => {
       expect(registered).toContain(ToolNames.READ_FILE);
     });
 
-    it('permissions.allow keeps the --exclude-tools (deny) path working (#9827)', async () => {
+    it('tools.eager keeps the --exclude-tools (deny) path working (#9827)', async () => {
       const settingsAllow = ['ReadFile', 'Shell'];
       const params: ConfigParameters = {
         ...baseParams,
         useRipgrep: false,
         coreTools: undefined,
+        eagerTools: settingsAllow,
         permissions: {
-          allow: settingsAllow,
-          registryAllowList: settingsAllow,
           deny: ['Shell'],
         },
       };

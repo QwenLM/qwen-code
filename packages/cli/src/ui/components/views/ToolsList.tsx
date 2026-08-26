@@ -35,6 +35,12 @@ export const ToolsList: React.FC<ToolsListProps> = ({
             <Text bold color={theme.text.accent}>
               {tool.displayName}
               {showDescriptions ? ` (${tool.name})` : ''}
+              {tool.deferred ? (
+                <Text bold={false} color={theme.text.secondary}>
+                  {' '}
+                  {t('(on demand)')}
+                </Text>
+              ) : null}
             </Text>
             {showDescriptions && tool.description && (
               <MarkdownDisplay
@@ -48,6 +54,17 @@ export const ToolsList: React.FC<ToolsListProps> = ({
       ))
     ) : (
       <Text color={theme.text.primary}> {t('No tools available')}</Text>
+    )}
+    {tools.some((tool) => tool.deferred) && (
+      <>
+        <Box height={1} />
+        <Text color={theme.text.secondary}>
+          {'  '}
+          {t(
+            'Tools marked "(on demand)" stay available but are not offered to the model upfront; it loads them via tool_search when needed. Set tools.eager in settings.json to choose which schemas are sent upfront.',
+          )}
+        </Text>
+      </>
     )}
   </Box>
 );

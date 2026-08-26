@@ -45,9 +45,11 @@ export interface SkillConfig {
    * allow rule, so matching tool calls are auto-approved instead of prompting.
    *
    * This is an additive grant only: it never hides or restricts the tools the
-   * model can see. Under an active `permissions.allow` registry allowlist it
-   * still cannot register a tool the startup allowlist skipped — that tool
-   * needs the rule in settings `permissions.allow` plus a restart (#9827).
+   * model can see, and since #10075 `permissions.allow` no longer affects
+   * registration at all. A tool the `settings.tools.eager` allowlist omits
+   * stays deferred (registered and loadable via `tool_search`) regardless of
+   * this grant; promoting it into the eager request needs the name in
+   * `tools.eager` plus a restart (#9827).
    * Malformed entries are ignored. See `applySkillAllowedTools`.
    */
   allowedTools?: string[];
