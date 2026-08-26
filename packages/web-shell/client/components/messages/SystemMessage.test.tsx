@@ -191,6 +191,119 @@ describe('SystemMessage — terminal turn error copy', () => {
   });
 });
 
+describe('SystemMessage — vision bridge notice', () => {
+  it('localizes a cancelled notice with egress details', () => {
+    const container = render(
+      <SystemMessage
+        content="English fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          modelName: 'qwen3.6-plus',
+          modelEndpoint: 'idealab.alibaba-inc.com',
+          egressOccurred: true,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(
+      '视觉桥接已取消。你的图片及提示词/上下文已发送至 qwen3.6-plus (idealab.alibaba-inc.com)。',
+    );
+    expect(container.textContent).not.toContain('English fallback');
+  });
+
+  it('falls back to daemon text for malformed metadata', () => {
+    const container = render(
+      <SystemMessage
+        content="Vision bridge fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{ status: 'unknown' }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('Vision bridge fallback');
+  });
+
+  it('falls back to daemon text for malformed egress metadata', () => {
+    const container = render(
+      <SystemMessage
+        content="Vision bridge fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+          egressOccurred: 'true',
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('Vision bridge fallback');
+  });
+
+  it('falls back to daemon text for malformed image counts', () => {
+    const container = render(
+      <SystemMessage
+        content="Vision bridge fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={{
+          status: 'ok',
+          convertedCount: Number.NaN,
+          omittedCount: 0,
+          egressOccurred: true,
+        }}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain('Vision bridge fallback');
+    expect(container.textContent).not.toContain('NaN 张图片');
+  });
+
+  it.each([
+    [
+      {
+        status: 'failed',
+        convertedCount: 0,
+        omittedCount: 0,
+        egressOccurred: false,
+      },
+      '视觉桥接（视觉模型）失败：视觉桥接无法运行。图片未被解析。',
+    ],
+    [
+      {
+        status: 'ok',
+        convertedCount: 2,
+        omittedCount: 1,
+        modelName: 'qwen-vl',
+        egressOccurred: true,
+      },
+      '已通过 qwen-vl 将 2 张图片转换为文本（已忽略 1 张图片）。你的图片及提示词/上下文已发送至该模型。',
+    ],
+  ])('localizes %s notices', (data, expected) => {
+    const container = render(
+      <SystemMessage
+        content="English fallback"
+        variant="info"
+        source="vision_bridge_notice"
+        data={data}
+      />,
+      'zh-CN',
+    );
+
+    expect(container.textContent).toContain(expected);
+  });
+});
+
 describe('SystemMessage — background notification label', () => {
   it('labels background task notifications and preserves display text', () => {
     const container = render(
