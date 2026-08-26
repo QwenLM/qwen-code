@@ -97,6 +97,28 @@ describe('advisorCommand', () => {
     });
   });
 
+  it('rejects model changes when the session disallows persistence', async () => {
+    const result = await advisorCommand.action!(
+      createMockCommandContext({
+        executionPolicy: { persistModelSelection: false },
+        services: {
+          config: { setAdvisorModel },
+          settings: { setValue },
+        },
+      }),
+      'advisor-model',
+    );
+
+    expect(mockCheckAvailability).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setAdvisorModel).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'This model selection is not available in this session.',
+    });
+  });
+
   it('rejects an unavailable model without changing settings', async () => {
     mockCheckAvailability.mockReturnValue({
       available: false,

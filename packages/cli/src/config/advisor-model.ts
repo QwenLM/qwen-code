@@ -25,6 +25,26 @@ interface AdvisorModelCandidate {
   imageOnly?: boolean;
 }
 
+function resolvesToSameModel(
+  modelName: string | undefined,
+  selector: ReturnType<typeof resolveModelId> | undefined,
+  context: AdvisorModelContext,
+): boolean {
+  if (!modelName || !selector) return false;
+  try {
+    const resolved = resolveModelId(modelName, {
+      ...context,
+      fastModel: undefined,
+    });
+    return (
+      resolved?.modelId === selector.modelId &&
+      resolved?.authType === selector.authType
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function isAdvisorModelEligible(
   model: AdvisorModelCandidate,
   allowFastOnly = false,
@@ -57,12 +77,15 @@ export function checkAdvisorModelAvailability(
   } catch {
     selector = undefined;
   }
+  const allowFastOnly =
+    modelName === 'fast' ||
+    resolvesToSameModel(context.fastModel, selector, context);
 
   const availableModels = config
     .getAllConfiguredModels(
       selector?.authType ? [selector.authType] : undefined,
     )
-    .filter((model) => isAdvisorModelEligible(model, modelName === 'fast'));
+    .filter((model) => isAdvisorModelEligible(model, allowFastOnly));
 
   return {
     available:
