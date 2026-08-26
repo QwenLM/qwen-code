@@ -398,6 +398,28 @@ export class ConversationWorkspace {
     }
   }
 
+  async createStandaloneDeletionExpectation(
+    storageSessionId: string,
+    recorded: { device: number; inode: number; inodeVerifiable: boolean },
+  ): Promise<ConversationDirectoryIdentity> {
+    if (recorded.inodeVerifiable !== (recorded.inode !== 0)) {
+      throw new ConversationDirectoryIdentityError(
+        'child',
+        'unexpected_identity',
+      );
+    }
+    const root = await this.revalidateStandaloneRoot();
+    const name = getConversationDirectoryName(storageSessionId);
+    return {
+      root,
+      storageSessionId,
+      name,
+      canonicalPath: join(root.canonicalRoot, name),
+      device: recorded.device,
+      inode: recorded.inode,
+    };
+  }
+
   async stageStandaloneDirectory(
     storageSessionId: string,
     expected: ConversationDirectoryIdentity,

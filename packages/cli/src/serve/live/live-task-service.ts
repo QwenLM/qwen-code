@@ -108,7 +108,7 @@ export interface LiveTaskServiceOptions {
   ensureConversationRuntime: () => Promise<WorkspaceRuntime>;
   standaloneSessionService?: Pick<
     StandaloneSessionService,
-    'createWithInitialPrompt' | 'get' | 'list' | 'resume'
+    'createWithInitialPrompt' | 'get' | 'list' | 'resumeForInternalTask'
   > & {
     dispatchPrompt(
       sessionId: string,
@@ -1099,7 +1099,9 @@ export class LiveTaskService {
       if (!(error instanceof SessionNotFoundError)) throw error;
     }
     if (isReservedStandaloneSessionSourceType(task.summary.sourceType)) {
-      await this.getStandaloneSessionService().resume(task.summary.sessionId);
+      await this.getStandaloneSessionService().resumeForInternalTask(
+        task.summary.sessionId,
+      );
       return;
     }
     const service = createWorkspaceRuntimeSessionService(task.runtime);

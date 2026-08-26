@@ -268,10 +268,13 @@ export class StandaloneDeletionJournal {
 
   async hasRecord(rawSessionId: string): Promise<boolean> {
     const sessionId = parseSessionId(rawSessionId);
-    return (
+    const identity = await this.inspectJournalDirectory();
+    if (!identity) return false;
+    const exists =
       (await this.pathExists(this.recordPath(sessionId, 'prepared'))) ||
-      (await this.pathExists(this.recordPath(sessionId, 'staged')))
-    );
+      (await this.pathExists(this.recordPath(sessionId, 'staged')));
+    await this.assertDirectoryIdentity(this.journalDirectory, identity);
+    return exists;
   }
 
   async listSessionIds(limit = 32): Promise<string[]> {
@@ -298,8 +301,11 @@ export class StandaloneDeletionJournal {
     currentRoot: ConversationRootIdentity,
   ): Promise<StandaloneDeletionJournalEntry | undefined> {
     const sessionId = parseSessionId(rawSessionId);
+    const identity = await this.inspectJournalDirectory();
+    if (!identity) return undefined;
     const prepared = await this.readPhase(sessionId, 'prepared', currentRoot);
     const staged = await this.readPhase(sessionId, 'staged', currentRoot);
+    await this.assertDirectoryIdentity(this.journalDirectory, identity);
     if (!prepared && !staged) return undefined;
     if (!prepared || (staged && !sameImmutableRecord(prepared, staged))) {
       throw new StandaloneDeletionJournalError('compromised');

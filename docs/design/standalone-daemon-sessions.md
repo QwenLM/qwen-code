@@ -9,9 +9,12 @@ source of truth for the standalone-session design and delivery plan.
 not a documentation-only gate: it keeps this document synchronized while
 delivering the Conversations runtime foundation.
 [PR #9181](https://github.com/QwenLM/qwen-code/pull/9181) is the merged PR1
-implementation of runtime ownership and ordinary-workspace isolation. The
-remaining standalone core, capability, SDK, WebUI, and WebShell work is
-delivered in PR2 through PR6 below.
+implementation of runtime ownership and ordinary-workspace isolation.
+[PR #9341](https://github.com/QwenLM/qwen-code/pull/9341) and
+[PR #9978](https://github.com/QwenLM/qwen-code/pull/9978) are the merged PR2A
+and PR2B implementation of isolation primitives and the internal standalone
+service. The remaining public daemon API, capability, SDK, WebUI, and WebShell
+work is delivered in PR3 through PR6 below.
 
 The design builds on the projectless conversation infrastructure introduced for
 Live Voice. It does not authorize a second projectless runtime, a second session
@@ -617,10 +620,12 @@ interface DaemonStandaloneFields {
 }
 
 interface DaemonStandaloneSession
-  extends DaemonSession, DaemonStandaloneFields {}
+  extends DaemonSession,
+    DaemonStandaloneFields {}
 
 interface DaemonRestoredStandaloneSession
-  extends DaemonRestoredSession, DaemonStandaloneFields {}
+  extends DaemonRestoredSession,
+    DaemonStandaloneFields {}
 
 interface DaemonStandaloneSessionSummary extends DaemonSessionSummary {
   sourceType: 'standalone';
@@ -1178,7 +1183,7 @@ pending, crashes between child rename and phase persistence, crashes between
 rollback restore and journal clear, embedded-app capability absence,
 multi-daemon ownership, and macOS/Linux/Windows path behavior.
 
-Audited estimate against PR2B head: 1,250-2,050 production lines and
+Audited estimate against merged PR2B: 1,250-2,050 production lines and
 2,500-4,000 test lines, dominated by the durable deletion transaction and fault
 injection. If production logic exceeds 1,000 added lines, obtain maintainer
 direction before publication as required by the repository advisory gate.

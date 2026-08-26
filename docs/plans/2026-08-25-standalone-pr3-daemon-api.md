@@ -1,8 +1,9 @@
 # Standalone daemon sessions PR3 implementation plan
 
-**Status:** design-only, provisional on QwenLM/qwen-code PR #9978 head
-`cd635a61ca778f067c101efb140557eceeee9afd`. Production implementation must
-start from the merge commit on a fresh branch after PR2B is approved and merged.
+**Status:** implementation-ready against merged QwenLM/qwen-code PR #9978.
+The implementation branch starts from `origin/main` merge commit
+`e5f14e33e0b7a0ad35b36acd3b91b3f117a27efb`; the final PR2B head was
+`bd3b27f88fef7e0959b044113bf45d56b8b92b75`.
 
 **Goal:** publish the complete daemon-only standalone-v1 contract: prompt-less
 creation, list/get/load/resume/repair, rename/export, archive/unarchive/delete,
@@ -17,30 +18,36 @@ updated in the same design change.
 
 ## Baseline and implementation gates
 
-The inspected PR2B head is open, mergeable, and currently blocked by requested
-changes. It adds the internal `StandaloneSessionService`, managed private
-directories, runtime quarantine, lifecycle admission, exact lookup/list,
-load/resume, prompt/continue guards, and projectless Live-task adoption. It does
-not register standalone routes or advertise a capability. The delta from the
-previous inspected head only retains queued deferred-artifact batches after a
-failed drain; it does not change any PR3 service or lifecycle seam.
+PR2B is merged, approved, and present in `origin/main`. Its final tree adds the
+internal `StandaloneSessionService`, managed private directories, runtime
+quarantine, lifecycle admission, exact lookup/list, load/resume,
+prompt/continue guards, and projectless Live-task adoption. It does not
+register standalone routes or advertise a capability. The final review delta
+adds restore-failure cleanup, terminal-quarantine propagation, persisted/live
+PR-summary merging, canonical Live-task entry IDs, structured unavailable
+errors, and ACP compatibility-restorer wiring. These changes strengthen but do
+not replace the PR3 seams below.
 
-PR3 implementation does not begin until all of the following hold:
+PR3 implementation and publication gates are:
 
-1. PR #9978 is approved, green, merged, and its merge commit is present in the
-   current `origin/main`.
-2. Every Critical review item on #9978 is classified against the final merged
-   code. In particular, deferred-artifact replay, quarantine state, directory
-   replacement, restore compatibility, and rollback ownership must not remain
-   uncertain.
-3. Issue #9490's remaining lock-key/live-entry spelling contract is either fixed
-   or explicitly proven irrelevant to the UUID v1-v5 standalone lifecycle.
-   PR3 must not introduce a second normalization rule.
-4. The implementation branch rebuilds this inventory against merged `main` and
-   records any signature drift before editing production code.
-5. Maintainers are told that PR3 touches cross-package/core lifecycle code. If
-   production logic exceeds 1,000 added lines, the repository's advisory gate
-   applies even though the change is a feature rather than a refactor.
+1. **Satisfied:** PR #9978 is approved and merged, and its merge commit is the
+   current `origin/main` baseline.
+2. **Satisfied:** the final PR has no unresolved review threads. The final
+   restore cleanup, quarantine state, directory replacement, compatibility
+   restore, and rollback ownership changes preserve the declared fail-closed
+   behavior.
+3. **Satisfied for PR3:** issue #9490 remains open for mixed-case legacy and
+   UUIDv7 populations, but PR3 accepts only canonicalizable UUID v1-v5 values.
+   `normalizeSessionIdForLookup()` and the final Live-task/coordinator paths use
+   the same lower-cased bridge key for that population. PR3 introduces no
+   second normalization rule; the broader compatibility defect stays in
+   #9490.
+4. **Satisfied:** this inventory was rebuilt against merged `main`; no signature
+   drift changes the implementation order or ownership boundaries below.
+5. **Publication gate:** maintainers are told that PR3 touches
+   cross-package/core lifecycle code. If production logic exceeds 1,000 added
+   lines, the repository's advisory gate applies even though the change is a
+   feature rather than a refactor.
 
 ## Locked scope
 
@@ -475,6 +482,7 @@ error serializer; do not inspect message text.
 | `invalid_request`                     |  400 | no                                                    |
 | `standalone_session_not_found`        |  404 | no                                                    |
 | `standalone_session_conflict`         |  409 | depends on pending/in-flight state                    |
+| `standalone_session_operation_failed` |  500 | no; refresh state before deciding whether to retry    |
 | `session_archived`                    |  409 | no                                                    |
 | `session_busy`                        |  409 | yes                                                   |
 | `working_directory_missing`           |  409 | yes through repair                                    |
@@ -702,7 +710,20 @@ consecutive clean passes; any fix resets the count.
   sequencing, estimates, exclusions, verification breadth, and simpler
   alternatives. No new actionable issue was found.
 
+### Merged-head reconciliation
+
+- Rebuilt the seam inventory against merged PR2B commit `e5f14e33e0` and final
+  PR head `bd3b27f88f`. The final review fixes strengthen cleanup, quarantine,
+  summary merging, Live-task canonicalization, unavailable errors, and ACP
+  compatibility restore without changing PR3's route, journal, or commit-point
+  ownership.
+- Verified that PR #9978 is approved with no unresolved review threads and that
+  its merge requirements completed successfully.
+- Classified issue #9490's remaining mixed-case legacy/UUIDv7 lock-key defect as
+  out of scope for PR3's UUID v1-v5 public contract. The final PR2B Live paths
+  already use `normalizeSessionIdForLookup()` for every PR3-valid ID.
+
 After these changes, no additional clear scope, compatibility, failure-path,
-testing, or simpler-design issue was found under the inspected #9978 head. The
-remaining blockers are upstream interface drift and maintainer review, not an
+testing, or simpler-design issue was found against merged PR2B. The remaining
+publication gate is maintainer awareness, not upstream interface drift or an
 unresolved PR3 product decision.

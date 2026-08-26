@@ -573,6 +573,30 @@ describe('Live conversation workspace root', () => {
     ).resolves.toMatchObject({ size: 19 });
   });
 
+  it('reconstructs only internally consistent deletion expectations', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const prepared = await workspace.prepareStandaloneDirectory('standalone');
+
+    await expect(
+      workspace.createStandaloneDeletionExpectation('standalone', {
+        device: prepared.identity.device,
+        inode: prepared.identity.inode,
+        inodeVerifiable: prepared.identity.inode !== 0,
+      }),
+    ).resolves.toEqual(prepared.identity);
+    await expect(
+      workspace.createStandaloneDeletionExpectation('standalone', {
+        device: prepared.identity.device,
+        inode: 0,
+        inodeVerifiable: true,
+      }),
+    ).rejects.toMatchObject({
+      name: 'ConversationDirectoryIdentityError',
+      reason: 'unexpected_identity',
+    });
+  });
+
   it('removes only a matching staged standalone directory', async () => {
     const home = await tempHome();
     const workspace = new ConversationWorkspace({ homeDir: home });

@@ -379,7 +379,7 @@ function makeHarness() {
         workingDirectory: { state: 'ready' as const },
       }),
     ),
-    resume: vi.fn(async (sessionId: string) => {
+    resumeForInternalTask: vi.fn(async (sessionId: string) => {
       const canonicalSessionId = normalizeSessionIdForLookup(sessionId);
       resident.add(canonicalSessionId);
       return {
@@ -1147,9 +1147,9 @@ describe('LiveTaskService', () => {
     });
 
     expect(result).toEqual({ threadId: 'task-1' });
-    expect(harness.standaloneSessionService.resume).toHaveBeenCalledWith(
-      'task-1',
-    );
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith('task-1');
     expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
     expect(harness.bridge.changeSessionCwd).not.toHaveBeenCalled();
     expect(harness.sendPrompt).toHaveBeenCalledOnce();
@@ -1298,9 +1298,9 @@ describe('LiveTaskService', () => {
       },
     });
 
-    expect(harness.standaloneSessionService.resume).toHaveBeenCalledWith(
-      sessionId,
-    );
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith(sessionId);
     expect(harness.bridge.resumeSession).not.toHaveBeenCalled();
     expect(harness.materializeConversationDirectory).not.toHaveBeenCalled();
     expect(harness.bridge.changeSessionCwd).not.toHaveBeenCalled();
@@ -1370,9 +1370,9 @@ describe('LiveTaskService', () => {
       arguments: { threadId: 'task-1', prompt: 'continue standalone' },
     });
 
-    expect(harness.standaloneSessionService.resume).toHaveBeenCalledWith(
-      'task-1',
-    );
+    expect(
+      harness.standaloneSessionService.resumeForInternalTask,
+    ).toHaveBeenCalledWith('task-1');
     expect(
       harness.standaloneSessionService.dispatchPrompt,
     ).toHaveBeenCalledWith('task-1', expect.any(Function));

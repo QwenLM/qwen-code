@@ -164,6 +164,20 @@ describe('StandaloneDeletionJournal', () => {
     });
   });
 
+  it('fails closed when the journal directory loses its private identity', async () => {
+    if (process.platform === 'win32') return;
+    const root = await workspace.getRoot();
+    await journal.writePrepared(await makeRecord('prepared'), root);
+    await fs.chmod(path.dirname(journalPath('prepared')), 0o755);
+
+    await expect(journal.hasRecord(SESSION_ID)).rejects.toMatchObject({
+      reason: 'compromised',
+    });
+    await expect(journal.read(SESSION_ID, root)).rejects.toMatchObject({
+      reason: 'compromised',
+    });
+  });
+
   it('rejects a record tied to another root identity', async () => {
     const root = await workspace.getRoot();
     const record = await makeRecord('prepared');

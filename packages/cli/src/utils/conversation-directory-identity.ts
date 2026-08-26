@@ -161,14 +161,15 @@ function hasExpectedDirectoryIdentity(
   identity: ConversationDirectoryIdentity,
   expected: ConversationDirectoryIdentity,
 ): boolean {
-  const inodesProvable =
-    hasVerifiableInode(identity.inode) && hasVerifiableInode(expected.inode);
+  const identityInodeVerifiable = hasVerifiableInode(identity.inode);
+  const expectedInodeVerifiable = hasVerifiableInode(expected.inode);
   return (
     identity.storageSessionId === expected.storageSessionId &&
     identity.name === expected.name &&
     isSameConversationPath(identity.canonicalPath, expected.canonicalPath) &&
     identity.device === expected.device &&
-    (!inodesProvable || identity.inode === expected.inode) &&
+    identityInodeVerifiable === expectedInodeVerifiable &&
+    (!identityInodeVerifiable || identity.inode === expected.inode) &&
     isSameConversationPath(
       identity.root.configuredRoot,
       expected.root.configuredRoot,
@@ -176,10 +177,6 @@ function hasExpectedDirectoryIdentity(
     isSameConversationPath(
       identity.root.canonicalRoot,
       expected.root.canonicalRoot,
-    ) &&
-    isSameConversationPath(
-      identity.root.configuredRoot,
-      expected.root.configuredRoot,
     ) &&
     identity.root.device === expected.root.device &&
     identity.root.inodeVerifiable === expected.root.inodeVerifiable &&
@@ -404,8 +401,8 @@ export function isSameConversationDirectoryObject(
       expected.root.canonicalRoot,
     ) &&
     identity.root.device === expected.root.device &&
+    identity.root.inodeVerifiable === expected.root.inodeVerifiable &&
     (!identity.root.inodeVerifiable ||
-      !expected.root.inodeVerifiable ||
       identity.root.inode === expected.root.inode)
   );
 }
