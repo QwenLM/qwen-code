@@ -12,6 +12,7 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -262,7 +263,13 @@ describe('emit-workflow — where it writes', () => {
   let projectDir: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'emit-wf-'));
+    // Canonicalized so both sides of every comparison spell paths alike:
+    // `reviewWorkflowScriptPath` realpaths an EXISTING plan before hashing,
+    // and a fixture planted before the plan exists would otherwise digest
+    // the aliased tmpdir spelling while the handler digests the canonical
+    // one — on hosts whose tmpdir resolves through a symlink (macOS's
+    // /var -> /private/var) that is one script name on each side.
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'emit-wf-')));
     projectDir = join(dir, 'project-dir');
     // The harness exports both for every review subcommand; the session id
     // carries a dot on purpose, because the harness's directory names do not.
@@ -454,6 +461,25 @@ describe('emit-workflow — where it writes', () => {
     const root = join(projectDir, 'workflows', 'generated');
     mkdirSync(dirname(root), { recursive: true });
     symlinkSync(external, root);
+
+    expect(() => run(plan)).toThrow(/symlinked/);
+    expect(readdirSync(external)).toEqual([]);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+  });
+
+  // The loop's middle component: dropped by a refactor, `lstatSync` on the
+  // absent session directory ENOENTs THROUGH the link, the loop breaks, and
+  // `mkdirSync` follows it — a stray session directory lands outside the
+  // trusted root before the canonical-containment check throws. Refused, but
+  // no longer before writing.
+  it('refuses a symlinked review subdirectory before writing anything', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    const external = join(dir, 'external');
+    mkdirSync(external, { recursive: true });
+    const reviewDir = join(projectDir, 'workflows', 'generated', 'review');
+    mkdirSync(dirname(reviewDir), { recursive: true });
+    symlinkSync(external, reviewDir);
 
     expect(() => run(plan)).toThrow(/symlinked/);
     expect(readdirSync(external)).toEqual([]);
