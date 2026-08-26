@@ -3268,6 +3268,15 @@ describe('PermissionManager', () => {
       expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
     });
 
+    it('addSessionAllowRule deduplicates identical rules', () => {
+      pm.addSessionAllowRule('Bash(git *)');
+      pm.addSessionAllowRule('Bash(git *)');
+      expect(
+        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
+          .allow,
+      ).toHaveLength(1);
+    });
+
     it('malformed session allow rule is silently ignored', async () => {
       pm.addSessionAllowRule('Bash(git commit');
       // 'git commit' is not readonly, so default is 'ask'.
