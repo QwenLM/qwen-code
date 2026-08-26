@@ -32,6 +32,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getAgentName } from '../agents/team/identity.js';
+import { findMemberByName } from '../agents/team/teamHelpers.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import type { ApprovalMode } from '../config/approval-mode.js';
 import {
@@ -224,9 +225,21 @@ class SendMessageInvocation extends BaseToolInvocation<
       const entry = registry.get(this.params.task_id);
 
       if (!entry) {
+        const teamManager = this.config.getTeamManager();
+        const teammate = teamManager
+          ? findMemberByName(
+              teamManager.getTeamFile().members,
+              this.params.task_id,
+            )
+          : undefined;
+        const teammateHint = teammate
+          ? ` Did you mean to message teammate "${teammate.name}"? If so, use \`to: "${teammate.name}"\` instead of \`task_id\`.`
+          : '';
         return {
-          llmContent: `Error: No background task found with ID "${this.params.task_id}".`,
-          returnDisplay: 'Task not found.',
+          llmContent: `Error: No background task found with ID "${this.params.task_id}".${teammateHint}`,
+          returnDisplay: teammate
+            ? `Task not found; use "to" for teammate "${teammate.name}".`
+            : 'Task not found.',
           error: {
             message: `Task not found: ${this.params.task_id}`,
             type: ToolErrorType.SEND_MESSAGE_NOT_FOUND,
@@ -534,6 +547,15 @@ export class SendMessageTool extends BaseDeclarativeTool<
     params: SendMessageParams,
   ): ToolInvocation<SendMessageParams, ToolResult> {
     return new SendMessageInvocation(this.config, params);
+  }
+
+  protected override validateToolParamValues(
+    params: SendMessageParams,
+  ): string | null {
+    if (params.to && params.task_id) {
+      return 'Only one of "to" or "task_id" may be provided.';
+    }
+    return null;
   }
 
   /**
