@@ -26,6 +26,8 @@ import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
+  computeUniqueBranchTitle,
+  normalizeDerivedBranchTitle,
   getResumePromptTokenCount,
   getResumeTokenCounts,
   type ConversationRecord,
@@ -4516,6 +4518,48 @@ describe('SessionService', () => {
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
     });
 
+    it('remaps persisted telemetry prompt ids into the fork', async () => {
+      const oldId = '51515151-5151-5151-5151-515151515151';
+      const newId = '61616161-6161-6161-6161-616161616161';
+      const { file, lines } = seedSession(oldId);
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'telemetry-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'ui_telemetry',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd,
+            version: 'test',
+            systemPayload: {
+              uiEvent: {
+                'event.name': 'api_response',
+                prompt_id: `${oldId}#Explore#0`,
+              },
+            },
+          },
+        ]
+          .map((record) => JSON.stringify(record))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const telemetry = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+        .find((record) => record.subtype === 'ui_telemetry');
+
+      expect(telemetry.systemPayload.uiEvent.prompt_id).toBe(
+        `${newId}#Explore#0`,
+      );
+    });
+
     it('does not copy source turn_result identities into a fork', async () => {
       const oldId = '31313131-3131-3131-3131-313131313131';
       const newId = '41414141-4141-4141-4141-414141414141';
@@ -6235,23 +6279,25 @@ describe('SessionService', () => {
     it('returns titles whose custom_title starts with the prefix (case-insensitive)', async () => {
       seedSessionWithTitle(
         '11111111-1111-1111-1111-111111111111',
-        'my-branch (Branch)',
+        'my-branch(1)',
       );
       seedSessionWithTitle(
         '22222222-2222-2222-2222-222222222222',
-        'My-Branch (Branch 2)',
+        'My-Branch(2)',
       );
       seedSessionWithTitle(
         '33333333-3333-3333-3333-333333333333',
         'unrelated session',
       );
 
-      const titles =
-        await service.findSessionTitlesByPrefix('my-branch (Branch');
+      const titles = await service.findSessionTitlesByPrefix('my-branch(');
 
       expect(new Set(titles)).toEqual(
-        new Set(['my-branch (Branch)', 'My-Branch (Branch 2)']),
+        new Set(['my-branch(1)', 'My-Branch(2)']),
       );
+      await expect(
+        service.getSessionDisplayName('11111111-1111-1111-1111-111111111111'),
+      ).resolves.toBe('my-branch(1)');
     });
 
     it('returns empty when chats directory does not exist', async () => {
@@ -6262,22 +6308,48 @@ describe('SessionService', () => {
     it('skips sessions from other projects (collisions are project-scoped)', async () => {
       seedSessionWithTitle(
         '11111111-1111-1111-1111-111111111111',
-        'shared (Branch)',
+        'shared(1)',
         cwd,
       );
       // Same chats dir (sessions are stored under projectHash anyway), but
       // the record's cwd belongs to another project → must be skipped.
       seedSessionWithTitle(
         '22222222-2222-2222-2222-222222222222',
-        'shared (Branch 2)',
+        'shared(2)',
         '/some/other/project',
       );
 
-      const titles = await service.findSessionTitlesByPrefix('shared (Branch');
-      expect(titles).toEqual(['shared (Branch)']);
+      const titles = await service.findSessionTitlesByPrefix('shared(');
+      expect(titles).toEqual(['shared(1)']);
+      await expect(
+        service.getSessionDisplayName('22222222-2222-2222-2222-222222222222'),
+      ).resolves.toBeUndefined();
     });
 
-    it('skips files without a custom_title record', async () => {
+    it('returns undefined for an empty session file', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      fs.writeFileSync(realPath.join(chatsDir, `${sessionId}.jsonl`), '');
+
+      await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
+        undefined,
+      );
+    });
+
+    it('returns undefined for missing sessions and invalid ids', async () => {
+      await expect(
+        service.getSessionDisplayName('44444444-4444-4444-8444-444444444444'),
+      ).resolves.toBeUndefined();
+      await expect(
+        service.getSessionDisplayName('not-a-session'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('uses the picker prompt when a session has no custom title', async () => {
       const sessionId = '11111111-1111-1111-1111-111111111111';
       const chatsDir = realPath.join(
         service['storage'].getProjectDir(),
@@ -6295,12 +6367,56 @@ describe('SessionService', () => {
           timestamp: '2026-04-22T00:00:00.000Z',
           cwd,
           version: 'test',
-          message: { role: 'user', parts: [{ text: 'hi' }] },
+          message: {
+            role: 'user',
+            parts: [{ text: '创建 MR 描述生成 Skill(1)' }],
+          },
         }) + '\n',
       );
 
-      const titles = await service.findSessionTitlesByPrefix('anything');
-      expect(titles).toEqual([]);
+      const titles =
+        await service.findSessionTitlesByPrefix('创建 MR 描述生成 Skill(');
+      expect(titles).toEqual(['创建 MR 描述生成 Skill(1)']);
+      expect(
+        vi
+          .mocked(jsonl.readLines)
+          .mock.calls.filter(([filePath]) => filePath === file),
+      ).toEqual([[file, 10]]);
+      await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
+        '创建 MR 描述生成 Skill(1)',
+      );
+    });
+  });
+
+  describe('computeUniqueBranchTitle', () => {
+    it('uses the first available numeric suffix', async () => {
+      const service = {
+        findSessionTitlesByPrefix: vi
+          .fn()
+          .mockResolvedValue([
+            '创建 MR 描述生成 Skill(1)',
+            '创建 MR 描述生成 Skill(2)',
+            '创建 MR 描述生成 Skill(4)',
+          ]),
+      } as unknown as SessionService;
+
+      await expect(
+        computeUniqueBranchTitle('创建 MR 描述生成 Skill', service),
+      ).resolves.toBe('创建 MR 描述生成 Skill(3)');
+      expect(service.findSessionTitlesByPrefix).toHaveBeenCalledWith(
+        '创建 MR 描述生成 Skill(',
+      );
+    });
+
+    it.each([
+      ['Source session (Branch)', 'Source session'],
+      ['Source session (Branch 2)', 'Source session'],
+      ['Source session(2)', 'Source session'],
+      ['Sprint (2)', 'Sprint (2)'],
+      ['(Branch)', undefined],
+      ['(Branch 2)', undefined],
+    ])('normalizes derived branch title %s', (title, expected) => {
+      expect(normalizeDerivedBranchTitle(title)).toBe(expected);
     });
   });
 
@@ -6520,6 +6636,26 @@ describe('SessionService', () => {
         parentSessionId: 'parent-abc',
         sourceType: 'scheduled_task',
         sourceId: 'task-123',
+      });
+    });
+
+    it('reads one exact persisted summary without paging the catalog', async () => {
+      const sessionId = '79777777-7777-4777-8777-777777777777';
+      writeSession(sessionId, [
+        userLine(sessionId, 'exact prompt'),
+        sessionSourceLine(sessionId),
+      ]);
+
+      await expect(
+        service.getSessionListItem(sessionId),
+      ).resolves.toMatchObject({
+        sessionId,
+        cwd,
+        startTime: '2026-04-22T00:00:00.000Z',
+        prompt: 'exact prompt',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+        isArchived: false,
       });
     });
 

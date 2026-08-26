@@ -104,15 +104,36 @@ if (tarballs.length !== 1 || tarballs[0] !== packed.filename) {
     `expected exactly one Node REPL tarball, found ${tarballs.join(', ')}`,
   );
 }
-run('npm', [
-  'publish',
-  tarball,
-  '--dry-run',
-  '--access',
-  'public',
-  '--json',
-  `--registry=${npmRegistry}`,
-]);
+const remoteIntegrityResult = spawnSync(
+  'npm',
+  [
+    'view',
+    `${packed.name}@${packed.version}`,
+    'dist.integrity',
+    `--registry=${npmRegistry}`,
+  ],
+  { cwd: packageRoot, encoding: 'utf8', stdio: 'pipe' },
+);
+if (remoteIntegrityResult.error) throw remoteIntegrityResult.error;
+const remoteIntegrity =
+  remoteIntegrityResult.status === 0 ? remoteIntegrityResult.stdout.trim() : '';
+if (remoteIntegrity) {
+  if (remoteIntegrity !== packed.integrity) {
+    throw new Error(
+      `${packed.name}@${packed.version} already exists with different integrity`,
+    );
+  }
+} else {
+  run('npm', [
+    'publish',
+    tarball,
+    '--dry-run',
+    '--access',
+    'public',
+    '--json',
+    `--registry=${npmRegistry}`,
+  ]);
+}
 
 const consumer = mkdtempSync(path.join(tmpdir(), 'qwen-node-repl-consumer-'));
 const textOf = (result) =>

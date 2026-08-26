@@ -1720,6 +1720,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   private async createForkSubagent(
     agentConfig: Config,
     eventEmitter: AgentEventEmitter = this.eventEmitter,
+    subagentId?: string,
   ): Promise<{
     subagent: AgentHeadless;
     initialMessages?: Content[];
@@ -1899,6 +1900,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      this.params.description,
+      subagentId,
     );
 
     return { subagent, initialMessages, taskPrompt, toolConfig };
@@ -2695,13 +2700,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // agent-level background flag retains its existing meaning, and safe
       // ordinary one-shot launches default to background.
       //
-      // This is the source of truth for the background-classification rule. Two
-      // UI classifiers replicate it from tool-call args (they cannot see
+      // This is the source of truth for the background-classification rule. The
+      // web-shell classifier replicates it from tool-call args (it cannot see
       // subagentConfig.background) and must be kept in sync when it changes:
       //   - packages/web-shell/client/adapters/toolClassification.ts
       //     (isBackgroundSubAgentToolCall)
-      //   - packages/desktop/packages/shared/src/agent/tool-matching.ts
-      //     (detectBackgroundEvents)
       //
       // Background delegation is top-level-only in v1. A nested launcher would
       // be handed a completion contract it cannot honor — the success guidance
@@ -3086,6 +3089,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const fork = await this.createForkSubagent(
           agentConfig,
           backgroundEventEmitter,
+          hookOpts.agentId,
         );
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;
@@ -3097,6 +3101,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentConfig,
           {
             eventEmitter: backgroundEventEmitter ?? this.eventEmitter,
+            taskName: this.params.description,
+            subagentId: hookOpts.agentId,
             ...(shouldRunInBackground && subagentModelId
               ? { modelConfigOverrides: { model: subagentModelId } }
               : {}),

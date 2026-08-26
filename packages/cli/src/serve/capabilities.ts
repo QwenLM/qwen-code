@@ -112,6 +112,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_context_usage: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_tasks: { since: 'v1' },
+  scheduled_task_session_reuse: { since: 'v1' },
   session_monitor_tool_correlation: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
@@ -470,6 +471,7 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
   sessionGenerationAvailable?: boolean;
+  currentSessionSchedulingAvailable?: boolean;
   workspaceGenerationAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
@@ -583,6 +585,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_generation',
     (toggles) => toggles.sessionGenerationAvailable === true,
+  ],
+  [
+    'scheduled_task_session_reuse',
+    (toggles) => toggles.currentSessionSchedulingAvailable === true,
   ],
   [
     'workspace_generation',
