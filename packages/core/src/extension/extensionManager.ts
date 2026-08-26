@@ -46,6 +46,7 @@ import {
   parseGitHubRepoForReleases,
   shouldUsePublicGitHubArchiveFallback,
 } from './github.js';
+import { assertDirectorySymlinksAreSafe } from './archive-safety.js';
 import { downloadFromNpmRegistry } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
 import type { LoadExtensionContext } from './variableSchema.js';
@@ -2271,6 +2272,20 @@ export class ExtensionManager {
         stagingPath = await this.extensionStore.createStagingDirectory();
 
         if (installMetadata.type !== 'link') {
+          if (
+            archiveSymlinksValidated &&
+            isAgentPlugin &&
+            localSourcePath !== sourceBeforeConversion
+          ) {
+            // archiveSymlinksValidated was only ever proven for
+            // sourceBeforeConversion. A converter that restructures the tree
+            // while preserving symlinks (today's Gemini/Claude/Qoder/
+            // AgentPlugins converters either leave it unchanged or
+            // materialize links, but that's not an invariant) would
+            // otherwise carry stale trust onto a directory that was never
+            // actually checked.
+            await assertDirectorySymlinksAreSafe(localSourcePath, signal);
+          }
           await copyExtension(localSourcePath, stagingPath, {
             skipSymlinks: isAgentPlugin && !archiveSymlinksValidated,
             excludeRootGitDirectory: remoteGitInstall,
