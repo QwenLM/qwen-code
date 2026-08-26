@@ -95,6 +95,7 @@ import {
 } from './loop-runtime.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
+const SESSION_ATTACHMENTS_FEATURE = 'session_attachments';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
@@ -492,6 +493,9 @@ export async function runChannelDaemonWorker(
       DaemonSessionClient: sdk.DaemonSessionClient,
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
+    sessionAttachments: capabilities.features.includes(
+      SESSION_ATTACHMENTS_FEATURE,
+    ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }
       : {}),

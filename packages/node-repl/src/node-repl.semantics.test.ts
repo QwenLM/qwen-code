@@ -370,9 +370,22 @@ describe('binding semantics through the real kernel', () => {
       expect(r.status).toBe('ok');
       expect(textOf(r.events).trim()).toBe('via-symlink');
     } finally {
+      // The kernel child's cwd is `work`; on Windows a directory that is any
+      // process's cwd cannot be removed (EBUSY). Dispose first, then retry
+      // the removal across the child's asynchronous teardown.
       manager.dispose();
-      fs.rmSync(store, { recursive: true, force: true });
-      fs.rmSync(work, { recursive: true, force: true });
+      fs.rmSync(store, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 200,
+      });
+      fs.rmSync(work, {
+        recursive: true,
+        force: true,
+        maxRetries: 10,
+        retryDelay: 200,
+      });
     }
   });
 
