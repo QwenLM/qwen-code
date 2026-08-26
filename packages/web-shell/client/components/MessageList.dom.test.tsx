@@ -406,6 +406,8 @@ function rerenderMessages(
     loadingTranscript?: boolean;
     catchingUp?: boolean;
     isResponding?: boolean;
+    hasOlderHistory?: boolean;
+    onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
   } = {},
 ): void {
   const entry = mounted.find((item) => item.container === container);
@@ -422,6 +424,8 @@ function rerenderMessages(
                 loadingTranscript={opts.loadingTranscript}
                 catchingUp={opts.catchingUp}
                 isResponding={opts.isResponding}
+                hasOlderHistory={opts.hasOlderHistory}
+                onLoadOlderHistory={opts.onLoadOlderHistory}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -1014,6 +1018,547 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'u1')).toBe(true);
     expect(has(c, 'a1')).toBe(true);
     expect(isCollapsed(c, 'g1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps a turn expanded when pagination completes its head after its tail was shown', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    // The daemon split turn B: only its tail (t1/a1) is loaded; turn C is
+    // complete in the window, so the tail renders as pre-prompt passthrough.
+    const c = mount(
+      [
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      { hasOlderHistory: true, onLoadOlderHistory },
+    );
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    expect(has(c, 't1')).toBe(true);
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // The next page brings turn B's head. The turn must stay expanded instead
+    // of collapsing the steps the user is already reading.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      { hasOlderHistory: true, onLoadOlderHistory },
+    );
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 't1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+    // The unrelated complete turn still collapses as usual.
+    expect(isCollapsed(c, 't2')).toBe(true);
+  });
+
+  it('still collapses a turn whose head arrives in one complete page', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const c = mount(
+      [userMsg('u2'), thinkingMsg('t2'), asstMsg('a2')],
+      undefined,
+      { hasOlderHistory: true, onLoadOlderHistory },
+    );
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      { hasOlderHistory: true, onLoadOlderHistory },
+    );
+    // A head that arrives together with its whole turn was never shown
+    // before, so the default collapse behavior applies unchanged.
+    expect(has(c, 'u1')).toBe(true);
+    expect(isCollapsed(c, 't1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('lets an explicit toggle re-collapse a pagination-expanded turn for good', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const c = mount(
+      [
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      { hasOlderHistory: true, onLoadOlderHistory },
+    );
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    const completed = [
+      userMsg('u1'),
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      asstMsg('a2'),
+    ];
+    rerenderMessages(c, completed, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(has(c, 't1')).toBe(true);
+
+    // The user collapses the turn: the toggle must stick across later
+    // re-renders instead of the pagination keep-open re-asserting itself.
+    click(toggle(c, 'u1'));
+    expect(isCollapsed(c, 't1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+
+    rerenderMessages(c, completed, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(isCollapsed(c, 't1')).toBe(true);
+  });
+
+  it('re-expands the anchored turn when its collapse hides the anchor row', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        const rowKey = this.getAttribute('data-message-row-key');
+        if (rowKey === 'msg:u1') return rect(800, 50, 50);
+        if (rowKey === 'msg:t1') return rect(800, 50, 100);
+        if (rowKey === 'msg:a1') return rect(800, 50, 150);
+        if (this.hasAttribute('data-web-shell-message-list')) {
+          return rect(800, 600, 100);
+        }
+        return rect(800, 50, 0);
+      });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () => new Promise<void>((resolve) => (resolveLoad = resolve)),
+    );
+    const messages = [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')];
+    // The turn is live (expanded) while a history page is requested; the
+    // anchor captures the topmost visible message row (t1).
+    const c = mount(messages, undefined, {
+      isResponding: true,
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    expect(has(c, 't1')).toBe(true);
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    try {
+      // The session ends while the page is still in flight: the turn
+      // collapses and the anchored row disappears.
+      rerenderMessages(c, messages, { isResponding: false });
+      expect(has(c, 't1')).toBe(true);
+
+      // The anchor restore re-expands the turn instead of dropping the
+      // anchor, so the reader keeps their position and the content.
+      await act(async () => {
+        resolveLoad();
+        await Promise.resolve();
+      });
+      await nextFrame();
+      expect(has(c, 't1')).toBe(true);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('drops the anchor instead of re-expanding when the user collapsed the anchored turn', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        const rowKey = this.getAttribute('data-message-row-key');
+        if (rowKey === 'msg:u1') return rect(800, 50, 50);
+        if (rowKey === 'msg:t1') return rect(800, 50, 100);
+        if (rowKey === 'msg:a1') return rect(800, 50, 150);
+        if (this.hasAttribute('data-web-shell-message-list')) {
+          return rect(800, 600, 100);
+        }
+        return rect(800, 50, 0);
+      });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () => new Promise<void>((resolve) => (resolveLoad = resolve)),
+    );
+    const tail = [
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      asstMsg('a2'),
+    ];
+    const completed = [userMsg('u1'), ...tail];
+    const c = mount(tail, undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    try {
+      // Page 1 completes the split turn's head: the keep-open expands it.
+      await act(async () => {
+        list.dispatchEvent(new Event('scroll'));
+        await Promise.resolve();
+      });
+      rerenderMessages(c, completed, {
+        hasOlderHistory: true,
+        onLoadOlderHistory,
+      });
+      await act(async () => {
+        resolveLoad();
+        await Promise.resolve();
+      });
+      await nextFrame();
+      expect(has(c, 't1')).toBe(true);
+
+      // Page 2 anchors on the now-visible t1 row while the fetch is in flight.
+      await act(async () => {
+        list.dispatchEvent(new Event('scroll'));
+        await Promise.resolve();
+      });
+      expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+
+      // The user collapses the turn before the page commits.
+      click(toggle(c, 'u1'));
+      expect(isCollapsed(c, 't1')).toBe(true);
+
+      // The commit lands: the explicit collapse wins over the keep-open, so
+      // the fallback must drop the anchor instead of re-expanding...
+      await act(async () => {
+        resolveLoad();
+        await Promise.resolve();
+      });
+      await nextFrame();
+      expect(isCollapsed(c, 't1')).toBe(true);
+
+      // ...and pagination is not stuck: a third load still fires.
+      await act(async () => {
+        list.dispatchEvent(new Event('scroll'));
+        await Promise.resolve();
+      });
+      expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('does not let a live message landing mid-fetch consume the split-turn detection', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () => new Promise<void>((resolve) => (resolveLoad = resolve)),
+    );
+    const tail = [
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(tail, undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // A live message appends while the page is in flight; it must not
+    // consume the detection snapshot (the head has not changed yet).
+    rerenderMessages(c, [...tail, asstMsg('live')], {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+
+    await act(async () => {
+      resolveLoad();
+      await Promise.resolve();
+    });
+
+    // The page then commits the split turn's head; detection still fires and
+    // keeps the turn expanded.
+    rerenderMessages(c, [userMsg('u1'), ...tail, asstMsg('live')], {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 't1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps the snapshot across a non-pagination head change mid-fetch', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () => new Promise<void>((resolve) => (resolveLoad = resolve)),
+    );
+    const tail = [
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(tail, undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // A non-pagination head change (transcript reload / session switch with
+    // fresh ids) lands while the fetch is in flight; it must NOT consume the
+    // snapshot, or the page commit below would silently skip detection.
+    rerenderMessages(c, [userMsg('x1'), thinkingMsg('x2'), asstMsg('x3')], {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    await act(async () => {
+      resolveLoad();
+      await Promise.resolve();
+    });
+
+    // The real page then commits the split turn's head; detection still
+    // fires because the snapshot survived.
+    rerenderMessages(c, [userMsg('u1'), ...tail], {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 't1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('clears the in-flight pagination snapshot on /clear so the next session is not mislabeled', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    // Session A tail; the block ids below are reused verbatim by session B,
+    // mirroring the daemon's per-session ordinal id scheme.
+    const sessionATail = [
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(sessionATail, undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+
+    // /clear while the load is still in flight: the snapshot must not leak
+    // into the next session.
+    rerenderMessages(c, [], { hasOlderHistory: true, onLoadOlderHistory });
+
+    // Session B arrives with a complete, never-split turn that reuses the
+    // same ids; it must collapse by default, not stay expanded off a stale
+    // pre-clear snapshot.
+    rerenderMessages(c, [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')], {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(has(c, 'u1')).toBe(true);
+    expect(isCollapsed(c, 't1')).toBe(true);
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
   });
 

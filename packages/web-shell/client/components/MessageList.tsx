@@ -665,6 +665,14 @@ export interface ApplyTurnCollapseOptions {
    */
   pendingApprovalCallId?: string | null;
   includeSubagentToolUsageInMetrics?: boolean;
+  /**
+   * Turns kept expanded despite being complete. Two sources: pagination
+   * split-turn detection (the tail was on screen before pagination completed
+   * the user prompt), and the anchor fallback (a turn collapsed while a
+   * history anchor sat on it). Entries persist until the user toggles the
+   * turn or the screen is cleared; an explicit user toggle always wins.
+   */
+  paginatedExpanded?: ReadonlySet<string>;
   /** Master switch; when false the items pass through untouched. */
   enabled: boolean;
 }
@@ -980,6 +988,39 @@ function isScheduledTaskMessage(message: {
 // auto-follow still uses getLastUserMessageId so shell prompts do not jump.
 function isTurnStartMessage(message: Message): boolean {
   return message.role === 'user' || message.role === 'user_shell';
+}
+
+// Find the turn head (user message id) owning the message referenced by a
+// `msg:` row key, when the message is still present.
+function turnIdOfMessageRow(
+  messages: Message[],
+  rowKey: string,
+): string | undefined {
+  if (!rowKey.startsWith('msg:')) return undefined;
+  const messageId = rowKey.slice('msg:'.length);
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message?.id !== messageId) continue;
+    for (let j = i; j >= 0; j--) {
+      const candidate = messages[j];
+      if (candidate && isTurnStartMessage(candidate)) return candidate.id;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+// True when the given turn currently renders as a collapsed turn_collapse row.
+function isTurnCollapsedInVisibleItems(
+  items: DisplayItem[],
+  turnId: string,
+): boolean {
+  for (const item of items) {
+    if (item.type === 'turn_collapse' && item.turnCollapse.turnId === turnId) {
+      return item.turnCollapse.collapsed;
+    }
+  }
+  return false;
 }
 
 function timelineDetailSnippetForMessage(
@@ -1798,6 +1839,7 @@ export function applyTurnCollapse(
     automaticallyExpandedAgentKeys,
     pendingApprovalCallId,
     includeSubagentToolUsageInMetrics = true,
+    paginatedExpanded,
     enabled,
   }: ApplyTurnCollapseOptions,
 ): DisplayItem[] {
@@ -1953,7 +1995,8 @@ export function applyTurnCollapse(
     // turn is incomplete; otherwise it collapses once a newer turn starts. A
     // step-less turn (e.g. a plain "hi" reply) has nothing to fold, so it stays
     // expanded and shows a chevron-less metrics line. An explicit user toggle
-    // always wins.
+    // always wins; a turn whose tail was shown before pagination finished its
+    // head stays open so that content never vanishes mid-read.
     const shouldStayOpen =
       isActiveTurn ||
       hasActiveAgent ||
@@ -1967,7 +2010,9 @@ export function applyTurnCollapse(
         ? true
         : overrides.has(turnId)
           ? (overrides.get(turnId) as boolean)
-          : shouldStayOpen;
+          : paginatedExpanded?.has(turnId)
+            ? true
+            : shouldStayOpen;
     const collapsed = !expanded;
     // Push the user message
     result.push({
@@ -3262,6 +3307,18 @@ export const MessageList = memo(
     const [collapseOverrides, setCollapseOverrides] = useState<
       ReadonlyMap<string, boolean>
     >(() => new Map());
+    // Turns kept expanded despite being complete. Two sources: pagination
+    // split-turn detection (tail was on screen before the user prompt
+    // arrived), and the anchor fallback (a turn collapsed while a history
+    // anchor sat on it). Entries persist until the user toggles the turn or
+    // the screen is cleared.
+    const [paginatedExpandedTurns, setPaginatedExpandedTurns] = useState<
+      ReadonlySet<string>
+    >(() => new Set());
+    const previousPaginationMessageIds = useRef<ReadonlySet<string> | null>(
+      null,
+    );
+    const pendingPaginationTurnCompare = useRef(false);
     const [turnLayoutPending, startTurnLayoutTransition] = useTransition();
     const turnLayoutTransitionStarted = useRef(false);
     const turnLayoutRowTops = useRef(new Map<string, number>());
@@ -3337,6 +3394,10 @@ export const MessageList = memo(
     useLayoutEffect(() => {
       mergedMessageCountRef.current = mergedMessages.length;
     }, [mergedMessages.length]);
+    const mergedMessagesRef = useRef(mergedMessages);
+    useLayoutEffect(() => {
+      mergedMessagesRef.current = mergedMessages;
+    }, [mergedMessages]);
     const [
       suppressOlderHistoryLoadingStatus,
       setSuppressOlderHistoryLoadingStatus,
@@ -3459,6 +3520,7 @@ export const MessageList = memo(
         automaticallyExpandedAgentKeys,
         pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
         includeSubagentToolUsageInMetrics,
+        paginatedExpanded: paginatedExpandedTurns,
         enabled: collapseEnabled,
       });
       let metricsApplied = false;
@@ -3539,6 +3601,7 @@ export const MessageList = memo(
       turnFileChanges,
       turnArtifacts,
       turnScheduledTasks,
+      paginatedExpandedTurns,
     ]);
     const virtualizerItems =
       visibleItemsCache.current?.sourceMessages === messages
@@ -3848,6 +3911,15 @@ export const MessageList = memo(
           });
         turnLayoutTransitionStarted.current = true;
         startTurnLayoutTransition(() => {
+          // An explicit toggle is the user's own decision: it wins over the
+          // pagination keep-open and returns the turn to normal collapse
+          // semantics.
+          setPaginatedExpandedTurns((prev) => {
+            if (!prev.has(turnId)) return prev;
+            const next = new Set(prev);
+            next.delete(turnId);
+            return next;
+          });
           setCollapseOverrides((prev) => {
             const next = new Map(prev);
             next.set(turnId, nextExpanded);
@@ -4069,6 +4141,33 @@ export const MessageList = memo(
         olderHistoryAnchor.rowKey &&
         !hasVisibleRowKey(olderHistoryAnchor.rowKey)
       ) {
+        // The anchor row can vanish because its turn collapsed while the page
+        // was loading (a turn completed by pagination). Re-expand that turn so
+        // the anchor can be restored instead of dropping the reader's position.
+        const anchorTurnId = turnIdOfMessageRow(
+          mergedMessagesRef.current,
+          olderHistoryAnchor.rowKey,
+        );
+        if (
+          anchorTurnId !== undefined &&
+          isTurnCollapsedInVisibleItems(visibleItems, anchorTurnId)
+        ) {
+          // Re-expanding only helps when it can actually take effect: an
+          // explicit user collapse override wins over the keep-open, and a
+          // turn already marked keep-open yet still hidden cannot be helped.
+          // Fall through and drop the anchor in those cases, or pagination
+          // state stays pinned in-flight forever (every later load bails at
+          // the in-flight guard).
+          if (
+            collapseOverrides.get(anchorTurnId) !== false &&
+            !paginatedExpandedTurns.has(anchorTurnId)
+          ) {
+            setPaginatedExpandedTurns((prev) =>
+              prev.has(anchorTurnId) ? prev : new Set(prev).add(anchorTurnId),
+            );
+            return;
+          }
+        }
         if (
           olderHistoryAnchor.generation === olderHistoryLoadGeneration.current
         ) {
@@ -4163,6 +4262,8 @@ export const MessageList = memo(
       mergedMessages.length,
       olderHistoryAnchor,
       visibleItems,
+      collapseOverrides,
+      paginatedExpandedTurns,
     ]);
     const virtualItems = virtualizer.getVirtualItems();
     const totalVirtualSize = virtualizer.getTotalSize();
@@ -4517,6 +4618,13 @@ export const MessageList = memo(
               : {})),
         });
         try {
+          // Remember which messages were on screen before the page arrives so
+          // a turn the daemon split across pages (tail shown first, head
+          // completing later) can be detected and kept expanded.
+          previousPaginationMessageIds.current = new Set(
+            mergedMessagesRef.current.map((message) => message.id),
+          );
+          pendingPaginationTurnCompare.current = true;
           await onLoadOlderHistory(force ? { force: true } : undefined);
           if (generation === olderHistoryLoadGeneration.current) {
             setOlderHistoryAnchor((anchor) =>
@@ -4529,6 +4637,8 @@ export const MessageList = memo(
           if (generation === olderHistoryLoadGeneration.current) {
             olderHistoryRetryBlocked.current = true;
             olderHistoryLoadInFlight.current = false;
+            pendingPaginationTurnCompare.current = false;
+            previousPaginationMessageIds.current = null;
             setOlderHistoryAnchor(null);
           }
         } finally {
@@ -4552,6 +4662,61 @@ export const MessageList = memo(
     const retryOlderHistory = useCallback(() => {
       void loadOlderHistory(true, true);
     }, [loadOlderHistory]);
+
+    // After a pagination page commits, mark turns whose user prompt just
+    // arrived while their tail was already on screen (the daemon split the
+    // turn across pages). `applyTurnCollapse` keeps those expanded so the
+    // content the user is reading never silently collapses.
+    useLayoutEffect(() => {
+      if (!pendingPaginationTurnCompare.current) return;
+      const before = previousPaginationMessageIds.current;
+      if (before === null) return;
+      // A page prepends older messages at the head; live messages that land
+      // while the fetch is in flight append at the tail. Wait for the head to
+      // change so a mid-flight live update cannot consume the snapshot before
+      // the page commits (which would silently skip the split-turn detection).
+      const first = mergedMessages[0];
+      if (!first || before.has(first.id)) return;
+      const newTurnIds: string[] = [];
+      for (let i = 0; i < mergedMessages.length; i++) {
+        const message = mergedMessages[i];
+        if (
+          !message ||
+          !isTurnStartMessage(message) ||
+          before.has(message.id)
+        ) {
+          continue;
+        }
+        let tailShown = false;
+        for (let j = i + 1; j < mergedMessages.length; j++) {
+          const next = mergedMessages[j];
+          if (isTurnStartMessage(next)) break;
+          if (before.has(next.id)) {
+            tailShown = true;
+            break;
+          }
+        }
+        if (tailShown) newTurnIds.push(message.id);
+      }
+      // Consume the snapshot only once detection actually ran against a
+      // page-like commit. A head change that is not the page landing (a
+      // transcript reload, a session/branch switch) otherwise discards the
+      // snapshot and the page commit that follows silently skips detection —
+      // the split turn collapses again, the bug this code exists to fix.
+      if (newTurnIds.length === 0) return;
+      pendingPaginationTurnCompare.current = false;
+      previousPaginationMessageIds.current = null;
+      setPaginatedExpandedTurns((prev) => {
+        let next: Set<string> | null = null;
+        for (const id of newTurnIds) {
+          if (!prev.has(id)) {
+            next ??= new Set(prev);
+            next.add(id);
+          }
+        }
+        return next ?? prev;
+      });
+    }, [mergedMessages]);
 
     useEffect(() => {
       const pendingGeneration = pendingOlderHistoryTopLoad.current;
@@ -4821,7 +4986,13 @@ export const MessageList = memo(
         pendingBottomFollowAfterCooldown.current = false;
         setShouldFollow(true);
         pendingScrollRef.current = null;
+        // Drop the in-flight pagination snapshot too: without this a stale
+        // pre-clear snapshot survives into the next session and can mislabel
+        // a complete turn as keep-open (block ids are per-session ordinals).
+        pendingPaginationTurnCompare.current = false;
+        previousPaginationMessageIds.current = null;
         setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+        setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
       }
     }, [messages.length, setShouldFollow]);
 
