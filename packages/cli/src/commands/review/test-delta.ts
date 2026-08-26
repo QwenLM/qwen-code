@@ -39,17 +39,15 @@
 // rescued summary lines. A file this cannot parse is disclosed, never guessed.
 
 import type { CommandModule } from 'yargs';
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
-  buildRunEnv,
-  spawnTimedOut,
-  trimOutput,
+  run as runCommand,
   type BuildTestReport,
   type CommandResult,
 } from './build-test.js';
+import { refuseUnsandboxedPhase } from './lib/sandboxed-exec.js';
 import { failingFilesOf } from './lib/failing-files.js';
 import { TEST_COMMAND_RE } from './lib/npm-toolchain.js';
 
@@ -144,6 +142,15 @@ export interface TestDeltaArgs {
   timeout: number;
   /** Test seam — production spawns the real command. */
   exec?: (command: string, cwd: string, timeoutMs: number) => BaseRunResult;
+  /**
+   * Containment gate, injectable for the same reason `exec` is: it resolves
+   * the operator's OWN policy from settings and environment, so without a seam
+   * every test in this file changes its answer on a machine where the operator
+   * opted into `required` — 21 of 31 of them, measured. Tests that are about
+   * delta arithmetic pass a gate that never refuses; the one test that is
+   * about the gate drives the real chain.
+   */
+  refuse?: (root: string) => string | null;
   /** Injectable clock, for tests only — the budget math cannot be driven to
    *  its cutoff in real time. Matches `test-efficacy`'s seam; without it a
    *  test has to reassign the global `Date.now`. */
@@ -162,50 +169,13 @@ export interface TestDeltaArgs {
  * attributed to this PR by "measurement". Parse the raw text, report the
  * bounded one.
  */
-export interface BaseRunResult extends CommandResult {
-  /** Parsed from the untrimmed output. Absent from a seam that predates this. */
-  failingFiles?: string[];
-}
-
-// Mirrors build-test's run() on the three properties its comments call out as
-// deliberate — reviewed live when this reimplementation diverged on all three:
-// stdin ignored (a rerun that asks a question hangs to the deadline), timeout
-// read from error.code with the SIGTERM/null-status fallback (the substring
-// form misses a maxBuffer kill, which would flow into the base-green Critical
-// path), and trimmed output (a failing monorepo suite is hundreds of KB that
-// would otherwise land verbatim in the report Agent 7 reads).
-function run(command: string, cwd: string, timeoutMs: number): BaseRunResult {
-  const started = Date.now();
-  const r = spawnSync(command, {
-    shell: true,
-    cwd,
-    encoding: 'utf8',
-    timeout: timeoutMs,
-    env: buildRunEnv(process.env),
-    maxBuffer: 64 * 1024 * 1024,
-    // build-test's, deliberately: "a build that asks a question is a build that
-    // hangs until the deadline" — and this reruns those same commands.
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  // The sibling's predicate, not a weaker re-derivation: an external SIGTERM
-  // (container stop, cancelled CI job) sets neither an ETIMEDOUT message nor
-  // an exit code, so the substring form reported timedOut:false with empty
-  // output and fed straight into the base-green path.
-  const timedOut = spawnTimedOut(r);
-  const raw = `${r.stdout ?? ''}${r.stderr ?? ''}`;
-  return {
-    command,
-    exitCode: timedOut ? null : (r.status ?? null),
-    seconds: Math.round((Date.now() - started) / 1000),
-    timedOut,
-    failingFiles: timedOut ? [] : failingFilesOf(raw, cwd),
-    // Bounded like build-test's: this lands in `entries[].base.output`, which
-    // is JSON.stringify'd to --out, and the verdict fields sit AFTER it — an
-    // untrimmed megabyte pushes exactly what the command produces past any
-    // reader's truncation.
-    output: trimOutput(raw),
-  };
-}
+/**
+ * Nothing of its own any more: `failingFiles` moved onto `CommandResult` when
+ * build-test grew the untrimmed capture, and this re-declared it. Kept as the
+ * name the injectable `exec` seam has always been spelled with rather than
+ * churning every caller for an alias.
+ */
+export type BaseRunResult = CommandResult;
 
 /**
  * Whole-command budget, mirroring test-efficacy's. `--timeout` is PER COMMAND,
@@ -220,7 +190,23 @@ const TOTAL_BUDGET_MS = 540_000;
 const DEFAULT_TIMEOUT_S = 300;
 
 export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
-  const exec = args.exec ?? run;
+  // The base-side rerun crosses the SAME containment boundary as the PR side.
+  //
+  // It used to have its own `run()`, a careful copy of build-test's — and the
+  // copy was correct right up until build-test's grew a container. Then the two
+  // sides stopped being comparable: the PR side ran in the image with an env
+  // allowlist and no network, the base side on the host with the full
+  // environment and the full network. A test that reads an env var or opens a
+  // socket then fails on one side and passes on the other for a reason that has
+  // nothing to do with the diff, and this file's whole job is to say which side
+  // a failure belongs to. It would have said "the PR's" — a manufactured
+  // Critical — or, on the other flip, waved a real regression through as
+  // pre-existing.
+  //
+  // So the duplicate is gone rather than re-synchronised: one `run`, one place
+  // where the boundary is decided, and no way for the two sides to drift again.
+  // `kind` defaults to 'test', which is the restrictive shape (no network).
+  const exec = args.exec ?? runCommand;
   const baseline = resolve(args.baseline);
   const empty = (note: string): TestDeltaReport => ({
     entries: [],
@@ -241,6 +227,19 @@ export function runTestDelta(args: TestDeltaArgs): TestDeltaReport {
   if (!existsSync(baseline)) {
     return empty(
       `the base tree ${baseline} does not exist — run \`qwen review base-tree\` first`,
+    );
+  }
+  // `required` means no reviewed-repository command runs outside a container,
+  // and that has to include this one. The base tree holds base-commit content,
+  // so this is not the PR reaching the host — it is the operator's setting
+  // meaning what it says at every phase rather than at most of them. Refusing
+  // is also the honest answer for the measurement itself: with containment
+  // unavailable the PR side either refused too or ran somewhere else, and a
+  // delta between two differently-shaped runs is worse than no delta.
+  const refusal = (args.refuse ?? refuseUnsandboxedPhase)(baseline);
+  if (refusal) {
+    return empty(
+      `the base-side rerun did not happen, so NOTHING was attributed — ${refusal}`,
     );
   }
 
