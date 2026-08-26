@@ -20,6 +20,10 @@ import {
   type FfmpegRunResult,
 } from '../../ffmpeg.js';
 import {
+  videoFrameDimensionsForTokenBudget,
+  type TokenBudgetTier,
+} from '../../smart-resize.js';
+import {
   assertMediaPolicyIo,
   BaseMediaPolicyTool,
   ffmpegFailureMessage,
@@ -29,6 +33,7 @@ import {
   mediaPolicyToolError,
   mediaPolicyToolFailure,
   policyOutputFileName,
+  resolvePolicyToolSettings,
   resolvePolicyToolTimeoutMs,
   createPolicyToolTimeoutBudget,
   type MediaPolicyIoParams,
@@ -43,7 +48,36 @@ export const EXTRACT_KEYFRAMES_DEFAULTS = {
   maxFrames: 8,
   sceneThreshold: 0.2,
   maxDimension: 768,
+  strategy: 'scene',
+  fps: 1,
 } as const;
+
+/** Lenient settings reads (malformed values resolve to "no default"). */
+function readTier(
+  settings: Record<string, unknown>,
+): TokenBudgetTier | undefined {
+  const value = settings['frameTokenBudget'];
+  return value === 'small' || value === 'normal' || value === 'large'
+    ? value
+    : undefined;
+}
+
+function readStrategy(
+  settings: Record<string, unknown>,
+): 'scene' | 'uniform' | undefined {
+  const value = settings['strategy'];
+  return value === 'scene' || value === 'uniform' ? value : undefined;
+}
+
+function readNumber(
+  settings: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = settings[key];
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : undefined;
+}
 
 /** Matcher for the frames of ONE source, derived from the name template
  * so the lister can never pick up a sibling video's frames out of a
@@ -60,6 +94,25 @@ export interface ExtractKeyframesParams extends MediaPolicyIoParams {
   sceneThreshold?: number;
   /** Longest-edge ceiling in pixels for the extracted frames. */
   maxDimension?: number;
+  /** Frame-selection strategy: 'scene' (per-bucket scene detection with
+   * midpoint fallback, the default) or 'uniform' (duration-adaptive
+   * even sampling at a dynamic fps, see `fps`). */
+  strategy?: 'scene' | 'uniform';
+  /** Uniform strategy only: target frames per second. The frame count is
+   * clamp(duration × fps, 1, maxFrames), so long videos automatically
+   * thin out (dynamic fps = nframes / duration, capped at the native
+   * frame rate). Default 1. */
+  fps?: number;
+  /** Uniform strategy only: sampling window start in seconds (default
+   * 0). With `endSec` this is clip-and-sample in one pass. */
+  startSec?: number;
+  /** Uniform strategy only: sampling window end in seconds (default:
+   * the video's end). */
+  endSec?: number;
+  /** Per-frame token-budget tier: frames are resized onto the model
+   * patch grid (28px cells) inside the tier's pixel budget
+   * (80/256/1024 tokens). Overrides maxDimension for frame sizing. */
+  frameTokenBudget?: TokenBudgetTier;
 }
 
 const TUNABLE_SCHEMA_PROPERTIES = {
@@ -82,6 +135,40 @@ const TUNABLE_SCHEMA_PROPERTIES = {
       'Longest-edge ceiling in pixels for the extracted frames ' +
       '(aspect ratio preserved, never enlarged). Default 768.',
     minimum: 16,
+  },
+  strategy: {
+    type: 'string',
+    enum: ['scene', 'uniform'],
+    description:
+      "Frame-selection strategy: 'scene' (default; per-bucket scene " +
+      "detection with midpoint fallback) or 'uniform' (duration-adaptive " +
+      'even sampling at a dynamic fps — the lever for long videos, whose ' +
+      'metered cost is frames×pixels).',
+  },
+  fps: {
+    type: 'number',
+    description:
+      'Uniform strategy only: target frames per second; the frame count is clamp(duration × fps, 1, maxFrames). Default 1.',
+    exclusiveMinimum: 0,
+    maximum: 10,
+  },
+  startSec: {
+    type: 'number',
+    description:
+      'Uniform strategy only: sampling window start in seconds. Default 0.',
+    minimum: 0,
+  },
+  endSec: {
+    type: 'number',
+    description:
+      "Uniform strategy only: sampling window end in seconds. Default: the video's end.",
+    exclusiveMinimum: 0,
+  },
+  frameTokenBudget: {
+    type: 'string',
+    enum: ['small', 'normal', 'large'],
+    description:
+      "Per-frame token-budget tier ('small'/'normal'/'large' = 80/256/1024 visual tokens): frames are resized onto the model patch grid inside the tier's pixel budget. Overrides maxDimension for frame sizing.",
   },
 } as const;
 
@@ -183,13 +270,20 @@ interface ExtractionContext {
   maxFrames: number;
   sceneThreshold: number;
   maxDimension: number;
+  /** Precomputed `-vf` scale expression for every frame (grid-snapped
+   * exact dimensions under a token budget, fit-inside box otherwise). */
+  scaleVf: string;
   remainingTimeoutMs: () => number;
   signal: AbortSignal;
 }
 
+/** How many uniform-strategy seek extractions run concurrently. */
+const SEEK_CONCURRENCY = 4;
+
 class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKeyframesParams> {
   constructor(
     params: ExtractKeyframesParams,
+    private readonly settingsDefaults: Record<string, unknown>,
     private readonly timeoutMs: number,
   ) {
     super(params);
@@ -202,13 +296,31 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
+    const settings = this.settingsDefaults;
     const maxFrames = Math.floor(
-      this.params.maxFrames ?? EXTRACT_KEYFRAMES_DEFAULTS.maxFrames,
+      this.params.maxFrames ??
+        readNumber(settings, 'maxFrames') ??
+        EXTRACT_KEYFRAMES_DEFAULTS.maxFrames,
     );
     const sceneThreshold =
-      this.params.sceneThreshold ?? EXTRACT_KEYFRAMES_DEFAULTS.sceneThreshold;
+      this.params.sceneThreshold ??
+      readNumber(settings, 'sceneThreshold') ??
+      EXTRACT_KEYFRAMES_DEFAULTS.sceneThreshold;
     const maxDimension =
-      this.params.maxDimension ?? EXTRACT_KEYFRAMES_DEFAULTS.maxDimension;
+      this.params.maxDimension ??
+      readNumber(settings, 'maxDimension') ??
+      EXTRACT_KEYFRAMES_DEFAULTS.maxDimension;
+    const strategy =
+      this.params.strategy ??
+      readStrategy(settings) ??
+      EXTRACT_KEYFRAMES_DEFAULTS.strategy;
+    const fps =
+      this.params.fps ??
+      readNumber(settings, 'fps') ??
+      EXTRACT_KEYFRAMES_DEFAULTS.fps;
+    const startSec = this.params.startSec ?? readNumber(settings, 'startSec');
+    const endSec = this.params.endSec ?? readNumber(settings, 'endSec');
+    const frameTokenBudget = this.params.frameTokenBudget ?? readTier(settings);
     try {
       const { inputSizeBytes } = await assertMediaPolicyIo(this.params);
       const probe = await probeMediaMetadata(
@@ -221,6 +333,26 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
           ? probe.durationMs / 1000
           : undefined;
 
+      // Frame sizing: a token budget snaps frames onto the model patch
+      // grid (the metered unit); otherwise the longest-edge box applies.
+      // Grid sizing needs the source dimensions — without them the box
+      // filter is the honest fallback.
+      let scaleVf = scaleFilter(maxDimension);
+      if (
+        frameTokenBudget &&
+        probe.width !== undefined &&
+        probe.height !== undefined &&
+        probe.width > 0 &&
+        probe.height > 0
+      ) {
+        const target = videoFrameDimensionsForTokenBudget(
+          probe.width,
+          probe.height,
+          frameTokenBudget,
+        );
+        scaleVf = `scale=${target.width}:${target.height}`;
+      }
+
       // ALL ffmpeg passes share ONE wall-clock budget, keeping the
       // invocation within the configured timeout no matter how many
       // per-bucket runs it takes.
@@ -229,25 +361,38 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         maxFrames,
         sceneThreshold,
         maxDimension,
+        scaleVf,
         remainingTimeoutMs,
         signal,
       };
 
-      // Bucketed extraction is the primary path: it spreads the frames
-      // across the FULL duration instead of stopping at the first
-      // maxFrames scene changes (which front-loads every frame into the
-      // opening minutes of a long video). The single-pass path remains
-      // for unknown duration (no way to place buckets) and single-frame
-      // requests (one bucket ≡ one pass).
-      const bucketed = durationSeconds !== undefined && maxFrames > 1;
-      const extraction = bucketed
-        ? await this.extractBucketed(context, durationSeconds)
-        : await this.extractSinglePass(context);
+      // Strategy selection: uniform (dynamic-fps even sampling) needs a
+      // known duration to place timestamps — without one the scene paths
+      // are the fallback. Bucketed scene extraction remains the default:
+      // it spreads the frames across the FULL duration instead of
+      // stopping at the first maxFrames scene changes (which front-loads
+      // every frame into the opening minutes of a long video). The
+      // single-pass path remains for unknown duration (no way to place
+      // buckets) and single-frame requests (one bucket ≡ one pass).
+      const extraction =
+        strategy === 'uniform' && durationSeconds !== undefined
+          ? await this.extractUniform(context, durationSeconds, {
+              fps,
+              startSec,
+              endSec,
+            })
+          : durationSeconds !== undefined && maxFrames > 1
+            ? await this.extractBucketed(context, durationSeconds)
+            : await this.extractSinglePass(context);
       if (!Array.isArray(extraction)) {
         return extraction;
       }
       const frames = extraction;
 
+      const bucketed =
+        strategy !== 'uniform' &&
+        durationSeconds !== undefined &&
+        maxFrames > 1;
       const originalDuration =
         durationSeconds !== undefined
           ? `${Math.round(durationSeconds)}s`
@@ -260,11 +405,14 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
       // actually yielded a frame — an early budget stop or a failed
       // bucket leaves unsampled spans, and the model must be told so it
       // does not answer questions about footage it never saw.
-      const samplingNote = bucketed
-        ? frames.length < maxFrames
-          ? `静态抽帧（全片分桶采样，仅覆盖 ${frames.length}/${maxFrames} 个分桶，其余时段未采样）`
-          : '静态抽帧（全片分桶采样）'
-        : '静态抽帧';
+      const samplingNote =
+        strategy === 'uniform'
+          ? `均匀抽帧（动态帧率 ${fps}fps 目标，共 ${frames.length} 帧）`
+          : bucketed
+            ? frames.length < maxFrames
+              ? `静态抽帧（全片分桶采样，仅覆盖 ${frames.length}/${maxFrames} 个分桶，其余时段未采样）`
+              : '静态抽帧（全片分桶采样）'
+            : '静态抽帧';
 
       const artifacts: ToolArtifact[] = [];
       for (const [index, frame] of frames.entries()) {
@@ -326,13 +474,8 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
     context: ExtractionContext,
     durationSeconds: number,
   ): Promise<ToolResult | ExtractedFrame[]> {
-    const {
-      maxFrames,
-      sceneThreshold,
-      maxDimension,
-      remainingTimeoutMs,
-      signal,
-    } = context;
+    const { maxFrames, sceneThreshold, scaleVf, remainingTimeoutMs, signal } =
+      context;
     const bucket = durationSeconds / maxFrames;
     const window = Math.min(bucket, SCENE_SEARCH_WINDOW_SECONDS);
     const frames: ExtractedFrame[] = [];
@@ -366,7 +509,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
           '-i',
           this.params.inputPath,
           '-vf',
-          `select='gt(scene,${sceneThreshold})',${scaleFilter(maxDimension)},showinfo`,
+          `select='gt(scene,${sceneThreshold})',${scaleVf},showinfo`,
           '-vsync',
           'vfr',
           '-frames:v',
@@ -408,7 +551,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
           '-i',
           this.params.inputPath,
           '-vf',
-          scaleFilter(maxDimension),
+          scaleVf,
           '-frames:v',
           '1',
           '-q:v',
@@ -444,6 +587,112 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
   }
 
   /**
+   * Uniform strategy (⓫, ported from the plugin's
+   * `compute_dynamic_fps` + `extract_frames_by_seeking`): the frame
+   * count adapts to the window length — clamp(window × fps, 1,
+   * maxFrames) — so long videos automatically thin out (the effective
+   * fps is nframes/window, capped at the native frame rate), and every
+   * timestamp is extracted by its own input-side seek (`-ss` before
+   * `-i`: no decode of the preceding footage) with bounded concurrency.
+   * `startSec`/`endSec` bound the sampling window (clip-and-sample in
+   * one pass). Per-frame timestamps are exact by construction.
+   */
+  private async extractUniform(
+    context: ExtractionContext,
+    durationSeconds: number,
+    options: { fps: number; startSec?: number; endSec?: number },
+  ): Promise<ToolResult | ExtractedFrame[]> {
+    const { maxFrames, scaleVf, remainingTimeoutMs, signal } = context;
+    const { fps } = options;
+    const windowStart = Math.max(0, options.startSec ?? 0);
+    if (windowStart >= durationSeconds) {
+      return mediaPolicyToolError(
+        `startSec (${windowStart}) is at or beyond the end of the video (${Math.round(durationSeconds)}s)`,
+      );
+    }
+    const windowEnd = Math.min(
+      options.endSec ?? durationSeconds,
+      durationSeconds,
+    );
+    if (windowEnd <= windowStart) {
+      return mediaPolicyToolError(
+        `the sampling window [${windowStart}–${windowEnd}] is empty`,
+      );
+    }
+    const windowSeconds = windowEnd - windowStart;
+    // compute_dynamic_fps: nframes = clamp(duration × fps, min, max).
+    const nframes = Math.max(
+      1,
+      Math.min(maxFrames, Math.floor(windowSeconds * fps)),
+    );
+    // Evenly spaced timestamps across the window (midpoints of equal
+    // slices: the first frame is not always t=0 and the last not t=end,
+    // so the sample set covers the window symmetrically).
+    const slice = windowSeconds / nframes;
+    const timestamps = Array.from(
+      { length: nframes },
+      (_, i) => windowStart + (i + 0.5) * slice,
+    );
+
+    const outcomes: Array<ExtractedFrame | undefined> = new Array(nframes);
+    let nextIndex = 0;
+    const worker = async (): Promise<void> => {
+      while (!signal.aborted) {
+        const index = nextIndex++;
+        if (index >= nframes) return;
+        if (remainingTimeoutMs() <= 1) return;
+        const timestamp = timestamps[index];
+        const fileName = policyOutputFileName({
+          inputPath: this.params.inputPath,
+          operation: 'keyframe',
+          variant: String(index + 1).padStart(4, '0'),
+          extension: '.jpg',
+        });
+        const outputPath = path.join(this.params.outputDir, fileName);
+        // One seek per timestamp (the plugin's extract_frames_by_seeking
+        // shape): input-side -ss jumps straight to the position; a single
+        // frame is decoded.
+        const run = await runFfmpeg(
+          [
+            '-y',
+            '-ss',
+            formatSeconds(timestamp),
+            '-i',
+            this.params.inputPath,
+            '-vf',
+            scaleVf,
+            '-frames:v',
+            '1',
+            '-q:v',
+            '4',
+            '-update',
+            '1',
+            outputPath,
+          ],
+          { signal, timeoutMs: remainingTimeoutMs() },
+        );
+        if (signal.aborted) return;
+        if (run.code === 0 && (await fileExists(outputPath))) {
+          outcomes[index] = { fileName, timeSeconds: timestamp };
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(SEEK_CONCURRENCY, nframes) }, worker),
+    );
+    if (signal.aborted) {
+      return mediaPolicyToolError('keyframe extraction aborted');
+    }
+    const frames = outcomes.filter((f): f is ExtractedFrame => f !== undefined);
+    if (frames.length === 0) {
+      return mediaPolicyToolError(
+        `no keyframes could be extracted from ${path.basename(this.params.inputPath)}`,
+      );
+    }
+    return frames;
+  }
+
+  /**
    * Single-pass scene detection (legacy path): frame 0 always selected,
    * then every frame whose scene score exceeds the threshold, capped at
    * maxFrames. Only used when the duration is unknown (buckets cannot
@@ -454,13 +703,8 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
   private async extractSinglePass(
     context: ExtractionContext,
   ): Promise<ToolResult | ExtractedFrame[]> {
-    const {
-      maxFrames,
-      sceneThreshold,
-      maxDimension,
-      remainingTimeoutMs,
-      signal,
-    } = context;
+    const { maxFrames, sceneThreshold, scaleVf, remainingTimeoutMs, signal } =
+      context;
     // Same self-describing scheme as the bucketed path, expressed as an
     // ffmpeg output pattern. `%04d` is ffmpeg's own frame counter.
     const frameNameTemplate = policyOutputFileName({
@@ -476,7 +720,7 @@ class ExtractKeyframesInvocation extends BaseMediaPolicyToolInvocation<ExtractKe
         '-i',
         this.params.inputPath,
         '-vf',
-        `select='eq(n,0)+gt(scene,${sceneThreshold})',${scaleFilter(maxDimension)},showinfo`,
+        `select='eq(n,0)+gt(scene,${sceneThreshold})',${scaleVf},showinfo`,
         '-vsync',
         'vfr',
         '-frames:v',
@@ -560,6 +804,7 @@ export class OmniExtractKeyframesTool extends BaseMediaPolicyTool<ExtractKeyfram
   ): ToolInvocation<ExtractKeyframesParams, ToolResult> {
     return new ExtractKeyframesInvocation(
       params,
+      resolvePolicyToolSettings(this.configView, this.name),
       resolvePolicyToolTimeoutMs(this.configView, this.name),
     );
   }

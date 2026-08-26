@@ -127,6 +127,8 @@ describe('OmniExtractKeyframesTool', () => {
       maxFrames: 8,
       sceneThreshold: 0.2,
       maxDimension: 768,
+      strategy: 'scene',
+      fps: 1,
     });
   });
 
@@ -478,10 +480,105 @@ describe('OmniExtractKeyframesTool', () => {
     ['unknown property', { extra: 1 }],
     ['maxFrames above cap', { maxFrames: 200 }],
     ['sceneThreshold out of range', { sceneThreshold: 1.5 }],
+    ['unknown strategy', { strategy: 'spiral' }],
+    ['fps above cap', { strategy: 'uniform', fps: 30 }],
   ])('build rejects %s', (_label, overrides) => {
     expect(() =>
       tool.build({ inputPath, outputDir, ...overrides } as never),
     ).toThrow();
+  });
+
+  describe('uniform strategy (dynamic fps + parallel seek)', () => {
+    it('samples clamp(window × fps, 1, maxFrames) frames at even timestamps', async () => {
+      probe({ durationMs: 60_000, width: 1920, height: 1080 });
+      // 60s window × 0.5fps = 30 frames (maxFrames lifted past it).
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
+      const { result } = await run({
+        strategy: 'uniform',
+        fps: 0.5,
+        maxFrames: 32,
+      });
+
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(30);
+      const first = mocks.runFfmpeg.mock.calls[0] as [string[], unknown];
+      // Slice midpoints of a 60s window in 30 slices: t₀ = 1s, t₁ = 3s…
+      expect(first[0][2]).toBe('1.000');
+      const second = mocks.runFfmpeg.mock.calls[1] as [string[], unknown];
+      expect(second[0][2]).toBe('3.000');
+      // Every extraction is an input-side seek decoding exactly one frame.
+      expect(first[0]).toContain('-ss');
+      expect(first[0]).toContain('-frames:v');
+
+      expect(result.error).toBeUndefined();
+      expect(result.artifacts).toHaveLength(30);
+      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+        '均匀抽帧',
+      );
+    });
+
+    it('clamps the frame count at maxFrames for long videos', async () => {
+      probe({ durationMs: 3600_000, width: 1920, height: 1080 });
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
+      const { result } = await run({
+        strategy: 'uniform',
+        fps: 1,
+        maxFrames: 10,
+      });
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(10);
+      expect(result.artifacts).toHaveLength(10);
+    });
+
+    it('samples inside the startSec/endSec window only', async () => {
+      probe({ durationMs: 600_000, width: 1920, height: 1080 });
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
+      const { result } = await run({
+        strategy: 'uniform',
+        fps: 1,
+        startSec: 100,
+        endSec: 110,
+        maxFrames: 4,
+      });
+      // 10s window × 1fps = 10 → clamped to 4; midpoints: 101.25, 103.75, …
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(4);
+      const first = mocks.runFfmpeg.mock.calls[0] as [string[], unknown];
+      expect(first[0][2]).toBe('101.250');
+      expect(result.artifacts).toHaveLength(4);
+    });
+
+    it('sizes frames onto the patch grid when frameTokenBudget is set', async () => {
+      probe({ durationMs: 10_000, width: 1920, height: 1080 });
+      mocks.runFfmpeg.mockImplementation(framesRun(1, [0]));
+      await run({ strategy: 'uniform', fps: 0.2, frameTokenBudget: 'small' });
+      const first = mocks.runFfmpeg.mock.calls[0] as [string[], unknown];
+      const vfIndex = first[0].indexOf('-vf');
+      // 1920×1080 under the 80-token small tier (80 × 28² px), grid-snapped.
+      expect(first[0][vfIndex + 1]).toMatch(/^scale=\d+:\d+$/);
+      const [w, h] = (first[0][vfIndex + 1] as string)
+        .replace('scale=', '')
+        .split(':')
+        .map(Number);
+      expect(w % 28).toBe(0);
+      expect(h % 28).toBe(0);
+      expect(w * h).toBeLessThanOrEqual(80 * 784 + 8 * 784);
+    });
+
+    it('falls back to the scene path when the duration is unknown', async () => {
+      probe({});
+      mocks.runFfmpeg.mockImplementation(framesRun(2, [0, 4]));
+      const { result } = await run({ strategy: 'uniform', maxFrames: 2 });
+      // Single-pass scene fallback: one ffmpeg run, no -ss seeks.
+      expect(mocks.runFfmpeg).toHaveBeenCalledTimes(1);
+      const args = (mocks.runFfmpeg.mock.calls[0] as [string[], unknown])[0];
+      expect(args).not.toContain('-ss');
+      expect(result.artifacts).toHaveLength(2);
+    });
+
+    it('rejects a window starting beyond the video end', async () => {
+      probe({ durationMs: 60_000 });
+      const { result } = await run({ strategy: 'uniform', startSec: 60 });
+      expect(result.error?.message).toMatch(/at or beyond the end/);
+      expect(mocks.runFfmpeg).not.toHaveBeenCalled();
+    });
   });
 });
 

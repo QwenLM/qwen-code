@@ -178,6 +178,66 @@ describe('OmniDownsampleImageTool', () => {
     });
   });
 
+  it('tokenBudget resizes to exact grid-snapped dimensions (fit: fill)', async () => {
+    probe({ width: 4000, height: 3000, frameCount: 1 });
+    // The budget path reads the DISPLAYED dimensions from sharp metadata.
+    mocks.sharpCreate.mockReturnValue({
+      timeout,
+      metadata: vi.fn().mockResolvedValue({
+        pages: 1,
+        width: 4000,
+        height: 3000,
+      }),
+    });
+    const { result } = await run({ tokenBudget: 'small' });
+
+    expect(resize).toHaveBeenCalledTimes(1);
+    const call = resize.mock.calls[0][0] as {
+      width: number;
+      height: number;
+      fit: string;
+    };
+    expect(call.fit).toBe('fill');
+    expect(call.width % 28).toBe(0);
+    expect(call.height % 28).toBe(0);
+    // 256 tokens × 28² px: on the grid, near the budget.
+    expect(call.width * call.height).toBeLessThanOrEqual(256 * 784 + 8 * 784);
+    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
+      'token 档位 small',
+    );
+  });
+
+  it('tokenBudget falls back to the maxDimension box when dimensions are unknown', async () => {
+    probe({ width: 4000, height: 3000, frameCount: 1 });
+    // metadata without dimensions: the grid target cannot be computed.
+    const { result } = await run({ tokenBudget: 'small', maxDimension: 800 });
+    expect(resize).toHaveBeenCalledWith({
+      width: 800,
+      height: 800,
+      fit: 'inside',
+      withoutEnlargement: true,
+    });
+    expect(result.error).toBeUndefined();
+  });
+
+  it('tokenBudget swaps axes for EXIF-rotated images (orientation ≥ 5)', async () => {
+    probe({ width: 4000, height: 3000, frameCount: 1 });
+    mocks.sharpCreate.mockReturnValue({
+      timeout,
+      metadata: vi.fn().mockResolvedValue({
+        pages: 1,
+        width: 4000,
+        height: 3000,
+        orientation: 6,
+      }),
+    });
+    await run({ tokenBudget: 'small' });
+    const call = resize.mock.calls[0][0] as { width: number; height: number };
+    // Displayed as 3000×4000 (portrait): the grid target must be taller
+    // than wide, not the stored landscape axes.
+    expect(call.height).toBeGreaterThan(call.width);
+  });
+
   it('threads policyTools.<tool>.runtime.timeoutMs into sharp, rounded up to seconds', async () => {
     probe({ width: 4096, height: 3072, frameCount: 1 });
     const configured = new OmniDownsampleImageTool({
