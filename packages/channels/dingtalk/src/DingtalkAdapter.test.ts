@@ -125,6 +125,18 @@ vi.mock('@qwen-code/channel-base', async () => {
       handleInbound = vi.fn().mockResolvedValue(undefined);
       protected preflightInbound = vi.fn().mockResolvedValue(true);
       protected processInbound = vi.fn().mockResolvedValue(undefined);
+      protected async prepareThenHandleInbound(
+        envelope: Envelope,
+        prepare: () => Promise<boolean | void>,
+      ): Promise<void> {
+        if ((await prepare()) === false) return;
+        await this.handleInbound(envelope);
+      }
+      protected processPreflightedInbound = vi.fn(
+        async (_envelope: Envelope, process: () => Promise<void>) => {
+          await process();
+        },
+      );
       onSessionDied(_sessionId: string): void {}
       protected logDebugPayload(platform: string, payload: unknown): void {
         (
@@ -1670,6 +1682,14 @@ describe('DingtalkChannel status cards', () => {
     };
 
     await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          processPreflightedInbound: ReturnType<typeof vi.fn>;
+        }
+      ).processPreflightedInbound,
+    ).toHaveBeenCalledWith(envelope, expect.any(Function));
 
     expect(
       (

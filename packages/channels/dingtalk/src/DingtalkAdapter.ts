@@ -1694,34 +1694,36 @@ export class DingtalkChannel extends ChannelBase {
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (!(await this.preflightInbound(envelope))) return;
 
-    const messageId = envelope.messageId;
-    if (messageId && envelope.senderId) {
-      this.inboundCardOwners.delete(messageId);
-      this.inboundCardOwners.set(messageId, {
-        ownerId: envelope.senderId,
-        target: {
-          chatId: envelope.chatId,
-          isGroup: envelope.isGroup,
-        },
-        ...(this.atSender && envelope.isGroup
-          ? {
-              sender: {
-                senderName: envelope.senderName,
-              },
-            }
-          : {}),
-      });
-      if (this.inboundCardOwners.size > 1000) {
-        const oldest = this.inboundCardOwners.keys().next().value;
-        if (oldest !== undefined) this.inboundCardOwners.delete(oldest);
+    await this.processPreflightedInbound(envelope, async () => {
+      const messageId = envelope.messageId;
+      if (messageId && envelope.senderId) {
+        this.inboundCardOwners.delete(messageId);
+        this.inboundCardOwners.set(messageId, {
+          ownerId: envelope.senderId,
+          target: {
+            chatId: envelope.chatId,
+            isGroup: envelope.isGroup,
+          },
+          ...(this.atSender && envelope.isGroup
+            ? {
+                sender: {
+                  senderName: envelope.senderName,
+                },
+              }
+            : {}),
+        });
+        if (this.inboundCardOwners.size > 1000) {
+          const oldest = this.inboundCardOwners.keys().next().value;
+          if (oldest !== undefined) this.inboundCardOwners.delete(oldest);
+        }
       }
-    }
-    const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
-    if (this.atSender && messageId && atUserId) {
-      this.mentionTargets.set(messageId, atUserId);
-    }
+      const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
+      if (this.atSender && messageId && atUserId) {
+        this.mentionTargets.set(messageId, atUserId);
+      }
 
-    await this.processInbound(envelope);
+      await this.processInbound(envelope);
+    });
   }
 
   protected override async processInbound(envelope: Envelope): Promise<void> {
@@ -2331,32 +2333,33 @@ export class DingtalkChannel extends ChannelBase {
         (envelope as MentionTargetEnvelope)[mentionTarget] = senderStaffId;
       }
 
-      const processMessage = async () => {
-        // Download media in callback order.
-        if (content.downloadCodes.length > 0 && content.mediaType) {
-          for (const downloadCode of content.downloadCodes) {
-            await this.attachMedia(
-              envelope,
-              downloadCode,
-              content.mediaType,
-              content.fileName,
-              content.placeholder,
-            );
-          }
-        }
-        if (quoted.media) {
-          await this.attachMedia(
-            envelope,
-            quoted.media.downloadCode,
-            quoted.media.mediaType,
-            quoted.media.fileName,
-          );
-        }
-        await this.handleInbound(envelope);
-      };
-
-      // Don't await — stream callback should return quickly
-      processMessage().catch((err) => {
+      const processMessage =
+        content.downloadCodes.length > 0 || quoted.media
+          ? this.prepareThenHandleInbound(envelope, async () => {
+              // Download media in callback order.
+              if (content.downloadCodes.length > 0 && content.mediaType) {
+                for (const downloadCode of content.downloadCodes) {
+                  await this.attachMedia(
+                    envelope,
+                    downloadCode,
+                    content.mediaType,
+                    content.fileName,
+                    content.placeholder,
+                  );
+                }
+              }
+              if (quoted.media) {
+                await this.attachMedia(
+                  envelope,
+                  quoted.media.downloadCode,
+                  quoted.media.mediaType,
+                  quoted.media.fileName,
+                );
+              }
+            })
+          : this.handleInbound(envelope);
+      processMessage.catch((err) => {
+        // Don't await — stream callback should return quickly
         process.stderr.write(
           `[DingTalk:${this.name}] Error handling message: ${err}\n`,
         );
