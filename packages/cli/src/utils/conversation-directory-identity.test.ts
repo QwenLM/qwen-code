@@ -10,6 +10,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  realpath,
   rename,
   rm,
   symlink,
@@ -112,6 +113,29 @@ describe('conversation directory identity', () => {
     await expect(
       inspectConversationDirectoryIdentity(root, 'missing'),
     ).resolves.toBeUndefined();
+  });
+
+  it('reports a child deleted between the lstat and the realpath as missing', async () => {
+    const { root } = await tempRoot();
+    const created = await materializeConversationDirectoryIdentity(
+      root,
+      'vanish',
+    );
+
+    const realRealpath = realFsPromises.realpath;
+    vi.mocked(realpath).mockImplementation((async (path: string) => {
+      if (path.endsWith(created.identity.name)) {
+        await rm(created.identity.canonicalPath, { recursive: true });
+      }
+      return realRealpath(path);
+    }) as unknown as typeof realpath);
+    try {
+      await expect(
+        inspectConversationDirectoryIdentity(root, 'vanish'),
+      ).resolves.toBeUndefined();
+    } finally {
+      vi.mocked(realpath).mockRestore();
+    }
   });
 
   it('rejects same-path replacement against an expected identity', async () => {

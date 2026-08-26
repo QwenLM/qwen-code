@@ -412,6 +412,32 @@ describe('parseReviewArgs', () => {
     expect(got.warnings[0]).toContain('not a PR/CR URL');
   });
 
+  it('a /codereview/ URL on a family-only (GHE) host is refused — fail closed', () => {
+    // `ghe.alibaba-inc.com` serves no /codereview/ grammar; accepting it
+    // as a live target would let detection route the explicit GHE host to
+    // GitHub and aim fetch/submit at GHE PR #123 — a target the supplied
+    // URL never named as a valid GHE resource.
+    const got = parseReviewArgs(
+      'https://ghe.alibaba-inc.com/group/repo/codereview/123',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('a /pull/ URL on a family-only (GHE) host is a real GHE PR target', () => {
+    // The mirror arm: GHE instances legitimately serve /pull/ pages, so
+    // the family host must parse as a pr-url (and its explicit host then
+    // routes to the GitHub reader — pinned in registry.test.ts).
+    const got = parseReviewArgs(
+      'https://ghe.alibaba-inc.com/group/repo/pull/123',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      host: 'ghe.alibaba-inc.com',
+      number: 123,
+    });
+  });
+
   it('refuses a junk PR URL instead of guessing (never a file path, never PR 42)', () => {
     const got = parseReviewArgs(
       'https://github.com/QwenLM/qwen-code/pull/42oops',
@@ -783,6 +809,199 @@ describe('parseReviewArgs — --severity-floor (the convergence posture knob)', 
   });
 });
 
+describe('parseReviewArgs — --topology (the minimal-prompt A/B arm)', () => {
+  it('defaults to auto: the standing effort-driven pipeline', () => {
+    const got = parseReviewArgs('6711');
+    expect(got.topology).toBe('auto');
+    expect(got.topologySource).toBe('default');
+  });
+
+  it('parses both forms case-insensitively; the last valid occurrence wins', () => {
+    expect(parseReviewArgs('6711 --topology minimal')).toMatchObject({
+      topology: 'minimal',
+      topologySource: 'explicit',
+    });
+    expect(parseReviewArgs('6711 --topology=Minimal')).toMatchObject({
+      topology: 'minimal',
+    });
+    expect(
+      parseReviewArgs('6711 --topology minimal --topology auto'),
+    ).toMatchObject({ topology: 'auto', topologySource: 'explicit' });
+  });
+
+  it('an explicit --topology auto is explicit, not the default', () => {
+    const got = parseReviewArgs('6711 --topology auto');
+    expect(got.topology).toBe('auto');
+    expect(got.topologySource).toBe('explicit');
+  });
+
+  it('selecting minimal does not change the target', () => {
+    expect(parseReviewArgs('6711 --topology minimal').target).toEqual({
+      type: 'pr-number',
+      number: 6711,
+    });
+    expect(parseReviewArgs('src/foo.ts --topology minimal').target).toEqual({
+      type: 'file',
+      path: 'src/foo.ts',
+    });
+  });
+
+  it('minimal gates --comment: terminal-only, posts nothing', () => {
+    const got = parseReviewArgs('6711 --topology minimal --comment');
+    expect(got.comment.requested).toBe(true);
+    expect(got.comment.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) => w.includes('`--comment`') && w.includes('terminal-only'),
+      ),
+    ).toBe(true);
+  });
+
+  it('minimal gates --fix: terminal-only, edits nothing', () => {
+    const got = parseReviewArgs('src/foo.ts --topology minimal --fix');
+    expect(got.fix.requested).toBe(true);
+    expect(got.fix.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) => w.includes('`--fix`') && w.includes('terminal-only'),
+      ),
+    ).toBe(true);
+  });
+
+  it('minimal gates --resume: a fresh single pass cannot continue an interrupted run', () => {
+    // The third flag the minimal arm gates: an effective resume would make
+    // `fetch-pr --resume` consume an interrupted pipeline run's lease and
+    // worktree for a pass that never continues it — destroying resumable
+    // state instead of either continuing or leaving it alone.
+    const got = parseReviewArgs('6711 --topology minimal --resume');
+    expect(got.resume.requested).toBe(true);
+    expect(got.resume.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) => w.includes('`--resume`') && w.includes('--topology minimal'),
+      ),
+    ).toBe(true);
+  });
+
+  it('an invalid value warns naming what is in effect, and never eats the target', () => {
+    const got = parseReviewArgs('--topology minial 6711');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.topology).toBe('auto');
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Invalid --topology value "minial"') &&
+          w.includes('default topology'),
+      ),
+    ).toBe(true);
+  });
+
+  it('an invalid equals-form value warns instead of vanishing', () => {
+    const got = parseReviewArgs('6711 --topology=minial');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.topology).toBe('auto');
+    expect(
+      got.warnings.some((w) => w.includes('Invalid --topology value "minial"')),
+    ).toBe(true);
+  });
+
+  it('a sole invalid value becomes the target, and the warning says so', () => {
+    const got = parseReviewArgs('--topology minial');
+    expect(got.target).toEqual({ type: 'file', path: 'minial' });
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('Invalid --topology value "minial"') &&
+          w.includes('treating it as the review target'),
+      ),
+    ).toBe(true);
+  });
+
+  it('a PR-shaped value is rescued as the target, not discarded', () => {
+    // `--topology 6711` (forgot the value) must review PR 6711, not silently
+    // fall back to the local diff — the same rescue --effort/--severity-floor get.
+    const got = parseReviewArgs('--topology 6711');
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.topology).toBe('auto');
+  });
+
+  it('minimal does not force effort the way --comment does', () => {
+    // minimal is terminal-only, so the comment-forces-high rule never fires;
+    // a local target's effort stays at its default.
+    const got = parseReviewArgs('src/foo.ts --topology minimal');
+    expect(got.effort).toBe('medium');
+    expect(got.effortSource).toBe('default');
+  });
+
+  it('the equals form rescues a PR-shaped value exactly as the spaced form does', () => {
+    // Sibling probes pin this for --effort/--severity-floor (the round-8
+    // regression); the topology copy must not diverge. Deleting the
+    // equals-form rescue branch reviews the local tree instead of PR 6711.
+    expect(parseReviewArgs('--topology=6711').target).toEqual({
+      type: 'pr-number',
+      number: 6711,
+    });
+  });
+
+  it('a quoted-empty value is consumed as missing, never an empty-string target', () => {
+    // Deleting the consumption branch leaves '' as the sole candidate, and
+    // it classifies as an empty-string file target.
+    const bare = parseReviewArgs('--topology ""');
+    expect(bare.target).toEqual({ type: 'local' });
+    expect(
+      bare.warnings.some((w) => w.includes('--topology requires a value')),
+    ).toBe(true);
+
+    const afterTarget = parseReviewArgs('6711 --topology ""');
+    expect(afterTarget.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      afterTarget.warnings.some((w) =>
+        w.includes('--topology requires a value'),
+      ),
+    ).toBe(true);
+  });
+
+  it('flag-final or flag-followed is a missing value, never a consumed flag', () => {
+    // Deleting the branch eats the following token into the kept pool, so
+    // `--comment` never registers.
+    const flagFinal = parseReviewArgs('6711 --topology');
+    expect(flagFinal.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(flagFinal.topology).toBe('auto');
+    expect(
+      flagFinal.warnings.some((w) => w.includes('--topology requires a value')),
+    ).toBe(true);
+
+    const followed = parseReviewArgs('6711 --topology --comment');
+    expect(followed.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(followed.comment.requested).toBe(true);
+    expect(followed.topology).toBe('auto');
+    expect(
+      followed.warnings.some((w) => w.includes('--topology requires a value')),
+    ).toBe(true);
+  });
+
+  it('minimal gates the review.comment setting too, and the warning names it', () => {
+    // The suppression gate is written over the SETTING-OR-FLAG request, so a
+    // settings-driven comment is gated exactly like a flagged one — pinning
+    // `effective: false` here witnesses the gate itself: narrowing it to the
+    // flag alone would let the terminal-only arm post while every flag-based
+    // test stays green. And the warning must name the setting, not a flag
+    // the operator never typed — the forced-by-comment warning makes the
+    // same distinction.
+    const got = parseReviewArgs('6711 --topology minimal', { comment: true });
+    expect(got.comment.effective).toBe(false);
+    expect(
+      got.warnings.some(
+        (w) =>
+          w.includes('`review.comment` setting') && w.includes('terminal-only'),
+      ),
+    ).toBe(true);
+    expect(got.warnings.some((w) => w.includes('`--comment` is ignored'))).toBe(
+      false,
+    );
+  });
+});
+
 describe('parseReviewArgs — settings-provided defaults', () => {
   it('applies the configured effort when --effort is absent', () => {
     const got = parseReviewArgs('6711', { effort: 'medium' });
@@ -1127,6 +1346,19 @@ describe('parseArgsCommand wiring', () => {
     expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
     expect(got.comment).toEqual({ requested: true, effective: true });
     expect(written).toBe(String(vi.mocked(writeStdoutLine).mock.calls[0][0]));
+  });
+
+  it('--topology minimal survives the stdin → yargs → handler path', async () => {
+    // The flag must reach the printed verdict through the real handler, not
+    // just the pure function: a wiring drop leaves every pure-function test
+    // green while real `/review … --topology minimal` runs the full pipeline.
+    fsState.stdin = '6711 --topology minimal --comment\n';
+    await runCli(['parse-args', '--stdin']);
+    const got = printedVerdict();
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(got.topology).toBe('minimal');
+    expect(got.topologySource).toBe('explicit');
+    expect(got.comment).toEqual({ requested: true, effective: false });
   });
 
   // The real CLI nests this command under `review`, which changes what

@@ -1057,13 +1057,13 @@ function ModelReasoningControls({
   onSelect,
 }: {
   reasoning: DaemonReasoningControls;
-  onSelect: (value: string) => Promise<void> | void;
+  onSelect?: (value: string) => Promise<void> | void;
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
   const hasEffortOptions = reasoning.efforts.length > 0;
   const select = async (value: string) => {
-    if (busy) return;
+    if (busy || !onSelect) return;
     setBusy(true);
     try {
       await onSelect(value);
@@ -1083,7 +1083,7 @@ function ModelReasoningControls({
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}
-          disabled={busy}
+          disabled={busy || !onSelect}
           aria-label={t('reasoning.thinking')}
           data-web-shell-thinking-toggle
           onCheckedChange={(enabled) =>
@@ -1104,7 +1104,7 @@ function ModelReasoningControls({
               className={styles.reasoningEffortRow}
               aria-pressed={reasoning.effort === effort}
               data-web-shell-effort={effort}
-              disabled={!reasoning.enabled || busy}
+              disabled={!reasoning.enabled || busy || !onSelect}
               onClick={() => void select(effort)}
             >
               <span>{t(`reasoning.effort.${effort}`)}</span>
@@ -2313,7 +2313,7 @@ export const ChatEditor = memo(
       currentModelLabel,
       lastConfirmedModelLabel,
     });
-    const showReasoningOptions = Boolean(reasoning && onSelectReasoningEffort);
+    const showReasoningOptions = Boolean(reasoning);
     const reasoningEffortLabel = reasoning
       ? reasoning.efforts.length > 0
         ? t(`reasoning.effort.${reasoning.effort}`)
@@ -3130,9 +3130,7 @@ export const ChatEditor = memo(
                             : undefined
                         }
                         header={
-                          showReasoningOptions &&
-                          reasoning &&
-                          onSelectReasoningEffort ? (
+                          showReasoningOptions && reasoning ? (
                             <ModelReasoningControls
                               reasoning={reasoning}
                               onSelect={onSelectReasoningEffort}

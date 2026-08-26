@@ -17,7 +17,8 @@ import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
 // Config
-import { ApprovalMode, type Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
@@ -56,7 +57,8 @@ import { createSessionStartProfiler } from './session-start-profiler.js';
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import { GeminiChat } from './geminiChat.js';
+import { GeminiChat, type RepairOrphanedToolUseOptions } from './geminiChat.js';
+import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
@@ -106,12 +108,13 @@ import type {
   MemoryRecallDiscardReason,
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import type { UiTelemetryReplaySnapshot } from '../telemetry/uiTelemetry.js';
 
 // Forked agent cache
 import {
   saveCacheSafeParams,
   clearCacheSafeParams,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 
 // Utilities
 import {
@@ -123,7 +126,7 @@ import {
   getInitialChatHistory,
   getStartupContextLength,
   type AgentAvailabilityEntry,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import {
   collectAvailableSkillEntries,
   type AvailableSkillEntry,
@@ -346,9 +349,51 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
   ToolNames.EDIT,
 ]);
 
+type MainSessionPromptConfig = Pick<
+  Config,
+  | 'getSystemPrompt'
+  | 'getModel'
+  | 'getOutputStyle'
+  | 'getExperimentalZedIntegration'
+  | 'getInputFormat'
+  | 'isInteractive'
+>;
+
+export function getMainSessionBaseSystemPrompt(
+  config: MainSessionPromptConfig,
+): string {
+  const overrideSystemPrompt = config.getSystemPrompt();
+  return overrideSystemPrompt
+    ? getCustomSystemPrompt(overrideSystemPrompt)
+    : getCoreSystemPrompt(
+        undefined,
+        config.getModel(),
+        undefined,
+        resolveInteractionMode(config),
+        config.getOutputStyle(),
+      );
+}
+
 export class GeminiClient {
   private chat?: GeminiChat;
   private initializedSessionId: string | undefined;
+  /**
+   * Open session-swap telemetry transaction, if any. See
+   * {@link beginTelemetrySwap} for the lifetime contract. Holds the undo for
+   * the replay the current swap's `initialize()` performed, armed by
+   * {@link armTelemetrySwapUndo} inside the replay branches.
+   */
+  private telemetrySwap?: {
+    /**
+     * The session the process was on when the transaction opened — the one
+     * a failed swap rolls back to. Captured at open time because
+     * `initializedSessionId` is unreliable by arm time: an earlier failed
+     * swap's abort clears it, and the next swap would then snapshot no
+     * outgoing bucket at all (#9844 review).
+     */
+    outgoingHint: string;
+    undo?: { sessionId: string; snapshot: UiTelemetryReplaySnapshot };
+  };
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
@@ -465,6 +510,7 @@ export class GeminiClient {
     const resumedSessionData = this.config.getResumedSessionData();
     const restoreRuntime = this.config.getSessionRestoreRuntime?.();
     if (restoreRuntime) {
+      this.armTelemetrySwapUndo(sessionId);
       uiTelemetryService.resetSession(sessionId);
       for (const event of restoreRuntime.uiTelemetryEvents) {
         uiTelemetryService.addEvent(event, sessionId);
@@ -489,6 +535,7 @@ export class GeminiClient {
         );
       }
     } else if (resumedSessionData) {
+      this.armTelemetrySwapUndo(sessionId);
       const resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),
@@ -575,6 +622,156 @@ export class GeminiClient {
 
   isInitialized(): boolean {
     return this.chat !== undefined;
+  }
+
+  /**
+   * Opens a session-swap telemetry transaction for the `/resume` / `/branch`
+   * hooks (#9833).
+   *
+   * Lifetime contract: one call per swap attempt, closed by exactly one
+   * {@link commitTelemetrySwap} (the UI swap committed — the replayed history
+   * now belongs to the session the user is on) or
+   * {@link abortTelemetrySwap} (the swap failed and core rolled back — put
+   * the usage aggregate back). The undo is armed lazily by
+   * {@link armTelemetrySwapUndo} inside `initialize()`'s replay branches, so
+   * it is scoped to the ONE replay this swap performs:
+   *
+   * - A replay outside any transaction (process-startup `Config.initialize()`,
+   *   ACP) arms nothing — there is no owning swap to settle it, and a
+   *   process-lived undo would let a much later failed swap restore a
+   *   process-start snapshot and wipe everything accrued since.
+   * - `initialize()` only replays when its private `initializedSessionId`
+   *   differs from the config session id. The hooks cannot see that fact, so
+   *   the snapshot is taken here, inside the replay decision, never keyed on
+   *   a caller's guess.
+   *
+   * Serialization: returns false WITHOUT opening when a transaction is
+   * already open. Callers MUST abort the swap attempt on a false return
+   * (the hooks surface "a session switch is already in progress"). Two
+   * concurrent swaps cannot share this single slot: the second open would
+   * no-op while both replays mutate the same aggregate, so the first swap's
+   * stale settlement would either no-op or restore its snapshot over the
+   * second swap's committed state — the double-count / split-brain this
+   * transaction exists to close. Nothing else serializes the swaps: the
+   * session picker fires them fire-and-forget and no input gate covers
+   * them, so this slot is the latch.
+   */
+  beginTelemetrySwap(): boolean {
+    if (this.telemetrySwap) {
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          '[TELEMETRY_SWAP_BEGIN] rejected: a swap is already in progress',
+        );
+      }
+      return false;
+    }
+    // The hooks call this BEFORE config.startNewSession, so the config
+    // session id still names the session the process is on — capture it as
+    // the outgoing session now; initializedSessionId may already be stale
+    // or cleared by the time the undo arms.
+    this.telemetrySwap = { outgoingHint: this.config.getSessionId() };
+    return true;
+  }
+
+  /**
+   * The swap committed: drop the armed undo without restoring. The replayed
+   * history legitimately belongs to the session the user is now on, and a
+   * later failed swap must restore ITS OWN pre-swap snapshot, never this one.
+   * Safe to call with no transaction open (no-op).
+   */
+  commitTelemetrySwap(): void {
+    const undo = this.telemetrySwap?.undo;
+    this.telemetrySwap = undefined;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_COMMIT] undo=${undo ? 'dropped' : 'none'} ` +
+          `incoming=${undo?.sessionId ?? 'n/a'}`,
+      );
+    }
+  }
+
+  /**
+   * The swap failed and core rolled back: restore the usage aggregate (and
+   * the two affected session buckets) to the state captured before this
+   * swap's replay. Overwrites rather than subtracts, so it stays correct
+   * when the rollback's own re-`initialize()` (the `/branch` and `/resume`
+   * paths) has already replayed something else on top.
+   *
+   * Also forgets `initializedSessionId` when it still names the abandoned
+   * INCOMING session: undoing the replay without forgetting it would make a
+   * retry early-return and never replay, permanently under-counting the
+   * session. The clear is an identity check, not the assumption that the
+   * undo always names the incoming session — when the swap's forward
+   * `initialize()` never ran (e.g. `/branch` fails between
+   * `startNewSession(fork)` and `initialize()`), the rollback's own
+   * re-initialize arms the undo with the PARENT's id and sets
+   * `initializedSessionId` to it. That session is live and correctly
+   * initialized; clearing it would make the next `initialize()` of the
+   * session the user is already on skip the early return and re-replay its
+   * stored telemetry on top of the live aggregate — a permanent
+   * double-count. The undo belongs to the outgoing session's own
+   * re-initialize exactly when `undo.sessionId` matches the begin-time
+   * `outgoingHint` (#9844 review).
+   *
+   * Safe to call with no transaction open or nothing armed (no-op). Returns
+   * whether an undo was applied.
+   */
+  abortTelemetrySwap(): boolean {
+    const swap = this.telemetrySwap;
+    this.telemetrySwap = undefined;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_ABORT] undo=${swap?.undo ? 'applied' : 'none'} ` +
+          `incoming=${swap?.undo?.sessionId ?? 'n/a'} ` +
+          `outgoing=${swap?.undo?.snapshot.outgoingSessionId ?? 'n/a'}`,
+      );
+    }
+    if (!swap?.undo) return false;
+    uiTelemetryService.restoreFromReplaySnapshot(swap.undo.snapshot);
+    if (
+      swap.undo.sessionId !== swap.outgoingHint &&
+      this.initializedSessionId === swap.undo.sessionId
+    ) {
+      this.initializedSessionId = undefined;
+    }
+    return true;
+  }
+
+  /**
+   * Arms the undo for the replay the current `initialize()` call is about to
+   * perform. Called only by the replay branches; a fresh-start `initialize()`
+   * replays nothing, and an undo armed there would outlive the transaction.
+   *
+   * `??=` on the undo: within one swap only the FIRST replay's pre-state is
+   * the correct restore point — on the `/branch` rollback the re-initialize
+   * of the parent runs while the failed swap's undo is still outstanding.
+   * No-ops when no transaction is open (replay outside a swap).
+   *
+   * The snapshot also covers the session the process is currently on — the
+   * one a failed swap rolls back to. That is the transaction's
+   * `outgoingHint`, captured at open time, NOT `initializedSessionId`: an
+   * earlier failed swap's abort clears `initializedSessionId`, so keying on
+   * it would snapshot no outgoing bucket and the rollback's re-initialize
+   * would wipe the live session's never-persisted state. The `/branch`
+   * rollback re-initializes that session, and the re-initialize's
+   * `resetSession` wipes its live bucket — only what the transcript persists
+   * comes back (skill invocations never do), so the undo must put the
+   * captured bucket back.
+   */
+  private armTelemetrySwapUndo(sessionId: string): void {
+    if (!this.telemetrySwap || this.telemetrySwap.undo) return;
+    const outgoing =
+      this.telemetrySwap.outgoingHint ?? this.initializedSessionId;
+    this.telemetrySwap.undo = {
+      sessionId,
+      snapshot: uiTelemetryService.snapshotForReplay(sessionId, outgoing),
+    };
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_ARM] incoming=${sessionId} ` +
+          `outgoing=${outgoing ?? 'n/a'}`,
+      );
+    }
   }
 
   getHistory(curated: boolean = false): Content[] {
@@ -745,11 +942,14 @@ export class GeminiClient {
    * late real result lands as a second `user[tool_result]` block (orphan
    * because the synthetic already consumed the matching `tool_use`).
    */
-  repairOrphanedToolUseTurnsInHistory(reason?: string): {
+  repairOrphanedToolUseTurnsInHistory(
+    reason?: string,
+    options?: RepairOrphanedToolUseOptions,
+  ): {
     injected: Array<{ callId: string; name: string }>;
     droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
-    const result = this.getChat().repairOrphanedToolUseTurns(reason);
+    const result = this.getChat().repairOrphanedToolUseTurns(reason, options);
     if (result.injected.length > 0) {
       debugLogger.warn(
         `[REPAIR] Synthesized ${result.injected.length} functionResponse(s) ` +
@@ -1161,15 +1361,7 @@ export class GeminiClient {
   }
 
   private getMainSessionSystemInstruction(): string {
-    const overrideSystemPrompt = this.config.getSystemPrompt();
-    const base = overrideSystemPrompt
-      ? getCustomSystemPrompt(overrideSystemPrompt)
-      : getCoreSystemPrompt(
-          undefined,
-          this.config.getModel(),
-          undefined,
-          resolveInteractionMode(this.config),
-        );
+    const base = getMainSessionBaseSystemPrompt(this.config);
     const stableLayers = {
       base,
       contextFiles: this.config.getUserMemory(),
@@ -1811,7 +2003,15 @@ export class GeminiClient {
       // any pre-send code reading `chat.history` from seeing a malformed
       // shape.)
       profiler.timeSync('orphan_tool_use_repair', () => {
-        this.repairOrphanedToolUseTurnsInHistory();
+        const preserveCallIds =
+          (this.config.getPreserveRestorableAskUserQuestion?.() ??
+          this.config.getRestoreAskUserQuestion?.())
+            ? restorableAskUserQuestionCallIds(chat.peekLastHistoryEntry())
+            : undefined;
+        this.repairOrphanedToolUseTurnsInHistory(
+          undefined,
+          preserveCallIds ? { preserveCallIds } : undefined,
+        );
       });
 
       const sessionStartAdditionalContext = await profiler.time(
@@ -2270,6 +2470,7 @@ export class GeminiClient {
       const m = mcResult.meta;
       const changed = m.tokensSaved > 0;
       if (changed) {
+        // setHistory conservatively clears loaded-skill tracking.
         this.getChat().setHistory(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
@@ -2568,6 +2769,8 @@ export class GeminiClient {
           this.getChat().addHistory(entry);
         }
       }
+      // Loaded-skill tracking was conservatively cleared by the strip
+      // above; restored bodies simply re-inject on their next invoke.
       strippedRetryEntries = [];
     };
 
@@ -3130,10 +3333,25 @@ export class GeminiClient {
       // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
       // still calls tryCompressChat directly for the full reset (env refresh +
       // forceFullIdeContext flip).
+      const model = options?.modelOverride ?? this.config.getModel();
       const sessionTokenLimit = this.config.getSessionTokenLimit();
       if (sessionTokenLimit > 0) {
+        // An exact `\0` full-turn route selector resolves to its route before
+        // GeminiChat.sendMessageStream stamps counts under it, so the gate
+        // must key the resolved route too — the raw selector key can never
+        // match a stamped count. Mirrors the resolution at the top of
+        // GeminiChat.sendMessageStream (#9454).
+        const exactRoute = model.endsWith('\0')
+          ? await this.config
+              .getBaseLlmClient()
+              .resolveForModel(model.slice(0, -1), { failClosed: true })
+          : undefined;
+        const requestRouteKey = this.config.getModelRouteIdentity(
+          exactRoute ? exactRoute.model : model,
+          exactRoute?.contentGeneratorConfig,
+        );
         const lastPromptTokenCount =
-          uiTelemetryService.getLastPromptTokenCount();
+          this.getChat().getLastPromptTokenCount(requestRouteKey);
         if (lastPromptTokenCount > sessionTokenLimit) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield {
@@ -3224,9 +3442,6 @@ export class GeminiClient {
       }
 
       const turn = new Turn(this.getChat(), prompt_id, goalPermit);
-
-      // Determine the model to use for this turn
-      const model = options?.modelOverride ?? this.config.getModel();
 
       // Assemble the outgoing request. IDE context is merged into the
       // user prompt's first text part, then on UserQuery / Cron turns
@@ -4047,8 +4262,8 @@ export class GeminiClient {
 
       if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
         // Save cache-safe params here — before any early return — so that
-        // background extract/dream agents calling getCacheSafeParams() always
-        // see the current turn's history regardless of which path exits below.
+        // background readers calling getCacheSafeParams(sessionId) can see the
+        // current turn's history regardless of which path exits below.
         try {
           const chat = this.getChat();
           const maxHistoryForCache = 40;

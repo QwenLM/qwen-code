@@ -275,6 +275,8 @@ export interface DaemonCreateScheduledTaskRequest {
   recurring?: boolean;
   /** Defaults to true. */
   enabled?: boolean;
+  /** Reuse an existing live, idle session instead of creating one. */
+  sessionId?: string | null;
 }
 
 /** Partial update. `name: null` (or '') clears the name. Omitted fields are

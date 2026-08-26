@@ -15,6 +15,14 @@ export const GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON =
   'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
 export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
   'The current Goal revision exceeded the checkpoint verifier request limit. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
+/**
+ * How many consecutive stalled checkpoints a Goal may run before it stops.
+ * Three matches the thrash bounds elsewhere in this family of runtimes: one
+ * stalled checkpoint is a busy turn, two is a pattern, three is the loop.
+ */
+export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
+export const GOAL_CHECKPOINT_STALLED_REASON =
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list or a result that could not be folded into claims at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
 
 /**
  * Which bound a `usage_limited` Goal ran into.
@@ -104,9 +112,28 @@ export interface GoalRecord {
   evidenceCursor: TranscriptCursor;
   turnCount: number;
   activeTimeMs: number;
+  /**
+   * Model tokens billed to this Goal so far, summed across its turn windows.
+   *
+   * Measured from the same session token source as `/stats`. Verification and
+   * checkpoint side queries run between turn windows and are not included.
+   * Zero on Goals recovered from a transcript written before the field existed.
+   */
+  tokensUsed: number;
   createdAt: number;
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;
+  /**
+   * Consecutive checkpoint checks that failed to relieve an overflowing
+   * evidence window: the checkpoint came back full (see
+   * `isGoalCheckpointStalled`) or the verifier result could not be folded
+   * into claims at all. Persisted on the record rather than held in memory
+   * so a daemon restart or session resume cannot launder the count; absent
+   * means zero. Reset by any checkpoint check that finds room, and by every
+   * control action that starts a different evidence window: edit, replace,
+   * and the resume of an evidence-limited Goal.
+   */
+  checkpointStalls?: number;
   lastReason?: string;
   /**
    * Set alongside `lastReason` whenever the runtime stops a Goal at one of the

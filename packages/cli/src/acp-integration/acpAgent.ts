@@ -8,6 +8,7 @@ import {
   APPROVAL_MODE_INFO,
   APPROVAL_MODES,
   AuthType,
+  hasVertexProjectConfigured,
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
   buildBtwPrompt,
@@ -77,6 +78,7 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
+  normalizeDerivedBranchTitle,
   BranchPointInvalidError,
   parseGoalSnapshotV2,
   parseGoalStateCause,
@@ -122,7 +124,6 @@ import {
   type ProviderConfig,
   type ProviderModelConfig,
   type ProviderSetupInputs,
-  type ReasoningEffort,
   type ResumedSessionData,
   type SelectiveSessionRestoreOptions,
   type SendSdkMcpMessage,
@@ -134,6 +135,7 @@ import {
   type ChatRecord,
   type ToolInvocationGuard,
   type TurnResultRecordPayload,
+  sessionIdContext,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -187,15 +189,13 @@ import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
   CHANNEL_PROMPT_META_KEY,
 } from '@qwen-code/channel-base';
-import { observeAcpToolResultWire } from '../utils/tool-result-boundary-diagnostics.js';
+import { observeAcpToolResultWire } from '../nonInteractive/tool-result-boundary-diagnostics.js';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
-import { pipeline } from 'node:stream/promises';
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
 import {
   loadSettings,
@@ -224,7 +224,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
-import { isCompatibleLiveSessionSource } from '../serve/conversations/session-source.js';
+import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
@@ -246,7 +246,12 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
-import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import {
+  Session,
+  buildAvailableCommandsSnapshot,
+  registerCreateSubSessionTool,
+} from './session/Session.js';
+import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
@@ -256,9 +261,19 @@ import {
   type ChildHeapProbe,
 } from './child-heap-probe.js';
 import {
+  buildModelReasoningConfigOption,
+  buildModelReasoningConfigPreview,
   getModelConfiguration,
+  REASONING_EFFORT_DEFAULT,
+  REASONING_EFFORT_NAMES,
+  REASONING_EFFORT_NONE,
   type ModelReasoningConfiguration,
 } from './model-configuration.js';
+import {
+  deleteManagedSkill,
+  installManagedSkill,
+  setManagedSkillEnabled,
+} from './skill-management.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
   collectHistoryReplayUpdates,
@@ -268,6 +283,7 @@ import {
   replayTranscriptRecordPage,
 } from './session/history-replay-page.js';
 import {
+  ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
   parseAcpBaseModelId,
@@ -278,11 +294,11 @@ import {
   resolveOutputLanguageOrPreserveAuto,
   getOutputLanguageFilePath,
   writeOutputLanguageAndRegisterPath,
-} from '../utils/languageUtils.js';
+} from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { runExitCleanup } from '../utils/cleanup.js';
-import { startNonInteractiveOpenAILogHousekeeping } from '../utils/housekeeping/scheduler.js';
+import { startNonInteractiveOpenAILogHousekeeping } from '../services/housekeeping/scheduler.js';
 import { appEvents, AppEvent } from '../utils/events.js';
 import {
   setLanguageAsync,
@@ -358,6 +374,8 @@ import {
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
   ACTIVE_WORK_LEGACY_HOLD_CATEGORIES,
+  CHANNEL_LIVENESS_META_KEY,
+  CHANNEL_LIVENESS_VERSION,
   clampActiveWorkIntervalMs,
   type ActiveWorkHoldV1,
   CHANNEL_STARTUP_PROFILE_META_KEY,
@@ -366,6 +384,8 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_BYTES,
@@ -417,16 +437,6 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
 const SESSION_DRAIN_TIMEOUT_MS = 30_000;
-const ACP_REASONING_EFFORT_DEFAULT = 'default';
-const ACP_REASONING_EFFORT_NONE = 'none';
-const ACP_REASONING_EFFORT_NAMES: Record<ReasoningEffort, string> = {
-  low: 'Low',
-  medium: 'Medium',
-  high: 'High',
-  xhigh: 'Extra high',
-  max: 'Max',
-};
-
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -537,6 +547,7 @@ type AcpSessionProfileStage =
   | 'live_restore'
   | 'existence_check'
   | 'config_setup'
+  | 'restore_session_model'
   | 'auth'
   | 'file_system_setup'
   | 'session_register'
@@ -870,6 +881,30 @@ const RESUME_RESTORE_OPTIONS: SelectiveSessionRestoreOptions = {
   replay: { kind: 'none' },
 };
 
+async function resolvePersistedSessionIdForRestore(
+  sessionService: SessionService,
+  sessionId: string,
+): Promise<string | undefined> {
+  try {
+    return await sessionService.findSessionIdIgnoringCase(sessionId);
+  } catch (error) {
+    if (
+      error instanceof SessionIdCaseConflictError &&
+      error.reason === 'case_conflict' &&
+      error.candidateSessionId === sessionId
+    ) {
+      return sessionId;
+    }
+    if (error instanceof SessionIdCaseConflictError) {
+      throw RequestError.internalError(
+        { errorKind: 'session_conflict', sessionId },
+        error.message,
+      );
+    }
+    throw error;
+  }
+}
+
 function mapSessionRestoreRequestError(
   error: unknown,
   sessionId: string,
@@ -1109,19 +1144,10 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
   return value as number;
 }
 
-function deriveForkBaseName(
-  name: unknown,
-  recording: { getCurrentCustomTitle(): string | undefined } | undefined,
-  sessionId: string,
-): string {
-  if (typeof name === 'string' && name.trim().length > 0) {
-    return name.trim();
-  }
-  const existingTitle = recording?.getCurrentCustomTitle();
-  const stripped = existingTitle
-    ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-    .trim();
-  return stripped && stripped.length > 0 ? stripped : sessionId.slice(0, 8);
+function normalizeRequestedBranchName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  return normalized || undefined;
 }
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
   return new Proxy(config, {
@@ -1211,52 +1237,6 @@ type QwenMemoryPaths = {
   autoMemoryDir: string;
 };
 
-type QwenSkillInstallRequest = {
-  id: string;
-  slug: string;
-  name: string;
-  description?: string;
-  sourceUrl: string;
-  scope: 'global';
-};
-
-type QwenSkillDeleteRequest = {
-  slug: string;
-  scope: 'global';
-};
-
-type QwenSkillSetEnabledRequest = {
-  slug: string;
-  enabled: boolean;
-  scope: 'global' | 'project';
-};
-
-type QwenManagedSkillFile = {
-  skillDir: string;
-  skillFile: string;
-  content: string;
-};
-
-const PROJECT_SKILL_DIRS = ['.qwen', '.agents'] as const;
-const SKILLS_DIR = 'skills';
-
-type DownloadedSkillFile = {
-  relativePath: string;
-  content: Uint8Array;
-};
-
-type DownloadedSkill = {
-  skillContent: string;
-  files: DownloadedSkillFile[];
-};
-
-type GitHubBlobSkillUrl = {
-  owner: string;
-  repo: string;
-  ref: string;
-  filePath: string;
-};
-
 type QwenSettingsScope = 'user' | 'workspace';
 type QwenSettingValue = string | number | boolean | string[] | undefined;
 type QwenMcpTransport = 'stdio' | 'http' | 'sse';
@@ -1298,6 +1278,7 @@ type QwenMcpServerConfig = {
   url?: string;
   headers?: Record<string, string>;
   timeout?: number;
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -1334,7 +1315,7 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   'general.language': { type: 'string' },
   'tools.approvalMode': {
     type: 'enum',
-    values: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
+    values: APPROVAL_MODES,
   },
   'general.vimMode': { type: 'boolean' },
   'general.enableAutoUpdate': { type: 'boolean' },
@@ -1458,738 +1439,6 @@ function readRequiredString(value: unknown, fieldName: string): string {
     );
   }
   return stringValue;
-}
-
-// Skill slugs are used to build filesystem paths under `<globalQwenDir>/skills`.
-// The character allowlist below already excludes `/` and `\`, but `.` and `..`
-// would still slip through and let `path.join` traverse out of the skills dir
-// (e.g. slug `..` resolves to the global config dir). Reject them explicitly.
-function validateSkillSlug(slug: string): void {
-  if (
-    !slug ||
-    slug === '.' ||
-    slug === '..' ||
-    slug.includes('/') ||
-    slug.includes(path.sep) ||
-    !/^[a-zA-Z0-9._-]+$/.test(slug)
-  ) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
-}
-
-function readSkillInstallRequest(
-  params: Record<string, unknown>,
-): QwenSkillInstallRequest {
-  const skillParams = toRecord(params['skill']);
-  const input = Object.keys(skillParams).length > 0 ? skillParams : params;
-  const slug = readRequiredString(input['slug'], 'skill.slug');
-  validateSkillSlug(slug);
-
-  const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
-  if (scope !== 'global') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Only global skill installation is supported',
-    );
-  }
-
-  const description = readOptionalString(
-    input['description'],
-    'skill.description',
-  );
-  return {
-    id: readOptionalString(input['id'], 'skill.id') ?? slug,
-    slug,
-    name: readOptionalString(input['name'], 'skill.name') ?? slug,
-    ...(description ? { description } : {}),
-    sourceUrl: readRequiredString(input['sourceUrl'], 'skill.sourceUrl'),
-    scope,
-  };
-}
-
-function readSkillSlugRequest(
-  params: Record<string, unknown>,
-): QwenSkillDeleteRequest {
-  const skillParams = toRecord(params['skill']);
-  const input = Object.keys(skillParams).length > 0 ? skillParams : params;
-  const slug = readRequiredString(input['slug'], 'skill.slug');
-  validateSkillSlug(slug);
-
-  const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
-  if (scope !== 'global') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Only global skill management is supported',
-    );
-  }
-
-  return { slug, scope };
-}
-
-function readSkillSetEnabledRequest(
-  params: Record<string, unknown>,
-): QwenSkillSetEnabledRequest {
-  const skillParams = toRecord(params['skill']);
-  const input = Object.keys(skillParams).length > 0 ? skillParams : params;
-  const slug = readRequiredString(input['slug'], 'skill.slug');
-  validateSkillSlug(slug);
-
-  const scope = readOptionalString(input['scope'], 'skill.scope') ?? 'global';
-  if (scope !== 'global' && scope !== 'project') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Only global or project skill management is supported',
-    );
-  }
-
-  if (typeof input['enabled'] !== 'boolean') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Invalid skill.enabled: expected boolean',
-    );
-  }
-  return {
-    slug,
-    scope,
-    enabled: input['enabled'],
-  };
-}
-
-function splitSkillMarkdown(content: string): {
-  frontmatter: string;
-  body: string;
-} {
-  const normalized = content.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
-  const match = normalized.match(/^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/);
-  if (!match) {
-    throw RequestError.invalidParams(
-      undefined,
-      'Invalid skill file: missing YAML frontmatter',
-    );
-  }
-  return {
-    frontmatter: match[1],
-    body: match[2],
-  };
-}
-
-function setSkillFrontmatterEnabled(content: string, enabled: boolean): string {
-  const { frontmatter, body } = splitSkillMarkdown(content);
-
-  // Surgically add/remove only the top-level `disable-model-invocation:` line
-  // instead of round-tripping the whole frontmatter through a YAML
-  // parse/stringify. The minimal core YAML serializer drops comments and
-  // flattens nested structures (e.g. `hooks:`), so reserializing here would
-  // corrupt hooks-bearing skills and strip user comments. Working on the raw
-  // text leaves every other byte untouched.
-  const lines = frontmatter.split('\n');
-  const disabledLineIndex = lines.findIndex((line) =>
-    /^disable-model-invocation\s*:/.test(line),
-  );
-
-  if (enabled) {
-    if (disabledLineIndex !== -1) {
-      lines.splice(disabledLineIndex, 1);
-    }
-  } else if (disabledLineIndex !== -1) {
-    lines[disabledLineIndex] = 'disable-model-invocation: true';
-  } else {
-    let insertIndex = lines.length;
-    while (insertIndex > 0 && lines[insertIndex - 1].trim() === '') {
-      insertIndex -= 1;
-    }
-    lines.splice(insertIndex, 0, 'disable-model-invocation: true');
-  }
-
-  const nextFrontmatter = lines.join('\n');
-  return `---\n${nextFrontmatter}\n---\n${body}`;
-}
-
-// Skill downloads must come from the GitHub host set. Restricting the host
-// here prevents the client-supplied `sourceUrl` from driving server-side
-// fetches at internal/loopback/link-local endpoints (SSRF), e.g.
-// `http://169.254.169.254/` cloud-metadata or `http://localhost:<port>/`.
-const ALLOWED_SKILL_SOURCE_HOSTS = new Set([
-  'github.com',
-  'raw.githubusercontent.com',
-  'codeload.github.com',
-  'api.github.com',
-]);
-
-function assertAllowedSkillSourceUrl(sourceUrl: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(sourceUrl);
-  } catch {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill sourceUrl must be a valid URL',
-    );
-  }
-  // Require HTTPS: a plaintext http: fetch of skill content (which can include
-  // executable hooks) is MITM-able by a network-position attacker, so the host
-  // allowlist alone is not sufficient. All supported GitHub hosts serve HTTPS.
-  if (parsed.protocol !== 'https:') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill sourceUrl must be an HTTPS URL',
-    );
-  }
-  if (!ALLOWED_SKILL_SOURCE_HOSTS.has(parsed.hostname)) {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill sourceUrl host is not allowed (only github.com sources are supported)',
-    );
-  }
-}
-
-function parseGitHubBlobSkillUrl(sourceUrl: string): GitHubBlobSkillUrl | null {
-  const parsed = new URL(sourceUrl);
-  // HTTPS-only, consistent with assertAllowedSkillSourceUrl (skill content can
-  // include executable hooks, so plaintext http: is MITM-able).
-  if (parsed.protocol !== 'https:') {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill sourceUrl must be an HTTPS URL',
-    );
-  }
-
-  if (parsed.hostname !== 'github.com') return null;
-  const parts = parsed.pathname.split('/').filter(Boolean);
-  if (parts.length < 5 || parts[2] !== 'blob') return null;
-
-  const owner = parts[0];
-  const repo = parts[1];
-  const ref = parts[3];
-  const filePathParts = parts.slice(4);
-  if (!owner || !repo || !ref || filePathParts.length === 0) return null;
-
-  return {
-    owner,
-    repo,
-    ref,
-    filePath: filePathParts.join('/'),
-  };
-}
-
-function toRawGitHubUrl(githubUrl: GitHubBlobSkillUrl): string {
-  return `https://raw.githubusercontent.com/${githubUrl.owner}/${githubUrl.repo}/${githubUrl.ref}/${githubUrl.filePath}`;
-}
-
-function encodeGitHubPath(filePath: string): string {
-  if (!filePath || filePath === '.') return '';
-  return filePath.split('/').map(encodeURIComponent).join('/');
-}
-
-function readTarString(
-  archive: Uint8Array,
-  offset: number,
-  length: number,
-): string {
-  const bytes = archive.subarray(offset, offset + length);
-  const nul = bytes.indexOf(0);
-  const end = nul >= 0 ? nul : bytes.length;
-  return Buffer.from(bytes.subarray(0, end)).toString('utf8').trim();
-}
-
-function readTarSize(archive: Uint8Array, offset: number): number {
-  const raw = readTarString(archive, offset + 124, 12);
-  return raw ? Number.parseInt(raw, 8) : 0;
-}
-
-function isZeroTarBlock(archive: Uint8Array, offset: number): boolean {
-  for (let i = 0; i < 512; i += 1) {
-    if (archive[offset + i] !== 0) return false;
-  }
-  return true;
-}
-
-function readTarPath(archive: Uint8Array, offset: number): string {
-  const name = readTarString(archive, offset, 100);
-  const prefix = readTarString(archive, offset + 345, 155);
-  return prefix ? `${prefix}/${name}` : name;
-}
-
-function stripArchiveRoot(filePath: string): string {
-  const parts = filePath.split('/').filter(Boolean);
-  return parts.length > 1 ? parts.slice(1).join('/') : '';
-}
-
-// Bound the work done on untrusted skill archives so a malicious or oversized
-// download cannot exhaust memory. Decompression is streamed (createGunzip) and
-// aborted the moment the cumulative inflated size crosses the cap, so a
-// decompression bomb can never fully inflate into memory.
-const MAX_SKILL_DOWNLOAD_BYTES = 100 * 1024 * 1024; // 100 MB compressed
-const MAX_SKILL_DECOMPRESSED_BYTES = 500 * 1024 * 1024; // 500 MB decompressed
-// Bounds for the GitHub Contents-API directory walk (the archive path is
-// already bounded by the byte caps above).
-const MAX_SKILL_API_DIR_DEPTH = 16;
-const MAX_SKILL_API_FILE_COUNT = 2000;
-
-// Sentinel so the streaming decompression's size-limit abort can be told apart
-// from a genuine gunzip/format error in the catch below.
-class DecompressedSizeExceededError extends Error {}
-
-export async function extractFilesFromTarGz(
-  archiveBytes: Uint8Array,
-  directoryPath: string,
-  // Limits are injectable so the size-guard branches can be exercised in tests
-  // without allocating the 100MB/500MB production thresholds.
-  limits: {
-    maxCompressedBytes?: number;
-    maxDecompressedBytes?: number;
-  } = {},
-): Promise<DownloadedSkillFile[]> {
-  const maxCompressedBytes =
-    limits.maxCompressedBytes ?? MAX_SKILL_DOWNLOAD_BYTES;
-  const maxDecompressedBytes =
-    limits.maxDecompressedBytes ?? MAX_SKILL_DECOMPRESSED_BYTES;
-
-  if (archiveBytes.length > maxCompressedBytes) {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill archive exceeds the maximum allowed size',
-    );
-  }
-
-  let archive: Buffer;
-  try {
-    // Stream the inflate so we can abort as soon as the cumulative output
-    // exceeds the cap, instead of materializing the entire decompressed buffer
-    // first (a ~1000:1 gzip ratio could otherwise inflate a small archive to
-    // many GB before any post-hoc length check fires).
-    const chunks: Buffer[] = [];
-    let total = 0;
-    await pipeline(
-      // Wrap in an array so the whole archive is emitted as a single chunk;
-      // `Readable.from(uint8array)` would otherwise iterate it byte-by-byte.
-      Readable.from([Buffer.from(archiveBytes)]),
-      createGunzip(),
-      new Writable({
-        write(chunk: Buffer, _enc, cb) {
-          total += chunk.length;
-          if (total > maxDecompressedBytes) {
-            cb(new DecompressedSizeExceededError());
-            return;
-          }
-          chunks.push(chunk);
-          cb();
-        },
-      }),
-    );
-    archive = Buffer.concat(chunks);
-  } catch (error) {
-    if (error instanceof DecompressedSizeExceededError) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Decompressed skill archive exceeds the maximum allowed size',
-      );
-    }
-    throw RequestError.invalidParams(
-      undefined,
-      `Failed to decompress skill archive: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
-    );
-  }
-
-  const normalizedDirectory = directoryPath.replace(/^\/+|\/+$/g, '');
-  // Treat '.' (SKILL.md at the repository root) as the empty prefix; otherwise
-  // the prefix becomes './' and never matches the root-stripped archive paths
-  // (e.g. 'SKILL.md'), yielding zero extracted files.
-  const directoryPrefix =
-    normalizedDirectory && normalizedDirectory !== '.'
-      ? `${normalizedDirectory}/`
-      : '';
-  const files: DownloadedSkillFile[] = [];
-
-  for (let offset = 0; offset + 512 <= archive.length; ) {
-    if (isZeroTarBlock(archive, offset)) break;
-
-    const fullPath = readTarPath(archive, offset);
-    const typeFlag = String.fromCharCode(archive[offset + 156] || 0);
-    const size = readTarSize(archive, offset);
-    const dataOffset = offset + 512;
-    const nextOffset = dataOffset + Math.ceil(size / 512) * 512;
-
-    if (typeFlag === '0' || typeFlag === '\0') {
-      const repoPath = stripArchiveRoot(fullPath);
-      if (repoPath.startsWith(directoryPrefix)) {
-        const relativePath = repoPath.slice(directoryPrefix.length);
-        if (relativePath) {
-          files.push({
-            relativePath,
-            content: archive.subarray(dataOffset, dataOffset + size),
-          });
-        }
-      }
-    }
-
-    offset = nextOffset;
-  }
-
-  return files;
-}
-
-// GitHub host suffixes a download may legitimately redirect to (raw/codeload
-// commonly 302 to their object CDN for geo/CDN routing). Redirects to anything
-// outside these are rejected, preserving the SSRF guard while not breaking
-// real downloads.
-const ALLOWED_REDIRECT_HOST_SUFFIXES = [
-  '.githubusercontent.com',
-  '.github.com',
-  // Note: '.github.io' is intentionally excluded — *.github.io are
-  // user-controlled GitHub Pages sites, so allowing redirects there would
-  // reopen the SSRF/exfiltration surface this allowlist exists to close.
-];
-
-function isAllowedSkillFetchHost(hostname: string): boolean {
-  if (ALLOWED_SKILL_SOURCE_HOSTS.has(hostname)) return true;
-  return ALLOWED_REDIRECT_HOST_SUFFIXES.some((suffix) =>
-    hostname.endsWith(suffix),
-  );
-}
-
-/**
- * Fetch that follows redirects manually, validating every hop stays on an
- * allowed GitHub host over HTTPS. This keeps the SSRF protection of
- * `redirect: 'manual'` (a malicious repo cannot bounce the fetch to an internal
- * endpoint) while still following GitHub's legitimate CDN redirects, which
- * plain `redirect: 'manual'` would surface as a download failure.
- */
-export async function fetchAllowedGitHub(
-  url: string,
-  init: RequestInit = {},
-  maxRedirects = 5,
-): Promise<Response> {
-  let current = url;
-  for (let hop = 0; hop <= maxRedirects; hop += 1) {
-    const response = await fetch(current, { ...init, redirect: 'manual' });
-    if (response.status < 300 || response.status >= 400) {
-      return response;
-    }
-    const location = response.headers?.get('location');
-    if (!location) return response;
-    let next: URL;
-    try {
-      next = new URL(location, current);
-    } catch {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download redirected to an invalid URL',
-      );
-    }
-    if (next.protocol !== 'https:' || !isAllowedSkillFetchHost(next.hostname)) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download redirected to a disallowed host',
-      );
-    }
-    current = next.toString();
-  }
-  throw RequestError.invalidParams(
-    undefined,
-    'Skill download exceeded the maximum number of redirects',
-  );
-}
-
-// Read a response body while enforcing a hard byte cap against the *actual*
-// streamed bytes. The Content-Length pre-checks at the call sites are advisory
-// only — a server that omits the header (chunked transfer, CDN redirect) could
-// otherwise stream an arbitrarily large body straight into memory via
-// `arrayBuffer()`.
-async function readBodyWithLimit(
-  response: Response,
-  maxBytes: number,
-): Promise<Uint8Array> {
-  const body = response.body;
-  if (!body) {
-    const buf = new Uint8Array(await response.arrayBuffer());
-    if (buf.byteLength > maxBytes) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download exceeds the maximum allowed size',
-      );
-    }
-    return buf;
-  }
-
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download exceeds the maximum allowed size',
-      );
-    }
-    chunks.push(value);
-  }
-
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return result;
-}
-
-async function fetchBytes(url: string): Promise<Uint8Array> {
-  const response = await fetchAllowedGitHub(url);
-  if (!response.ok) {
-    throw RequestError.invalidParams(
-      undefined,
-      `Failed to download skill (${response.status})`,
-    );
-  }
-
-  const contentLength = response.headers?.get('content-length');
-  if (contentLength) {
-    const declaredSize = Number.parseInt(contentLength, 10);
-    if (
-      Number.isFinite(declaredSize) &&
-      declaredSize > MAX_SKILL_DOWNLOAD_BYTES
-    ) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill download exceeds the maximum allowed size',
-      );
-    }
-  }
-
-  return readBodyWithLimit(response, MAX_SKILL_DOWNLOAD_BYTES);
-}
-
-async function downloadSingleSkillFile(
-  sourceUrl: string,
-): Promise<DownloadedSkill> {
-  const githubUrl = parseGitHubBlobSkillUrl(sourceUrl);
-  const fetchUrl = githubUrl ? toRawGitHubUrl(githubUrl) : sourceUrl;
-  const content = await fetchBytes(fetchUrl);
-  return {
-    skillContent: Buffer.from(content).toString('utf8'),
-    files: [{ relativePath: 'SKILL.md', content }],
-  };
-}
-
-async function downloadGitHubSkillDirectoryFromArchive(
-  githubUrl: GitHubBlobSkillUrl,
-  directoryPath: string,
-): Promise<DownloadedSkillFile[]> {
-  const archiveUrl = `https://codeload.github.com/${githubUrl.owner}/${githubUrl.repo}/tar.gz/${encodeURIComponent(
-    githubUrl.ref,
-  )}`;
-  const response = await fetchAllowedGitHub(archiveUrl, {
-    headers: {
-      'User-Agent': 'qwen-code',
-    },
-  });
-  if (!response.ok) {
-    throw RequestError.invalidParams(
-      undefined,
-      `Failed to download GitHub skill archive (${response.status})`,
-    );
-  }
-
-  // Reject oversized archives by declared Content-Length before buffering the
-  // whole body into memory, mirroring the guard in fetchBytes.
-  const contentLength = response.headers?.get('content-length');
-  if (contentLength) {
-    const declaredSize = Number.parseInt(contentLength, 10);
-    if (
-      Number.isFinite(declaredSize) &&
-      declaredSize > MAX_SKILL_DOWNLOAD_BYTES
-    ) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill archive exceeds the maximum allowed size',
-      );
-    }
-  }
-
-  return extractFilesFromTarGz(
-    await readBodyWithLimit(response, MAX_SKILL_DOWNLOAD_BYTES),
-    directoryPath,
-  );
-}
-
-async function fetchGitHubDirectoryItems(
-  githubUrl: GitHubBlobSkillUrl,
-  directoryPath: string,
-): Promise<unknown[]> {
-  const encodedPath = encodeGitHubPath(directoryPath);
-  const apiUrl = `https://api.github.com/repos/${githubUrl.owner}/${githubUrl.repo}/contents/${encodedPath}?ref=${encodeURIComponent(githubUrl.ref)}`;
-  const response = await fetchAllowedGitHub(apiUrl, {
-    headers: {
-      Accept: 'application/vnd.github+json',
-      'User-Agent': 'qwen-code',
-    },
-  });
-  if (!response.ok) {
-    throw RequestError.invalidParams(
-      undefined,
-      `Failed to list GitHub skill files (${response.status})`,
-    );
-  }
-
-  const data = await response.json();
-  if (!Array.isArray(data)) {
-    throw RequestError.invalidParams(
-      undefined,
-      'GitHub skill URL must point to a directory-backed SKILL.md file',
-    );
-  }
-  return data;
-}
-
-async function downloadGitHubSkillDirectoryFromApi(
-  githubUrl: GitHubBlobSkillUrl,
-  directoryPath: string,
-  relativeRoot = '',
-  // Bound the recursive API walk so a crafted repo (deeply nested dirs, huge
-  // file counts, or large cumulative size) can't exhaust memory/time. The
-  // archive fallback already enforces size caps; this gives the API path
-  // equivalent guards.
-  depth = 0,
-  budget: { files: number; bytes: number } = { files: 0, bytes: 0 },
-): Promise<DownloadedSkillFile[]> {
-  if (depth > MAX_SKILL_API_DIR_DEPTH) {
-    throw RequestError.invalidParams(
-      undefined,
-      'Skill directory nesting exceeds the maximum allowed depth',
-    );
-  }
-  const items = await fetchGitHubDirectoryItems(githubUrl, directoryPath);
-  const files: DownloadedSkillFile[] = [];
-
-  for (const item of items) {
-    const record = toRecord(item);
-    const name = readRequiredString(record['name'], 'github.name');
-    const itemPath = readRequiredString(record['path'], 'github.path');
-    const type = readRequiredString(record['type'], 'github.type');
-    const relativePath = relativeRoot
-      ? path.posix.join(relativeRoot, name)
-      : name;
-
-    if (type === 'dir') {
-      files.push(
-        ...(await downloadGitHubSkillDirectoryFromApi(
-          githubUrl,
-          itemPath,
-          relativePath,
-          depth + 1,
-          budget,
-        )),
-      );
-      continue;
-    }
-
-    if (type !== 'file') continue;
-    budget.files += 1;
-    if (budget.files > MAX_SKILL_API_FILE_COUNT) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill directory contains too many files',
-      );
-    }
-    const downloadUrl = readRequiredString(
-      record['download_url'],
-      'github.download_url',
-    );
-    // SSRF defense: the API-provided download_url is attacker-influenced, so
-    // run it through the same host allowlist + HTTPS check as the initial URL.
-    assertAllowedSkillSourceUrl(downloadUrl);
-    const content = await fetchBytes(downloadUrl);
-    budget.bytes += content.length;
-    if (budget.bytes > MAX_SKILL_DECOMPRESSED_BYTES) {
-      throw RequestError.invalidParams(
-        undefined,
-        'Skill directory exceeds the maximum allowed size',
-      );
-    }
-    files.push({
-      relativePath,
-      content,
-    });
-  }
-
-  return files;
-}
-
-async function downloadGitHubSkillDirectory(
-  githubUrl: GitHubBlobSkillUrl,
-  directoryPath: string,
-): Promise<DownloadedSkillFile[]> {
-  const apiFiles = await downloadGitHubSkillDirectoryFromApi(
-    githubUrl,
-    directoryPath,
-  ).catch((error) => {
-    debugLogger.warn(
-      'GitHub API directory listing failed, falling back to archive download:',
-      error,
-    );
-    return null;
-  });
-  if (apiFiles) return apiFiles;
-
-  return downloadGitHubSkillDirectoryFromArchive(githubUrl, directoryPath);
-}
-
-async function downloadSkill(sourceUrl: string): Promise<DownloadedSkill> {
-  assertAllowedSkillSourceUrl(sourceUrl);
-  const githubUrl = parseGitHubBlobSkillUrl(sourceUrl);
-  if (!githubUrl || path.posix.basename(githubUrl.filePath) !== 'SKILL.md') {
-    return downloadSingleSkillFile(sourceUrl);
-  }
-
-  const skillDirectory = path.posix.dirname(githubUrl.filePath);
-  const files = await downloadGitHubSkillDirectory(githubUrl, skillDirectory);
-  const skillFile = files.find((file) => file.relativePath === 'SKILL.md');
-  if (!skillFile) {
-    throw RequestError.invalidParams(
-      undefined,
-      'GitHub skill directory does not contain SKILL.md',
-    );
-  }
-
-  return {
-    skillContent: Buffer.from(skillFile.content).toString('utf8'),
-    files,
-  };
-}
-
-function resolveSkillInstallPath(
-  skillDir: string,
-  relativePath: string,
-): string {
-  const root = path.resolve(skillDir);
-  const target = path.resolve(skillDir, relativePath);
-  if (target !== root && !target.startsWith(root + path.sep)) {
-    throw RequestError.invalidParams(
-      undefined,
-      `Invalid skill file path: ${relativePath}`,
-    );
-  }
-  return target;
-}
-
-// Builds the per-skill directory and asserts (defense-in-depth, on top of
-// validateSkillSlug) that it stays strictly under the managed skills root, so a
-// crafted slug can never make install/delete operate on `<globalQwenDir>` itself.
-function resolveManagedSkillDir(skillsBaseDir: string, slug: string): string {
-  const root = path.resolve(skillsBaseDir);
-  const skillDir = path.resolve(skillsBaseDir, slug);
-  if (!skillDir.startsWith(root + path.sep)) {
-    throw RequestError.invalidParams(undefined, 'Invalid skill.slug');
-  }
-  return skillDir;
 }
 
 function readStringArray(value: unknown, fieldName: string): string[] {
@@ -2655,6 +1904,19 @@ function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
   if (typeof cwd === 'string' && cwd.trim()) server.cwd = cwd.trim();
   const timeout = normalizeOptionalNumber(input['timeout']);
   if (timeout !== undefined) server.timeout = timeout;
+  const versionNegotiation = toMcpVersionNegotiation(
+    input['versionNegotiation'],
+  );
+  if (
+    input['versionNegotiation'] !== undefined &&
+    versionNegotiation === undefined
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      'MCP versionNegotiation must be auto or legacy',
+    );
+  }
+  server.versionNegotiation = versionNegotiation;
   if (typeof input['trust'] === 'boolean') server.trust = input['trust'];
   server.includeTools = normalizeStringArray(input['includeTools']);
   server.excludeTools = normalizeStringArray(input['excludeTools']);
@@ -2693,6 +1955,7 @@ function toStoredMcpServerConfig(
   const result: Record<string, unknown> = {};
   for (const key of [
     'timeout',
+    'versionNegotiation',
     'trust',
     'description',
     'includeTools',
@@ -2723,6 +1986,7 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       httpUrl: server['httpUrl'],
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
+      versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2742,6 +2006,7 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       url: server['url'],
       headers: normalizeStringRecord(server['headers']),
       timeout: normalizeOptionalNumber(server['timeout']),
+      versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2763,6 +2028,7 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
       cwd: typeof server['cwd'] === 'string' ? server['cwd'] : undefined,
       env: normalizeStringRecord(server['env']),
       timeout: normalizeOptionalNumber(server['timeout']),
+      versionNegotiation: toMcpVersionNegotiation(server['versionNegotiation']),
       trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
       description:
         typeof server['description'] === 'string'
@@ -2777,6 +2043,12 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
     };
   }
   return undefined;
+}
+
+function toMcpVersionNegotiation(
+  value: unknown,
+): 'auto' | 'legacy' | undefined {
+  return value === 'auto' || value === 'legacy' ? value : undefined;
 }
 
 function redactSecretRecord(
@@ -3904,8 +3176,15 @@ interface ActivePromptCall {
 }
 
 function isOwnerOnlyDirectory(stats: Stats): boolean {
-  if (process.platform === 'win32') return false;
   if (stats.isSymbolicLink() || !stats.isDirectory()) return false;
+  if (process.platform === 'win32') {
+    // Node's fs.Stats exposes no ownership or permission bits on Windows, so
+    // the POSIX mode/uid check has no equivalent here. Containment then rests
+    // on the structural checks around this predicate — symlink rejection and
+    // dev/ino identity across the realpath round trip — the same trade-off
+    // serve/live/discovery.ts already makes on this platform.
+    return true;
+  }
   if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) {
     return false;
   }
@@ -4651,6 +3930,26 @@ class QwenAgent implements Agent {
     return `${path.resolve(runtimeBaseDir)}\0${sessionId}`;
   }
 
+  private withAskUserQuestionRestoreHint<
+    T extends { _meta?: Record<string, unknown> | null },
+  >(session: Session | undefined, response: T): T {
+    if (this.argv.restoreAskUserQuestion !== true) {
+      return response;
+    }
+    if (!session?.shouldHintAskUserQuestionRestore()) {
+      return response;
+    }
+    return {
+      ...response,
+      _meta: {
+        ...(response._meta && typeof response._meta === 'object'
+          ? response._meta
+          : {}),
+        [DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+      },
+    };
+  }
+
   private async retryPendingConfigCleanup(
     runtimeBaseDir: string,
     requiredSessionId?: string,
@@ -4931,6 +4230,33 @@ class QwenAgent implements Agent {
     return runWithAcpRuntimeOutputDir(settings, cwd, operation);
   }
 
+  /**
+   * Whether an ungated restore replay (qwen/session/loadUpdates) may
+   * finalize dangling tool calls. A session with an active turn — a client
+   * prompt or an autonomous goal/cron/notification turn — may still owe the
+   * trailing call's result, so the replay keeps it pending and lets the
+   * live stream deliver it (#9704). Samples the turn state before the
+   * transcript read and again at replay time so a turn that starts or
+   * settles inside the read window is seen. Not for the live loadSession
+   * path: that restore runs under the close gate, which drains active
+   * turns, blocks new ones, and reports closing=true — so isTurnIdle()
+   * there is structurally false and would keep genuinely abandoned calls
+   * pending forever.
+   */
+  private finalizeDanglingForRestore(
+    session: Session | undefined,
+    turnIdleBeforeRead: boolean,
+  ): boolean {
+    const idleAtReplay = session?.isTurnIdle() ?? true;
+    const finalize = turnIdleBeforeRead && idleAtReplay;
+    // Template literal, not printf-style placeholders: createDebugLogger's
+    // formatArgs does no util.format substitution, it space-joins the args.
+    debugLogger.debug(
+      `[ACP] restore replay finalizeDangling=${finalize} (idleBeforeRead=${turnIdleBeforeRead}, idleAtReplay=${idleAtReplay}) session=${session?.getId() ?? '(non-live)'}`,
+    );
+    return finalize;
+  }
+
   private async assertLiveSessionScope(
     config: Config,
     settings: LoadedSettings,
@@ -5103,6 +4429,13 @@ class QwenAgent implements Agent {
           )
         : ACTIVE_WORK_LEGACY_HOLD_CATEGORIES
       : undefined;
+    const requestedChannelLiveness = args._meta?.[CHANNEL_LIVENESS_META_KEY];
+    const channelLivenessRequested =
+      requestedChannelLiveness !== null &&
+      typeof requestedChannelLiveness === 'object' &&
+      !Array.isArray(requestedChannelLiveness) &&
+      (requestedChannelLiveness as Record<string, unknown>)['v'] ===
+        CHANNEL_LIVENESS_VERSION;
     if (activeWorkIntervalMs !== undefined) {
       this.activeWorkReporter?.dispose();
       this.activeWorkReporter = new ActiveWorkReporter(
@@ -5129,6 +4462,13 @@ class QwenAgent implements Agent {
               v: ACTIVE_WORK_HEARTBEAT_VERSION,
               intervalMs: activeWorkIntervalMs,
               categories: [...(activeWorkCategories ?? [])],
+            },
+          }
+        : {}),
+      ...(channelLivenessRequested
+        ? {
+            [CHANNEL_LIVENESS_META_KEY]: {
+              v: CHANNEL_LIVENESS_VERSION,
             },
           }
         : {}),
@@ -5299,6 +4639,23 @@ class QwenAgent implements Agent {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
     const restoreOptions = loadRestoreOptions(params);
+    // The daemon already knows it will decline the re-hang (no attached
+    // client, fork restore): emit no hint and don't skip finalizing the
+    // trailing ask_user_question during replay, so skip and re-hang stay
+    // in lockstep.
+    const suppressRestoreAskUserQuestion =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
+      ] === true;
+    const withRestoreHint = <
+      T extends { _meta?: Record<string, unknown> | null },
+    >(
+      session: Session | undefined,
+      response: T,
+    ): T =>
+      suppressRestoreAskUserQuestion
+        ? response
+        : this.withAskUserQuestionRestoreHint(session, response);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -5325,7 +4682,9 @@ class QwenAgent implements Agent {
                 }) as LoadSessionResponse,
             );
             const replayPage = projection?.replay;
-            if (!replayPage || replayPage.records.length === 0) return response;
+            if (!replayPage || replayPage.records.length === 0) {
+              return withRestoreHint(liveSession, response);
+            }
 
             const bulkReplay = isBulkLoadReplayRequest(params);
             const replay = await profiler.time('history_replay', () =>
@@ -5337,6 +4696,14 @@ class QwenAgent implements Agent {
                 cumulativeUsage: createReplayCumulativeUsage(),
                 replayState: replayPage.replay,
                 goalBootstrap: replayGoalBootstrap(projection),
+                suppressRestoreAskUserQuestion,
+                // The restore gate already drained active turns and blocks
+                // new ones (and a drain timeout rejects before replay), so
+                // a trailing unmatched call here is genuinely abandoned —
+                // finalize it. The turn-activity guard cannot be sampled
+                // under the gate: isTurnIdle() is structurally false while
+                // the close gate is held (#9704).
+                finalizeDangling: true,
                 ...(restoreOptions.replay.kind === 'recent'
                   ? {
                       limits: {
@@ -5369,7 +4736,7 @@ class QwenAgent implements Agent {
               if (replay.replayError !== undefined) {
                 throw RequestError.internalError(undefined, replay.replayError);
               }
-              return response;
+              return withRestoreHint(liveSession, response);
             }
 
             const envelope: BridgeLoadReplayEnvelope = {
@@ -5391,12 +4758,12 @@ class QwenAgent implements Agent {
               envelope,
               restoreOptions.replay.kind === 'recent',
             );
-            return {
+            return withRestoreHint(liveSession, {
               ...response,
               _meta: {
                 [LOAD_REPLAY_META_KEY]: envelope,
               },
-            };
+            });
           },
         );
       });
@@ -5411,21 +4778,7 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          try {
-            return await sessionService.findSessionIdIgnoringCase(sessionId);
-          } catch (error) {
-            if (error instanceof SessionIdCaseConflictError) {
-              // Parity with the daemon surfaces (toRpcError / REST 409):
-              // persisted-storage conflicts use `session_conflict`;
-              // `session_id_conflict` is reserved for live-id admission
-              // occupancy.
-              throw RequestError.internalError(
-                { errorKind: 'session_conflict', sessionId },
-                error.message,
-              );
-            }
-            throw error;
-          }
+          return resolvePersistedSessionIdForRestore(sessionService, sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5456,6 +4809,9 @@ class QwenAgent implements Agent {
           restoreOptions,
         ),
       );
+      if (suppressRestoreAskUserQuestion) {
+        config.suppressRestorableAskUserQuestionPreservation();
+      }
       const projection = config.consumeSessionRestoreProjection?.();
       const suppressRecoveredGoalPresentation =
         projection?.runtime.goalRecoverySourceUuid !== undefined &&
@@ -5485,7 +4841,11 @@ class QwenAgent implements Agent {
             : {}),
         })) as LoadSessionResponse;
       try {
-        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        await profiler.time('restore_session_model', () =>
+          restoreSessionModelThenAuthenticate(config, projection, () =>
+            profiler.time('auth', () => this.ensureAuthenticated(config)),
+          ),
+        );
         profiler.timeSync('file_system_setup', () =>
           this.setupFileSystem(config),
         );
@@ -5506,6 +4866,7 @@ class QwenAgent implements Agent {
                     cumulativeUsage: replayUsage,
                     replayState: projection.replay!.replay,
                     goalBootstrap: replayGoalBootstrap(projection),
+                    suppressRestoreAskUserQuestion,
                     ...(restoreOptions.replay.kind === 'recent'
                       ? {
                           limits: {
@@ -5622,7 +4983,16 @@ class QwenAgent implements Agent {
                       {
                         ...(goalBootstrap ? { goalBootstrap } : {}),
                         ...initialGoalState,
+                        ...(suppressRestoreAskUserQuestion
+                          ? { skipFinalizeCallIds: undefined }
+                          : {}),
                       },
+                    );
+                  } else if (suppressRestoreAskUserQuestion) {
+                    await createdSession.replayHistory(
+                      projection.replay!.records,
+                      projection.replay!.gaps,
+                      { skipFinalizeCallIds: undefined },
                     );
                   } else {
                     await createdSession.replayHistory(
@@ -5668,7 +5038,10 @@ class QwenAgent implements Agent {
           sessionId,
         );
       }
-      return response!;
+      return withRestoreHint(
+        this.sessions.get(normalizeSessionIdForLookup(sessionId)),
+        response!,
+      );
     } finally {
       releaseStartingSessionId();
     }
@@ -5703,6 +5076,21 @@ class QwenAgent implements Agent {
   ): Promise<ResumeSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    // Same daemon-decline suppression as loadSessionWithProfiler: no hint,
+    // and the replay finalize-skip stays aligned with the re-hang decision.
+    const suppressRestoreAskUserQuestion =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
+      ] === true;
+    const withRestoreHint = <
+      T extends { _meta?: Record<string, unknown> | null },
+    >(
+      session: Session | undefined,
+      response: T,
+    ): T =>
+      suppressRestoreAskUserQuestion
+        ? response
+        : this.withAskUserQuestionRestoreHint(session, response);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -5716,17 +5104,20 @@ class QwenAgent implements Agent {
           liveSession,
           RESUME_RESTORE_OPTIONS,
           async (config, projection) =>
-            profiler.timeSync(
-              'response_build',
-              () =>
-                ({
-                  modes: this.buildModesData(config),
-                  models: this.buildAvailableModels(config),
-                  configOptions: this.buildConfigOptions(config),
-                  ...(projection?.artifactSnapshot
-                    ? { artifactSnapshot: projection.artifactSnapshot }
-                    : {}),
-                }) as ResumeSessionResponse,
+            withRestoreHint(
+              liveSession,
+              profiler.timeSync(
+                'response_build',
+                () =>
+                  ({
+                    modes: this.buildModesData(config),
+                    models: this.buildAvailableModels(config),
+                    configOptions: this.buildConfigOptions(config),
+                    ...(projection?.artifactSnapshot
+                      ? { artifactSnapshot: projection.artifactSnapshot }
+                      : {}),
+                  }) as ResumeSessionResponse,
+              ),
             ),
         );
       });
@@ -5740,21 +5131,7 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          try {
-            return await sessionService.findSessionIdIgnoringCase(sessionId);
-          } catch (error) {
-            if (error instanceof SessionIdCaseConflictError) {
-              // Parity with the daemon surfaces (toRpcError / REST 409):
-              // persisted-storage conflicts use `session_conflict`;
-              // `session_id_conflict` is reserved for live-id admission
-              // occupancy.
-              throw RequestError.internalError(
-                { errorKind: 'session_conflict', sessionId },
-                error.message,
-              );
-            }
-            throw error;
-          }
+          return resolvePersistedSessionIdForRestore(sessionService, sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5778,10 +5155,17 @@ class QwenAgent implements Agent {
           RESUME_RESTORE_OPTIONS,
         ),
       );
+      if (suppressRestoreAskUserQuestion) {
+        config.suppressRestorableAskUserQuestionPreservation();
+      }
       const projection = config.consumeSessionRestoreProjection?.();
       let response: ResumeSessionResponse | undefined;
       try {
-        await profiler.time('auth', () => this.ensureAuthenticated(config));
+        await profiler.time('restore_session_model', () =>
+          restoreSessionModelThenAuthenticate(config, projection, () =>
+            profiler.time('auth', () => this.ensureAuthenticated(config)),
+          ),
+        );
         profiler.timeSync('file_system_setup', () =>
           this.setupFileSystem(config),
         );
@@ -5837,7 +5221,10 @@ class QwenAgent implements Agent {
         );
       }
 
-      return response!;
+      return withRestoreHint(
+        this.sessions.get(normalizeSessionIdForLookup(sessionId)),
+        response!,
+      );
     } finally {
       releaseStartingSessionId();
     }
@@ -5927,7 +5314,9 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return session.setMode({ ...params, sessionId });
+    return this.runInSessionContext(session, () =>
+      session.setMode({ ...params, sessionId }),
+    );
   }
 
   async unstable_setSessionModel(
@@ -5941,7 +5330,9 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return await session.setModel({ ...params, sessionId });
+    return await this.runInSessionContext(session, () =>
+      session.setModel({ ...params, sessionId }),
+    );
   }
 
   async setSessionConfigOption(
@@ -5958,92 +5349,94 @@ class QwenAgent implements Agent {
       );
     }
 
-    switch (configId) {
-      case 'mode': {
-        await this.setSessionMode({
-          sessionId,
-          modeId: value as string,
-        });
-        break;
-      }
-      case 'model': {
-        await session.setModel(
-          {
+    return this.runInSessionContext(session, async () => {
+      switch (configId) {
+        case 'mode': {
+          await this.setSessionMode({
             sessionId,
-            modelId: value as string,
-          },
-          { persistDefault: false },
-        );
-        break;
-      }
-      case 'reasoning_effort': {
-        const modelReasoning = this.getModelReasoningConfiguration(
-          session.getConfig(),
-        );
-        if (modelReasoning) {
-          const effortValues = modelReasoning.toggleOnly
-            ? undefined
-            : modelReasoning.efforts;
-          const selected =
-            value === ACP_REASONING_EFFORT_NONE
-              ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.toggleOnly
-                ? value === ACP_REASONING_EFFORT_DEFAULT
-                  ? ACP_REASONING_EFFORT_DEFAULT
-                  : undefined
-                : effortValues?.find((effort) => effort === value);
-          if (!selected) {
-            const choices = [
-              ACP_REASONING_EFFORT_NONE,
-              ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
-            ];
+            modeId: value as string,
+          });
+          break;
+        }
+        case 'model': {
+          await session.setModel(
+            {
+              sessionId,
+              modelId: value as string,
+            },
+            { persistDefault: false },
+          );
+          break;
+        }
+        case 'reasoning_effort': {
+          const modelReasoning = this.getModelReasoningConfiguration(
+            session.getConfig(),
+          );
+          if (modelReasoning) {
+            const effortValues = modelReasoning.toggleOnly
+              ? undefined
+              : modelReasoning.efforts;
+            const selected =
+              value === REASONING_EFFORT_NONE
+                ? REASONING_EFFORT_NONE
+                : modelReasoning.toggleOnly
+                  ? value === REASONING_EFFORT_DEFAULT
+                    ? REASONING_EFFORT_DEFAULT
+                    : undefined
+                  : effortValues?.find((effort) => effort === value);
+            if (!selected) {
+              const choices = [
+                REASONING_EFFORT_NONE,
+                ...(effortValues ?? [REASONING_EFFORT_DEFAULT]),
+              ];
+              throw RequestError.invalidParams(
+                undefined,
+                `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
+              );
+            }
+            const generation = session.getConfig().getContentGeneratorConfig();
+            if (selected === REASONING_EFFORT_NONE) {
+              generation.reasoning = false;
+            } else if (selected === REASONING_EFFORT_DEFAULT) {
+              generation.reasoning = undefined;
+            } else {
+              const current = generation.reasoning;
+              generation.reasoning = {
+                ...(current || {}),
+                effort: selected,
+              };
+            }
+            break;
+          }
+          const effort =
+            value === REASONING_EFFORT_DEFAULT
+              ? undefined
+              : REASONING_EFFORT_TIERS.find((tier) => tier === value);
+          if (value !== REASONING_EFFORT_DEFAULT && effort === undefined) {
             throw RequestError.invalidParams(
               undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
+              `Unknown reasoning effort: ${value}. Choose one of: ${REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
             );
           }
-          const generation = session.getConfig().getContentGeneratorConfig();
-          if (selected === ACP_REASONING_EFFORT_NONE) {
-            generation.reasoning = false;
-          } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
-            generation.reasoning = undefined;
-          } else {
-            const current = generation.reasoning;
-            generation.reasoning = {
-              ...(current || {}),
-              effort: selected,
-            };
+          if (!applyReasoningEffort(session.getConfig(), effort)) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Reasoning effort cannot be applied while thinking is disabled',
+            );
           }
           break;
         }
-        const effort =
-          value === ACP_REASONING_EFFORT_DEFAULT
-            ? undefined
-            : REASONING_EFFORT_TIERS.find((tier) => tier === value);
-        if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
+        default:
           throw RequestError.invalidParams(
             undefined,
-            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+            `Unsupported configId: ${configId}`,
           );
-        }
-        if (!applyReasoningEffort(session.getConfig(), effort)) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Reasoning effort cannot be applied while thinking is disabled',
-          );
-        }
-        break;
       }
-      default:
-        throw RequestError.invalidParams(
-          undefined,
-          `Unsupported configId: ${configId}`,
-        );
-    }
 
-    return {
-      configOptions: this.buildConfigOptions(session.getConfig()),
-    };
+      return {
+        configOptions: this.buildConfigOptions(session.getConfig()),
+      };
+    });
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -6175,20 +5568,22 @@ class QwenAgent implements Agent {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    try {
-      await session.cancelPendingPrompt();
-    } catch (error) {
-      if (!isNotCurrentlyGeneratingCancelError(error)) {
-        throw error;
+    await this.runInSessionContext(session, async () => {
+      try {
+        await session.cancelPendingPrompt();
+      } catch (error) {
+        if (!isNotCurrentlyGeneratingCancelError(error)) {
+          throw error;
+        }
       }
-    }
-    // Prompt calls still waiting at Session admission are tracked in
-    // activePromptCalls but have no session pendingPrompt yet, so
-    // cancelPendingPrompt cannot see them. Abort their controllers too, or a
-    // cancelled prompt would run in full once admission frees.
-    for (const call of this.activePromptCalls.get(sessionId) ?? []) {
-      call.controller.abort();
-    }
+      // Prompt calls still waiting at Session admission are tracked in
+      // activePromptCalls but have no session pendingPrompt yet, so
+      // cancelPendingPrompt cannot see them. Abort their controllers too, or a
+      // cancelled prompt would run in full once admission frees.
+      for (const call of this.activePromptCalls.get(sessionId) ?? []) {
+        call.controller.abort();
+      }
+    });
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
@@ -7268,6 +6663,10 @@ class QwenAgent implements Agent {
 
         const isCurrent =
           currentAuth === model.authType && currentAcpModelId === modelId;
+        const configOptions =
+          model.isRuntimeModel || modelId.startsWith(ACP_ROUTE_ID_PREFIX)
+            ? undefined
+            : buildModelReasoningConfigPreview(model.id);
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
           baseModelId: parseAcpBaseModelId(effectiveModelId),
@@ -7285,6 +6684,7 @@ class QwenAgent implements Agent {
           ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
           isCurrent,
           isRuntime: model.isRuntimeModel === true,
+          ...(configOptions ? { configOptions } : {}),
         };
         provider.models.push(providerModel);
         if (isCurrent) provider.current = true;
@@ -7403,6 +6803,25 @@ class QwenAgent implements Agent {
         if (resolvedApiKey) {
           hasToken = true;
         }
+      }
+      // Keyless Vertex: a configured project selects the ADC path, but it is
+      // routing configuration, not evidence that a usable credential exists.
+      // Report indeterminate rather than a confirmed token and let the session
+      // boot settle it.
+      if (
+        !hasToken &&
+        authType === AuthType.USE_VERTEX_AI &&
+        hasVertexProjectConfigured()
+      ) {
+        return this.acpCell('auth', {
+          status: 'unknown',
+          hint: 'Vertex AI is configured for Application Default Credentials; whether they resolve is only known at session start.',
+          detail: {
+            source: String(authType),
+            hasToken: 'unknown' as const,
+            envVarCandidates: apiKeyVars,
+          },
+        });
       }
       // No env-var registration → either OAuth-style auth (qwen-oauth) or
       // a custom provider whose key is sourced from settings rather than
@@ -8203,255 +7622,25 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async installSkillFromUrl(
-    request: QwenSkillInstallRequest,
-  ): Promise<Record<string, unknown>> {
-    const skillManager = this.config.getSkillManager();
-    if (!skillManager) {
-      throw RequestError.invalidParams(
-        undefined,
-        'SkillManager is not available',
-      );
-    }
-
-    const download = await downloadSkill(request.sourceUrl);
-    const skillsBaseDir = path.join(Storage.getGlobalQwenDir(), 'skills');
-    const skillDir = resolveManagedSkillDir(skillsBaseDir, request.slug);
-    const skillFile = path.join(skillDir, 'SKILL.md');
-    const parsed = skillManager.parseSkillContent(
-      download.skillContent,
-      skillFile,
-      'user',
-    );
-    if (parsed.name !== request.slug) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
-      );
-    }
-
-    // Install atomically: stage all files in a sibling temp directory, then
-    // swap it in with a single rename. A mid-write failure (disk full,
-    // permission error) therefore leaves the previously installed skill
-    // intact instead of deleting it up front and ending up with a partial
-    // install. Removing the old dir before writing also dropped orphaned
-    // files from older versions; the rename preserves that property.
-    const stagingDir = `${skillDir}.installing-${process.pid}-${Date.now()}`;
-    try {
-      await fs.rm(stagingDir, { recursive: true, force: true });
-      for (const file of download.files) {
-        const targetPath = resolveSkillInstallPath(
-          stagingDir,
-          file.relativePath,
-        );
-        await fs.mkdir(path.dirname(targetPath), { recursive: true });
-        await fs.writeFile(targetPath, file.content);
-      }
-      // stagingDir is a sibling of skillDir (same filesystem), so the rename
-      // is atomic; the only gap is between the rm and rename, during which
-      // the fully-staged copy still exists for recovery.
-      await fs.rm(skillDir, { recursive: true, force: true });
-      await fs.rename(stagingDir, skillDir);
-    } catch (error) {
-      await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-      throw error;
-    }
-    await skillManager.refreshCache();
-
-    return {
-      id: request.id,
-      slug: parsed.name,
-      installed: true,
-      installedPath: skillFile,
-      sourceUrl: request.sourceUrl,
-    };
+  private runInSessionContext<T>(session: Session, fn: () => T): T {
+    // Use the Config's session id spelling (not the lowercased lookup form
+    // stored on the Session object) so the context matches the binding in
+    // Session.ts and the debug log filename on disk.
+    return sessionIdContext.run(session.getConfig().getSessionId(), fn);
   }
 
-  private async deleteGlobalSkill(
-    request: QwenSkillDeleteRequest,
-  ): Promise<Record<string, unknown>> {
-    const skillManager = this.config.getSkillManager();
-    if (!skillManager) {
-      throw RequestError.invalidParams(
-        undefined,
-        'SkillManager is not available',
-      );
-    }
-
-    const { skillDir, skillFile, content } = await this.readManagedSkillFile(
-      request.slug,
-      'global',
-      skillManager,
+  private isSessionScopedExtMethod(method: string): boolean {
+    return (
+      method === PROMPT_CANCEL_METHOD ||
+      method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD ||
+      method.startsWith('qwen/control/session/') ||
+      method.startsWith('qwen/status/session/') ||
+      method.startsWith('qwen/session/') ||
+      method === 'deleteSession' ||
+      method === 'renameSession' ||
+      method === 'rewindSession' ||
+      method === 'restoreSessionHistory'
     );
-    const parsed = skillManager.parseSkillContent(content, skillFile, 'user');
-    if (parsed.name !== request.slug) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
-      );
-    }
-
-    // Guard the recursive delete: readManagedSkillFile's generic fallback can
-    // resolve skillDir from listSkills() to an arbitrary path. Only ever remove
-    // the directory that directly contains the SKILL.md we just validated, and
-    // never a filesystem root or the global Qwen dir itself, so a malformed
-    // skill entry can't trigger a destructive rm of a shared/parent directory.
-    const resolvedSkillDir = path.resolve(skillDir);
-    const resolvedSkillFile = path.resolve(skillFile);
-    const globalDir = path.resolve(Storage.getGlobalQwenDir());
-    const isDedicatedSkillDir =
-      resolvedSkillFile === path.join(resolvedSkillDir, 'SKILL.md');
-    if (
-      !isDedicatedSkillDir ||
-      resolvedSkillDir === path.parse(resolvedSkillDir).root ||
-      resolvedSkillDir === globalDir
-    ) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Refusing to delete unexpected skill directory: ${skillDir}`,
-      );
-    }
-
-    await fs.rm(skillDir, { recursive: true, force: true });
-    await skillManager.refreshCache();
-    return {
-      slug: request.slug,
-      deleted: true,
-    };
-  }
-
-  private async readManagedSkillFile(
-    slug: string,
-    scope: QwenSkillSetEnabledRequest['scope'],
-    skillManager: NonNullable<ReturnType<Config['getSkillManager']>>,
-    cwd?: string,
-  ): Promise<QwenManagedSkillFile> {
-    if (scope === 'global') {
-      const qwenSkillDir = resolveManagedSkillDir(
-        path.join(Storage.getGlobalQwenDir(), 'skills'),
-        slug,
-      );
-      const qwenSkillFile = path.join(qwenSkillDir, 'SKILL.md');
-      const qwenContent = await fs
-        .readFile(qwenSkillFile, 'utf8')
-        .catch(() => undefined);
-      if (qwenContent !== undefined) {
-        return {
-          skillDir: qwenSkillDir,
-          skillFile: qwenSkillFile,
-          content: qwenContent,
-        };
-      }
-    }
-
-    if (scope === 'project' && cwd?.trim()) {
-      const projectSkill = await this.findProjectSkillFileFromCwd(
-        slug,
-        cwd,
-        skillManager,
-      );
-      if (projectSkill) return projectSkill;
-    }
-
-    const level = scope === 'project' ? 'project' : 'user';
-    const skill = (await skillManager.listSkills({ level })).find(
-      (candidate) => candidate.name === slug,
-    );
-    const skillFile = skill?.filePath;
-    if (!skillFile) {
-      throw RequestError.invalidParams(
-        undefined,
-        `${scope === 'project' ? 'Project' : 'Global'} skill not found: ${slug}`,
-      );
-    }
-
-    const content = await fs.readFile(skillFile, 'utf8').catch(() => {
-      throw RequestError.invalidParams(
-        undefined,
-        `${scope === 'project' ? 'Project' : 'Global'} skill not found: ${slug}`,
-      );
-    });
-    return {
-      skillDir: path.dirname(skillFile),
-      skillFile,
-      content,
-    };
-  }
-
-  private async findProjectSkillFileFromCwd(
-    slug: string,
-    cwd: string,
-    skillManager: NonNullable<ReturnType<Config['getSkillManager']>>,
-  ): Promise<QwenManagedSkillFile | undefined> {
-    const projectRoot = path.resolve(cwd);
-    for (const configDir of PROJECT_SKILL_DIRS) {
-      const baseDir = path.join(projectRoot, configDir, SKILLS_DIR);
-      const skills = await skillManager.loadSkillsFromDir(baseDir, 'project');
-      const skill = skills.find((candidate) => candidate.name === slug);
-      const skillFile = skill?.filePath;
-      if (!skillFile) continue;
-
-      const content = await fs.readFile(skillFile, 'utf8').catch(() => {
-        throw RequestError.invalidParams(
-          undefined,
-          `Project skill not found: ${slug}`,
-        );
-      });
-      return {
-        skillDir: path.dirname(skillFile),
-        skillFile,
-        content,
-      };
-    }
-    return undefined;
-  }
-
-  private async setGlobalSkillEnabled(
-    request: QwenSkillSetEnabledRequest,
-    cwd?: string,
-  ): Promise<Record<string, unknown>> {
-    const skillManager = this.config.getSkillManager();
-    if (!skillManager) {
-      throw RequestError.invalidParams(
-        undefined,
-        'SkillManager is not available',
-      );
-    }
-
-    const { skillFile, content } = await this.readManagedSkillFile(
-      request.slug,
-      request.scope,
-      skillManager,
-      cwd,
-    );
-    const level = request.scope === 'project' ? 'project' : 'user';
-    const parsed = skillManager.parseSkillContent(content, skillFile, level);
-    if (parsed.name !== request.slug) {
-      throw RequestError.invalidParams(
-        undefined,
-        `Skill name "${parsed.name}" does not match requested slug "${request.slug}"`,
-      );
-    }
-
-    const nextContent = setSkillFrontmatterEnabled(content, request.enabled);
-    skillManager.parseSkillContent(nextContent, skillFile, level);
-    // Defense-in-depth (consistent with deleteGlobalSkill): readManagedSkillFile's
-    // generic fallback can resolve skillFile from listSkills() to an arbitrary
-    // path. We only ever write back to the SKILL.md manifest we just read and
-    // whose parsed name matched the slug, so refuse to write anything else.
-    if (path.basename(skillFile) !== 'SKILL.md') {
-      throw RequestError.invalidParams(
-        undefined,
-        `Refusing to write to unexpected skill file: ${skillFile}`,
-      );
-    }
-    await fs.writeFile(skillFile, nextContent, 'utf8');
-    await skillManager.refreshCache();
-    return {
-      slug: request.slug,
-      enabled: request.enabled,
-      installedPath: skillFile,
-    };
   }
 
   async extMethod(
@@ -8476,6 +7665,17 @@ class QwenAgent implements Agent {
           'Background notifications require a trusted private ACP parent',
         );
       }
+      const sessionId = normalizedParams['sessionId'];
+      const session =
+        typeof sessionId === 'string' && sessionId.length > 0
+          ? this.sessions.get(sessionId)
+          : undefined;
+      if (session && this.isSessionScopedExtMethod(method)) {
+        return await this.runInSessionContext(session, () =>
+          this.extMethodInternal(method, normalizedParams),
+        );
+      }
+
       return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
       const writerError = getSessionWriterError(error);
@@ -8498,6 +7698,21 @@ class QwenAgent implements Agent {
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
+      case SERVE_STATUS_EXT_METHODS.channelPing: {
+        const nonce = params['nonce'];
+        if (
+          params['v'] !== CHANNEL_LIVENESS_VERSION ||
+          typeof nonce !== 'number' ||
+          !Number.isSafeInteger(nonce) ||
+          nonce < 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid channel liveness ping',
+          );
+        }
+        return { v: CHANNEL_LIVENESS_VERSION, nonce };
+      }
       case PROMPT_CANCEL_METHOD: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -8612,16 +7827,13 @@ class QwenAgent implements Agent {
         };
       }
       case 'qwen/skills/install': {
-        return this.installSkillFromUrl(readSkillInstallRequest(params));
+        return installManagedSkill(this.config, params);
       }
       case 'qwen/skills/delete': {
-        return this.deleteGlobalSkill(readSkillSlugRequest(params));
+        return deleteManagedSkill(this.config, params);
       }
       case 'qwen/skills/setEnabled': {
-        return this.setGlobalSkillEnabled(
-          readSkillSetEnabledRequest(params),
-          requestedCwd,
-        );
+        return setManagedSkillEnabled(this.config, params, requestedCwd);
       }
       case 'qwen/settings/getMemory': {
         const settings = loadSettings(cwd);
@@ -11788,6 +11000,7 @@ class QwenAgent implements Agent {
         }
 
         const liveSession = this.sessions.get(sessionId);
+        const turnIdleBeforeRead = liveSession?.isTurnIdle() ?? true;
         let replayConfig = this.config;
         let sessionData: ResumedSessionData | undefined;
         if (liveSession) {
@@ -11826,6 +11039,16 @@ class QwenAgent implements Agent {
           gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
           logger: debugLogger,
+          // Read-only history dump never re-hangs the question. Skip
+          // finalize only on load/resume that will actually restore.
+          suppressRestoreAskUserQuestion: true,
+          // Ungated read: unlike the live loadSession restore (whose gate
+          // drains turns), a turn may still be running here, so guard on
+          // turn activity instead of finalizing unconditionally (#9704).
+          finalizeDangling: this.finalizeDanglingForRestore(
+            liveSession,
+            turnIdleBeforeRead,
+          ),
         });
 
         return {
@@ -11927,11 +11150,31 @@ class QwenAgent implements Agent {
                   const recording = sourceConfig.getChatRecordingService();
                   const sessionService = sourceConfig.getSessionService();
 
-                  const baseName = deriveForkBaseName(
-                    name,
-                    recording,
-                    sessionId,
-                  );
+                  const requestedName = normalizeRequestedBranchName(name);
+                  const sourceCustomTitle =
+                    requestedName === undefined
+                      ? recording?.getCurrentCustomTitle()
+                      : undefined;
+                  const persistedDisplayName =
+                    requestedName === undefined &&
+                    sourceCustomTitle === undefined
+                      ? await sessionService.getSessionDisplayName(sessionId)
+                      : undefined;
+                  const sourceDisplayName =
+                    sourceCustomTitle ?? persistedDisplayName;
+                  const derivedBaseName = sourceCustomTitle
+                    ? normalizeDerivedBranchTitle(sourceCustomTitle)
+                    : sourceDisplayName;
+                  // A base that is empty, whitespace-only, or exactly a
+                  // legacy `(Branch)`/`(Branch N)` token falls back to the
+                  // session-id prefix here, while CLI /branch falls back to
+                  // the first prompt. Deliberate: no picker name survives to
+                  // anchor the family to, and one shared fallback would need
+                  // a prompt-only display-name read on this route.
+                  const baseName =
+                    requestedName ??
+                    (derivedBaseName?.trim() || undefined) ??
+                    sessionId.slice(0, 8);
 
                   const title = await computeUniqueBranchTitle(
                     baseName,
@@ -11969,7 +11212,15 @@ class QwenAgent implements Agent {
         const recording = sourceConfig.getChatRecordingService();
         if (recording) await recording.flush();
         const sessionService = sourceConfig.getSessionService();
-        const title = deriveForkBaseName(name, recording, sessionId);
+        const requestedName = normalizeRequestedBranchName(name);
+        let title = requestedName;
+        if (title === undefined) {
+          const sourceCustomTitle = recording?.getCurrentCustomTitle();
+          title = sourceCustomTitle
+            ? (normalizeDerivedBranchTitle(sourceCustomTitle) ??
+              sessionId.slice(0, 8))
+            : sessionId.slice(0, 8);
+        }
         const newSessionId = randomUUID();
         const fork = () =>
           sessionService.forkSession(sessionId, newSessionId, {
@@ -13019,6 +12270,10 @@ class QwenAgent implements Agent {
     );
     let published = false;
     try {
+      // After `new Session` (which wires the spawner the tool needs) and before
+      // the session is published: the permission check is async, and the tool
+      // must be declared before the first prompt can be served.
+      await registerCreateSubSessionTool(config);
       options.primeSession?.(session);
       config.hydrateSessionRestoreFileHistory?.();
       this.sessions.set(sessionId, session);
@@ -13211,70 +12466,32 @@ class QwenAgent implements Agent {
 
     const modelReasoning = this.getModelReasoningConfiguration(config);
     const currentModelEffort = config.getReasoningEffort?.();
-    const reasoningEffortConfigOption: SessionConfigOption = modelReasoning
-      ? {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          description: `Thinking and reasoning effort for ${rawCurrentModelId}`,
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue:
-            config.getContentGeneratorConfig().reasoning === false
-              ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.toggleOnly
-                ? ACP_REASONING_EFFORT_DEFAULT
-                : (modelReasoning.efforts.find(
-                    (effort) => effort === currentModelEffort,
-                  ) ?? modelReasoning.defaultEffort),
-          options: [
-            {
-              value: ACP_REASONING_EFFORT_NONE,
-              name: 'Thinking off',
-              description: 'Disable thinking for this session',
-            },
-            ...(modelReasoning.toggleOnly
-              ? [
-                  {
-                    value: ACP_REASONING_EFFORT_DEFAULT,
-                    name: 'Thinking on',
-                    description: 'Use the model or provider thinking default',
-                  },
-                ]
-              : modelReasoning.efforts.map((effort) => ({
-                  value: effort,
-                  name: ACP_REASONING_EFFORT_NAMES[effort],
-                  description: 'Apply this effort to the next request',
-                }))),
-          ],
-          _meta: {
-            'qwenCode/reasoning': {
-              ...(modelReasoning.toggleOnly
-                ? { toggleOnly: true }
-                : { defaultEffort: modelReasoning.defaultEffort }),
-            },
-          },
-        }
-      : {
-          id: 'reasoning_effort',
-          name: 'Reasoning effort',
-          description: 'How hard reasoning-capable models should think',
-          category: 'thought_level',
-          type: 'select' as const,
-          currentValue: currentModelEffort ?? ACP_REASONING_EFFORT_DEFAULT,
-          options: [
-            {
-              value: ACP_REASONING_EFFORT_DEFAULT,
-              name: 'Default',
-              description: 'Use the model or provider default',
-            },
-            ...REASONING_EFFORT_TIERS.map((effort) => ({
-              value: effort,
-              name: ACP_REASONING_EFFORT_NAMES[effort],
-              description:
-                'Providers map or clamp the requested tier for the active model',
-            })),
-          ],
-        };
+    const reasoningEffortConfigOption: SessionConfigOption = (modelReasoning
+      ? buildModelReasoningConfigOption(rawCurrentModelId, {
+          enabled: config.getContentGeneratorConfig().reasoning !== false,
+          effort: currentModelEffort,
+        })
+      : undefined) ?? {
+      id: 'reasoning_effort',
+      name: 'Reasoning effort',
+      description: 'How hard reasoning-capable models should think',
+      category: 'thought_level',
+      type: 'select' as const,
+      currentValue: currentModelEffort ?? REASONING_EFFORT_DEFAULT,
+      options: [
+        {
+          value: REASONING_EFFORT_DEFAULT,
+          name: 'Default',
+          description: 'Use the model or provider default',
+        },
+        ...REASONING_EFFORT_TIERS.map((effort) => ({
+          value: effort,
+          name: REASONING_EFFORT_NAMES[effort],
+          description:
+            'Providers map or clamp the requested tier for the active model',
+        })),
+      ],
+    };
 
     return [modeConfigOption, modelConfigOption, reasoningEffortConfigOption];
   }

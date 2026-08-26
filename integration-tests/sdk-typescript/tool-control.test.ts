@@ -83,7 +83,13 @@ describe('Tool Control Parameters (E2E)', () => {
   beforeEach(async () => {
     helper = new SDKTestHelper();
     testDir = await helper.setup('tool-control', {
-      settings: { fastModel: 'openai:fake-model' },
+      settings: {
+        fastModel: 'openai:fake-model',
+        // list_directory is opt-in (disabled by default). This suite tests
+        // coreTools/excludeTools control semantics, so keep it enabled here;
+        // an active coreTools allowlist still outranks this flag.
+        tools: { listDirectory: { enabled: true } },
+      },
     });
   });
 

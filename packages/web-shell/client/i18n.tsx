@@ -364,6 +364,7 @@ const EN: Messages = {
   'agentType.general-purpose': 'General-purpose',
   'agentType.explore': 'Explore',
   'agentType.statusline-setup': 'Status Line Setup',
+  'agentType.review-agent': 'Review Agent',
   'agentType.test-engineer': 'Test Engineer',
   'agentType.fork': 'Fork',
   'timeline.parallelAgents': 'Parallel agents',
@@ -505,6 +506,15 @@ const EN: Messages = {
   'toast.dismissShort': 'Dismiss',
   'insight.ready': 'Insight report generated successfully!',
   'request.cancelled': 'Request cancelled.',
+  'visionBridge.model': 'vision model',
+  'visionBridge.skipped': (v) =>
+    `Vision bridge cancelled.${v?.egressOccurred === 1 ? ` Your image and prompt/context were sent to ${v?.target ?? ''}.` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `Vision bridge (${v?.modelName ?? ''}) failed: the vision model request failed. Your image and prompt/context were sent to ${v?.target ?? ''}. The image was not interpreted.`
+      : `Vision bridge (${v?.target ?? ''}) failed: the vision bridge could not run. The image was not interpreted.`,
+  'visionBridge.ok': (v) =>
+    `Converted ${v?.convertedCount ?? 0} image(s)${Number(v?.omittedCount ?? 0) > 0 ? ` (${v?.omittedCount ?? 0} image(s) omitted)` : ''} to text via ${v?.target ?? ''}.${v?.egressOccurred === 1 ? ' Your image and prompt/context were sent to that model.' : ''}`,
   'approval.execQuestion': (v) => `Allow execution of: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Apply this change?',
   'approval.launchAgentQuestion': 'Launch this agent?',
@@ -1240,6 +1250,9 @@ const EN: Messages = {
   'turnOutputs.preview': 'Preview',
   'turnOutputs.collapseFiles': 'Collapse files',
   'turnOutputs.showMoreFiles': (v) => `Show ${v?.count ?? 0} more files`,
+  'turnOutputs.collapseArtifacts': 'Collapse artifacts',
+  'turnOutputs.showMoreArtifacts': (v) =>
+    `Show ${v?.count ?? 0} more artifacts`,
   'turnOutputs.previousTurn': 'Previous turn',
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} files`,
   'turnOutputs.openFileTree': 'Open file tree',
@@ -1366,6 +1379,9 @@ const EN: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
   'sidebar.userInputNeeded': 'User input needed',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
@@ -1431,6 +1447,8 @@ const EN: Messages = {
     'The prompt may already be running. Continue editing only if you accept the risk of sending it twice.',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
+  'queue.commandGoalBlocked':
+    'Slash commands are unavailable while a Goal owns the session or its state is loading.',
   'queue.shellQueued':
     'Shell command queued — it will run after the current turn finishes.',
   'queue.shellDropped': (v) => {
@@ -1478,7 +1496,6 @@ const EN: Messages = {
   'help.shortcut.shell': 'Run shell commands',
   'help.shortcut.togglePanel': 'Toggle this panel',
   'help.shortcut.retry': 'Retry last request',
-  'help.shortcut.compact': 'Toggle compact mode',
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
   'system.taskNotification': 'Task notification',
@@ -1544,9 +1561,6 @@ const EN: Messages = {
   'error.loopDetected':
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
   'shell.command': 'Shell Command',
-  'compact.enabled': 'Compact mode enabled',
-  'compact.disabled': 'Compact mode disabled',
-  'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
   'help.tab.custom': 'custom-commands',
@@ -1614,15 +1628,12 @@ const EN: Messages = {
   'skilldesc.bugfix': 'Fix a bug from a GitHub issue, reproduce-first',
   'skilldesc.codegraph': 'Analyze the codebase via graph and vector index',
   'skilldesc.createIssue': 'Draft and submit a GitHub issue from an idea',
-  'skilldesc.desktopPet': 'Create a pixel-art desktop pet for Qwen Code',
   'skilldesc.docsAuditAndRefresh':
     'Audit and refresh docs/ against the codebase',
   'skilldesc.docsUpdateFromDiff': 'Update official docs from local git diff',
   'skilldesc.e2eTesting': 'Run end-to-end tests of the Qwen Code CLI',
   'skilldesc.featDev': 'End-to-end workflow for a non-trivial feature',
   'skilldesc.memoryLeakDebug': 'Diagnose CLI memory leaks via heap snapshots',
-  'skilldesc.openworkDesktopSync':
-    'Sync packages/desktop with openwork commit-by-commit',
   'skilldesc.preparePr': 'Prepare a GitHub PR title and body from the branch',
   'skilldesc.qwenCodeClaw': 'Use Qwen Code as a code-understanding agent',
   'skilldesc.structuredDebugging':
@@ -2599,6 +2610,8 @@ const EN: Messages = {
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) =>
     `Ran ${v?.count ?? 0} tool${v?.count === 1 ? '' : 's'}`,
+  'toolGroup.summary.ranAgents': (v) =>
+    `Ran ${v?.count ?? 0} agent${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.editedFiles': (v) =>
     `Edited ${v?.count ?? 0} file${v?.count === 1 ? '' : 's'}`,
   'toolGroup.summary.ranCommands': (v) =>
@@ -3186,6 +3199,7 @@ const ZH: Messages = {
   'toolName.team_create': '创建团队',
   'toolName.team_delete': '删除团队',
   'toolName.send_message': '发送消息',
+  'toolName.request_shutdown': '请求下线',
   'toolName.list_agents': '列出 Agent',
   'toolName.structured_output': '结构化输出',
   'toolName.monitor': '监控',
@@ -3200,6 +3214,7 @@ const ZH: Messages = {
   'toolName.read_mcp_resource': '读取 MCP 资源',
   'toolName.artifact': '制品',
   'toolName.record_artifact': '记录制品',
+  'toolName.report_findings': '上报评审发现',
   'toolName.image_gen': '生成图片',
   'toolName.display_image': '显示图片',
   // web-shell-only wire aliases (see TOOL_DISPLAY_NAMES in toolFormatting.ts)
@@ -3422,6 +3437,7 @@ const ZH: Messages = {
   'agentType.general-purpose': '通用',
   'agentType.explore': '探索',
   'agentType.statusline-setup': '状态栏设置',
+  'agentType.review-agent': '代码评审',
   'agentType.test-engineer': '测试工程师',
   'agentType.fork': '分支',
   'timeline.parallelAgents': '并行智能体',
@@ -3560,6 +3576,15 @@ const ZH: Messages = {
   'toast.dismissShort': '关闭',
   'insight.ready': 'Insight 报告已生成！',
   'request.cancelled': '请求已取消。',
+  'visionBridge.model': '视觉模型',
+  'visionBridge.skipped': (v) =>
+    `视觉桥接已取消。${v?.egressOccurred === 1 ? `你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。` : ''}`,
+  'visionBridge.failed': (v) =>
+    v?.egressOccurred === 1
+      ? `视觉桥接（${v?.modelName ?? ''}）失败：视觉模型请求失败。你的图片及提示词/上下文已发送至 ${v?.target ?? ''}。图片未被解析。`
+      : `视觉桥接（${v?.target ?? ''}）失败：视觉桥接无法运行。图片未被解析。`,
+  'visionBridge.ok': (v) =>
+    `已通过 ${v?.target ?? ''} 将 ${v?.convertedCount ?? 0} 张图片转换为文本${Number(v?.omittedCount ?? 0) > 0 ? `（已忽略 ${v?.omittedCount ?? 0} 张图片）` : ''}。${v?.egressOccurred === 1 ? '你的图片及提示词/上下文已发送至该模型。' : ''}`,
   'approval.execQuestion': (v) => `允许执行：'${v?.tool ?? ''}'？`,
   'approval.changeQuestion': '是否继续？',
   'approval.launchAgentQuestion': '启动这个 agent？',
@@ -4247,6 +4272,8 @@ const ZH: Messages = {
   'turnOutputs.preview': '预览',
   'turnOutputs.collapseFiles': '收起文件',
   'turnOutputs.showMoreFiles': (v) => `再展示 ${v?.count ?? 0} 个文件`,
+  'turnOutputs.collapseArtifacts': '收起产物',
+  'turnOutputs.showMoreArtifacts': (v) => `再展示 ${v?.count ?? 0} 个产物`,
   'turnOutputs.previousTurn': '上轮对话',
   'turnOutputs.fileCount': (v) => `${v?.count ?? 0} 个文件`,
   'turnOutputs.openFileTree': '打开文件树',
@@ -4365,6 +4392,9 @@ const ZH: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.waitingForApproval': '等待批准',
+  'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
   'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
@@ -4426,6 +4456,8 @@ const ZH: Messages = {
   'queue.continueEditingConfirm':
     '这条消息可能已经在执行。只有在接受重复发送风险时才继续编辑。',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
+  'queue.commandGoalBlocked':
+    'Goal 正在占用会话或状态仍在加载，暂时无法执行 Slash 命令。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
   'queue.shellDropped': (v) =>
     `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
@@ -4466,7 +4498,6 @@ const ZH: Messages = {
   'help.shortcut.shell': '运行 shell 命令',
   'help.shortcut.togglePanel': '切换此面板',
   'help.shortcut.retry': '重试上次请求',
-  'help.shortcut.compact': '切换紧凑模式',
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
   'system.taskNotification': '后台任务通知',
@@ -4522,9 +4553,6 @@ const ZH: Messages = {
   'error.loopDetected':
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'shell.command': 'Shell 命令',
-  'compact.enabled': '紧凑模式已开启',
-  'compact.disabled': '紧凑模式已关闭',
-  'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
   'help.tab.custom': '自定义命令',
@@ -4584,13 +4612,11 @@ const ZH: Messages = {
   'skilldesc.bugfix': '按先复现流程修复 GitHub issue 中的 bug',
   'skilldesc.codegraph': '通过图数据库和向量索引分析代码库',
   'skilldesc.createIssue': '根据想法或 bug 描述起草并提交 GitHub issue',
-  'skilldesc.desktopPet': '为 Qwen Code 创建像素风桌面宠物',
   'skilldesc.docsAuditAndRefresh': '对照代码库审计并刷新 docs/ 文档',
   'skilldesc.docsUpdateFromDiff': '按本地 git diff 更新官方文档',
   'skilldesc.e2eTesting': '运行 Qwen Code CLI 的端到端测试',
   'skilldesc.featDev': '实现非平凡功能的端到端工作流',
   'skilldesc.memoryLeakDebug': '用堆快照诊断 CLI 内存泄漏',
-  'skilldesc.openworkDesktopSync': '将 packages/desktop 与 openwork 逐提交同步',
   'skilldesc.preparePr': '从当前分支准备 GitHub PR 标题和正文',
   'skilldesc.qwenCodeClaw': '将 Qwen Code 用作代码理解智能体',
   'skilldesc.structuredDebugging': '假设驱动的疑难 bug 调试方法',
@@ -5498,6 +5524,7 @@ const ZH: Messages = {
   'tool.status.failed': '执行失败',
   'toolGroup.moreKinds': (v) => ` +${v?.count ?? 0}`,
   'toolGroup.summary': (v) => `调用了 ${v?.count ?? 0} 个工具`,
+  'toolGroup.summary.ranAgents': (v) => `已运行 ${v?.count ?? 0} 个智能体`,
   'toolGroup.summary.editedFiles': (v) => `已编辑 ${v?.count ?? 0} 个文件`,
   'toolGroup.summary.ranCommands': (v) => `已运行 ${v?.count ?? 0} 条命令`,
   'toolGroup.summary.readFiles': (v) => `已读取 ${v?.count ?? 0} 个文件`,
@@ -5935,12 +5962,6 @@ const ZH: Messages = {
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
     '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
-  'settings.label.ui.compactMode': '紧凑模式',
-  'settings.description.ui.compactMode':
-    '隐藏工具输出和思考内容，显示更简洁的视图（可用 Ctrl+O 切换）。',
-  'settings.label.ui.compactInline': '紧凑内联',
-  'settings.description.ui.compactInline':
-    '在每个分组内紧凑显示工具内容，而不是跨分组合并。需要先启用紧凑模式。',
   'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
   'settings.description.ui.shellOutputMaxLines':
     '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
@@ -5967,9 +5988,6 @@ const ZH: Messages = {
   'settings.label.tools.shell.enableInteractiveShell': '交互式 Shell（PTY）',
   'settings.description.tools.shell.enableInteractiveShell':
     '使用 node-pty 提供交互式 shell 体验。PTY 不可用时回退到 child_process。',
-  'settings.label.tools.computerUse.enabled': '启用 Computer Use',
-  'settings.description.tools.computerUse.enabled':
-    '启用后（默认），会注册 9 个 computer_use__* 延迟内置工具。',
   'settings.label.policy.permissionStrategy': '权限协调策略',
   'settings.description.policy.permissionStrategy':
     '多个客户端连接时权限请求的决策方式。first-responder 表示任意客户端先响应者生效；designated 表示仅提示发起方决策；consensus 表示需要 N-of-M 投票同意；local-only 表示只有 loopback 客户端可决策。需要重启 daemon 后生效。',
@@ -5985,7 +6003,7 @@ const ZH: Messages = {
     '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
   'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
   'settings.description.experimental.emitToolUseSummaries':
-    '每个工具批次完成后生成一个简短的 LLM 标签。紧凑模式下会替代通用的 Tool × N 标题；完整模式下显示为工具组下方的弱化 ● <label> 行。需要配置快速模型。',
+    '每个工具批次完成后生成一个简短的 LLM 标签。已完成工具组的标签会替代通用的 Tool × N 标题；强制展开的工具组下方显示弱化的 ● <label> 行。需要配置快速模型。',
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',

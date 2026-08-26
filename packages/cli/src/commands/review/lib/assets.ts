@@ -70,9 +70,8 @@ export const ASSET_HEADER_BYTES = 16;
  *
  * A sibling signature table lives in core: `sniffFileKind` in
  * `packages/core/src/utils/binary-content.ts` (best-effort kind detection for
- * fetched web content, deliberately looser) and the dimension extractors in
- * `packages/core/src/utils/request-tokenizer/imageTokenizer.ts`. Admitting or
- * correcting a format here means checking those sites too.
+ * fetched web content, deliberately looser). Admitting or correcting a format
+ * here means checking that site too.
  */
 export function sniffImageFormat(header: Uint8Array): ImageFormat | null {
   const at = (i: number): number => header[i] ?? -1;

@@ -424,22 +424,14 @@ export async function startTelemetrySdk(
       ? [new SessionIdSpanProcessor(), new BatchSpanProcessor(spanExporter)]
       : [],
     logRecordProcessors: logExporter
-      ? [new BatchLogRecordProcessor(logExporter)]
+      ? [new BatchLogRecordProcessor({ exporter: logExporter })]
       : logToSpanProcessor
         ? [logToSpanProcessor]
         : [],
-    // Metrics uses the singular `metricReader` field because
-    // `@opentelemetry/sdk-node@0.203.0` only accepts one reader; there is no
-    // `metricReaders: []` opt-out. The SDK's `start()` calls
-    // `configureMetricProviderFromEnv()` unconditionally, so env-based readers
-    // are only suppressed when an explicit reader is provided. This is
-    // intentionally asymmetric with `spanProcessors`/`logRecordProcessors`,
-    // where an empty array disables env fallback for those signals. Those two
-    // must stay unconditional arrays: omitting them re-enables sdk-node's
-    // env-based fallback, and the logs fallback runs in the NodeSDK
-    // constructor — outside the env-var scrub window around `start()` in
-    // sdk.ts (`startSdkWithExplicitExporters`).
-    ...(metricReader && { metricReader }),
+    // In 0.221, omitting both metrics fields enables constructor-time env
+    // fallback. An explicit empty array keeps metrics disabled when qwen-code
+    // has no configured reader, before the start() env scrub can take effect.
+    metricReaders: metricReader ? [metricReader] : [],
     instrumentations: [
       new HttpInstrumentation({
         // OTLP HTTP exporter uses node:http (patched here, not by undici).

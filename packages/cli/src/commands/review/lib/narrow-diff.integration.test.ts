@@ -19,7 +19,11 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { narrowToDelta } from './narrow-diff.js';
+import {
+  assembleSections,
+  narrowToDelta,
+  selectNarrowing,
+} from './narrow-diff.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './diff-flags.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
@@ -1208,5 +1212,77 @@ describe('narrowToDelta on real-git captures', () => {
     // the second from the scope while every check above stayed green.
     expect(narrowed).toContain('+R10-EDIT');
     expect(narrowed).toContain('+R40-EDIT');
+  });
+});
+
+describe('the two halves narrowToDelta composes', () => {
+  // `narrowToDelta` is a thin wrapper now, so the pieces are the surface a
+  // second caller uses: the widening runs between them, on a selection whose
+  // guards have already passed, and asks for a LARGER set of paths. Exercised
+  // through the wrapper alone, a change that broke the emit for any set other
+  // than `selection.touched` would leave every scenario above green.
+  let base: string;
+  let anchor: string;
+  let head: string;
+
+  beforeAll(() => {
+    base = commit('base', { 'a.ts': lines(4, 'A'), 'b.ts': lines(4, 'B') });
+    anchor = commit('anchor', {
+      'a.ts': lines(4, 'A') + 'A-ANCHOR\n',
+      'b.ts': lines(4, 'B') + 'B-ANCHOR\n',
+    });
+    head = commit('head', {
+      'a.ts': lines(4, 'A') + 'A-ANCHOR\nA-HEAD\n',
+      'b.ts': lines(4, 'B') + 'B-ANCHOR\n',
+    });
+  });
+
+  it('selects the touched paths, and only those the full capture carries', () => {
+    const selection = selectNarrowing(
+      captureBytes(base, head),
+      captureBytes(anchor, head),
+    );
+    expect(selection).not.toBeNull();
+    // `b.ts` changed in the PR but not since the anchor: it is a section of
+    // the full capture and NOT touched, which is exactly the state the
+    // widening needs to see to consider it at all.
+    expect([...selection!.touched]).toEqual(['a.ts']);
+    expect(selection!.sections.map((f) => f.path).sort()).toEqual([
+      'a.ts',
+      'b.ts',
+    ]);
+    expect(selection!.fullText).toBe(capture(base, head));
+  });
+
+  it('emits whatever subset it is asked for, out of the full capture', () => {
+    const selection = selectNarrowing(
+      captureBytes(base, head),
+      captureBytes(anchor, head),
+    )!;
+    const full = capture(base, head);
+
+    // The set the wrapper passes reproduces the wrapper's own answer…
+    expect(
+      assembleSections(selection, selection.touched)?.toString('utf8'),
+    ).toBe(
+      narrowToDelta(
+        captureBytes(base, head),
+        captureBytes(anchor, head),
+      )?.toString('utf8'),
+    );
+    // …a WIDER set adds the other section whole, still out of the full
+    // capture — the emit the widening depends on and the wrapper never asks
+    // for.
+    const widened = assembleSections(
+      selection,
+      new Set(['a.ts', 'b.ts']),
+    )!.toString('utf8');
+    expect(widened).toContain('b/a.ts');
+    expect(widened).toContain('b/b.ts');
+    expect(widened).toContain('+B-ANCHOR');
+    expect(everyLineIsDisplayed(widened, full)).toBe(true);
+    // …and a set naming nothing the capture carries is the same "nothing to
+    // publish" the wrapper reports as null.
+    expect(assembleSections(selection, new Set(['nope.ts']))).toBeNull();
   });
 });

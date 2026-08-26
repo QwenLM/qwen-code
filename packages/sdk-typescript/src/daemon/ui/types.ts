@@ -1153,6 +1153,21 @@ export interface DaemonTranscriptReducerOptions {
   onTruncation?: (detail: DaemonTranscriptTruncationDetail) => void;
 }
 
+export interface DaemonTranscriptBlockChangeSummary {
+  /** Opaque identity of the transcript store that produced this summary. */
+  source: object;
+  /** Monotonic version of the store's block projection state. */
+  revision: number;
+  /**
+   * The latest revision that was not a pure append to one streaming tail
+   * block. For summaries from the same source, equal values therefore prove
+   * that every intervening revision was such an append.
+   */
+  tailAppendBarrierRevision: number;
+  /** The streaming tail block changed at this revision, when eligible. */
+  tailBlockId?: string;
+}
+
 export interface DaemonTranscriptTruncationDetail {
   kind: 'blocks' | 'text';
   blockId?: string;
@@ -1185,6 +1200,7 @@ export interface DaemonTranscriptTruncationDetail {
 
 export interface DaemonTranscriptStore {
   getSnapshot(): DaemonTranscriptState;
+  getBlockChangeSummary?(): DaemonTranscriptBlockChangeSummary;
   subscribe(listener: () => void): () => void;
   dispatch(event: DaemonUiEvent | DaemonUiEvent[]): void;
   appendLocalUserMessage(

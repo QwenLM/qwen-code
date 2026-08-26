@@ -41,6 +41,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import { extractHttpStatus, isInvalidClientIdError } from './httpErrors.js';
 import {
+  mapProviderStatus,
   mapReasoningControls,
   mapSessionContextReasoning,
   mapSupportedCommands,
@@ -193,6 +194,14 @@ export interface CreateDaemonSessionActionsArgs {
   clearLiveJournalRepair?: () => void;
 }
 
+export function getWorkspaceModelsAfterSessionClear(
+  current: DaemonConnectionState,
+): DaemonConnectionState['models'] {
+  return current.providers
+    ? mapProviderStatus(current.providers).models
+    : current.models;
+}
+
 export function getConnectionAfterSessionClear(
   current: DaemonConnectionState,
   clearedSessionId: string | undefined,
@@ -211,6 +220,7 @@ export function getConnectionAfterSessionClear(
     delete next.supportedCommands;
     delete next.context;
     delete next.reasoning;
+    next.models = getWorkspaceModelsAfterSessionClear(current);
     // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
     // MCP-prompt and workflow slash commands all live at the workspace/config
     // level, not the session), so they stay valid after the session is
@@ -1086,6 +1096,19 @@ export function createDaemonSessionActions({
           ),
           'Set reasoning effort timed out',
         );
+        const nextReasoning = mapReasoningControls(
+          result.configOptions,
+          getConnection().reasoning?.effort,
+        );
+        const confirmed =
+          value === 'none'
+            ? nextReasoning?.enabled === false
+            : nextReasoning?.enabled === true && nextReasoning.effort === value;
+        if (!confirmed) {
+          throw new Error(
+            `Daemon did not confirm reasoning effort ${JSON.stringify(value)}`,
+          );
+        }
         const current = getConnection();
         if (
           sessionRef.current === session &&
@@ -1105,10 +1128,7 @@ export function createDaemonSessionActions({
             const configOptions = result.configOptions;
             return {
               ...current,
-              reasoning: mapReasoningControls(
-                configOptions,
-                current.reasoning?.effort,
-              ),
+              reasoning: nextReasoning,
               context: current.context
                 ? {
                     ...current.context,

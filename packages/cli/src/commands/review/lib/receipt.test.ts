@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseReceiptIds } from './receipt.js';
+import { parseReceiptCommentIds, parseReceiptIds } from './receipt.js';
 
 describe('parseReceiptIds', () => {
   it('reads the current reviewIds array', () => {
@@ -44,5 +44,43 @@ describe('parseReceiptIds', () => {
     expect(parseReceiptIds('42')).toEqual([]);
     expect(parseReceiptIds('"x"')).toEqual([]);
     expect(parseReceiptIds('[1,2]')).toEqual([]);
+  });
+});
+
+describe('parseReceiptCommentIds', () => {
+  it('reads the commentIds array', () => {
+    expect(
+      parseReceiptCommentIds(JSON.stringify({ commentIds: [1, 2, 3] })),
+    ).toEqual([1, 2, 3]);
+  });
+
+  it('reads nothing from the review-id axis — the two axes never blur', () => {
+    expect(
+      parseReceiptCommentIds(JSON.stringify({ reviewIds: [1, 2, 3] })),
+    ).toEqual([]);
+    expect(parseReceiptIds(JSON.stringify({ commentIds: [1, 2, 3] }))).toEqual(
+      [],
+    );
+  });
+
+  it('drops non-numeric entries rather than trusting them', () => {
+    expect(
+      parseReceiptCommentIds(JSON.stringify({ commentIds: [1, 'x', null, 2] })),
+    ).toEqual([1, 2]);
+  });
+
+  it('returns [] for malformed JSON, a missing field, or a wrong-typed field', () => {
+    expect(parseReceiptCommentIds('not json {')).toEqual([]);
+    expect(parseReceiptCommentIds(JSON.stringify({}))).toEqual([]);
+    expect(
+      parseReceiptCommentIds(JSON.stringify({ commentIds: 'nope' })),
+    ).toEqual([]);
+  });
+
+  it('does not throw on valid JSON that is not an object (null, number, array, string)', () => {
+    expect(parseReceiptCommentIds('null')).toEqual([]);
+    expect(parseReceiptCommentIds('42')).toEqual([]);
+    expect(parseReceiptCommentIds('"x"')).toEqual([]);
+    expect(parseReceiptCommentIds('[1,2]')).toEqual([]);
   });
 });

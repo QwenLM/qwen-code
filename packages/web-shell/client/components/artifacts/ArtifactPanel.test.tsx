@@ -1016,6 +1016,13 @@ describe('ArtifactPanel code review artifacts', () => {
     // The regression the early `return` in the dispatch can cause: an
     // artifact WITHOUT the code_review metadata must keep reaching the
     // generic file preview, not the dedicated renderer.
+    mockWorkspaceActions.stat.mockResolvedValue({
+      kind: 'stat',
+      path: '.qwen/reviews/review.json',
+      type: 'file',
+      sizeBytes: 2,
+      modifiedMs: 1,
+    });
     mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
       content: '{}',
       truncated: false,
@@ -2528,5 +2535,173 @@ describe('ArtifactPanel image preview tabs', () => {
     expect(download).not.toBeNull();
     expect(download.getAttribute('href')).toBe('data:image/png;base64,aWFh');
     expect(download.getAttribute('download')).toBe('image.png');
+  });
+});
+
+describe('ArtifactPanel workspace artifact previews', () => {
+  it.each([
+    {
+      label: 'Markdown',
+      mimeType: 'text/markdown; charset=utf-8',
+      content: '# Charset Markdown',
+    },
+    {
+      label: 'HTML',
+      mimeType: 'text/html; charset=utf-8',
+      content: '<h1>Charset HTML</h1>',
+    },
+  ])('previews document-classified $label MIME types', async (testCase) => {
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: testCase.content.length,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: testCase.content,
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'document',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: `${testCase.label} preview`,
+          workspacePath: 'reports/preview',
+          mimeType: testCase.mimeType,
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-23T00:00:00.000Z',
+          updatedAt: '2026-08-23T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(mockWorkspaceActions.readWorkspaceFile).toHaveBeenCalledWith(
+      'reports/preview',
+    );
+    if (testCase.label === 'Markdown') {
+      expect(container.querySelector('h1')?.textContent).toBe(
+        'Charset Markdown',
+      );
+    } else {
+      expect(
+        container.querySelector('iframe')?.getAttribute('srcdoc'),
+      ).toContain(testCase.content);
+    }
+  });
+
+  it('renders a document artifact as download-only and does not preview it', async () => {
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'file',
+      sizeBytes: 12,
+      modifiedMs: 1,
+    });
+    mockWorkspaceActions.readWorkspaceFile.mockResolvedValue({
+      content: 'PK\u0003\u0004',
+      truncated: false,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'document',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'Q3 workbook',
+          workspacePath: 'reports/q3.xlsx',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-18T00:00:00.000Z',
+          updatedAt: '2026-08-18T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toMatch(/Download/i);
+    expect(container.querySelector('.cm-editor')).toBeNull();
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
+  it('shows status and disables download for a missing document artifact', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'document',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'missing',
+          title: 'Q3 workbook',
+          workspacePath: 'reports/q3.xlsx',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-18T00:00:00.000Z',
+          updatedAt: '2026-08-18T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toMatch(/missing/i);
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Download'),
+    );
+    expect(download).toBeTruthy();
+    expect(download).toHaveProperty('disabled', true);
+  });
+
+  it('does not read workspace bytes when stat says the path is a directory', async () => {
+    mockWorkspaceActions.stat.mockResolvedValue({
+      type: 'directory',
+      sizeBytes: 0,
+      modifiedMs: 1,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() =>
+      root.render(
+        artifactPanel({
+          id: 'review-artifact',
+          kind: 'file',
+          storage: 'workspace',
+          source: 'tool',
+          status: 'available',
+          title: 'Legacy folder',
+          workspacePath: 'exports',
+          retention: 'ephemeral',
+          clientRetained: false,
+          createdAt: '2026-08-18T00:00:00.000Z',
+          updatedAt: '2026-08-18T00:00:00.000Z',
+        }),
+      ),
+    );
+    await flush();
+
+    expect(container.textContent).toMatch(/director/i);
+    expect(mockWorkspaceActions.readWorkspaceFile).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,7 @@
 import './styles/globals.css';
 import {
-  createContext,
+  forwardRef,
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -8,9 +9,9 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ComponentPropsWithoutRef,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -41,6 +42,8 @@ import {
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
+  DaemonSkillToggleMutation,
+  DaemonTranscriptBlockChangeSummary,
   DaemonTranscriptBlock,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
@@ -75,7 +78,10 @@ import {
   type VoiceStatusRevision,
 } from './voice/voice-workspace-target';
 import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
-import { useSessionCatalogController } from './session-catalog/session-catalog-hooks';
+import {
+  useSessionCatalogController,
+  useSessionHasActivePrompt,
+} from './session-catalog/session-catalog-hooks';
 import {
   loadSessionCatalogOnce,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
@@ -171,6 +177,7 @@ import { ExtensionsManagerPage } from './components/extensions/ExtensionsManager
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
+import { McpAppHostContext } from './mcpAppHostContext';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -204,10 +211,13 @@ import {
   skillDescriptionKey,
 } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
-import { useAnimationFrameTranscriptBlocks } from './hooks/useAnimationFrameTranscriptBlocks';
+import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { isSessionDisconnectedError } from './utils/sessionErrors';
-import { useMessagesFromBlocks } from './hooks/useMessages';
+import {
+  projectStreamingTailMessages,
+  useMessagesFromBlocks,
+} from './hooks/useMessages';
 import { useSessionArtifacts } from './hooks/useSessionArtifacts';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
@@ -331,54 +341,13 @@ import {
   type ComposerTagRenderer,
   type WebShellComposerTagIconMap,
   type WebShellBottomStatusItem,
+  type WebShellPreparedSubmit,
+  type WebShellSubmitSnapshot,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
+import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
-
-export const CompactModeContext = createContext(false);
-
-/**
- * Per-snapshot status diffs (keyed by tool callId or plan message id), so a
- * history row can render what changed in that snapshot without re-deriving it
- * from the whole transcript. Empty by default so a row rendered outside the
- * provider still falls back gracefully.
- */
-export const TodoTimelineContext = createContext<Map<string, TodoSnapshotDiff>>(
-  new Map(),
-);
-
-/**
- * Per-todo timing and resource detail keyed by todoStateKey, consumed by the
- * expanded todo list so a finished task can reveal when it ran and what it
- * spent. Empty by default so a row rendered outside the provider (or in tests)
- * simply shows no expander.
- */
-export const TodoDetailContext = createContext<Map<string, TodoDetail>>(
-  new Map(),
-);
-
-/**
- * Provides both todo contexts in one wrapper so the message list stays at a
- * single nesting level (one provider in the tree, not two).
- */
-function TodoContextsProvider({
-  timeline,
-  details,
-  children,
-}: {
-  timeline: Map<string, TodoSnapshotDiff>;
-  details: Map<string, TodoDetail>;
-  children: ReactNode;
-}) {
-  return (
-    <TodoTimelineContext.Provider value={timeline}>
-      <TodoDetailContext.Provider value={details}>
-        {children}
-      </TodoDetailContext.Provider>
-    </TodoTimelineContext.Provider>
-  );
-}
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
 const MAX_TOASTS = 4;
@@ -474,7 +443,69 @@ function availableSkillInfos(status: {
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
-const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
+function availableSessionSkillInfos(
+  skills: readonly string[],
+  commands: readonly {
+    name: string;
+    description: string;
+    argumentHint?: string;
+  }[],
+): SkillInfo[] {
+  const commandsByName = new Map(
+    commands.map((command) => [command.name.toLowerCase(), command]),
+  );
+  return skills
+    .map((name) => {
+      const command = commandsByName.get(name.toLowerCase());
+      return {
+        name,
+        description: command?.description ?? '',
+        ...(command?.argumentHint
+          ? { argumentHint: command.argumentHint }
+          : {}),
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function sessionSkillsReflectToggle(
+  sessionSkills: readonly string[] | undefined,
+  mutationSkills: ReadonlyArray<{ name: string; enabled: boolean }>,
+): boolean {
+  if (sessionSkills === undefined) {
+    return false;
+  }
+  const enabledNames = new Set(sessionSkills.map((name) => name.toLowerCase()));
+  return mutationSkills.every((skill) => {
+    const enabled = enabledNames.has(skill.name.toLowerCase());
+    return skill.enabled === enabled;
+  });
+}
+
+function skillMutationsForWorkspace(
+  lastSkillMutation: DaemonSkillToggleMutation | undefined,
+  skillMutationsByCwd: Record<string, DaemonSkillToggleMutation[]> | undefined,
+  workspaceCwd?: string,
+): readonly DaemonSkillToggleMutation[] {
+  if (skillMutationsByCwd) {
+    return workspaceCwd ? (skillMutationsByCwd[workspaceCwd] ?? []) : [];
+  }
+  return lastSkillMutation ? [lastSkillMutation] : [];
+}
+
+function mergeSkillToggles(
+  current: ReadonlyArray<{ name: string; enabled: boolean }>,
+  incoming: ReadonlyArray<{ name: string; enabled: boolean }>,
+): Array<{ name: string; enabled: boolean }> {
+  const byName = new Map(
+    current.map((skill) => [skill.name.toLowerCase(), skill] as const),
+  );
+  for (const skill of incoming) {
+    byName.set(skill.name.toLowerCase(), skill);
+  }
+  return [...byName.values()];
+}
+
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 
 /** Maps each ModelDialogMode to its i18n title key — single source of truth. */
@@ -487,6 +518,20 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
 
 function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
+}
+
+function resolvePreparedSubmit(
+  prompt: string,
+  inputAnnotations: readonly DaemonInputAnnotation[],
+  prepared: void | WebShellPreparedSubmit,
+): WebShellPreparedSubmit {
+  if (!prepared || typeof prepared.prompt !== 'string') {
+    return { prompt, inputAnnotations };
+  }
+  return {
+    prompt: prepared.prompt,
+    inputAnnotations: prepared.inputAnnotations ?? inputAnnotations,
+  };
 }
 
 interface SendPromptOptionsWithRetry {
@@ -752,6 +797,97 @@ interface LocalAnchoredMessage {
   message: Message;
 }
 
+function buildDisplayMessages(
+  messages: Message[],
+  recapMessage: LocalAnchoredMessage | null,
+): Message[] {
+  if (!recapMessage) return filterModelSwitchMessages(messages);
+  const result = [...messages];
+  const anchorIndex = recapMessage.anchorAfterId
+    ? result.findIndex((message) => message.id === recapMessage.anchorAfterId)
+    : -1;
+  result.splice(
+    anchorIndex >= 0
+      ? anchorIndex + 1
+      : Math.min(recapMessage.anchorIndex, result.length),
+    0,
+    recapMessage.message,
+  );
+  return filterModelSwitchMessages(result);
+}
+
+type LiveMessageListProps = Omit<
+  ComponentPropsWithoutRef<typeof MessageList>,
+  'messages' | 'transcriptBlockCount'
+> & {
+  baselineBlocks: readonly DaemonTranscriptBlock[];
+  baselineSummary?: DaemonTranscriptBlockChangeSummary;
+  baselineMessages: Message[];
+  recapMessage: LocalAnchoredMessage | null;
+  messagesRef: { current: Message[] };
+  onTranscriptChange?: (blocks: readonly DaemonTranscriptBlock[]) => void;
+  t: ReturnType<typeof getTranslator>;
+};
+
+const LiveMessageList = memo(
+  forwardRef<MessageListHandle, LiveMessageListProps>(function LiveMessageList(
+    {
+      baselineBlocks,
+      baselineSummary,
+      baselineMessages,
+      recapMessage,
+      messagesRef,
+      onTranscriptChange,
+      t,
+      ...props
+    },
+    ref,
+  ) {
+    const live = useAnimationFrameTranscriptSnapshot();
+    const messages = useMemo(
+      () =>
+        projectStreamingTailMessages(
+          {
+            blocks: baselineBlocks,
+            messages: baselineMessages,
+            t,
+            blockChangeSummary: baselineSummary,
+          },
+          live.blocks,
+          t,
+          live.blockChangeSummary,
+        ) ?? baselineMessages,
+      [
+        baselineBlocks,
+        baselineMessages,
+        baselineSummary,
+        live.blockChangeSummary,
+        live.blocks,
+        t,
+      ],
+    );
+    const displayMessages = useMemo(
+      () => buildDisplayMessages(messages, recapMessage),
+      [messages, recapMessage],
+    );
+    useLayoutEffect(() => {
+      messagesRef.current = messages;
+    }, [messages, messagesRef]);
+    useEffect(() => {
+      onTranscriptChange?.(live.blocks);
+    }, [live.blocks, onTranscriptChange]);
+
+    return (
+      <MessageList
+        {...props}
+        ref={ref}
+        messages={displayMessages}
+        transcriptBlockCount={live.blocks.length}
+      />
+    );
+  }),
+);
+
 interface ModelSwitchSummary {
   authType: string;
   modelId: string;
@@ -887,6 +1023,12 @@ export interface WebShellProps {
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
   /**
+   * Called with the initial merged agent task snapshot and when its roster,
+   * status, or stable metadata changes. Poll-only runtime, stats, and activity
+   * updates are suppressed.
+   */
+  onAgentTasksChange?: (tasks: readonly DaemonSessionAgentTaskStatus[]) => void;
+  /**
    * Called whenever transcript blocks change. Receives the full blocks array
    * at most once per animation frame during active generation.
    */
@@ -1000,6 +1142,15 @@ export interface WebShellProps {
   /** Called when a session-level event occurs (rename, submit, turn complete). */
   onSessionChange?: (event: SessionChangeEvent) => void;
   /**
+   * Prepare the immutable payload for a daemon submission. Called once for a
+   * direct or queued logical submit, after local command routing and before
+   * session creation, composer commit, optimistic rendering, or admission.
+   * Retries reuse the previously prepared payload and skip this callback.
+   */
+  prepareSubmit?: (
+    submission: WebShellSubmitSnapshot,
+  ) => Promise<void | WebShellPreparedSubmit>;
+  /**
    * Called before a prompt is submitted. Return a Promise — the prompt is held
    * until the Promise resolves. If the Promise rejects, the prompt is cancelled.
    * `sessionId` is `undefined` when the session has not yet been created (deferred).
@@ -1034,6 +1185,12 @@ type SessionActionsWithCreate = {
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
+};
+
+type PendingReasoningIntent = {
+  modelId: string;
+  value: string;
+  effort: string;
 };
 
 const emptyComposerApi: WebShellComposerApi = {
@@ -1831,6 +1988,7 @@ export function App({
   virtualScrollThreshold,
   markdown,
   loadingPhrases,
+  onAgentTasksChange,
   onTranscriptChange,
   onToast,
   composerRef,
@@ -1838,6 +1996,7 @@ export function App({
   composerInput,
   composerInputVersion,
   onSessionChange,
+  prepareSubmit,
   onSubmitBefore,
   restartSseOnPrompt,
   historyPageSize,
@@ -2087,7 +2246,9 @@ export function App({
   const CustomComposerHeader = renderComposerHeader;
   const CustomComposerFooter = renderComposerFooter;
   const store = useTranscriptStore();
-  const blocks = useAnimationFrameTranscriptBlocks();
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot({
+    structuralOnly: true,
+  });
   const connection = useConnection();
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
@@ -2113,6 +2274,16 @@ export function App({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
+  // Daemon-authoritative "turn is running" signal for the connected session:
+  // keeps the conversation indicator (and its cancel affordances) alive
+  // through >3s silent tool gaps where streamingState drops to idle (#9487).
+  const sessionHasActivePrompt = useSessionHasActivePrompt(
+    workspace.client,
+    connection.workspaceCwd,
+    connection.sessionId,
+  );
+  const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
+  sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
@@ -2503,9 +2674,8 @@ export function App({
     });
   }, []);
 
-  const messages = useMessagesFromBlocks(t, blocks);
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const messagesRef = useRef(messages);
-  messagesRef.current = messages;
   const [failedPrompt, setFailedPrompt] = useState<FailedPrompt | null>(null);
   const failedPromptRef = useRef<FailedPrompt | null>(failedPrompt);
   const [failedPromptRetry, setFailedPromptRetry] =
@@ -2577,31 +2747,10 @@ export function App({
   const lastNotifiedSessionIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceIdRef = useRef<string | undefined>(undefined);
   const lastNotifiedWorkspaceCwdRef = useRef<string | undefined>(undefined);
-  const displayMessages = useMemo(() => {
-    const localMessages = [recapMessage].filter(
-      (message): message is LocalAnchoredMessage => message !== null,
-    );
-    if (localMessages.length === 0) {
-      return filterModelSwitchMessages(messages);
-    }
-
-    const result = [...messages];
-    for (const localMessage of localMessages.sort(
-      (a, b) => a.anchorIndex - b.anchorIndex,
-    )) {
-      const anchorIndex = localMessage.anchorAfterId
-        ? result.findIndex(
-            (message) => message.id === localMessage.anchorAfterId,
-          )
-        : -1;
-      const index =
-        anchorIndex >= 0
-          ? anchorIndex + 1
-          : Math.min(localMessage.anchorIndex, result.length);
-      result.splice(index, 0, localMessage.message);
-    }
-    return filterModelSwitchMessages(result);
-  }, [messages, recapMessage]);
+  const displayMessages = useMemo(
+    () => buildDisplayMessages(messages, recapMessage),
+    [messages, recapMessage],
+  );
   useEffect(() => {
     const failed = failedPromptRef.current;
     if (!failed) return;
@@ -4040,6 +4189,27 @@ export function App({
     () => getEnvironmentAgentTasks(messages, sessionTasks),
     [messages, sessionTasks],
   );
+  const lastReportedAgentTasksRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!onAgentTasksChange) {
+      lastReportedAgentTasksRef.current = undefined;
+      return;
+    }
+    const snapshot = JSON.stringify(
+      environmentAgentTasks.map(
+        ({
+          runtimeMs: _runtimeMs,
+          stats: _stats,
+          recentActivities: _recentActivities,
+          prompt: _prompt,
+          ...stable
+        }) => stable,
+      ),
+    );
+    if (snapshot === lastReportedAgentTasksRef.current) return;
+    lastReportedAgentTasksRef.current = snapshot;
+    onAgentTasksChange(environmentAgentTasks);
+  }, [environmentAgentTasks, onAgentTasksChange]);
   const backgroundTasks = useMemo(
     () => sessionTasks.filter((task) => task.kind !== 'agent'),
     [sessionTasks],
@@ -4242,9 +4412,7 @@ export function App({
       (!failedPromptRetry.admitted || failedPromptRetry.settled),
   );
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
-  useEffect(() => {
-    streamingStateRef.current = streamingState;
-  }, [streamingState]);
+  streamingStateRef.current = streamingState;
   // Cleared in three places: the session-switch effect, the drain loop, and
   // handleCancel. Bumping drainGenerationRef at each clear site also cancels
   // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
@@ -4581,9 +4749,21 @@ export function App({
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
   const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
+  const [loadedSkillsFallback, setLoadedSkillsFallback] = useState<{
+    sessionId: string;
+    workspaceCwd: string | undefined;
+  }>();
+  const connectionSkillSnapshotRef = useRef({
+    sessionId: connection.sessionId,
+    skills: connection.skills,
+  });
+  connectionSkillSnapshotRef.current = {
+    sessionId: connection.sessionId,
+    skills: connection.skills,
+  };
   const loadedSkillsRequestRef = useRef(0);
   const reloadLoadedSkills = useCallback(
-    async (workspaceCwd?: string) => {
+    async (workspaceCwd?: string, notifyOnError = false) => {
       const request = ++loadedSkillsRequestRef.current;
       try {
         const status =
@@ -4595,16 +4775,137 @@ export function App({
         if (request !== loadedSkillsRequestRef.current) return;
         setLoadedSkills(availableSkillInfos(status));
         setLoadedSkillsReady(true);
-      } catch {
-        return;
+        return true;
+      } catch (error) {
+        if (notifyOnError) {
+          pushToast(
+            'error',
+            formatError(error, 'Failed to refresh composer skills'),
+          );
+        }
+        return false;
       }
     },
-    [workspace.client, workspaceActions],
+    [pushToast, workspace.client, workspaceActions],
   );
   useEffect(() => {
     if (!connected) return;
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
+  const handledSkillMutationKeysRef = useRef(new Set<string>());
+  const pendingSkillTogglesByContextRef = useRef(
+    new Map<string, Array<{ name: string; enabled: boolean }>>(),
+  );
+  useEffect(() => {
+    if (!connected) {
+      handledSkillMutationKeysRef.current.clear();
+      return;
+    }
+    const sessionId = connection.sessionId;
+    const workspaceCwd = connection.workspaceCwd;
+    const contextKey = `${workspaceCwd ?? ''}\n${sessionId ?? ''}`;
+    const mutations = skillMutationsForWorkspace(
+      workspaceEventSignals?.lastSkillMutation,
+      workspaceEventSignals?.skillMutationsByCwd,
+      workspaceCwd,
+    );
+    const mutationKeys = mutations.map(
+      (mutation) => `${contextKey}\n${mutation.id}`,
+    );
+    const unhandled = mutations.filter(
+      (_, index) =>
+        !handledSkillMutationKeysRef.current.has(mutationKeys[index]!),
+    );
+    if (unhandled.length === 0) return;
+    const markHandled = () => {
+      for (const mutationKey of mutationKeys) {
+        handledSkillMutationKeysRef.current.add(mutationKey);
+      }
+    };
+    const priorPending =
+      pendingSkillTogglesByContextRef.current.get(contextKey) ?? [];
+    const pendingToggles = mergeSkillToggles(
+      priorPending,
+      unhandled.flatMap((mutation) => mutation.skills),
+    );
+    const sessionSkills = connectionSkillSnapshotRef.current.skills;
+    if (
+      sessionId &&
+      sessionSkills !== undefined &&
+      priorPending.length === 0 &&
+      unhandled.every(
+        (mutation) =>
+          mutation.activation === 'applied' &&
+          mutation.sessionsFailed === 0 &&
+          mutation.sessionsRefreshed > 0,
+      )
+    ) {
+      markHandled();
+      setLoadedSkillsFallback(undefined);
+      return;
+    }
+    pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
+    let cancelled = false;
+    void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
+      if (cancelled || !loaded) return;
+      markHandled();
+      if (!sessionId) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        return;
+      }
+      const currentSnapshot = connectionSkillSnapshotRef.current;
+      if (
+        currentSnapshot.sessionId === sessionId &&
+        sessionSkillsReflectToggle(currentSnapshot.skills, pendingToggles)
+      ) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
+        return;
+      }
+      setLoadedSkillsFallback({ sessionId, workspaceCwd });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    connected,
+    connection.sessionId,
+    connection.workspaceCwd,
+    reloadLoadedSkills,
+    workspaceEventSignals?.lastSkillMutation,
+    workspaceEventSignals?.skillMutationsByCwd,
+  ]);
+  useEffect(() => {
+    if (!loadedSkillsFallback) return;
+    if (
+      connection.sessionId !== loadedSkillsFallback.sessionId ||
+      connection.workspaceCwd !== loadedSkillsFallback.workspaceCwd
+    ) {
+      const previousContextKey = `${loadedSkillsFallback.workspaceCwd ?? ''}\n${loadedSkillsFallback.sessionId}`;
+      for (const mutationKey of handledSkillMutationKeysRef.current) {
+        if (mutationKey.startsWith(`${previousContextKey}\n`)) {
+          handledSkillMutationKeysRef.current.delete(mutationKey);
+        }
+      }
+      setLoadedSkillsFallback(undefined);
+      return;
+    }
+    const contextKey = `${connection.workspaceCwd ?? ''}\n${connection.sessionId ?? ''}`;
+    const pendingToggles =
+      pendingSkillTogglesByContextRef.current.get(contextKey) ?? [];
+    if (
+      pendingToggles.length > 0 &&
+      sessionSkillsReflectToggle(connection.skills, pendingToggles)
+    ) {
+      pendingSkillTogglesByContextRef.current.delete(contextKey);
+      setLoadedSkillsFallback(undefined);
+    }
+  }, [
+    connection.sessionId,
+    connection.skills,
+    connection.workspaceCwd,
+    loadedSkillsFallback,
+  ]);
 
   const [modelDialogMode, setModelDialogMode] =
     useState<ModelDialogMode | null>(null);
@@ -5370,13 +5671,24 @@ export function App({
     currentModelRef.current = modelId;
     setCurrentModel(modelId);
   }, []);
+  const [pendingReasoningIntent, setPendingReasoningIntentState] = useState<
+    PendingReasoningIntent | undefined
+  >(undefined);
+  const pendingReasoningIntentRef = useRef(pendingReasoningIntent);
+  const setPendingReasoningIntent = useCallback(
+    (intent: PendingReasoningIntent | undefined) => {
+      pendingReasoningIntentRef.current = intent;
+      setPendingReasoningIntentState(intent);
+    },
+    [],
+  );
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
   /**
    * Whether a local action must be held back because a Goal owns the session.
    * Reads the latest connection through the ref so callers get the gate as of
-   * call time; the fail-closed hydration convention lives in the shared
-   * predicate, which every Goal gate in the client shares.
+   * call time. Commands and run guards fail closed during Goal hydration;
+   * ordinary chat submissions do not consult this gate.
    */
   const isGoalGateBlocked = useCallback(
     () => isGoalGateBlockedFor(connectionRef.current),
@@ -5505,6 +5817,14 @@ export function App({
     null,
   );
   const preparingSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      connection.sessionId &&
+      connection.sessionId !== preparingSessionIdRef.current
+    ) {
+      setPendingReasoningIntent(undefined);
+    }
+  }, [connection.sessionId, setPendingReasoningIntent]);
   const allocatedSessionCatalogOwnerRef = useRef<
     | {
         sessionId: string;
@@ -5566,6 +5886,18 @@ export function App({
       let allocatedSessionId: string | undefined;
       const modelId =
         currentModelRef.current || connectionRef.current.currentModel;
+      const reasoningIntent = pendingReasoningIntentRef.current;
+      const reasoningPreview = connectionRef.current.models?.find(
+        (model) => model.id === modelId,
+      )?.reasoningPreview;
+      const reasoningEffort =
+        reasoningIntent &&
+        reasoningIntent.modelId === modelId &&
+        reasoningPreview &&
+        (reasoningIntent.value === 'none' ||
+          reasoningPreview.efforts.includes(reasoningIntent.value))
+          ? reasoningIntent.value
+          : undefined;
       const modeId =
         currentModeRef.current || connectionRef.current.currentMode;
       const primaryWorkspaceCwd = ordinaryWorkspaces.find(
@@ -5592,6 +5924,7 @@ export function App({
           sessionActions: sessionActions as typeof sessionActions &
             SessionActionsWithCreate,
           modelId,
+          reasoningEffort,
           modeId,
           workspaceCwd: targetWorkspaceCwd,
           worktree:
@@ -5629,6 +5962,9 @@ export function App({
           // composer chip stays in the selected mode so the user knows
           // the intent was not fulfilled and can retry.
           setGitModeIntent({ mode: 'current' });
+          if (pendingReasoningIntentRef.current === reasoningIntent) {
+            setPendingReasoningIntent(undefined);
+          }
         });
       } catch (error) {
         if (allocatedSessionId && catalogWorkspaceCwd) {
@@ -5655,11 +5991,14 @@ export function App({
     lockedWorkspaceCwd,
     sessionActions,
     sessionCatalogController,
+    setPendingReasoningIntent,
     workspace.workspaceCwd,
     ordinaryWorkspaces,
   ]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
+  const prepareSubmitRef = useRef(prepareSubmit);
+  prepareSubmitRef.current = prepareSubmit;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
   const getComposerWorkspaceCwd = useCallback(() => {
@@ -5703,6 +6042,10 @@ export function App({
       opts?: {
         optimisticUserMessage?: boolean;
         retry?: boolean;
+        // Skips prepareSubmit without daemon retry semantics; used
+        // by the failed-prompt retry, whose user message was never
+        // recorded.
+        skipPrepareSubmit?: boolean;
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
@@ -5710,6 +6053,7 @@ export function App({
         onAdmitted?: () => void;
         onCancelledBeforeAdmission?: () => void;
         onOptimisticUserMessage?: (message: OptimisticUserMessage) => void;
+        onPreparedSubmit?: (prepared: WebShellPreparedSubmit) => void;
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
@@ -5719,7 +6063,10 @@ export function App({
           'InvalidStateError',
         );
       }
-      const isUserPrompt = !text.trimStart().startsWith('/');
+      let preparedPrompt = text;
+      let preparedInputAnnotations = opts?.inputAnnotations
+        ? [...opts.inputAnnotations]
+        : [];
       let promptPreparationOwner: symbol | undefined;
       const startPreparing = () => {
         promptPreparationOwner ??= beginPromptPreparation();
@@ -5732,7 +6079,12 @@ export function App({
         opts?.onCancelledBeforeAdmission?.();
       };
       const shouldShowPreparing = !connectionRef.current.sessionId;
+      const prepare =
+        opts?.retry || opts?.skipPrepareSubmit
+          ? undefined
+          : prepareSubmitRef.current;
       const submitBefore = onSubmitBeforeRef.current;
+      const hasAsyncPreflight = Boolean(prepare || submitBefore);
       const admissionSource = {
         owner: sessionOwnerGuard.capture(),
         sessionId: connectionRef.current.sessionId,
@@ -5767,17 +6119,37 @@ export function App({
         !sessionWriteBlockedRef.current &&
         sessionWriteBlockGenerationRef.current ===
           admissionSource.writeBlockGeneration;
-      if (submitBefore) {
+      if (hasAsyncPreflight) {
         startPreparing();
         try {
-          await submitBefore({
-            sessionId: admissionSource.sessionId,
-            prompt: text,
-          });
+          if (prepare) {
+            const prepared = await prepare({
+              sessionId: admissionSource.sessionId,
+              prompt: preparedPrompt,
+              inputAnnotations: preparedInputAnnotations,
+            });
+            const resolved = resolvePreparedSubmit(
+              preparedPrompt,
+              preparedInputAnnotations,
+              prepared,
+            );
+            preparedPrompt = resolved.prompt;
+            preparedInputAnnotations = [...(resolved.inputAnnotations ?? [])];
+          }
+          if (!admissionSourceIsCurrent()) {
+            restoreCancelledSubmitState();
+            return;
+          }
+          if (submitBefore) {
+            await submitBefore({
+              sessionId: admissionSource.sessionId,
+              prompt: preparedPrompt,
+            });
+          }
         } catch (err) {
           if (!appMountedRef.current) return;
           console.warn(
-            '[web-shell] onSubmitBefore rejected, prompt cancelled',
+            '[web-shell] prompt preflight rejected, prompt cancelled',
             err,
           );
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
@@ -5791,7 +6163,19 @@ export function App({
           return;
         }
       }
-      if (!submitBefore && shouldShowPreparing) {
+      if (
+        !preparedPrompt.trim() &&
+        (images?.length ?? 0) === 0 &&
+        (files?.length ?? 0) === 0
+      ) {
+        restoreCancelledSubmitState();
+        return;
+      }
+      opts?.onPreparedSubmit?.({
+        prompt: preparedPrompt,
+        inputAnnotations: preparedInputAnnotations,
+      });
+      if (!hasAsyncPreflight && shouldShowPreparing) {
         startPreparing();
       }
       const existingSessionWorkspaceCwd = getComposerWorkspaceCwd();
@@ -5816,15 +6200,19 @@ export function App({
           ? allocatedOwner.workspaceCwd
           : undefined
         : existingSessionWorkspaceCwd;
+      const isSlashPreparedSubmit = preparedPrompt.trimStart().startsWith('/');
       if (
         !opts?.retry &&
         opts?.optimisticUserMessage !== false &&
-        isUserPrompt
+        !isSlashPreparedSubmit
       ) {
-        lastSubmittedPromptRef.current = text;
+        lastSubmittedPromptRef.current = preparedPrompt;
         lastSubmittedImagesRef.current = images;
         lastSubmittedFilesRef.current = files;
-        lastSubmittedInputAnnotationsRef.current = opts?.inputAnnotations;
+        lastSubmittedInputAnnotationsRef.current =
+          preparedInputAnnotations.length > 0
+            ? preparedInputAnnotations
+            : undefined;
         lastSubmittedSourceVersionRef.current =
           composerSourceVersionRef.current;
         retryableTurnErrorIdRef.current = null;
@@ -5841,6 +6229,22 @@ export function App({
           sourceVersion: composerSourceVersionRef.current,
           snapshot: sessionOwnerGuard.capture(),
         };
+      } else if (
+        !opts?.retry &&
+        opts?.optimisticUserMessage !== false &&
+        isSlashPreparedSubmit
+      ) {
+        // A slash submit is never retried; disarm the previous submit's
+        // recorded retry state so a turn error on the slash turn cannot
+        // resend the already-succeeded earlier prompt.
+        lastSubmittedPromptRef.current = '';
+        lastSubmittedImagesRef.current = undefined;
+        lastSubmittedFilesRef.current = undefined;
+        lastSubmittedInputAnnotationsRef.current = undefined;
+        retryableTurnErrorIdRef.current = null;
+        retryableTurnErrorIdentityRef.current = undefined;
+        retriedTurnErrorIdRef.current = null;
+        failedTurnErrorRetryRef.current = null;
       }
       setShowRetryHint(false);
       finishPreparing();
@@ -5856,7 +6260,10 @@ export function App({
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
         files,
-        inputAnnotations: opts?.inputAnnotations,
+        inputAnnotations:
+          preparedInputAnnotations.length > 0
+            ? preparedInputAnnotations
+            : undefined,
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
         onAdmissionStarted: () => {
@@ -5878,12 +6285,14 @@ export function App({
       };
       if (
         sessionIdAfterEnsure &&
-        (text.trim() || (images?.length ?? 0) > 0 || (files?.length ?? 0) > 0)
+        (preparedPrompt.trim() ||
+          (images?.length ?? 0) > 0 ||
+          (files?.length ?? 0) > 0)
       ) {
         dispatchSessionChangeRef.current?.({
           type: 'submit',
           sessionId: sessionIdAfterEnsure,
-          prompt: text,
+          prompt: preparedPrompt,
           queued: false,
         });
       }
@@ -5895,7 +6304,7 @@ export function App({
           promptText: string,
           options?: SendPromptOptionsWithRetry,
         ) => ReturnType<typeof sessionActions.sendPrompt>
-      )(text, promptOptions);
+      )(preparedPrompt, promptOptions);
       if (
         sessionIdAfterEnsure &&
         opts?.optimisticUserMessage !== false &&
@@ -5993,6 +6402,35 @@ export function App({
       })),
     [connection.models],
   );
+  const hasAuthoritativeReasoningContext = Boolean(
+    connection.sessionId &&
+      connection.context?.sessionId === connection.sessionId,
+  );
+  const welcomeReasoningPreview =
+    !connection.sessionId && !connection.context
+      ? connection.models?.find((model) => model.id === currentModel)
+          ?.reasoningPreview
+      : undefined;
+  const validPendingReasoningIntent =
+    pendingReasoningIntent?.modelId === currentModel &&
+    welcomeReasoningPreview &&
+    (pendingReasoningIntent.value === 'none' ||
+      welcomeReasoningPreview.efforts.includes(pendingReasoningIntent.value))
+      ? pendingReasoningIntent
+      : undefined;
+  const displayedReasoning = hasAuthoritativeReasoningContext
+    ? connection.reasoning
+    : welcomeReasoningPreview
+      ? {
+          ...welcomeReasoningPreview,
+          enabled: validPendingReasoningIntent
+            ? validPendingReasoningIntent.value !== 'none'
+            : welcomeReasoningPreview.enabled,
+          effort:
+            validPendingReasoningIntent?.effort ??
+            welcomeReasoningPreview.effort,
+        }
+      : undefined;
   // The workspace the Changes dialog reads — the same active workspace the
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
@@ -6132,7 +6570,8 @@ export function App({
     if (
       sessionWriteBlockedRef.current ||
       promptPreparationOwnerRef.current ||
-      isGoalGateBlocked()
+      streamingStateRef.current !== 'idle' ||
+      sessionHasActivePromptRef.current
     ) {
       return;
     }
@@ -6194,6 +6633,7 @@ export function App({
     let admissionStarted = false;
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
+      skipPrepareSubmit: true,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
         admissionStarted = true;
@@ -6269,7 +6709,6 @@ export function App({
     t,
     updateFailedPrompt,
     updateUnknownPromptAdmission,
-    isGoalGateBlocked,
   ]);
   const canMutateMidTurn =
     connection.capabilities?.features.includes(
@@ -6301,10 +6740,7 @@ export function App({
     canInjectMidTurnMedia,
     workspaceFileActions: artifactWorkspaceActions,
     streamingState,
-    holdQueuedPromptsLocally:
-      connection.sessionId !== undefined &&
-      (connection.goalState === undefined ||
-        connection.goalState.goal?.status === 'active'),
+    sessionHasActivePrompt,
     sessionActions,
     store,
     editorRef,
@@ -6321,94 +6757,124 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       inputAnnotations?: DaemonInputAnnotation[],
     ) => {
-      if (onSubmitBeforeRef.current) {
+      const normalizedInputAnnotations = inputAnnotations
+        ? [...inputAnnotations]
+        : [];
+      const enqueuePreparedPrompt = (
+        prepared: WebShellPreparedSubmit,
+        sessionId: string | undefined,
+        workspaceCwd: string | undefined,
+      ) => {
+        if (
+          !prepared.prompt.trim() &&
+          (images?.length ?? 0) === 0 &&
+          (files?.length ?? 0) === 0
+        ) {
+          return false;
+        }
+        const annotations =
+          prepared.inputAnnotations && prepared.inputAnnotations.length > 0
+            ? [...prepared.inputAnnotations]
+            : undefined;
+        const result = rawEnqueuePrompt(
+          prepared.prompt,
+          images,
+          files,
+          onComplete,
+          annotations,
+        );
+        if (result !== false) {
+          if (commitComposerAccepted) {
+            commitComposerAccepted();
+          } else {
+            editorRef.current?.clear();
+          }
+        }
+        if (
+          sessionId &&
+          (prepared.prompt.trim() ||
+            (images?.length ?? 0) > 0 ||
+            (files?.length ?? 0) > 0)
+        ) {
+          dispatchSessionChangeRef.current?.({
+            type: 'submit',
+            sessionId,
+            prompt: prepared.prompt,
+            queued: true,
+          });
+          if (workspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          }
+        }
+        return result;
+      };
+      const prepare = prepareSubmitRef.current;
+      const submitBefore = onSubmitBeforeRef.current;
+      if (prepare || submitBefore) {
         const sourceOwner = sessionOwnerGuard.capture();
         const sourceSessionId = connectionRef.current.sessionId;
         const sourceWorkspaceCwd = getComposerWorkspaceCwd();
         const sourceVersion = composerSourceVersionRef.current;
         const writeBlockGeneration = sessionWriteBlockGenerationRef.current;
-        onSubmitBeforeRef
-          .current({
-            sessionId: sourceSessionId,
-            prompt: text,
-          })
-          .then(() => {
-            if (
-              !appMountedRef.current ||
-              !sourceOwner.isCurrent() ||
-              sessionWriteBlockedRef.current ||
-              sessionWriteBlockGenerationRef.current !== writeBlockGeneration ||
-              connectionRef.current.sessionId !== sourceSessionId ||
-              getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
-              composerSourceVersionRef.current !== sourceVersion
-            ) {
-              return;
-            }
-            const result = rawEnqueuePrompt(
-              text,
-              images,
-              files,
-              onComplete,
-              inputAnnotations,
-            );
-            if (result !== false) {
-              if (commitComposerAccepted) {
-                commitComposerAccepted();
-              } else {
-                editorRef.current?.clear();
-              }
-            }
-            if (
-              sourceSessionId &&
-              (text.trim() ||
-                (images?.length ?? 0) > 0 ||
-                (files?.length ?? 0) > 0)
-            ) {
-              dispatchSessionChangeRef.current?.({
-                type: 'submit',
+        const submissionOwnerIsCurrent = () =>
+          appMountedRef.current &&
+          sourceOwner.isCurrent() &&
+          !sessionWriteBlockedRef.current &&
+          sessionWriteBlockGenerationRef.current === writeBlockGeneration &&
+          connectionRef.current.sessionId === sourceSessionId &&
+          getComposerWorkspaceCwd() === sourceWorkspaceCwd &&
+          composerSourceVersionRef.current === sourceVersion;
+        void (async () => {
+          let preparedPrompt = text;
+          let preparedInputAnnotations = normalizedInputAnnotations;
+          try {
+            if (prepare) {
+              const prepared = await prepare({
                 sessionId: sourceSessionId,
-                prompt: text,
-                queued: true,
+                prompt: preparedPrompt,
+                inputAnnotations: preparedInputAnnotations,
               });
-              if (sourceWorkspaceCwd) {
-                sessionCatalogController.invalidateWorkspace(
-                  sourceWorkspaceCwd,
-                );
-              }
+              const resolved = resolvePreparedSubmit(
+                preparedPrompt,
+                preparedInputAnnotations,
+                prepared,
+              );
+              preparedPrompt = resolved.prompt;
+              preparedInputAnnotations = [...(resolved.inputAnnotations ?? [])];
             }
-          })
-          .catch((err: unknown) => {
+            if (!submissionOwnerIsCurrent()) return;
+            if (submitBefore) {
+              await submitBefore({
+                sessionId: sourceSessionId,
+                prompt: preparedPrompt,
+              });
+            }
+            if (!submissionOwnerIsCurrent()) return;
+            enqueuePreparedPrompt(
+              {
+                prompt: preparedPrompt,
+                inputAnnotations: preparedInputAnnotations,
+              },
+              sourceSessionId,
+              sourceWorkspaceCwd,
+            );
+          } catch (err) {
             console.warn(
-              '[web-shell] onSubmitBefore rejected queued prompt, cancelled',
+              '[web-shell] queued prompt preflight rejected, cancelled',
               err,
             );
-          });
+          }
+        })();
         return false;
       }
-      const result = rawEnqueuePrompt(
-        text,
-        images,
-        files,
-        onComplete,
-        inputAnnotations,
-      );
-      const sessionId = connectionRef.current.sessionId;
-      if (
-        sessionId &&
-        (text.trim() || (images?.length ?? 0) > 0 || (files?.length ?? 0) > 0)
-      ) {
-        dispatchSessionChangeRef.current?.({
-          type: 'submit',
-          sessionId,
+      return enqueuePreparedPrompt(
+        {
           prompt: text,
-          queued: true,
-        });
-        const workspaceCwd = getComposerWorkspaceCwd();
-        if (workspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(workspaceCwd);
-        }
-      }
-      return result;
+          inputAnnotations: normalizedInputAnnotations,
+        },
+        connectionRef.current.sessionId,
+        getComposerWorkspaceCwd(),
+      );
     },
     [
       getComposerWorkspaceCwd,
@@ -6446,8 +6912,9 @@ export function App({
     if (sessionWriteBlocked) return;
     if (!requireActiveSessionForLocalCommand()) return;
     const messageId = `local-recap-${nextRecapMessageIdRef.current++}`;
-    const anchorIndex = messages.length;
-    const anchorAfterId = messages.at(-1)?.id;
+    const currentMessages = messagesRef.current;
+    const anchorIndex = currentMessages.length;
+    const anchorAfterId = currentMessages.at(-1)?.id;
     const sessionId = connection.sessionId;
     const workspaceCwd = connection.workspaceCwd;
     setRecapMessage({
@@ -6497,7 +6964,6 @@ export function App({
   }, [
     connection.sessionId,
     connection.workspaceCwd,
-    messages,
     requireActiveSessionForLocalCommand,
     sessionWriteBlocked,
     sessionActions,
@@ -6665,10 +7131,17 @@ export function App({
     [store, resumeChatBottomFollow],
   );
 
-  const blockLocalCommandDuringTurn = useCallback((): false => {
-    pushToast('error', t('queue.commandBlocked'));
+  const blockCommand = useCallback((): false => {
+    pushToast(
+      'error',
+      t(
+        isGoalGateBlocked()
+          ? 'queue.commandGoalBlocked'
+          : 'queue.commandBlocked',
+      ),
+    );
     return false;
-  }, [pushToast, t]);
+  }, [isGoalGateBlocked, pushToast, t]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -6768,9 +7241,6 @@ export function App({
   );
   const languageSetting = workspaceSettings.find(
     (setting) => setting.key === LANGUAGE_SETTING_KEY,
-  );
-  const compactModeSetting = workspaceSettings.find(
-    (setting) => setting.key === COMPACT_MODE_SETTING_KEY,
   );
   const currentVoiceModel = (() => {
     const value = readScopedModelSetting(
@@ -7031,14 +7501,6 @@ export function App({
     }
     return options;
   }, [connection.models]);
-  const [compactMode, setCompactMode] = useState(false);
-  const compactModeRef = useRef(compactMode);
-  compactModeRef.current = compactMode;
-
-  useEffect(() => {
-    const value = compactModeSetting?.values.effective;
-    if (typeof value === 'boolean') setCompactMode(value);
-  }, [compactModeSetting?.values.effective]);
 
   useEffect(() => {
     if (providedTheme) {
@@ -7086,9 +7548,13 @@ export function App({
           reloadWorkspaceSettings(),
         ]);
       };
-      if (streamingStateRef.current !== 'idle' || isGoalGateBlocked()) {
+      if (
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
         handleLanguageChange(previousLanguage);
-        blockLocalCommandDuringTurn();
+        blockCommand();
         return;
       }
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
@@ -7100,7 +7566,7 @@ export function App({
         });
     },
     [
-      blockLocalCommandDuringTurn,
+      blockCommand,
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
@@ -7122,18 +7588,6 @@ export function App({
     lastRecapBlockCountRef.current = 0;
     store.reset();
   }, [store, t]);
-
-  const handleToggleCompact = useCallback(() => {
-    const previous = compactModeRef.current;
-    const next = !compactModeRef.current;
-    setCompactMode(next);
-    setWorkspaceSetting('workspace', COMPACT_MODE_SETTING_KEY, next).catch(
-      (error: unknown) => {
-        setCompactMode(previous);
-        reportError(error, t('compact.saveFailed'));
-      },
-    );
-  }, [reportError, setWorkspaceSetting, t]);
 
   const handleSetMode = useCallback(
     (modeId: string) => {
@@ -7444,10 +7898,6 @@ export function App({
   useEffect(() => {
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
-
-  useEffect(() => {
-    onTranscriptChange?.(blocks);
-  }, [blocks, onTranscriptChange]);
 
   useEffect(() => {
     if (connection.error) {
@@ -8706,10 +9156,7 @@ export function App({
         });
         // The workspace-scoped control does not write `connection.goalState`
         // the way `sessionActions.controlGoal` does, so install the create
-        // response directly. Until it lands, `holdQueuedPromptsLocally` reads
-        // false and the sync effect re-derives the local snapshot to null — a
-        // prompt typed in that window would go straight to the daemon instead
-        // of the Goal queue, and no Goal strip would render.
+        // response directly to keep the Goal strip and controls authoritative.
         sessionActions.applyGoalSnapshot(sessionId, response.snapshot);
         if (
           !connectionRef.current.sessionId ||
@@ -8922,8 +9369,22 @@ export function App({
         pushToast('warning', t('editor.connectionDisconnected'));
         return false;
       }
-      const promptBlocked =
-        streamingStateRef.current !== 'idle' || isGoalGateBlocked();
+      const goalBlocked = isGoalGateBlocked();
+      const sessionActive =
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current;
+      const commandBlocked = sessionActive || goalBlocked;
+      const enqueueBlockedCommand = (commandText: string) => {
+        if (goalBlocked) return blockCommand();
+        return enqueuePrompt(
+          commandText,
+          images,
+          files,
+          undefined,
+          commitComposerAccepted,
+          metadata?.inputAnnotations,
+        );
+      };
       const submitPromptFromEditor = (
         promptText: string,
         promptImages: PromptImage[] | undefined,
@@ -8951,12 +9412,15 @@ export function App({
             (connectionRef.current.sessionId === admissionOwner.sessionId &&
               getComposerWorkspaceCwd() === admissionOwner.workspaceCwd));
         const { trackSendFailure = false, ...sendOptions } = opts ?? {};
+        const startedWithoutSession = !connectionRef.current.sessionId;
         const deferComposerCommit =
-          Boolean(onSubmitBeforeRef.current) ||
+          Boolean(prepareSubmitRef.current || onSubmitBeforeRef.current) ||
           createSessionPromiseRef.current !== null;
         const clearComposerOnPromptStart =
-          !connectionRef.current.sessionId || deferComposerCommit;
+          startedWithoutSession || deferComposerCommit;
         let optimisticUserMessage: OptimisticUserMessage | undefined;
+        let submittedPromptText = promptText;
+        let submittedInputAnnotations = sendOptions.inputAnnotations;
         let admitted = false;
         let admissionStarted = false;
         let admissionSessionId: string | undefined;
@@ -8964,6 +9428,12 @@ export function App({
           ownerRef: admissionAttachment,
           ...sendOptions,
           clearComposerOnPromptStart,
+          onPreparedSubmit: (prepared) => {
+            submittedPromptText = prepared.prompt;
+            const annotations = prepared.inputAnnotations ?? [];
+            submittedInputAnnotations =
+              annotations.length > 0 ? [...annotations] : undefined;
+          },
           commitComposerAccepted: clearComposerOnPromptStart
             ? commitComposerAccepted
             : undefined,
@@ -8995,10 +9465,10 @@ export function App({
               updateUnknownPromptAdmission({
                 sessionId: uncertainSessionId,
                 messageId: failedMessage?.messageId,
-                text: promptText,
+                text: submittedPromptText,
                 images: promptImages ? [...promptImages] : undefined,
                 files: promptFiles ? [...promptFiles] : undefined,
-                inputAnnotations: sendOptions.inputAnnotations,
+                inputAnnotations: submittedInputAnnotations,
                 payloadAvailable: true,
               });
             }
@@ -9028,11 +9498,22 @@ export function App({
           ) {
             updateFailedPrompt({
               ...failedMessage,
-              text: promptText,
+              text: submittedPromptText,
               images: promptImages,
               files: promptFiles,
-              inputAnnotations: sendOptions.inputAnnotations,
+              inputAnnotations: submittedInputAnnotations,
             });
+          }
+          if (startedWithoutSession && !admissionStarted) {
+            const editor = editorRef.current;
+            if (editor && !editor.hasInput()) {
+              editor.setText(submittedPromptText);
+              if (promptImages?.length) editor.restoreImages(promptImages);
+              if (promptFiles?.length) editor.restoreFiles(promptFiles);
+              if (submittedInputAnnotations?.length) {
+                editor.restoreInputAnnotations?.(submittedInputAnnotations);
+              }
+            }
           }
           reportError(error, errorMessage);
         });
@@ -9043,15 +9524,8 @@ export function App({
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) {
-              return enqueuePrompt(
-                text,
-                images,
-                files,
-                undefined,
-                commitComposerAccepted,
-                metadata?.inputAnnotations,
-              );
+            if (commandBlocked) {
+              return enqueueBlockedCommand(text);
             }
             return submitPromptFromEditor(
               text,
@@ -9177,12 +9651,13 @@ export function App({
               // (turn in flight, or a Goal owning the session) refuse the
               // command instead of switching the UI alone — the language
               // picker treats the identical condition the same way.
-              if (promptBlocked) return blockLocalCommandDuringTurn();
+              if (commandBlocked) return blockCommand();
               handleLanguageChange(nextLanguage);
               {
                 const deferComposerCommit =
-                  Boolean(onSubmitBeforeRef.current) ||
-                  createSessionPromiseRef.current !== null;
+                  Boolean(
+                    prepareSubmitRef.current || onSubmitBeforeRef.current,
+                  ) || createSessionPromiseRef.current !== null;
                 const clearComposerOnPromptStart =
                   !connectionRef.current.sessionId || deferComposerCommit;
                 sendPrompt(
@@ -9240,13 +9715,13 @@ export function App({
             return true;
           }
           if (cmd === 'branch') {
-            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (commandBlocked) return blockCommand();
             const branchName = text.slice(match[0].length).trim();
             branchCurrentSession(branchName || undefined);
             return true;
           }
           if (cmd === 'fork') {
-            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (commandBlocked) return blockCommand();
             if (!requireActiveSessionForLocalCommand()) return false;
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
@@ -9287,15 +9762,8 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) {
-                return enqueuePrompt(
-                  text,
-                  images,
-                  files,
-                  undefined,
-                  commitComposerAccepted,
-                  metadata?.inputAnnotations,
-                );
+              if (commandBlocked) {
+                return enqueueBlockedCommand(text);
               }
               return submitPromptFromEditor(
                 text,
@@ -9354,7 +9822,7 @@ export function App({
             return true;
           }
           if (cmd === 'plan') {
-            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (commandBlocked) return blockCommand();
             const prompt = text.slice(match[0].length).trim();
             if (!connectionRef.current.sessionId) {
               setPendingMode('plan');
@@ -9445,15 +9913,8 @@ export function App({
               openPanel('skills');
             } else {
               const skillPrompt = `/${skillArg}`;
-              if (promptBlocked) {
-                return enqueuePrompt(
-                  skillPrompt,
-                  images,
-                  files,
-                  undefined,
-                  commitComposerAccepted,
-                  metadata?.inputAnnotations,
-                );
+              if (commandBlocked) {
+                return enqueueBlockedCommand(skillPrompt);
               }
               return submitPromptFromEditor(
                 skillPrompt,
@@ -9564,7 +10025,7 @@ export function App({
             if (subCommand === 'install') {
               // Install echoes into the transcript (and its error/usage replies
               // do too); block it mid-turn so it can't split the active turn.
-              if (promptBlocked) return blockLocalCommandDuringTurn();
+              if (commandBlocked) return blockCommand();
               const tokens = args.slice('install'.length).trim().split(/\s+/);
               let source = '';
               let ref: string | undefined;
@@ -9675,15 +10136,8 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) {
-                return enqueuePrompt(
-                  text,
-                  images,
-                  files,
-                  undefined,
-                  commitComposerAccepted,
-                  metadata?.inputAnnotations,
-                );
+              if (commandBlocked) {
+                return enqueueBlockedCommand(text);
               }
               return submitPromptFromEditor(
                 text,
@@ -9907,15 +10361,8 @@ export function App({
           }
         }
         // Forward slash commands as prompts
-        if (promptBlocked) {
-          return enqueuePrompt(
-            text,
-            images,
-            files,
-            undefined,
-            commitComposerAccepted,
-            metadata?.inputAnnotations,
-          );
+        if (commandBlocked) {
+          return enqueueBlockedCommand(text);
         }
         return submitPromptFromEditor(
           text,
@@ -9988,7 +10435,7 @@ export function App({
           });
         return !needsSession;
       } else {
-        if (promptBlocked) {
+        if (sessionActive) {
           return enqueuePrompt(
             text,
             images,
@@ -10036,7 +10483,7 @@ export function App({
       handleThemeChange,
       handleSetMode,
       handleLanguageChange,
-      blockLocalCommandDuringTurn,
+      blockCommand,
       createSideTask,
       sideTasksAvailable,
       openEnvironmentTasksPanel,
@@ -10187,17 +10634,14 @@ export function App({
   );
 
   const handleRetry = useCallback(() => {
-    if (
-      sessionWriteBlockedRef.current ||
-      promptPreparationOwnerRef.current ||
-      isGoalGateBlocked()
-    ) {
+    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
       return;
     }
     if (
       showRetryHintRef.current &&
       connected &&
       streamingStateRef.current === 'idle' &&
+      !sessionHasActivePromptRef.current &&
       retryableTurnErrorIdRef.current &&
       retryableTurnErrorIdentityRef.current &&
       connectionRef.current.sessionId &&
@@ -10387,7 +10831,6 @@ export function App({
     store,
     t,
     updateUnknownPromptAdmission,
-    isGoalGateBlocked,
   ]);
 
   useEffect(() => {
@@ -10400,8 +10843,9 @@ export function App({
           return;
         }
         if (e.key === 'o') {
+          // The compact toggle is gone; keep Ctrl+O suppressed everywhere so
+          // the key never falls through to the browser's Open File dialog.
           e.preventDefault();
-          handleToggleCompact();
           return;
         }
         if (e.key === 'y') {
@@ -10413,14 +10857,7 @@ export function App({
     };
     window.addEventListener('keydown', onGlobalShortcut, true);
     return () => window.removeEventListener('keydown', onGlobalShortcut, true);
-  }, [
-    interactionBlocked,
-    handleClearScreen,
-    handleToggleCompact,
-    handleRetry,
-    store,
-    t,
-  ]);
+  }, [interactionBlocked, handleClearScreen, handleRetry, store, t]);
 
   const resetEscapeState = useCallback(() => {
     escArmedActionRef.current = null;
@@ -10439,6 +10876,7 @@ export function App({
   // through a ref so the listener stays put across re-renders.
   const escLiveRef = useRef({
     streamingState,
+    sessionHasActivePrompt,
     pendingApproval,
     interactionBlocked,
     activePanel,
@@ -10449,6 +10887,7 @@ export function App({
   });
   escLiveRef.current = {
     streamingState,
+    sessionHasActivePrompt,
     pendingApproval,
     interactionBlocked,
     activePanel,
@@ -10461,7 +10900,8 @@ export function App({
   // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
   // relevant action (cancel vs clear) changes with it, so a leftover arm is now
   // stale. Keyed on the boolean, so intra-turn sub-state flips don't reset it.
-  const escStreamingBoundary = streamingState !== 'idle';
+  const escStreamingBoundary =
+    streamingState !== 'idle' || sessionHasActivePrompt;
   useEffect(() => {
     resetEscapeState();
   }, [escStreamingBoundary, resetEscapeState]);
@@ -10534,7 +10974,8 @@ export function App({
       // and drain after the turn settles); see decideEscapeIntent for the rules.
       const intent = decideEscapeIntent({
         blocked: !!live.pendingApproval || live.interactionBlocked,
-        streaming: live.streamingState !== 'idle',
+        streaming:
+          live.streamingState !== 'idle' || live.sessionHasActivePrompt,
         hasInput: !!editorRef.current?.hasInput(),
         armed: escArmedActionRef.current,
       });
@@ -10576,6 +11017,7 @@ export function App({
   const showCurrentRetryHint = Boolean(
     showRetryHint &&
       !isPreparingPrompt &&
+      !sessionHasActivePrompt &&
       retryableTurnErrorIdentity &&
       matchesTurnErrorIdentity(
         getRetryableTurnError(blocks),
@@ -10670,6 +11112,41 @@ export function App({
         );
     },
     [reportError, sessionActions, sessionWriteBlocked, t],
+  );
+
+  const handleWelcomeReasoningEffort = useCallback(
+    (value: string) => {
+      const activeConnection = connectionRef.current;
+      if (
+        sessionWriteBlockedRef.current ||
+        activeConnection.sessionId ||
+        activeConnection.context
+      ) {
+        return;
+      }
+      const modelId = currentModelRef.current;
+      const preview = activeConnection.models?.find(
+        (model) => model.id === modelId,
+      )?.reasoningPreview;
+      if (!preview) return;
+      const previous = pendingReasoningIntentRef.current;
+      if (value === 'none') {
+        const previousEffort =
+          previous?.modelId === modelId &&
+          preview.efforts.includes(previous.effort)
+            ? previous.effort
+            : preview.effort;
+        setPendingReasoningIntent({
+          modelId,
+          value,
+          effort: previousEffort,
+        });
+        return;
+      }
+      if (!preview.efforts.includes(value)) return;
+      setPendingReasoningIntent({ modelId, value, effort: value });
+    },
+    [setPendingReasoningIntent],
   );
 
   const handleDeleteModel = useCallback(
@@ -10777,8 +11254,12 @@ export function App({
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle' || isGoalGateBlocked()) {
-        blockLocalCommandDuringTurn();
+      if (
+        streamingState !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
+        blockCommand();
         return;
       }
       // Model IDs from the picker arrive as bare model IDs (baseModelId), not
@@ -10825,7 +11306,7 @@ export function App({
         });
     },
     [
-      blockLocalCommandDuringTurn,
+      blockCommand,
       closePanel,
       sendPrompt,
       streamingState,
@@ -10890,18 +11371,39 @@ export function App({
     }
   }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
+  const useWorkspaceSkillSnapshot =
+    loadedSkillsReady &&
+    (!connection.sessionId ||
+      connection.skills === undefined ||
+      (loadedSkillsFallback?.sessionId === connection.sessionId &&
+        loadedSkillsFallback.workspaceCwd === connection.workspaceCwd));
+  const composerSkills = useMemo(
+    () =>
+      useWorkspaceSkillSnapshot
+        ? loadedSkills
+        : availableSessionSkillInfos(
+            connection.skills ?? [],
+            connection.commands ?? [],
+          ),
+    [
+      connection.commands,
+      connection.skills,
+      loadedSkills,
+      useWorkspaceSkillSnapshot,
+    ],
+  );
   const commands = useMemo(() => {
     const previousSkillNames = new Set(
       (connection.skills ?? []).map((skill) => skill.toLowerCase()),
     );
-    const retainedCommands = loadedSkillsReady
+    const retainedCommands = useWorkspaceSkillSnapshot
       ? (connection.commands ?? []).filter(
           (command) =>
             command.source !== 'skill' &&
             !previousSkillNames.has(command.name.toLowerCase()),
         )
       : (connection.commands ?? []);
-    const refreshedSkillCommands = loadedSkillsReady
+    const refreshedSkillCommands = useWorkspaceSkillSnapshot
       ? loadedSkills.map((skill) => ({
           name: skill.name,
           description: skill.description,
@@ -10935,9 +11437,9 @@ export function App({
     connection.skills,
     hiddenCommands,
     loadedSkills,
-    loadedSkillsReady,
     sideTasksAvailable,
     t,
+    useWorkspaceSkillSnapshot,
   ]);
 
   const welcomeHeaderProps = useMemo(
@@ -11279,8 +11781,12 @@ export function App({
   return (
     <ThemeProvider value={selectedTheme}>
       <I18nProvider language={selectedLanguage}>
-        {/* prettier-ignore */}
-        <WebShellPortalRootContext.Provider value={portalRoot}>
+        <McpAppHostContext.Provider value={workspace.baseUrl}>
+          {/* prettier-ignore */}
+          <WebShellPortalRootContext.Provider value={portalRoot}>
+          {/* Compact view is fixed on for every message surface (main chat,
+              split panes, subagent detail, drawer) — no toggle remains. */}
+          <CompactModeContext.Provider value={true}>
         <div
           ref={appRootRef}
           className={appClassName}
@@ -12275,12 +12781,11 @@ export function App({
                       </button>
                     </div>
                   )}
-                  {/* Share the app-level customization + compact-mode contexts so
-                      split panes render markdown/tool-headers/thinking the same
-                      way the single-session chat does (todo contexts stay chat-
-                      only — they belong to the outer session, not the panes). */}
+                  {/* Share the app-level customization so split panes render
+                      markdown/tool-headers/thinking the same way the single-
+                      session chat does (todo contexts stay chat-only — they
+                      belong to the outer session, not the panes). */}
                   <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
                       <SplitView
                         sessionIds={splitSessionIds}
                         // Mirror live pane add/remove back up so switching away
@@ -12314,7 +12819,6 @@ export function App({
                         }
                         sessionWorkflowEnabled={sessionWorkflowEnabled}
                       />
-                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
               )}
@@ -12376,7 +12880,6 @@ export function App({
                   }
                 >
                   <WebShellCustomizationProvider value={customization}>
-                    <CompactModeContext.Provider value={compactMode}>
                       <TodoContextsProvider
                         timeline={todoTimeline}
                         details={todoDetails}
@@ -12397,9 +12900,15 @@ export function App({
                               .join(' ');
 
                             const messageListContent = (
-                              <MessageList
+                              <LiveMessageList
                                 ref={messageListRef}
-                                messages={displayMessages}
+                                baselineBlocks={blocks}
+                                baselineSummary={blockChangeSummary}
+                                baselineMessages={messages}
+                                recapMessage={recapMessage}
+                                messagesRef={messagesRef}
+                                onTranscriptChange={onTranscriptChange}
+                                t={t}
                                 terminalBackgroundShellTaskIds={
                                   terminalBackgroundShellTaskIds
                                 }
@@ -12415,7 +12924,6 @@ export function App({
                                 historyPaginationError={
                                   transcriptHistory.paginationError}
                                 onLoadOlderHistory={transcriptHistory.loadMore}
-                                transcriptBlockCount={blocks.length}
                                 transcriptActivity={store}
                                 onReloadTranscript={
                                   transcriptReloadSupported
@@ -12425,6 +12933,9 @@ export function App({
                                 isResponding={
                                   streamingState !== 'idle' &&
                                   !suppressFailedPromptRetryStreaming
+                                }
+                                transcriptReloadPaused={
+                                  streamingState !== 'idle'
                                 }
                                 activeTurnStartedAt={
                                   suppressFailedPromptRetryStreaming
@@ -12439,7 +12950,9 @@ export function App({
                                 showRetryHint={showCurrentRetryHint}
                                 onRetryClick={handleRetry}
                                 failedPromptMessageId={
-                                  isPreparingPrompt
+                                  isPreparingPrompt ||
+                                  streamingState !== 'idle' ||
+                                  sessionHasActivePrompt
                                     ? undefined
                                     : visibleFailedPromptBlock?.id
                                 }
@@ -12548,7 +13061,6 @@ export function App({
                           })()}
                         </InteractionBlockContext.Provider>
                       </TodoContextsProvider>
-                    </CompactModeContext.Provider>
 
                     <div
                       ref={footerRef}
@@ -12651,13 +13163,15 @@ export function App({
                             : styles.composer
                         }
                       >
-                        {streamingState !== 'idle' ? (
+                        {streamingState !== 'idle' ||
+                        sessionHasActivePrompt ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
                               startedAt={
                                 failedPromptRetry?.startedAt ??
                                 activeTurnStartedAt
                               }
+                              hasActivePrompt={sessionHasActivePrompt}
                             />
                           )
                         ) : newSessionSuggestion ? (
@@ -12757,7 +13271,10 @@ export function App({
                               prompts={queuedPrompts}
                               t={t}
                               canMutateMidTurn={canMutateMidTurn}
-                              canInsertMidTurn={streamingState !== 'idle'}
+                              canInsertMidTurn={
+                                streamingState !== 'idle' ||
+                                sessionHasActivePrompt
+                              }
                               onDelete={removeQueuedPrompt}
                               onInsert={insertQueuedPrompt}
                               onEdit={editQueuedPrompt}
@@ -12786,7 +13303,10 @@ export function App({
                                 isDisabled ||
                                 unknownPromptAdmission?.payloadAvailable === true
                               }
-                              isRunning={streamingState !== 'idle'}
+                              isRunning={
+                                streamingState !== 'idle' ||
+                                sessionHasActivePrompt
+                              }
                               currentMode={currentMode}
                               currentModel={currentModel}
                               sessionName={sessionDisplayName}
@@ -12806,7 +13326,10 @@ export function App({
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
-                          isRunning={streamingState !== 'idle'}
+                          isRunning={
+                            streamingState !== 'idle' ||
+                            sessionHasActivePrompt
+                          }
                           isPreparing={
                             isPreparingPrompt || isStartingNewSessionSuggestion
                           }
@@ -12819,7 +13342,7 @@ export function App({
                             unknownPromptAdmission?.payloadAvailable === true
                           }
                           commands={commands}
-                          skills={loadedSkills}
+                          skills={composerSkills}
                           slashCommandCategoryOrder={slashCommandCategoryOrder}
                           builtinAtProviders={builtinAtProviders}
                           atProviders={atProviders}
@@ -12869,8 +13392,14 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
-                          reasoning={connection.reasoning}
-                          onSelectReasoningEffort={handleReasoningEffort}
+                          reasoning={displayedReasoning}
+                          onSelectReasoningEffort={
+                            hasAuthoritativeReasoningContext
+                              ? handleReasoningEffort
+                              : welcomeReasoningPreview && !sessionWriteBlocked
+                                ? handleWelcomeReasoningEffort
+                                : undefined
+                          }
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
@@ -12925,7 +13454,10 @@ export function App({
                         {CustomComposerFooter && (
                           <CustomComposerFooter
                             disabled={isDisabled}
-                            isRunning={streamingState !== 'idle'}
+                            isRunning={
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt
+                            }
                             currentMode={currentMode}
                             currentModel={currentModel}
                             sessionName={sessionDisplayName}
@@ -12957,7 +13489,7 @@ export function App({
                                   label: getModelDisplayName(m.label || m.id),
                                   contextWindow: m.contextWindow,
                                 }))}
-                              skills={loadedSkills}
+                              skills={composerSkills}
                               onSelectMode={handleSetMode}
                               onSelectModel={handleModelSelect}
                             />
@@ -12985,7 +13517,7 @@ export function App({
                                 label: getModelDisplayName(m.label || m.id),
                                 contextWindow: m.contextWindow,
                               }))}
-                            skills={loadedSkills}
+                            skills={composerSkills}
                             onSelectMode={handleSetMode}
                             onSelectModel={handleModelSelect}
                           />
@@ -13178,7 +13710,9 @@ export function App({
               )}
           </div>
         </div>
+        </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
+        </McpAppHostContext.Provider>
       </I18nProvider>
     </ThemeProvider>
   );

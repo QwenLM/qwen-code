@@ -126,6 +126,7 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'agent_retry',
   'file_history_snapshot',
   'session_source',
+  'session_model',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',

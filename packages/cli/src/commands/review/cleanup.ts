@@ -33,7 +33,9 @@ import {
 } from '../../services/review-worktree-lease.js';
 import { redirectedAncestor, sanitizedGitEnv } from './lib/worktree.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
-import { parseReceiptIds } from './lib/receipt.js';
+import { parseReceiptCommentIds, parseReceiptIds } from './lib/receipt.js';
+import { detectPlatformKind } from './lib/platform/registry.js';
+import { a1Json, aoneWhoamiAccount } from './lib/platform/aone-client.js';
 import { refExists, releaseWorktree } from './lib/git.js';
 import { readBudgetStopUnfenced } from './lib/deadline.js';
 import { promptRecordDir, runEpochMs } from './lib/prompt-record.js';
@@ -43,6 +45,7 @@ import {
   baseWorktreePath,
   scratchWorktreePrefix,
   reviewBranch,
+  inertPath,
   REVIEW_TMP_DIR,
   tmpFile,
   tmpPrefix,
@@ -91,13 +94,16 @@ function isAutomationComment(body: string | null | undefined): boolean {
  */
 const CLOCK_SKEW_MS = 2 * 60 * 1000;
 
-export interface WindowWrites {
+export interface WindowWrites<T> {
   /** Created inside the window by the reviewing account — the incident shape. */
-  posted: RawIssueComment[];
-  /** Created before the window but edited inside it. Reactions do NOT bump
-   * an issue comment's `updated_at` (verified empirically), so an entry here
-   * is a real body edit. */
-  edited: RawIssueComment[];
+  posted: T[];
+  /** Created before the window but edited inside it. On GitHub, reactions do
+   * NOT bump an issue comment's `updated_at` (verified empirically), so an
+   * entry here is a real body edit. On Aone the edited arm additionally sees
+   * only UNRESOLVED comments — a resolution bumps `updatedAt` exactly like
+   * an edit, so a resolved comment's `updatedAt` is not an edit signal (see
+   * findUnsanctionedAoneComments); what else bumps it there is unverified. */
+  edited: T[];
 }
 
 /**
@@ -126,7 +132,7 @@ export function findUnsanctionedIssueComments(
   comments: RawIssueComment[],
   reviewer: string,
   sinceIso: string,
-): WindowWrites {
+): WindowWrites<RawIssueComment> {
   const reviewerLc = reviewer.toLowerCase();
   const relevant = comments.filter(
     (c) =>
@@ -141,6 +147,77 @@ export function findUnsanctionedIssueComments(
         c.created_at! < sinceIso &&
         typeof c.updated_at === 'string' &&
         c.updated_at >= sinceIso,
+    ),
+  };
+}
+
+/** An MR comment, as listed by `a1 repo mr comment list --format json`. */
+export interface RawAoneComment {
+  id: number;
+  note?: string;
+  author?: { username?: string } | null;
+  /** ISO-8601 with a NUMERIC utc offset — Aone stamps `+08:00`, not `Z`. */
+  createdAt?: string;
+  updatedAt?: string;
+  /** 1 when the discussion is resolved. The DEFAULT comment list excludes
+   * resolved comments; the `--resolved` query returns (only) the resolved
+   * root inline ones (measured). */
+  closed?: number;
+  /** Present on inline comments, absent on global ones. */
+  path?: string;
+  line?: number;
+}
+
+/**
+ * MR-comment writes by the authenticated account inside the review window
+ * that the submit receipt does not vouch for — the Aone twin of
+ * {@link findUnsanctionedIssueComments}, differing where the platform
+ * differs. One: on Aone the sanctioned submit POSTS COMMENTS (the inline
+ * findings and the summary — Aone has no review object), so
+ * sanctioned-vs-bypass is decided by id against the receipt submit wrote;
+ * the GitHub twin needs no receipt for comments because submit never posts
+ * one there. (The vouch is post-time only: an EDIT of a vouched comment
+ * inside the window is outside this tripwire's sight — its `updatedAt`
+ * bump cannot be told from a resolution or other state flip, so detecting
+ * it would flag healthy runs; aone has no comment-edit subcommand to begin
+ * with. Disclosed residual, design doc #9617.) Two: Aone timestamps carry a
+ * numeric utc offset (`+08:00`), so the window comparison parses to epoch
+ * milliseconds — a lexicographic comparison across differing offsets orders
+ * by local wall clock, not by instant (`07:30+08:00` is 23:30Z the PREVIOUS
+ * day, yet sorts after any `…T23:00Z` boundary string). Three: a resolved
+ * comment's `updatedAt` is the resolution instant, indistinguishable from a
+ * body edit — so the edited arm skips resolved comments entirely; a
+ * posted-then-resolved bypass is still caught by the posted arm. That skip
+ * opens the third disclosed residual: an EDIT of an UNVOUCHED pre-window
+ * comment is invisible once its discussion is resolved — the `--resolved`
+ * union lists it, but the posted arm keys on creation inside the window and
+ * the edited arm drops resolved comments, so a resolved comment is judged
+ * by creation only (design doc #9617).
+ */
+export function findUnsanctionedAoneComments(
+  comments: RawAoneComment[],
+  account: string,
+  sinceMs: number,
+  receiptCommentIds: ReadonlySet<number>,
+): WindowWrites<RawAoneComment> {
+  const accountLc = account.toLowerCase();
+  const relevant = comments.filter(
+    (c) =>
+      typeof c.id === 'number' &&
+      (c.author?.username ?? '').toLowerCase() === accountLc &&
+      typeof c.createdAt === 'string' &&
+      !Number.isNaN(Date.parse(c.createdAt)) &&
+      !isAutomationComment(c.note) &&
+      !receiptCommentIds.has(c.id),
+  );
+  return {
+    posted: relevant.filter((c) => Date.parse(c.createdAt!) >= sinceMs),
+    edited: relevant.filter(
+      (c) =>
+        Date.parse(c.createdAt!) < sinceMs &&
+        c.closed !== 1 &&
+        typeof c.updatedAt === 'string' &&
+        Date.parse(c.updatedAt) >= sinceMs,
     ),
   };
 }
@@ -266,28 +343,63 @@ function readAuditWindow(
 }
 
 /**
- * The set of review ids sanctioned submits recorded this session — empty when
- * none did. The shape parse is shared with submit's writer
- * (`lib/receipt.ts`); only the empty-case wrapper (a `Set` here, `[]` there)
- * differs.
+ * One receipt-read axis: parse the shared receipt file through the given
+ * axis parser and collect the ids. Absent or unreadable is an EMPTY set —
+ * vouching for nothing (fail-safe), never a throw.
  */
-function readSubmitReceipt(target: string): Set<number> {
+function readReceiptAxis(
+  target: string,
+  parse: (raw: string) => number[],
+): Set<number> {
   try {
     return new Set(
-      parseReceiptIds(
-        readFileSync(tmpFile(target, 'submit-receipt.json'), 'utf8'),
-      ),
+      parse(readFileSync(tmpFile(target, 'submit-receipt.json'), 'utf8')),
     );
   } catch {
     return new Set();
   }
 }
 
+/**
+ * The set of review ids sanctioned submits recorded this session — empty when
+ * none did. The shape parse is shared with submit's writer
+ * (`lib/receipt.ts`); only the empty-case wrapper (a `Set` here, `[]` there)
+ * differs.
+ */
+function readSubmitReceipt(target: string): Set<number> {
+  return readReceiptAxis(target, parseReceiptIds);
+}
+
+/**
+ * The comment ids Aone submits recorded this session — empty when none did.
+ * The same file as {@link readSubmitReceipt}, read through the comment-id
+ * half of the shared parse: on Aone the sanctioned write posts COMMENTS, so
+ * the audit's sanctioned-vs-bypass ruling keys on comment ids. Empty
+ * vouches for nothing: every in-window comment by the account is flagged
+ * (fail-safe), exactly as an empty review-id set does on GitHub.
+ */
+function readAoneSubmitReceipt(target: string): Set<number> {
+  return readReceiptAxis(target, parseReceiptCommentIds);
+}
+
 /** First line that actually says something: gh puts the HTTP/auth/DNS cause
- * on stderr while `err.message` is often the generic "Command failed" wrap. */
+ * on stderr while `err.message` is often the generic "Command failed" wrap.
+ * a1 fails differently — a pretty-printed JSON error OBJECT on stderr whose
+ * first non-empty line is the opening brace; the `message` field is the
+ * cause there, so it wins when present, and an object carrying no usable
+ * one is flattened whole — the line scan would render just the brace. */
 function briefErrorLine(err: unknown): string {
   const stderr = (err as { stderr?: unknown }).stderr;
   if (typeof stderr === 'string') {
+    try {
+      const parsed = JSON.parse(stderr) as { message?: unknown };
+      if (typeof parsed.message === 'string' && parsed.message.trim() !== '') {
+        return parsed.message.trim();
+      }
+      return JSON.stringify(parsed);
+    } catch {
+      // Not a JSON error object — fall through to the line scan.
+    }
     const line = stderr.split('\n').find((l) => l.trim().length > 0);
     if (line) return line.trim();
   }
@@ -313,6 +425,23 @@ function auditPrWrites(target: string, prNumber: string): void {
     return;
   }
   const window = read.window;
+  // The platform the FETCH ran on decides the audit's backend. The recorded
+  // host is the primary evidence (the skill passes --host to every
+  // platform-talking subcommand); a hostless report falls back to the cwd
+  // clone's origin — the registry's own fall-through — so a bare-number Aone
+  // run that omitted --host is still audited through a1 instead of querying
+  // github.com's same-named repo. The misroute this replaced audited Aone
+  // MRs against GitHub: a hostless report hit github.com, a recorded Aone
+  // host pointed gh at a host it has no auth on — both skipped the audit,
+  // leaving Aone with no tripwire at all (#9617).
+  if (detectPlatformKind({ host: window.host ?? undefined }) === 'aone') {
+    try {
+      auditAoneMrWrites(target, window);
+    } catch (err) {
+      skipNote(briefErrorLine(err));
+    }
+    return;
+  }
   // The audit routes gh at the PR's host, but that override must not leak out
   // of this block — cleanup runs last today, but a future caller after it (or
   // a second auditPrWrites) would otherwise inherit the Enterprise host. Save
@@ -373,19 +502,131 @@ function auditPrWrites(target: string, prNumber: string): void {
         `warning:   review ${r.id} (${r.state ?? 'UNKNOWN'}) at ${r.submitted_at}${r.html_url ? ` — ${r.html_url}` : ''} — no submit receipt vouches for it`,
       );
     }
-    writeStdoutLine(
-      `warning: The likely cause is benign — the user (from another terminal), ` +
-        `another workflow, or a bot posting under the same account (${me}) produces ` +
-        `exactly this shape. ` +
-        `\`/review\` writes to the PR only through \`qwen review submit\`; a write ` +
-        `here is a real bypass of that gate only if its content is this review's own ` +
-        `output. Relay this warning verbatim in the terminal summary so a human can judge.`,
-    );
+    writeStdoutLine(bypassAuditFooter(me, 'PR'));
   } catch (err) {
     skipNote(briefErrorLine(err));
   } finally {
     setGhHost(prevHost);
   }
+}
+
+/**
+ * The tripwire's closing guidance, shared by both platform halves — the
+ * relay instruction is contract text SKILL.md tells the model to carry
+ * verbatim, so it lives in one place (only the target noun differs).
+ */
+function bypassAuditFooter(me: string, target: 'PR' | 'MR'): string {
+  return (
+    `warning: The likely cause is benign — the user (from another terminal), ` +
+    `another workflow, or a bot posting under the same account (${me}) produces ` +
+    `exactly this shape. ` +
+    `\`/review\` writes to the ${target} only through \`qwen review submit\`; a write ` +
+    `here is a real bypass of that gate only if its content is this review's own ` +
+    `output. Relay this warning verbatim in the terminal summary so a human can judge.`
+  );
+}
+
+/**
+ * One `a1 repo mr comment list` query, shape-checked. a1 signals command
+ * failure by exit code (execFileSync throws), but it can also answer a
+ * well-formed `a1.error/v1` error OBJECT with exit 0 (a backend auth
+ * failure or a client timeout — measured) — returning that silently would
+ * read exactly like a clean window, so it throws instead, surfacing the
+ * error object's `message` when it carries one (the difference between
+ * "auth outage" and "schema drift" for the paged human).
+ */
+function a1CommentList(...flags: string[]): RawAoneComment[] {
+  const out = a1Json<unknown>('repo', 'mr', 'comment', 'list', ...flags);
+  if (!Array.isArray(out)) {
+    const cause = (out as { message?: unknown } | null)?.message;
+    throw new Error(
+      'a1 mr comment list returned an unexpected shape' +
+        (typeof cause === 'string' && cause.trim() !== ''
+          ? `: ${cause.trim()}`
+          : ''),
+    );
+  }
+  return out as RawAoneComment[];
+}
+
+/**
+ * The Aone half of the tripwire (design D8: `cleanup`'s bypass audit maps
+ * to `comment list` filtered by the authenticated account within the audit
+ * window). Lists the MR's comments through a1 and flags every one the
+ * account created — or edited — inside the window that the submit receipt
+ * does not vouch for. Coverage stops at the comment channel: `a1 repo mr
+ * approve` and `a1 repo mr edit` are banned by Step 7's write ban but
+ * invisible here — the recorded a1 surface exposes no listing an audit
+ * could query for them (disclosed residual, design doc #9617). Throws on
+ * any failure; the caller names the skip, so a skipped audit is never
+ * mistaken for a clean one (same contract as the gh half).
+ */
+function auditAoneMrWrites(target: string, window: AuditWindow): void {
+  // The same boundary the gh half applies, in epoch milliseconds: Aone
+  // timestamps carry a numeric utc offset, so the window comparison is
+  // numeric (see findUnsanctionedAoneComments).
+  const boundaryMs = Date.parse(window.auditSince) - CLOCK_SKEW_MS;
+  // The DEFAULT list excludes RESOLVED comments (measured: the MR's
+  // `comments` minus `closedComments` is exactly what it returns), so a
+  // bypass posted-then-resolved inside the window would hide there. The
+  // `--resolved` query returns the resolved ROOT INLINE comments — union
+  // the two, dedupe by id. Resolved replies stay invisible: a1 exposes no
+  // listing that includes them (disclosed residual, design doc #9617).
+  // Both queries are one UNPAGED `comment list` each: a1 documents no
+  // page-size guarantee, so if a cap exists, comments past it stay
+  // invisible too (disclosed residual, design doc #9617).
+  const listed = a1CommentList(
+    '--mr',
+    window.prNumber,
+    '--repo',
+    window.ownerRepo,
+  );
+  const resolved = a1CommentList(
+    '--mr',
+    window.prNumber,
+    '--repo',
+    window.ownerRepo,
+    '--resolved',
+  );
+  const byId = new Map<number, RawAoneComment>();
+  for (const c of [...listed, ...resolved]) {
+    if (typeof c.id === 'number' && !byId.has(c.id)) byId.set(c.id, c);
+  }
+  // The common case; skipping whoami here saves an a1 call on every clean
+  // cleanup — the same fast path the gh half applies to currentUser().
+  if (byId.size === 0) return;
+  const me = aoneWhoamiAccount();
+  const { posted, edited } = findUnsanctionedAoneComments(
+    [...byId.values()],
+    me,
+    boundaryMs,
+    readAoneSubmitReceipt(target),
+  );
+  const total = posted.length + edited.length;
+  if (total === 0) return;
+  writeStdoutLine(
+    `warning: ${total} comment(s) by the reviewing account on ` +
+      `${window.ownerRepo} MR ${window.prNumber} during this review window were not made by ` +
+      `\`qwen review submit\` — the only sanctioned write in /review:`,
+  );
+  // The path is an MR-author-controlled filename reaching a terminal —
+  // flatten it the way every other reviewer-facing path rendering does
+  // (a legal git filename can carry control sequences).
+  const where = (c: RawAoneComment): string =>
+    typeof c.path === 'string' && c.path !== ''
+      ? ` on ${inertPath(c.path)}${typeof c.line === 'number' ? `:${c.line}` : ''}`
+      : '';
+  for (const c of posted) {
+    writeStdoutLine(
+      `warning:   posted comment ${c.id} at ${c.createdAt}${where(c)}`,
+    );
+  }
+  for (const c of edited) {
+    writeStdoutLine(
+      `warning:   edited comment ${c.id} at ${c.updatedAt}${where(c)}`,
+    );
+  }
+  writeStdoutLine(bypassAuditFooter(me, 'MR'));
 }
 
 /**

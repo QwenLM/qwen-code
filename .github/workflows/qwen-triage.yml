@@ -747,8 +747,12 @@ jobs:
           # coreToolScheduler L5 + permissionFlow.needsConfirmation). `tools.core`
           # additionally filters which tools register at all (fail-safe: an
           # unlisted tool like web_fetch/web_search/save_memory never loads, so
-          # those network/persistence tool channels are gone). No `sandbox` key:
-          # the ECS pool ships no container runtime.
+          # those network/persistence tool channels are gone). No `sandbox` key
+          # — a deliberate omission, not a capability gap: the ECS pool does run
+          # containers (this workflow's own container jobs, and autofix's
+          # `sandbox: "docker"` agent, both land on those labels). Adding one
+          # here is an open decision, NOT tracked in #9556 — that issue is
+          # scoped to the /review pipeline's execution steps.
           #
           # ⚠️ A command denylist is NOT a security boundary under --yolo, and
           # is not treated as one here. It is defense-in-depth against the

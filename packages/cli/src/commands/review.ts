@@ -12,7 +12,7 @@ import type { Argv, CommandModule } from 'yargs';
 import { parseArgsCommand } from './review/parse-args.js';
 import { matchRemoteCommand } from './review/match-remote.js';
 import { composeReviewCommand } from './review/compose-review.js';
-import { findingsCommand } from '../utils/findings.js';
+import { findingsCommand } from './review/findings.js';
 import { recoverFindingsCommand } from './review/recover-findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';

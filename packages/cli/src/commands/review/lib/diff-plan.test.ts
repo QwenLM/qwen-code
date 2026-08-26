@@ -56,7 +56,7 @@ describe('classifyPath', () => {
   it('recognises generated and vendored files', () => {
     const paths = [
       'package-lock.json',
-      'packages/desktop/bun.lock',
+      'packages/desktop-shell/bun.lock',
       'packages/vscode-ide-companion/NOTICES.txt',
       'dist/bundle.min.js',
       'vendor/lib.go',
@@ -839,5 +839,107 @@ describe('real-world shape', () => {
     expect(plan.chunks.length).toBeGreaterThanOrEqual(4);
     // No chunk approaches the historical Shell preview that motivated this.
     for (const c of plan.chunks) expect(c.lines).toBeLessThanOrEqual(400 + 42);
+  });
+});
+
+describe('the wrapper signal — the roster gate for Agent 1e', () => {
+  const hunks = (lines: string[]) =>
+    [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      `@@ -1,1 +1,${lines.length} @@`,
+      ...lines,
+    ].join('\n');
+
+  it('is true when an added line names a wrapping type — PascalCase included', () => {
+    // Substring, not word-boundary: camelCase carries no boundary between the
+    // words, and a wrapping type is usually PascalCase. Map each added line to
+    // its signal so a failure names the offending line. Between these lines
+    // and the path tests below, every vocabulary word is exercised — dropping
+    // any alternative from the regex turns a row false and an assertion red.
+    const added = [
+      '+export class CachedModelProvider implements ModelProvider {',
+      '+class RetryDecorator {',
+      '+const handler = new Proxy(target, traps);',
+      '+def __init__(self, delegate: Client):',
+      '+class RetryWrapper implements ModelProvider {',
+      '+export class AuthFacade {',
+    ];
+    const signals = Object.fromEntries(
+      added.map((line) => [
+        line,
+        buildDiffPlan(hunks([' old', line]), 400).wrapperSignal,
+      ]),
+    );
+    expect(signals).toEqual(
+      Object.fromEntries(added.map((line) => [line, true])),
+    );
+  });
+
+  it('is true when a file path names a wrapping type — a MODIFIED wrapper whose changed lines never spell the name', () => {
+    const diff = [
+      'diff --git a/src/adapters/github-adapter.ts b/src/adapters/github-adapter.ts',
+      '--- a/src/adapters/github-adapter.ts',
+      '+++ b/src/adapters/github-adapter.ts',
+      '@@ -10,1 +10,1 @@',
+      '-const timeout = 30;',
+      '+const timeout = 60;',
+    ].join('\n');
+    expect(buildDiffPlan(diff, 400).wrapperSignal).toBe(true);
+  });
+
+  it('is false on a diff that touches no wrapping vocabulary', () => {
+    expect(
+      buildDiffPlan(hunks([' old', '+const x = 1;']), 400).wrapperSignal,
+    ).toBe(false);
+    // Bare `cache` is deliberately out of the vocabulary — too common an
+    // ordinary identifier for the gate to stay a gate.
+    expect(
+      buildDiffPlan(hunks([' old', '+this.cache.set(key, value);']), 400)
+        .wrapperSignal,
+    ).toBe(false);
+  });
+
+  it('ignores removed and context lines — only what the diff WRITES can add a wrapper', () => {
+    const diff = [
+      'diff --git a/src/a.ts b/src/a.ts',
+      '--- a/src/a.ts',
+      '+++ b/src/a.ts',
+      '@@ -1,2 +1,1 @@',
+      ' class OldDecorator {',
+      '-const removed = new Proxy(t, h);',
+      '+const kept = 1;',
+    ].join('\n');
+    expect(buildDiffPlan(diff, 400).wrapperSignal).toBe(false);
+  });
+
+  it('aggregates across files — one signalling file among many is enough', () => {
+    const diff = [
+      ...fileSection('src/plain.ts', [[1, 3]]),
+      'diff --git a/src/caching-layer.ts b/src/caching-layer.ts',
+      '--- a/src/caching-layer.ts',
+      '+++ b/src/caching-layer.ts',
+      '@@ -1,1 +1,1 @@',
+      '+export class CachingLayer {}',
+    ].join('\n');
+    expect(buildDiffPlan(diff, 400).wrapperSignal).toBe(true);
+  });
+
+  it('signals on the refined path when the header guess diverges', () => {
+    // Pins WHEN the path check runs: only after `+++` / `rename to` refine the
+    // header's guess. `splitHeaderPaths` splits at the LAST ` b/` and lands on
+    // `plain.ts` — no vocabulary match — while the refined path carries it.
+    // Moving the check up to the raw `diff --git` header computes false here,
+    // and Agent 1e silently leaves the roster on exactly this shape.
+    const diff = [
+      'diff --git a/src/old.ts b/src/wrapper b/plain.ts',
+      '--- a/src/old.ts',
+      '+++ b/src/wrapper b/plain.ts',
+      'rename to src/wrapper b/plain.ts',
+      '@@ -1,1 +1,1 @@',
+      '+const x = 1;',
+    ].join('\n');
+    expect(buildDiffPlan(diff, 400).wrapperSignal).toBe(true);
   });
 });

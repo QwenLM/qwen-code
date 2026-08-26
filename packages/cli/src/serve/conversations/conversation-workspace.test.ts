@@ -27,6 +27,7 @@ import {
 import { ConversationDirectoryIdentityError } from '../../utils/conversation-directory-identity.js';
 
 const plantOnExpectedInspect = vi.hoisted(() => ({ armed: false }));
+const enoentOnInspect = vi.hoisted(() => ({ armed: false }));
 
 vi.mock(
   '../../utils/conversation-directory-identity.js',
@@ -40,6 +41,14 @@ vi.mock(
       inspectConversationDirectoryIdentity: async (
         ...args: Parameters<typeof actual.inspectConversationDirectoryIdentity>
       ) => {
+        if (enoentOnInspect.armed) {
+          enoentOnInspect.armed = false;
+          throw new actual.ConversationDirectoryIdentityError(
+            'root',
+            'io_error',
+            Object.assign(new Error('root vanished'), { code: 'ENOENT' }),
+          );
+        }
         const identity = await actual.inspectConversationDirectoryIdentity(
           ...args,
         );
@@ -270,6 +279,21 @@ describe('Live conversation workspace root', () => {
       workspace.discardEmptyConversationDirectory('occupied'),
     ).resolves.toBe(false);
     expect((await lstat(occupied)).isDirectory()).toBe(true);
+  });
+
+  it('treats a root that vanishes mid-inspection as already discarded', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    await workspace.materializeConversationDirectory('empty-racy');
+
+    enoentOnInspect.armed = true;
+    try {
+      await expect(
+        workspace.discardEmptyConversationDirectory('empty-racy'),
+      ).resolves.toBe(false);
+    } finally {
+      enoentOnInspect.armed = false;
+    }
   });
 
   it('prepares only a new or reusable empty standalone child', async () => {

@@ -28,7 +28,7 @@ import {
   isAutoLanguage,
   resolveOutputLanguageOrPreserveAuto,
   writeOutputLanguageAndRegisterPath,
-} from '../../utils/languageUtils.js';
+} from '../../i18n/languageUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('LANGUAGE_COMMAND');

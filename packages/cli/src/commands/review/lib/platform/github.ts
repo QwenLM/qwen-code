@@ -9,7 +9,18 @@
 // this module owns the GitHub API *shapes* so the subcommands and the skill
 // prose never name an endpoint.
 
-import { ensureAuthenticated, gh, ghApi, ghRaw, isOwnerRepo } from '../gh.js';
+import {
+  currentUser,
+  ensureAuthenticated,
+  getGhHost,
+  gh,
+  ghApi,
+  ghApiAll,
+  ghRaw,
+  isOwnerRepo,
+  normalizeGhHostForUrl,
+  resolveGhHost,
+} from '../gh.js';
 import type {
   ClosingIssueRef,
   CommentKind,
@@ -18,6 +29,9 @@ import type {
   LinkedIssue,
   PrMeta,
   RepoIdentity,
+  ReviewContext,
+  ReviewContextComment,
+  ReviewContextVerdict,
   ReviewPlatformReader,
 } from './types.js';
 
@@ -70,6 +84,28 @@ interface GhIssueView {
     body?: string;
     createdAt?: string;
   }>;
+}
+
+/** One entry of `pulls/<n>/comments` or `issues/<n>/comments` (REST). */
+interface GhComment {
+  id: number;
+  user?: { login?: string };
+  body?: string;
+  created_at?: string;
+  /** Inline-only fields (issue comments never carry them). */
+  path?: string;
+  line?: number;
+  in_reply_to_id?: number | null;
+}
+
+/** One entry of `pulls/<n>/reviews` (REST). */
+interface GhReview {
+  id: number;
+  user?: { login?: string };
+  body?: string;
+  state?: string;
+  submitted_at?: string;
+  commit_id?: string;
 }
 
 /**
@@ -261,5 +297,106 @@ export const githubReader: ReviewPlatformReader = {
       deletions: view.deletions,
       changedFiles: view.changedFiles,
     };
+  },
+
+  getReviewContext(prNumber: number, ownerRepo: string): ReviewContext {
+    checkOwnerRepo(ownerRepo);
+    const [owner, repo] = ownerRepo.split('/');
+    const view = ghJson<{
+      title: string;
+      body: string | null;
+      author: { login: string } | null;
+      baseRefName: string;
+      headRefName: string;
+      headRefOid: string;
+      additions: number;
+      deletions: number;
+      changedFiles: number;
+      state: string;
+    }>(
+      'pr',
+      'view',
+      String(prNumber),
+      '--repo',
+      ownerRepo,
+      '--json',
+      'title,body,author,baseRefName,headRefName,headRefOid,additions,deletions,changedFiles,state',
+    );
+    // Paginate — busy PRs routinely cross the default 30-per-page limit on
+    // each of these endpoints, and the latest entries (which carry the most
+    // recent reviewer summaries / replies) end up on later pages we'd
+    // otherwise miss.
+    const inline = ghApiAll(
+      `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
+    ) as GhComment[];
+    const issue = ghApiAll(
+      `repos/${owner}/${repo}/issues/${prNumber}/comments`,
+    ) as GhComment[];
+    const reviews = ghApiAll(
+      `repos/${owner}/${repo}/pulls/${prNumber}/reviews`,
+    ) as GhReview[];
+    const comments: ReviewContextComment[] = [...inline, ...issue].map((c) => ({
+      id: c.id,
+      author: c.user?.login ?? '',
+      body: c.body ?? '',
+      createdAt: c.created_at ?? '',
+      ...(c.path !== undefined ? { path: c.path } : {}),
+      ...(c.line !== undefined ? { line: c.line } : {}),
+      ...(c.in_reply_to_id !== undefined && c.in_reply_to_id !== null
+        ? { parentId: c.in_reply_to_id }
+        : {}),
+    }));
+    const verdicts: ReviewContextVerdict[] = reviews.map((r) => ({
+      id: r.id,
+      author: r.user?.login ?? '',
+      body: r.body ?? '',
+      state: r.state ?? '',
+      submittedAt: r.submitted_at ?? '',
+      ...(typeof r.commit_id === 'string' ? { commitId: r.commit_id } : {}),
+    }));
+    return {
+      title: view.title,
+      body: view.body ?? '',
+      authorLogin: view.author?.login ?? '',
+      state: view.state,
+      baseRefName: view.baseRefName,
+      headRefName: view.headRefName,
+      headRefOid: view.headRefOid,
+      additions: view.additions,
+      deletions: view.deletions,
+      changedFiles: view.changedFiles,
+      comments,
+      verdicts,
+      // GitHub's ledger markers ride in the review bodies.
+      ledgerCarriers: verdicts,
+    };
+  },
+
+  getCurrentUser(): string {
+    return currentUser();
+  },
+
+  composeUrl(prNumber: number, ownerRepo: string): string {
+    checkOwnerRepo(ownerRepo);
+    // The PR-page grammar is deterministic — no API call. The host is the
+    // one gh calls are currently routed at (a subcommand's setGhHost), else
+    // the operator-exported GH_HOST a gh child would inherit — the routing
+    // this codebase applies, so the composed link lands where the review
+    // ran. When NEITHER names a host, fail CLOSED with '': gh's own third
+    // fallback is hosts.yml's authenticated default (a single recorded host
+    // wins — go-gh's defaultHost), which this process cannot see, so
+    // composing github.com there affirms a host the write may not have
+    // taken — the link can resolve to a real, unrelated PR of a
+    // same-named github.com repo while the review sits on a GHE host. ''
+    // leaves the receipt linkless — submit's truthy checks drop the url,
+    // and the skill relays the target's coordinates instead. The spelling
+    // rides the shared PR-page helper — the SAME normalization
+    // compose-review's comment anchors apply, so one run cannot print two
+    // textual spellings of the same page (`--host GHE.Corp:443` lands on
+    // `https://ghe.corp/…` in both).
+    const routed = getGhHost() ?? resolveGhHost(undefined);
+    if (!routed) return '';
+    const host = normalizeGhHostForUrl(routed);
+    return `https://${host}/${ownerRepo}/pull/${prNumber}`;
   },
 };

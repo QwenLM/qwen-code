@@ -8,6 +8,8 @@ import {
   getWorkspaceArtifactOpenBlockReason,
   isDownloadableReviewFilePath,
   isRenderedFilePath,
+  TURN_OUTPUT_VISIBLE_LIMIT,
+  visibleTurnOutputs,
   type TurnOutputFileChange,
 } from './TurnOutputs';
 import {
@@ -22,6 +24,14 @@ import {
 } from 'lucide-react';
 
 describe('TurnOutputs helpers', () => {
+  it('caps collapsed turn outputs at three items', () => {
+    const items = [1, 2, 3, 4, 5];
+    expect(visibleTurnOutputs(items, false)).toEqual([1, 2, 3]);
+    expect(visibleTurnOutputs(items, true)).toEqual(items);
+    expect(TURN_OUTPUT_VISIBLE_LIMIT).toBe(3);
+    expect(items.length - TURN_OUTPUT_VISIBLE_LIMIT).toBe(2);
+  });
+
   it('uses workspace cwd when matching artifact preview content', () => {
     const artifact = {
       id: 'artifact-1',
@@ -114,6 +124,7 @@ describe('TurnOutputs helpers', () => {
     ['audio', FileAudioIcon],
     ['pdf', FileTextIcon],
     ['notebook', NotebookTabsIcon],
+    ['document', FileTextIcon],
   ])('selects the Lucide icon for %s artifacts', (kind, icon) => {
     expect(getArtifactFormatIcon(kind)).toBe(icon);
   });

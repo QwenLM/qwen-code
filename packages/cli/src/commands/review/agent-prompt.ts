@@ -41,6 +41,7 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   writeStdoutLine,
   writeStderrLine,
@@ -98,7 +99,11 @@ import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
-import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
+import {
+  RESIDUE_PATH_CAP,
+  worktreeResidue,
+  type WorktreeResidue,
+} from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   requiredAgents,
@@ -150,9 +155,10 @@ interface PlanReport {
   prNumber?: unknown;
   ownerRepo?: unknown;
   worktreePath?: unknown;
+  /** The PR head sha fetch-pr recorded — the probe's identity anchor. */
+  fetchedSha?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
-  incremental?: unknown;
   repositoryContext?: unknown;
   /**
    * The two size fields the topology gate reads (#9242) and the ones
@@ -170,6 +176,163 @@ interface PlanReport {
   srcDiffLines?: unknown;
   diffLines?: unknown;
   budget?: { agentToolBudget?: unknown; reverseAuditRounds?: unknown };
+  /** Present only on a `--since`-scoped round — see incrementalScopeOf. */
+  incremental?: unknown;
+}
+
+/**
+ * The `incremental.scope` block a `--since`-scoped plan carries, re-validated field by
+ * field: the plan is parsed off disk with an unchecked cast, and a malformed
+ * block must degrade to "not an incremental round" (full-scope briefs, which
+ * are always safe) rather than render `undefined` into an agent's contract.
+ */
+interface IncrementalScope {
+  anchor: string;
+  deltaFiles: string[];
+  interaction: Array<{ path: string; importsChanged: string[] }>;
+}
+
+/**
+ * The per-file scope bullets for ONE chunk's files — uncapped, because the
+ * agent holding that chunk is the sole reviewer of those files and has no
+ * other source for their class.
+ */
+function chunkScopeBullets(
+  incremental: IncrementalScope,
+  chunk: DiffChunk | undefined,
+): string[] {
+  if (!chunk) return [];
+  const paths = new Set(
+    (Array.isArray(chunk.files) ? chunk.files : [])
+      .map((f) => f?.path)
+      .filter((p): p is string => typeof p === 'string'),
+  );
+  const delta = incremental.deltaFiles.filter((p) => paths.has(p));
+  const seam = incremental.interaction.filter((e) => paths.has(e.path));
+  if (delta.length === 0 && seam.length === 0) return [];
+  return [
+    "Your territory's files, by scope class:",
+    ...delta.map(
+      (p) =>
+        `- ${inertPath(p)} — **changed since the last round**: review its hunks in full.`,
+    ),
+    ...seam.map(
+      (e) =>
+        `- ${inertPath(e.path)} — **interaction only**: cleared last round, back in ` +
+        `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}. ` +
+        `Review that seam, not the rest of its diff.`,
+    ),
+  ];
+}
+
+const SCOPE_LIST_CAP = 30;
+/** Edge lists are capped per entry in the WHOLE-DIFF frame — the entry cap
+ *  alone still let one interaction row carry hundreds of imports into every
+ *  brief. The chunk-level bullets are uncapped on purpose: that agent is the
+ *  sole reviewer of its files' seams and has nowhere to recover a tail. */
+const SCOPE_EDGE_CAP = 8;
+function cappedEdges(edges: readonly string[]): string {
+  const shown = edges.slice(0, SCOPE_EDGE_CAP).map(inertPath);
+  const rest = edges.length - SCOPE_EDGE_CAP;
+  return shown.join(', ') + (rest > 0 ? ` (+${rest} more)` : '');
+}
+/**
+ * The per-file scope lists a whole-diff brief renders under its incremental
+ * frame. Capped per class: past the cap the tail is counted, not listed —
+ * the plan's own `incremental.scope` block remains the complete record.
+ *
+ * This doc used to sit above `chunkScopeBullets`, the function that is
+ * explicitly UNCAPPED, where hover picked it up and the cap rationale read
+ * as documentation of its own contradiction.
+ */
+function scopeFileLists(incremental: IncrementalScope): string[] {
+  const cap = <T>(items: T[], render: (item: T) => string): string => {
+    const shown = items.slice(0, SCOPE_LIST_CAP).map(render);
+    const rest = items.length - SCOPE_LIST_CAP;
+    return shown.join(', ') + (rest > 0 ? ` (+${rest} more)` : '');
+  };
+  const out: string[] = [];
+  if (incremental.deltaFiles.length > 0) {
+    out.push(
+      `Changed since the last round (full review): ` +
+        `${cap(incremental.deltaFiles, inertPath)}.`,
+    );
+  }
+  if (incremental.interaction.length > 0) {
+    out.push(
+      `Interaction only (cleared last round; check the seam with what each ` +
+        `imports): ${cap(
+          incremental.interaction,
+          (e) =>
+            `${inertPath(e.path)} (imports ${cappedEdges(e.importsChanged)})`,
+        )}.`,
+    );
+  }
+  return out;
+}
+
+function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
+  // `incremental.scope`, not `incremental`: the outer block is the anchor
+  // RULING (`since`/`effective`/`reason`), and the scope it produced is
+  // nested under it — absent on every refusal and every up-to-date round, so
+  // reading the outer object for these fields would find nothing anyway. Both
+  // levels stay defensively parsed: the plan is `JSON.parse`d with an
+  // unchecked cast, and a malformed block must degrade to "not an incremental
+  // round" (full-scope briefs, which are always safe) rather than render
+  // `undefined` into an agent's contract.
+  const raw = (report.incremental as { scope?: unknown } | undefined | null)
+    ?.scope as
+    | {
+        anchor?: unknown;
+        deltaFiles?: unknown;
+        interaction?: unknown;
+      }
+    | undefined
+    | null;
+  if (!raw || typeof raw.anchor !== 'string' || raw.anchor === '') return null;
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v.filter((s): s is string => typeof s === 'string' && s.length > 0)
+      : [];
+  const interaction = Array.isArray(raw.interaction)
+    ? raw.interaction
+        .filter(
+          (e): e is { path: string; importsChanged?: unknown } =>
+            !!e &&
+            typeof (e as { path?: unknown }).path === 'string' &&
+            (e as { path: string }).path.length > 0 &&
+            // An interaction entry IS its edge: with no surviving
+            // importsChanged the brief would read "because it imports ,
+            // which changed" — a seam pointing at nothing.
+            strings((e as { importsChanged?: unknown }).importsChanged).length >
+              0,
+        )
+        .map((e) => ({
+          path: e.path,
+          importsChanged: strings(e.importsChanged),
+        }))
+    : [];
+  // The SAME validity notion the roster applies
+  // (`incrementalInteractionPaths`): a partially corrupt delta list
+  // invalidates the block wholesale. The two consumers used to disagree —
+  // the roster widened on a list this function still filtered and narrowed
+  // with, so one plan told a chunk agent "interaction only" for a file the
+  // roster said it could not safely classify.
+  if (
+    !Array.isArray(raw.deltaFiles) ||
+    raw.deltaFiles.some((p) => typeof p !== 'string')
+  ) {
+    return null;
+  }
+  const deltaFiles = strings(raw.deltaFiles);
+  // Degrade-to-full-scope means DEGRADE: a block whose lists all failed
+  // validation must not render an incremental frame with zero scope bullets.
+  if (deltaFiles.length === 0 && interaction.length === 0) return null;
+  return {
+    anchor: raw.anchor,
+    deltaFiles,
+    interaction,
+  };
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -217,6 +380,7 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - **Issue:** <one-line statement of the defect>
 - **Failure scenario:** <the concrete trigger and the concrete wrong outcome: what input, state, timing, or config makes this code misbehave, and what incorrect output / crash / leak / exposure results>
 - **Suggested fix:** <concrete code suggestion when possible, or "N/A">
+- **Fix witness:** <the test that must go RED if that fix is removed — the test file and the behaviour it pins — or "N/A" when the fix adds no guard, branch or behaviour a test can pin>
 - **Severity:** Critical | Suggestion | Nice to have
 - **Confidence:** high | low
 
@@ -229,7 +393,9 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - A line too long to quote whole — a multi-KB single-line Markdown paragraph — may be quoted as a distinctive verbatim **fragment** of at least 12 characters (measured after whitespace collapse); it resolves to the line containing it.
 - Fill in **File** and the line number anyway. The path selects the file and the line breaks a tie when the snippet genuinely repeats. Neither is trusted as the answer.
 
-**The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.`;
+**The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.
+
+**A fix that adds a guard owes a test that fails without it — say so in the finding.** The fix round is this loop's largest single source of its own next round: measured across six multi-round pull requests, roughly a third of every post-first-round finding was introduced by the fix immediately before it, and the dominant shape was a guard or branch added with no test of its own. The suite re-runs only the tests that exist, so an unwitnessed guard passes every gate and its hole comes back as next round's finding. So when your **Suggested fix** adds or changes a guard, a branch, or a behaviour, fill **Fix witness** with the test that must go red without it — the file and what it asserts — and, where you can, the mutation that proves it: remove the guard, run that test, watch it fail. Write \`N/A\` when there is genuinely nothing to pin — a rename, a comment, a docs line, a type-only change, a fix whose whole content is deleting code. **This field never gates reporting**: a finding whose fix you cannot pin is still filed, with \`N/A\`. It is an acceptance criterion for the author, not a bar for you.`;
 
 /**
  * What not to report.
@@ -558,6 +724,70 @@ export function buildChunkAgentPrompt(
     );
   }
 
+  // Incremental rounds carry two scopes in one diff, and the difference is
+  // the agent's whole brief for the second kind: an interaction file's diff
+  // was already reviewed clean once, and re-litigating it from scratch is how
+  // an incremental round quietly costs what it saved — or worse, re-reports
+  // findings the previous round already ruled on.
+  const incremental = incrementalScopeOf(report);
+  if (incremental) {
+    const chunkPaths = new Set(
+      (Array.isArray(chunk.files) ? chunk.files : [])
+        .map((f) => f?.path)
+        .filter((p): p is string => typeof p === 'string'),
+    );
+    const deltaHere = incremental.deltaFiles.filter((p) => chunkPaths.has(p));
+    const seamHere = incremental.interaction.filter((e) =>
+      chunkPaths.has(e.path),
+    );
+    const lines = [
+      '',
+      `**This is an INCREMENTAL round** — the diff holds only what changed since the ` +
+        `previous clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), ` +
+        `plus still-clean files one import hop from a change. Your files' scopes:`,
+    ];
+    if (deltaHere.length > 0) {
+      lines.push(
+        ...deltaHere.map(
+          (p) =>
+            `- ${inertPath(p)} — **changed since the last round**: its hunks here are ` +
+            `its full change against the review's base (the previous round's clean verdict ` +
+            `no longer covers this file); review them in full, as usual.`,
+        ),
+      );
+    }
+    if (seamHere.length > 0) {
+      lines.push(
+        ...seamHere.map(
+          (e) =>
+            `- ${inertPath(e.path)} — **unchanged, cleared by the previous round**, back in ` +
+            `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}, ` +
+            `which ` +
+            `changed. Review the INTERACTION only: do this file's uses of what it imports ` +
+            `still hold — signatures, argument contracts, invariants, error behaviour — ` +
+            `now that the imported side moved? Read the changed side from the worktree to ` +
+            `answer that. Do not re-review the rest of this file's diff from scratch, and ` +
+            `do not report defects in it that the change it imports does not affect.`,
+        ),
+      );
+      lines.push(
+        // The generic duties below this block (the line-by-line walk, the
+        // deletion audit, every-dimension ownership) predate incremental
+        // scope and address the ordinary case. Without this sentence an
+        // agent obeys whichever instruction it read last — measured in
+        // review: told "interaction only", then told "audit all deletions
+        // in your territory", it re-opened round-1 findings.
+        `Where those general duties below conflict with a file's scope class ` +
+          `above, the scope class WINS: for an interaction file, every duty ` +
+          `applies only to its interaction surface with what changed.`,
+      );
+    }
+    // A frame with a header and no scope bullets tells the agent nothing and
+    // implies its files are out of scope — render it only when at least one
+    // of this chunk's files actually carries a class.
+    if (deltaHere.length > 0 || seamHere.length > 0) parts.push(...lines);
+  }
+
   parts.push(
     '',
     'You may also `read_file` the **full source files** above from the worktree whenever a ' +
@@ -871,9 +1101,53 @@ function diffReadingBlock(
     (c) => c.maxLineChars > READ_FILE_CHAR_CAP,
   );
 
+  // Whole-diff readers (dimension agents, auditors) get the incremental frame
+  // once, up front: without it, "the diff" reads as the whole PR, and an agent
+  // that notices most of the PR is absent invents its own explanation — or
+  // walks the worktree re-reviewing scope the previous round already cleared.
+  const incremental = incrementalScopeOf(report);
+
   const parts = [
     '## The diff',
     '',
+    ...(incremental
+      ? [
+          `**Incremental round.** This diff is scoped to what changed since the previous ` +
+            `clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), plus ` +
+            `still-clean files one import hop from a change — each of those is in scope ` +
+            `only for its interaction with what it imports. The rest of the change was ` +
+            `reviewed clean last round and is deliberately absent; do not go find it. ` +
+            `A defect in absent code is reportable only when a change IN this diff is ` +
+            `what makes it wrong now. Where the sweep duties below (walk every ` +
+            `hunk, audit every deletion, own every dimension) conflict with a ` +
+            `file's scope class, the scope class WINS: for an interaction file ` +
+            `every duty applies only to its interaction surface with what ` +
+            `changed — its other hunks were cleared last round and re-reporting ` +
+            `them is the cost this scoping exists to prevent.`,
+          '',
+          // A whole-diff reader must know WHICH file carries which scope —
+          // told only that the two classes coexist, it cannot tell the file
+          // owed a full review from the one owed a seam check. Capped so a
+          // wide round cannot flood the brief; the chunk briefs always carry
+          // their own files' classes in full.
+          ...scopeFileLists(incremental),
+          '',
+        ]
+      : []),
+    // A CHUNK-scoped role brief (the reverse auditors) owns one territory and
+    // is its sole reviewer: the capped global list above can elide its own
+    // files past entry 30, leaving the agent no way to learn their class or
+    // recover the tail. Its own files are therefore listed in full, exactly
+    // as the bare chunk agent's brief lists them.
+    ...(incremental && scoped
+      ? [
+          ...chunkScopeBullets(
+            incremental,
+            chunks.find((c) => c.id === chunkId),
+          ),
+          '',
+        ]
+      : []),
     scoped
       ? `Your territory is **chunk ${chunkId}** of the diff. It is a file on disk — ` +
         'nothing in this prompt contains the code. Read your chunk:'
@@ -1049,6 +1323,27 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 }
 
 /**
+ * The plan's fetched head sha when it carries a usable one. Absent or
+ * malformed answers nothing rather than a broken anchor: every worktree-mode
+ * fetch writes the field, so both call sites fail closed on that absence,
+ * each in its own way.
+ *
+ * A usable one is a FULL Git object ID: 40 hex for SHA-1 repositories and
+ * 64 for SHA-256 ones — fetch-pr records `git rev-parse` verbatim, and the
+ * pipeline's own shape contract admits both lengths (pr-context's
+ * COMMIT_SHA_RE carries its {40,64} breadth for exactly that class). A
+ * validator matching only the SHA-1 length would drop the record every
+ * SHA-256 review writes, failing closed as though the plan were tampered
+ * with and welding an unpinned scratch-tree command.
+ */
+function fetchedShaOf(report: PlanReport): string | undefined {
+  const sha = report.fetchedSha;
+  return typeof sha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)
+    ? sha
+    : undefined;
+}
+
+/**
  * The review worktree's residue, or nothing at all when there is no worktree to
  * have any. Resolved against the process cwd, like every other use of
  * `worktreePath` here: the report stores it repo-relative and review commands
@@ -1057,7 +1352,28 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
-  return worktreeResidue(resolve(wt));
+  // Hand over the sha fetch-pr recorded: committing the contamination moves
+  // a forge's HEAD off it, so with it the probe refuses a forged admin entry
+  // (see worktreeResidue). The record raises the plant's cost; it does not
+  // make planting impossible — it is re-read from the plan file at every
+  // invocation, and a same-user writer can rewrite it along with the forge.
+  // Absent or malformed it fails CLOSED: every worktree-mode fetch writes
+  // the field, so a plan that names a worktree without it is tampered or
+  // corrupted, and measuring unpinned would certify whichever index the
+  // gitfile names.
+  const sha = fetchedShaOf(report);
+  if (sha === undefined) {
+    return {
+      paths: [],
+      total: 0,
+      unmeasured:
+        'the plan carries no usable record of the fetched head sha — ' +
+        'every worktree-mode fetch writes one, so its absence means ' +
+        'tampering or corruption, and measuring without it would certify ' +
+        'whichever index the .git gitfile names',
+    };
+  }
+  return worktreeResidue(resolve(wt), RESIDUE_PATH_CAP, sha);
 }
 
 /**
@@ -1112,7 +1428,7 @@ function worktreeEvidenceBlock(
   if (residue?.unmeasured) {
     parts.push(
       '',
-      `**Whether it is clean could not be measured** (\`git status\` failed: ` +
+      `**Whether it is clean could not be measured** (reason: ` +
         `${inertPath(residue.unmeasured)}). That is not the same as clean: treat ` +
         'anything that surprises you in this tree as unverified until you have ' +
         'checked it against `git show HEAD:<path>`.',
@@ -1319,14 +1635,15 @@ export function buildRoleBrief(
     }
   }
 
-  // Cross-repo lightweight mode: there is no tree, only the diff. Two briefs assume
-  // one, and the degradation used to be a sentence the orchestrator was told to add
-  // by hand — which is not a thing that survives, and is now not a thing it can do:
-  // it does not write these any more. So the builder degrades them, from the same
-  // plan the roster reads.
+  // Cross-repo lightweight mode: there is no tree, only the diff. Several briefs
+  // assume one, and the degradation used to be a sentence the orchestrator was told
+  // to add by hand — which is not a thing that survives, and is now not a thing it
+  // can do: it does not write these any more. So the builder degrades them, from
+  // the same plan the roster reads.
   //
-  // 1b's is a *precision* rule, not a convenience: an agent that cannot grep for a
-  // re-establishment and asserts one is missing files a false Critical, and a false
+  // The clause below is a *precision* rule, not a convenience: an agent that
+  // cannot grep for a re-establishment (1b), a caller (1c), or a wrapper's call
+  // sites (1e) and asserts one is missing files a false Critical, and a false
   // Critical blocks a merge.
   if (reviewMode(report as RosterPlan) === 'diff-only' && brief.reviewsCode) {
     parts.push(
@@ -1335,12 +1652,16 @@ export function buildRoleBrief(
         'local checkout to read enclosing functions from, and nothing to `grep_search`. ' +
         'Work from the diff alone.',
     );
-    if (role === '1b' || role === '1c') {
+    // 1e's forwarding-completeness walk greps the wrapper's call sites, and a
+    // caller lives outside the diff exactly like 1b's replacement or 1c's
+    // consumers — the same precision rule applies.
+    if (role === '1b' || role === '1c' || role === '1e') {
       parts.push(
         '',
         'Which changes what you may conclude. When the evidence you would need sits **outside ' +
           'the diff** — the replacement for a deleted export, the call sites of a changed ' +
-          'signature, the read sites of a new field — you cannot check it, and you must not ' +
+          'signature, the read sites of a new field, the callers a wrapper does not forward — ' +
+          'you cannot check it, and you must not ' +
           'assert it is missing. Report the candidate at `Confidence: low` and say plainly that ' +
           'the check could not be made. A false Critical blocks a merge.',
       );
@@ -1381,6 +1702,11 @@ export function buildRoleBrief(
       // written into a shell command, and the one function that decides the
       // tree's name is also what keeps a metacharacter out of that command.
       const label = scratchLabel(opts.key ?? role);
+      // The identity anchor fetch-pr recorded, when the plan carries a usable
+      // one: with it the probe pins the shared tree and a healthy run measures
+      // clean — without it the no-record refusal fires on every run, and a
+      // tampering note that fires always is a note nobody reads.
+      const sha = fetchedShaOf(report);
       parts.push(
         '',
         '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
@@ -1399,7 +1725,8 @@ export function buildRoleBrief(
         // a bare interpolation, and the failure would be silent — every shard's
         // scratch tree unavailable, every probe demoted to a reading.
         `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
-        `  --label ${label}`,
+        `  --label ${label}${sha === undefined ? '' : ' \\'}`,
+        ...(sha === undefined ? [] : [`  --fetched-sha ${sha}`]),
         '```',
         '',
         'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +
@@ -2146,6 +2473,27 @@ function rosterLabel(req: RequiredAgent): string {
  * the list it builds is the same one `check-coverage` will hold the run to,
  * because both come from `requiredAgents(plan)`.
  */
+/**
+ * The launch parameters every review agent needs, on every emission path.
+ *
+ * It lived inside `runRoster`'s worktree-only note because that block began as
+ * a `working_dir` reminder — so three review modes were told nothing, and then
+ * so were Step 4's verify shards and Step 5's audit rounds, which are the most
+ * numerous agents a high-effort review launches and the ones furthest from
+ * SKILL.md's own statement of the rule. Omitting the type is not a no-op:
+ * `AgentTool.execute` resolves an omitted `subagent_type` to `general-purpose`,
+ * which declares no `tools` and so takes `prepareTools`' inherit-everything
+ * branch — the entire cost `review-agent` exists to remove, spent silently.
+ * Before the review had its own type, forgetting the parameter was harmless
+ * because the default WAS the right answer.
+ */
+const TYPE_NOTE =
+  `\n\n**Set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and ` +
+  `\`run_in_background: false\` on EVERY agent call below**, in every review ` +
+  `mode and at every step. An omitted \`subagent_type\` is not left blank — it ` +
+  `resolves to the general-purpose default, which inherits every tool in the ` +
+  `session and re-declares them on each agent's every turn.`;
+
 function runRoster(
   report: PlanReport,
   planPath: string,
@@ -2190,12 +2538,20 @@ function runRoster(
   const paramNote =
     typeof wt === 'string' && wt
       ? `\n\n**Agent tool parameters (worktree mode):** Set ` +
-        `\`working_dir: "${wt}"\` and ` +
-        `\`subagent_type: "general-purpose"\`, \`run_in_background: false\` ` +
-        `on EVERY agent call below. Do NOT set \`isolation\` — the worktree ` +
-        `already exists; \`isolation\` creates a new copy and is mutually ` +
-        `exclusive with \`working_dir\`.`
+        `\`working_dir: "${wt}"\` on EVERY agent call below. Do NOT set ` +
+        `\`isolation\` — the worktree already exists; \`isolation\` creates a ` +
+        `new copy and is mutually exclusive with \`working_dir\`.`
       : '';
+  // The type belongs OUTSIDE that gate. It was written inside it because the
+  // block began as a `working_dir` reminder, and worktrees are the only mode
+  // that needs one — but the type is needed by all four (local diff, file
+  // path and cross-repo lightweight reviews have no worktree and were
+  // therefore told nothing). Omitting it is not a no-op: `AgentTool.execute`
+  // substitutes `general-purpose` for an omitted `subagent_type`, which
+  // declares no `tools` and so takes prepareTools' inherit-everything branch —
+  // 13 agents × 4 turns × ~17.7k tokens of tool declarations, the entire cost
+  // this type exists to remove. Before the review had its own type, forgetting
+  // the parameter was harmless because the default WAS the right answer.
   // The Agent tool's `description` is the task name the user watches in the
   // TUI while the agent runs, and nothing downstream reads it — the delivery
   // check compares prompts, coverage reads transcripts. So it is the one part
@@ -2222,6 +2578,7 @@ function runRoster(
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
         `plus the same --rules this call was given.` +
         descNote +
+        TYPE_NOTE +
         paramNote,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,
@@ -2654,7 +3011,8 @@ function runAllChunks(
         `rebuild just the missing chunks with --chunk <id>. Write each ` +
         `Agent call's \`description\` (the task ` +
         `name the user watches) in your output language, translating the ` +
-        `separator label — display only; the prompt stays the block VERBATIM.`,
+        `separator label — display only; the prompt stays the block VERBATIM.` +
+        TYPE_NOTE,
       ...blocks,
       `───── end of round — ${dueChunks.length} auditors ─────`,
       ...retirementNote,
@@ -2913,7 +3271,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   const residue = worktreeResidueOf(report);
   if (residue.unmeasured) {
     writeStderrLine(
-      `warning: could not measure whether the review worktree is clean (git status failed: ` +
+      `warning: could not measure whether the review worktree is clean (reason: ` +
         `${inertPath(residue.unmeasured)}). Every brief built by this call says so; an unmeasured tree is ` +
         'not a clean one.',
     );
@@ -3219,6 +3577,21 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       ? foldFindings(args.role as RoleId, findingsContent, prompt, findingsFile)
       : prompt;
   recordPrompt(args.plan, key, printed);
+  // The whole output of this path IS the block the orchestrator pastes
+  // verbatim, and the delivery check compares that paste against the record.
+  // So the launch note gets NO channel here, and the second-best channel is
+  // not stderr: `ShellExecutionService` builds its result as
+  // `stdout + separator + stderr`, and `ShellToolInvocation` hands that
+  // combined string back, so a note on stderr arrives inside the very text
+  // the caller is told to copy. It fails the same equality as stdout would,
+  // only invisibly — the five tests that catch the stdout version see
+  // nothing. Removing it by hand is the edit the delivery gate forbids, so
+  // the launch would enter drift/relaunch repair.
+  //
+  // The rule still reaches these launches: SKILL.md states it for every
+  // `agent` call, and the two paths that CAN carry a note — the roster
+  // header and the audit-round header — do, because there the note sits
+  // outside the ───── blocks that get pasted.
   writeStdoutLine(printed);
   // Admitted AND built — the single-build twin of the all-chunks stamp in
   // `runAllChunks`. A `--chunk <id>` build lands here too: the first chunk

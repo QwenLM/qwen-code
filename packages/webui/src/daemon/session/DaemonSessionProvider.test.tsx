@@ -548,6 +548,175 @@ describe('DaemonSessionProvider', () => {
     expect(connection).not.toHaveProperty('sessionId');
   });
 
+  it('keeps model preview separate until live reasoning context is authoritative', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValueOnce(
+      workspaceProvidersWithReasoningPreview(),
+    );
+    const session = createMockSession({
+      sessionId: 'lazy-session',
+      context: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'lazy-session',
+        workspaceCwd: '/mock-workspace',
+        state: { configOptions: reasoningConfigOptions('medium') },
+      })),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.createSession();
+    });
+    expect(connection?.sessionId).toBe('lazy-session');
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
+
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+
+    expect(connection?.context?.sessionId).toBe('lazy-session');
+    expect(connection?.reasoning).toEqual({
+      enabled: true,
+      effort: 'medium',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it('does not restore model preview when live context lacks reasoning capability', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValueOnce(
+      workspaceProvidersWithReasoningPreview(),
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'lazy-session',
+        context: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'lazy-session',
+          workspaceCwd: '/mock-workspace',
+          state: { configOptions: [] },
+        })),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.createSession();
+    });
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+
+    expect(connection?.context?.sessionId).toBe('lazy-session');
+    expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview?.effort).toBe('xhigh');
+  });
+
+  it('restores workspace reasoning preview after clearing live context models', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'lazy-session',
+        context: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'lazy-session',
+          workspaceCwd: '/mock-workspace',
+          state: {
+            configOptions: reasoningConfigOptions('medium'),
+            models: {
+              currentModelId: 'qwen3.8-max',
+              availableModels: [
+                {
+                  modelId: 'qwen3.8-max',
+                  baseModelId: 'qwen3.8-max',
+                  name: 'Qwen 3.8 Max',
+                  contextLimit: 131_072,
+                },
+              ],
+            },
+          },
+        })),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'lazy-session',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.context?.sessionId).toBe('lazy-session');
+    expect(connection?.models?.[0]?.reasoningPreview).toBeUndefined();
+
+    await act(async () => {
+      await actions?.clearSession();
+    });
+
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
   it('populates git branch from the active session workspace', async () => {
     sdkMocks.sessions.push(createMockSession());
     let connection: DaemonConnectionState | undefined;
@@ -1733,11 +1902,9 @@ describe('DaemonSessionProvider', () => {
     expect(sessionId).toBeDefined();
     await act(async () => {
       actions?.applyGoalSnapshot(sessionId!, created);
-    });
-    expect(connection?.goalState).toBe(created);
-
-    pendingGoal.resolve({ snapshot: { v: 2, goal: null, activity: 'idle' } });
-    await act(async () => {
+      pendingGoal.resolve({
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      });
       await flushPromises();
     });
 
@@ -3173,6 +3340,161 @@ describe('DaemonSessionProvider', () => {
       artifactsVersion: 1,
       initVersion: 0,
       authVersion: 0,
+    });
+  });
+
+  it('deduplicates skill toggle settings events from the generic settings signal', async () => {
+    const mutation = {
+      id: 'skill-toggle-1',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'web-search', enabled: false }],
+      activation: 'applied' as const,
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const laterMutation = {
+      id: 'skill-toggle-2',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'review', enabled: false }],
+      activation: 'partial' as const,
+      sessionsRefreshed: 0,
+      sessionsFailed: 1,
+    };
+    const session = createMockSession({
+      events: async function* skillToggleEvents() {
+        yield {
+          id: 27,
+          v: 1,
+          type: 'settings_changed',
+          data: {
+            key: 'skills.disabled',
+            scope: 'workspace',
+            value: ['web-search'],
+            mutation,
+          },
+        };
+        yield {
+          id: 28,
+          v: 1,
+          type: 'settings_changed',
+          data: {
+            key: 'skills.enabled',
+            scope: 'workspace',
+            value: undefined,
+            mutation,
+          },
+        };
+        yield {
+          id: 29,
+          v: 1,
+          type: 'settings_changed',
+          data: {
+            key: 'ui.theme',
+            scope: 'workspace',
+            value: 'Qwen Dark',
+          },
+        };
+        yield {
+          id: 30,
+          v: 1,
+          type: 'settings_changed',
+          data: {
+            key: 'skills.disabled',
+            scope: 'workspace',
+            value: ['web-search', 'review'],
+            mutation: laterMutation,
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let signals: DaemonWorkspaceEventSignals | undefined;
+
+    function Harness() {
+      signals = useDaemonWorkspaceEventSignals();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(signals).toMatchObject({
+      settingsVersion: 1,
+      skillsVersion: 2,
+      lastSkillMutation: laterMutation,
+      skillMutationsByCwd: {
+        '/mock-workspace': [mutation, laterMutation],
+      },
+    });
+  });
+
+  it('retains every distinct skill mutation from one replay batch', async () => {
+    const partialMutation = {
+      id: 'replay-skill-toggle-1',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'web-search', enabled: false }],
+      activation: 'partial' as const,
+      sessionsRefreshed: 0,
+      sessionsFailed: 1,
+    };
+    const appliedMutation = {
+      id: 'replay-skill-toggle-2',
+      kind: 'skill_toggle' as const,
+      skills: [{ name: 'review', enabled: false }],
+      activation: 'applied' as const,
+      sessionsRefreshed: 1,
+      sessionsFailed: 0,
+    };
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            id: 27,
+            v: 1,
+            type: 'settings_changed',
+            data: {
+              key: 'skills.disabled',
+              scope: 'workspace',
+              value: ['web-search'],
+              mutation: partialMutation,
+            },
+          },
+          {
+            id: 28,
+            v: 1,
+            type: 'settings_changed',
+            data: {
+              key: 'skills.disabled',
+              scope: 'workspace',
+              value: ['web-search', 'review'],
+              mutation: appliedMutation,
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let signals: DaemonWorkspaceEventSignals | undefined;
+
+    function Harness() {
+      signals = useDaemonWorkspaceEventSignals();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(signals).toMatchObject({
+      skillsVersion: 2,
+      lastSkillMutation: appliedMutation,
+      skillMutationsByCwd: {
+        '/mock-workspace': [partialMutation, appliedMutation],
+      },
     });
   });
 
@@ -8248,6 +8570,145 @@ describe('DaemonSessionProvider', () => {
     expect(loadCalls[1]?.[3]).toBe('client-a');
   });
 
+  it('hydrates Goal state without waiting for session metadata after a switch', async () => {
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    const providers = createDeferred<unknown>();
+    const commands =
+      createDeferred<Awaited<ReturnType<MockSession['supportedCommands']>>>();
+    const context =
+      createDeferred<Awaited<ReturnType<MockSession['context']>>>();
+    sdkMocks.workspaceProviders.mockReturnValueOnce(providers.promise);
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-b',
+        supportedCommands: vi.fn(() => commands.promise),
+        context: vi.fn(() => context.promise),
+      }),
+    );
+
+    let loadSession: Promise<void> | undefined;
+    act(() => {
+      loadSession = requireActions(actions).loadSession('session-b');
+    });
+    await act(async () => {
+      await wait(5);
+      await loadSession;
+      await flushPromises();
+    });
+    const goalStateBeforeMetadata = connection?.goalState;
+
+    providers.resolve({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      providers: [],
+    });
+    commands.resolve({
+      v: 1,
+      sessionId: 'session-b',
+      availableCommands: [],
+      availableSkills: [],
+    });
+    context.resolve({
+      v: 1,
+      sessionId: 'session-b',
+      workspaceCwd: '/mock-workspace',
+      state: {},
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(goalStateBeforeMetadata).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+    expect(connection?.goalState).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+  });
+
+  it('preserves hydrated Goal state when the event stream starts', async () => {
+    sdkMocks.sessions.push(createMockSession({ sessionId: 'session-a' }));
+    const goal = createDeferred<GoalStateResponse>();
+    const eventApplied = createDeferred<void>();
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-b',
+        goal: vi.fn(() => goal.promise),
+        events: async function* events(opts = {}) {
+          yield {
+            v: 1,
+            type: 'git_branch_changed',
+            data: { branch: 'feature' },
+          };
+          eventApplied.resolve();
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    act(() => {
+      void requireActions(actions).loadSession('session-b');
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection?.goalState).toBeUndefined();
+
+    await act(async () => {
+      goal.resolve({
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      });
+      await eventApplied.promise;
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-b',
+      gitBranch: 'feature',
+      goalState: { v: 2, goal: null, activity: 'idle' },
+    });
+  });
+
   it('retries a session switch while the target session is closing', async () => {
     const firstSession = createMockSession({ sessionId: 'session-a' });
     const secondSession = createMockSession({ sessionId: 'session-b' });
@@ -8789,6 +9250,7 @@ describe('DaemonSessionProvider', () => {
     expect(connection).toMatchObject({
       sessionId: 'session-1',
       displayName: 'Updated session',
+      goalState: { v: 2, goal: null, activity: 'idle' },
     });
   });
 
@@ -8972,6 +9434,9 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('clears stale sessions on terminal HTTP heartbeat errors', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,
       mode: 'http-bridge',
@@ -8985,6 +9450,7 @@ describe('DaemonSessionProvider', () => {
     sdkMocks.sessions.push(
       createMockSession({
         heartbeat,
+        context: vi.fn(async () => sessionContextWithModels('session-1')),
         events: createIdleEvents(),
       }),
     );
@@ -9018,6 +9484,13 @@ describe('DaemonSessionProvider', () => {
       },
     });
     expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
   });
 
   it('uses recent HTTP status when heartbeat threshold ends with transport failure', async () => {
@@ -9230,6 +9703,8 @@ describe('DaemonSessionProvider', () => {
         errorStatus: status,
       });
       expect(connection?.sessionId).toBeUndefined();
+      expect(connection?.context).toBeUndefined();
+      expect(connection?.reasoning).toBeUndefined();
     },
   );
 
@@ -10356,7 +10831,11 @@ describe('DaemonSessionProvider', () => {
   });
 
   it('clears stale sessions on terminal HTTP stream errors', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
     const session = createMockSession({
+      context: vi.fn(async () => sessionContextWithModels('session-1')),
       events: async function* terminalErrorEvents() {
         await Promise.resolve();
         yield* [];
@@ -10389,10 +10868,61 @@ describe('DaemonSessionProvider', () => {
     });
     expect(connection?.missingSession).not.toBe(true);
     expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
     await act(async () => {
       await expect(providerActions.cancel()).rejects.toThrow(
         'Daemon session is not connected',
       );
+    });
+  });
+
+  it('restores the workspace reasoning preview after an auth failure clears the stream', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
+    const session = createMockSession({
+      context: vi.fn(async () => sessionContextWithModels('session-1')),
+      events: async function* authErrorEvents() {
+        await Promise.resolve();
+        yield* [];
+        throw Object.assign(new Error('Unauthorized'), { status: 401 });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'error',
+      error: 'Unauthorized',
+      errorStatus: 401,
+    });
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
     });
   });
 
@@ -10600,6 +11130,8 @@ describe('DaemonSessionProvider', () => {
         },
       });
       expect(connection?.sessionId).toBeUndefined();
+      expect(connection?.context).toBeUndefined();
+      expect(connection?.reasoning).toBeUndefined();
       expect(blocks[0]).toMatchObject({
         kind: 'user',
         text: 'keep transcript',
@@ -11932,7 +12464,11 @@ describe('DaemonSessionProvider', () => {
     // When the user deletes a running session, the server publishes
     // session_closed on SSE. The provider must NOT auto-reconnect and
     // create a new session — that would undo the user's delete action.
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
     const session = createMockSession({
+      context: vi.fn(async () => sessionContextWithModels('session-1')),
       events: async function* sessionClosedEvents(
         opts: { signal?: AbortSignal } = {},
       ) {
@@ -11977,6 +12513,16 @@ describe('DaemonSessionProvider', () => {
     // Connection should be disconnected with no sessionId.
     expect(connection?.status).toBe('disconnected');
     expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.reasoning).toBeUndefined();
+    // The close must re-project models from the retained provider snapshot:
+    // the attached context's models carry no reasoningPreview, so keeping
+    // them would drop the welcome preview.
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
   });
 
   it('aborts in-flight prompt when session_closed arrives mid-stream', async () => {
@@ -14597,6 +15143,72 @@ function createTextReplaySnapshot(text: string): MockSession['replaySnapshot'] {
       },
     ],
     liveJournal: [],
+  };
+}
+
+function reasoningConfigOptions(currentValue: string): unknown[] {
+  return [
+    {
+      id: 'reasoning_effort',
+      currentValue,
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+      _meta: {
+        'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+      },
+    },
+  ];
+}
+
+function workspaceProvidersWithReasoningPreview() {
+  return {
+    v: 1,
+    workspaceCwd: '/mock-workspace',
+    initialized: true,
+    current: { modelId: 'qwen3.8-max' },
+    providers: [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'qwen-oauth',
+        current: true,
+        models: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            isCurrent: true,
+            isRuntime: false,
+            configOptions: reasoningConfigOptions('xhigh'),
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function sessionContextWithModels(sessionId: string) {
+  return {
+    v: 1 as const,
+    sessionId,
+    workspaceCwd: '/mock-workspace',
+    state: {
+      models: {
+        currentModelId: 'qwen3.8-max',
+        availableModels: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            contextLimit: 131_072,
+          },
+        ],
+      },
+    },
   };
 }
 

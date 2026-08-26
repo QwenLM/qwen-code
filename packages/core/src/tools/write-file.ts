@@ -59,6 +59,7 @@ import {
   hasControlCharacter,
   hasUnsafeDisplayPayload,
 } from './record-artifact.js';
+import { OFFICE_DOCUMENT_EXTENSIONS } from '../utils/workspace-artifact-directory.js';
 import { toCanonicalWorkspaceArtifactPath } from '../utils/workspace-artifact-path.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
@@ -73,8 +74,10 @@ const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
   ['.png', 'image'],
   ['.svg', 'image'],
   ['.webp', 'image'],
-  ['.xlsx', 'file'],
 ]);
+for (const ext of OFFICE_DOCUMENT_EXTENSIONS) {
+  ARTIFACT_KIND_BY_EXTENSION.set(ext, 'document');
+}
 
 type WorkspaceToolArtifact = ToolArtifact & {
   storage: 'workspace';
