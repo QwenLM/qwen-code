@@ -18,7 +18,7 @@
  */
 
 import { Box, Text, useStdin } from 'ink';
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   AgentStatus,
   isTerminalStatus,
@@ -72,6 +72,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     setAgentTabBarFocused,
     setAgentApprovalMode,
     setAgentMessageQueue,
+    appendToAgentMessageQueue,
   } = useAgentViewActions();
   const agent = agents.get(agentId);
   const interactiveAgent = agent?.interactiveAgent;
@@ -207,6 +208,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
   const messageQueue = agentMessageQueues.get(agentId) ?? EMPTY_MESSAGE_QUEUE;
 
   // When agent becomes idle (and not terminal), flush queued messages.
+  const flushedQueueRef = useRef<readonly string[] | null>(null);
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
@@ -214,6 +216,8 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       status !== undefined &&
       !isTerminalStatus(status)
     ) {
+      if (flushedQueueRef.current === messageQueue) return;
+      flushedQueueRef.current = messageQueue;
       const combined = messageQueue.join('\n');
       setAgentMessageQueue(agentId, []);
       interactiveAgent?.enqueueMessage(combined);
@@ -234,16 +238,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
       if (streamingState === StreamingState.Idle) {
         interactiveAgent.enqueueMessage(trimmed);
       } else {
-        setAgentMessageQueue(agentId, [...messageQueue, trimmed]);
+        appendToAgentMessageQueue(agentId, trimmed);
       }
     },
-    [
-      interactiveAgent,
-      streamingState,
-      agentId,
-      messageQueue,
-      setAgentMessageQueue,
-    ],
+    [interactiveAgent, streamingState, agentId, appendToAgentMessageQueue],
   );
 
   // ── Render ──
@@ -307,7 +305,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           </Box>
         )}
 
-        <QueuedMessageDisplay messageQueue={messageQueue} />
+        <QueuedMessageDisplay messageQueue={messageQueue} showHint={false} />
 
         {/* Input prompt — always visible, like the main Composer */}
         <BaseTextInput

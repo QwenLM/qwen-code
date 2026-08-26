@@ -13,10 +13,12 @@ const NUM_TIMES_QUEUE_HINT_SHOWN = 3;
 
 export interface QueuedMessageDisplayProps {
   messageQueue: readonly string[];
+  showHint?: boolean;
 }
 
 export const QueuedMessageDisplay = ({
   messageQueue,
+  showHint: hintEnabled = true,
 }: QueuedMessageDisplayProps) => {
   // Track how many times the edit hint has been shown (per session).
   // Once the user has seen it enough times, hide it.
@@ -35,7 +37,7 @@ export const QueuedMessageDisplay = ({
     wasEmptyRef.current = false;
   }
 
-  const showHint = hintSeenCountRef.current <= NUM_TIMES_QUEUE_HINT_SHOWN;
+  const shouldShowHint = hintSeenCountRef.current <= NUM_TIMES_QUEUE_HINT_SHOWN;
 
   return (
     <Box flexDirection="column" marginTop={1}>
@@ -60,7 +62,7 @@ export const QueuedMessageDisplay = ({
           </Text>
         </Box>
       )}
-      {showHint && (
+      {hintEnabled && shouldShowHint && (
         <Box paddingLeft={2}>
           <Text dimColor italic>
             {t('Ctrl+Q to queue · ↑ to edit queued messages')}

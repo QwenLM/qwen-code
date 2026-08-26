@@ -13,7 +13,7 @@
  */
 
 import { render } from 'ink-testing-library';
-import { useEffect } from 'react';
+import { StrictMode, useEffect } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AgentStatus,
@@ -114,9 +114,11 @@ describe('AgentComposer queued follow-ups (#10069)', () => {
   }
 
   const view = (name: string) => (
-    <AgentViewProvider>
-      <Harness view={name} />
-    </AgentViewProvider>
+    <StrictMode>
+      <AgentViewProvider>
+        <Harness view={name} />
+      </AgentViewProvider>
+    </StrictMode>
   );
 
   const renderWithView = async (name: string) => {
@@ -189,6 +191,19 @@ describe('AgentComposer queued follow-ups (#10069)', () => {
     expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
   });
 
+  it('flushes when returning to a tab after the agent becomes idle', async () => {
+    streamingByAgent.set(agentA, BUSY);
+    const app = await renderWithView('agent-a');
+
+    submitCapture.current!('follow-up while away');
+    await switchTo(app, 'agent-b');
+    streamingByAgent.set(agentA, IDLE);
+    await switchTo(app, 'agent-a');
+
+    expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
+    expect(agentA.enqueueMessage).toHaveBeenCalledWith('follow-up while away');
+  });
+
   it('joins multiple queued follow-ups into one prompt after a tab switch', async () => {
     streamingByAgent.set(agentA, BUSY);
     const app = await renderWithView('agent-a');
@@ -208,6 +223,27 @@ describe('AgentComposer queued follow-ups (#10069)', () => {
     expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
     expect(agentA.enqueueMessage).toHaveBeenCalledWith(
       'first follow-up\nsecond follow-up',
+    );
+  });
+
+  it('keeps both submits when two land in one batch while busy', async () => {
+    streamingByAgent.set(agentA, BUSY);
+    const app = await renderWithView('agent-a');
+
+    // Two submits dispatched before the composer re-renders (e.g. two Enter
+    // presses in one stdin chunk): the second must not replace the first.
+    submitCapture.current!('same-batch one');
+    submitCapture.current!('same-batch two');
+    await switchTo(app, 'agent-a');
+
+    expect(app.lastFrame()).toContain('same-batch one');
+    expect(app.lastFrame()).toContain('same-batch two');
+
+    streamingByAgent.set(agentA, IDLE);
+    await switchTo(app, 'agent-a');
+    expect(agentA.enqueueMessage).toHaveBeenCalledTimes(1);
+    expect(agentA.enqueueMessage).toHaveBeenCalledWith(
+      'same-batch one\nsame-batch two',
     );
   });
 

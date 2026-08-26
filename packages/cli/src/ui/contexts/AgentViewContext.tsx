@@ -84,6 +84,8 @@ export interface AgentViewActions {
   setAgentApprovalMode(agentId: string, mode: ApprovalMode): void;
   /** Replace the queued follow-up messages for an agent (see state docs). */
   setAgentMessageQueue(agentId: string, queue: readonly string[]): void;
+  /** Append one follow-up message without relying on a render-time snapshot. */
+  appendToAgentMessageQueue(agentId: string, message: string): void;
 }
 
 // ─── Context ────────────────────────────────────────────────
@@ -117,6 +119,7 @@ const DEFAULT_ACTIONS: AgentViewActions = {
   setAgentTabBarFocused: noop,
   setAgentApprovalMode: noop,
   setAgentMessageQueue: noop,
+  appendToAgentMessageQueue: noop,
 };
 
 // ─── Hook: useAgentViewState ────────────────────────────────
@@ -155,6 +158,12 @@ export function AgentViewProvider({
   const [agentMessageQueues, setAgentMessageQueues] = useState<
     Map<string, readonly string[]>
   >(() => new Map());
+  // Synchronous mirror of the registered agent ids. The `agents` state only
+  // reflects register/unregister after commit, so a same-batch append cannot
+  // consult it to learn that an agent is being unregistered right now; this
+  // ref is updated at action-call time so appendToAgentMessageQueue drops
+  // follow-ups for a departing agent instead of resurrecting its queue.
+  const registeredIdsRef = useRef<Set<string>>(new Set());
 
   // ── Navigation ──
 
@@ -210,6 +219,7 @@ export function AgentViewProvider({
       color: string,
       modelName?: string,
     ) => {
+      registeredIdsRef.current.add(agentId);
       setAgents((prev) => {
         const next = new Map(prev);
         next.set(agentId, {
@@ -232,6 +242,7 @@ export function AgentViewProvider({
   );
 
   const unregisterAgent = useCallback((agentId: string) => {
+    registeredIdsRef.current.delete(agentId);
     setAgents((prev) => {
       if (!prev.has(agentId)) return prev;
       const next = new Map(prev);
@@ -254,6 +265,7 @@ export function AgentViewProvider({
   }, []);
 
   const unregisterAll = useCallback(() => {
+    registeredIdsRef.current.clear();
     setAgents(new Map());
     setAgentApprovalModes(new Map());
     setAgentMessageQueues(new Map());
@@ -287,6 +299,22 @@ export function AgentViewProvider({
         } else {
           next.set(agentId, queue);
         }
+        return next;
+      });
+    },
+    [],
+  );
+
+  const appendToAgentMessageQueue = useCallback(
+    (agentId: string, message: string) => {
+      // Membership is checked against the registered-agents mirror, not the
+      // queues map: empty queues hold no map entry (a `prev.has` guard would
+      // drop the first message), and the mirror already reflects an
+      // unregisterAgent that ran earlier in the same React batch.
+      if (!registeredIdsRef.current.has(agentId)) return;
+      setAgentMessageQueues((prev) => {
+        const next = new Map(prev);
+        next.set(agentId, [...(next.get(agentId) ?? []), message]);
         return next;
       });
     },
@@ -329,6 +357,7 @@ export function AgentViewProvider({
       setAgentTabBarFocused,
       setAgentApprovalMode,
       setAgentMessageQueue,
+      appendToAgentMessageQueue,
     }),
     [
       switchToAgent,
@@ -342,6 +371,7 @@ export function AgentViewProvider({
       setAgentTabBarFocused,
       setAgentApprovalMode,
       setAgentMessageQueue,
+      appendToAgentMessageQueue,
     ],
   );
 
