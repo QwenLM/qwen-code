@@ -141,12 +141,24 @@ Package with the current host target unless the user requested a target:
 cd packages/desktop-shell
 npm run build:runtime --workspaces=false
 npx tauri build            # current platform
+```
+
+**Cross-compile:** `build:runtime` bundles the Node runtime for the platform
+indicated by `QWEN_DESKTOP_TARGET` (defaults to the host). When targeting a
+different platform you **must** re-run `build:runtime` with the env var set
+before each `tauri build --target`, otherwise the packaged artifact contains
+a wrong-arch Node binary and fails at launch with an exec format error:
+
+```bash
+# Cross-compile: set QWEN_DESKTOP_TARGET and re-run build:runtime per target
+QWEN_DESKTOP_TARGET=aarch64-apple-darwin npm run build:runtime --workspaces=false
 npx tauri build --target aarch64-apple-darwin   # explicit macOS arm64
 ```
 
-For `target: all`, run only targets supported by the current machine or CI
-environment. Do not claim cross-platform artifacts were produced unless the
-files exist. Artifacts land under `packages/desktop-shell/src-tauri/target/release/bundle/`
+For `target: all`, iterate `build:runtime` → `tauri build` per target; run
+only targets supported by the current machine or CI environment. Do not
+claim cross-platform artifacts were produced unless the files exist.
+Artifacts land under `packages/desktop-shell/src-tauri/target/release/bundle/`
 for the host target, or `src-tauri/target/<triple>/release/bundle/` when
 `--target <triple>` is used.
 
@@ -177,7 +189,14 @@ After packaging:
 - Missing bundled script: report that
   `packages/desktop-shell/.agents/skills/desktop-brand-builder/scripts/brand-create.mjs`
   is missing, and include the expected command.
+- Already-branded shell-root: the script refuses to run when
+  `productName` is no longer the default (`Qwen Code Desktop`). Start from
+  a fresh clone — do not re-run the script in an already-patched tree.
 - Build failure: preserve the build directory, return the last useful error
   lines, and include the full log path or command that produced the failure.
 
-Do not delete the build directory on failure.
+Do not delete the build directory on failure. **Never re-run `brand-create`
+in the same clone** — the script is single-use. The "preserve the build
+directory" guidance is for post-mortem debugging, not for retrying the
+brand step. If the brand config was wrong, discard the clone and start
+fresh.

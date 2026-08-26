@@ -189,10 +189,33 @@ function patchBootstrap(shellRoot, brand) {
   return patched;
 }
 
+function detectAlreadyBranded(shellRoot) {
+  const configPath = join(shellRoot, 'src-tauri', 'tauri.conf.json');
+  try {
+    const config = JSON.parse(readFileSync(configPath, 'utf8'));
+    // The pristine shell always ships productName === 'Qwen Code Desktop'.
+    // If it has already been changed, this tree was branded before and
+    // re-running would produce stale results (bootstrap patches key on
+    // the original literals, pubkey/endpoints mutations are not reversible).
+    return config.productName && config.productName !== 'Qwen Code Desktop';
+  } catch {
+    return false;
+  }
+}
+
 function main() {
   const configPath = argValue('--config');
   if (!configPath) fail(USAGE);
   const shellRoot = shellRootFromArgs();
+
+  if (detectAlreadyBranded(shellRoot)) {
+    fail(
+      'this shell-root appears to be already branded (productName is no ' +
+        'longer "Qwen Code Desktop"). brand-create is not idempotent — ' +
+        'start from a fresh clone for each brand.',
+    );
+  }
+
   const brand = loadConfig(resolve(configPath));
 
   const configPathPatched = patchTauriConfig(shellRoot, brand);
