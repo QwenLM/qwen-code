@@ -262,6 +262,13 @@ const systemMsg = (id: string): SystemMessage => ({
   variant: 'warning',
   source: 'prompt_cancelled',
 });
+const recapMsg = (id: string): SystemMessage => ({
+  id,
+  role: 'system',
+  content: 'Recap: earlier work',
+  variant: 'info',
+  source: 'recap',
+});
 const backgroundNotificationMsg = (
   id: string,
   toolUseId?: string,
@@ -1999,6 +2006,69 @@ describe('MessageList — turn collapse (DOM)', () => {
       hasOlderHistory: true,
       onLoadOlderHistory,
     });
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 't1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps split-turn detection alive when a recap message is pinned at the head', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const recap = recapMsg('local-recap-1');
+    // A /recap issued after Ctrl+L pins a local recap message at index 0;
+    // pagination prepends cannot move it. The daemon split turn u1: only its
+    // tail (t1/a1) is loaded, plus a complete turn u2 after it.
+    const c = mount(
+      [
+        recap,
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      { hasOlderHistory: true, onLoadOlderHistory },
+    );
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    expect(has(c, 't1')).toBe(true);
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // The page completes the split turn's head, landing right after the
+    // pinned recap; the recap stays at index 0.
+    rerenderMessages(
+      c,
+      [
+        recap,
+        userMsg('u1'),
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      { hasOlderHistory: true, onLoadOlderHistory },
+    );
     expect(has(c, 'u1')).toBe(true);
     expect(has(c, 't1')).toBe(true);
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');

@@ -4722,7 +4722,13 @@ export const MessageList = memo(
     useLayoutEffect(() => {
       const pending = pendingPaginationTurnCompares.current;
       if (pending.size === 0) return;
-      const first = messages[0];
+      // Skip locally-injected messages (recap ids `local-*`): /recap re-pins
+      // them at index 0 on every render and pagination cannot move them, so
+      // they never reflect a page landing and would pin the head-change check
+      // forever, wedging split-turn detection for the rest of the session.
+      const first = messages.find(
+        (message) => !message?.id.startsWith('local-'),
+      );
       if (!first) return;
       const oldest = pending.entries().next().value;
       if (!oldest) return;
