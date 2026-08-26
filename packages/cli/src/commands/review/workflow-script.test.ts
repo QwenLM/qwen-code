@@ -232,34 +232,33 @@ describe('the generated Step 3A fan-out script', () => {
     }
   });
 
-  it('names the agents that returned nothing instead of dropping them', async () => {
+  // A required agent that died must fail the step, not shrink it: the roster
+  // is the set of dimensions the plan says this review needs, and a result
+  // missing one reads downstream as a complete review that lacks a
+  // dimension. The coverage gate cannot see this class — it asserts
+  // launches, and a dead agent WAS launched — so the script itself is the
+  // consumer, and names the missing role.
+  it('rejects, naming the agent, when a dispatched agent returned nothing', async () => {
     // parallel() reports a dead dispatch as a null element rather than
     // throwing. A script that ignored that would return a short findings list
     // with no sign a dimension went unreviewed.
-    const { result } = await runScript(
-      buildReviewWorkflowScript(AGENTS),
-      async (prompt) => {
+    await expect(
+      runScript(buildReviewWorkflowScript(AGENTS), async (prompt) => {
         if (prompt === 'PROMPT-2') throw new Error('agent died');
         return `said:${prompt}`;
-      },
-    );
-    const r = result as {
-      delivered: Array<{ key: string }>;
-      missingRoles: string[];
-    };
-    expect(r.missingRoles).toEqual(['2']);
-    expect(r.delivered.map((d) => d.key)).toEqual(['1a', '7']);
+      }),
+    ).rejects.toThrow(/required agents failed to deliver \(2\)/);
   });
 
-  it('treats an undefined return as missing, not as an empty finding set', async () => {
-    const { result } = await runScript(
-      buildReviewWorkflowScript(AGENTS),
-      async (prompt) => (prompt === 'PROMPT-7' ? undefined : `said:${prompt}`),
-    );
-    expect((result as { missingRoles: string[] }).missingRoles).toEqual(['7']);
+  it('rejects on an undefined return, not a shorter finding set', async () => {
+    await expect(
+      runScript(buildReviewWorkflowScript(AGENTS), async (prompt) =>
+        prompt === 'PROMPT-7' ? undefined : `said:${prompt}`,
+      ),
+    ).rejects.toThrow(/required agents failed to deliver \(7\)/);
   });
 
-  it('counts a result that strips to empty as missing, not delivered', async () => {
+  it('rejects when a result strips to empty, not as delivered', async () => {
     // A GOAL-mode dispatch can finish with visible text that strips to
     // nothing — a scratchpad-only final message, or a cutoff mid-analysis.
     // It fulfilled, so the null check passes it; counting it delivered would
@@ -267,16 +266,11 @@ describe('the generated Step 3A fan-out script', () => {
     // Step 3D cannot catch it — the agent was launched, so a transcript
     // exists.
     for (const empty of ['', '   ']) {
-      const { result } = await runScript(
-        buildReviewWorkflowScript(AGENTS),
-        async (prompt) => (prompt === 'PROMPT-2' ? empty : `said:${prompt}`),
-      );
-      const r = result as {
-        delivered: Array<{ key: string }>;
-        missingRoles: string[];
-      };
-      expect(r.missingRoles).toEqual(['2']);
-      expect(r.delivered.map((d) => d.key)).toEqual(['1a', '7']);
+      await expect(
+        runScript(buildReviewWorkflowScript(AGENTS), async (prompt) =>
+          prompt === 'PROMPT-2' ? empty : `said:${prompt}`,
+        ),
+      ).rejects.toThrow(/required agents failed to deliver \(2\)/);
     }
   });
 
@@ -294,16 +288,15 @@ describe('the generated Step 3A fan-out script', () => {
     ]);
   });
 
-  // A fan-out where nothing came back is a failed step, not a step with an
-  // empty result. Returned as a value, it would let the caller aggregate over
-  // a diff no agent read — the outcome the coverage gate exists to prevent,
-  // reached without the gate being consulted.
+  // A fan-out where nothing came back is the all-missing case of the same
+  // fail-closed rule: a failed step, never an empty result the caller could
+  // aggregate over a diff no agent read.
   it('throws when every agent failed rather than returning an empty result', async () => {
     await expect(
       runScript(buildReviewWorkflowScript(AGENTS), async () => {
         throw new Error('all dead');
       }),
-    ).rejects.toThrow(/all 3 agents failed to deliver/);
+    ).rejects.toThrow(/required agents failed to deliver \(1a, 2, 7\)/);
   });
 
   it('throws on an empty roster rather than reporting a clean review', async () => {

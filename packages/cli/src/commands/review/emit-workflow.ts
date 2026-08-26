@@ -25,19 +25,17 @@
 // can be evaluated on its own before the skill is taught to ask for it.
 
 import type { CommandModule } from 'yargs';
-import {
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { buildLaunch, worktreeResidueOf } from './agent-prompt.js';
 import { isTerritoryFanOut, usableLineCount } from './lib/budget.js';
-import { inertPath, reviewWorkflowScriptPath } from './lib/paths.js';
+import {
+  ensureWritableReviewWorkflowsDir,
+  inertPath,
+  reviewWorkflowScriptPath,
+} from './lib/paths.js';
 import { recordPrompt } from './lib/prompt-record.js';
 import type { PlanReport } from './lib/report.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
@@ -216,10 +214,14 @@ function runEmitWorkflow(args: EmitWorkflowArgs): void {
   // nowhere to go would read to the coverage gate as a launched fan-out that
   // returned nothing.
   const scriptPath = reviewWorkflowScriptPath(args.plan);
+  // Validated for the same reason, one step further: a symlinked root or
+  // session directory would carry the write outside the trusted root, so the
+  // refusal must land before the briefs and records exist too. Also creates
+  // the session directory, so the write below finds it.
+  ensureWritableReviewWorkflowsDir();
 
   const agents = buildFanOutRoster(report, args.plan, rules);
 
-  mkdirSync(dirname(scriptPath), { recursive: true });
   const temporaryPath = `${scriptPath}.${randomUUID()}.tmp`;
   // Temp-and-rename, and the write is inside the cleanup too: a failure
   // mid-write (ENOSPC, EIO) throws AFTER the temp file exists, and a finally

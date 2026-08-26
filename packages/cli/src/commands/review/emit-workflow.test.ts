@@ -16,8 +16,9 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Storage } from '@qwen-code/qwen-code-core';
 
@@ -289,8 +290,21 @@ describe('emit-workflow — where it writes', () => {
     run(plan);
 
     const scriptPath = reviewWorkflowScriptPath(plan);
+    // The readable sanitized prefix, plus a digest of the RAW session id —
+    // sanitizing is lossy, and the digest is what keeps two sessions whose
+    // ids flatten identically apart (see the collision case below).
+    const sessionDigest = createHash('sha256')
+      .update('sess.1')
+      .digest('hex')
+      .slice(0, 8);
     expect(dirname(scriptPath)).toBe(
-      join(projectDir, 'workflows', 'generated', 'review', 'sess_1'),
+      join(
+        projectDir,
+        'workflows',
+        'generated',
+        'review',
+        `sess_1-${sessionDigest}`,
+      ),
     );
     expect(existsSync(scriptPath)).toBe(true);
     const script = readFileSync(scriptPath, 'utf8');
@@ -343,6 +357,29 @@ describe('emit-workflow — where it writes', () => {
     );
   });
 
+  // `sanitizeFilenameComponent` is lossy — `sess.1` and `sess_1` both flatten
+  // to `sess_1` — so the raw-id digest is what keeps two concurrent sessions
+  // apart. Without it they would select the same script target for the same
+  // plan, and the later atomic rename would hand one session's roster, rules,
+  // and worktree pin to the other.
+  it('keeps sessions that sanitize identically in separate directories', () => {
+    const envFor = (session: string): NodeJS.ProcessEnv => ({
+      QWEN_CODE_PROJECT_DIR: projectDir,
+      QWEN_CODE_SESSION_ID: session,
+    });
+    const a = reviewWorkflowsDir(envFor('sess.1'));
+    const b = reviewWorkflowsDir(envFor('sess_1'));
+    expect(a).not.toBe(b);
+    // The readable prefix survives on both.
+    expect(basename(a).startsWith('sess_1-')).toBe(true);
+    expect(basename(b).startsWith('sess_1-')).toBe(true);
+    // ...and the same plan cannot overwrite across the collision.
+    const plan = join(dir, 'plan.json');
+    expect(reviewWorkflowScriptPath(plan, envFor('sess.1'))).not.toBe(
+      reviewWorkflowScriptPath(plan, envFor('sess_1')),
+    );
+  });
+
   // Nothing large may travel through the model: `args` is inline-only and the
   // sandbox cannot read files, so a roster passed as args is a roster the
   // model has to retype — the failure this command exists to remove.
@@ -389,6 +426,40 @@ describe('emit-workflow — where it writes', () => {
     expect(readFileSync(scriptPath, 'utf8')).toContain('export const meta');
   });
 
+  // The writer shares the loader's canonical-containment policy: a symlinked
+  // root or session directory would carry the script — embedding every review
+  // prompt — outside the trusted root and print a scriptPath the loader then
+  // refuses. The refusal must land before ANY write: briefs and prompt
+  // records are the delivery evidence, and evidence for a script that went
+  // nowhere safe would read to the coverage gate as a launched fan-out.
+  it('refuses a symlinked session directory before writing anything', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    const external = join(dir, 'external');
+    mkdirSync(external, { recursive: true });
+    const sessionDir = reviewWorkflowsDir();
+    mkdirSync(dirname(sessionDir), { recursive: true });
+    symlinkSync(external, sessionDir);
+
+    expect(() => run(plan)).toThrow(/symlinked/);
+    expect(readdirSync(external)).toEqual([]);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+  });
+
+  it('refuses a symlinked generated root before writing anything', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    const external = join(dir, 'external');
+    mkdirSync(external, { recursive: true });
+    const root = join(projectDir, 'workflows', 'generated');
+    mkdirSync(dirname(root), { recursive: true });
+    symlinkSync(external, root);
+
+    expect(() => run(plan)).toThrow(/symlinked/);
+    expect(readdirSync(external)).toEqual([]);
+    expect(readRecordedPrompts(plan).size).toBe(0);
+  });
+
   it('leaves no temp file behind, on success or on a failed write', () => {
     const plan = join(dir, 'plan.json');
     writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
@@ -423,6 +494,20 @@ describe('emit-workflow — where it writes', () => {
     } finally {
       process.chdir(cwd);
     }
+  });
+
+  // The identity must survive canonical spellings of one file: on macOS the
+  // same existing plan is `/var/...` and `/private/var/...` at once, and the
+  // loader canonicalizes with realpath before it checks containment. A link
+  // is the platform-neutral shape of that same divergence.
+  it('names an existing plan one script however the path is spelled', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    const alias = join(dir, 'alias.json');
+    symlinkSync(plan, alias);
+    expect(reviewWorkflowScriptPath(alias)).toBe(
+      reviewWorkflowScriptPath(plan),
+    );
   });
 
   it('refuses an unreadable rules path before writing anything', () => {

@@ -105,8 +105,9 @@ const returns = await parallel(
 // as little — collect both by name. An agent silently missing from the
 // fan-out is the one regression this path must not introduce, and the
 // coverage gate cannot see this class — it asserts launches, and a
-// cap-killed agent WAS launched — so the caller is the consumer: a non-empty
-// missingRoles is a failed step, not a shorter finding set.
+// cap-killed agent WAS launched — so this script is the consumer: any
+// missing role fails the step below, instead of reaching the caller as a
+// shorter finding set.
 const delivered = [];
 const missingRoles = [];
 for (let i = 0; i < AGENTS.length; i++) {
@@ -122,18 +123,15 @@ for (let i = 0; i < AGENTS.length; i++) {
   }
 }
 
+// Fail closed on ANY missing required agent, not only when every one died:
+// the roster is the set of dimensions the plan says this review needs, and
+// a shortened delivered list would let the caller aggregate a review that
+// silently lacks one of them.
 if (missingRoles.length > 0) {
-  log(missingRoles.length + ' agent(s) returned nothing: ' + missingRoles.join(', '));
-}
-
-// A fan-out where nothing came back is a failed step, not a step with an empty
-// result. Returning it as a value would let the caller proceed to aggregation
-// over a diff no agent read — the exact outcome the coverage gate exists to
-// prevent, arrived at without the gate ever being consulted.
-if (delivered.length === 0) {
   throw new Error(
-    'review fan-out: all ' + AGENTS.length + ' agents failed to deliver (' +
-      missingRoles.join(', ') + '). Nothing was reviewed.',
+    'review fan-out: required agents failed to deliver (' +
+      missingRoles.join(', ') +
+      '). Re-run \\'qwen review emit-workflow\\' and dispatch again.',
   );
 }
 
