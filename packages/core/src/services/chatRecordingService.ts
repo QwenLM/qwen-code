@@ -1851,6 +1851,41 @@ export class ChatRecordingService {
     }
   }
 
+  /**
+   * Retires the turn boundary `recordUserMessage` just appended for
+   * `promptId`, keeping the boundary space aligned with the positional
+   * history when that prompt is dropped before its content ever reaches
+   * API history (e.g. the session-token-limit stop records and snapshots
+   * the prompt, then discards the message without sending — R8-13). A
+   * leaked boundary permanently fails the strict legacy pairing gates
+   * closed (boundaries = turns + 1) until /clear.
+   *
+   * No-op unless the NEWEST boundary belongs to `promptId`: retiring
+   * anything older would shift every later slot — the same desync this
+   * repairs. The appended transcript record stays on the active branch —
+   * a later `/resume` reconstructs the dropped message as a positional
+   * turn WITH its boundary, so the stores stay pairable there too.
+   */
+  retireTurnBoundary(promptId: string): boolean {
+    if (!promptId || this.turnPromptIds.at(-1) !== promptId) {
+      return false;
+    }
+    // recordUserMessage appends the title display text, the parent uuid
+    // and the prompt id together; retire them together so rewindRecording's
+    // projection math (boundaries minus display texts) stays aligned. Pop
+    // the display text only while the lists are in lockstep — a resumed
+    // session can legitimately carry fewer display texts than boundaries,
+    // and popping then would remove a DIFFERENT turn's title text.
+    const displayTextsInLockstep =
+      this.userDisplayTextsForTitle.length === this.turnParentUuids.length;
+    this.turnParentUuids.pop();
+    this.turnPromptIds.pop();
+    if (displayTextsInLockstep) {
+      this.userDisplayTextsForTitle.pop();
+    }
+    return true;
+  }
+
   getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
     return this.userDisplayTextsForTitle;
   }

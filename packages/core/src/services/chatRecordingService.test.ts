@@ -504,6 +504,97 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('retireTurnBoundary', () => {
+    it('pops the newest boundary when the promptId matches', () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'first' }],
+        undefined,
+        { displayText: 'first', hookContext: '' },
+        'prompt-1',
+      );
+      chatRecordingService.recordUserMessage(
+        [{ text: 'second' }],
+        undefined,
+        { displayText: 'second', hookContext: '' },
+        'prompt-2',
+      );
+      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
+        'prompt-1',
+        'prompt-2',
+      ]);
+
+      expect(chatRecordingService.retireTurnBoundary('prompt-2')).toBe(true);
+
+      // The newest boundary and its title display text are retired together,
+      // keeping the boundary space aligned with the positional turns after a
+      // prompt is dropped before its content ever reaches API history.
+      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
+        'prompt-1',
+      ]);
+      expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+        'first',
+      ]);
+    });
+
+    it('is a no-op unless the newest boundary owns the promptId', () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'first' }],
+        undefined,
+        { displayText: 'first', hookContext: '' },
+        'prompt-1',
+      );
+      chatRecordingService.recordUserMessage(
+        [{ text: 'second' }],
+        undefined,
+        { displayText: 'second', hookContext: '' },
+        'prompt-2',
+      );
+
+      // Retiring an older (or unknown/empty) boundary would shift every later
+      // slot — the same desync a leaked boundary creates — so it must refuse.
+      expect(chatRecordingService.retireTurnBoundary('prompt-1')).toBe(false);
+      expect(chatRecordingService.retireTurnBoundary('prompt-missing')).toBe(
+        false,
+      );
+      expect(chatRecordingService.retireTurnBoundary('')).toBe(false);
+
+      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
+        'prompt-1',
+        'prompt-2',
+      ]);
+      expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+        'first',
+        'second',
+      ]);
+    });
+
+    it('keeps the next recorded turn paired after a retirement', () => {
+      chatRecordingService.recordUserMessage(
+        [{ text: 'dropped' }],
+        undefined,
+        { displayText: 'dropped', hookContext: '' },
+        'prompt-dropped',
+      );
+      expect(chatRecordingService.retireTurnBoundary('prompt-dropped')).toBe(
+        true,
+      );
+
+      chatRecordingService.recordUserMessage(
+        [{ text: 'next' }],
+        undefined,
+        { displayText: 'next', hookContext: '' },
+        'prompt-next',
+      );
+
+      expect(chatRecordingService.getRewindableTurnPromptIds()).toEqual([
+        'prompt-next',
+      ]);
+      expect(chatRecordingService.getUserDisplayTextsForTitle()).toEqual([
+        'next',
+      ]);
+    });
+  });
+
   describe('recordBranchCheckpointTransaction', () => {
     it('durably records a checkpoint for a completed text turn', async () => {
       const cursor = chatRecordingService.getBranchCheckpointCursor();

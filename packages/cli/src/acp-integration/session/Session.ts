@@ -4095,6 +4095,31 @@ export class Session implements SessionContext {
     }
   }
 
+  /**
+   * Retire the recording artifacts a prompt left behind when its send was
+   * dropped before any positional turn materialized (the session-token-limit
+   * stop, R8-13). recordUserMessage pushes a recording boundary before the
+   * send; if the send is then dropped without pushing the user content, that
+   * boundary (and any turn-start snapshot) outlives the turn it belongs to.
+   * The strict legacy pairing gates compare counts, so one stray boundary or
+   * snapshot permanently fails them closed until /clear. Pop the boundary via
+   * the recording service and drop the snapshot if it belongs to this prompt.
+   */
+  #retireDroppedTurnArtifacts(promptId: string): void {
+    try {
+      this.config.getChatRecordingService()?.retireTurnBoundary(promptId);
+      const fileHistoryService = this.config.getFileHistoryService();
+      if (!fileHistoryService.isEnabled()) return;
+      const snapshots = fileHistoryService.getSnapshots();
+      const last = snapshots.at(-1);
+      if (last && last.promptId === promptId) {
+        fileHistoryService.restoreFromSnapshots(snapshots.slice(0, -1));
+      }
+    } catch (e) {
+      debugLogger.error(`FileHistory: retireDroppedTurnArtifacts failed: ${e}`);
+    }
+  }
+
   captureHistorySnapshot(): Content[] {
     return this.config.getGeminiClient()!.getChat().getHistoryShallow();
   }
@@ -5716,16 +5741,30 @@ export class Session implements SessionContext {
               }
             }
 
-            // Snapshot file state before this turn. Placed after
-            // slash-command and hook early-returns so locally handled commands
-            // don't create phantom snapshots that desync the snapshot index.
-            // Goal-runtime turns keep their snapshot too — every positional
-            // turn must own one (#snapshotTurnStart documents the invariant).
-            // Restore continuations record no user message; rewindToTurn()
-            // indexes snapshots by user-turn position, so skip them.
-            if (!isContinue && !isRetry && !isRestoreAskUserQuestion) {
-              await this.#snapshotTurnStart(promptId);
-            }
+            // Snapshot file state for this turn. Placed after slash-command
+            // and hook early-returns so locally handled commands don't create
+            // phantom snapshots that desync the snapshot index. Goal-runtime
+            // turns keep their snapshot too — every positional turn must own
+            // one (#snapshotTurnStart documents the invariant). Restore
+            // continuations record no user message; rewindToTurn() indexes
+            // snapshots by user-turn position, so skip them.
+            //
+            // R8-13: the capture is LAZY — taken inside beforeSend of the
+            // first send that actually leaves, mirroring the cron/loop and
+            // background-notification paths (R8-12). A prompt dropped by the
+            // session-token-limit check never pushes a positional turn, so an
+            // eager turn-start snapshot would stay a permanent phantom
+            // (snapshots = turns + 1) that fails the strict legacy pairing
+            // gates closed until /clear. #sendMessageStreamWithAutoCompression
+            // runs beforeSend only after its abort and token-limit checks, and
+            // no file mutations happen between turn start and the first send
+            // (only history compression), so the capture contents are
+            // identical to an eager one. A send cancelled AFTER the capture
+            // still preserves its message, so the null-stream branch below
+            // catches the snapshot up for the preserved turn.
+            const turnStartSnapshotEligible =
+              !isContinue && !isRetry && !isRestoreAskUserQuestion;
+            let promptTurnSnapshotTaken = false;
 
             // Prepend session-level system reminders (plan mode / subagent /
             // arena) so the model sees them, matching the behaviour of
@@ -6018,6 +6057,17 @@ export class Session implements SessionContext {
                             orphanSendPushCountBeforeSend =
                               orphanSendChat.getUserContentPushCount?.() ?? 0;
                           }
+                          // R8-13: the lazy turn-start snapshot (see the
+                          // declaration above) — runs only once the send is
+                          // past the abort and session-token-limit checks, so
+                          // a dropped prompt never creates a phantom snapshot.
+                          if (
+                            turnStartSnapshotEligible &&
+                            !promptTurnSnapshotTaken
+                          ) {
+                            promptTurnSnapshotTaken = true;
+                            await this.#snapshotTurnStart(promptId);
+                          }
                           return {
                             kind: 'send',
                             message: nextMessage?.parts ?? [],
@@ -6039,6 +6089,33 @@ export class Session implements SessionContext {
                       isContinue ||
                       isRetry ||
                       sendResult.stopReason === 'cancelled';
+                    if (!preserveFullMessage && turnCount === 1) {
+                      // R8-13: a non-cancelled drop of the FIRST send (the
+                      // session-token-limit stop) discards the message, so no
+                      // positional turn materializes — but recordUserMessage
+                      // already pushed a recording boundary before the send.
+                      // Retire it (and any turn-start snapshot) so the
+                      // boundary/snapshot space stays aligned with the
+                      // positional turns; a leaked boundary permanently fails
+                      // the strict legacy pairing gates closed until /clear.
+                      // Mirrors the lazy-snapshot guard the cron/notification
+                      // paths use for the same drop shape (R8-12). Gated on
+                      // turnCount === 1: a drop on a later tool-loop lap
+                      // arrives after the first send pushed the user content,
+                      // so the turn DOES exist there and its boundary must
+                      // stay.
+                      this.#retireDroppedTurnArtifacts(promptId);
+                    } else if (
+                      sendResult.stopReason === 'cancelled' &&
+                      turnStartSnapshotEligible &&
+                      !promptTurnSnapshotTaken
+                    ) {
+                      // A cancelled send preserves the message, so the turn
+                      // materializes after all — catch up the lazy turn-start
+                      // snapshot it needs (mirrors the cron path).
+                      promptTurnSnapshotTaken = true;
+                      await this.#snapshotTurnStart(promptId);
+                    }
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
                       preserveFullMessage,

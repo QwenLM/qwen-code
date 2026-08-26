@@ -434,6 +434,7 @@ describe('Session', () => {
     recordNotificationStrict: ReturnType<typeof vi.fn>;
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
+    retireTurnBoundary: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     captureRewindCheckpoint: ReturnType<typeof vi.fn>;
     restoreRewindCheckpoint: ReturnType<typeof vi.fn>;
@@ -725,6 +726,7 @@ describe('Session', () => {
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
       recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
+      retireTurnBoundary: vi.fn().mockReturnValue(true),
       rewindRecording: vi.fn(),
       captureRewindCheckpoint: vi.fn().mockReturnValue({}),
       restoreRewindCheckpoint: vi.fn(),
@@ -14434,6 +14436,95 @@ describe('Session', () => {
         });
 
         expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('retires the recording boundary and skips the snapshot when an interactive prompt is dropped by the session token limit', async () => {
+        // R8-13 (prompt() twin of R8-12): recordUserMessage pushes the
+        // recording boundary before the send, and the turn-start snapshot
+        // used to be captured there too. The token-limit check then drops
+        // the prompt without ever pushing a positional turn, so both
+        // artifacts leaked permanently (boundaries = turns+1, snapshots =
+        // turns+1) and the strict legacy pairing gates failed closed until
+        // /clear. The snapshot is now lazy (beforeSend runs only after the
+        // token check) and the dropped prompt's boundary is retired.
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat.mockResolvedValue({
+          originalTokenCount: 999,
+          newTokenCount: 999,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        const result = await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'over the limit' }],
+        });
+
+        expect(result).toEqual({ stopReason: 'max_tokens' });
+        // The boundary was recorded before the send...
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).toHaveBeenCalledTimes(1);
+        const recordedPromptId = vi.mocked(
+          mockChatRecordingService.recordUserMessage,
+        ).mock.calls[0]![3];
+        expect(recordedPromptId).toBe('test-session-id########1');
+        // ...and retired once the drop made sure no positional turn
+        // materializes — the leak that locked the legacy rewind gates.
+        expect(
+          mockChatRecordingService.retireTurnBoundary,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          mockChatRecordingService.retireTurnBoundary,
+        ).toHaveBeenCalledWith(recordedPromptId);
+        // The lazy turn-start snapshot never runs for a prompt that never
+        // sends, and nothing reached the model.
+        expect(mockFileHistoryService.makeSnapshot).not.toHaveBeenCalled();
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      });
+
+      it('catches up the turn-start snapshot when a send is cancelled before it leaves', async () => {
+        // R8-13 lazy-snapshot companion: a cancelled send preserves the full
+        // message, so the positional turn materializes after all — it must
+        // keep its turn-start snapshot even though the lazy capture never
+        // ran (mirrors the cron/notification catch-up, R8-12).
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat.mockImplementation(
+          async (_promptId: string, _force: boolean, signal: AbortSignal) =>
+            new Promise((_, reject) => {
+              signal.addEventListener('abort', () => {
+                const abortError = new Error('aborted');
+                abortError.name = 'AbortError';
+                reject(abortError);
+              });
+            }),
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        const promptPromise = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockGeminiClient.tryCompressChat).toHaveBeenCalled();
+        });
+
+        await session.cancelPendingPrompt();
+
+        await expect(promptPromise).resolves.toEqual({
+          stopReason: 'cancelled',
+        });
+        // The message was preserved, so the turn exists and owns its
+        // snapshot; the boundary stays (no retirement on a preserved turn).
+        expect(mockChat.addHistory).toHaveBeenCalled();
+        expect(mockFileHistoryService.makeSnapshot).toHaveBeenCalledTimes(1);
+        expect(
+          mockChatRecordingService.retireTurnBoundary,
+        ).not.toHaveBeenCalled();
       });
 
       it('falls back to the previous prompt token count when compression returns zero token info', async () => {
