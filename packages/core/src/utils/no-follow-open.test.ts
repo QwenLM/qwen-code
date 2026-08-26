@@ -12,6 +12,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import type { Stats } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -42,6 +43,41 @@ afterEach(() => {
 // Symlink creation needs developer mode on Windows; skip there like the
 // other symlink planting tests in this repo.
 const itNoSymlink = process.platform === 'win32' ? it.skip : it;
+
+// Copy a Stats object with identity fields patched, keeping the prototype
+// so isSymbolicLink()/isFile() keep working on the perturbed result.
+function perturbedStats(
+  stats: Stats,
+  patch: Partial<Pick<Stats, 'dev' | 'ino'>>,
+): Stats {
+  return Object.assign(
+    Object.create(Object.getPrototypeOf(stats)),
+    stats,
+    patch,
+  );
+}
+
+// Install a node:fs mock with O_NOFOLLOW removed so the module under test
+// takes the lstat/open/fstat fallback path. The `default` member is
+// LOAD-BEARING: no-follow-open.ts binds node:fs through a DEFAULT import,
+// so a mock without it hands the helper the real O_NOFOLLOW and the
+// fallback tests would silently pass on the native branch.
+function mockNoFollowFs(
+  build: (
+    actual: typeof import('node:fs'),
+  ) => Record<string, unknown> = () => ({}),
+): void {
+  vi.resetModules();
+  vi.doMock('node:fs', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('node:fs')>();
+    const modified = {
+      ...actual,
+      ...build(actual),
+      constants: { ...actual.constants, O_NOFOLLOW: undefined },
+    };
+    return { ...modified, default: modified };
+  });
+}
 
 describe('openNoFollow (native O_NOFOLLOW available)', () => {
   it('opens a regular file for reading', async () => {
@@ -110,18 +146,7 @@ describe('openNoFollow (native O_NOFOLLOW available)', () => {
 
 describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
   async function importWithoutNoFollow() {
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      // The helper uses a DEFAULT import of node:fs, so the `default`
-      // property must carry the stubbed constants too (`...actual` alone
-      // would keep the real default binding with the real O_NOFOLLOW).
-      const modified = {
-        ...actual,
-        constants: { ...actual.constants, O_NOFOLLOW: undefined },
-      };
-      return { ...modified, default: modified };
-    });
+    mockNoFollowFs();
     const mockedFs = await import('node:fs');
     const { openNoFollow: openFallback, openSyncNoFollow: openSyncFallback } =
       await import('./no-follow-open.js');
@@ -176,43 +201,27 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     const filePath = join(dir, 'data.txt');
     writeFileSync(filePath, 'payload');
 
-    vi.resetModules();
     const closeSpy = vi.fn();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      const modified = {
-        ...actual,
-        constants: { ...actual.constants, O_NOFOLLOW: undefined },
-        fstatSync: ((fd: number) => {
-          const stats = actual.fstatSync(fd);
-          return Object.assign(
-            Object.create(Object.getPrototypeOf(stats)),
-            stats,
-            { ino: stats.ino + 1 },
-          );
-        }) as typeof actual.fstatSync,
-        // Pin the rejection-path fd close: without it every sync fallback
-        // refusal leaks the raw fd it opened for the identity re-check.
-        closeSync: ((fd: number) => {
-          closeSpy();
-          return actual.closeSync(fd);
-        }) as typeof actual.closeSync,
-      };
-      return { ...modified, default: modified };
-    });
+    mockNoFollowFs((actual) => ({
+      fstatSync: ((fd: number) => {
+        const stats = actual.fstatSync(fd);
+        return perturbedStats(stats, { ino: stats.ino + 1 });
+      }) as typeof actual.fstatSync,
+      // Pin the rejection-path fd close: without it every sync fallback
+      // refusal leaks the raw fd it opened for the identity re-check.
+      closeSync: ((fd: number) => {
+        closeSpy();
+        return actual.closeSync(fd);
+      }) as typeof actual.closeSync,
+    }));
 
-    try {
-      const { openSyncNoFollow: openSyncFallback } = await import(
-        './no-follow-open.js'
-      );
-      expect(() => openSyncFallback(filePath)).toThrow(
-        expect.objectContaining({ code: 'ELOOP' }),
-      );
-      expect(closeSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.doUnmock('node:fs');
-      vi.resetModules();
-    }
+    const { openSyncNoFollow: openSyncFallback } = await import(
+      './no-follow-open.js'
+    );
+    expect(() => openSyncFallback(filePath)).toThrow(
+      expect.objectContaining({ code: 'ELOOP' }),
+    );
+    expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
   it('refuses when the device identity changes between lstat and open', async () => {
@@ -224,35 +233,19 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     const filePath = join(dir, 'data.txt');
     writeFileSync(filePath, 'payload');
 
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      const modified = {
-        ...actual,
-        constants: { ...actual.constants, O_NOFOLLOW: undefined },
-        fstatSync: ((fd: number) => {
-          const stats = actual.fstatSync(fd);
-          return Object.assign(
-            Object.create(Object.getPrototypeOf(stats)),
-            stats,
-            { dev: stats.dev + 1 },
-          );
-        }) as typeof actual.fstatSync,
-      };
-      return { ...modified, default: modified };
-    });
+    mockNoFollowFs((actual) => ({
+      fstatSync: ((fd: number) => {
+        const stats = actual.fstatSync(fd);
+        return perturbedStats(stats, { dev: stats.dev + 1 });
+      }) as typeof actual.fstatSync,
+    }));
 
-    try {
-      const { openSyncNoFollow: openSyncFallback } = await import(
-        './no-follow-open.js'
-      );
-      expect(() => openSyncFallback(filePath)).toThrow(
-        expect.objectContaining({ code: 'ELOOP' }),
-      );
-    } finally {
-      vi.doUnmock('node:fs');
-      vi.resetModules();
-    }
+    const { openSyncNoFollow: openSyncFallback } = await import(
+      './no-follow-open.js'
+    );
+    expect(() => openSyncFallback(filePath)).toThrow(
+      expect.objectContaining({ code: 'ELOOP' }),
+    );
   });
 
   it('refuses when the file identity changes between lstat and open (async)', async () => {
@@ -270,44 +263,26 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
 
     let closeSpy: ReturnType<typeof vi.spyOn> | undefined;
 
-    vi.resetModules();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      const modified = {
-        ...actual,
-        constants: { ...actual.constants, O_NOFOLLOW: undefined },
-        promises: {
-          ...actual.promises,
-          lstat: (async (p: string) => {
-            const stats = await actual.promises.lstat(p);
-            return Object.assign(
-              Object.create(Object.getPrototypeOf(stats)),
-              stats,
-              { ino: stats.ino + 1 },
-            );
-          }) as typeof actual.promises.lstat,
-          open: (async (...args: Parameters<typeof actual.promises.open>) => {
-            const handle = await actual.promises.open(...args);
-            closeSpy = vi.spyOn(handle, 'close');
-            return handle;
-          }) as typeof actual.promises.open,
-        },
-      };
-      return { ...modified, default: modified };
-    });
+    mockNoFollowFs((actual) => ({
+      promises: {
+        ...actual.promises,
+        lstat: (async (p: string) => {
+          const stats = await actual.promises.lstat(p);
+          return perturbedStats(stats, { ino: stats.ino + 1 });
+        }) as typeof actual.promises.lstat,
+        open: (async (...args: Parameters<typeof actual.promises.open>) => {
+          const handle = await actual.promises.open(...args);
+          closeSpy = vi.spyOn(handle, 'close');
+          return handle;
+        }) as typeof actual.promises.open,
+      },
+    }));
 
-    try {
-      const { openNoFollow: openFallback } = await import(
-        './no-follow-open.js'
-      );
-      const error = await openFallback(filePath).catch((e) => e);
-      expect((error as NodeJS.ErrnoException).code).toBe('ELOOP');
-      expect(closeSpy).toBeDefined();
-      expect(closeSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.doUnmock('node:fs');
-      vi.resetModules();
-    }
+    const { openNoFollow: openFallback } = await import('./no-follow-open.js');
+    const error = await openFallback(filePath).catch((e) => e);
+    expect((error as NodeJS.ErrnoException).code).toBe('ELOOP');
+    expect(closeSpy).toBeDefined();
+    expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
   // The identity re-check must compare the opened fd against the PRE-OPEN
@@ -315,33 +290,27 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
   // so an implementation re-basing the comparison on a fresh post-open
   // lstat would see the perturbed stats, mismatch the fd, and throw ELOOP;
   // the correct single-lstat implementation opens and reads the payload.
-  function makeSnapshotMockFactory() {
-    return async (importOriginal: () => Promise<typeof import('node:fs')>) => {
-      const actual = await importOriginal();
-      let lstatCalls = 0;
-      const perturb = (stats: import('node:fs').Stats) =>
-        Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, {
-          ino: stats.ino + 1,
-        });
-      const modified = {
-        ...actual,
-        constants: { ...actual.constants, O_NOFOLLOW: undefined },
-        lstatSync: ((p: string) => {
-          const stats = actual.lstatSync(p);
-          lstatCalls += 1;
-          return lstatCalls === 1 ? stats : perturb(stats);
-        }) as typeof actual.lstatSync,
+  function mockNoFollowFsWithPerturbedSnapshot(): void {
+    let lstatCalls = 0;
+    mockNoFollowFs((actual) => {
+      const snapshotStats = (stats: Stats): Stats => {
+        lstatCalls += 1;
+        return lstatCalls === 1
+          ? stats
+          : perturbedStats(stats, { ino: stats.ino + 1 });
+      };
+      return {
+        lstatSync: ((p: string) =>
+          snapshotStats(actual.lstatSync(p))) as typeof actual.lstatSync,
         promises: {
           ...actual.promises,
-          lstat: (async (p: string) => {
-            const stats = await actual.promises.lstat(p);
-            lstatCalls += 1;
-            return lstatCalls === 1 ? stats : perturb(stats);
-          }) as typeof actual.promises.lstat,
+          lstat: (async (p: string) =>
+            snapshotStats(
+              await actual.promises.lstat(p),
+            )) as typeof actual.promises.lstat,
         },
       };
-      return { ...modified, default: modified };
-    };
+    });
   }
 
   it('compares the opened fd against the PRE-OPEN lstat snapshot (sync)', async () => {
@@ -349,22 +318,16 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     const filePath = join(dir, 'data.txt');
     writeFileSync(filePath, 'snapshot-payload');
 
-    vi.resetModules();
-    vi.doMock('node:fs', makeSnapshotMockFactory());
+    mockNoFollowFsWithPerturbedSnapshot();
 
+    const { openSyncNoFollow: openSyncFallback } = await import(
+      './no-follow-open.js'
+    );
+    const fd = openSyncFallback(filePath);
     try {
-      const { openSyncNoFollow: openSyncFallback } = await import(
-        './no-follow-open.js'
-      );
-      const fd = openSyncFallback(filePath);
-      try {
-        expect(readFileSync(fd, 'utf8')).toBe('snapshot-payload');
-      } finally {
-        closeSync(fd);
-      }
+      expect(readFileSync(fd, 'utf8')).toBe('snapshot-payload');
     } finally {
-      vi.doUnmock('node:fs');
-      vi.resetModules();
+      closeSync(fd);
     }
   });
 
@@ -373,24 +336,16 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     const filePath = join(dir, 'data.txt');
     writeFileSync(filePath, 'snapshot-payload');
 
-    vi.resetModules();
-    vi.doMock('node:fs', makeSnapshotMockFactory());
+    mockNoFollowFsWithPerturbedSnapshot();
 
+    const { openNoFollow: openFallback } = await import('./no-follow-open.js');
+    const handle = await openFallback(filePath);
     try {
-      const { openNoFollow: openFallback } = await import(
-        './no-follow-open.js'
-      );
-      const handle = await openFallback(filePath);
-      try {
-        const buffer = Buffer.alloc(16);
-        const { bytesRead } = await handle.read(buffer, 0, 16, 0);
-        expect(buffer.toString('utf8', 0, bytesRead)).toBe('snapshot-payload');
-      } finally {
-        await handle.close();
-      }
+      const buffer = Buffer.alloc(16);
+      const { bytesRead } = await handle.read(buffer, 0, 16, 0);
+      expect(buffer.toString('utf8', 0, bytesRead)).toBe('snapshot-payload');
     } finally {
-      vi.doUnmock('node:fs');
-      vi.resetModules();
+      await handle.close();
     }
   });
 
@@ -401,55 +356,129 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     const filePath = join(dir, 'data.txt');
     writeFileSync(filePath, 'payload');
 
-    vi.resetModules();
     const closeSpy = vi.fn();
-    vi.doMock('node:fs', async (importOriginal) => {
-      const actual = await importOriginal<typeof import('node:fs')>();
-      const modified = {
-        ...actual,
-        constants: { ...actual.constants, O_NOFOLLOW: undefined },
-        lstatSync: ((p: string) => {
-          const stats = actual.lstatSync(p);
-          return Object.assign(
-            Object.create(Object.getPrototypeOf(stats)),
-            stats,
-            { ino: 0 },
-          );
-        }) as typeof actual.lstatSync,
-        // Same rejection-path fd close pin as the identity-change test.
-        closeSync: ((fd: number) => {
-          closeSpy();
-          return actual.closeSync(fd);
-        }) as typeof actual.closeSync,
-      };
-      return { ...modified, default: modified };
-    });
+    mockNoFollowFs((actual) => ({
+      lstatSync: ((p: string) =>
+        perturbedStats(actual.lstatSync(p), {
+          ino: 0,
+        })) as typeof actual.lstatSync,
+      // Same rejection-path fd close pin as the identity-change test.
+      closeSync: ((fd: number) => {
+        closeSpy();
+        return actual.closeSync(fd);
+      }) as typeof actual.closeSync,
+    }));
 
-    try {
-      const { openSyncNoFollow: openSyncFallback } = await import(
-        './no-follow-open.js'
-      );
-      // Distinct from a genuine symlink refusal: the code must NOT be
-      // 'ELOOP', or consumers' ELOOP-specific handling (symlink-escape
-      // flags, "not a regular file" errors, binary-row collapses) misfires
-      // on legitimate files that merely live on an inode-0 volume.
-      const error = (() => {
-        try {
-          openSyncFallback(filePath);
-          return undefined;
-        } catch (e) {
-          return e as NodeJS.ErrnoException;
-        }
-      })();
-      expect(error).toBeDefined();
-      expect(error?.code).toBe(UNVERIFIABLE_IDENTITY_CODE);
-      expect(error?.code).not.toBe('ELOOP');
-      expect(isUnverifiableIdentityError(error)).toBe(true);
-      expect(closeSpy).toHaveBeenCalledTimes(1);
-    } finally {
-      vi.doUnmock('node:fs');
-      vi.resetModules();
-    }
+    const { openSyncNoFollow: openSyncFallback } = await import(
+      './no-follow-open.js'
+    );
+    // Distinct from a genuine symlink refusal: the code must NOT be
+    // 'ELOOP', or consumers' ELOOP-specific handling (symlink-escape
+    // flags, "not a regular file" errors, binary-row collapses) misfires
+    // on legitimate files that merely live on an inode-0 volume.
+    const error = (() => {
+      try {
+        openSyncFallback(filePath);
+        return undefined;
+      } catch (e) {
+        return e as NodeJS.ErrnoException;
+      }
+    })();
+    expect(error).toBeDefined();
+    expect(error?.code).toBe(UNVERIFIABLE_IDENTITY_CODE);
+    expect(error?.code).not.toBe('ELOOP');
+    expect(isUnverifiableIdentityError(error)).toBe(true);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('still rejects with ELOOP when the rejection-path close fails (sync)', async () => {
+    // The identity-mismatch close is best-effort: if closeSync itself
+    // throws, the pinned ELOOP refusal must still surface, not the
+    // close error. Deleting the swallow around fs.closeSync in
+    // openSyncNoFollow makes this test fail with the close error.
+    const dir = makeTempDir();
+    const filePath = join(dir, 'data.txt');
+    writeFileSync(filePath, 'payload');
+
+    mockNoFollowFs((actual) => ({
+      fstatSync: ((fd: number) => {
+        const stats = actual.fstatSync(fd);
+        return perturbedStats(stats, { ino: stats.ino + 1 });
+      }) as typeof actual.fstatSync,
+      closeSync: (() => {
+        throw Object.assign(new Error('close failed'), { code: 'EBADF' });
+      }) as typeof actual.closeSync,
+    }));
+
+    const { openSyncNoFollow: openSyncFallback } = await import(
+      './no-follow-open.js'
+    );
+    expect(() => openSyncFallback(filePath)).toThrow(
+      expect.objectContaining({ code: 'ELOOP' }),
+    );
+  });
+
+  it('still rejects with EUNVERIFIABLE when the rejection-path close fails (inode 0)', async () => {
+    // Same best-effort-close pin for the inode-0 refusal: a throwing
+    // closeSync must not mask the UNVERIFIABLE_IDENTITY_CODE error.
+    const dir = makeTempDir();
+    const filePath = join(dir, 'data.txt');
+    writeFileSync(filePath, 'payload');
+
+    mockNoFollowFs((actual) => ({
+      lstatSync: ((p: string) =>
+        perturbedStats(actual.lstatSync(p), {
+          ino: 0,
+        })) as typeof actual.lstatSync,
+      closeSync: (() => {
+        throw Object.assign(new Error('close failed'), { code: 'EBADF' });
+      }) as typeof actual.closeSync,
+    }));
+
+    const { openSyncNoFollow: openSyncFallback } = await import(
+      './no-follow-open.js'
+    );
+    const error = (() => {
+      try {
+        openSyncFallback(filePath);
+        return undefined;
+      } catch (e) {
+        return e as NodeJS.ErrnoException;
+      }
+    })();
+    expect(error).toBeDefined();
+    expect(error?.code).toBe(UNVERIFIABLE_IDENTITY_CODE);
+  });
+
+  it('still rejects with ELOOP when the rejection-path close fails (async)', async () => {
+    // Async best-effort-close pin: a rejecting handle.close() must not
+    // mask the pinned ELOOP refusal. Deleting the .catch(() => {}) on
+    // handle.close() in openNoFollow makes this test fail with the
+    // close rejection instead.
+    const dir = makeTempDir();
+    const filePath = join(dir, 'data.txt');
+    writeFileSync(filePath, 'payload');
+
+    mockNoFollowFs((actual) => ({
+      promises: {
+        ...actual.promises,
+        lstat: (async (p: string) => {
+          const stats = await actual.promises.lstat(p);
+          return perturbedStats(stats, { ino: stats.ino + 1 });
+        }) as typeof actual.promises.lstat,
+        open: (async (...args: Parameters<typeof actual.promises.open>) => {
+          const handle = await actual.promises.open(...args);
+          vi.spyOn(handle, 'close').mockRejectedValue(
+            Object.assign(new Error('close failed'), { code: 'EIO' }),
+          );
+          return handle;
+        }) as typeof actual.promises.open,
+      },
+    }));
+
+    const { openNoFollow: openFallback } = await import('./no-follow-open.js');
+    const error = await openFallback(filePath).catch((e) => e);
+    expect((error as NodeJS.ErrnoException).code).toBe('ELOOP');
   });
 
   it('propagates ENOENT for missing paths', async () => {
