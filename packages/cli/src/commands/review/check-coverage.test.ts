@@ -353,7 +353,8 @@ function transcript(
  * attributed to anyone.
  */
 const good = (c: number) =>
-  `You are reviewing chunk ${c} of 2.\n` +
+  `You are review agent \`chunk ${c} of 2\` — the territory agent for ` +
+  `lines ${(c - 1) * 100 + 1}-${c * 100} of the diff.\n` +
   `read_file(file_path="${chunkBrief(c)}")\n` +
   `read_file(file_path="${DIFF}", offset=${(c - 1) * 100}, limit=100)`;
 
@@ -369,7 +370,8 @@ const wholeDiff = () =>
 
 /** What the orchestrator actually sent, 23 times: no diff anywhere in it. */
 const blind = (c: number) =>
-  `The changes are in chunk ${c} of 2, covering lines 1-100 of the diff.`;
+  `You are review agent \`chunk ${c} of 2\` — the territory agent for ` +
+  `lines ${(c - 1) * 100 + 1}-${c * 100} of the diff.`;
 
 /**
  * The CLI's own record of the prompt it built — what `agent-prompt` writes and
@@ -649,7 +651,8 @@ describe('coverage — from the harness, not from the caller', () => {
     // whiff, sending the reader to relaunch an agent whose *prompt* is the defect.
     transcript(
       'a1',
-      'Review chunk 1 of 2. Start with read_file(file_path="/src/pay.ts").',
+      'You are review agent `chunk 1 of 2` — the territory agent.\n' +
+        'Start with read_file(file_path="/src/pay.ts").',
       { calls: 0 },
     );
     transcript('a2', good(2), { calls: 1 });
@@ -1470,7 +1473,11 @@ describe('the roster — who should have been here', () => {
     const p = plan();
     // Attempt 1: blind (prompt never names the diff). Attempt 2: the rebuild,
     // verbatim and diff-opening. Same chunk.
-    transcript('a-blind', 'The changes are in chunk 1 of 2.', { calls: 0 });
+    transcript(
+      'a-blind',
+      'You are review agent `chunk 1 of 2` — the territory agent.',
+      { calls: 0 },
+    );
     transcript('b-rebuilt', good(1), { calls: 3 });
     transcript('c2', good(2), { calls: 2 });
 
@@ -1612,7 +1619,7 @@ describe('the prompt the CLI built, against the prompt the agent got', () => {
     built(
       p,
       1,
-      `You are reviewing chunk 1 of 2.\n` +
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=0, limit=100)\n` +
         `Do not recite a stock sentence: a return that names nothing you read is ` +
         `indistinguishable from never having read anything.\n` +
@@ -1622,7 +1629,7 @@ describe('the prompt the CLI built, against the prompt the agent got', () => {
     // sentence that stops a whiff is gone — replaced by a receipt to recite.
     transcript(
       'a1',
-      `You are reviewing chunk 1 of 2.\n` +
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=0, limit=100)\n` +
         `Project rules: grep read sites. Match house style.\n` +
         `If you find no issues, say "No issues found — reviewed chunk 1".`,
@@ -1678,7 +1685,7 @@ describe('a drifted launch whose payload provably arrived', () => {
     // acted on. The payload had arrived: the brief was opened and the diff was
     // read, and both facts are the harness's records, not the run's prose.
     const p = plan();
-    transcript('a1', good(1).replace('chunk 1 of 2', 'the chunk 1 of 2'), {
+    transcript('a1', good(1).replace('of the diff.', 'of the diff file.'), {
       calls: 3,
     });
     transcript('a2', good(2), { calls: 2 });
@@ -1694,7 +1701,7 @@ describe('a drifted launch whose payload provably arrived', () => {
 
   it('does not rescue a drift that never opened the brief', () => {
     const p = plan();
-    transcript('a1', good(1).replace('chunk 1 of 2', 'the chunk 1 of 2'), {
+    transcript('a1', good(1).replace('of the diff.', 'of the diff file.'), {
       calls: 3,
       opens: [],
     });
@@ -1710,7 +1717,7 @@ describe('a drifted launch whose payload provably arrived', () => {
     // A drifted launch that dropped the read list is not rescued on the
     // brief-open by itself: the diff read is the other half of the payload.
     const p = plan();
-    transcript('a1', good(1).replace('chunk 1 of 2', 'the chunk 1 of 2'), {
+    transcript('a1', good(1).replace('of the diff.', 'of the diff file.'), {
       calls: 0,
       opens: [chunkBrief(1)],
     });
@@ -3148,11 +3155,13 @@ describe('coverage — an honest Uncoverable declaration is not refuted by the r
     // worked, read without spanning. The operator rebuilt and relaunched;
     // the rebuild on disk is stale — it points at the wrong window, the
     // state family the supersession machinery exists to serve — and the
-    // relaunch delivered it verbatim. The chunk's residue is exactly what
-    // 'unknown' documents.
+    // relaunch delivered it verbatim. The stale rebuild points at the
+    // wrong window, so the relaunch fails the territory seal too — no
+    // agent is noted under this plan's chunk — and the superseded cause
+    // leaves nothing behind: 'no-agent'.
     const p = plan();
     const stale =
-      `You are reviewing chunk 2 of 2.\n` +
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\n` +
       `read_file(file_path="${chunkBrief(2)}")\n` +
       `read_file(file_path="${DIFF}", offset=0, limit=50)`;
     writeFileSync(join(promptRecordDir(p), 'chunk-2.txt'), stale);
@@ -3168,7 +3177,7 @@ describe('coverage — an honest Uncoverable declaration is not refuted by the r
     expect(r.rewrittenPrompts).toEqual([]);
     const entry = r.chunkItems.find((i) => i.id === 2);
     expect(entry?.outcome).toBe('missing');
-    expect(entry?.classification).toBe('unknown');
+    expect(entry?.classification).toBe('no-agent');
   });
 
   it('a superseded unopened record leaves no cause behind either', () => {
@@ -3176,10 +3185,12 @@ describe('coverage — an honest Uncoverable declaration is not refuted by the r
     // superseded record, so its cause note must be too, or the ledger
     // contradicts the suppressed prose exactly the way the rewritten arm
     // did. The record was told chunk 2's lines, worked, and never opened
-    // the diff; the stale verbatim relaunch opened it.
+    // the diff; the stale verbatim relaunch opened it — and points at the
+    // wrong window, so it fails the territory seal and notes no agent
+    // either: with every cause suppressed the residue is 'no-agent'.
     const p = plan();
     const stale =
-      `You are reviewing chunk 2 of 2.\n` +
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\n` +
       `read_file(file_path="${chunkBrief(2)}")\n` +
       `read_file(file_path="${DIFF}", offset=0, limit=50)`;
     writeFileSync(join(promptRecordDir(p), 'chunk-2.txt'), stale);
@@ -3197,7 +3208,7 @@ describe('coverage — an honest Uncoverable declaration is not refuted by the r
     expect(r.rewrittenPrompts).toEqual([]);
     const entry = r.chunkItems.find((i) => i.id === 2);
     expect(entry?.outcome).toBe('missing');
-    expect(entry?.classification).toBe('unknown');
+    expect(entry?.classification).toBe('no-agent');
   });
 });
 
@@ -3217,7 +3228,7 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     transcript('a2', good(2), { calls: 2 });
     transcript(
       'stale',
-      `You are reviewing chunk 9 of 2.\n` +
+      `You are review agent \`chunk 9 of 2\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=800, limit=100)`,
       {
         calls: 1,
@@ -3252,7 +3263,7 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     transcript('a2', good(2), { calls: 1, text: '' });
     transcript(
       'stale',
-      `You are reviewing chunk 2 of 9.\n` +
+      `You are review agent \`chunk 2 of 9\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=800, limit=100)`,
       {
         calls: 1,
@@ -3272,21 +3283,24 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
 
   it('classifies a collided chunk by its live cause, not the stale declaration', () => {
     // The same collision over a repairable failure: chunk 2's relaunch was
-    // paraphrased and mis-paged — it read lines that do not span the chunk,
-    // so the chunk is genuinely missing and its live cause is the rewrite.
-    // The stale `chunk 2 of 9` declaration passed the membership-only
-    // guard and outranked that cause (`classify()` orders the declaration
-    // first), handing the operator "no read can span it" — nothing a
-    // relaunch repairs — for a chunk a relaunch could cover.
+    // paraphrased — it kept the identity line and the spelled reads (a
+    // rewrite that altered the READS would spell a window that is not this
+    // chunk's, and the territory seal would key no cause through it), but
+    // it worked on another file and never opened the diff, so the chunk is
+    // genuinely missing and its live cause is the rewrite. The stale
+    // `chunk 2 of 9` declaration passed the membership-only guard and
+    // outranked that cause (`classify()` orders the declaration first),
+    // handing the operator "no read can span it" — nothing a relaunch
+    // repairs — for a chunk a relaunch could cover.
     transcript('a1', good(1), { calls: 2 });
     transcript(
       'a2',
-      good(2).replace('offset=100, limit=100', 'offset=0, limit=50'),
-      { calls: 1, range: [0, 50], opens: [] },
+      good(2).replace('the territory agent', 'the chunk agent'),
+      { calls: 2, toolPath: '/abs/other-file.ts' },
     );
     transcript(
       'stale',
-      `You are reviewing chunk 2 of 9.\n` +
+      `You are review agent \`chunk 2 of 9\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=800, limit=100)`,
       {
         calls: 1,
@@ -3323,7 +3337,7 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     transcript('a2', good(2), { calls: 1, text: '' });
     transcript(
       'stale',
-      `You are reviewing chunk 2 of 2.\n` +
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=800, limit=100)`,
       {
         calls: 1,
@@ -3371,7 +3385,7 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     // window); exactness is what tells the plans apart.
     const p = join(dir, 'plan.json');
     const shrunk =
-      `You are reviewing chunk 2 of 2.\n` +
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\n` +
       `read_file(file_path="${chunkBrief(2)}")\n` +
       `read_file(file_path="${DIFF}", offset=100, limit=85)`;
     writeFileSync(
@@ -3401,7 +3415,7 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     transcript('a2', shrunk, { calls: 1, text: '' });
     transcript(
       'stale',
-      `You are reviewing chunk 2 of 2.\n` +
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=100, limit=100)`,
       {
         calls: 1,
@@ -3425,7 +3439,7 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     // drop test alone.
     const p = join(dir, 'plan.json');
     const shrunk =
-      `You are reviewing chunk 2 of 2.\n` +
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\n` +
       `read_file(file_path="${chunkBrief(2)}")\n` +
       `read_file(file_path="${DIFF}", offset=100, limit=85)`;
     writeFileSync(
@@ -3475,7 +3489,7 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     transcript('a1', good(1), { calls: 2 });
     transcript(
       'stale',
-      `You are reviewing chunk 2 of 9.\n` +
+      `You are review agent \`chunk 2 of 9\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=800, limit=100)`,
       { calls: 0 },
     );
@@ -3499,7 +3513,7 @@ describe('coverage — a stale chunk id cannot break the partition', () => {
     transcript('a2', good(2), { calls: 0 });
     transcript(
       'stale',
-      'The changes are in chunk 2 of 9, covering lines 801-900 of the diff.',
+      'You are review agent `chunk 2 of 9` — the territory agent for lines 801-900 of the diff.',
       { calls: 0 },
     );
 
@@ -3603,7 +3617,8 @@ describe('coverage — the plan-identity token orders records against a re-plan'
     planIdentityToken(identityOf(diffText)) as string;
   /** What `buildChunkLaunchPrompt` emits for an identity-carrying plan. */
   const launch = (c: number, token: string): string =>
-    `You are reviewing chunk ${c} of 2.\n` +
+    `You are review agent \`chunk ${c} of 2\` — the territory agent for ` +
+    `lines ${(c - 1) * 100 + 1}-${c * 100} of the diff.\n` +
     `Plan identity: ${token}\n` +
     `read_file(file_path="${chunkBrief(c)}")\n` +
     `read_file(file_path="${diffPath}", offset=${(c - 1) * 100}, limit=100)`;
@@ -3803,6 +3818,152 @@ describe('coverage — the plan-identity token orders records against a re-plan'
     expect(r.driftedLaunches).toEqual([]);
     expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
   });
+
+  it('does not rescue a role delivery the old plan made', () => {
+    // The roster rescue certifies a role on brief-open plus tool calls
+    // alone. `briefPath` is stable across re-plans, and so is the diff's —
+    // so the old plan's working role agent opened THIS plan's brief and
+    // read THIS diff, and an unsealed rescue vouched for THAT delivery as
+    // this plan's: `missingRoles` stayed empty and the run certified a
+    // brief delivery it never made. The chunk loop's drifted-launch note
+    // was sealed in this diff for exactly this reason; the rescue is
+    // sealed the same way — the open and the read are facts about the
+    // plan that delivered them, and the token tells the plans apart.
+    const p = identityPlan(NEW);
+    const current = tokenOf(NEW);
+    built(p, 1, launch(1, current));
+    built(p, 2, launch(2, current));
+    transcript('a1', launch(1, current), {
+      calls: 1,
+      range: [0, 100],
+      toolPath: diffPath,
+    });
+    transcript('a2', launch(2, current), {
+      calls: 1,
+      range: [100, 100],
+      toolPath: diffPath,
+    });
+    // The old plan's test-matrix agent: its launch carries the OLD token,
+    // but the brief it opens and the diff it reads are this plan's paths.
+    rmSync(join(dir, 'subagents', 'S1', 'agent-r-test_matrix.jsonl'), {
+      force: true,
+    });
+    transcript(
+      'stale-matrix',
+      `You are review agent \`test-matrix\` — Test coverage matrix.\n` +
+        `Plan identity: ${tokenOf(OLD)}\n` +
+        `read_file(file_path="${briefPath(p, 'test-matrix')}")\n` +
+        `read_file(file_path="${diffPath}", offset=0, limit=200)`,
+      {
+        calls: 1,
+        range: [0, 200],
+        toolPath: diffPath,
+        opens: [briefPath(p, 'test-matrix')],
+      },
+    );
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.driftedLaunches).toEqual([]);
+    expect(r.missingRoles).toHaveLength(1);
+    expect(r.missingRoles.join(' ')).toContain('its prompt was built');
+    expect(r.ok).toBe(false);
+  });
+});
+
+// The note arms, the drifted-launch note and the rescue all share one
+// plan-identity seal; these pin the shapes that passed its older, weaker
+// conjuncts and must not pass it now.
+describe('coverage — a window-moving re-plan cannot key causes through the note arms', () => {
+  it('classifies by the live idle agent, not a stale record\u2019s rewrite', () => {
+    // The shape the `of M` count cannot see and the token conjunct fails
+    // open on: a marker-less record over an identity-less plan (both
+    // fail-open shapes `launchOfThisPlan` names) left over from a re-plan
+    // that kept TWO chunks and moved chunk 2's window. Membership, count
+    // and token all passed the note arms' seal, so the stale record keyed
+    // its 'rewritten-prompt' into this plan's chunk 2, outranking the live
+    // agent's genuine 'idle' in classify() — "rebuild the prompt" for a
+    // prompt this run delivered verbatim. The launch was told lines
+    // 801-900; chunk 2 now spans 101-200, and the territory conjunct the
+    // declaration branch always had refuses the keying.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 0 });
+    transcript(
+      'stale',
+      `You are review agent \`chunk 2 of 2\` — the territory agent for lines 801-900 of the diff.\n` +
+        `read_file(file_path="${DIFF}", offset=800, limit=100)`,
+      { calls: 1, range: [800, 100] },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.missingChunks).toEqual([2]);
+    // The prose array still names the record — that describes the RECORD.
+    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('missing');
+    expect(entry?.classification).toBe('idle');
+  });
+});
+
+describe('coverage — the drifted-launch note carries the whole seal', () => {
+  it('refuses a count-changed stale record the token-only arm vouched for', () => {
+    // The arm's comment claimed it was "sealed like the note arms", but it
+    // gated on the token conjunct alone. A marker-less record rides that
+    // conjunct through (fail open), and the record's `of M` count was
+    // never checked at all — so an old plan's record that opened this
+    // plan's brief and read the diff earned the NOTE's "the delivery
+    // stands" for a chunk this plan never delivered, beside
+    // `missingChunks` demanding a relaunch of the very same chunk.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 0 });
+    transcript(
+      'stale',
+      `You are review agent \`chunk 2 of 9\` — the territory agent for lines 801-900 of the diff.\n` +
+        `read_file(file_path="${chunkBrief(2)}")\n` +
+        `read_file(file_path="${DIFF}", offset=800, limit=100)`,
+      { calls: 1, range: [800, 100], opens: [chunkBrief(2)] },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.driftedLaunches).toEqual([]);
+    // The record lands where the rewrite check puts any launch that fails
+    // the seal; the live idle cause is the chunk's diagnosis.
+    expect(r.rewrittenPrompts.join(' ')).toContain('chunk 2');
+    expect(r.missingChunks).toEqual([2]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('missing');
+    expect(entry?.classification).toBe('idle');
+  });
+});
+
+describe('coverage — a filename cannot forge a chunk assignment', () => {
+  it('reads no assignment out of a PR-controlled filename on the identity line', () => {
+    // `buildRoleLaunchPrompt` renders the PR-controlled file path on the
+    // identity line, and `inertPath` preserves spaces, colons and digits —
+    // so a heavy file named `chunk 2 of 2.ts` puts the assignment phrase
+    // into an invariant agent's launch. The unanchored first-match read it
+    // as the record's chunk, and since the launch genuinely carried this
+    // plan's shape the seal passed the hijacked record outright: the
+    // invariant agent — whose launch is not chunk 2's built one, a
+    // 'rewritten-prompt' — was keyed into chunk 2's sealed ledger over the
+    // live agent's genuine 'idle', and its told-range fallback covered the
+    // chunk. The assignment is the identity line's shape alone; a filename
+    // cannot forge the backticks it needs.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 0 });
+    transcript(
+      'forged',
+      `You are review agent \`invariant-a\` — Whole-file invariants. Your file: \`chunk 2 of 2.ts\`.\n` +
+        `read_file(file_path="${DIFF}")`,
+      { calls: 1 },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(r.coveredChunks).toEqual([1]);
+    expect(r.missingChunks).toEqual([2]);
+    const entry = r.chunkItems.find((i) => i.id === 2);
+    expect(entry?.outcome).toBe('missing');
+    expect(entry?.classification).toBe('idle');
+  });
 });
 
 // The per-chunk ledger: the same walk's conclusions, keyed by CHUNK instead of
@@ -3873,7 +4034,7 @@ describe('the chunk ledger', () => {
     // non-empty.
     const p = plan();
     const mispaged =
-      `You are reviewing chunk 2 of 2.\n` +
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\n` +
       `read_file(file_path="${chunkBrief(2)}")\n` +
       `read_file(file_path="${DIFF}", offset=0, limit=50)`;
     built(p, 2, mispaged);
@@ -3896,7 +4057,7 @@ describe('the chunk ledger', () => {
     // ('unknown'), not the cause the relaunch repaired.
     const p = plan();
     const mispaged =
-      `You are reviewing chunk 2 of 2.\n` +
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\n` +
       `read_file(file_path="${chunkBrief(2)}")\n` +
       `read_file(file_path="${DIFF}", offset=0, limit=50)`;
     built(p, 2, mispaged);
@@ -3932,17 +4093,20 @@ describe('the chunk ledger', () => {
     // The CLI built good(2); the orchestrator delivered a prompt that
     // ALTERED one of its lines (adding lines is delivery, not rewrite —
     // `wasDeliveredVerbatim` permits it). The record worked but never read
-    // the diff, so the cause is the rewrite. What pins that is `classify()`
-    // ordering rewritten-prompt above unopened: the ternary inside the
-    // unopened branch re-notes the same cause, so a mutant replacing it with
-    // plain `'unopened'` keeps this test green — and so does deleting the
-    // unconditional note ahead of the branch, because this fixture enters
-    // that branch and the ternary re-notes. The unconditional note is pinned
-    // by the next test, whose rewrite opened the diff and skips the branch.
+    // the diff, so the cause is the rewrite. The paraphrase keeps the
+    // identity line and the spelled reads — a rewrite that altered the
+    // READS spells a window that is not this chunk's, and the territory
+    // seal refuses to key causes through a launch it cannot order against
+    // this plan. What pins the classification is `classify()` ordering
+    // rewritten-prompt above unopened: the ternary inside the unopened
+    // branch re-notes the same cause, so a mutant replacing it with plain
+    // `'unopened'` flips this test. The unconditional note ahead of the
+    // branch is pinned by the next test, whose rewrite opened the diff and
+    // skips the branch.
     transcript('a1', good(1), { calls: 2 });
     transcript(
       'a2',
-      good(2).replace('offset=100, limit=100', 'offset=0, limit=50'),
+      good(2).replace('the territory agent', 'the chunk agent'),
       { calls: 2, toolPath: '/abs/other-file.ts' },
     );
 
@@ -3953,22 +4117,32 @@ describe('the chunk ledger', () => {
     });
   });
 
-  it('pins the unconditional rewritten-prompt note on a rewrite that opened the diff', () => {
+  it('pins the unconditional rewritten-prompt note on a refused declarer', () => {
     // The fixture above never opens the diff, so it enters the unopened
     // branch, whose ternary re-notes the same cause — deleting the
     // unconditional note ahead of the branch keeps it green. This launch
-    // opened the diff but read lines that do not span its chunk, so it
-    // skips that branch, and the unconditional note is the only record of
-    // the cause. Deleting it hands the operator `'unknown'` — a cause with
-    // no repair — instead of "rebuild the prompt".
+    // opened the diff, so it skips that branch; it also returned an
+    // `Uncoverable:` declaration the plan's own measurement contradicts,
+    // which the declaration branch refuses and then `continue`s — no
+    // coverage credit, the chunk stays missing. The unconditional note is
+    // the only record of the cause: a rewrite that altered the READS
+    // would fail the territory seal and note nothing, and the plan's
+    // contradiction refuses the declaration's own cause. Deleting the
+    // note hands the operator `'unknown'` — a cause with no repair —
+    // instead of "rebuild the prompt".
     transcript('a1', good(1), { calls: 2 });
     transcript(
       'a2',
-      good(2).replace('offset=100, limit=100', 'offset=0, limit=50'),
-      { calls: 1, range: [0, 50], opens: [] },
+      good(2).replace('the territory agent', 'the chunk agent'),
+      {
+        calls: 1,
+        range: [100, 100],
+        opens: [],
+        text: 'Uncoverable: chunk 2 — line exceeds the read limit',
+      },
     );
 
-    const r = coverageFromTranscripts(plan(), ENV);
+    const r = coverageFromTranscripts(plan(2, { maxLineChars: 42 }), ENV);
     expect(entryFor(r, 2)).toMatchObject({
       outcome: 'missing',
       classification: 'rewritten-prompt',
@@ -4172,7 +4346,8 @@ describe('coverage — a drifted selection identity, end to end', () => {
     // The chunk prompts name the fixture's own diff path — `good()` names the
     // module constant, a different (nonexistent) file.
     const goodHere = (c: number) =>
-      `You are reviewing chunk ${c} of 2.\n` +
+      `You are review agent \`chunk ${c} of 2\` — the territory agent for ` +
+      `lines ${(c - 1) * 100 + 1}-${c * 100} of the diff.\n` +
       `read_file(file_path="${chunkBrief(c)}")\n` +
       `read_file(file_path="${diffPath}", offset=${(c - 1) * 100}, limit=100)`;
     for (const c of [1, 2]) built(p, c, goodHere(c));

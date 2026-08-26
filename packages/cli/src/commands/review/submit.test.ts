@@ -3454,7 +3454,8 @@ describe('the ledger marker on the body that reaches GitHub', () => {
       transcript(id, launch, [...reads, brief]);
     };
     const chunkPrompt = (chunk: number) =>
-      `You are reviewing chunk ${chunk} of 2.\n` +
+      `You are review agent \`chunk ${chunk} of 2\` — the territory agent for ` +
+      `lines ${(chunk - 1) * 100 + 1}-${chunk * 100} of the diff.\n` +
       `read_file(file_path="${briefPath(planPath, `chunk-${chunk}`)}")\n` +
       `read_file(file_path="${diffPath}", offset=${(chunk - 1) * 100}, limit=100)`;
     build('chunk-1', 'a1', chunkPrompt(1), [diffPath, diffPath]);

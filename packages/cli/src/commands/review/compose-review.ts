@@ -3653,13 +3653,17 @@ function composeReviewBody(
   // 2's auditor returned nothing substantive twice` beside the floor's own
   // sentence — and swallowing it routed a whiffed audit scope to the
   // verification axis. `includes`, not equality, so a prefix-reshaped
-  // relay ("step 5 — …") still dedupes; the budget entry's relays ride
-  // the canonical-entry splice and never match here.
+  // relay ("step 5 — …") still dedupes. The budget entry is exempt from
+  // BOTH arms: its subject is `reverse audit`, which is also the subject
+  // the orchestrator gives a WHIFFED reverse audit — a bare-subject entry
+  // that is the whiff's only detector and a line-coverage claim, not an
+  // echo of the stop — and its relays classify through `isRelayedStopEntry`
+  // rather than being swallowed here.
   const echoesCoverageEntry = (entry: string): boolean =>
     coverageEntries.some(
       (e) =>
-        entry === e.subject ||
-        (e !== budgetEntry && entry.includes(`${e.subject} — ${e.reason}`)),
+        e !== budgetEntry &&
+        (entry === e.subject || entry.includes(`${e.subject} — ${e.reason}`)),
     );
   const nonEchoedDimensionGaps = [
     ...unreviewed,

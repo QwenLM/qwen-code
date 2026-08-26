@@ -559,8 +559,19 @@ function readPlan(path: string): {
  */
 const DIGEST_WINDOW_MS = 5000;
 
-/** `chunk 13 of 25` — written into the prompt by `agent-prompt`, in code. */
-export const CHUNK_RE = /\bchunk\s+(\d+)\s+of\s+(\d+)\b/i;
+/**
+ * The chunk assignment, read from the identity line `agent-prompt` writes —
+ * `` You are review agent `chunk 13 of 25` `` — anchored to that line's
+ * shape. The words `chunk N of M` anywhere else in a launch are not an
+ * assignment: `buildRoleLaunchPrompt` renders a PR-controlled filename on
+ * the identity line (`inertPath` preserves spaces, colons and digits), so a
+ * file named `chunk 2 of 5.ts` carries the phrase, and an unanchored
+ * first-match read it as the record's assignment — keying agents and causes
+ * into the sealed ledger for a chunk the launch never owned. A filename
+ * cannot forge the anchored shape: `inertPath` strips backticks, and no
+ * PR-controlled text in a launch can open a line of its own.
+ */
+export const CHUNK_RE = /^You are review agent `chunk (\d+) of (\d+)`/m;
 
 /** The chunk this agent owns, when it was launched to own one. */
 export function assignedChunk(rec: AgentRecord): number | null {
@@ -815,19 +826,30 @@ export function coverageFromTranscripts(
     const carried = launchPlanToken(launch);
     return carried === null || carried === planToken;
   };
-  // The plan identity a `chunk N of M` launch was written against — the
-  // same seal the declaration branch applies below. A stale record's id can
-  // collide with a planned chunk's, and a cause or agent keyed through the
-  // collision writes an old plan's diagnosis into this plan's ledger:
-  // `classify()` then hands the operator a repair for a failure this run
-  // never had, and a stale cause can outrank the chunk's genuine current
-  // one. Stale records still feed the prose arrays — those name the RECORD
-  // — but may not key causes or agents into a chunk they were never
-  // assigned under this plan.
+  // The plan identity a `chunk N of M` launch was written against. A stale
+  // record's id can collide with a planned chunk's, and a cause or agent
+  // keyed through the collision writes an old plan's diagnosis into this
+  // plan's ledger: `classify()` then hands the operator a repair for a
+  // failure this run never had, and a stale cause can outrank the chunk's
+  // genuine current one. Stale records still feed the prose arrays — those
+  // name the RECORD — but may not key causes or agents into a chunk they
+  // were never assigned under this plan.
+  //
+  // Membership, count and token are not the whole of that identity: a
+  // same-session re-plan can keep BOTH count and token facts out of reach —
+  // two chunks stay two chunks while their windows move, and a marker-less
+  // record over an identity-less plan (the fail-open shapes
+  // `launchOfThisPlan` names) rides the token conjunct through. Territory
+  // tells the plans apart where the count cannot — see
+  // `declarationStillOnTerritory`. Every launch this CLI builds spells its
+  // chunk's whole window, so an honest record's told-range spans its chunk
+  // exactly; a launch that spells no read resolves through the current plan
+  // inside `pointedAt` and still passes.
   const sealedToThisPlan = (rec: AgentRecord, chunkId: number): boolean =>
     plan.chunks.some((c) => c.id === chunkId) &&
     assignedChunkTotal(rec) === plan.chunks.length &&
-    launchOfThisPlan(rec.launchPrompt);
+    launchOfThisPlan(rec.launchPrompt) &&
+    declarationStillOnTerritory(pointedAt(rec.launchPrompt, plan), chunkId);
   const noteChunkAgent = (
     rec: AgentRecord,
     c: number | null,
@@ -1261,10 +1283,15 @@ export function coverageFromTranscripts(
         // relaunch. Not pushed through `disclose()`: the posted body caps on
         // disclosures, and a delivery that demonstrably arrived caps nothing.
         if (
-          // Sealed like the note arms: a launch marked with ANOTHER plan's
-          // token is positively the old plan's — its brief-open and diff
-          // read are facts about THAT plan's delivery, not this one's.
-          launchOfThisPlan(rec.launchPrompt) &&
+          // Sealed like the note arms: membership, count, token AND
+          // territory. A launch marked with ANOTHER plan's token is
+          // positively the old plan's — its brief-open and diff read are
+          // facts about THAT plan's delivery, not this one's — and a
+          // marker-less stale record over an identity-less plan rides the
+          // token conjunct through, so a count-changed or window-moved
+          // record must fail the geometry conjuncts here the same way it
+          // does in the note arms it claims parity with.
+          sealedToThisPlan(rec, chunk) &&
           openedBriefOf(rec, `chunk-${chunk}`) &&
           rec.diffToolCalls > 0
         ) {
@@ -1386,20 +1413,20 @@ export function coverageFromTranscripts(
       // Membership alone does not prove the declaration is about THIS plan:
       // a stale id can collide with a planned one — `chunk 2 of 9` left
       // over from a nine-chunk plan over a plan that now carries two
-      // chunks. The `of M` count is the plan identity the launch was
-      // written against; a declaration whose count contradicts this plan
-      // describes different lines even when its id exists in it, and
-      // admitting it classified a chunk a relaunch could cover as
-      // `declared-uncoverable` and erased its live coverage. The
-      // declarer's own reads are the last seal: told the right window but
-      // demonstrably reading elsewhere is a repairable failure wearing an
-      // impossible verdict — see `declarerReadItsChunk`.
+      // chunks. `sealedToThisPlan` is the plan-identity seal — membership,
+      // the `of M` count, the token AND the told-range territory: a
+      // declaration whose count or window contradicts this plan describes
+      // different lines even when its id exists in it, and admitting it
+      // classified a chunk a relaunch could cover as `declared-uncoverable`
+      // and erased its live coverage. The declarer's own reads are the last
+      // seal: told the right window but demonstrably reading elsewhere is a
+      // repairable failure wearing an impossible verdict — see
+      // `declarerReadItsChunk`.
       // The plan's own measurement is the mirror-image seal: metadata
       // saying every line fits contradicts the declaration outright — see
       // `planContradictsDeclaration`.
       if (
         sealedToThisPlan(rec, chunk) &&
-        declarationStillOnTerritory(told, chunk) &&
         declarerReadItsChunk(rec, chunk) &&
         !planContradictsDeclaration(chunk) &&
         // A chunk the plan's own measurement proves unspannable cannot have
@@ -1610,6 +1637,13 @@ export function coverageFromTranscripts(
         const needsDiff = req.role === 'chunk' || BRIEFS[req.role].readsDiff;
         const rescue = records.find(
           (r) =>
+            // Sealed like the chunk loop's drifted-launch note: the
+            // brief-open and the diff read are facts about the plan that
+            // DELIVERED them. A launch marked with another plan's token is
+            // the old plan's working role agent — and `briefPath` is stable
+            // across re-plans, so its brief-open is this plan's path with
+            // the old plan's delivery behind it.
+            launchOfThisPlan(r.launchPrompt) &&
             !matchedRec.has(r) &&
             !rescued.has(r) &&
             r.successfulToolCalls > 0 &&

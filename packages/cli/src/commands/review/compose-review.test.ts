@@ -436,7 +436,8 @@ function goodPrompt(chunk: number): string {
   const offset = (chunk - 1) * 100;
   const brief = briefPath(join(dir, 'plan.json'), `chunk-${chunk}`);
   return (
-    `You are reviewing chunk ${chunk} of 2.\n` +
+    `You are review agent \`chunk ${chunk} of 2\` — the territory agent for ` +
+    `lines ${offset + 1}-${offset + 100} of the diff.\n` +
     `read_file(file_path="${brief}")\n` +
     `read_file(file_path="${DIFF}", offset=${offset}, limit=100)`
   );
@@ -468,7 +469,10 @@ function recordMatrix(planPath: string): void {
 
 /** The prompt the orchestrator actually sent, 23 times: no diff anywhere. */
 function blindPrompt(chunk: number): string {
-  return `The changes are in chunk ${chunk} of 2, covering lines 1-100 of the diff.`;
+  return (
+    `You are review agent \`chunk ${chunk} of 2\` — the territory agent for ` +
+    `lines ${(chunk - 1) * 100 + 1}-${chunk * 100} of the diff.`
+  );
 }
 
 /**
@@ -4779,12 +4783,12 @@ describe('coverage is recomputed, never accepted', () => {
     recordBuilt(p, 2);
     transcript(
       'a1',
-      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
       { toolCalls: 2 },
     );
     transcript(
       'a2',
-      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
       { toolCalls: 2 },
     );
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
@@ -4812,12 +4816,12 @@ describe('coverage is recomputed, never accepted', () => {
     recordBuilt(p, 2);
     transcript(
       'a1',
-      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
       { toolCalls: 2 },
     );
     transcript(
       'a2',
-      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
       { toolCalls: 2 },
     );
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
@@ -4955,12 +4959,12 @@ describe('coverage is recomputed, never accepted', () => {
     recordBuilt(p, 2);
     transcript(
       'a1',
-      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
       { toolCalls: 2 },
     );
     transcript(
       'a2',
-      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      `You are review agent \`chunk 2 of 2\` — the territory agent.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
       { toolCalls: 2 },
     );
     const r = composeReview({
@@ -5229,7 +5233,7 @@ describe('coverage is recomputed, never accepted', () => {
     recordMatrix(p); // roster satisfied: these three categories, nothing else
     transcript(
       'a1',
-      `You are reviewing chunk 1 of 2.\n` +
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\n` +
         `read_file(file_path="${DIFF}", offset=0, limit=100)`,
       { toolCalls: 3 },
     );
@@ -7853,6 +7857,43 @@ describe('the ledger marker reaches the POSTED body', () => {
     ]);
     expect(whiffed.dimensionGapsAreDepthOnly).toBe(false);
     expect(parseLedger(whiffed.body)?.sha).toBeUndefined();
+  });
+
+  it('does not swallow a bare reverse-audit whiff beside the budget-stop marker', () => {
+    // The stop's structural entry has subject `reverse audit` — and so does
+    // the orchestrator's entry for a WHIFFED reverse audit, which an audit
+    // that made tool calls and returned bare prose twice leaves as the ONLY
+    // detector (`coverageFromTranscripts` reports nothing of it). The echo
+    // filter's bare-subject arm matched the whiff against the budget entry
+    // and swallowed it: `dimensionGapsAreDepthOnly` turned vacuously true,
+    // the incremental anchor rode past the lines the whiffed audit never
+    // reviewed, and the cap routed to the verification axis. A bare-subject
+    // entry carrying no reason is not an echo of the stop's `subject —
+    // reason` sentence — the budget entry may claim no bare-subject echo.
+    const p = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeBudgetStop(
+      p,
+      { remainingSeconds: 10, reserveSeconds: 300, expectedRoundSeconds: 60 },
+      3,
+    );
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested' },
+      ],
+      unreviewedDimensions: ['reverse audit'],
+    });
+    expect(r.dimensionGapsAreDepthOnly).toBe(false);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
   });
 
   it('classifies a ROUND-CAP stop the same way, relay or no relay', () => {

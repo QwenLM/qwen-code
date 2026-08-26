@@ -139,12 +139,26 @@ export function planTokenLine(selection: unknown): string | null {
   return token === null ? null : `${PLAN_TOKEN_LABEL} ${token}`;
 }
 
-const PLAN_TOKEN_RE = new RegExp(`${PLAN_TOKEN_LABEL} ([0-9a-f]{16})\\b`);
+// Line-anchored, on purpose: the marker is read out of RENDERED launch text,
+// and two entrances let foreign text carry one. `buildRoleLaunchPrompt`
+// renders the PR-controlled file path on the identity line ahead of the token
+// line (`inertPath` preserves spaces and colons), and `foldFindings` inserts
+// the findings section between the identity and token lines — on the
+// write-failure fallback that section inlines the prior findings list, which
+// can QUOTE a marker. A writer always emits the marker as its own line, and
+// `inertPath` strips newline and line-separator chars, so no filename can
+// forge a standalone line — the anchor is what a forged marker cannot reach.
+const PLAN_TOKEN_RE = new RegExp(`^${PLAN_TOKEN_LABEL} ([0-9a-f]{16})$`, 'mg');
 
 /** The token a launch prompt carries, or `null` when it carries no marker. */
 export function launchPlanToken(launchPrompt: string): string | null {
-  const m = PLAN_TOKEN_RE.exec(launchPrompt);
-  return m === null ? null : m[1];
+  // The LAST standalone marker: the launch's own. Foreign markers can only
+  // PRECEDE it — folded findings land between the identity line and the
+  // token line, and nothing after the token line carries PR-controlled text
+  // that could open a line of its own.
+  let token: string | null = null;
+  for (const m of launchPrompt.matchAll(PLAN_TOKEN_RE)) token = m[1];
+  return token;
 }
 
 /**

@@ -412,15 +412,15 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
   });
 
   it('vetoes a return that declares a chunk uncoverable', () => {
-    // Production shape: a chunk agent's launch prompt carries its `chunk N
-    // of M` line — that line is how BOTH pipeline authorities assign the
-    // record, and the veto keys on the record's own assignment exactly as
-    // they do.
+    // Production shape: a chunk agent's launch prompt carries its identity
+    // line — that line is how BOTH pipeline authorities assign the record,
+    // and the veto keys on the record's own assignment exactly as they do.
     const recordDir = promptRecordDir(plan);
     const brief = briefPath(plan, 'chunk-1');
     writeFileSync(brief, 'The chunk-1 brief.');
     const prompt =
-      `You are reviewing chunk 1 of 2.\n` + `read_file(file_path="${brief}")`;
+      `You are review agent \`chunk 1 of 2\` — the territory agent.\n` +
+      `read_file(file_path="${brief}")`;
     writeFileSync(
       join(recordDir, `${encodeURIComponent('chunk-1')}.txt`),
       prompt,

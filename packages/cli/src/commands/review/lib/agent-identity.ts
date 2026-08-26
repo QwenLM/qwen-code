@@ -21,11 +21,12 @@
 
 /**
  * A role that IS a chunk assignment — `chunk 3 of 7` — labels as its id.
- * The shape matches coverage's `CHUNK_RE` (whitespace-tolerant,
- * case-insensitive) so both readers resolve the same role the same way; a
- * hand-edited `Chunk 3 of 7` used to resolve as a chunk owner in the posted
- * body and a role agent in the ledger row. Anchored, because here the whole
- * role slot is the candidate, not a substring of a prompt.
+ * Both readers key on the chunk role slot of the identity line —
+ * coverage's `CHUNK_RE` anchors that line's shape around the same slot —
+ * so a launch the one assigns, the other labels. A hand-edited `Chunk 3 of
+ * 7` used to resolve as a chunk owner in the posted body and a role agent
+ * in the ledger row. Anchored, because here the whole role slot is the
+ * candidate, not a substring of a prompt.
  */
 const CHUNK_ROLE_RE = /^chunk\s+(\d+)\s+of\s+\d+$/i;
 
