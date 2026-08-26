@@ -65,6 +65,8 @@
 
 如果三个字段都不设置,则保留旧行为:当前推理配置本身必须是带静态 API key 的 DashScope 兼容配置,并同时作为上传配置。
 
+> **预设模板**:设计文档 4.1–4.9 的 9 条策略(长视频 ASR 链、大图降采样、上下文紧张抽帧、长音频转写、文档图 OCR、大视频降分辨率、三模态 >10MB 超限兜底)有一份开箱即用的预设 [`omni-fixed-policies-preset.json`](./omni-fixed-policies-preset.json)——把其中的 `omni` 对象合并进 settings.json 即可,策略已按 priority 排好执行顺序(链式派生先于条件分支,超限兜底最后),并附带 ASR 链所需的超时与预算放大。该预设由 `packages/core/src/omni/policy/preset-validation.test.ts` 持续验证可正常归一化。
+
 ---
 
 ## 配置总览
