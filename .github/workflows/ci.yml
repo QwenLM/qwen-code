@@ -61,7 +61,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/ci/platform-lane-triggers.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -871,16 +871,17 @@ jobs:
   # backstop. Read a red nightly as a blocker; nothing else will report it.
   #
   # Restoring the pull-request trigger is the last step of fixing those
-  # failures, not a separate decision. It takes three things, and the pieces
-  # are all still here: revert the commit that removed the `classify_platform`
-  # job (its classifier, `classify-platform-sensitivity.mjs`, the `platform`
-  # mode of `classify-pr-profile.sh` and both their test files were left
-  # untouched precisely so this stays a revert), put its
-  # `github.event_name == 'pull_request' && needs.classify_platform.outputs
-  # .platform_sensitive != 'false'` arm back on both lanes, and re-add it to
-  # each lane's `needs`. Worth revisiting at the same time: that classifier
-  # calls every fork pull request platform-sensitive, which is most of the
-  # traffic here and most of what the macOS queue was spent on.
+  # failures, not a separate decision — and it is a REVERT of the commit that
+  # carried this change, not an edit: the classifier job, its `if` arms on
+  # both lanes, and the contract pins in scripts/tests/ci-platform-lanes.
+  # test.js all moved together, and that suite now fails a half-restoration
+  # (a trigger without its classifier, or the reverse). The classifier script
+  # `classify-platform-sensitivity.mjs`, the `platform` mode of
+  # `classify-pr-profile.sh` and both their test files were left untouched
+  # precisely so the revert stays clean. Worth revisiting at the same time:
+  # that classifier calls every fork pull request platform-sensitive, which
+  # is most of the traffic here and most of what the macOS queue was spent
+  # on.
   #
   # Two named jobs, not a matrix: a skipped matrix job reports one collapsed
   # check name, never the per-OS contexts, so a required-check configuration
