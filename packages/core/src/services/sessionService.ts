@@ -2469,6 +2469,34 @@ export class SessionService {
     };
   }
 
+  /**
+   * Unarchiving surfaces this session in the active picker again, so if its
+   * stored title is already held by an active session — reachable when a
+   * session was branched to a duplicate name while this one sat archived,
+   * outside the uniqueness scan — give it the next free suffix before the
+   * move so the two don't read as one entry. A collision-free title is left
+   * untouched.
+   */
+  private async retitleIfCollidesWithActive(
+    sessionId: string,
+    archivedFilePath: string,
+  ): Promise<void> {
+    const currentTitle = await this.readSessionDisplayNameFromFile(
+      archivedFilePath,
+    ).catch(() => undefined);
+    if (!currentTitle) return;
+    const normalizedTitle = currentTitle.toLowerCase().trim();
+    const activeTitles = new Set(
+      (
+        await this.findSessionTitlesByPrefixInState(normalizedTitle, 'active')
+      ).map((title) => title.toLowerCase().trim()),
+    );
+    if (!activeTitles.has(normalizedTitle)) return;
+    const baseName = normalizeDerivedBranchTitle(currentTitle) ?? currentTitle;
+    const uniqueTitle = await computeUniqueBranchTitle(baseName, this);
+    await this.renameSession(sessionId, uniqueTitle, 'auto', 'archived');
+  }
+
   async unarchiveSessions(
     sessionIds: string[],
     options: UnarchiveSessionsOptions = {},
@@ -2543,6 +2571,7 @@ export class SessionService {
         await options.assertStorageUnchanged?.();
         options.assertCanMutate?.();
         this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+        await this.retitleIfCollidesWithActive(sessionId, sourcePath);
         try {
           fs.renameSync(sourcePath, targetPath);
         } catch (error) {
