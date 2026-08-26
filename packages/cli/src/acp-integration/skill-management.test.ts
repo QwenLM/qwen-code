@@ -363,6 +363,11 @@ describe('managed Skill mutations', () => {
       await expect(fs.readFile(installedPath, 'utf8')).resolves.toContain(
         'name: pptx',
       );
+      // Verify the reinstall actually replaced the skill content, not just
+      // that the pre-existing SKILL.md is still present.
+      await expect(fs.readFile(installedPath, 'utf8')).resolves.toContain(
+        'New body',
+      );
     } finally {
       await fs.rm(tempHome, { recursive: true, force: true });
     }
