@@ -14,6 +14,15 @@ import {
   LlmEventType,
 } from './index.js';
 import { LlmChat as LegacyPathLlmChat } from './core/geminiChat.js';
+import {
+  GeminiContentGenerator as LegacyPathGeminiContentGenerator,
+  createGeminiContentGenerator as legacyCreateGeminiContentGenerator,
+} from './core/geminiContentGenerator/index.js';
+import { GeminiContentGenerator as LegacyLeafGeminiContentGenerator } from './core/geminiContentGenerator/geminiContentGenerator.js';
+import {
+  LlmContentGenerator,
+  createLlmContentGenerator,
+} from './core/llm-content-generator/index.js';
 
 describe('deprecated LLM rename aliases', () => {
   it('keeps the published class, enum, and module-path aliases', () => {
@@ -21,5 +30,8 @@ describe('deprecated LLM rename aliases', () => {
     expect(GeminiChat).toBe(LlmChat);
     expect(GeminiEventType).toBe(LlmEventType);
     expect(LegacyPathLlmChat).toBe(LlmChat);
+    expect(LegacyPathGeminiContentGenerator).toBe(LlmContentGenerator);
+    expect(LegacyLeafGeminiContentGenerator).toBe(LlmContentGenerator);
+    expect(legacyCreateGeminiContentGenerator).toBe(createLlmContentGenerator);
   });
 });

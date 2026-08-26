@@ -133,6 +133,7 @@ export const legacyFilenames = [
   'forkedAgent.cache',
   'functionHookRunner',
   'geminiChat',
+  'geminiContentGenerator',
   'geminiRequest',
   'generateContentResponseUtilities',
   'generatedFiles',
