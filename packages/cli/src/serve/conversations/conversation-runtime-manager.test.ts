@@ -25,6 +25,7 @@ const root = {
   canonicalRoot: '/work/conversations',
   device: 1,
   inode: 2,
+  inodeVerifiable: true,
 };
 
 function createBridge() {

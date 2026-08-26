@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.21.11",
+  "version": "0.22.0",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -15,18 +15,19 @@
     "packages/channels/feishu",
     "packages/channels/qqbot",
     "packages/channels/github",
+    "packages/channels/dws",
     "packages/channels/gitlab",
     "packages/channels/plugin-example",
     "integrations/external-context",
-    "!packages/desktop",
-    "!packages/desktop-shell"
+    "!packages/desktop-shell",
+    "!packages/live-host"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.21.11"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.22.0"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -53,7 +54,7 @@
     "test:integration:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests",
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
-    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./cli/daemon-invocation-context.test.ts ./cli/list_directory.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts",
+    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./cli/daemon-invocation-context.test.ts ./cli/list_directory.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-streaming.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",
@@ -71,7 +72,8 @@
     "lint:all": "node scripts/lint.js",
     "audit:runtime:critical": "node scripts/audit-runtime-critical.js",
     "format": "prettier --experimental-cli --write .",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && npm run typecheck:integration",
+    "typecheck:integration": "tsc -p integration-tests/tsconfig.json --pretty false",
     "typecheck:sdk:python": "python3 -m mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src",
     "smoke:sdk:python": "python3 packages/sdk-python/scripts/smoke_real.py",
     "build:sdk:python": "python3 -m build packages/sdk-python",
@@ -89,9 +91,7 @@
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
     "check:desktop-isolation": "node scripts/check-desktop-isolation.js",
-    "check:voice-guard-sync": "node scripts/check-voice-guard-sync.js",
     "check:serve-fast-path-bundle": "node scripts/clean-package-build-artifacts.js && npm run build -- --cli-only && cross-env DEV=true npm run bundle && node scripts/check-serve-fast-path-bundle.js",
-    "desktop-openwork-sync": "bun run scripts/desktop-openwork-sync.ts",
     "clean": "node scripts/clean.js",
     "pre-commit": "node scripts/pre-commit.js"
   },
@@ -105,7 +105,8 @@
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0"
+    "@types/react-dom": "^19.2.0",
+    "axios": "^1.19.0"
   },
   "bin": {
     "qwen": "scripts/cli-entry.js"

@@ -11,6 +11,7 @@
 
 import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { safeTarget } from '../../../utils/paths.js';
 
 /**
  * Classify a `--out` target BEFORE the command fetches anything: an empty /
@@ -95,26 +96,102 @@ export function baseWorktreePath(worktree: string): string {
   return `${resolve(worktree)}-base`;
 }
 
-/** Local branch ref name for a fetched PR head. */
-export function reviewBranch(prNumber: string | number): string {
-  return `qwen-review/pr-${prNumber}`;
+/**
+ * The infix that marks a verifier's private scratch worktree. Private to this
+ * module and reached through the two functions below, so the creator
+ * (`scratch-tree`) and the sweeper (`cleanup.ts`, which can only match on the
+ * prefix — the label half is per-agent and unknown to it) cannot drift apart on
+ * it, the way the `-probe` suffix once did.
+ */
+const SCRATCH_INFIX = '-scratch-';
+
+/**
+ * A Step 4 verifier's own throwaway worktree — the tree its probes run in
+ * (#9207).
+ *
+ * The review worktree is READ by concurrent agents for the whole run: the
+ * pipelined loop launches round k's verifiers alongside round k+1's reverse
+ * auditors, all pinned to that one tree by `working_dir`. A verifier that
+ * writes a probe file there, or applies the one-line fix its flip-check needs,
+ * is mutating a tree other agents are reading mid-review — measured live, an
+ * auditor read a probe's mutant plus a leftover probe test and nearly filed a
+ * Critical against residue no commit contains. Restoring afterwards does not
+ * close it; the exposure is the window *during* the probe.
+ *
+ * So each verifier gets its own, and the LABEL is what keeps them apart: shards
+ * of one round run concurrently too, and a shared scratch tree would just move
+ * the same race one level down (shard B's probe editing the file shard A is
+ * measuring). Callers pass their record key, which is already unique per role,
+ * round and findings digest.
+ *
+ * Absolute, and for the same reason as {@link probeWorktreePath}: `git worktree
+ * add` runs with the review worktree as cwd, so a relative path would land the
+ * scratch tree *inside* the tree it is meant to sit beside — the one place it
+ * must never be, since that is the tree it exists to keep clean.
+ */
+export function scratchWorktreePath(worktree: string, label: string): string {
+  const safe = scratchLabel(label);
+  // A label that flattens to nothing would name the tree after the PREFIX
+  // itself — one tree for every agent whose label happened to be unusable, and
+  // a path `cleanup`'s prefix sweep matches as a whole family. Refusing is the
+  // fail-closed direction: the caller (`scratch-tree`) turns this into an
+  // `available: false` the verifier can act on.
+  if (!safe) {
+    throw new TypeError(
+      `scratch label ${JSON.stringify(label)} keeps no path-safe character ` +
+        '(A-Za-z0-9._-); a tree cannot be named for it',
+    );
+  }
+  return `${resolve(worktree)}${SCRATCH_INFIX}${safe}`;
 }
 
 /**
- * A `target` reduced to a single safe filename component.
- *
- * `target` is a file-path review's own path — `src/foo.ts` — or a PR/local
- * label. Interpolated raw, `src/foo.ts` becomes `qwen-review-src/foo.ts-diff.txt`,
- * a nested path whose parent nobody created (ENOENT), and a crafted `../../evil`
- * escapes `.qwen/tmp` and lets `writeFileSync` land anywhere. Flatten every
- * separator and dot-segment to a single component so the file always sits
- * directly in the temp dir.
+ * The `<worktree>-scratch-` prefix every scratch tree of one review shares, so
+ * `cleanup` can sweep a family whose members it cannot name.
  */
-function safeTarget(target: string): string {
-  const flat = target
-    .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
-    .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token
-  return flat.replace(/^[._]+/, '') || 'target';
+export function scratchWorktreePrefix(worktree: string): string {
+  return `${resolve(worktree)}${SCRATCH_INFIX}`;
+}
+
+/**
+ * A scratch label reduced to one safe path component.
+ *
+ * The label reaching this is a record key (`verify--round-2--<digest>`), but it
+ * arrives over a CLI flag, so it is treated as untrusted: a `../` in it would
+ * put the tree — and the `git worktree add` that creates it, and the sweep that
+ * later deletes it — somewhere else entirely. Same flattening as
+ * {@link safeTarget}, plus a length cap: the suffix rides on a path that is
+ * already deep, and a 200-character label is how a `git worktree add` starts
+ * failing with ENAMETOOLONG on the platforms with the shortest limits.
+ *
+ * Exported because the label makes one more journey the path does not:
+ * `agent-prompt` writes it into a shell command inside the verifier's brief.
+ * Sanitising there with this same function keeps the label shell-inert (no
+ * quoting to get right, no metacharacter to reach a shell) AND keeps the brief
+ * honest — the flag it shows is exactly the label the tree will be named for.
+ *
+ * Returns the empty string when nothing survives, and deliberately does NOT
+ * substitute a default: `???` and `!!!` are two different labels that flatten
+ * to nothing, and a shared default would put two shards in one tree — the race
+ * the label exists to prevent, reached through the sanitiser.
+ */
+export function scratchLabel(label: string): string {
+  return (
+    label
+      .replace(/[^A-Za-z0-9._-]/g, '_')
+      .replace(/\.\.+/g, '_')
+      // Leading `.`/`_` would make a hidden directory; a leading `-` is worse
+      // than cosmetic — the label is welded into `scratch-tree --label <it>`,
+      // and yargs reads `-rm` as flags, so the command dies before it can
+      // report while the brief still shows a label.
+      .replace(/^[._-]+/, '')
+      .slice(0, 64)
+  );
+}
+
+/** Local branch ref name for a fetched PR head. */
+export function reviewBranch(prNumber: string | number): string {
+  return `qwen-review/pr-${prNumber}`;
 }
 
 /**
@@ -132,4 +209,35 @@ export function tmpFile(target: string, suffix: string): string {
 /** Filename prefix used by `tmpFile`; useful for cleanup globbing. */
 export function tmpPrefix(target: string): string {
   return `qwen-review-${safeTarget(target)}-`;
+}
+
+/**
+ * A PR-controlled path, flattened for display inside a brief, a prompt, or a
+ * terminal line. The brief is the file the agent is told is the whole of its
+ * instructions — a git path can legally contain newlines, and a newline inside
+ * an interpolated path would let PR content open its own Markdown line there.
+ * Functional arguments (the `read_file` path) are JSON-quoted instead, which
+ * both survives the newline and remains the parseable single-line form the
+ * transcripts checks read.
+ *
+ * Lives here, not in `agent-prompt.ts`, because residue paths reach two more
+ * sinks the same way: `scratch-tree`'s verifier-facing note and the
+ * orchestrator's stderr warning. Both render paths that git reports verbatim
+ * (the residue probe reads the NUL format precisely so names arrive intact),
+ * so both need the same flattening — a control sequence in a filename must not
+ * reach a terminal from any of the three.
+ */
+export function inertPath(p: string): string {
+  // `\p{Cc}` covers every control character (newlines, tabs, ESC — a terminal
+  // control sequence in a filename must not reach a terminal either); `\p{Cf}`
+  // covers the INVISIBLE ones that survive it — bidi overrides and isolates
+  // (U+202A-202E, U+2066-2069) can reverse the rendering of the rest of the
+  // line, and zero-width joiners and the BOM hide characters inside a path a
+  // reader is being asked to judge; `\p{Zl}`/`\p{Zp}` are the line and
+  // paragraph separators, which open a new line in the Markdown the same way a
+  // newline does. U+2500 is the roster separator glyph, and the backtick would
+  // close the Markdown code span these paths are rendered inside, letting the
+  // tail of a filename run as markup in the file the agent treats as
+  // authoritative.
+  return p.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u2500`]+/gu, ' ');
 }

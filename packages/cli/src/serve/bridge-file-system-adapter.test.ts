@@ -984,6 +984,7 @@ describe('createBridgeFileSystemAdapter', () => {
             edit: vi.fn(),
             editAtomic: vi.fn(),
             writeBytesAtomic: vi.fn(),
+            mkdir: vi.fn(),
           };
         },
       };
@@ -1036,6 +1037,7 @@ describe('createBridgeFileSystemAdapter', () => {
             edit: vi.fn(),
             editAtomic: vi.fn(),
             writeBytesAtomic: vi.fn(),
+            mkdir: vi.fn(),
           };
         },
       };

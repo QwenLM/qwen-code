@@ -120,13 +120,13 @@ Control is enabled (the LAN origin is added/removed with the listener):
 
 Per-route opt-in gate. Behavior matrix:
 
-| daemon config           | route opts      | result                           |
-| ----------------------- | --------------- | -------------------------------- |
-| `requireAuth=true`      | any             | passthrough¹                     |
-| `token` configured      | any             | passthrough²                     |
-| no token (loopback dev) | `strict: false` | passthrough                      |
+| daemon config           | route opts                      | result                           |
+| ----------------------- | ------------------------------- | -------------------------------- |
+| `requireAuth=true`      | any                             | passthrough¹                     |
+| `token` configured      | any                             | passthrough²                     |
+| no token (loopback dev) | `strict: false`                 | passthrough                      |
 | no token (loopback dev) | `strict: true`, unauthenticated | `401 { code: 'token_required' }` |
-| no token (loopback dev) | `strict: true`, authenticated³ | passthrough          |
+| no token (loopback dev) | `strict: true`, authenticated³  | passthrough                      |
 
 ¹ `--require-auth` boots only with a token, so global `bearerAuth` already 401'd unauthenticated callers.
 ² Any token configuration makes global `bearerAuth` enforce bearer-required-everywhere; the gate is redundant but harmless.
@@ -273,6 +273,7 @@ sequenceDiagram
 ## State & Lifecycle
 
 - Bearer token is read at boot and trimmed (newlines from `cat token.txt` would otherwise silently break comparison).
+- The CLI-only `--open-with-auth` mode runs before boot: after deterministic loopback/Web Shell checks, it applies the same option-over-environment selection and fills `ServeOptions.token` with 32 random bytes encoded as base64url only when no non-empty selected token exists. The generated credential has process lifetime, is not written to `process.env` or persisted by the daemon, and reaches the browser through the existing URL fragment. The Web Shell retains its browser copy in per-tab `sessionStorage`. Bare `--open` and direct `runQwenServe()` callers never generate it.
 - Allowed-Host Set is cached per port; rebuilt on port change (ephemeral `0` → real port post-`listen`).
 - Mutation gate constructs `passthrough` and `strictDenier` once per app build; per-route call returns the cached closure (no per-request allocation).
 - Device-flow registry is disposed on `shutdown()` Phase 1 so pending flows resolve as `cancelled` before HTTP teardown.
@@ -290,6 +291,7 @@ sequenceDiagram
 | --------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Env             | `QWEN_SERVER_TOKEN`                                                                     | Bearer token (trimmed).                                                 |
 | Flag            | `--token`                                                                               | Bearer token (overrides env).                                           |
+| CLI flags       | `--open-with-auth`                                                                      | Reuse or generate a loopback Web Shell bearer before daemon boot.       |
 | Flag            | `--require-auth`                                                                        | Extends bearer to loopback + `/health`. Boots only with a token.        |
 | Flag            | `--hostname`                                                                            | Non-loopback bind requires `--token` (or env).                          |
 | Flag            | `--allow-origin <pattern>`                                                              | Switch to CORS allowlist mode. `'*'` requires a token.                  |

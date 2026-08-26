@@ -35,6 +35,7 @@ const goalRecord = (overrides: Partial<GoalRecord> = {}): GoalRecord => ({
   evidenceCursor: { recordId: 'r-100' },
   turnCount: 0,
   activeTimeMs: 0,
+  tokensUsed: 0,
   createdAt: 100,
   updatedAt: 100,
   ...overrides,
@@ -309,32 +310,100 @@ describe('goal reducer', () => {
   });
 
   it.each(['evidence_catalog', 'checkpoint_request'] as const)(
-    'refuses to resume a Goal that carries limitKind %s',
+    'resumes a Goal limited by %s from a fresh evidence window',
     (limitKind) => {
-      expect(() =>
-        reduceGoalControl(
-          goalRecord({
-            status: 'usage_limited',
-            revision: 4,
-            limitKind,
-            lastReason: 'a reason the guard no longer has to recognise',
-          }),
-          {
-            request: {
-              action: 'resume',
-              expectedGoalId: 'g-1',
-              expectedRevision: 4,
-            },
-            now: 200,
-            nextGoalId: 'unused',
-            cursor: { recordId: 'r-200' },
+      const resumed = reduceGoalControl(
+        goalRecord({
+          status: 'usage_limited',
+          revision: 4,
+          limitKind,
+          lastReason: 'a reason the guard no longer has to recognise',
+          evidenceCheckpoint: {
+            checkpointId: 'r-100',
+            createdAt: 1,
+            claims: [
+              {
+                id: 'r-100:1',
+                proofKind: 'external_fact',
+                claim: 'note-01.md exists',
+                sourceRefs: ['r-99'],
+              },
+            ],
           },
-        ),
-      ).toThrow(
-        'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
+        }),
+        {
+          request: {
+            action: 'resume',
+            expectedGoalId: 'g-1',
+            expectedRevision: 4,
+          },
+          now: 200,
+          nextGoalId: 'unused',
+          cursor: { recordId: 'r-200' },
+        },
       );
+
+      // Same objective, same revision, same accumulated turn count — only the
+      // evidence window resets, because carrying the exhausted one back into
+      // an active Goal would exhaust it again on the next turn.
+      expect(resumed).toMatchObject({
+        status: 'active',
+        revision: 4,
+        objective: 'ship',
+        evidenceCursor: { recordId: 'r-200' },
+      });
+      expect(resumed?.evidenceCheckpoint).toBeUndefined();
+      expect(resumed?.limitKind).toBeUndefined();
+      expect(resumed?.lastReason).toBeUndefined();
     },
   );
+
+  it('resets the checkpoint stall streak when a resume restarts the window', () => {
+    // The streak counts checkpoints against one window. This resume starts a
+    // different one, so carrying the count over would spend the new window's
+    // allowance on the old window's failures -- a Goal resumed at two stalls
+    // would stop again after a single stalled checkpoint.
+    const resumed = reduceGoalControl(
+      goalRecord({
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        checkpointStalls: 2,
+      }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed).toMatchObject({ status: 'active' });
+    expect(resumed?.checkpointStalls).toBeUndefined();
+  });
+
+  it('keeps the stall streak across a resume that does not restart the window', () => {
+    // A paused Goal resumes into the same evidence window it left, so the
+    // streak it accumulated there is still the truth about that window.
+    const resumed = reduceGoalControl(
+      goalRecord({ status: 'paused', checkpointStalls: 2 }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed).toMatchObject({ status: 'active', checkpointStalls: 2 });
+  });
 
   it.each([
     [GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON, 'evidence_catalog'],
@@ -351,25 +420,71 @@ describe('goal reducer', () => {
     GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
     GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   ])(
-    'still refuses to resume a pre-limitKind Goal stopped by the sentinel prose',
+    'resets the window for a pre-limitKind Goal known only by its sentinel prose',
     (lastReason) => {
-      expect(() =>
-        reduceGoalControl(
-          goalRecord({ status: 'usage_limited', revision: 4, lastReason }),
-          {
-            request: {
-              action: 'resume',
-              expectedGoalId: 'g-1',
-              expectedRevision: 4,
-            },
-            now: 200,
-            nextGoalId: 'unused',
-            cursor: { recordId: 'r-200' },
+      const resumed = reduceGoalControl(
+        goalRecord({ status: 'usage_limited', revision: 4, lastReason }),
+        {
+          request: {
+            action: 'resume',
+            expectedGoalId: 'g-1',
+            expectedRevision: 4,
           },
-        ),
-      ).toThrow(GoalInvalidTransitionError);
+          now: 200,
+          nextGoalId: 'unused',
+          cursor: { recordId: 'r-200' },
+        },
+      );
+
+      expect(resumed).toMatchObject({
+        status: 'active',
+        evidenceCursor: { recordId: 'r-200' },
+      });
+      expect(resumed?.lastReason).toBeUndefined();
     },
   );
+
+  it('keeps the window of an operationally limited Goal when it resumes', () => {
+    // Only the enumerated evidence bounds reset the window. A `usage_limited`
+    // Goal stopped by a transient operational failure keeps its cursor and
+    // checkpoint, so a resume does not throw away citable evidence it never
+    // had a problem with.
+    const resumed = reduceGoalControl(
+      goalRecord({
+        status: 'usage_limited',
+        revision: 4,
+        lastReason: 'Goal checkpoint recovery dependencies are unavailable',
+        evidenceCheckpoint: {
+          checkpointId: 'r-100',
+          createdAt: 1,
+          claims: [
+            {
+              id: 'r-100:1',
+              proofKind: 'external_fact',
+              claim: 'note-01.md exists',
+              sourceRefs: ['r-99'],
+            },
+          ],
+        },
+      }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 4,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed).toMatchObject({
+      status: 'active',
+      evidenceCursor: { recordId: 'r-100' },
+    });
+    expect(resumed?.evidenceCheckpoint).toBeDefined();
+  });
 
   it('clears limitKind when the objective is edited', () => {
     const edited = reduceGoalControl(
@@ -523,6 +638,7 @@ describe('goal reducer', () => {
       revision: 1,
       turnCount: 150,
       activeTimeMs: 150,
+      tokensUsed: 0,
       evidenceCursor: { recordId: 'r-100' },
     });
   });
@@ -533,6 +649,7 @@ describe('goal reducer', () => {
       status: 'paused',
       turnCount: 2,
       activeTimeMs: 60,
+      tokensUsed: 0,
       updatedAt: 160,
     });
 
@@ -544,8 +661,74 @@ describe('goal reducer', () => {
       evidenceCursor: { recordId: 'r-100' },
       turnCount: 3,
       activeTimeMs: 60,
+      tokensUsed: 0,
       updatedAt: 225,
     });
+  });
+
+  it('accumulates per-turn token spend across finished turns', () => {
+    let goal = goalRecord({ tokensUsed: 0 });
+
+    goal = reduceGoalTurnFinished(goal, { now: 200, tokensUsed: 1_200 });
+    goal = reduceGoalTurnFinished(goal, { now: 300, tokensUsed: 800 });
+
+    expect(goal).toMatchObject({ turnCount: 2, tokensUsed: 2_000 });
+  });
+
+  it.each([
+    ['a turn with no ledger entry', undefined],
+    ['a negative reading', -50],
+  ])('adds nothing for %s', (_label, tokensUsed) => {
+    const finished = reduceGoalTurnFinished(goalRecord({ tokensUsed: 700 }), {
+      now: 200,
+      ...(tokensUsed === undefined ? {} : { tokensUsed }),
+    });
+
+    expect(finished).toMatchObject({ turnCount: 1, tokensUsed: 700 });
+  });
+
+  it('migrates a snapshot persisted before spend was recorded', () => {
+    const goal = goalRecord();
+    delete (goal as Partial<GoalRecord>).tokensUsed;
+
+    expect(parseGoalSnapshotV2(snapshot(goal))).toMatchObject({
+      goal: { tokensUsed: 0 },
+    });
+  });
+
+  it('restores a persisted checkpoint stall streak and spells zero as no field', () => {
+    const stalled = snapshot(goalRecord({ checkpointStalls: 2 }));
+    expect(parseGoalSnapshotV2(stalled)).toEqual(stalled);
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ checkpointStalls: 0 })))?.goal,
+    ).not.toHaveProperty('checkpointStalls');
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ checkpointStalls: -1 }))),
+    ).toBeUndefined();
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ checkpointStalls: 1.5 }))),
+    ).toBeUndefined();
+  });
+
+  it('resets the checkpoint stall streak on edit', () => {
+    const edited = reduceGoalControl(goalRecord({ checkpointStalls: 2 }), {
+      request: {
+        action: 'edit',
+        objective: 'deliver the rest',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      },
+      now: 200,
+      nextGoalId: 'g-next',
+      cursor: { recordId: 'r-200' },
+    });
+    expect(edited?.checkpointStalls).toBeUndefined();
+  });
+
+  it('rejects a snapshot carrying negative spend', () => {
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ tokensUsed: -1 }))),
+    ).toBeUndefined();
   });
 
   it.each(['blocked', 'usage_limited', 'complete'] as const)(
@@ -624,6 +807,23 @@ describe('goal reducer', () => {
       expect(parseGoalSnapshotV2(value)).toEqual(value);
     },
   );
+
+  it('parses clear snapshots with their cleared goal order', () => {
+    const value = {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+      clearedGoal: { goalId: 'g-1', revision: 3, updatedAt: 42 },
+    } as const;
+
+    expect(parseGoalSnapshotV2(value)).toEqual(value);
+    expect(
+      parseGoalSnapshotV2({
+        ...value,
+        clearedGoal: { ...value.clearedGoal, revision: 0 },
+      }),
+    ).toBeUndefined();
+  });
 
   it.each(['evidence_catalog', 'checkpoint_request'] as const)(
     'round-trips a %s limitKind through a persisted snapshot',

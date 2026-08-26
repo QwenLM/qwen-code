@@ -7,12 +7,17 @@
 import { describe, expect, it } from 'vitest';
 import type {
   DaemonEvent,
+  DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
   getReplayTokenCount,
   getReplayTokenUsage,
+  mapProviderStatus,
+  mapReasoningControls,
   mapWorkspaceSkills,
+  selectGoalState,
+  selectGoalStateFromRead,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import type { DaemonConnectionState } from './types.js';
@@ -71,6 +76,114 @@ const turnComplete: DaemonEvent = {
   type: 'turn_complete',
   data: { stopReason: 'end_turn' },
 };
+
+describe('mapReasoningControls', () => {
+  it('maps toggle-only reasoning without exposing an effort list', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'default',
+          options: [{ value: 'none' }, { value: 'default' }],
+          _meta: {
+            'qwenCode/reasoning': { toggleOnly: true },
+          },
+        },
+      ]),
+    ).toEqual({
+      enabled: true,
+      effort: 'default',
+      efforts: [],
+    });
+  });
+});
+
+describe('mapProviderStatus reasoning preview', () => {
+  it('maps a valid preview onto its model entry', () => {
+    const result = mapProviderStatus(
+      workspaceProvidersWithConfigOptions([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none' },
+            { value: 'low' },
+            { value: 'medium' },
+            { value: 'xhigh' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+          },
+        },
+      ]),
+    );
+
+    expect(result.models[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it.each([
+    { name: 'absent', configOptions: undefined },
+    { name: 'empty', configOptions: [] },
+    {
+      name: 'missing Thinking off',
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [{ value: 'default' }, { value: 'xhigh' }],
+        },
+      ],
+    },
+    {
+      name: 'unknown current value',
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'bogus',
+          options: [{ value: 'none' }, { value: 'low' }],
+        },
+      ],
+    },
+  ])('ignores $name preview', ({ configOptions }) => {
+    const result = mapProviderStatus(
+      workspaceProvidersWithConfigOptions(configOptions),
+    );
+    expect(result.models[0]?.reasoningPreview).toBeUndefined();
+  });
+});
+
+function workspaceProvidersWithConfigOptions(
+  configOptions: unknown[] | undefined,
+): DaemonWorkspaceProvidersStatus {
+  return {
+    v: 1,
+    workspaceCwd: '/workspace',
+    initialized: true,
+    current: { modelId: 'qwen3.8-max' },
+    providers: [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'qwen-oauth',
+        current: true,
+        models: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            isCurrent: true,
+            isRuntime: false,
+            ...(configOptions ? { configOptions } : {}),
+          },
+        ],
+      },
+    ],
+  };
+}
 
 describe('getReplayTokenCount', () => {
   it('returns undefined for an empty array', () => {
@@ -250,6 +363,489 @@ describe('mapWorkspaceSkills', () => {
 });
 
 describe('updateConnectionFromDaemonEvent', () => {
+  it('updates and clears the authoritative Goal snapshot', () => {
+    const goal = {
+      goalId: 'goal-1',
+      revision: 2,
+      objective: 'ship safely',
+      status: 'active',
+      evidenceCursor: { recordId: 'record-1' },
+      turnCount: 3,
+      activeTimeMs: 4_000,
+      createdAt: 10,
+      updatedAt: 20,
+    };
+    const active = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: { goalState: { v: 2, goal, activity: 'running' } },
+          },
+        },
+      } as DaemonEvent,
+    );
+    expect(active.goalState).toEqual({
+      v: 2,
+      goal,
+      activity: 'running',
+    });
+
+    const cleared = applyEvent(active, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: { goalState: { v: 2, goal: null, activity: 'idle' } },
+        },
+      },
+    } as DaemonEvent);
+    expect(cleared.goalState).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+  });
+
+  it('does not regress the same Goal to an older revision', () => {
+    const goal = {
+      goalId: 'goal-1',
+      revision: 7,
+      objective: 'newer objective',
+      status: 'paused' as const,
+      evidenceCursor: { recordId: 'record-1' },
+      turnCount: 3,
+      activeTimeMs: 4_000,
+      createdAt: 10,
+      updatedAt: 30,
+    };
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workspaceCwd: '/workspace',
+      goalState: { v: 2, goal, activity: 'idle' },
+    };
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: {
+            goalState: {
+              v: 2,
+              activity: 'running',
+              goal: { ...goal, revision: 6, status: 'active', updatedAt: 20 },
+            },
+          },
+        },
+      },
+    } as DaemonEvent);
+
+    expect(next.goalState).toBe(current.goalState);
+  });
+
+  it('orders equal-revision Goal snapshots by updatedAt', () => {
+    const current = {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'paused' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const stale = {
+      ...current,
+      activity: 'running' as const,
+      goal: { ...current.goal, status: 'active' as const, updatedAt: 20 },
+    };
+
+    expect(selectGoalState(current, stale)).toBe(current);
+  });
+
+  it('holds a bare-null Goal read back from the Goal it never observed', () => {
+    // The stamp is what separates "the daemon cleared the goal I read" from
+    // "the daemon answered before the goal I now hold existed".
+    const created = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-new',
+        revision: 1,
+        objective: 'ship safely',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    };
+    const bareNull = { v: 2 as const, goal: null, activity: 'idle' as const };
+
+    // Issued while goal-less: cannot clear the goal that landed meanwhile...
+    expect(selectGoalStateFromRead(created, bareNull, undefined)).toBe(created);
+    // ...and leaves no tombstone, so the goal's own later frames still apply.
+    expect(selectGoalState(created, { ...created, activity: 'idle' })).toEqual({
+      ...created,
+      activity: 'idle',
+    });
+    // Issued while holding this goal: the clear is authoritative.
+    expect(
+      selectGoalStateFromRead(created, bareNull, 'goal-new').goal,
+    ).toBeNull();
+    // A tombstoned clear is authoritative whatever the read observed.
+    expect(
+      selectGoalStateFromRead(
+        created,
+        {
+          ...bareNull,
+          clearedGoal: { goalId: 'goal-new', revision: 2, updatedAt: 30 },
+        },
+        undefined,
+      ).goal,
+    ).toBeNull();
+  });
+
+  it('does not resurrect a cleared Goal from a stale snapshot', () => {
+    const active = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const cleared = selectGoalState(active, {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+
+    expect(selectGoalState(cleared, active)).toBe(cleared);
+  });
+
+  it('does not resurrect a replaced Goal from a stale snapshot', () => {
+    // A replacement mints a new goalId and `goal-runtime` sends no
+    // `clearedGoal` tombstone for it, so the replaced goal's ordering identity
+    // is the only thing that can reject its late frames.
+    const replaced = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 4,
+        objective: 'first objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-a' },
+        turnCount: 2,
+        activeTimeMs: 2_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const replacement = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-b',
+        revision: 1,
+        objective: 'replacement objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-b' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 40,
+        updatedAt: 50,
+      },
+    };
+
+    const current = selectGoalState(replaced, replacement);
+    expect(current).toBe(replacement);
+    expect(selectGoalState(current, replaced)).toBe(current);
+  });
+
+  it('keeps rejecting a replaced Goal across further replacements', () => {
+    const first = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 4,
+        objective: 'first objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-a' },
+        turnCount: 2,
+        activeTimeMs: 2_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const second = {
+      ...first,
+      goal: {
+        ...first.goal,
+        goalId: 'goal-b',
+        revision: 1,
+        objective: 'second objective',
+        updatedAt: 50,
+      },
+    };
+    const third = {
+      ...first,
+      goal: {
+        ...first.goal,
+        goalId: 'goal-c',
+        revision: 1,
+        objective: 'third objective',
+        updatedAt: 70,
+      },
+    };
+
+    const current = selectGoalState(selectGoalState(first, second), third);
+    expect(current).toBe(third);
+    expect(selectGoalState(current, first)).toBe(current);
+    expect(selectGoalState(current, second)).toBe(current);
+  });
+
+  it('does not resurrect a cleared Goal after a new Goal starts', () => {
+    const active = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 7,
+        objective: 'ship safely',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 3,
+        activeTimeMs: 4_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const cleared = selectGoalState(active, {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+    const next = selectGoalState(cleared, {
+      ...active,
+      goal: {
+        ...active.goal,
+        goalId: 'goal-2',
+        revision: 1,
+        objective: 'next objective',
+        updatedAt: 60,
+      },
+    });
+
+    // The cleared goal's identity survives the new goal, so a frame the daemon
+    // emitted before the clear cannot come back over it.
+    expect(selectGoalState(next, active)).toBe(next);
+  });
+
+  it('accepts a superseded Goal again when the daemon advances its revision', () => {
+    const first = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-a',
+        revision: 4,
+        objective: 'first objective',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-a' },
+        turnCount: 2,
+        activeTimeMs: 2_000,
+        createdAt: 10,
+        updatedAt: 30,
+      },
+    };
+    const second = {
+      ...first,
+      goal: {
+        ...first.goal,
+        goalId: 'goal-b',
+        revision: 1,
+        objective: 'second objective',
+        updatedAt: 50,
+      },
+    };
+    const revived = {
+      ...first,
+      goal: { ...first.goal, revision: 5, updatedAt: 80 },
+    };
+
+    const current = selectGoalState(first, second);
+    expect(selectGoalState(current, revived)).toBe(revived);
+  });
+
+  it('does not apply a delayed clear tombstone to a replacement Goal', () => {
+    const replacement = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-h',
+        revision: 1,
+        objective: 'replacement',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-h' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        createdAt: 40,
+        updatedAt: 50,
+      },
+    };
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workspaceCwd: '/workspace',
+      goalState: replacement,
+    };
+    const next = applyEvent(current, {
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: {
+            goalState: {
+              v: 2,
+              goal: null,
+              activity: 'idle',
+              clearedGoal: {
+                goalId: 'goal-g',
+                revision: 4,
+                updatedAt: 30,
+              },
+            },
+          },
+        },
+      },
+    } as DaemonEvent);
+
+    expect(next.goalState).toBe(replacement);
+  });
+
+  it('carries limitKind through from the wire', () => {
+    // The mapper rebuilds the Goal record field-by-field after validating it,
+    // which is exactly how a newly added field gets dropped in silence. No
+    // client logic keys off `limitKind` any more (resumability is decided by
+    // status alone; the reducer resumes an evidence-limited Goal by restarting
+    // its window), but the wire copy is the client's only copy of the record
+    // -- the pin is that mapping does not quietly narrow it.
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'usage_limited',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  lastReason: 'evidence catalog exhausted',
+                  limitKind: 'evidence_catalog',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'evidence_catalog',
+    });
+  });
+
+  it('drops an unknown limitKind rather than passing it through', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'paused',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  limitKind: 'not-a-kind',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal?.limitKind).toBeUndefined();
+  });
+
+  it('ignores malformed Goal snapshots', () => {
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workspaceCwd: '/workspace',
+      goalState: { v: 2, goal: null, activity: 'idle' },
+    };
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: { goalState: { v: 2, goal: {}, activity: 'running' } },
+        },
+      },
+    } as DaemonEvent);
+
+    expect(next.goalState).toBe(current.goalState);
+  });
+
   it('updates and clears the current git branch', () => {
     const changed = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace', gitBranch: 'main' },
@@ -339,6 +935,49 @@ describe('updateConnectionFromDaemonEvent', () => {
 
     expect(next.commands?.map((command) => command.name)).toEqual(['review']);
     expect(next.skills).toEqual(['review']);
+  });
+
+  it('reads nested availableSkills from the daemon wire shape', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              { name: 'review', description: 'Review a PR', input: null },
+            ],
+            _meta: { availableSkills: ['review'] },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.skills).toEqual(['review']);
+  });
+
+  it('prefers flat availableSkills when both wire shapes are present', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [],
+            availableSkills: ['flat-skill'],
+            _meta: { availableSkills: ['nested-skill'] },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.skills).toEqual(['flat-skill']);
   });
 
   it('clears stale commands when the update reports an empty list', () => {

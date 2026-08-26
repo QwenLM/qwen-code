@@ -947,6 +947,12 @@
   justify-content: flex-end;
 }
 
+.sessionMetaSlot:not(
+  :has(.sessionLoading, .sessionAttention, .sessionGitIcon)
+) {
+  padding-right: 10px;
+}
+
 .sessionAttention {
   height: 22px;
   display: inline-flex;
@@ -964,10 +970,6 @@
 .sessionAttentionUserInput {
   background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
   color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
-}
-
-.sessionAttention + .sessionLoading {
-  margin-left: 10px;
 }
 
 .sessionRow:hover .sessionMetaSlot,
@@ -993,7 +995,7 @@
 }
 
 .sessionLoading {
-  margin-right: 10px;
+  margin: 0 10px;
   width: 12px;
   height: 12px;
   display: inline-flex;

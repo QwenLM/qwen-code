@@ -30,7 +30,7 @@ import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
   parseSlashCommand,
-} from '../../utils/commands.js';
+} from '../commands/commands.js';
 
 export enum CompletionMode {
   IDLE = 'IDLE',

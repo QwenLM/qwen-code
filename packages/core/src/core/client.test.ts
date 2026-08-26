@@ -79,6 +79,7 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
 } from './prompts.js';
+import { getBuiltInOutputStyle } from './output-styles.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
@@ -90,7 +91,7 @@ import {
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
   getInitialChatHistory,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -107,7 +108,7 @@ import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import {
   clearCacheSafeParams,
   getCacheSafeParams,
-} from '../utils/forkedAgent.js';
+} from '../agents/forkedAgent.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -218,9 +219,9 @@ vi.mock('../tools/skill-utils.js', async (importOriginal) => {
     collectAvailableSkillEntries: vi.fn(),
   };
 });
-vi.mock('../utils/environmentContext', async (importOriginal) => {
+vi.mock('./environmentContext', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('../utils/environmentContext.js')>();
+    await importOriginal<typeof import('./environmentContext.js')>();
   return {
     ...actual,
     getEnvironmentContext: vi
@@ -424,26 +425,6 @@ vi.mock(
 );
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
-// Mock RequestTokenizer to use simple character-based estimation
-vi.mock('../utils/request-tokenizer/requestTokenizer.js', () => ({
-  RequestTokenizer: class {
-    async calculateTokens(request: { contents: unknown }) {
-      // Simple estimation: count characters in JSON and divide by 4
-      const totalChars = JSON.stringify(request.contents).length;
-      return {
-        totalTokens: Math.floor(totalChars / 4),
-        breakdown: {
-          textTokens: Math.floor(totalChars / 4),
-          imageTokens: 0,
-          audioTokens: 0,
-          otherTokens: 0,
-        },
-        processingTime: 0,
-      };
-    }
-  },
-}));
-
 /**
  * Array.fromAsync ponyfill, which will be available in es 2024.
  *
@@ -562,7 +543,6 @@ describe('Gemini Client (client.ts)', () => {
       generateContent: mockGenerateContentFn,
       generateContentStream: vi.fn(),
       batchEmbedContents: vi.fn(),
-      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
     } as unknown as ContentGenerator;
 
     // Because the GeminiClient constructor kicks off an async process (startChat)
@@ -602,6 +582,7 @@ describe('Gemini Client (client.ts)', () => {
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getStaticSystemPrefix: vi.fn().mockReturnValue(undefined),
       setStaticSystemPrefix: vi.fn(),
       getFullContext: vi.fn().mockReturnValue(false),
@@ -619,7 +600,7 @@ describe('Gemini Client (client.ts)', () => {
         toolResultsThresholdMinutes: 60,
         toolResultsNumToKeep: 5,
       }),
-      getSessionTokenLimit: vi.fn().mockReturnValue(32000),
+      getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getTelemetryIncludeSensitiveSpanAttributes: vi
@@ -654,6 +635,7 @@ describe('Gemini Client (client.ts)', () => {
           .mockReturnValue('/test/project/root/.gemini/projects/test-project'),
       },
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+      getModelRouteIdentity: vi.fn().mockReturnValue('test-route'),
       getEffectiveInputModalities: vi.fn().mockReturnValue({}),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
@@ -702,6 +684,7 @@ describe('Gemini Client (client.ts)', () => {
       getFileReadCache: vi.fn().mockReturnValue({
         clear: vi.fn(),
       }),
+      getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     // Real BaseLlmClient routes generateText through mockContentGenerator;
@@ -1924,6 +1907,134 @@ describe('Gemini Client (client.ts)', () => {
       ).toMatch(/interrupted/i);
     });
 
+    it('still synthesizes a failed functionResponse for dangling ask_user_question when restore is off', async () => {
+      await client.startChat([
+        { role: 'user', parts: [{ text: 'pick one' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_auq_resume',
+                name: 'ask_user_question',
+                args: {
+                  questions: [
+                    {
+                      question: 'Which approach?',
+                      header: 'Approach',
+                      options: [
+                        { label: 'Polling', description: 'Poll the API' },
+                        { label: 'Webhook', description: 'Use a webhook' },
+                      ],
+                    },
+                  ],
+                },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      const danglingIdx = history.findIndex(
+        (h) =>
+          h.role === 'model' &&
+          h.parts?.some((p) => p.functionCall?.id === 'call_auq_resume'),
+      );
+      expect(danglingIdx).toBeGreaterThanOrEqual(0);
+      const userAfter = history[danglingIdx + 1];
+      expect(userAfter?.role).toBe('user');
+      const fr = userAfter?.parts!.find((p) => p.functionResponse);
+      expect(fr?.functionResponse?.id).toBe('call_auq_resume');
+      expect(
+        (fr?.functionResponse?.response as { error?: string })?.error,
+      ).toMatch(/interrupted/i);
+    });
+
+    it('skips orphan repair for a restorable ask_user_question when restore is on', async () => {
+      vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
+
+      await client.startChat([
+        { role: 'user', parts: [{ text: 'pick one' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_auq_resume',
+                name: 'ask_user_question',
+                args: {
+                  questions: [
+                    {
+                      question: 'Which approach?',
+                      header: 'Approach',
+                      options: [
+                        { label: 'Polling', description: 'Poll the API' },
+                        { label: 'Webhook', description: 'Use a webhook' },
+                      ],
+                    },
+                  ],
+                },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      const danglingIdx = history.findIndex(
+        (h) =>
+          h.role === 'model' &&
+          h.parts?.some((p) => p.functionCall?.id === 'call_auq_resume'),
+      );
+      expect(danglingIdx).toBeGreaterThanOrEqual(0);
+      expect(history[danglingIdx + 1]).toBeUndefined();
+      const hasFunctionResponse = history.some((h) =>
+        h.parts?.some((p) => p.functionResponse?.id === 'call_auq_resume'),
+      );
+      expect(hasFunctionResponse).toBe(false);
+    });
+
+    it('repairs a restorable ask_user_question when restore preservation is suppressed', async () => {
+      vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
+      Object.assign(mockConfig, {
+        getPreserveRestorableAskUserQuestion: vi.fn().mockReturnValue(false),
+      });
+
+      await client.startChat([
+        { role: 'user', parts: [{ text: 'pick one' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_auq_resume',
+                name: 'ask_user_question',
+                args: {
+                  questions: [
+                    {
+                      question: 'Which approach?',
+                      header: 'Approach',
+                      options: [
+                        { label: 'Polling', description: 'Poll the API' },
+                        { label: 'Webhook', description: 'Use a webhook' },
+                      ],
+                    },
+                  ],
+                },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      const hasFunctionResponse = history.some((h) =>
+        h.parts?.some((p) => p.functionResponse?.id === 'call_auq_resume'),
+      );
+      expect(hasFunctionResponse).toBe(true);
+    });
+
     it('is a no-op when the resumed transcript has no dangling tool_use', async () => {
       // Happy resume path: don't inject a synthetic functionResponse
       // into a transcript whose tool_use pairing is already valid (or,
@@ -3018,6 +3129,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory,
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength: vi.fn().mockReturnValue(1),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(101),
         // Send is skipped, so the push counter never advances → restore.
         getUserContentPushCount: vi.fn().mockReturnValue(0),
         stripOrphanedUserEntriesFromHistory: vi
@@ -3042,6 +3154,170 @@ describe('Gemini Client (client.ts)', () => {
       expect(events[0]?.type).toBe(GeminiEventType.SessionTokenLimitExceeded);
       expect(mockTurnRunFn).not.toHaveBeenCalled();
       expect(addHistory).toHaveBeenCalledWith(retryEntry);
+    });
+
+    it('invalidates a foreign route count before the session limit gate', async () => {
+      let route = 'route-a';
+      let telemetryCount = 691_000;
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation(
+        () => route,
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100_000);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockImplementation(
+        () => telemetryCount,
+      );
+      vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockImplementation(
+        (count) => {
+          telemetryCount = count;
+        },
+      );
+      client.getChat().setLastPromptTokenCount(telemetryCount);
+      route = 'route-b';
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'new route' }],
+          new AbortController().signal,
+          'prompt-route-switch',
+        ),
+      );
+
+      expect(events).not.toContainEqual(
+        expect.objectContaining({
+          type: GeminiEventType.SessionTokenLimitExceeded,
+        }),
+      );
+      expect(telemetryCount).toBe(0);
+    });
+
+    it('applies the session limit to the requested override route', async () => {
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'override-model@route',
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      client.getChat().setLastPromptTokenCount(101);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active-model@route',
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'override route' }],
+          new AbortController().signal,
+          'prompt-override-limit',
+          {
+            type: SendMessageType.UserQuery,
+            modelOverride: 'override-model',
+          },
+        ),
+      );
+
+      expect(events).toContainEqual({
+        type: GeminiEventType.SessionTokenLimitExceeded,
+        value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
+      });
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
+    it('applies the session limit to a resolved full-turn route selector', async () => {
+      // The vision-bridge full-turn selector `${id}\0${baseUrl}\0` arrives as
+      // modelOverride. GeminiChat.sendMessageStream resolves it and stamps
+      // counts under the RESOLVED route's identity, so the gate must resolve
+      // the selector before keying — the raw selector key (always containing
+      // a NUL) can never match a stamped count (#9454).
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'vision-agent@route',
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      client.getChat().setLastPromptTokenCount(101);
+      const resolveForModel = vi.fn().mockResolvedValue({
+        model: 'vision-agent',
+        contentGeneratorConfig: undefined,
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active-model@route',
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'vision route' }],
+          new AbortController().signal,
+          'prompt-selector-limit',
+          {
+            type: SendMessageType.UserQuery,
+            modelOverride: 'openai:vision-agent\0https://vision.example/v1\0',
+          },
+        ),
+      );
+
+      expect(resolveForModel).toHaveBeenCalledWith(
+        'openai:vision-agent\0https://vision.example/v1',
+        { failClosed: true },
+      );
+      expect(events).toContainEqual({
+        type: GeminiEventType.SessionTokenLimitExceeded,
+        value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
+      });
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
+    it('keeps the session limit enforced when turns alternate routes (#9506)', async () => {
+      // Counts are retained per route (#9506): an intervening turn on
+      // another route must not destroy the count the gate later reads for
+      // the original route. Pre-fix, the foreign-route gate read zeroed
+      // the only slot, so the returning turn read 0 and was admitted
+      // regardless of size — steady alternation disabled the limit.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model === 'route-x' ? 'route-x@route' : 'route-a',
+      );
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      // Route A's last response stamped an over-limit count.
+      client.getChat().setLastPromptTokenCount(101);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+
+      // Intervening turn on route X: no counts recorded for X yet, so the
+      // gate admits it.
+      const foreignEvents = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'foreign route turn' }],
+          new AbortController().signal,
+          'prompt-alternate-foreign',
+          { type: SendMessageType.UserQuery, modelOverride: 'route-x' },
+        ),
+      );
+      expect(foreignEvents).not.toContainEqual(
+        expect.objectContaining({
+          type: GeminiEventType.SessionTokenLimitExceeded,
+        }),
+      );
+
+      // Returning to route A must still trip the gate with the retained
+      // over-limit count — the alternation must not have zeroed it.
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'back on route a' }],
+          new AbortController().signal,
+          'prompt-alternate-return',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      expect(events).toContainEqual({
+        type: GeminiEventType.SessionTokenLimitExceeded,
+        value: expect.objectContaining({ currentTokens: 101, limit: 100 }),
+      });
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -4809,6 +5085,7 @@ describe('Gemini Client (client.ts)', () => {
       const history = JSON.stringify(getCacheSafeParams()?.history);
       expect(history).not.toContain('image-bytes');
       expect(history).toContain('pdf-bytes');
+      expect(getCacheSafeParams()?.sessionId).toBe('test-session-id');
     });
 
     it.each([
@@ -5095,6 +5372,664 @@ hello
       expect(requestText).not.toContain('</system-reminder\uFE0F>');
     });
 
+    // Delivery-stage coverage for the deterministic fast path. The model
+    // selector is a network side query, so on a turn that makes no tool call
+    // the refined result has no safe delivery point at all. These cases pin
+    // the fast path that closes that gap, plus the dedupe, cancellation, and
+    // exactly-once guarantees it must not break.
+    const fastDoc = (filePath: string, body: string) => ({
+      type: 'user' as const,
+      filePath,
+      relativePath: filePath.split('/').at(-1)!,
+      filename: filePath.split('/').at(-1)!,
+      title: 'User Memory',
+      description: 'User preferences',
+      body,
+      mtimeMs: 1,
+    });
+
+    const toolCallStream = () =>
+      (async function* () {
+        yield { type: 'content', value: 'Hello' };
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'call-1',
+            name: 'foo',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-fast',
+          },
+        };
+      })();
+
+    it('delivers the deterministic fast result on a tool-free turn when the selector is still in flight', async () => {
+      vi.useFakeTimers();
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nFast deterministic result.',
+          selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+          strategy: 'heuristic',
+        });
+        // Selector never settles — stands in for a slow round trip.
+        return new Promise(() => {});
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-tool-free',
+        ),
+      );
+
+      // The deterministic result was already published, so the budget has
+      // nothing left to wait for and the request goes out without spending it.
+      await vi.advanceTimersByTimeAsync(0);
+      await done;
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('ends the initial wait as soon as the deterministic result arrives', async () => {
+      vi.useFakeTimers();
+      // Stands in for the memory-tree scan: the fast result is not ready when
+      // the wait begins, but lands well before the budget expires.
+      const SCAN_MS = 30;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        setTimeout(() => {
+          if (options.abortSignal?.aborted) return;
+          options.onFastResult?.({
+            prompt: '## Relevant memory\n\nFast deterministic result.',
+            selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+            strategy: 'heuristic',
+          });
+        }, SCAN_MS);
+        // Selector never settles — stands in for a slow round trip.
+        return new Promise(() => {});
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-early-return',
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(SCAN_MS - 1);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      // The remaining ~70 ms of budget is never spent.
+      await vi.advanceTimersByTimeAsync(1);
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+
+      await vi.advanceTimersByTimeAsync(100);
+      await done;
+    });
+
+    /**
+     * Pins the consequence of ending the wait on the fast result, which local
+     * verification on a real stack surfaced as broader than "slow selectors":
+     * once the deterministic scorer matches, the initial turn delivers the
+     * fast result whatever the selector's latency.
+     *
+     * `onFastResult` is published before recall issues the selector request,
+     * so the recall promise cannot be settled when the wait ends on it. This
+     * is the intended trade — a model side query does not return inside the
+     * ceiling in production, so arbitrating would cost every turn the rest of
+     * the budget to win a race that does not happen — and the selector's
+     * judgement still lands at ToolResult. Recorded as a decision so a future
+     * reader does not mistake it for an accident.
+     */
+    it('delivers the fast result even when the selector settles inside the budget', async () => {
+      vi.useFakeTimers();
+      const SCAN_MS = 10;
+      const SELECTOR_MS = 15;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        setTimeout(() => {
+          if (options.abortSignal?.aborted) return;
+          options.onFastResult?.({
+            prompt: '## Relevant memory\n\nFast deterministic result.',
+            selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+            strategy: 'heuristic',
+          });
+        }, SCAN_MS);
+        // Settles comfortably inside the 100 ms ceiling — and still loses.
+        return new Promise((resolve) => {
+          setTimeout(
+            () =>
+              resolve({
+                prompt: '## Relevant memory\n\nRefined model result.',
+                selectedDocs: [fastDoc('/m/refined.md', '- refined')],
+                strategy: 'model',
+              }),
+            SELECTOR_MS,
+          );
+        });
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-beats-quick-selector',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(200);
+      await done;
+
+      const initialRequest = mockTurnRunFn.mock.calls[0]?.[1] as unknown[];
+      expect(initialRequest).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+      );
+      expect(initialRequest).not.toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Refined model result.'),
+        ]),
+      );
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'fast',
+          delivery_point: 'initial',
+          strategy: 'heuristic',
+        }),
+      );
+    });
+
+    it('still delivers the model-selected result at ToolResult after a fast initial delivery', async () => {
+      vi.useFakeTimers();
+      let settleRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: Array<ReturnType<typeof fastDoc>>;
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nFast deterministic result.',
+          selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+          strategy: 'heuristic',
+        });
+        return new Promise((resolve) => {
+          settleRecall = resolve;
+        });
+      });
+
+      mockTurnRunFn.mockReturnValue(toolCallStream());
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const userDone = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-then-refined',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await userDone;
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+
+      // Selector lands between turns with a different document.
+      settleRecall!({
+        prompt: '## Relevant memory\n\nRefined model result.',
+        selectedDocs: [fastDoc('/m/refined.md', '- refined')],
+        strategy: 'model',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'tool result turn' };
+        })(),
+      );
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+          new AbortController().signal,
+          'prompt-id-fast-then-refined-tool',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Refined model result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('does not re-deliver a document the fast phase already injected', async () => {
+      vi.useFakeTimers();
+      const overlapping = fastDoc('/m/overlap.md', '- overlapping');
+      let settleRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: Array<ReturnType<typeof fastDoc>>;
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nOverlapping memory body.',
+          selectedDocs: [overlapping],
+          strategy: 'heuristic',
+        });
+        return new Promise((resolve) => {
+          settleRecall = resolve;
+        });
+      });
+
+      mockTurnRunFn.mockReturnValue(toolCallStream());
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const userDone = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-dedupe',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await userDone;
+
+      // The selector re-selects the fast document alongside a genuinely new
+      // one — it never saw the fast delivery, so overlap is expected.
+      // Markers live only in the selector's own prompt string. Dedupe must
+      // rebuild the prompt from the remaining documents, dropping them; if the
+      // result were passed through untouched the markers would survive.
+      settleRecall!({
+        prompt: '## Relevant memory\n\nOVERLAP_MARKER\n\nNEW_MARKER',
+        selectedDocs: [overlapping, fastDoc('/m/new.md', '- brand new')],
+        strategy: 'model',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'tool result turn' };
+        })(),
+      );
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+          new AbortController().signal,
+          'prompt-id-fast-dedupe-tool',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      const toolRequest = mockTurnRunFn.mock.calls.at(-1)?.[1] as unknown[];
+      const toolText = JSON.stringify(toolRequest);
+      // The genuinely new document still reaches the model, rendered from its
+      // own body by the rebuilt prompt.
+      expect(toolText).toContain('brand new');
+      // The overlapping document was already in front of the model from the
+      // fast delivery; sending it again would duplicate context. Passing the
+      // selector result through unchanged would leave both markers intact.
+      expect(toolText).not.toContain('OVERLAP_MARKER');
+      expect(toolText).not.toContain('- overlapping');
+    });
+
+    it('logs already-delivered discards with the selector count', async () => {
+      vi.useFakeTimers();
+      const overlapping = fastDoc('/m/overlap.md', '- overlapping');
+      let settleRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: Array<ReturnType<typeof fastDoc>>;
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nOverlapping memory body.',
+          selectedDocs: [overlapping],
+          strategy: 'heuristic',
+        });
+        return new Promise((resolve) => {
+          settleRecall = resolve;
+        });
+      });
+
+      mockTurnRunFn.mockReturnValue(toolCallStream());
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const userDone = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          'prompt-id-fast-dedupe-discard',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await userDone;
+
+      settleRecall!({
+        prompt: '## Relevant memory\n\nOVERLAP_MARKER',
+        selectedDocs: [overlapping],
+        strategy: 'model',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'tool result turn' };
+        })(),
+      );
+      await fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+          new AbortController().signal,
+          'prompt-id-fast-dedupe-discard-tool',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          strategy: 'model',
+          docs_selected: 1,
+          discard_reason: 'already_delivered',
+        }),
+      );
+    });
+
+    /**
+     * Tool-free turn where the selector lands *after* the fast delivery but
+     * before the turn ends: the handle is discarded, so the reason it records
+     * is the only delivery signal this shape of turn produces.
+     */
+    const runFastDiscardTurn = async (
+      promptId: string,
+      fastDocs: Array<ReturnType<typeof fastDoc>>,
+      refinedDocs: Array<ReturnType<typeof fastDoc>>,
+    ) => {
+      let settleRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: Array<ReturnType<typeof fastDoc>>;
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          prompt: '## Relevant memory\n\nFast deterministic result.',
+          selectedDocs: fastDocs,
+          strategy: 'heuristic',
+        });
+        return new Promise((resolve) => {
+          settleRecall = resolve;
+        });
+      });
+
+      // Held open so the selector can settle mid-turn; without it the turn
+      // ends first and the discard sees no result at all.
+      let releaseStream: (() => void) | undefined;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          await new Promise<void>((resolve) => {
+            releaseStream = resolve;
+          });
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          new AbortController().signal,
+          promptId,
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      settleRecall!({
+        prompt: '## Relevant memory\n\nREFINED_MARKER',
+        selectedDocs: refinedDocs,
+        strategy: 'model',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      releaseStream!();
+      await done;
+    };
+
+    it('reports a fully fast-delivered result as already-delivered, not as a lost one', async () => {
+      vi.useFakeTimers();
+      const overlapping = fastDoc('/m/overlap.md', '- overlapping');
+      await runFastDiscardTurn(
+        'prompt-id-fast-discard-already-delivered',
+        [overlapping],
+        [overlapping],
+      );
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'already_delivered',
+          docs_selected: 1,
+        }),
+      );
+      expect(logMemoryRecallDelivery).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          discard_reason: 'no_safe_delivery_point',
+        }),
+      );
+    });
+
+    it('still reports a partly fast-delivered result as having no safe delivery point', async () => {
+      vi.useFakeTimers();
+      const overlapping = fastDoc('/m/overlap.md', '- overlapping');
+      // `/m/extra.md` never reached the model, so the turn really did lose it.
+      const undelivered = fastDoc('/m/extra.md', '- extra');
+      await runFastDiscardTurn(
+        'prompt-id-fast-discard-partial',
+        [overlapping],
+        [overlapping, undelivered],
+      );
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'no_safe_delivery_point',
+        }),
+      );
+    });
+
+    it('delivers no fast result when the turn is cancelled inside the initial window', async () => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      // The fast result must still be in flight when the abort lands,
+      // otherwise the wait would already have ended on its arrival and there
+      // would be no window left to cancel inside.
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        setTimeout(() => {
+          if (options.abortSignal?.aborted) return;
+          options.onFastResult?.({
+            prompt: '## Relevant memory\n\nFast deterministic result.',
+            selectedDocs: [fastDoc('/m/fast.md', '- terse')],
+            strategy: 'heuristic',
+          });
+        }, 80);
+        return new Promise(() => {});
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'What do you know about me?' }],
+          controller.signal,
+          'prompt-id-fast-cancelled',
+        ),
+      ).catch(() => {});
+
+      await vi.advanceTimersByTimeAsync(50);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(100);
+      await done;
+
+      expect(mockTurnRunFn).not.toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining('Fast deterministic result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('does not leak a fast result across query boundaries', async () => {
+      vi.useFakeTimers();
+      let call = 0;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        call += 1;
+        if (call === 1) {
+          options.onFastResult?.({
+            prompt: '## Relevant memory\n\nFirst turn fast result.',
+            selectedDocs: [fastDoc('/m/first.md', '- first')],
+            strategy: 'heuristic',
+          });
+        }
+        // Neither recall settles; the second turn must not inherit the first
+        // turn's fast result.
+        return new Promise(() => {});
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const first = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'First question' }],
+          new AbortController().signal,
+          'prompt-id-fast-leak-1',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await first;
+
+      mockTurnRunFn.mockClear();
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello again' };
+        })(),
+      );
+
+      const second = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Second question' }],
+          new AbortController().signal,
+          'prompt-id-fast-leak-2',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      await second;
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('First turn fast result.'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
     it('should prepend relevant managed auto-memory prompt when recall returns content', async () => {
       mockMemoryManager.recall.mockResolvedValue({
         prompt: '## Relevant memory\n\nUser prefers terse responses.',
@@ -5218,9 +6153,13 @@ hello
       );
     });
 
-    it('should not block the main request when auto-memory recall is slow', async () => {
-      // Recall never settles — settledAt stays null so the UserQuery consume
-      // point skips it and turn.run() is called immediately without memory.
+    it('should hold the main request for exactly the initial recall budget when recall never settles', async () => {
+      // Recall never settles and never publishes a deterministic result, so
+      // nothing can end the wait early. Fake timers pin the ceiling: the
+      // request must still be blocked 1 ms inside the budget and proceed,
+      // without memory, the moment the budget expires. This is also the shape
+      // of a memory tree whose scan is slower than the budget.
+      vi.useFakeTimers();
       mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
 
       const mockStream = (async function* () {
@@ -5234,20 +6173,82 @@ hello
       };
       client['chat'] = mockChat as GeminiChat;
 
-      const stream = client.sendMessageStream(
-        [{ text: 'Quick question' }],
-        new AbortController().signal,
-        'prompt-id-slow-memory',
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Quick question' }],
+          new AbortController().signal,
+          'prompt-id-slow-memory',
+        ),
       );
-      for await (const _ of stream) {
-        // consume stream
-      }
 
-      // turn.run() must have been called without the slow memory
+      // Drain microtasks up to the consume point, then stop 1 ms short of
+      // the 100 ms budget: the request must still be held.
+      await vi.advanceTimersByTimeAsync(99);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+
+      // Budget expiry: the request proceeds without the slow memory.
+      await vi.advanceTimersByTimeAsync(1);
+      await done;
+
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         expect.not.arrayContaining([
           expect.stringContaining('Slow memory result'),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should end the initial wait early when recall settles inside the budget', async () => {
+      // Fake timers pin the early-exit contract: once recall settles the
+      // request proceeds immediately with the memory — it must not run out
+      // the remaining budget. Dropping the settle listener in
+      // tryConsumeMemoryPrefetch would leave the request blocked until the
+      // full budget, which this assertion catches.
+      vi.useFakeTimers();
+      mockMemoryManager.recall.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  prompt: '## Relevant memory\n\nBounded memory result.',
+                  selectedDocs: [],
+                  strategy: 'model',
+                }),
+              10,
+            );
+          }),
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Quick question' }],
+          new AbortController().signal,
+          'prompt-id-bounded-memory',
+        ),
+      );
+
+      // Recall settles 10 ms in; the request must already be proceeding,
+      // 90 ms short of the budget.
+      await vi.advanceTimersByTimeAsync(10);
+      expect(mockTurnRunFn).toHaveBeenCalled();
+      await done;
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          '## Relevant memory\n\nBounded memory result.',
         ]),
         expect.any(AbortSignal),
       );
@@ -5407,11 +6408,13 @@ hello
             strategy: 'model';
           }) => void)
         | undefined;
-      mockMemoryManager.recall.mockReturnValue(
-        new Promise((resolve) => {
+      let recallSignal: AbortSignal | undefined;
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        recallSignal = options.abortSignal;
+        return new Promise((resolve) => {
           resolveRecall = resolve;
-        }),
-      );
+        });
+      });
 
       // The model requests a tool call so pendingToolCalls is non-empty and
       // the prefetch is preserved for the subsequent ToolResult turn.
@@ -5454,6 +6457,7 @@ hello
         ]),
         expect.any(AbortSignal),
       );
+      expect(recallSignal?.aborted).toBe(false);
 
       // Recall settles between turns
       resolveRecall!({
@@ -6172,6 +7176,189 @@ hello
       expect(abortHandlerInvoked).toBe(true);
     });
 
+    it('should end the bounded initial wait when the prefetch is cancelled', async () => {
+      vi.useFakeTimers();
+      const controller = new AbortController();
+      const handle = {
+        promise: new Promise<never>(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredPaths: new Set<string>(),
+        firedAt: Date.now(),
+        controller,
+      };
+      client['pendingMemoryPrefetch'] = handle;
+      const privateClient = client as unknown as {
+        tryConsumeMemoryPrefetch: (
+          deliveryPoint: 'initial',
+          waitMs: number,
+        ) => Promise<unknown>;
+        cancelPendingMemoryPrefetch: (reason: 'abort') => void;
+      };
+
+      const consume = privateClient.tryConsumeMemoryPrefetch('initial', 100);
+      setTimeout(() => privateClient.cancelPendingMemoryPrefetch('abort'), 10);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await expect(consume).resolves.toBeNull();
+      expect(controller.signal.aborted).toBe(true);
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
+    it('should not consume a prefetch replaced during the bounded wait', async () => {
+      vi.useFakeTimers();
+      type RecallResult = {
+        prompt: string;
+        selectedDocs: Array<{
+          type: 'user';
+          filePath: string;
+          relativePath: string;
+          filename: string;
+          title: string;
+          description: string;
+          body: string;
+          mtimeMs: number;
+        }>;
+        strategy: 'model';
+      };
+      let settleRecall: ((value: RecallResult) => void) | undefined;
+      const handle = {
+        promise: new Promise<RecallResult>((resolve) => {
+          settleRecall = resolve;
+        }),
+        settledAt: null as number | null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredPaths: new Set<string>(),
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+      client['pendingMemoryPrefetch'] = handle;
+      const privateClient = client as unknown as {
+        tryConsumeMemoryPrefetch: (
+          deliveryPoint: 'initial',
+          waitMs: number,
+        ) => Promise<unknown>;
+      };
+
+      const consume = privateClient.tryConsumeMemoryPrefetch('initial', 100);
+
+      // The handle is replaced mid-wait and only settles afterwards; the
+      // post-wait guard must refuse the stale handle instead of consuming
+      // it.
+      const replacement = { ...handle, controller: new AbortController() };
+      setTimeout(() => {
+        client['pendingMemoryPrefetch'] = replacement;
+      }, 10);
+      setTimeout(() => {
+        handle.settledAt = Date.now();
+        settleRecall!({
+          prompt: '## Relevant memory\n\nReplaced result.',
+          selectedDocs: [],
+          strategy: 'model',
+        });
+      }, 20);
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      await expect(consume).resolves.toBeNull();
+      expect(handle.consumed).toBe(false);
+      expect(client['pendingMemoryPrefetch']).toBe(replacement);
+    });
+
+    it('should not apply the initial wait budget on Cron turns', async () => {
+      // Cron recall fires too, but its consume point is zero-wait: with a
+      // never-settling recall the Cron request must proceed at elapsed 0
+      // instead of being held for the user-query budget.
+      vi.useFakeTimers();
+      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Cron response' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Scheduled sweep' }],
+          new AbortController().signal,
+          'prompt-id-cron-memory',
+          { type: SendMessageType.Cron },
+        ),
+      );
+
+      // Zero elapsed: the Cron turn must not be held by the recall budget.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('Relevant memory'),
+        ]),
+        expect.any(AbortSignal),
+      );
+      await done;
+    });
+
+    it('should keep the ToolResult consume point zero-wait', async () => {
+      // The ToolResult delivery point must never block on the recall
+      // budget: with a still-pending prefetch the ToolResult turn proceeds
+      // at elapsed 0 and without memory.
+      vi.useFakeTimers();
+      client['pendingMemoryPrefetch'] = {
+        promise: new Promise<never>(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredPaths: new Set<string>(),
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'tool result turn' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const done = fromAsync(
+        client.sendMessageStream(
+          [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+          new AbortController().signal,
+          'prompt-id-tool-result-zero-wait',
+          { type: SendMessageType.ToolResult },
+        ),
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('Relevant memory'),
+        ]),
+        expect.any(AbortSignal),
+      );
+      await done;
+    });
+
     it('should abort the previous prefetch when a new UserQuery arrives mid-flight', async () => {
       // Pending recall on first UserQuery — never resolves on its own.
       const abortSignals: AbortSignal[] = [];
@@ -6757,6 +7944,9 @@ hello
         result,
         consumed: false,
         terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredPaths: new Set<string>(),
         firedAt: Date.now(),
         controller: new AbortController(),
       };
@@ -8223,6 +9413,7 @@ Other open files:
       const mockChat: Partial<GeminiChat> = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getLastPromptTokenCount: vi.fn().mockReturnValue(9999),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -12346,6 +13537,7 @@ Other open files:
         'test-model',
         undefined,
         'headless',
+        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -12354,6 +13546,30 @@ Other open files:
           }),
         }),
         'test-session-id',
+      );
+    });
+
+    it('passes the active output style to the core system prompt', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+      const concise = getBuiltInOutputStyle('Concise');
+
+      vi.mocked(getCoreSystemPrompt).mockClear();
+      vi.spyOn(client['config'], 'getOutputStyle').mockReturnValue(concise);
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+        undefined,
+        'test-model',
+        undefined,
+        'headless',
+        concise,
       );
     });
 
@@ -12385,6 +13601,7 @@ Other open files:
           'test-model',
           undefined,
           mode,
+          undefined,
         );
       },
     );

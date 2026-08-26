@@ -49,6 +49,7 @@ export type PersistedSessionArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
 
 export type PersistedSessionArtifactStorage =
@@ -856,6 +857,7 @@ function normalizePersistedArtifact(
     'audio',
     'pdf',
     'notebook',
+    'document',
     'other',
   ]);
   const storage = normalizeLiteral<PersistedSessionArtifactStorage>(

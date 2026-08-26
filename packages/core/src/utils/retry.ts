@@ -5,7 +5,7 @@
  */
 
 import type { GenerateContentResponse } from '@google/genai';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType } from './auth-type.js';
 import {
   isQwenQuotaExceededError,
   isQuotaExhaustedError,
@@ -87,7 +87,12 @@ export interface RetryOptions {
   onRetry?: (info: RetryAttemptInfo) => void;
 }
 
-const DEFAULT_RETRY_OPTIONS: RetryOptions = {
+/**
+ * Default ladder for the normal HTTP retry path. Exported so callers that
+ * must outlast it — the workflow stall watchdog sizes `DEFAULT_STALL_MS`
+ * against it — can derive the ladder rather than hand-copy it.
+ */
+export const DEFAULT_RETRY_OPTIONS: RetryOptions = {
   maxAttempts: 7,
   initialDelayMs: 1500,
   maxDelayMs: 30000, // 30 seconds

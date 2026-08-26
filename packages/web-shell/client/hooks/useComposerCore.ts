@@ -81,6 +81,7 @@ import {
   getComposerTagIconUrl,
   getComposerTagSerialized,
   isBuiltinComposerTagIconUrl,
+  isPreviewableFileComposerTag,
   parseUserMessageContentSafely,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
@@ -101,13 +102,15 @@ import type {
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
   dedupeAttachmentName,
+  extractFiles,
   extractFileTransfer,
   hasFileTransferPayload,
   MAX_IMAGE_ATTACHMENT_DATA_BYTES,
-  MAX_TEXT_ATTACHMENT_DATA_BYTES,
+  MAX_FILE_ATTACHMENT_DATA_BYTES,
   readImageTransfer,
-  readTextTransfer,
+  readFileTransfer,
   sanitizeAttachmentName,
+  type ExtractedFileTransfer,
 } from '../utils/imageIngestion';
 
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
@@ -1094,6 +1097,14 @@ export interface UseComposerCoreOptions {
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
+  /**
+   * Whether the composer may react to FILE drags at all (drag highlight and
+   * drop ingestion on the inline image/text lane). `false` leaves paste
+   * working but makes file drag-and-drop inert, matching a host that
+   * force-disables file upload via `fileUploadEnabled={false}`. Defaults to
+   * `true`.
+   */
+  fileDragEnabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
@@ -1119,6 +1130,7 @@ export interface UseComposerCoreOptions {
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
+  onFileTagClick?: ComposerTagClickHandler;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /**
    * Invoked when the user selects the @ panel's "Upload file" item, with the
@@ -1333,6 +1345,7 @@ export interface UseComposerCoreReturn {
   pendingImageBatchCount: number;
   imageDragActive: boolean;
   clearImageDragState: () => void;
+  ingestFiles: (files: readonly File[]) => boolean;
   imageTransferHandlers: ComposerImageTransferHandlers;
   handle: EditorHandle;
   pastedImages: PromptImage[];
@@ -1388,6 +1401,7 @@ export function useComposerCore(
     onCycleMode,
     onToggleShortcuts,
     disabled = false,
+    fileDragEnabled = true,
     placeholderText = 'Type a message...',
     commands,
     skills = [],
@@ -1412,6 +1426,7 @@ export function useComposerCore(
     renderComposerTag,
     renderComposerTagTooltip,
     onComposerTagClick,
+    onFileTagClick,
     onImageIngestionNotice,
     onFileUploadRequest,
     workspaceUploadBusy = false,
@@ -1505,6 +1520,8 @@ export function useComposerCore(
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const fileDragEnabledRef = useRef(fileDragEnabled);
+  fileDragEnabledRef.current = fileDragEnabled;
   const workspaceUploadBusyRef = useRef(workspaceUploadBusy);
   workspaceUploadBusyRef.current = workspaceUploadBusy;
   const commandsRef = useRef(commands);
@@ -1585,6 +1602,8 @@ export function useComposerCore(
   renderComposerTagTooltipRef.current = renderComposerTagTooltip;
   const onComposerTagClickRef = useRef(onComposerTagClick);
   onComposerTagClickRef.current = onComposerTagClick;
+  const onFileTagClickRef = useRef(onFileTagClick);
+  onFileTagClickRef.current = onFileTagClick;
   const resolveComposerTagIcon = useCallback(
     (tag: WebShellComposerTag): InlineComposerTag => {
       const iconUrl =
@@ -1605,6 +1624,12 @@ export function useComposerCore(
         typeof tooltip === 'string' || typeof tooltip === 'number'
           ? String(tooltip)
           : undefined;
+      const onClick =
+        tag.kind === 'file'
+          ? isPreviewableFileComposerTag(tag)
+            ? (onFileTagClickRef.current ?? onComposerTagClickRef.current)
+            : onComposerTagClickRef.current
+          : onComposerTagClickRef.current;
       return {
         ...tag,
         ...(iconUrl ? { iconUrl } : {}),
@@ -1613,9 +1638,7 @@ export function useComposerCore(
           : {}),
         ...(tooltip !== undefined && tooltip !== null ? { tooltip } : {}),
         ...(tooltipText ? { tooltipText } : {}),
-        ...(onComposerTagClickRef.current
-          ? { onClick: onComposerTagClickRef.current }
-          : {}),
+        ...(onClick ? { onClick } : {}),
       };
     },
     [],
@@ -1734,9 +1757,8 @@ export function useComposerCore(
     },
     [],
   );
-  const enqueueImageTransfer = useCallback(
-    (dataTransfer: DataTransfer, source: 'paste' | 'drop') => {
-      const transfer = extractFileTransfer(dataTransfer, source);
+  const enqueueExtractedTransfer = useCallback(
+    (transfer: ExtractedFileTransfer) => {
       if (!transfer.claimed) return false;
       if (disabledRef.current) return true;
 
@@ -1756,27 +1778,12 @@ export function useComposerCore(
             transfer.imageCandidates,
             {
               ...readerLifecycle,
-              maxEncodedBytes: Math.max(
-                0,
-                MAX_IMAGE_ATTACHMENT_DATA_BYTES -
-                  pastedImagesRef.current.reduce(
-                    (total, image) => total + image.data.length,
-                    0,
-                  ),
-              ),
+              maxBytes: MAX_IMAGE_ATTACHMENT_DATA_BYTES,
             },
           );
           if (imageIngestionLaneRef.current !== lane) return;
-          const textResult = await readTextTransfer(transfer.textCandidates, {
-            ...readerLifecycle,
-            maxEncodedBytes: Math.max(
-              0,
-              MAX_TEXT_ATTACHMENT_DATA_BYTES -
-                pastedFilesRef.current.reduce(
-                  (total, file) => total + (file.size ?? file.text.length),
-                  0,
-                ),
-            ),
+          const fileResult = await readFileTransfer(transfer.fileCandidates, {
+            maxBytes: MAX_FILE_ATTACHMENT_DATA_BYTES,
           });
           if (imageIngestionLaneRef.current !== lane) return;
           if (imageResult.accepted.length > 0) {
@@ -1784,11 +1791,11 @@ export function useComposerCore(
             pastedImagesRef.current = next;
             setPastedImages(next);
           }
-          if (textResult.accepted.length > 0) {
+          if (fileResult.accepted.length > 0) {
             const taken = new Set(
               pastedFilesRef.current.map((file) => file.name),
             );
-            const named = textResult.accepted.map((file) => {
+            const named = fileResult.accepted.map((file) => {
               const name = dedupeAttachmentName(
                 sanitizeAttachmentName(file.name),
                 taken,
@@ -1803,7 +1810,7 @@ export function useComposerCore(
           const rejected = [
             ...transfer.rejected,
             ...imageResult.rejected,
-            ...textResult.rejected,
+            ...fileResult.rejected,
           ];
           const skipped = rejected.filter(
             ({ reason }) => reason !== 'read-failed' && reason !== 'too-large',
@@ -1850,6 +1857,15 @@ export function useComposerCore(
     },
     [emitImageIngestionNotice],
   );
+  const enqueueImageTransfer = useCallback(
+    (dataTransfer: DataTransfer, source: 'paste' | 'drop') =>
+      enqueueExtractedTransfer(extractFileTransfer(dataTransfer, source)),
+    [enqueueExtractedTransfer],
+  );
+  const ingestFiles = useCallback(
+    (files: readonly File[]) => enqueueExtractedTransfer(extractFiles(files)),
+    [enqueueExtractedTransfer],
+  );
   const imageTransferHandlers = useMemo<ComposerImageTransferHandlers>(
     () => ({
       onPasteCapture: (event) => {
@@ -1859,18 +1875,30 @@ export function useComposerCore(
         }
       },
       onDragEnterCapture: (event) => {
-        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
         event.preventDefault();
         imageDragDepthRef.current += 1;
         if (!disabledRef.current) setImageDragActive(true);
       },
       onDragOverCapture: (event) => {
-        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
         event.preventDefault();
         event.dataTransfer.dropEffect = 'copy';
       },
       onDragLeaveCapture: (event) => {
-        if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (
+          !fileDragEnabledRef.current ||
+          !hasFileTransferPayload(event.dataTransfer)
+        )
+          return;
         imageDragDepthRef.current = Math.max(0, imageDragDepthRef.current - 1);
         const nextTarget = event.relatedTarget;
         if (
@@ -1882,6 +1910,13 @@ export function useComposerCore(
       },
       onDropCapture: (event) => {
         if (!hasFileTransferPayload(event.dataTransfer)) return;
+        if (!fileDragEnabledRef.current) {
+          // File drags are inert, but still cancel the drop so the browser
+          // cannot navigate to the file. Capture-phase preventDefault does
+          // not stop propagation, so a host handler can still react.
+          event.preventDefault();
+          return;
+        }
         event.preventDefault();
         event.stopPropagation();
         clearImageDragState();
@@ -1908,6 +1943,12 @@ export function useComposerCore(
   useEffect(() => {
     if (disabled) clearImageDragState();
   }, [clearImageDragState, disabled]);
+  useEffect(() => {
+    // A host flipping `fileUploadEnabled` to false mid-drag gates the
+    // leave handler, so a depth already counted would never drain; clear
+    // the highlight explicitly instead of waiting for dragend/blur.
+    if (fileDragEnabled === false) clearImageDragState();
+  }, [clearImageDragState, fileDragEnabled]);
   useEffect(
     () => () => {
       resetImageIngestion(false);
@@ -4367,6 +4408,7 @@ export function useComposerCore(
     pendingImageBatchCount,
     imageDragActive,
     clearImageDragState,
+    ingestFiles,
     imageTransferHandlers,
     handle,
     pastedImages,

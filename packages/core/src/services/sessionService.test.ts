@@ -5,7 +5,11 @@
  */
 
 import fs from 'node:fs';
-import { persistUsageBeforeTranscriptDeletion } from './usageHistoryService.js';
+import {
+  commitUsageBeforeTranscriptDeletion,
+  prepareUsageBeforeTranscriptDeletion,
+  type PreparedUsageBeforeTranscriptDeletion,
+} from './usageHistoryService.js';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
@@ -22,6 +26,8 @@ import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
+  computeUniqueBranchTitle,
+  normalizeDerivedBranchTitle,
   getResumePromptTokenCount,
   getResumeTokenCounts,
   type ConversationRecord,
@@ -38,14 +44,25 @@ import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { readSessionPrs, writeSessionPrs } from './session-pr-service.js';
 
 vi.mock('./usageHistoryService.js', () => ({
-  persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(true),
+  prepareUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue({
+    usagePath: '/usage.jsonl',
+    record: { sessionId: 'salvage-session' },
+  }),
+  commitUsageBeforeTranscriptDeletion: vi.fn().mockReturnValue(true),
 }));
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
+// Keep the real merge logic; only the sidecar I/O is controlled per test.
+vi.mock('./session-pr-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-pr-service.js')>()),
+  readSessionPrs: vi.fn(),
+  writeSessionPrs: vi.fn(),
+}));
 
 describe('SessionService', () => {
   let sessionService: SessionService;
@@ -71,7 +88,15 @@ describe('SessionService', () => {
     sessionService = new SessionService('/test/project/root');
     // Module mocks are not reset by restoreAllMocks; clear the salvage spy
     // so per-test call/order assertions never read stale invocations.
-    vi.mocked(persistUsageBeforeTranscriptDeletion).mockClear();
+    vi.mocked(prepareUsageBeforeTranscriptDeletion)
+      .mockReset()
+      .mockResolvedValue({
+        usagePath: '/usage.jsonl',
+        record: { sessionId: 'salvage-session' },
+      } as PreparedUsageBeforeTranscriptDeletion);
+    vi.mocked(commitUsageBeforeTranscriptDeletion)
+      .mockReset()
+      .mockReturnValue(true);
 
     readdirSyncSpy = vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
     statSyncSpy = vi.spyOn(fs, 'statSync').mockImplementation(
@@ -107,6 +132,60 @@ describe('SessionService', () => {
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
     vi.mocked(readRuntimeStatus).mockResolvedValue(null);
+
+    type MaintenanceInternals = {
+      getSessionFilePath: (
+        sessionId: string,
+        state: 'active' | 'archived',
+      ) => string;
+      resolveMaintainableSessionSnapshot: (sessionId: string) => Promise<{
+        location: 'active' | 'archived' | 'conflict' | undefined;
+        identities: Array<{
+          state: 'active' | 'archived';
+          filePath: string;
+          dev: number;
+          ino: number;
+          size: number;
+          mtimeMs: number;
+          ctimeMs: number;
+        }>;
+      }>;
+      assertMaintainableSessionUnchanged: () => void;
+    };
+    const maintenancePrototype =
+      SessionService.prototype as unknown as MaintenanceInternals;
+    vi.spyOn(
+      maintenancePrototype,
+      'resolveMaintainableSessionSnapshot',
+    ).mockImplementation(async function (
+      this: MaintenanceInternals,
+      sessionId,
+    ) {
+      const service = this as unknown as SessionService;
+      const location = await service.getSessionLocation(sessionId);
+      const states =
+        location === 'conflict'
+          ? (['active', 'archived'] as const)
+          : location === undefined
+            ? []
+            : [location];
+      return {
+        location,
+        identities: states.map((state, index) => ({
+          state,
+          filePath: this.getSessionFilePath(sessionId, state),
+          dev: 1,
+          ino: index + 1,
+          size: 1,
+          mtimeMs: 1,
+          ctimeMs: 1,
+        })),
+      };
+    });
+    vi.spyOn(
+      maintenancePrototype,
+      'assertMaintainableSessionUnchanged',
+    ).mockImplementation(() => undefined);
   });
 
   afterEach(() => {
@@ -1691,13 +1770,17 @@ describe('SessionService', () => {
       expect(unlinkSyncSpy).toHaveBeenCalled();
       // #7384: the usage salvage must see the transcript BEFORE it is
       // unlinked, or the summary is unrecoverable.
-      const salvage = vi.mocked(persistUsageBeforeTranscriptDeletion);
+      const salvage = vi.mocked(prepareUsageBeforeTranscriptDeletion);
       expect(salvage).toHaveBeenCalledWith(
         expect.stringContaining(`${sessionIdA}.jsonl`),
       );
       expect(salvage.mock.invocationCallOrder[0]!).toBeLessThan(
         unlinkSyncSpy.mock.invocationCallOrder[0]!,
       );
+      expect(
+        vi.mocked(commitUsageBeforeTranscriptDeletion).mock
+          .invocationCallOrder[0]!,
+      ).toBeGreaterThan(unlinkSyncSpy.mock.invocationCallOrder[0]!);
       expect(rmSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`file-history/${sessionIdA}`),
         { recursive: true, force: true },
@@ -1706,7 +1789,7 @@ describe('SessionService', () => {
 
     it('still deletes the session when the usage salvage fails', async () => {
       // Contract: the salvage must never block deletion.
-      vi.mocked(persistUsageBeforeTranscriptDeletion).mockRejectedValueOnce(
+      vi.mocked(prepareUsageBeforeTranscriptDeletion).mockRejectedValueOnce(
         new Error('salvage exploded'),
       );
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
@@ -1715,6 +1798,70 @@ describe('SessionService', () => {
         true,
       );
       expect(unlinkSyncSpy).toHaveBeenCalled();
+    });
+
+    it('does not commit usage when a mutation fence rejects deletion', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const rejected = new Error('generation changed');
+
+      await expect(
+        sessionService.removeSession(sessionIdA, {
+          assertCanMutate: () => {
+            throw rejected;
+          },
+        }),
+      ).rejects.toBe(rejected);
+
+      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not commit usage when transcript deletion fails', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const unlinkError = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
+      });
+      unlinkSyncSpy.mockImplementationOnce(() => {
+        throw unlinkError;
+      });
+
+      await expect(sessionService.removeSession(sessionIdA)).rejects.toBe(
+        unlinkError,
+      );
+
+      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+    });
+
+    it('commits usage when a later transcript deletion fails', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      const unlinkError = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
+      });
+      unlinkSyncSpy
+        .mockImplementationOnce(() => undefined)
+        .mockImplementationOnce(() => {
+          throw unlinkError;
+        });
+
+      await expect(sessionService.removeSession(sessionIdA)).rejects.toBe(
+        unlinkError,
+      );
+
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
+      expect(commitUsageBeforeTranscriptDeletion).toHaveBeenCalledTimes(1);
+      const commitOrder = vi.mocked(commitUsageBeforeTranscriptDeletion).mock
+        .invocationCallOrder[0]!;
+      expect(commitOrder).toBeGreaterThan(
+        unlinkSyncSpy.mock.invocationCallOrder[0]!,
+      );
+      expect(commitOrder).toBeLessThan(
+        unlinkSyncSpy.mock.invocationCallOrder[1]!,
+      );
     });
 
     it('should clear session organization when removing a session', async () => {
@@ -1834,6 +1981,30 @@ describe('SessionService', () => {
       );
     });
 
+    it('should remove pr sidecars in both states when removing a session', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`${sessionIdA}.pr.json`),
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+      );
+    });
+
     it('should remove both JSONL files when active and archived copies conflict', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
       existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
@@ -1854,9 +2025,33 @@ describe('SessionService', () => {
       // the only holder of the session's history. Pin the call so removing
       // the "redundant-looking" archived salvage fails this test.
       expect(
-        vi.mocked(persistUsageBeforeTranscriptDeletion),
+        vi.mocked(prepareUsageBeforeTranscriptDeletion),
       ).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should remove prompt ledger sidecars in both archive states', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`${sessionIdA}.ledger.jsonl`),
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.ledger.jsonl`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
       );
     });
   });
@@ -1913,6 +2108,94 @@ describe('SessionService', () => {
       );
     });
 
+    it('should move the pr sidecar into the archive directory', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`/chats/${sessionIdA}.pr.json`),
+      );
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+      );
+    });
+
+    it('should merge split pr sidecars on archive instead of wedging', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        return (
+          value.endsWith(`/chats/${sessionIdA}.pr.json`) ||
+          value.endsWith(`/chats/archive/${sessionIdA}.pr.json`)
+        );
+      });
+      const archivedEntry = {
+        number: 100,
+        url: 'https://github.com/o/r/pull/100',
+        createdAt: '2026-08-20T00:00:00.000Z',
+      };
+      const activeEntry = {
+        number: 101,
+        url: 'https://github.com/o/r/pull/101',
+        createdAt: '2026-08-20T01:00:00.000Z',
+      };
+      vi.mocked(readSessionPrs)
+        .mockResolvedValueOnce([archivedEntry])
+        .mockResolvedValueOnce([activeEntry]);
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+
+      const result = await service.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(warnings).toEqual([]);
+      expect(writeSessionPrs).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        [archivedEntry, activeEntry],
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+      );
+    });
+
+    it('passes the generation fence to an asynchronous pr-sidecar commit', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        return (
+          value.endsWith(`/chats/${sessionIdA}.pr.json`) ||
+          value.endsWith(`/chats/archive/${sessionIdA}.pr.json`)
+        );
+      });
+      const entry = {
+        number: 100,
+        url: 'https://github.com/o/r/pull/100',
+        createdAt: '2026-08-20T00:00:00.000Z',
+      };
+      vi.mocked(readSessionPrs)
+        .mockResolvedValueOnce([entry])
+        .mockResolvedValueOnce([entry]);
+      const assertCanMutate = vi.fn();
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        assertCanMutate,
+      });
+
+      expect(result.errors).toEqual([]);
+      expect(writeSessionPrs).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        [entry],
+        { assertCanCommit: assertCanMutate },
+      );
+    });
+
     it('should archive JSONL and warn when archiving worktree sidecar fails', async () => {
       mockActiveSessionOnly();
       mockActiveWorktreeSidecarOnly();
@@ -1943,6 +2226,120 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('rechecks the generation before moving the active worktree sidecar', async () => {
+      mockActiveSessionOnly();
+      mockActiveWorktreeSidecarOnly();
+      const generationChanged = new Error('generation changed');
+      const assertCanMutate = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw generationChanged;
+        });
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        assertCanMutate,
+      });
+
+      expect(result.errors[0]?.error).toBe(generationChanged);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+        expect.anything(),
+      );
+    });
+
+    it('should move the prompt ledger alongside the archived session', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.includes('/chats/archive/')) return false;
+        return value.endsWith(`${sessionIdA}.ledger.jsonl`);
+      });
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.ledger.jsonl`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
+      );
+    });
+
+    it('should warn but still archive when the prompt ledger move fails', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.includes('/chats/archive/')) return false;
+        return value.endsWith(`${sessionIdA}.ledger.jsonl`);
+      });
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const ledgerError = new Error('ledger move failed');
+      renameSyncSpy.mockImplementation((sourcePath) => {
+        if (sourcePath.toString().endsWith('.ledger.jsonl')) {
+          throw ledgerError;
+        }
+        return undefined;
+      });
+
+      const result = await service.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain(
+        `archiveSessions: failed to move prompt ledger for ${sessionIdA}`,
+      );
+      // The warning carries the full paths so the split pair is debuggable.
+      expect(warnings[0]).toContain(`/chats/${sessionIdA}.ledger.jsonl`);
+      expect(warnings[0]).toContain(
+        `/chats/archive/${sessionIdA}.ledger.jsonl`,
+      );
+    });
+
+    it('should merge the prompt ledger into an existing destination instead of wedging', async () => {
+      mockActiveSessionOnly();
+      const sourceLedger =
+        '{"v":1,"promptId":"p1","state":"in_flight","at":1}\n';
+      vi.spyOn(fs, 'readFileSync').mockReturnValue(sourceLedger);
+      const appendFileSyncSpy = vi
+        .spyOn(fs, 'appendFileSync')
+        .mockImplementation(() => undefined);
+      // Both the active and the archived ledger exist (e.g. a partially
+      // completed earlier archive cycle): the merge path must run.
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`${sessionIdA}.ledger.jsonl`),
+      );
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      // Source records are concatenated onto the destination (append-only
+      // JSONL, write order preserved)...
+      expect(appendFileSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
+        expect.stringContaining('"promptId":"p1"'),
+        'utf8',
+      );
+      // ...the source sidecar is unlinked...
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.ledger.jsonl`),
+      );
+      // ...and no rename was attempted for the ledger.
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.ledger.jsonl`),
+        expect.anything(),
       );
     });
 
@@ -1978,8 +2375,8 @@ describe('SessionService', () => {
       );
     });
 
-    it('should skip location reads when archiving known active sessions', async () => {
-      const getLocationSpy = vi.spyOn(sessionService, 'getSessionLocation');
+    it('should archive known active sessions', async () => {
+      mockActiveSessionOnly();
 
       const result = await sessionService.archiveSessions([sessionIdA], {
         knownLocation: 'active',
@@ -1987,7 +2384,6 @@ describe('SessionService', () => {
 
       expect(result.archived).toEqual([sessionIdA]);
       expect(result.errors).toEqual([]);
-      expect(getLocationSpy).not.toHaveBeenCalled();
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
@@ -2020,6 +2416,38 @@ describe('SessionService', () => {
       expect(result.errors[0]?.sessionId).toBe(sessionIdA);
       expect(result.errors[0]?.error.message).toMatch(/conflict/i);
       expect(renameSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not commit usage when conflict repair is rejected', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        resolveConflicts: true,
+        assertCanMutate: () => {
+          throw new Error('generation changed');
+        },
+      });
+
+      expect(result.errors).toHaveLength(1);
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not persist a final usage snapshot during conflict repair', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        resolveConflicts: true,
+      });
+
+      expect(result).toMatchObject({
+        archived: [sessionIdA],
+        resolvedConflicts: [sessionIdA],
+        errors: [],
+      });
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
     });
   });
 
@@ -2070,9 +2498,70 @@ describe('SessionService', () => {
       );
     });
 
-    it('should skip location reads when unarchiving known archived sessions', async () => {
+    it('should move the pr sidecar back to the active directory', async () => {
       mockArchivedSessionOnly();
-      const getLocationSpy = vi.spyOn(sessionService, 'getSessionLocation');
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`/chats/archive/${sessionIdA}.pr.json`),
+      );
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+      );
+    });
+
+    it('should merge a split pr sidecar pair on unarchive, keeping the full history', async () => {
+      mockArchivedSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        return (
+          value.endsWith(`/chats/archive/${sessionIdA}.pr.json`) ||
+          value.endsWith(`/chats/${sessionIdA}.pr.json`)
+        );
+      });
+      const olderOne = {
+        number: 100,
+        url: 'https://github.com/o/r/pull/100',
+        createdAt: '2026-08-20T00:00:00.000Z',
+      };
+      const olderTwo = {
+        number: 101,
+        url: 'https://github.com/o/r/pull/101',
+        createdAt: '2026-08-20T00:30:00.000Z',
+      };
+      const orphan = {
+        number: 102,
+        url: 'https://github.com/o/r/pull/102',
+        createdAt: '2026-08-20T01:00:00.000Z',
+      };
+      vi.mocked(readSessionPrs)
+        .mockResolvedValueOnce([orphan])
+        .mockResolvedValueOnce([olderOne, olderTwo]);
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+
+      const result = await service.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(warnings).toEqual([]);
+      expect(writeSessionPrs).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+        [olderOne, olderTwo, orphan],
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+      );
+    });
+
+    it('should unarchive known archived sessions', async () => {
+      mockArchivedSessionOnly();
 
       const result = await sessionService.unarchiveSessions([sessionIdA], {
         knownLocation: 'archived',
@@ -2080,11 +2569,42 @@ describe('SessionService', () => {
 
       expect(result.unarchived).toEqual([sessionIdA]);
       expect(result.errors).toEqual([]);
-      expect(getLocationSpy).not.toHaveBeenCalled();
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
       );
+    });
+
+    it('does not commit usage when conflict repair is rejected', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        resolveConflicts: true,
+        assertCanMutate: () => {
+          throw new Error('generation changed');
+        },
+      });
+
+      expect(result.errors).toHaveLength(1);
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not persist a final usage snapshot for the retained active copy', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        resolveConflicts: true,
+      });
+
+      expect(result).toMatchObject({
+        unarchived: [sessionIdA],
+        resolvedConflicts: [sessionIdA],
+        errors: [],
+      });
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
     });
 
     it('should recreate active chats directory before moving archived sessions', async () => {
@@ -2170,6 +2690,53 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
         expect.stringContaining(`/chats/${sessionIdA}.worktree.json`),
+      );
+    });
+
+    it('rechecks the generation before moving the archived worktree sidecar', async () => {
+      mockArchivedSessionOnly();
+      mockArchivedWorktreeSidecarOnly();
+      const generationChanged = new Error('generation changed');
+      const assertCanMutate = vi
+        .fn()
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw generationChanged;
+        });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        assertCanMutate,
+      });
+
+      expect(result.errors[0]?.error).toBe(generationChanged);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(renameSyncSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.worktree.json`),
+        expect.anything(),
+      );
+    });
+
+    it('should move the prompt ledger back to the active directory when unarchiving', async () => {
+      mockArchivedSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        if (value.endsWith(`/chats/${sessionIdA}.jsonl`)) return false;
+        if (value.endsWith(`${sessionIdA}.ledger.jsonl`)) {
+          return value.includes('/chats/archive/');
+        }
+        return false;
+      });
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.ledger.jsonl`),
       );
     });
 
@@ -2496,13 +3063,388 @@ describe('SessionService', () => {
   });
 
   describe('findSessionIdIgnoringCase', () => {
+    let readdirSpy: MockInstance<typeof fs.promises.readdir>;
+
+    beforeEach(() => {
+      readdirSpy = vi
+        .spyOn(fs.promises, 'readdir')
+        .mockResolvedValue([] as never);
+    });
+
     it('finds a legacy mixed-case transcript', async () => {
       const legacySessionId = sessionIdA.toUpperCase();
-      readdirSyncSpy.mockReturnValue([`${legacySessionId}.jsonl`] as never);
+      readdirSpy
+        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never)
+        .mockResolvedValueOnce([] as never);
       vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
         async (sessionId) =>
           sessionId === legacySessionId ? 'active' : undefined,
       );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+
+    it('returns the single authoritative spelling after scanning both states', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSpy
+        .mockResolvedValueOnce([] as never)
+        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (sessionId) =>
+          sessionId === legacySessionId ? 'archived' : undefined,
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+
+    it('rejects case-only duplicate spellings instead of choosing by enumeration order', async () => {
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${sessionIdA.toUpperCase()}.jsonl`,
+          `${sessionIdA.replace('e29b', 'E29b')}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([] as never);
+      // Both twins are genuinely readable while the requested spelling
+      // resolves nothing — a true conflict.
+      const getLocation = vi
+        .spyOn(sessionService, 'getSessionLocation')
+        .mockImplementation(async (id) =>
+          id === sessionIdA ? undefined : 'active',
+        );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: undefined,
+        message: `Multiple persisted sessions match "${sessionIdA}" by case.`,
+      });
+      expect(getLocation).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejects case-only duplicates whose heads are all unreadable as occupying the id', async () => {
+      // Neither spelling on disk is the requested one, so minting the request
+      // beside them would add a third case-variant of the same id.
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${sessionIdA.toUpperCase()}.jsonl`,
+          `${sessionIdA.replace('e29b', 'E29b')}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([] as never);
+      // Neither head recovers records, but both files persist on disk.
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: undefined,
+        reason: 'unreadable_transcript',
+      });
+    });
+
+    it('rejects one spelling that exists in both active and archive state', async () => {
+      readdirSpy.mockResolvedValue([`${sessionIdA}.jsonl`] as never);
+      const getLocation = vi
+        .spyOn(sessionService, 'getSessionLocation')
+        .mockResolvedValue('conflict');
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: sessionIdA,
+        message: `Session "${sessionIdA}" is persisted in both active and archived states.`,
+      });
+      expect(getLocation).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects a present-but-unreadable single candidate as occupying the id', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSpy
+        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never)
+        .mockResolvedValueOnce([] as never);
+      // The head recovers no records (torn/empty/foreign), but the file
+      // still occupies the id — admission must not mint a case-only twin.
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: legacySessionId,
+        reason: 'unreadable_transcript',
+        message: `Session "${legacySessionId}" is persisted but its transcript head is unreadable.`,
+      });
+    });
+
+    it('returns the sole readable spelling when a case twin is unreadable', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === legacySessionId ? 'active' : undefined),
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+
+    it('returns a twin spelling when one of its two state copies is unreadable', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSpy.mockResolvedValue([`${legacySessionId}.jsonl`] as never);
+      // getSessionLocation counts only readable copies, so one garbage
+      // twin still resolves to the surviving state.
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === legacySessionId ? 'active' : undefined),
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+
+    it('returns undefined when the matching transcript disappears during resolution', async () => {
+      // The candidate must differ in case from the request, otherwise the
+      // self-escape short-circuits and the race loop below it never runs.
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSpy
+        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never)
+        .mockResolvedValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockReturnValue(false);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBeUndefined();
+    });
+
+    it('lets an unreadable case twin keep occupying the id', async () => {
+      // Both files are unreadable. The requested spelling's own file is a twin of
+      // nothing, but the *other* spelling still occupies the id: minting the
+      // request beside it is what would make both permanently unrestorable.
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        reason: 'unreadable_transcript',
+      });
+    });
+
+    it('reports the requested spelling absent when only its own file survives', async () => {
+      // The twin raced away between enumeration and the presence check, so
+      // nothing but the request's own unreadable file is left to occupy the id.
+      const legacySessionId = sessionIdA.toUpperCase();
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${sessionIdA}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        String(filePath).includes(`${sessionIdA}.jsonl`),
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBeUndefined();
+      expect(existsSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`${legacySessionId}.jsonl`),
+      );
+    });
+
+    it('reports the requested spelling absent when its own transcript head is unreadable', async () => {
+      // A first run that crashed before its first record leaves a 0-byte
+      // transcript under the requested spelling. It is a case-only twin of
+      // nothing, so reusing the id must stay possible — `getSessionLocation`
+      // already reports the file as nonexistent.
+      readdirSpy
+        .mockResolvedValueOnce([`${sessionIdA}.jsonl`] as never)
+        .mockResolvedValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
+        undefined,
+      );
+      existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBeUndefined();
+    });
+
+    it('ignores persisted names getSessionLocation cannot classify', async () => {
+      // Agent-suffixed ids are admitted by the CLI and written under the raw
+      // session id, but SESSION_FILE_PATTERN excludes them — enumerating them
+      // here would report a healthy transcript as occupied-but-unreadable.
+      const agentSessionId = `${sessionIdA}-agent-foo`;
+      readdirSpy
+        .mockResolvedValueOnce([`${agentSessionId}.jsonl`] as never)
+        .mockResolvedValueOnce([] as never);
+      const getLocation = vi.spyOn(sessionService, 'getSessionLocation');
+      existsSyncSpy.mockReturnValue(true);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(agentSessionId),
+      ).resolves.toBeUndefined();
+      expect(getLocation).not.toHaveBeenCalled();
+    });
+
+    it('collapses case-variant spellings that alias one physical transcript', async () => {
+      // On a case-insensitive filesystem both spellings open the same file, so
+      // each reports a readable location even though only one copy exists.
+      const legacySessionId = sessionIdA.toUpperCase();
+      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
+      readdirSpy
+        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never)
+        .mockResolvedValueOnce([`${mixedSessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === sessionIdA ? undefined : 'active'),
+      );
+      statSyncSpy.mockReturnValue({
+        dev: 1,
+        ino: 42,
+        isFile: () => true,
+      } as fs.Stats);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).resolves.toBe(legacySessionId);
+    });
+
+    it('still rejects two readable spellings backed by distinct files', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${legacySessionId}.jsonl`,
+          `${mixedSessionId}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === sessionIdA ? undefined : 'active'),
+      );
+      statSyncSpy.mockImplementation(
+        (filePath: fs.PathLike) =>
+          ({
+            dev: 1,
+            ino: String(filePath).includes(legacySessionId) ? 43 : 42,
+            isFile: () => true,
+          }) as fs.Stats,
+      );
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: undefined,
+      });
+    });
+
+    it('reports a conflict rather than collapsing when the filesystem exposes no inode', async () => {
+      // FAT/exFAT and some SMB mounts report ino 0 for every file, so `dev:ino`
+      // cannot prove two spellings are one transcript. Without that proof the
+      // pair must stay a conflict instead of silently resolving to one.
+      const legacySessionId = sessionIdA.toUpperCase();
+      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
+      readdirSpy
+        .mockResolvedValueOnce([`${mixedSessionId}.jsonl`] as never)
+        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === sessionIdA ? undefined : 'active'),
+      );
+      statSyncSpy.mockReturnValue({
+        dev: 1,
+        ino: 0,
+        isFile: () => true,
+      } as fs.Stats);
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+      });
+    });
+
+    it('propagates an I/O failure instead of reporting it as a case conflict', async () => {
+      // A transient EACCES/EMFILE says nothing about aliasing; laundering it
+      // into `session_conflict` would report a retryable blip as permanent.
+      const legacySessionId = sessionIdA.toUpperCase();
+      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
+      readdirSpy
+        .mockResolvedValueOnce([`${mixedSessionId}.jsonl`] as never)
+        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === sessionIdA ? undefined : 'active'),
+      );
+      statSyncSpy.mockImplementation(() => {
+        throw Object.assign(new Error('permission denied'), {
+          code: 'EACCES',
+        });
+      });
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({ code: 'EACCES' });
+    });
+
+    it('ignores a candidate whose transcript vanishes mid-resolution', async () => {
+      // The mixed-case entry races away, so only the uppercase spelling is
+      // left to back the readable state and it resolves without a conflict.
+      const legacySessionId = sessionIdA.toUpperCase();
+      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
+      readdirSpy
+        .mockResolvedValueOnce([`${mixedSessionId}.jsonl`] as never)
+        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => {
+          if (id === legacySessionId) return 'archived';
+          return id === sessionIdA ? undefined : 'active';
+        },
+      );
+      statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
+        if (String(filePath).includes(`${mixedSessionId}.jsonl`)) {
+          throw Object.assign(new Error('gone'), { code: 'ENOENT' });
+        }
+        return { dev: 1, ino: 7, isFile: () => true } as fs.Stats;
+      });
 
       await expect(
         sessionService.findSessionIdIgnoringCase(sessionIdA),
@@ -3574,6 +4516,67 @@ describe('SessionService', () => {
         .map((l) => JSON.parse(l));
       expect(srcLines.every((r) => r.sessionId === oldId)).toBe(true);
       expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
+    });
+
+    it('does not copy source turn_result identities into a fork', async () => {
+      const oldId = '31313131-3131-3131-3131-313131313131';
+      const newId = '41414141-4141-4141-4141-414141414141';
+      const { file, lines } = seedSession(oldId);
+      fs.writeFileSync(
+        file,
+        [
+          ...lines,
+          {
+            uuid: 'turn-result-1',
+            parentUuid: 'u2',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'turn_result',
+            timestamp: '2026-04-22T00:00:02.000Z',
+            cwd: lines[0]!['cwd'],
+            version: 'test',
+            systemPayload: {
+              promptId: 'source-prompt-id',
+              state: 'completed',
+              endedAt: 2000,
+            },
+          },
+          {
+            uuid: 'artifact-after-turn-result',
+            parentUuid: 'turn-result-1',
+            sessionId: oldId,
+            type: 'system',
+            subtype: 'session_artifact_event',
+            timestamp: '2026-04-22T00:00:03.000Z',
+            cwd: lines[0]!['cwd'],
+            version: 'test',
+            systemPayload: {
+              v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+              sessionId: oldId,
+              sequence: 1,
+              recordedAt: '2026-04-22T00:00:03.000Z',
+              changes: [],
+            },
+          },
+        ]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written).toHaveLength(3);
+      expect(written.some((record) => record.subtype === 'turn_result')).toBe(
+        false,
+      );
+      expect(
+        written.find((record) => record.uuid === 'artifact-after-turn-result'),
+      ).toMatchObject({ parentUuid: 'u2' });
     });
 
     it('writes source metadata and drops the inherited title for sourced forks', async () => {
@@ -5234,23 +6237,25 @@ describe('SessionService', () => {
     it('returns titles whose custom_title starts with the prefix (case-insensitive)', async () => {
       seedSessionWithTitle(
         '11111111-1111-1111-1111-111111111111',
-        'my-branch (Branch)',
+        'my-branch(1)',
       );
       seedSessionWithTitle(
         '22222222-2222-2222-2222-222222222222',
-        'My-Branch (Branch 2)',
+        'My-Branch(2)',
       );
       seedSessionWithTitle(
         '33333333-3333-3333-3333-333333333333',
         'unrelated session',
       );
 
-      const titles =
-        await service.findSessionTitlesByPrefix('my-branch (Branch');
+      const titles = await service.findSessionTitlesByPrefix('my-branch(');
 
       expect(new Set(titles)).toEqual(
-        new Set(['my-branch (Branch)', 'My-Branch (Branch 2)']),
+        new Set(['my-branch(1)', 'My-Branch(2)']),
       );
+      await expect(
+        service.getSessionDisplayName('11111111-1111-1111-1111-111111111111'),
+      ).resolves.toBe('my-branch(1)');
     });
 
     it('returns empty when chats directory does not exist', async () => {
@@ -5261,22 +6266,48 @@ describe('SessionService', () => {
     it('skips sessions from other projects (collisions are project-scoped)', async () => {
       seedSessionWithTitle(
         '11111111-1111-1111-1111-111111111111',
-        'shared (Branch)',
+        'shared(1)',
         cwd,
       );
       // Same chats dir (sessions are stored under projectHash anyway), but
       // the record's cwd belongs to another project → must be skipped.
       seedSessionWithTitle(
         '22222222-2222-2222-2222-222222222222',
-        'shared (Branch 2)',
+        'shared(2)',
         '/some/other/project',
       );
 
-      const titles = await service.findSessionTitlesByPrefix('shared (Branch');
-      expect(titles).toEqual(['shared (Branch)']);
+      const titles = await service.findSessionTitlesByPrefix('shared(');
+      expect(titles).toEqual(['shared(1)']);
+      await expect(
+        service.getSessionDisplayName('22222222-2222-2222-2222-222222222222'),
+      ).resolves.toBeUndefined();
     });
 
-    it('skips files without a custom_title record', async () => {
+    it('returns undefined for an empty session file', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      fs.writeFileSync(realPath.join(chatsDir, `${sessionId}.jsonl`), '');
+
+      await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
+        undefined,
+      );
+    });
+
+    it('returns undefined for missing sessions and invalid ids', async () => {
+      await expect(
+        service.getSessionDisplayName('44444444-4444-4444-8444-444444444444'),
+      ).resolves.toBeUndefined();
+      await expect(
+        service.getSessionDisplayName('not-a-session'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('uses the picker prompt when a session has no custom title', async () => {
       const sessionId = '11111111-1111-1111-1111-111111111111';
       const chatsDir = realPath.join(
         service['storage'].getProjectDir(),
@@ -5294,12 +6325,56 @@ describe('SessionService', () => {
           timestamp: '2026-04-22T00:00:00.000Z',
           cwd,
           version: 'test',
-          message: { role: 'user', parts: [{ text: 'hi' }] },
+          message: {
+            role: 'user',
+            parts: [{ text: '创建 MR 描述生成 Skill(1)' }],
+          },
         }) + '\n',
       );
 
-      const titles = await service.findSessionTitlesByPrefix('anything');
-      expect(titles).toEqual([]);
+      const titles =
+        await service.findSessionTitlesByPrefix('创建 MR 描述生成 Skill(');
+      expect(titles).toEqual(['创建 MR 描述生成 Skill(1)']);
+      expect(
+        vi
+          .mocked(jsonl.readLines)
+          .mock.calls.filter(([filePath]) => filePath === file),
+      ).toEqual([[file, 10]]);
+      await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
+        '创建 MR 描述生成 Skill(1)',
+      );
+    });
+  });
+
+  describe('computeUniqueBranchTitle', () => {
+    it('uses the first available numeric suffix', async () => {
+      const service = {
+        findSessionTitlesByPrefix: vi
+          .fn()
+          .mockResolvedValue([
+            '创建 MR 描述生成 Skill(1)',
+            '创建 MR 描述生成 Skill(2)',
+            '创建 MR 描述生成 Skill(4)',
+          ]),
+      } as unknown as SessionService;
+
+      await expect(
+        computeUniqueBranchTitle('创建 MR 描述生成 Skill', service),
+      ).resolves.toBe('创建 MR 描述生成 Skill(3)');
+      expect(service.findSessionTitlesByPrefix).toHaveBeenCalledWith(
+        '创建 MR 描述生成 Skill(',
+      );
+    });
+
+    it.each([
+      ['Source session (Branch)', 'Source session'],
+      ['Source session (Branch 2)', 'Source session'],
+      ['Source session(2)', 'Source session'],
+      ['Sprint (2)', 'Sprint (2)'],
+      ['(Branch)', undefined],
+      ['(Branch 2)', undefined],
+    ])('normalizes derived branch title %s', (title, expected) => {
+      expect(normalizeDerivedBranchTitle(title)).toBe(expected);
     });
   });
 

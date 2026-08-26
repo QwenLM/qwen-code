@@ -21,7 +21,7 @@ import type { PermissionSuggestion } from '../nonInteractive/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { StreamJsonOutputAdapter } from '../nonInteractive/io/index.js';
-import { reportChatRecordingFailureToAdapter } from '../utils/chat-recording-failure.js';
+import { reportChatRecordingFailureToAdapter } from '../nonInteractive/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('DUAL_OUTPUT');
 

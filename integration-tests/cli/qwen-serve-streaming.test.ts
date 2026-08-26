@@ -48,7 +48,10 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { isPathWithinRoot } from '@qwen-code/qwen-code-core';
+import {
+  isPathWithinRoot,
+  TURN_RESULT_TEXT_MAX_CHARS,
+} from '@qwen-code/qwen-code-core';
 import { DaemonClient, parseSseStream } from '@qwen-code/sdk';
 import type { DaemonEvent, DaemonSessionSummary } from '@qwen-code/sdk';
 import {
@@ -194,6 +197,32 @@ beforeAll(async () => {
       return { content: 'The test Todo remains unfinished.' };
     }
 
+    if (messages.includes('turn-final-answer-boundary-e2e')) {
+      const toolCallId = 'call_turn_final_answer_boundary';
+      if (!messages.includes(toolCallId)) {
+        return {
+          content: 'I will inspect the fixture first. ',
+          toolCalls: [
+            fakeToolCall(
+              'read_file',
+              {
+                file_path: path.join(
+                  workspaceDir,
+                  'turn-final-answer-boundary.txt',
+                ),
+              },
+              toolCallId,
+            ),
+          ],
+        };
+      }
+      return { content: 'The strict final answer is 42.' };
+    }
+
+    if (messages.includes('turn-result-truncation-e2e')) {
+      return { content: 'z'.repeat(TURN_RESULT_TEXT_MAX_CHARS + 100) };
+    }
+
     if (pendingWritePath && messages.includes('fan-out') && !hasToolResult) {
       return {
         toolCalls: [
@@ -272,6 +301,10 @@ beforeAll(async () => {
     }),
   );
   workspaceDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-streaming-ws-'));
+  writeFileSync(
+    path.join(workspaceDir, 'turn-final-answer-boundary.txt'),
+    '42',
+  );
   daemon = spawn(
     process.execPath,
     [
@@ -388,6 +421,121 @@ async function* sseFrames(
   // wants to abort mid-stream.
   yield* parseSseStream(res.body!, opts.signal);
 }
+
+async function turnStatus(
+  sessionId: string,
+  promptId: string,
+): Promise<Record<string, unknown>> {
+  const response = await fetch(
+    `${base}/session/${sessionId}/turns/${promptId}`,
+    { headers: { Authorization: `Bearer ${TOKEN}` } },
+  );
+  if (!response.ok) return { status: response.status };
+  return (await response.json()) as Record<string, unknown>;
+}
+
+describePOSIX('qwen serve — pollable turn results', () => {
+  it('returns only the final parent answer after a tool boundary', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    await client.setSessionApprovalMode(session.sessionId, 'yolo');
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: 'turn-final-answer-boundary-e2e' }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          stopReason: 'end_turn',
+          resultText: 'The strict final answer is 42.',
+        });
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
+
+  it('reports truncation through the stable result code', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: 'turn-result-truncation-e2e' }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          resultTruncated: true,
+          resultCode: 'RESULT_TEXT_TRUNCATED',
+        });
+      const status = await turnStatus(session.sessionId, accepted.promptId);
+      expect(status['resultText']).toHaveLength(TURN_RESULT_TEXT_MAX_CHARS);
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
+
+  it('reads a settled result after a normal Session reload', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+    try {
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: 'turn-result-reload-e2e' }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          stopReason: 'end_turn',
+          resultText: 'fake response complete',
+        });
+
+      await client.closeSession(session.sessionId);
+      await client.loadSession(session.sessionId, {
+        workspaceCwd: workspaceDir,
+      });
+      await expect
+        .poll(() => turnStatus(session.sessionId, accepted.promptId), {
+          timeout: 30_000,
+        })
+        .toMatchObject({
+          state: 'completed',
+          stopReason: 'end_turn',
+          resultText: 'fake response complete',
+        });
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
+});
 
 describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
   it('publishes session_died after the qwen --acp child is SIGKILL-ed', async () => {

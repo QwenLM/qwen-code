@@ -150,6 +150,7 @@ describe('ModelRegistry', () => {
             name: 'GPT-4 Turbo',
             baseUrl: 'https://api.openai.com/v1',
             generationConfig: {
+              streamIdleTimeoutMs: 600000,
               samplingParams: {
                 temperature: 0.8,
                 max_tokens: 4096,
@@ -176,6 +177,7 @@ describe('ModelRegistry', () => {
 
       expect(model?.generationConfig.samplingParams?.temperature).toBe(0.8);
       expect(model?.generationConfig.samplingParams?.max_tokens).toBe(4096);
+      expect(model?.generationConfig.streamIdleTimeoutMs).toBe(600000);
       // No defaults are applied - only the configured values are present
       expect(model?.generationConfig.samplingParams?.top_p).toBeUndefined();
       expect(model?.generationConfig.timeout).toBeUndefined();
@@ -1029,6 +1031,23 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(
       registry.getModelsForAuthType(AuthType.USE_OPENAI)[0]?.imageOnly,
     ).toBe(true);
+  });
+
+  it('should propagate image generation capability without excluding the default model', () => {
+    const registry = new ModelRegistry({
+      openai: [
+        {
+          id: 'dual-role-model',
+          supportsImageGeneration: true,
+        },
+      ],
+    });
+
+    const available = registry.getModelsForAuthType(AuthType.USE_OPENAI)[0];
+    expect(available?.supportsImageGeneration).toBe(true);
+    expect(registry.getDefaultModelForAuthType(AuthType.USE_OPENAI)?.id).toBe(
+      'dual-role-model',
+    );
   });
 
   it('should warn when both fastOnly and voiceOnly are set', () => {

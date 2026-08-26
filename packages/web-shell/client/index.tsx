@@ -223,6 +223,8 @@ export type {
   WebShellAgentTask,
   WebShellShellTask,
   WebShellMonitorTask,
+  WebShellPreparedSubmit,
+  WebShellSubmitSnapshot,
   WebShellModelInfo,
   WebShellSkillInfo,
 } from './customization';

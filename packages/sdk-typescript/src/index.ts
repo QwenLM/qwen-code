@@ -2,6 +2,7 @@ export { query } from './query/createQuery.js';
 export { AbortError, isAbortError } from './types/errors.js';
 export { Query } from './query/Query.js';
 export { SdkLogger } from './utils/logger.js';
+export { PERMISSION_MODES } from './types/permission-mode.js';
 
 // Daemon HTTP client (talks to `qwen serve`)
 export {
@@ -108,6 +109,10 @@ export {
   type DaemonSkillBatchToggleErrorCode,
   type DaemonSkillBatchToggleItem,
   type DaemonSkillBatchToggleResult,
+  type ExtensionMutationResponse,
+  type ExtensionWorkspaceBatchActivationState,
+  type ExtensionDefaultActivationBatchItem,
+  type ExtensionWorkspaceActivationBatchItem,
   type DaemonSkillToggleActivation,
   type DaemonSkillToggleMutation,
   type DaemonSkillToggleMutationSkill,

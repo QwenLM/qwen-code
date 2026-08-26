@@ -12,6 +12,7 @@ import { AgentCore } from '../runtime/agent-core.js';
 import { getTeammateContext } from '../team/identity.js';
 import { createContentGenerator } from '../../core/contentGenerator.js';
 import { ApprovalMode, Config } from '../../config/config.js';
+import { hasRebuiltToolRegistry } from '../../tools/agent/agent.js';
 import { join } from 'node:path';
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
@@ -642,6 +643,21 @@ describe('InProcessBackend', () => {
     expect(agentContext.getWorkingDir()).toBe(agentCwd);
     expect(agentContext.getTargetDir()).toBe(agentCwd);
     expect(agentContext.getToolRegistry()).toBeDefined();
+
+    // This config is LONG-LIVED — the agent keeps it — so it must NOT carry
+    // the rebuilt marker. `hasRebuiltToolRegistry` reads it through the
+    // prototype chain, so a wrapper built on it later (a dir-scoped workflow
+    // dispatch) would see it and skip `buildSubagentContextOverride`'s
+    // rebuild — the sole re-anchoring that lifts the subagent's tools above
+    // that wrapper. Without it, relative paths resolve against this agent's
+    // cwd instead of the provisioned worktree.
+    //
+    // Pinned HERE, at the call site, because the helper's own tests pass
+    // explicit options and so say nothing about what this caller passes:
+    // dropping `{ markRebuilt: false }` left every other suite green.
+    expect(hasRebuiltToolRegistry(runtimeContext as unknown as Config)).toBe(
+      false,
+    );
   });
 
   it('uses a per-agent approval mode without mutating the parent config', async () => {

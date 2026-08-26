@@ -12,6 +12,8 @@ Authorization: Bearer <token>
 
 Without a configured token (loopback dev default) the header is optional. Token comparison is constant-time. 401 responses are uniform across `missing header` / `wrong scheme` / `wrong token`.
 
+**`--open-with-auth`.** This default-off CLI mode requires a loopback bind and an available Web Shell. It reuses the normal `--token`-over-`QWEN_SERVER_TOKEN` selection, or generates 32 random bytes encoded as base64url before daemon startup when that selection is empty. The browser receives the selected bearer through `#token=` and stores it per tab; the protocol and middleware see an ordinary configured token. Bare `--open`, direct embedded callers, non-loopback binds, and other clients do not receive automatic credentials. Browser-ineligible environments print the secret-bearing fragment URL for manual opening. Loopback `/health` and static Web Shell assets retain the exemptions described below; `--require-auth` still gates `/health`.
+
 **`/health` exemption** (Bctum): on loopback binds (`127.0.0.1` / `localhost` / `::1` / `[::1]`) `/health` is registered BEFORE the bearer middleware, so liveness probes inside the pod don't need to carry the token even when the daemon was started with `--token`. Non-loopback binds (`--hostname 0.0.0.0` etc.) gate `/health` behind the bearer like every other route — see the [`GET /health`](#get-health) section for the rationale.
 
 **`--require-auth` (#4175 PR 15).** Pass this flag at boot to extend the "must have a token" rule to loopback as well. Boot fails without a token; the `/health` exemption is dropped (so `/health` also requires `Authorization: Bearer …`).
@@ -198,6 +200,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_file_upload',
  'session_approval_mode_control', 'workspace_tool_toggle', 'workspace_skill_toggle',
  'workspace_skill_batch_toggle',
+ 'extension_batch_activation_v2',
  'workspace_settings', 'workspace_init', 'workspace_mcp_restart',
  'session_recap', 'session_generation', 'session_btw', 'session_shell_command',
  'mcp_workspace_pool', 'mcp_pool_restart',
@@ -210,7 +213,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'multi_workspace_session_shell', 'persistent_workspace_registration',
  'workspace_display_name',
  'workspace_qualified_rest_core', 'workspace_qualified_voice',
- 'workspace_qualified_memory', 'extension_management_v2',
+ 'workspace_qualified_memory', 'extension_management_v2', 'extension_git_credentials',
  'workspace_persisted_transcript',
  'workspace_session_export', 'workspace_archived_session_export',
  'workspace_session_live_state',
@@ -241,7 +244,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `workspace_archived_session_export` advertises `GET /workspaces/:workspace/session/:id/archive/export`, a trusted-only full export from the selected workspace's archived persisted storage. It is independent of `workspace_session_export` and `workspace_qualified_rest_core`; clients must pre-flight this tag directly. A distinct route prevents an older daemon from ignoring archive intent and returning an active transcript with the same id.
 
-`workspace_session_live_state` advertises `GET /workspaces/:workspace/sessions/live-state`, a trusted-only, memory-only snapshot of the selected workspace runtime's live sessions plus an in-memory catalog version that tells clients when a full persisted-catalog reload is warranted. It is independent of `workspace_qualified_rest_core`: released daemons can advertise the broader workspace REST capability without implementing this route, so clients must pre-flight this tag directly. The tag is unconditional because a trusted single-workspace primary can use the route by id or cwd; per-workspace trust checks still apply on every request, and the route does not extend the permissive untrusted-secondary persisted-catalog read policy to live bridge state.
+`workspace_session_live_state` advertises `GET /workspaces/:workspace/sessions/live-state`, a trusted-only, memory-only snapshot of the selected workspace runtime's live sessions plus an in-memory catalog version that tells clients when a full persisted-catalog reload is warranted. It is independent of `workspace_qualified_rest_core`: released daemons can advertise the broader workspace REST capability without implementing this route, so clients must pre-flight this tag directly. The tag is unconditional because a trusted single-workspace primary can use the route by id or cwd; per-workspace trust checks still apply on every request, and the route does not extend the permissive untrusted-secondary persisted-catalog read policy to live bridge state. The tag means the endpoint exists; it does not promise that every live item carries the optional `updatedAt` activity watermark, which is lifecycle-dependent.
 
 `slow_client_warning` covers SSE backpressure behavior: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's live frame backlog or live serialized-byte backlog crosses 75% full, once per overflow episode (rearmed after both measurements drain below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber frame backlog for cold reconnects against a large replay ring. The serialized-byte cap is daemon-owned (default **2 MiB** per subscriber), live-only, and intentionally has no query parameter. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack the warning/query behavior — pre-flight this tag before opting in.
 
@@ -253,7 +256,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_organization` advertises custom session groups and pinning. It adds `GET/POST/PATCH/DELETE /workspace/:id/session-groups`, `PATCH /session/:id/organization`, and the opt-in organized list view `GET /workspace/:id/sessions?view=organized`. When both `session_organization` and `workspace_qualified_rest_core` are advertised, the workspace-qualified organization mutation `PATCH /workspaces/:workspace/session/:id/organization` is also available. The legacy mutation remains primary-workspace-only. Older daemons return `404` for the mutation/group routes and ignore the organized view contract, so WebShell/SDK clients must pre-flight these tags before showing the matching grouping or pinning UI.
 
-`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
+`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived. `session_storage_conflict_repair` advertises the additive `resolveConflicts` request option and `resolvedConflicts` response bucket described below.
 
 `workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability explicitly defines a narrower read-only policy, such as `workspace_persisted_transcript`. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
 
@@ -263,11 +266,11 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_lsp` advertises `GET /session/:id/lsp`, the read-only structured LSP status snapshot for daemon clients. Older daemons return `404`; pre-flight this tag before exposing remote LSP status.
 
-`session_status` advertises `GET /session/:id/status`, the live bridge summary for a single session by id. In addition to `clientCount` and `hasActivePrompt`, live sessions expose `isWaitingForPermission`, `isWaitingForUserQuestion`, `pendingInteractionCount`, and a retained `turnError` after a failed turn. The error clears when the next prompt actually starts. Both the single-session status response and workspace session lists include `turnError` and `pendingInteractions`: render-ready permission actions or `ask_user_question` questions plus the `requestId` and selectable options required by the existing permission vote routes. Each user question has an `answerKey`; vote with `answers`, for example `{ "0": "Polling" }`, keyed by that value. Persisted-only sessions omit runtime state because no runtime exists. Older daemons return `404`; pre-flight this tag before polling a single session's status instead of scanning the full session list.
+`session_status` advertises `GET /session/:id/status`, the live bridge summary for a single session by id. In addition to `clientCount` and `hasActivePrompt`, live sessions expose `isWaitingForPermission`, `isWaitingForUserQuestion`, `pendingInteractionCount`, and a retained `turnError` after a failed turn. The error clears when the next prompt actually starts. A live session that has settled a running turn in the current bridge also carries `updatedAt`, the same activity watermark documented under the live-state route; because this route returns the bridge summary directly, the value is not merged with the persisted transcript mtime and may be earlier than the one a session list reports. Both the single-session status response and workspace session lists include `turnError` and `pendingInteractions`: render-ready permission actions or `ask_user_question` questions plus the `requestId` and selectable options required by the existing permission vote routes. Each user question has an `answerKey`; vote with `answers`, for example `{ "0": "Polling" }`, keyed by that value. Persisted-only sessions omit runtime state because no runtime exists. Older daemons return `404`; pre-flight this tag before polling a single session's status instead of scanning the full session list.
 
 `session_info` advertises `GET /workspace/:id/session-info` and its `/workspaces/:workspace/session-info` twin. The response aggregates persisted active and archived session counts without hydrating list metadata. It is an explicit O(n) disk scan and must not be polled; clients should treat `truncated: true` as a lower-bound result.
 
-`session_approval_mode_control`, `workspace_tool_toggle`, `workspace_skill_toggle`, `workspace_skill_batch_toggle`, `workspace_init`, and `workspace_mcp_restart` advertise the mutation control routes documented below. They are strict-gated by the mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
+`session_approval_mode_control`, `workspace_tool_toggle`, `workspace_skill_toggle`, `workspace_skill_batch_toggle`, `extension_batch_activation_v2`, `workspace_init`, and `workspace_mcp_restart` advertise the mutation control routes documented below. They are strict-gated by the mutation gate (a daemon configured without a bearer token rejects them with 401 `token_required`). Older daemons return `404`; pre-flight each tag before exposing the corresponding affordance.
 
 `mcp_guardrails` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14) covers the MCP budget surface: the `clientCount` / `clientBudget` / `budgetMode` / `budgets[]` fields on `GET /workspace/mcp`, the `disabledReason` field on per-server cells, and the `--mcp-client-budget` / `--mcp-budget-mode` CLI flags. Older daemons omit the new fields entirely; SDK clients pre-flight this tag before relying on `budgets[]` semantics. The registry descriptor also carries `modes: ['warn', 'enforce']` for future feature-modes exposure — for now, clients infer mode from the snapshot's `budgetMode` field. Server refusal under `enforce` mode is deterministic by `Object.entries(mcpServers)` declaration order; a future scope-precedence layer (if qwen-code adopts one) would shift this to "lowest-precedence first" to mirror claude-code's `plugin < user < project < local` convention.
 
@@ -293,6 +296,10 @@ The same tag also exposes workspace-qualified project-agent CRUD at `/workspaces
 
 `extension_management_v2` advertises a user-level extension catalog and mutation surface at `/extensions/*`, plus workspace activation projections at `/workspaces/:workspace/extensions/*`. Artifacts are global; workspace routes expose only projection reads, exact activation overrides, and runtime refresh. Reads may target an untrusted registered workspace, while activation, refresh, and workspace-scoped install require a trusted target. Slow mutations use daemon-local operations at `/extensions/operations/:operationId`; store generation, not operation history, is authoritative across restart and across daemons. The published `workspace_extensions` capability and `/workspace/extensions/*` routes remain a primary-workspace compatibility adapter. Clients must preflight `extension_management_v2` and must not infer it from daemon mode or `workspace_qualified_rest_core`.
 
+`extension_git_credentials` advertises authenticated HTTPS Git installs on both `POST /workspace/extensions/install` and `POST /extensions/install`. Clients must preflight this tag before sending URL userinfo or `credentialPersistence`; older daemons reject URL credentials. The tag describes backend protocol support, not the availability of a keychain: stored mode reports the selected backend in the terminal operation result.
+
+`extension_batch_activation_v2` adds `PUT /extensions/activation` and `PUT /workspaces/:workspace/extensions/activation`. Both accept 1–100 names in `extensionNames`, deduplicate them case-insensitively while preserving first-seen order, persist changed targets in one generation, and return one `202` operation handle. A target does not need to be installed when setting `enabled` or `disabled`: its name creates a desired-state declaration that is preserved when an Extension with that name is installed. The global route accepts `state: "enabled" | "disabled"`, writes V2 `defaultActivation`, and reconciles every registered runtime. The workspace route also accepts `"inherit"`, applies or clears exact overrides for the selected trusted runtime, and reconciles only that runtime. `inherit` does not declare an unknown name; an all-unknown clear reports `updated: false` and skips reconciliation. Singular activation routes remain installed-only and id-addressed.
+
 ### Extension Management V2 wire contract
 
 All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` is optional for the V2 mutation routes; when supplied, it must identify a client registered with one of the mutation's target workspace runtimes. `:extensionId` is the lowercase 64-hex extension identity. `:workspace` resolves as an exact workspace id first and otherwise as a URL-encoded absolute cwd after canonicalization.
@@ -300,6 +307,7 @@ All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` 
 | Method and path                                                    | Success                                                                     |
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------- |
 | `GET /extensions`                                                  | `200` global artifact catalog                                               |
+| `PUT /extensions/activation`                                       | `202` global default-activation batch operation                             |
 | `PUT /extensions/:extensionId/activation`                          | `202` global default-activation operation                                   |
 | `POST /extensions/install`                                         | `202` install operation                                                     |
 | `POST /extensions/check-updates`                                   | `202` update-check operation                                                |
@@ -307,6 +315,7 @@ All routes use the daemon bearer authentication rules above. `X-Qwen-Client-Id` 
 | `DELETE /extensions/:extensionId`                                  | `202` uninstall operation, or idempotent `204` when the extension is absent |
 | `GET /extensions/operations/:operationId`                          | `200` operation snapshot                                                    |
 | `GET /workspaces/:workspace/extensions`                            | `200` workspace activation projection                                       |
+| `PUT /workspaces/:workspace/extensions/activation`                 | `202` exact workspace-activation batch operation                            |
 | `PUT /workspaces/:workspace/extensions/:extensionId/activation`    | `202` exact workspace-activation operation                                  |
 | `DELETE /workspaces/:workspace/extensions/:extensionId/activation` | `202` clear-override operation                                              |
 | `POST /workspaces/:workspace/extensions/refresh`                   | `202` runtime-refresh operation                                             |
@@ -374,6 +383,10 @@ Install requires explicit consent and an initial activation:
 
 For workspace-only initial activation use `{ "scope": "workspace", "workspaceId": "target-workspace-id" }`; the target must exist and be trusted. Daemon installs accept GitHub, Git, and npm sources. `ref` does not apply to npm, and `registry` applies only to npm. `ref`, `autoUpdate`, `allowPreRelease`, and `registry` are optional.
 
+When `extension_git_credentials` is advertised, an HTTPS Git source may include userinfo, for example `https://username:token@git.example.com/org/repository.git`. `credentialPersistence` is valid only with such a source. It is `stored` or `one_time` and defaults to `one_time` when omitted. Stored mode saves the credential through the daemon's hybrid secret storage and keeps only the clean repository URL in install metadata, so the extension remains updatable. One-time mode saves neither the repository URL nor the credential and creates a non-updatable `snapshot`; `autoUpdate: true` is rejected for this mode. Supplying the field without URL credentials, supplying invalid credentials, or using credentials with npm, archive, local, SSH, or non-Git sources returns `400`.
+
+Credentialed install responses and operations expose `credentialPersistence` and may expose `credentialStorage` as `keychain` or `encrypted_file`. One-time operations omit `source`; stored operations may return the clean source. Snapshot catalog/status entries omit source, set `credentialPersistence` to `one_time`, and report `not updatable`. Update fails with `extension_not_updatable`; an unavailable stored secret fails before network access with `extension_credential_unavailable`.
+
 Global and workspace activation `PUT` requests use the same body:
 
 ```json
@@ -381,6 +394,17 @@ Global and workspace activation `PUT` requests use the same body:
 ```
 
 `state` is `enabled` or `disabled`. Update, uninstall, check-updates, clear-activation, and refresh requests have no required body.
+
+Batch activation requests use Extension names:
+
+```json
+{
+  "extensionNames": ["formatter", "review-tools"],
+  "state": "disabled"
+}
+```
+
+The workspace batch also accepts `"state": "inherit"`. Terminal global results contain `name` and `defaultActivation`; workspace results contain `name`, `workspaceActivation` (`null` for inherit), and `effectiveActivation`. Malformed names reject the request; conflicts with existing Store identities fail atomically without a partial commit. An unknown `inherit` target is not persisted, because clearing an override must not manufacture a default-activation declaration or replace later install consent.
 
 Every accepted asynchronous mutation returns:
 
@@ -411,7 +435,7 @@ An operation snapshot has this shape:
 }
 ```
 
-`status` transitions from `queued` to `running`, then to `succeeded`, `succeeded_with_warnings`, or `failed`. While running, `phase` is `preparing`, `committing`, or `reconciling`. Terminal success may include `result` with `status` equal to `installed`, `enabled`, `disabled`, `updated`, `uninstalled`, `checked`, or `refreshed`; reconciliation results can additionally contain `refreshed`, `failed`, and `error`. Update checks return `result.states`, keyed by extension name, with values such as `checking for updates`, `update available`, `up to date`, `not updatable`, or `error`.
+`status` transitions from `queued` to `running`, then to `succeeded`, `succeeded_with_warnings`, or `failed`. While running, `phase` is `preparing`, `committing`, or `reconciling`. Terminal success may include `result` with `status` equal to `installed`, `enabled`, `disabled`, `updated`, `uninstalled`, `checked`, or `refreshed`; reconciliation results can additionally contain `refreshed`, `failed`, and `error`, while batch activation results contain ordered `results`. Update checks return `result.states`, keyed by extension name, with values such as `checking for updates`, `update available`, `up to date`, `not updatable`, or `error`. Credentials and authorization headers are never operation fields.
 
 A durable commit followed by incomplete cleanup or runtime reconciliation is not reported as a failed mutation. It returns `succeeded_with_warnings` and preserves the committed result:
 
@@ -442,7 +466,7 @@ A durable commit followed by incomplete cleanup or runtime reconciliation is not
 
 Warning `workspaceId` and `code` are optional; `workspaceCwd` and `error` are always present. Clients should display warnings, refresh their catalog/projection, and must not retry the durable mutation blindly.
 
-Validation and authorization failures are synchronous HTTP errors using `{ "error": "...", "code": "..." }` when a stable code exists. Important cases are `400 invalid_extension_id`, `400 invalid_extension_activation`, `400 workspace_mismatch`, `403 untrusted_workspace`, `404 extension_operation_not_found`, and `429 extension_queue_full`. Install validation also returns `400` for invalid source/ref/registry options, missing consent, or missing/invalid initial activation. A mutation that fails after `202` is represented, while retained in operation history, with `status: "failed"`, `error`, and an optional stable `code`; common codes include `extension_prepare_timeout` and `extension_conflict`. HTTP `404` for an operation does not imply rollback because operation history is not durable.
+Validation and authorization failures are synchronous HTTP errors using `{ "error": "...", "code": "..." }` when a stable code exists. Important cases are `400 invalid_extension_id`, `400 invalid_extension_names`, `400 invalid_extension_name`, `400 invalid_extension_activation`, `400 workspace_mismatch`, `403 untrusted_workspace`, `404 extension_operation_not_found`, and `429 extension_queue_full`. Install validation also returns `400` for invalid source/ref/registry options, missing consent, or missing/invalid initial activation. A mutation that fails after `202` is represented, while retained in operation history, with `status: "failed"`, `error`, and an optional stable `code`; common codes include `extension_prepare_timeout` and `extension_conflict`. HTTP `404` for an operation does not imply rollback because operation history is not durable.
 
 `daemon_status` advertises `GET /daemon/status`, the consolidated read-only
 operator diagnostic snapshot documented below.
@@ -501,6 +525,8 @@ operator diagnostic snapshot documented below.
 Both events live in the per-session SSE replay ring (they carry an `id`) so a client reconnecting with `Last-Event-ID` resumes through them; the snapshot at `GET /workspace/mcp` is still the source-of-truth for state-after-extended-disconnect. Always-on once advertised — there is no conditional toggle. SDK reducer state (`DaemonSessionViewState`) exposes `mcpBudgetWarningCount`, `lastMcpBudgetWarning`, `mcpChildRefusedBatchCount`, `lastMcpChildRefusedBatch` for adapters that want simple lag-style UI.
 
 ## Routes
+
+Clients can feature-detect `session_turn_status` and poll `GET /session/:id/turns/current` or `GET /session/:id/turns/:promptId`. These routes require the live owning Session and never load or scan another workspace. Settled results are best-effort transcript records read from the active branch with a bounded scan; `prompt_not_found` means no result was found in the live queue, 64-entry terminal overlay, or bounded active window. `resultText` is the raw final parent-model answer after the last tool boundary, before optional message rewriting, and may be absent. Results over 32,768 UTF-16 code units include `resultTruncated: true` and `resultCode: "RESULT_TEXT_TRUNCATED"`.
 
 ### `GET /health`
 
@@ -668,6 +694,8 @@ runtime routes return `503`.
 `limits.memory` is additive and reports the daemon's resolved memory figures: a required `enforced: false`, a `childHeap` object (`mode`; `maxConcurrentChildren` and `perChildCeilingMb`, both `null` under `mode: 'off'`, which models nothing — and `perChildCeilingMb` additionally `null` wherever no partition can be modeled within `modeled.minChildHeapMb` — either the pool cannot cover one child at that floor, or the ceiling would land under it once capped at `modeled.legacyChildCeilingMb`, which is `floor(available / 2)` and so drops under the floor on a host below 1024 MB. It is never 0, and `maxConcurrentChildren` is `0` in those cases, since a host that models no partition is a computed answer rather than an absent model; and `refusals`, the spawns that would have exceeded the modeled limit), `configuredBudgetMb`, `effectiveBudgetMb` (the configured value capped at resolved cgroup/host memory), `budgetSource` (`flag` / `derived`), `availableMemoryMb`, `availableMemorySource` (`constrained` / `host`), `insufficientMemory`, and a `modeled` object holding `rootReserveMb`, `childPoolMb`, `minChildHeapMb`, `maxChildHeapMb`, and `legacyChildCeilingMb` (a conservative model of the ceiling an ACP child receives today, which can sit below the real figure). `runtime.memory` additionally reports `registeredWorkspaces` (the registration count — non-removed workspace entries, including draining, transitioning, or blocked ones; not a live-child count), `activeAcpChildren` (daemon-managed ACP children with a live, non-dying channel — includes transitioning or blocked entries, but excludes a workspace whose kill has started even if the child has not exited; not channel workers, MCP descendants, or unattached spawn reservations), `childRssCoverage` (`active_children` — every ACP child with a live channel, which is the set `activeAcpChildren` counts; older daemons send `primary_only`), a `children` object described below, and a `modeled` object holding `recommendedShareAtRegisteredMb` (`null` when no workspace is registered) and `recommendedShareAtActiveMb` (`null` when no child is active). Each share is capped at the legacy child ceiling, and floored at the minimum child heap only when the ceiling allows — on a small host the ceiling sits below the floor, so share × count can exceed the child pool. Read a share as advisory, not a partition of the pool. All of it is observation: no child spawn argument derives from these values, and no request is refused on their basis. `childHeap` models a fixed partition of `modeled.childPoolMb` — every child would receive the same `perChildCeilingMb`, so the modeled total stays inside the pool rather than accumulating as a per-spawn share would. Read `refusals` as admission pressure only: a count of 0 does **not** mean the partition is safe to apply, because children run on the much larger host-derived ceiling, so a workload needing more old space than `perChildCeilingMb` is healthy here and would only fail once the partition were applied. Two further reasons a nonzero count need not mean capacity pressure: the admission decision counts a terminating child until it exits, so on a daemon already at `maxConcurrentChildren` every channel replacement books a refusal during the overlap window; and on a host too small to model a partition `maxConcurrentChildren` is `0`, so `refusals` equals the total ACP spawn count, with `insufficientMemory` as the field that explains it. On the normal `runQwenServe` path the budget is resolved before the bootstrap app is created, so `limits.memory` is already populated during the bootstrap window. It is `null` only on paths that resolve no budget (such as direct-embed bypassing `runQwenServeImpl`). The SDK type allows `null`, so correct clients cope.
 
 `runtime.memory.children` is additive within that block and reports aggregate RSS across the children `childRssCoverage` names: `rssBytes` (their summed self-reported RSS), `sampled` (how many produced a reading), and `oldestReadingAgeMs` (the age of the oldest reading in the sum, so a caller can tell how far apart its parts were taken). The denominator for `sampled` is the sibling `activeAcpChildren`, not repeated inside the block; when `sampled` is lower, `rssBytes` is a floor rather than a total. Sampling is gated on an active SSE/WS watcher, so a status request against a daemon nobody is streaming from reports `sampled: 0` even with live children — `activeAcpChildren` beside it makes that gap visible, and `rssBytes: 0` with `sampled: 0` never means a measured zero. `oldestReadingAgeMs` is `null` when nothing was sampled and also when every contributor is a bridge predating the field, so it never means "fresh". Read the sum as an over-count and an under-count at once: summing per-process RSS double-counts pages the children share, while each child reports only its own process, so its MCP descendants and every channel worker are missing. It is not the daemon tree's memory. The field is optional in the SDK mirror because daemons reporting `primary_only` never send it.
+
+`runtime.memory.children.heap` is additive within that block and reports each ACP child's lifetime V8 old-generation high-water marks, aggregated as a **maximum, not a sum**: `peakOldGenerationBytes`, `peakLiveSetBytes`, `peakTotalHeapBytes`, `majorGcCount`, `majorGcMs`, `unclassifiedSpaceNames`, and `reported`. A heap ceiling applies per child and the peaks were reached at different times, so a total would answer no question; each field is an independent maximum across the reporting children, not a portrait of one child, and a per-child ceiling is judged against each axis on its own. `reported` counts how many of `sampled` contributed, and is lower when some children predate the fields. Every byte figure covers the **old generation** — what `--max-old-space-size` actually bounds — and not `old_space` alone, because a child can exhaust its ceiling with `old_space` at a few megabytes while `large_object_space` holds everything. `peakOldGenerationBytes` is committed bytes and rises with the ceiling the child was given, so read it as an upper bound on what the workload needs rather than as its requirement; `peakLiveSetBytes` is what survives a major GC and does not move with the ceiling, which is what makes it the figure able to say a child cannot fit one; read it as an upper bound rather than an exact live set, because GC entries arrive asynchronously and anything allocated between the collection and the read is counted. `peakLiveSetBytes` is `0` until a major GC is observed, which is an absence rather than a measurement. `unclassifiedSpaceNames` is the union of heap spaces no reporting child could classify; V8 renames and adds spaces between versions, an unknown space is dropped from the sums, and dropping under-counts — so a non-empty array means the byte figures are incomplete and must not be read as a full measurement. The whole object is `null`, never a zeroed object, when no sampled child reported one; with no SSE/WS watcher attached nothing is sampled at all, so that is a routine state rather than an edge case. All of it is observational: nothing here sizes a child, refuses a spawn, or moves `limits.memory.enforced` off `false`.
 
 `runtime.memory.pressure` is additive within that block and reports the daemon root's own memory pressure: `mode` (`off` / `observe`), `level` (`normal` / `soft` / `hard` / `critical`), `source` (`rss` / `heap` / `unknown`), `ratio`, and the six raw figures the ratios come from — `rssBytes`, `rssRatio`, `availableBytes`, `heapUsedBytes`, `heapRatio`, `heapLimitBytes`. `ratio` is the larger of `rssRatio` and `heapRatio`, and `source` names which one it was; ties are reported as `rss`. `availableBytes` is `limits.memory.availableMemoryMb` in bytes — deliberately the detected cgroup/host figure rather than `effectiveBudgetMb`, because what ends the process is the real limit, not an operator's policy number. `source: "unknown"` means neither denominator was measurable and must not be read as healthy; `level` is `normal` in that case only because there is nothing to classify. The figures cover the daemon **root process only**: they are this process's own `memoryUsage()`, so children growing does not move them. `runtime.memory.children` reports those separately, and neither figure is process-tree memory. Both modes report the whole block; only `observe` additionally raises the path-free `daemon_memory_pressure` warning into the status rollup, so `off` leaves the top-level `status` unchanged. Nothing remediates in either mode. The field is optional in the SDK mirror because daemons that shipped `runtime.memory` before it exists send the block without it.
 
@@ -2265,6 +2293,8 @@ Response:
 
 With `view=organized`, the daemon reads `<Storage.getProjectDir(cwd)>/session-organization.v1.json`, returns pinned sessions first, then activity time descending, and then `sessionId` for stable ties. The organized cursor is opaque base64url JSON and must not be reused with the legacy recent list. `pinned` is a virtual filter, not a group. `groupId: null` means ungrouped. Archived sessions keep their organization metadata, but `archiveState=archived&view=organized` still returns only archived sessions.
 
+Activity-ordered cursors — the organized view and the `parentSessionId` / `sourceType` filtered lists — are not snapshot-isolated, and a trusted active list orders rows by the later of the transcript mtime and the live activity watermark. A live watermark is in-memory only, so a session's key can regress to its mtime when the live entry retires between two page fetches. The cursor compensates: it carries the identities already emitted at a live-derived key — retaining them while the row is absent from a page's collection and while a pin flip could re-admit them — and excludes them for the rest of the pass, so live-derived key movement returns a session at most once per pass. The guarantee is scoped to the carry: it is bounded at 64 identities (excess identities in one pass degrade to an at-most-once duplicate rather than an error), and a persisted-only row emitted before its pin state changed is never carried, so an unpin between fetches can return that row a second time exactly as before this field existed. Callers that accumulate pages should therefore always key rows by `sessionId`, not only in the over-64 case. Rows can still move or be skipped under concurrent activity, exactly as before; a caller that needs a coherent view reloads from the first page after an activity change.
+
 Additional fields may appear on each session when `view=organized`:
 
 ```json
@@ -2296,15 +2326,18 @@ Response:
       "clientCount": 1,
       "hasActivePrompt": true,
       "isWaitingForPermission": false,
-      "isWaitingForUserQuestion": false
+      "isWaitingForUserQuestion": false,
+      "updatedAt": "2026-08-18T08:12:30.123Z"
     }
   ]
 }
 ```
 
-`v` is the response schema version. Every successful response includes `Cache-Control: no-store`. `sessions` is the complete, unpaginated, unordered set of sessions currently live in the selected runtime; an empty live runtime returns `200` with `sessions: []`. `clientCount`, `hasActivePrompt`, `isWaitingForPermission`, and `isWaitingForUserQuestion` are required wire fields, and missing optional bridge values project to `0` or `false`. Static catalog fields such as display name, timestamps, organization, and source metadata are deliberately excluded and remain owned by the full catalog. An absent live-state row only clears a known catalog row's volatile fields; it never deletes a persisted catalog row.
+`v` is the response schema version. Every successful response includes `Cache-Control: no-store`. `sessions` is the complete, unpaginated, unordered set of sessions currently live in the selected runtime; an empty live runtime returns `200` with `sessions: []`. `clientCount`, `hasActivePrompt`, `isWaitingForPermission`, and `isWaitingForUserQuestion` are required wire fields, and missing optional bridge values project to `0` or `false`. Static catalog fields such as display name, creation time, organization, and source metadata are deliberately excluded and remain owned by the full catalog. An absent live-state row only clears a known catalog row's volatile fields; it never deletes a persisted catalog row.
 
-`catalogVersion` is an equality token for daemon-observed catalog changes. `generation` is a random UUID created with each bridge instance and changes on daemon restart or workspace runtime replacement; `revision` starts at zero and increases monotonically within a generation. The only supported operation is equality over the whole pair: same generation and revision means no daemon-observed catalog change, and any difference means reload the full catalog. Clients must not perform revision arithmetic or compare revisions across generations, and conservative extra increments are allowed. The version covers catalog membership and static metadata changes observed by the daemon; ordinary turn activity, prompt lifecycle, attach/detach, and waiting-state transitions do not advance it because the live snapshot already carries the corresponding volatile fields. Two volatile overlay values are deliberately outside both signals: turn-error state (`hasTurnError`/`turnError`) and the pending-interaction count/content (`pendingInteractionCount`/`pendingInteractions`) neither advance the version nor appear in the snapshot, so a client that needs them must keep reading the per-session event stream or the full catalog rather than relying on this route; either field can be added wire-additively when a concrete consumer requires it. Mutations written directly by another daemon, a TUI, or an external process are not observed, so once a client stops periodic full-catalog polling those writes have no bounded discovery time and surface only after an explicit full reload, another observed catalog mutation, reconnect, or daemon/runtime replacement.
+`updatedAt` is an optional daemon-observed activity watermark, present when a prompt that reached the running state has published a formal terminal in the current bridge. It advances exactly once per such terminal — success, error, cancellation, and deadline alike — is written before the terminal event is published, and is strictly increasing per live session even when two terminals land in one wall-clock millisecond or the wall clock moves backward; a forward clock jump therefore persists until wall time catches up. It is never earlier than the session's `createdAt`: the first advance floors at creation time, so a wall-clock rollback between creation and the first terminal cannot key a row behind the `createdAt` it was already listed at. Prompt admission, queue waits, streamed updates, queue-only cancellation, heartbeats, and interaction waits never advance it. Clients use it to refresh the recency of a catalog row they already hold instead of reloading the full catalog after a completed turn. It is not a persistence acknowledgement: the recorder writes turn results asynchronously, so the value proves only that the daemon observed a running attempt settle. It is absent before the first running terminal in a bridge generation — including for a session restored from disk — so absence is not a support probe, and it disappears when a daemon restart or workspace runtime replacement installs a new bridge. When both a live and a persisted summary exist for one session, full catalog responses report the later valid timestamp, so `GET /session/:id/status`, which returns the bridge summary directly without that merge, may report an earlier value than a list response.
+
+`catalogVersion` is an equality token for daemon-observed catalog changes. `generation` is a random UUID created with each bridge instance and changes on daemon restart or workspace runtime replacement; `revision` starts at zero and increases monotonically within a generation. The only supported operation is equality over the whole pair: same generation and revision means no daemon-observed catalog change, and any difference means reload the full catalog. Clients must not perform revision arithmetic or compare revisions across generations, and conservative extra increments are allowed. The version covers catalog membership and static metadata changes observed by the daemon; ordinary turn activity, prompt lifecycle, attach/detach, and waiting-state transitions do not advance it because the live snapshot already carries the corresponding volatile fields. A changed `updatedAt` under an unchanged version is therefore valid and expected, and it does not invalidate the daemon's persisted-list caches. Two volatile overlay values are deliberately outside both signals: turn-error state (`hasTurnError`/`turnError`) and the pending-interaction count/content (`pendingInteractionCount`/`pendingInteractions`) neither advance the version nor appear in the snapshot, so a client that needs them must keep reading the per-session event stream or the full catalog rather than relying on this route; either field can be added wire-additively when a concrete consumer requires it. Mutations written directly by another daemon, a TUI, or an external process are not observed, so once a client stops periodic full-catalog polling those writes have no bounded discovery time and surface only after an explicit full reload, another observed catalog mutation, reconnect, or daemon/runtime replacement.
 
 Clients reconcile a catalog bundle with a two-read handshake: read live-state A, load the full session list (plus `GET /workspaces/:workspace/session-groups` when the client consumes `session_organization`), then read live-state B. Equal A and B versions accept the bundle; differing versions mark the catalog stale and coalesce at most one trailing reload rather than entering a tight retry loop. Every accepted catalog request must be initiated after A — a request or deduplicated promise that began before A cannot satisfy the reconciliation. Version-driven reloads are single-flight per workspace and obey a non-zero background minimum interval, so sustained catalog churn cannot drive one full catalog scan per live-state poll; explicit local mutations may still request an immediate refresh through the same single-flight operation.
 
@@ -2401,7 +2434,7 @@ Archive one or more sessions. Archive is a state transition, not deletion: the J
 Request:
 
 ```json
-{ "sessionIds": ["<uuid>"] }
+{ "sessionIds": ["<uuid>"], "resolveConflicts": true }
 ```
 
 `sessionIds` must be a non-empty string array with at most 100 ids. Duplicates are collapsed.
@@ -2412,12 +2445,15 @@ Response:
 {
   "archived": ["<uuid>"],
   "alreadyArchived": [],
+  "resolvedConflicts": ["<uuid>"],
   "notFound": [],
   "errors": []
 }
 ```
 
-`errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`. Active and archived files with the same id are treated as a conflict and reported in `errors`; no file is overwritten.
+`resolveConflicts` is optional and defaults to `false`. By default, active and archived files with the same id are reported in `errors`, and neither copy is moved, removed, or overwritten. Archiving a live session still performs the strict close described above before classifying the conflict, so that close may flush queued records to the active transcript. With `resolveConflicts: true`, archive keeps the archived copy, removes the active copy, and reports the id in both `archived` and `resolvedConflicts`. `errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`.
+
+Lifecycle conflicts are batch item outcomes: the workspace-less and workspace-qualified routes return HTTP `200` with the conflict in `errors`. This replaces the earlier workspace-qualified HTTP `409 session_conflict` envelope; clients that called that route must inspect the batch response. Internal-runtime REST batches preserve the safe conflict message while continuing to redact other per-session failure details.
 
 ### `POST /sessions/unarchive`
 
@@ -2426,7 +2462,7 @@ Restore archived sessions to the active directory. This does not resume the sess
 Request:
 
 ```json
-{ "sessionIds": ["<uuid>"] }
+{ "sessionIds": ["<uuid>"], "resolveConflicts": true }
 ```
 
 Response:
@@ -2435,12 +2471,13 @@ Response:
 {
   "unarchived": ["<uuid>"],
   "alreadyActive": [],
+  "resolvedConflicts": ["<uuid>"],
   "notFound": [],
   "errors": []
 }
 ```
 
-If an active JSONL already exists for the id, unarchive reports a conflict in `errors` and does not overwrite it. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
+`resolveConflicts` is optional and defaults to `false`. By default, simultaneous active and archived JSONL files produce a conflict in `errors`, and neither copy is moved, removed, or overwritten; an active-only session is returned in `alreadyActive`. With `resolveConflicts: true`, unarchive keeps the active copy, removes the archived copy, and reports the id in both `unarchived` and `resolvedConflicts`. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
 
 ACP-over-HTTP uses the same request and response bodies through vendor methods `_qwen/sessions/archive` and `_qwen/sessions/unarchive`. The REST route table maps `POST /sessions/archive` and `POST /sessions/unarchive` to those methods for ACP transports.
 
@@ -2510,7 +2547,10 @@ If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` noti
 
 When `prompt_absolute_deadline` is advertised, `deadlineMs` may shorten the
 configured server deadline. Expiry emits a correlated `turn_error` with
-`errorKind: "prompt_deadline_exceeded"`.
+`errorKind: "prompt_deadline_exceeded"`. The deadline releases the caller
+without killing the agent; if the agent later settles, turn-status polls for
+that `promptId` return the settled transcript outcome instead of the deadline
+error.
 
 ### `POST /session/:id/cancel`
 
@@ -2643,7 +2683,7 @@ Response:
 { "modelId": "qwen-staging" }
 ```
 
-On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler.
+On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also records the session model in the session JSONL on a best-effort basis; when the record is written, daemon load/resume attempts to restore this session's model before authentication. If the recorded model can no longer be applied (model removed, credentials unavailable), restore uses a same-id registry route when one exists — for a runtime-snapshot record that can be a different endpoint than the recorded binding — and continues on the `settings.model.name` default only when no route resolves. `settings.model.name` is still updated as the default for **new** sessions.
 
 ### `POST /session/:id/recap`
 
@@ -3038,19 +3078,23 @@ The active policy is configured in `settings.json` under `policy.permissionStrat
 
 > **F3 (#4175): multi-client permission coordination.** F3 added the four policies above. Pre-F3 daemons hardcoded first-responder; the wire shape stays bit-for-bit unchanged when the configured policy is `first-responder`. New events (`permission_partial_vote`, `permission_forbidden`) are additive — old SDKs see them as `unrecognized_known_event` and gracefully ignore.
 
-> **Permission timeout (default 5 minutes).** A `permission_request`
+> **Permission timeout (disabled by default).** A `permission_request`
 > stays pending until: (a) some client votes here, (b) `POST /session/:id/cancel`
 > fires, (c) the HTTP client driving the prompt disconnects
 > (mid-prompt cancel resolves outstanding permissions as `cancelled`),
 > (d) the session is killed, (e) the daemon shuts down, **or
-> (f) the per-session permission timeout fires** (`DEFAULT_PERMISSION_TIMEOUT_MS`,
-> 5 minutes). On timeout fire the agent's `requestPermission` resolves
+> (f) its configured timeout fires**. On timeout fire the agent's
+> `requestPermission` resolves
 > as `{outcome: 'cancelled'}`, the audit ring records a
 > `permission.timeout` entry, daemon stderr emits a one-line
 > breadcrumb, and the SSE bus fans out the standard
 > `permission_resolved` cancelled frame so subscribers clean up. The
-> timeout is configurable via `BridgeOptions.permissionResponseTimeoutMs`;
-> headless callers running long-form prompts may want to extend it.
+> shared timeout is configurable via
+> `BridgeOptions.permissionResponseTimeoutMs` or
+> `qwen serve --permission-response-timeout-ms`. Its default is `0`, so both
+> ordinary permissions and `ask_user_question` wait indefinitely for a human
+> decision. Voter cancellation, session cancellation, disconnect cleanup, and
+> daemon shutdown still resolve pending interactions as cancelled.
 
 Request:
 

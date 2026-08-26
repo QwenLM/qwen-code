@@ -5,6 +5,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
 import type { Config } from '../../config/config.js';
 import {
@@ -170,7 +171,7 @@ export function resolveConcurrencyLimit(
  * which apply valid overrides verbatim), clamped to a hard ceiling.
  *
  * Three time bounds act on a dispatch and they are NOT redundant:
- *  - `stallMs` (60s default) — no *progress* for this long ⇒ abort + retry.
+ *  - `stallMs` (3 min default) — no *progress* for this long ⇒ abort + retry.
  *    Held while a tool is in flight, so a slow tool is not a stall.
  *  - `max_time_minutes` (this) — total wall time for ONE attempt, stalled or
  *    not. Bounds the case the watchdog cannot see (a model that keeps
@@ -404,6 +405,7 @@ export interface WorkflowRunOutcome {
 export type WorkflowAgentDispatch = (
   prompt: string,
   opts: WorkflowAgentOpts,
+  dispatchId?: string,
 ) => Promise<WorkflowAgentResult>;
 
 function generateRunId(): string {
@@ -465,9 +467,12 @@ export function createProductionDispatch(
    * just without budget recording.
    */
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
-  bridgeApprovalEvents?: (emitter: AgentEventEmitter) => () => void,
+  bridgeApprovalEvents?: (
+    emitter: AgentEventEmitter,
+    dispatchId?: string,
+  ) => () => void,
 ): WorkflowAgentDispatch {
-  return async (prompt, opts) => {
+  return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
     // transcript would carry no evidence of what the agent was asked —
     // and a stall retry on top would open the file with an orphaned
@@ -499,7 +504,10 @@ export function createProductionDispatch(
     return runStallResilient(
       async (attemptSignal, emitter) => {
         attempt += 1;
-        const cleanupApprovalBridge = bridgeApprovalEvents?.(emitter);
+        const cleanupApprovalBridge = bridgeApprovalEvents?.(
+          emitter,
+          dispatchId,
+        );
         const cleanupTranscript = attachDispatchTranscript(
           config,
           workflowAgentId,
@@ -1646,8 +1654,33 @@ export class WorkflowOrchestrator {
     // cap regardless of launch path (increment-then-check: calls 1..max pass,
     // the (max+1)th throws), and scheduler.run enforces the dispatch window.
     let agentCount = 0;
+    let dispatchTraceCount = 0;
     const emitter = req.emitter;
     const budget = req.budget;
+    const dependencyContext = new AsyncLocalStorage<{ tails: string[] }>();
+    const issueDispatchTrace = (
+      prompt: string,
+      opts: WorkflowAgentOpts,
+      cached = false,
+    ): string => {
+      const id = `dispatch-${(dispatchTraceCount += 1)}`;
+      const store = dependencyContext.getStore();
+      const dependsOn = Array.from(new Set(store?.tails ?? []));
+      if (store) store.tails = [id];
+      try {
+        emitter?.dispatchQueued?.({
+          id,
+          ...(typeof opts.label === 'string' ? { label: opts.label } : {}),
+          prompt,
+          dependsOn,
+          queuedAt: Date.now(),
+          ...(cached ? { cached: true } : {}),
+        });
+      } catch (e) {
+        debugLogger.warn('emitter.dispatchQueued threw:', e);
+      }
+      return id;
+    };
 
     // P6: resume journal state. `prefixHash` chains across sequential
     // agent() calls; `hadMiss` enforces the "first miss invalidates the
@@ -1700,6 +1733,7 @@ export class WorkflowOrchestrator {
             }
             const label =
               typeof opts.label === 'string' ? opts.label : undefined;
+            const dispatchId = issueDispatchTrace(prompt, opts, true);
             try {
               emitter?.agentDispatched?.(label);
             } catch (e) {
@@ -1709,6 +1743,11 @@ export class WorkflowOrchestrator {
               emitter?.agentCompleted?.(label);
             } catch (e) {
               debugLogger.warn('emitter.agentCompleted threw:', e);
+            }
+            try {
+              emitter?.dispatchSettled?.(dispatchId, undefined, Date.now());
+            } catch (e) {
+              debugLogger.warn('emitter.dispatchSettled threw:', e);
             }
             // Resolve even if the gate aborts: rejecting an already-cached
             // result at teardown would surface an unobserved rejection for
@@ -1781,6 +1820,7 @@ export class WorkflowOrchestrator {
       // settles (success or thrown) — defensive try/catch on both so a
       // subscriber error never propagates into the script.
       const label = typeof opts.label === 'string' ? opts.label : undefined;
+      const dispatchId = issueDispatchTrace(prompt, opts);
       try {
         emitter?.agentDispatched?.(label);
       } catch (e) {
@@ -1801,10 +1841,20 @@ export class WorkflowOrchestrator {
         } catch (e) {
           debugLogger.warn('emitter.agentCompleted threw:', e);
         }
+        try {
+          emitter?.dispatchSettled?.(dispatchId, message, Date.now());
+        } catch (e) {
+          debugLogger.warn('emitter.dispatchSettled threw:', e);
+        }
       };
       return scheduler
         .run(async () => {
           try {
+            try {
+              emitter?.dispatchStarted?.(dispatchId, Date.now());
+            } catch (e) {
+              debugLogger.warn('emitter.dispatchStarted threw:', e);
+            }
             // P5 R1 (Critical #2): re-check the gate at slot-acquire time so
             // queued thunks see budget updates from already-completed in-
             // flight dispatches. Without this, the entry gate above is
@@ -1821,7 +1871,7 @@ export class WorkflowOrchestrator {
                 budget.spent(),
               );
             }
-            const result = await this.dispatch(prompt, opts);
+            const result = await this.dispatch(prompt, opts, dispatchId);
             emitCompletion();
             // P6: append the live result to the journal so a later resume
             // serves it from cache. Only JSON-serializable results are
@@ -1904,8 +1954,8 @@ export class WorkflowOrchestrator {
         );
     };
 
-    const parallelImpl = makeParallelImpl(signal);
-    const pipelineImpl = makePipelineImpl(signal);
+    const parallelImpl = makeParallelImpl(signal, dependencyContext);
+    const pipelineImpl = makePipelineImpl(signal, dependencyContext);
 
     // P-nested: build the host-side `workflow(nameOrRef, args)` impl. Only
     // wired at the top level (when a resolver is provided). The nested
@@ -1947,13 +1997,9 @@ export class WorkflowOrchestrator {
             // so the parent can try/catch it like any other async failure.
             return await nestedSandbox.run(resolved.script);
           } finally {
-            // Nested logs (script log() lines AND the unconsumed-
-            // rejection mirror) reach no production surface on their
-            // own — getLogs() is only ever read on the top-level
-            // sandbox and the production emitter's logAppended is a
-            // deliberate no-op. Merge them into the parent run's logs
-            // at nested settlement (after the nested flush ran) so a
-            // failed nested dispatch leaves a visible trace.
+            // The shared emitter already publishes nested logs live. Merge
+            // them into the parent buffer without re-emitting so the final
+            // outcome retains the same lines exactly once.
             for (const line of nestedSandbox.getLogs()) {
               parentSandboxRef.current?.appendLog(line);
             }
@@ -1975,7 +2021,9 @@ export class WorkflowOrchestrator {
     });
     parentSandboxRef.current = sandbox;
     try {
-      const result = await sandbox.run(req.script);
+      const result = await dependencyContext.run({ tails: [] }, () =>
+        sandbox.run(req.script),
+      );
       return {
         runId,
         result,
@@ -2091,7 +2139,8 @@ async function settleToNullArray(
  * array never reaches the script directly.
  */
 function makeParallelImpl(
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  dependencyContext: AsyncLocalStorage<{ tails: string[] }>,
 ): (thunks: Array<() => Promise<unknown>>) => Promise<unknown[]> {
   return (thunks) => {
     if (!Array.isArray(thunks)) {
@@ -2111,7 +2160,28 @@ function makeParallelImpl(
         );
       }
     }
-    return settleToNullArray(thunks, signal);
+    const parent = dependencyContext.getStore();
+    const inheritedTails = parent?.tails ?? [];
+    const branches = thunks.map((thunk) => {
+      const store = { tails: [...inheritedTails] };
+      return {
+        store,
+        thunk: () => dependencyContext.run(store, thunk),
+      };
+    });
+    return settleToNullArray(
+      branches.map(({ thunk }) => thunk),
+      signal,
+    ).then((result) => {
+      if (parent && branches.length > 0) {
+        parent.tails = mergeFanoutTails(
+          parent.tails,
+          inheritedTails,
+          branches.flatMap(({ store }) => store.tails),
+        );
+      }
+      return result;
+    });
   };
 }
 
@@ -2128,7 +2198,8 @@ function makeParallelImpl(
  * per-element vm-realm revival.
  */
 function makePipelineImpl(
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  dependencyContext: AsyncLocalStorage<{ tails: string[] }>,
 ): (
   items: unknown[],
   ...stages: Array<
@@ -2153,11 +2224,55 @@ function makePipelineImpl(
         );
       }
     }
-    const chains = items.map(
-      (item, idx) => () => runPipelineChain(item, idx, stages),
-    );
-    return settleToNullArray(chains, signal, 'pipeline');
+    const parent = dependencyContext.getStore();
+    const inheritedTails = parent?.tails ?? [];
+    const branches = items.map((item, idx) => {
+      const store = { tails: [...inheritedTails] };
+      return {
+        store,
+        thunk: () =>
+          dependencyContext.run(store, () =>
+            runPipelineChain(item, idx, stages),
+          ),
+      };
+    });
+    return settleToNullArray(
+      branches.map(({ thunk }) => thunk),
+      signal,
+      'pipeline',
+    ).then((result) => {
+      if (parent && branches.length > 0) {
+        parent.tails = mergeFanoutTails(
+          parent.tails,
+          inheritedTails,
+          branches.flatMap(({ store }) => store.tails),
+        );
+      }
+      return result;
+    });
   };
+}
+
+function mergeFanoutTails(
+  currentParentTails: readonly string[],
+  inheritedTails: readonly string[],
+  branchTails: readonly string[],
+): string[] {
+  const inherited = new Set(inheritedTails);
+  // A dispatching branch always ends on its fresh dispatch id; a branch that
+  // never dispatched still carries its inherited seed. Merging that seed back
+  // would re-inject ancestor ids as redundant transitive dependsOn edges —
+  // unless no branch dispatched at all, where the inherited tails must pass
+  // through unchanged (same contract as an empty fan-out).
+  const newBranchTails = branchTails.filter((tail) => !inherited.has(tail));
+  const merged =
+    newBranchTails.length > 0
+      ? [
+          ...newBranchTails,
+          ...currentParentTails.filter((tail) => !inherited.has(tail)),
+        ]
+      : currentParentTails;
+  return Array.from(new Set(merged));
 }
 
 /**

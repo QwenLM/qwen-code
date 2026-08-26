@@ -3,10 +3,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
+  artifactKindLabel,
   downloadWorkspaceFile,
   getArtifactImageMimeType,
   getArtifactTypeLabel,
   getReviewDownloadMimeType,
+  isDownloadOnlyWorkspaceArtifact,
+  isOfficeDocumentPath,
   normalizePath,
   readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
@@ -15,6 +18,110 @@ import {
 describe('artifactUtils', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('labels office documents from path or kind', () => {
+    expect(artifactKindLabel('file', 'data/table.xlsx')).toBe('Excel');
+    expect(artifactKindLabel('document', 'brief.docx')).toBe('Word');
+    expect(artifactKindLabel('document', 'deck.pptx')).toBe('PowerPoint');
+    expect(artifactKindLabel('document')).toBe('Document');
+    expect(isOfficeDocumentPath('reports/a.XLSX')).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'file',
+        workspacePath: 'a.xlsx',
+      }),
+    ).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'pdf',
+        workspacePath: 'paper.pdf',
+      }),
+    ).toBe(true);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'image',
+        workspacePath: 'photo.png',
+      }),
+    ).toBe(false);
+    expect(
+      isDownloadOnlyWorkspaceArtifact({
+        kind: 'file',
+        workspacePath: 'notes.md',
+      }),
+    ).toBe(false);
+  });
+
+  it.each([
+    { workspacePath: 'notes.md' },
+    { workspacePath: 'notes.markdown' },
+    { workspacePath: 'notes', mimeType: 'text/markdown' },
+    { workspacePath: 'notes', mimeType: 'text/markdown; charset=utf-8' },
+    { workspacePath: 'report.html' },
+    { workspacePath: 'report.htm' },
+    { workspacePath: 'report', mimeType: 'text/html' },
+    { workspacePath: 'report', mimeType: 'text/html; charset=utf-8' },
+  ])('previews document-classified text artifacts', (artifact) => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind: 'document', ...artifact }),
+    ).toBe(false);
+  });
+
+  it.each([
+    { workspacePath: 'photo.png' },
+    { workspacePath: 'photo', mimeType: 'image/png' },
+  ])('previews document-classified raster image artifacts', (artifact) => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind: 'document', ...artifact }),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['document', 'graphic.svg', 'image/svg+xml'],
+    ['image', 'graphic.svg', 'image/svg+xml'],
+    ['file', 'graphic.svg', 'image/svg+xml'],
+    ['image', 'graphic.svg', 'image/png'],
+    ['image', 'graphic.svg', 'text/html'],
+    ['file', 'graphic', 'image/svg+xml'],
+  ])('keeps SVG artifacts download-only', (kind, workspacePath, mimeType) => {
+    expect(
+      isDownloadOnlyWorkspaceArtifact({ kind, workspacePath, mimeType }),
+    ).toBe(true);
+  });
+
+  it.each([
+    ['report.docx', 'text/html'],
+    ['report.xlsx', 'image/png'],
+    ['report.pdf', 'text/markdown'],
+    ['clip.mp4', 'image/png'],
+  ])(
+    'does not let previewable MIME types override download-only paths',
+    (workspacePath, mimeType) => {
+      expect(isDownloadOnlyWorkspaceArtifact({ workspacePath, mimeType })).toBe(
+        true,
+      );
+    },
+  );
+
+  it('rejects directory stats before reading bytes', async () => {
+    const readFileBytes = vi.fn();
+    const statFile = vi.fn().mockResolvedValue({
+      sizeBytes: 0,
+      modifiedMs: 1,
+      type: 'directory',
+    });
+
+    await expect(
+      readWorkspaceFileAsBlob(
+        readFileBytes,
+        'exports',
+        'application/octet-stream',
+        {
+          statFile,
+        },
+      ),
+    ).rejects.toThrow('Directories cannot be opened');
+    expect(readFileBytes).not.toHaveBeenCalled();
   });
 
   it('resolves parent path segments', () => {

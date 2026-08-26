@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, createRef, type RefObject } from 'react';
+import {
+  act,
+  createRef,
+  startTransition,
+  Suspense,
+  type RefObject,
+} from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { Message } from '../adapters/types';
+import type { Message, PermissionRequest } from '../adapters/types';
 import {
   WebShellCustomizationProvider,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -18,14 +24,18 @@ import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
 const virtualizerTestState = vi.hoisted(() => ({
+  getItemKeys: [] as Array<(index: number) => string | number>,
   itemSizeCache: new Map<string | number, number>(),
   resizeItem: vi.fn(),
   renderItems: true,
 }));
+const messageItemTestState = vi.hoisted(() => ({
+  toolArrays: [] as unknown[][],
+}));
 
-// Mock the App context and the heavy row children so this test exercises only
+// Mock the shared context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
-vi.mock('../App', async () => {
+vi.mock('../WebShellContexts', async () => {
   const { createContext } = await import('react');
   return { CompactModeContext: createContext(false) };
 });
@@ -54,6 +64,9 @@ vi.mock('./MessageItem', async () => {
       sendFailed?: boolean;
       onRetrySend?: () => void;
     }) => {
+      if (message.role === 'tool_group') {
+        messageItemTestState.toolArrays.push(message.tools);
+      }
       const { renderAssistantTurnFooter } = useWebShellCustomization();
       const assistantTurnFooter = assistantTurnFooterInfo
         ? renderAssistantTurnFooter?.(assistantTurnFooterInfo)
@@ -66,9 +79,15 @@ vi.mock('./MessageItem', async () => {
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
           'data-send-failed': sendFailed ? 'true' : undefined,
           'data-timestamp': message.timestamp,
+          'data-message-content':
+            'content' in message ? message.content : undefined,
           'data-tool-ids':
             message.role === 'tool_group'
               ? message.tools.map((tool) => tool.callId).join(',')
+              : undefined,
+          'data-thought-content':
+            message.role === 'tool_group'
+              ? message.thoughts?.map((thought) => thought.content).join('|')
               : undefined,
         },
         sendFailed
@@ -111,6 +130,7 @@ vi.mock('@tanstack/react-virtual', () => ({
     enabled: boolean;
     getItemKey: (index: number) => string | number;
   }) => {
+    virtualizerTestState.getItemKeys.push(getItemKey);
     const virtualItems =
       enabled && virtualizerTestState.renderItems
         ? Array.from({ length: Math.min(count, 5) }, (_, index) => ({
@@ -131,7 +151,7 @@ vi.mock('@tanstack/react-virtual', () => ({
 }));
 
 const { MessageList } = await import('./MessageList');
-const { CompactModeContext } = await import('../App');
+const { CompactModeContext } = await import('../WebShellContexts');
 type MessageListHandle = import('./MessageList').MessageListHandle;
 
 (
@@ -182,6 +202,8 @@ afterEach(() => {
   virtualizerTestState.itemSizeCache.clear();
   virtualizerTestState.resizeItem.mockClear();
   virtualizerTestState.renderItems = true;
+  virtualizerTestState.getItemKeys.length = 0;
+  messageItemTestState.toolArrays.length = 0;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -320,6 +342,7 @@ function mount(
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
     compactMode?: boolean;
+    pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
   } = {},
@@ -338,7 +361,7 @@ function mount(
               <MessageList
                 ref={ref}
                 messages={messages}
-                pendingApproval={null}
+                pendingApproval={opts.pendingApproval ?? null}
                 hideSessionTimeline={opts.hideSessionTimeline}
                 loadingTranscript={opts.loadingTranscript}
                 catchingUp={opts.catchingUp}
@@ -522,6 +545,35 @@ describe('MessageList — failed prompt retry', () => {
 });
 
 describe('MessageList — compact mode', () => {
+  it('updates a lone streaming thinking tail in place without nesting', () => {
+    const user = userMsg('u1');
+    const thinking = {
+      ...thinkingMsg('t1'),
+      content: 'first',
+      isStreaming: true,
+    };
+    const container = mount([user, thinking], undefined, {
+      compactMode: true,
+      isResponding: true,
+    });
+    const row = container.querySelector('[data-testid="msg-t1"]');
+    expect(row).not.toBeNull();
+    expect(row?.getAttribute('data-message-content')).toBe('first');
+    // A lone thought stays a standalone row — no summary nesting.
+    expect(
+      container.querySelector('[data-testid="msg-summary-t1"]'),
+    ).toBeNull();
+
+    rerenderMessages(
+      container,
+      [user, { ...thinking, content: 'first second' }],
+      { isResponding: true },
+    );
+
+    expect(container.querySelector('[data-testid="msg-t1"]')).toBe(row);
+    expect(row?.getAttribute('data-message-content')).toBe('first second');
+  });
+
   it('keeps thinking without adjacent tools visible in compact mode', () => {
     const container = mount(
       [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
@@ -547,6 +599,23 @@ describe('MessageList — compact mode', () => {
     expect(container.querySelector('[data-testid="msg-t2"]')).toBeNull();
     expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+  });
+
+  it('does not create a tool summary for consecutive thinking only', () => {
+    const container = mount(
+      [userMsg('u1'), thinkingMsg('t1'), thinkingMsg('t2'), asstMsg('a1')],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-t2"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-summary-t1"]'),
+    ).toBeNull();
   });
 
   it('merges tool groups separated by completed thinking', () => {
@@ -582,9 +651,12 @@ describe('MessageList — compact mode', () => {
         ?.getAttribute('data-tool-ids'),
     ).toBe('call-g1,call-g2');
     expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+    // The trailing lone tool has no thought or sibling to merge with, so it
+    // stays a standalone row like a single tool in non-compact mode.
+    expect(container.querySelector('[data-testid="msg-g3"]')).not.toBeNull();
     expect(
       container.querySelector('[data-testid="msg-summary-g3"]'),
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
   it('keeps visible thinking and tool groups in transcript order', () => {
@@ -611,14 +683,9 @@ describe('MessageList — compact mode', () => {
     ).toEqual(['msg-u1', 'msg-g1', 'msg-t1', 'msg-g2', 'msg-a1']);
   });
 
-  it('keeps agent groups on their parallel-agent path', () => {
+  it('keeps a parallel-agent-only run on its direct path', () => {
     const container = mount(
-      [
-        userMsg('u1'),
-        agentMsg('agent-1'),
-        thinkingMsg('t1'),
-        agentMsg('agent-2'),
-      ],
+      [userMsg('u1'), agentMsg('agent-1'), agentMsg('agent-2')],
       undefined,
       {
         compactMode: true,
@@ -629,8 +696,98 @@ describe('MessageList — compact mode', () => {
     expect(parallelAgentsSummary(container)).not.toBeNull();
   });
 
+  it('folds a single agent and adjacent thinking into one summary', () => {
+    const container = mount(
+      [userMsg('u1'), thinkingMsg('t1'), agentMsg('agent-1'), asstMsg('a1')],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(
+      container
+        .querySelector('[data-testid="msg-summary-t1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-agent-1');
+    expect(container.querySelector('[data-testid="msg-t1"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-agent-1"]')).toBeNull();
+  });
+
+  it('keeps a folded single-agent summary separate from an approving agent', () => {
+    const container = mount(
+      [thinkingMsg('t1'), agentMsg('agent-1'), agentMsg('agent-2')],
+      undefined,
+      {
+        compactMode: true,
+        pendingApproval: {
+          id: 'req-1',
+          toolCallId: 'call-agent-2',
+          content: [],
+          options: [],
+        },
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(
+      container.querySelector('[data-testid="msg-summary-t1"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-agent-2"]'),
+    ).not.toBeNull();
+    expect(parallelAgentsSummary(container)).toBeNull();
+  });
+
+  it('folds parallel agents and trailing thinking into one compact summary', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        agentMsg('agent-2'),
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+      ],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(parallelAgentsSummary(container)).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-summary-agent-1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-agent-1,call-agent-2');
+    expect(container.querySelector('[data-testid="msg-t1"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+  });
+
+  it('does not fold parallel agents with thinking outside compact mode', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        agentMsg('agent-2'),
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+      ],
+      undefined,
+      { customization: { collapseCompletedTurns: false } },
+    );
+
+    expect(parallelAgentsSummary(container)).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-summary-agent-1"]'),
+    ).toBeNull();
+  });
+
   it.each(['TodoWrite', 'AskUserQuestion'])(
-    'keeps %s groups separate across hidden thinking',
+    'folds %s groups into the summary across hidden thinking',
     (toolName) => {
       const container = mount(
         [
@@ -646,11 +803,11 @@ describe('MessageList — compact mode', () => {
       );
 
       expect(
-        container.querySelector('[data-testid="msg-summary-g1"]'),
-      ).not.toBeNull();
-      expect(
-        container.querySelector('[data-testid="msg-special"]'),
-      ).not.toBeNull();
+        container
+          .querySelector('[data-testid="msg-summary-g1"]')
+          ?.getAttribute('data-tool-ids'),
+      ).toBe('call-g1,call-special');
+      expect(container.querySelector('[data-testid="msg-special"]')).toBeNull();
     },
   );
 
@@ -658,72 +815,131 @@ describe('MessageList — compact mode', () => {
     ['TodoWrite', standaloneToolMsg('special', 'TodoWrite')],
     ['AskUserQuestion', standaloneToolMsg('special', 'AskUserQuestion')],
     ['agent', agentMsg('special')],
-  ])('does not merge a leading %s group with later tools', (_name, special) => {
-    const container = mount(
-      [special, thinkingMsg('t1'), toolMsg('g2')],
-      undefined,
-      {
-        compactMode: true,
-        customization: { collapseCompletedTurns: false },
-      },
-    );
+  ])(
+    'merges a leading %s group with later thinking and tools',
+    (_name, special) => {
+      const container = mount(
+        [special, thinkingMsg('t1'), toolMsg('g2')],
+        undefined,
+        {
+          compactMode: true,
+          customization: { collapseCompletedTurns: false },
+        },
+      );
 
-    expect(
-      container.querySelector('[data-testid="msg-special"]'),
-    ).not.toBeNull();
-    // The completed thinking folds into the adjacent tool group, which keeps
-    // the tool while the standalone group stays separate.
-    expect(
-      container
-        .querySelector('[data-testid="msg-special"]')
-        ?.getAttribute('data-tool-ids'),
-    ).toBe('call-special');
-    expect(
-      container
-        .querySelector('[data-testid="msg-summary-t1"]')
-        ?.getAttribute('data-tool-ids'),
-    ).toBe('call-g2');
-    expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
-  });
+      expect(
+        container
+          .querySelector('[data-testid="msg-summary-special"]')
+          ?.getAttribute('data-tool-ids'),
+      ).toBe('call-special,call-g2');
+      expect(container.querySelector('[data-testid="msg-special"]')).toBeNull();
+      expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
+    },
+  );
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
-  it('reloads an oversized transcript after 120 quiet seconds at the tail', async () => {
+  it('does not reload a responding transcript when pause is implicit', async () => {
+    vi.useFakeTimers();
+    const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
+    mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      onReloadTranscript,
+      isResponding: true,
+    });
+
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+
+    expect(onReloadTranscript).not.toHaveBeenCalled();
+  });
+
+  it('reloads an oversized transcript after 15 quiet seconds at the tail', async () => {
     vi.useFakeTimers();
     const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
     let lastEventId = 10;
     let notifyActivity = () => undefined;
-    mount([userMsg('u1'), asstMsg('a1')], undefined, {
-      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
-      transcriptActivity: {
-        getSnapshot: () => ({ lastEventId }),
-        subscribe: (listener) => {
-          notifyActivity = listener;
-          return () => undefined;
-        },
+    const transcriptActivity = {
+      getSnapshot: () => ({ lastEventId }),
+      subscribe: (listener: () => void) => {
+        notifyActivity = listener;
+        return () => undefined;
       },
-      onReloadTranscript,
+    };
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({
+      root,
+      container,
+      transcriptRenderMode: 'interactive',
+      compactMode: false,
     });
+    const render = (
+      transcriptBlockCount: number,
+      transcriptReloadPaused = false,
+    ) => {
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={[userMsg('u1'), asstMsg('a1')]}
+            pendingApproval={null}
+            transcriptBlockCount={transcriptBlockCount}
+            transcriptActivity={transcriptActivity}
+            onReloadTranscript={onReloadTranscript}
+            transcriptReloadPaused={transcriptReloadPaused}
+          />
+        </I18nProvider>,
+      );
+    };
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1));
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(7_500);
       lastEventId++;
       notifyActivity();
-      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(7_500);
     });
     expect(onReloadTranscript).not.toHaveBeenCalled();
 
-    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    await act(async () => vi.advanceTimersByTimeAsync(7_500));
 
     expect(onReloadTranscript).toHaveBeenCalledOnce();
 
-    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 2));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(onReloadTranscript).toHaveBeenCalledOnce();
 
     lastEventId++;
     notifyActivity();
-    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(onReloadTranscript).toHaveBeenCalledTimes(2);
+
+    lastEventId++;
+    notifyActivity();
+    const clearTimeout = vi
+      .spyOn(window, 'clearTimeout')
+      .mockImplementation(() => undefined);
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 2, true));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(onReloadTranscript).toHaveBeenCalledTimes(2);
+    clearTimeout.mockRestore();
+
+    let reloadSignal: AbortSignal | undefined;
+    let resolveReload = () => undefined;
+    onReloadTranscript.mockImplementationOnce((signal: AbortSignal) => {
+      reloadSignal = signal;
+      return new Promise<void>((resolve) => {
+        resolveReload = resolve;
+      });
+    });
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 2));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+    expect(onReloadTranscript).toHaveBeenCalledTimes(3);
+    expect(reloadSignal?.aborted).toBe(false);
+
+    act(() => render(WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 2, true));
+    expect(reloadSignal?.aborted).toBe(true);
+    await act(async () => resolveReload());
   });
 
   it('aborts an in-flight transcript reload when the reader leaves the tail', async () => {
@@ -754,7 +970,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       onReloadTranscript,
     });
 
-    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
     expect(reloadSignal?.aborted).toBe(false);
 
     const list = container.firstElementChild as HTMLElement;
@@ -1868,40 +2084,6 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(parallelAgentsSummary(c)).toBeNull();
   });
 
-  it('defers automatic collapse of a latest-turn group while still responding', () => {
-    vi.useFakeTimers();
-    const firstAgent = agentMsg('agent-1');
-    const secondAgent = agentMsg('agent-2');
-    firstAgent.tools[0]!.status = 'pending';
-    secondAgent.tools[0]!.status = 'pending';
-    const c = mount([userMsg('u1'), firstAgent, secondAgent], undefined, {
-      isResponding: true,
-    });
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'true',
-    );
-    const completedMessages = [
-      userMsg('u1'),
-      agentMsg('agent-1'),
-      agentMsg('agent-2'),
-      asstMsg('u1-answer'),
-    ];
-
-    rerenderMessages(c, completedMessages, { isResponding: true });
-    act(() => vi.advanceTimersByTime(3_000));
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'true',
-    );
-
-    rerenderMessages(c, completedMessages, { isResponding: false });
-    act(() => vi.advanceTimersByTime(1_500));
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'false',
-    );
-    act(() => vi.advanceTimersByTime(180));
-    expect(parallelAgentsSummary(c)).toBeNull();
-  });
-
   it('defers only the group that owns the awaited agent notification', () => {
     vi.useFakeTimers();
     const agentA1 = describedAgentMsg('agent-a1', 'group A task');
@@ -1952,46 +2134,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     ]);
   });
 
-  it('keeps deferring a latest-turn agent group when a monitor notification arrives mid-response', () => {
-    vi.useFakeTimers();
-    const firstAgent = agentMsg('agent-1');
-    const secondAgent = agentMsg('agent-2');
-    firstAgent.tools[0]!.status = 'pending';
-    secondAgent.tools[0]!.status = 'pending';
-    const c = mount([userMsg('u1'), firstAgent, secondAgent], undefined, {
-      isResponding: true,
-    });
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'true',
-    );
-    const completedMessages = [
-      userMsg('u1'),
-      agentMsg('agent-1'),
-      agentMsg('agent-2'),
-      asstMsg('u1-answer'),
-      monitorNotificationMsg('monitor'),
-    ];
-
-    rerenderMessages(c, completedMessages, { isResponding: true });
-    // A non-agent notification must not strip the latest-turn deferral while
-    // the response is still streaming.
-    act(() => vi.advanceTimersByTime(3_000));
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'true',
-    );
-
-    rerenderMessages(c, completedMessages, { isResponding: false });
-    act(() => vi.advanceTimersByTime(1_500));
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'false',
-    );
-    act(() => vi.advanceTimersByTime(180));
-    // The turn itself stays open for the monitor notification's reply.
-    expect(c.querySelector('[data-agent-collapse-exit="true"]')).toBeNull();
-    expect(parallelAgentsSummary(c)?.hasAttribute('aria-disabled')).toBe(false);
-  });
-
-  it('defers every latest-turn group while the response awaits the agent summary', () => {
+  it('defers only the owner group while the response awaits the agent summary', () => {
     vi.useFakeTimers();
     const agentA1 = describedAgentMsg('agent-a1', 'group A task');
     const agentA2 = describedAgentMsg('agent-a2', 'group A task');
@@ -2024,19 +2167,20 @@ describe('MessageList — turn collapse (DOM)', () => {
     ];
     rerenderMessages(c, completedMessages, { isResponding: true });
 
-    // Past group B's 1500ms window: the non-owning group stays deferred too
-    // while the latest background item is the awaited agent notification.
+    // Past group B's 1500ms window: only the group owning the awaited
+    // notification stays deferred; group B, whose completion is already on
+    // screen, collapses to its summary row even while the response streams.
     act(() => vi.advanceTimersByTime(1_680));
     expect(c.textContent).toContain('group A task');
-    expect(c.textContent).toContain('group B task');
+    expect(c.textContent).not.toContain('group B task');
     expect(summaries().map((b) => b.getAttribute('aria-expanded'))).toEqual([
-      'true',
+      'false',
       'true',
     ]);
 
-    // Once the response ends, only the owner group stays deferred. The
-    // collapsed group keeps its launch position while the pinned owner group
-    // renders at the turn's tail.
+    // Once the response ends the outcome is unchanged: the collapsed group
+    // keeps its launch position while the pinned owner group renders at the
+    // turn's tail.
     rerenderMessages(c, completedMessages);
     act(() => vi.advanceTimersByTime(1_680));
     expect(c.textContent).toContain('group A task');
@@ -2045,6 +2189,43 @@ describe('MessageList — turn collapse (DOM)', () => {
       'false',
       'true',
     ]);
+  });
+
+  it('collapses a completed agent group despite a monitor notification mid-response', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), firstAgent, secondAgent], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    const completedMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('u1-answer'),
+      monitorNotificationMsg('monitor'),
+    ];
+
+    rerenderMessages(c, completedMessages, { isResponding: true });
+    // A non-agent notification does not defer the agent group: it collapses
+    // as soon as the agents finish, even while the response is streaming.
+    act(() => vi.advanceTimersByTime(1_680));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+
+    rerenderMessages(c, completedMessages, { isResponding: false });
+    act(() => vi.advanceTimersByTime(1_500));
+    // No exit sequence re-runs for an already-collapsed group, and the turn
+    // stays open for the monitor notification's reply, so the summary row
+    // remains in place.
+    expect(c.querySelector('[data-agent-collapse-exit="true"]')).toBeNull();
+    expect(parallelAgentsSummary(c)?.hasAttribute('aria-disabled')).toBe(false);
   });
 
   it('renders collapse metrics in the standalone turn row', () => {
@@ -3199,6 +3380,155 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
   });
 
+  it.each([false, true])(
+    'renders the latest content through the streamed-tail fast path (compact: %s)',
+    (compactMode) => {
+      const assistant = {
+        ...asstMsg('a1'),
+        content: 'first chunk',
+        isStreaming: true,
+        timestamp: 1_001,
+      };
+      const messages = [userMsg('u1'), assistant];
+      const container = mount(messages, undefined, {
+        isResponding: true,
+        compactMode,
+      });
+      const getItemKey = virtualizerTestState.getItemKeys.at(-1);
+
+      rerenderMessages(
+        container,
+        [
+          messages[0],
+          {
+            ...assistant,
+            content: 'first chunk plus delta',
+            timestamp: 1_002,
+          },
+        ],
+        { isResponding: true, compactMode },
+      );
+
+      expect(
+        container
+          .querySelector('[data-testid="msg-a1"]')
+          ?.getAttribute('data-message-content'),
+      ).toBe('first chunk plus delta');
+      expect(virtualizerTestState.getItemKeys.at(-1)).toBe(getItemKey);
+    },
+  );
+
+  it('falls back safely when streamed assistant content is undefined', () => {
+    const assistant = {
+      ...asstMsg('a1'),
+      content: undefined as unknown as string,
+      isStreaming: true,
+    };
+    const messages = [userMsg('u1'), assistant];
+    const container = mount(messages, undefined, { isResponding: true });
+
+    rerenderMessages(container, [messages[0], { ...assistant }], {
+      isResponding: true,
+    });
+
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+  });
+
+  it('does not reuse streamed-tail derivations when an earlier row changes', () => {
+    const assistant = {
+      ...asstMsg('a1'),
+      content: 'first chunk',
+      isStreaming: true,
+    };
+    const status = { ...systemMsg('s1'), timestamp: 1 };
+    const messages = [userMsg('u1'), status, assistant];
+    const container = mount(messages, undefined, { isResponding: true });
+
+    const changedStatus = { ...status, timestamp: 2 };
+    rerenderMessages(
+      container,
+      [
+        messages[0],
+        changedStatus,
+        { ...assistant, content: 'first chunk plus delta' },
+      ],
+      { isResponding: true },
+    );
+
+    expect(
+      container
+        .querySelector('[data-testid="msg-s1"]')
+        ?.getAttribute('data-timestamp'),
+    ).toBe('2');
+    expect(
+      container
+        .querySelector('[data-testid="msg-a1"]')
+        ?.getAttribute('data-message-content'),
+    ).toBe('first chunk plus delta');
+  });
+
+  it('does not reuse caches written by an abandoned concurrent render', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({
+      root,
+      container,
+      transcriptRenderMode: 'interactive',
+      compactMode: false,
+    });
+    const userA = { ...userMsg('u1'), content: 'committed' };
+    const assistant = {
+      ...asstMsg('a1'),
+      content: 'first chunk',
+      isStreaming: true,
+    };
+    const never = new Promise<void>(() => {});
+    const Suspend = () => {
+      throw never;
+    };
+    const render = (messages: Message[], suspend = false) =>
+      root.render(
+        <I18nProvider language="en">
+          <Suspense fallback={null}>
+            <MessageList
+              messages={messages}
+              pendingApproval={null}
+              isResponding
+            />
+            {suspend ? <Suspend /> : null}
+          </Suspense>
+        </I18nProvider>,
+      );
+
+    act(() => render([userA, assistant]));
+    const committedGetItemKey = virtualizerTestState.getItemKeys.at(-1);
+    await act(async () => {
+      startTransition(() =>
+        render(
+          [{ ...userA, id: 'u-abandoned', content: 'abandoned' }, assistant],
+          true,
+        ),
+      );
+      await Promise.resolve();
+    });
+    expect(committedGetItemKey?.(0)).toBe('msg:u1');
+    act(() =>
+      render([userA, { ...assistant, content: 'latest committed chunk' }]),
+    );
+
+    expect(
+      container
+        .querySelector('[data-testid="msg-u1"]')
+        ?.getAttribute('data-message-content'),
+    ).toBe('committed');
+    expect(
+      container
+        .querySelector('[data-testid="msg-a1"]')
+        ?.getAttribute('data-message-content'),
+    ).toBe('latest committed chunk');
+  });
+
   it('measures newly prepended virtual rows before they can overlap the anchor', async () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,
@@ -3247,6 +3577,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
 
     virtualizerTestState.resizeItem.mockClear();
+    await nextFrame();
+    await nextFrame();
     act(() => render([...earlierMessages, ...currentMessages]));
 
     expect(virtualizerTestState.resizeItem).toHaveBeenCalled();
@@ -3335,6 +3667,15 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+
+    for (let frame = 0; frame < 32; frame += 1) await nextFrame();
+    await act(async () => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      await Promise.resolve();
+    });
+    await nextFrame();
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
   });
 
   it('waits for another upward scroll intent before retrying a failed underfill load', async () => {
@@ -3527,6 +3868,48 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
     expect(onLoadOlderHistory).toHaveBeenCalledWith({ force: true });
+  });
+
+  it('does not scroll again for a content-only update in a virtual transcript', async () => {
+    let scrollTop = 0;
+    const getScrollHeight = vi.fn(() => 20_000);
+    const setScrollTop = vi.fn((value: number) => {
+      scrollTop = value;
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: getScrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: setScrollTop,
+    });
+    const messages = simpleTurns(101);
+    messages[messages.length - 1] = {
+      ...(messages[messages.length - 1] as AssistantMessage),
+      isStreaming: true,
+    };
+    const container = mount(messages, undefined, { isResponding: true });
+    await nextFrame();
+    await nextFrame();
+    getScrollHeight.mockClear();
+    setScrollTop.mockClear();
+
+    const updated = messages.slice();
+    updated[updated.length - 1] = {
+      ...(updated[updated.length - 1] as AssistantMessage),
+      content: 'answer with one more streamed token',
+    };
+    rerenderMessages(container, updated, { isResponding: true });
+    await nextFrame();
+
+    expect(getScrollHeight).not.toHaveBeenCalled();
+    expect(setScrollTop).not.toHaveBeenCalled();
   });
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {
@@ -4162,5 +4545,231 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
 
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it('collapses an automatically expanded parallel-agents group as soon as its agents finish, even while the main agent keeps responding', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+
+    // The group auto-expands while the agents are live.
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // Both agents finish while the main agent still streams its answer; the
+    // group collapses without waiting for the whole turn to end.
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    rerenderMessages(c, [userMsg('u1'), done1, done2, asstMsg('a1')], {
+      isResponding: true,
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    expect(has(c, 'a1')).toBe(true);
+
+    // Once the turn ends, the completed turn folds the summary away.
+    rerenderMessages(c, [userMsg('u1'), done1, done2, asstMsg('a1')], {
+      isResponding: false,
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)).toBeNull();
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 'a1')).toBe(true);
+  });
+
+  it('returns a completed parallel-agents group to its chronological position while later tools run', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // Agents complete while the main agent continues with a new tool call.
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    rerenderMessages(c, [userMsg('u1'), done1, done2, toolMsg('g1')], {
+      isResponding: true,
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+
+    // The group collapsed back to its summary row and returned above the
+    // later tool (chronological order) instead of staying pinned at the
+    // bottom of the turn.
+    const summary = parallelAgentsSummary(c);
+    expect(summary?.getAttribute('aria-expanded')).toBe('false');
+    const laterTool = c.querySelector('[data-testid="msg-g1"]');
+    expect(laterTool).toBeTruthy();
+    expect(
+      (summary as HTMLElement).compareDocumentPosition(
+        laterTool as HTMLElement,
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
+
+  it('auto-collapses a background-agent group once the summary narration lands', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // Both agents complete; completion notifications land and the model
+    // narrates the summary afterwards.
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    const settled = [
+      userMsg('u1'),
+      done1,
+      done2,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      thinkingMsg('t1'),
+      asstMsg('summary'),
+    ];
+    rerenderMessages(c, settled, { isResponding: true });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    rerenderMessages(c, settled, { isResponding: false });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)).toBeNull();
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 'summary')).toBe(true);
+  });
+
+  it('collapses a background-agent group once the awaited summary grace expires', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // The model already answered before the agents reconciled; their
+    // completion notifications land afterwards with no follow-up narration.
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        done1,
+        done2,
+        asstMsg('final'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+        backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      ],
+      { isResponding: false },
+    );
+    // The turn is awaiting the summary the model is expected to narrate, so
+    // the group stays expanded through the bounded grace window…
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // …but a summary that never arrives cannot pin it open forever: once the
+    // grace expires the group collapses and the completed turn folds it back
+    // into the turn summary (the trailing completion notification stays as
+    // the turn's final content, mirroring the pre-notification answer fold).
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)).toBeNull();
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 'bg-2')).toBe(true);
+    expect(has(c, 'final')).toBe(false);
+  });
+
+  it('does not restart the awaited-summary grace for a monitor notification', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    const settled = [
+      userMsg('u1'),
+      done1,
+      done2,
+      asstMsg('final'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+    ];
+    rerenderMessages(c, settled, { isResponding: false });
+
+    // A monitor banner lands mid-wait. It is not the awaited agent summary,
+    // so it must neither restart the 5s bound nor re-arm an expired one;
+    // the group still collapses when the grace window closes.
+    rerenderMessages(c, [...settled, monitorNotificationMsg('monitor')], {
+      isResponding: false,
+    });
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)).toBeNull();
   });
 });

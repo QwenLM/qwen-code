@@ -5,9 +5,13 @@ import {
   CopyIcon,
   FolderClosedIcon,
   GitBranchIcon,
+  GitPullRequestIcon,
   RadioTowerIcon,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
+import { writeClipboardText } from '../../utils/clipboard';
+import { isExternalOpenUrl } from '../../utils/externalOpen';
 import { workspaceBasename } from '../../utils/workspace';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 import styles from './WebShellSidebar.module.css';
@@ -29,6 +33,7 @@ export function SessionDetailsTooltip({
   children,
 }: SessionDetailsTooltipProps) {
   const { t } = useI18n();
+  const openExternalLink = useExternalLinkOpener();
   const [open, setOpen] = useState(false);
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>(
     'idle',
@@ -139,6 +144,33 @@ export function SessionDetailsTooltip({
             <span title={branch}>{branch}</span>
           </div>
         )}
+        {[...(session.prs ?? [])]
+          .reverse()
+          .filter((pr) => isExternalOpenUrl(pr.url))
+          .map((pr, index) => (
+            // Index composite: a hand-edited sidecar can carry duplicate
+            // numbers (the reader validates shape, not uniqueness), and a
+            // duplicate key would reconcile rows against each other. The
+            // list is a stable per-snapshot order, so index keys are safe.
+            <div
+              className={styles.sessionDetailsRow}
+              key={`${index}-${pr.number}`}
+            >
+              <GitPullRequestIcon aria-hidden="true" />
+              <a
+                href={pr.url}
+                target="_blank"
+                rel="noreferrer"
+                title={pr.url}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openExternalLink(event, pr.url);
+                }}
+              >
+                {t('sidebar.sessionPr', { number: pr.number })}
+              </a>
+            </div>
+          ))}
         <div className={styles.sessionDetailsRow}>
           <RadioTowerIcon aria-hidden="true" />
           <span>{status}</span>
@@ -153,15 +185,7 @@ export function SessionDetailsTooltip({
             title={t('sidebar.copySessionId')}
             onClick={() => {
               const copyAttempt = ++copyAttemptRef.current;
-              if (
-                typeof navigator === 'undefined' ||
-                !navigator.clipboard?.writeText
-              ) {
-                setCopyStatus('failed');
-                return;
-              }
-              void navigator.clipboard
-                .writeText(session.sessionId)
+              void writeClipboardText(session.sessionId)
                 .then(() => {
                   if (copyAttemptRef.current === copyAttempt) {
                     setCopyStatus('copied');

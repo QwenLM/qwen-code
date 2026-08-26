@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, type FC, type ReactNode } from 'react';
+import { type FC, type ReactNode } from 'react';
+import { useControlledExpanded } from '../../../context/ExpandControlContext.js';
 
 interface CollapsibleOutputProps {
   children: ReactNode;
@@ -24,7 +25,7 @@ export const CollapsibleOutput: FC<CollapsibleOutputProps> = ({
   fadeStart = 140,
   className = '',
 }) => {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [isExpanded, setIsExpanded] = useControlledExpanded(false);
 
   return (
     <div className="flex flex-col gap-[3px]">

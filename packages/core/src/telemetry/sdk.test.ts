@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { diag, ROOT_CONTEXT } from '@opentelemetry/api';
+import { diag, ROOT_CONTEXT, trace } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
 import {
   initializeTelemetry,
@@ -69,6 +69,7 @@ vi.mock('./session-tracing.js', () => ({
 }));
 vi.mock('./tracer.js', () => ({
   createSessionRootContext: vi.fn((id: string) => ({ __sessionId: id })),
+  shouldForceSampled: vi.fn((): boolean => true),
 }));
 
 import { LogToSpanProcessor } from './log-to-span-processor.js';
@@ -80,6 +81,7 @@ import {
 import { setShellTracePropagation } from './trace-context.js';
 import { createSessionRootContext } from './tracer.js';
 import { emitSessionEnd, emitSessionStart } from './session-events.js';
+import { extractDaemonHttpTraceContext } from './daemon-tracing.js';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 import { sessionIdContext } from '../utils/sessionIdContext.js';
@@ -280,6 +282,22 @@ describe('Telemetry SDK', () => {
       ).toBeGreaterThan(
         vi.mocked(NodeSDK.prototype.start).mock.invocationCallOrder[0],
       );
+    });
+
+    it('installs the daemon fallback propagator when the SDK initializes', async () => {
+      // The pre-init state (fresh registry, empty fallback holder → no
+      // parent context) is covered by daemon-tracing.test.ts; this test
+      // proves the other half of the wiring: after initializeTelemetry the
+      // sdk-impl chunk has injected the W3C fallback, so inbound HTTP
+      // extraction resolves a remote parent even though the global
+      // propagator stays a no-op (NodeSDK is mocked, nothing registers one).
+      await initializeTelemetry(mockConfig);
+
+      const extracted = extractDaemonHttpTraceContext({
+        traceparent: `00-${'3'.repeat(32)}-${'4'.repeat(16)}-01`,
+      });
+      expect(trace.getSpanContext(extracted!)?.traceId).toBe('3'.repeat(32));
+      expect(trace.getSpanContext(extracted!)?.isRemote).toBe(true);
     });
 
     it('ignores external exporter selectors while starting explicit exporters', async () => {
@@ -751,6 +769,20 @@ describe('Telemetry SDK', () => {
     } finally {
       diagWarnSpy.mockRestore();
     }
+  });
+
+  it('explicitly disables metrics when no HTTP metrics endpoint is configured', async () => {
+    vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+      'http://traces-host/v1/traces',
+    );
+
+    await initializeTelemetry(mockConfig);
+
+    expect(NodeSDK).toHaveBeenCalledWith(
+      expect.objectContaining({ metricReaders: [] }),
+    );
   });
 
   it('should not use OTLP exporters when telemetryOutfile is set', async () => {
