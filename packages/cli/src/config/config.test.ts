@@ -3067,6 +3067,30 @@ describe('Approval mode tool exclusion logic', () => {
     expect(config.getCoreTools()).toEqual(['read_file']);
   });
 
+  it('should prefer --core-tools over settings tools.core when both are set', async () => {
+    // argv-over-settings precedence on the resolved coreTools ternary:
+    // a valued --core-tools flag must win over settings tools.core
+    // instead of being overridden by it (#10065).
+    process.argv = [
+      'node',
+      'script.js',
+      '--core-tools',
+      'web_fetch',
+      '-p',
+      'test',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: ['read_file'],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toEqual(['web_fetch']);
+  });
+
   it('should exclude only shell tools in non-interactive mode with auto-edit approval mode', async () => {
     process.argv = [
       'node',
