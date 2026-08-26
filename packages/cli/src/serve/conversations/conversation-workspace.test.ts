@@ -10,6 +10,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  open,
   rename,
   rm,
   symlink,
@@ -68,6 +69,7 @@ vi.mock(
 const cleanup: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(
     cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })),
   );
@@ -624,6 +626,59 @@ describe('Live conversation workspace root', () => {
     expect(
       (await lstat((await workspace.getRoot()).canonicalRoot)).isDirectory(),
     ).toBe(true);
+  });
+
+  it('surfaces root directory sync failures', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const root = await workspace.getRoot();
+    const probe = await open(root.canonicalRoot, 'r');
+    const prototype = Object.getPrototypeOf(probe) as {
+      sync(): Promise<void>;
+    };
+    await probe.close();
+    const syncError = Object.assign(new Error('root sync failed'), {
+      code: 'EIO',
+    });
+    vi.spyOn(prototype, 'sync').mockRejectedValueOnce(syncError);
+
+    await expect(workspace.confirmStandaloneRootDurability(root)).rejects.toBe(
+      syncError,
+    );
+  });
+
+  it('rejects a root whose inode verifiability changed', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const root = await workspace.getRoot();
+
+    await expect(
+      workspace.confirmStandaloneRootDurability({
+        ...root,
+        inode: 0,
+        inodeVerifiable: false,
+      }),
+    ).rejects.toBeInstanceOf(ConversationDirectoryIdentityError);
+  });
+
+  it('does not treat root inspection failures as unsupported Windows sync', async () => {
+    const home = await tempHome();
+    const workspace = new ConversationWorkspace({ homeDir: home });
+    const root = await workspace.getRoot();
+    const probe = await open(root.canonicalRoot, 'r');
+    const prototype = Object.getPrototypeOf(probe) as {
+      stat(): ReturnType<typeof probe.stat>;
+    };
+    await probe.close();
+    const statError = Object.assign(new Error('root stat failed'), {
+      code: 'EACCES',
+    });
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    vi.spyOn(prototype, 'stat').mockRejectedValueOnce(statError);
+
+    await expect(workspace.confirmStandaloneRootDurability(root)).rejects.toBe(
+      statError,
+    );
   });
 
   it('fails closed when both normal and staged deletion paths exist', async () => {

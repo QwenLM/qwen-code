@@ -15,6 +15,7 @@ import {
   type StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
 import { sendBridgeError } from '../server/error-response.js';
+import { InvalidCursorError } from '../server/session-list.js';
 import { registerStandaloneSessionRoutes } from './standalone-sessions.js';
 
 const sessionId = '11111111-1111-4111-8111-111111111111';
@@ -79,7 +80,8 @@ function createHarness() {
       errors: [],
       fileCleanupPending: [],
     })),
-    detachResponseClient: vi.fn(async () => undefined),
+    cleanupDisconnectedCreate: vi.fn(async () => undefined),
+    cleanupDisconnectedRestore: vi.fn(async () => undefined),
   };
   const mutate = vi.fn(() => ((_req, _res, next) => next()) as RequestHandler);
   const app = express();
@@ -117,6 +119,9 @@ describe('standalone session routes', () => {
 
   it('detaches only the response client when creation outlives the request', async () => {
     const { app, service } = createHarness();
+    service.cleanupDisconnectedCreate.mockRejectedValueOnce(
+      new Error('transient'),
+    );
     let finishCreate!: () => void;
     service.create.mockImplementationOnce(
       () =>
@@ -165,11 +170,16 @@ describe('standalone session routes', () => {
     finishCreate();
 
     await vi.waitFor(() =>
-      expect(service.detachResponseClient).toHaveBeenCalledWith(
-        sessionId,
-        'client-1',
+      expect(service.cleanupDisconnectedCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          session: expect.objectContaining({
+            sessionId,
+            clientId: 'client-1',
+          }),
+        }),
       ),
     );
+    expect(service.cleanupDisconnectedCreate).toHaveBeenCalledTimes(2);
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
     );
@@ -229,6 +239,21 @@ describe('standalone session routes', () => {
     const invalid = await request(app).get('/standalone/sessions?cwd=/tmp');
     expect(invalid.status).toBe(400);
     expect(service.list).toHaveBeenCalledOnce();
+  });
+
+  it('returns invalid_cursor for an invalid standalone list cursor', async () => {
+    const { app, service } = createHarness();
+    service.list.mockRejectedValueOnce(new InvalidCursorError('invalid'));
+
+    const response = await request(app).get(
+      '/standalone/sessions?cursor=invalid',
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: 'Invalid cursor: "invalid" is not a valid numeric cursor',
+      code: 'invalid_cursor',
+    });
   });
 
   it('aborts a standalone catalog scan when the request disconnects', async () => {
@@ -295,6 +320,109 @@ describe('standalone session routes', () => {
       expect(service[action]).toHaveBeenCalledOnce();
     },
   );
+
+  it.each([
+    ['load', false],
+    ['resume', true],
+  ] as const)(
+    'cleans up a %s restore that finishes after the request disconnects',
+    async (action, attached) => {
+      const { app, service } = createHarness();
+      service.cleanupDisconnectedRestore.mockRejectedValueOnce(
+        new Error('transient'),
+      );
+      let finishRestore!: () => void;
+      const restored = {
+        sessionId,
+        clientId: 'response-client',
+        workspaceCwd: '/conversations',
+        currentCwd: '/conversations/conversation-child',
+        attached,
+        sourceType: 'standalone' as const,
+        context: { kind: 'standalone' as const },
+        projectlessOutputDirectory: '/conversations/conversation-child',
+        workingDirectory: { state: 'ready' as const },
+        state: {},
+      };
+      service[action].mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishRestore = () => resolve(restored as never);
+          }),
+      );
+      const server = app.listen(0);
+      await new Promise<void>((resolve) => server.once('listening', resolve));
+      const { port } = server.address() as AddressInfo;
+      const operation = httpRequest({
+        hostname: '127.0.0.1',
+        port,
+        path: `/standalone/sessions/${sessionId}/${action}`,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      operation.on('error', () => undefined);
+      operation.end('{}');
+      await vi.waitFor(() => expect(service[action]).toHaveBeenCalledOnce());
+
+      operation.destroy();
+      await vi.waitFor(async () => {
+        const connections = await new Promise<number>((resolve, reject) =>
+          server.getConnections((error, count) =>
+            error ? reject(error) : resolve(count),
+          ),
+        );
+        expect(connections).toBe(0);
+      });
+      finishRestore();
+
+      await vi.waitFor(() =>
+        expect(service.cleanupDisconnectedRestore).toHaveBeenCalledWith(
+          restored,
+        ),
+      );
+      expect(service.cleanupDisconnectedRestore).toHaveBeenCalledTimes(2);
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    },
+  );
+
+  it('redacts full skill details from standalone restore replay arrays', async () => {
+    const { app, service } = createHarness();
+    service.load.mockResolvedValueOnce({
+      sessionId,
+      compactedReplay: [
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId,
+            update: {
+              sessionUpdate: 'available_commands_update',
+              availableCommands: [],
+              _meta: {
+                availableSkills: ['bugfix'],
+                availableSkillDetails: [
+                  { name: 'bugfix', body: 'full skill body' },
+                ],
+              },
+            },
+          },
+        },
+      ],
+    } as never);
+
+    const response = await request(app)
+      .post(`/standalone/sessions/${sessionId}/load`)
+      .send({});
+
+    expect(response.status).toBe(200);
+    expect(response.body.compactedReplay[0].data.update._meta).toEqual({
+      availableSkills: ['bugfix'],
+    });
+    expect(JSON.stringify(response.body)).not.toContain('full skill body');
+  });
 
   it('repairs an exact directory only with an empty object body', async () => {
     const { app, service } = createHarness();

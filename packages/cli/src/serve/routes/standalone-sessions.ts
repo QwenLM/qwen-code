@@ -13,10 +13,14 @@ import {
 import type { Application, Request, RequestHandler, Response } from 'express';
 import type {
   CreateStandaloneSessionRequest,
+  CreatedStandaloneSession,
   RestoreStandaloneSessionOptions,
+  RestoredStandaloneSession,
   StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
+import { omitSkillDetailsFromReplayArrays } from '../skill-details-redaction.js';
 import type { SendBridgeError } from '../server/error-response.js';
+import { InvalidCursorError } from '../server/session-list.js';
 import {
   parseSessionExportFormat,
   sessionExportFormatValues,
@@ -230,7 +234,7 @@ function parseListOptions(
   const abort = () => controller.abort();
   req.once('aborted', abort);
   res.once('close', () => {
-    if (!res.writableEnded) abort();
+    if (!res.writableFinished) abort();
   });
   return {
     ...(cursor !== undefined ? { cursor } : {}),
@@ -300,35 +304,37 @@ export function registerStandaloneSessionRoutes(
         ...(approvalMode !== undefined ? { approvalMode } : {}),
       };
       let disconnected = req.aborted;
-      let responseClient: { sessionId: string; clientId: string } | undefined;
-      let detach: Promise<void> | undefined;
-      const detachResponseClient = (): Promise<void> | undefined => {
-        if (!responseClient) return undefined;
-        detach ??= deps.service
-          .detachResponseClient(
-            responseClient.sessionId,
-            responseClient.clientId,
-          )
-          .catch(() => undefined);
-        return detach;
+      let responseSession: CreatedStandaloneSession | undefined;
+      let cleanup: Promise<void> | undefined;
+      const cleanupResponseSession = (): Promise<void> | undefined => {
+        if (!responseSession) return undefined;
+        const created = responseSession;
+        cleanup ??= (async () => {
+          try {
+            await deps.service.cleanupDisconnectedCreate(created);
+          } catch {
+            await deps.service.cleanupDisconnectedCreate(created);
+          }
+        })().catch((error: unknown) => {
+          cleanup = undefined;
+          throw error;
+        });
+        return cleanup;
       };
       const markDisconnected = () => {
         disconnected = true;
-        void detachResponseClient();
+        void cleanupResponseSession()?.catch(() => undefined);
       };
       req.once('aborted', markDisconnected);
       res.once('close', () => {
-        if (!res.writableEnded) markDisconnected();
+        if (!res.writableFinished) markDisconnected();
       });
       const created = await deps.service.create(request);
       if (created.session.clientId !== undefined) {
-        responseClient = {
-          sessionId: created.session.sessionId,
-          clientId: created.session.clientId,
-        };
+        responseSession = created;
       }
       if (disconnected || !res.writable || res.destroyed) {
-        await detachResponseClient();
+        await cleanupResponseSession()?.catch(() => undefined);
         return;
       }
       res.status(200).json({
@@ -345,7 +351,22 @@ export function registerStandaloneSessionRoutes(
     handle('GET /standalone/sessions', req, res, async () => {
       const options = parseListOptions(req, res);
       if (!options) return;
-      res.status(200).json(await deps.service.list(options));
+      try {
+        const result = await deps.service.list(options);
+        options.signal.throwIfAborted();
+        if (res.destroyed || !res.writable) return;
+        res.status(200).json(result);
+      } catch (error) {
+        if (options.signal.aborted || res.destroyed) return;
+        if (error instanceof InvalidCursorError) {
+          res.status(400).json({
+            error: error.message,
+            code: 'invalid_cursor',
+          });
+          return;
+        }
+        throw error;
+      }
     }),
   );
 
@@ -368,11 +389,44 @@ export function registerStandaloneSessionRoutes(
           async () => {
             const options = parseRestoreOptions(req, res);
             if (!options) return;
-            res
-              .status(200)
-              .json(
-                await deps.service[action](req.params['id'] ?? '', options),
-              );
+            let disconnected = req.aborted;
+            const responseState: {
+              restored?: RestoredStandaloneSession;
+            } = {};
+            let cleanup: Promise<void> | undefined;
+            const cleanupRestore = (): Promise<void> | undefined => {
+              const response = responseState.restored;
+              if (!response) return undefined;
+              cleanup ??= (async () => {
+                try {
+                  await deps.service.cleanupDisconnectedRestore(response);
+                } catch {
+                  await deps.service.cleanupDisconnectedRestore(response);
+                }
+              })().catch((error: unknown) => {
+                cleanup = undefined;
+                throw error;
+              });
+              return cleanup;
+            };
+            const markDisconnected = () => {
+              disconnected = true;
+              void cleanupRestore()?.catch(() => undefined);
+            };
+            req.once('aborted', markDisconnected);
+            res.once('close', () => {
+              if (!res.writableFinished) markDisconnected();
+            });
+            const restored = await deps.service[action](
+              req.params['id'] ?? '',
+              options,
+            );
+            responseState.restored = restored;
+            if (disconnected || !res.writable || res.destroyed) {
+              await cleanupRestore()?.catch(() => undefined);
+              return;
+            }
+            res.status(200).json(omitSkillDetailsFromReplayArrays(restored));
           },
         ),
     );

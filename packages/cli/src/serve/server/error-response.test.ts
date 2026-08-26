@@ -100,7 +100,7 @@ describe('sendBridgeError session writer errors', () => {
     ['working_directory_compromised', 409, false],
     ['deletion_recovery_compromised', 409, false],
     ['standalone_session_operation_failed', 500, false],
-    ['standalone_creation_rolled_back', 500, false],
+    ['standalone_creation_rolled_back', 500, true],
     ['standalone_creation_outcome_unknown', 500, false],
     ['transcript_deletion_failed', 500, true],
     ['transcript_deletion_outcome_unknown', 500, false],

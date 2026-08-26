@@ -23,6 +23,8 @@ import { STANDALONE_SESSION_SOURCE_TYPE } from '@qwen-code/acp-bridge/sessionSou
 import {
   readSessionPrs,
   SessionIdCaseConflictError,
+  SessionStorageEntryError,
+  SessionTranscriptDurabilityError,
   SessionTranscriptChangedError,
   SessionWriterUnavailableError,
   type ApprovalMode,
@@ -62,7 +64,7 @@ import type { ConversationWorkspace } from './conversation-workspace.js';
 import {
   StandaloneDeletionJournalError,
   type StandaloneDeletionJournal,
-  type StandaloneDeletionRecordV1,
+  type StandaloneDeletionRecordV2,
 } from './standalone-deletion-journal.js';
 
 export type StandaloneSessionServiceErrorCode =
@@ -233,6 +235,7 @@ export interface StandaloneSessionServiceOptions {
     | 'stageStandaloneDirectory'
     | 'restoreStagedStandaloneDirectory'
     | 'removeStagedStandaloneDirectory'
+    | 'confirmStandaloneRootDurability'
   >;
   deletionJournal: StandaloneDeletionJournal;
   lifecycle: SessionArchiveCoordinator;
@@ -454,6 +457,18 @@ function isSameDirectoryIdentity(
 }
 
 export class StandaloneSessionService {
+  private readonly responseCreateRuntimes = new WeakMap<
+    CreatedStandaloneSession,
+    WorkspaceRuntime
+  >();
+  private readonly responseRestoreRuntimes = new WeakMap<
+    RestoredStandaloneSession,
+    WorkspaceRuntime
+  >();
+  private readonly pendingLifecycleLeaseReleases = new Map<
+    string,
+    SessionWriterLease
+  >();
   private readonly creating = new Map<string, CreatingEntry>();
   private readonly directoryStates = new Map<string, DirectoryState>();
   private readonly reconciliations = new WeakMap<
@@ -585,18 +600,22 @@ export class StandaloneSessionService {
       }
       const sessions: StandaloneSessionSummary[] = [];
       for (const summary of byCanonicalId.values()) {
+        options.signal?.throwIfAborted();
         const stable = await this.options.lifecycle.runSharedMany(
           [summary.sessionId],
           async () => {
+            options.signal?.throwIfAborted();
             if (
               await this.options.deletionJournal.hasRecord(summary.sessionId)
             ) {
               return false;
             }
+            options.signal?.throwIfAborted();
             const durable = await this.inspectStoredStandalone(
               runtime,
               summary.sessionId,
             );
+            options.signal?.throwIfAborted();
             return (
               durable.kind === 'standalone' &&
               durable.source.metadata.parentSessionId === undefined &&
@@ -605,6 +624,7 @@ export class StandaloneSessionService {
             );
           },
         );
+        options.signal?.throwIfAborted();
         if (stable) sessions.push(summary);
       }
       return {
@@ -624,20 +644,17 @@ export class StandaloneSessionService {
     const clientId = randomUUID();
     const restored = await this.restore('resume', rawSessionId, { clientId });
     try {
-      const runtime = await this.options.ensureRuntime();
-      await this.options.runRuntimeActivity(runtime, async () => {
-        this.options.assertRuntimeCurrent(runtime);
-        await runtime.bridge.detachClient(
-          restored.sessionId,
-          restored.clientId,
-        );
-      });
+      await this.cleanupDisconnectedRestore(restored);
     } catch {
-      throw serviceError(
-        'working_directory_recovery_failed',
-        restored.sessionId,
-        true,
-      );
+      try {
+        await this.cleanupDisconnectedRestore(restored);
+      } catch {
+        throw serviceError(
+          'working_directory_recovery_failed',
+          restored.sessionId,
+          true,
+        );
+      }
     }
     return {
       sessionId: restored.sessionId,
@@ -687,19 +704,35 @@ export class StandaloneSessionService {
                 durable.storageSessionId,
               );
               try {
-                await lease.assertOwnedAndUnchanged();
-                const renamed = await service.renameSession(
+                const renamed = await service.renameSessionForLifecycle(
                   durable.storageSessionId,
                   displayName,
                   'manual',
                   durable.location,
+                  {
+                    assertStorageUnchanged: () =>
+                      lease.assertOwnedAndUnchanged(),
+                    assertCanMutate: () =>
+                      this.options.assertRuntimeCurrent(runtime),
+                  },
                 );
-                await lease.assertOwnedAndUnchanged();
                 if (!renamed) {
                   throw serviceError('standalone_session_not_found', sessionId);
                 }
-              } finally {
-                await lease.release();
+              } catch (error) {
+                await this.releaseLifecycleLease(
+                  lease,
+                  durable.storageSessionId,
+                );
+                throw error;
+              }
+              if (
+                !(await this.releaseLifecycleLease(
+                  lease,
+                  durable.storageSessionId,
+                ))
+              ) {
+                throw new SessionWriterUnavailableError();
               }
             });
             runtime.bridge.markSessionCatalogChanged();
@@ -756,16 +789,35 @@ export class StandaloneSessionService {
     return this.deleteMany(sessionIds);
   }
 
-  async detachResponseClient(
-    rawSessionId: string,
-    clientId: string,
+  async cleanupDisconnectedCreate(
+    created: CreatedStandaloneSession,
   ): Promise<void> {
-    const { sessionId } = parseRequiredSessionId(rawSessionId);
-    const runtime = await this.options.ensureRuntime();
-    await this.options.runRuntimeActivity(runtime, async () => {
-      this.options.assertRuntimeCurrent(runtime);
-      await runtime.bridge.detachClient(sessionId, clientId);
-    });
+    const runtime = this.responseCreateRuntimes.get(created);
+    if (!runtime || created.session.clientId === undefined) {
+      throw serviceError(
+        'standalone_session_operation_failed',
+        created.session.sessionId,
+      );
+    }
+    await runtime.bridge.detachClient(
+      created.session.sessionId,
+      created.session.clientId,
+    );
+    this.responseCreateRuntimes.delete(created);
+  }
+
+  async cleanupDisconnectedRestore(
+    restored: RestoredStandaloneSession,
+  ): Promise<void> {
+    const runtime = this.responseRestoreRuntimes.get(restored);
+    if (!runtime) {
+      throw serviceError(
+        'standalone_session_operation_failed',
+        restored.sessionId,
+      );
+    }
+    await runtime.bridge.detachClient(restored.sessionId, restored.clientId);
+    this.responseRestoreRuntimes.delete(restored);
   }
 
   load(
@@ -923,7 +975,8 @@ export class StandaloneSessionService {
   private async reconcileDeletionUnderExclusive(
     runtime: WorkspaceRuntime,
     sessionId: string,
-  ): Promise<'none' | 'rolled-back' | 'committed'> {
+    allowCommittedCleanupPending = false,
+  ): Promise<'none' | 'rolled-back' | 'committed' | 'cleanup-pending'> {
     this.options.assertRuntimeCurrent(runtime);
     const root = await this.options.workspace.assertExactRoot(
       runtime.workspaceCwd,
@@ -972,11 +1025,75 @@ export class StandaloneSessionService {
         service,
         record.storageSessionId,
       );
+      const mapRecoveryError = (error: unknown): never => {
+        if (error instanceof StandaloneSessionServiceError) throw error;
+        if (error instanceof SessionTranscriptDurabilityError) {
+          throw serviceError('transcript_deletion_outcome_unknown', sessionId);
+        }
+        if (
+          error instanceof ConversationDirectoryIdentityError ||
+          error instanceof SessionStorageEntryError ||
+          error instanceof StandaloneDeletionJournalError
+        ) {
+          throw serviceError('deletion_recovery_compromised', sessionId);
+        }
+        throw serviceError(
+          'working_directory_recovery_failed',
+          sessionId,
+          true,
+        );
+      };
+
+      let durable: StoredStandaloneState;
       try {
-        const durable = await this.inspectStoredStandalone(runtime, sessionId);
+        durable = await this.inspectStoredStandalone(runtime, sessionId);
         await lease.assertOwnedAndUnchanged();
         if (durable.kind === 'conflict' || durable.kind === 'foreign') {
           throw serviceError('deletion_recovery_compromised', sessionId);
+        }
+        if (record.version === 1 && durable.kind !== 'standalone') {
+          const physical =
+            await service.getSessionTranscriptLocationForLifecycle(
+              record.storageSessionId,
+            );
+          if (physical === undefined) {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+          if (physical !== record.transcriptLocation) {
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          if (record.directory.kind === 'absent') {
+            if (paths.status !== 'absent') {
+              throw serviceError('deletion_recovery_compromised', sessionId);
+            }
+          } else if (paths.status === 'staged') {
+            await this.options.workspace.restoreStagedStandaloneDirectory(
+              sessionId,
+              expected!,
+            );
+          } else if (paths.status !== 'normal') {
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          await this.options.workspace.confirmStandaloneRootDurability(root);
+          await lease.assertOwnedAndUnchanged();
+          if (
+            !(await this.releaseLifecycleLease(lease, record.storageSessionId))
+          ) {
+            throw serviceError(
+              'working_directory_recovery_failed',
+              sessionId,
+              true,
+            );
+          }
+          try {
+            await this.options.deletionJournal.clear(sessionId, root);
+          } catch (error) {
+            return mapRecoveryError(error);
+          }
+          return 'rolled-back';
         }
         if (durable.kind === 'standalone') {
           if (
@@ -998,50 +1115,151 @@ export class StandaloneSessionService {
           } else if (paths.status !== 'normal') {
             throw serviceError('deletion_recovery_compromised', sessionId);
           }
+          await this.options.workspace.confirmStandaloneRootDurability(root);
           await lease.assertOwnedAndUnchanged();
-          await this.options.deletionJournal.clear(sessionId, root);
-          return 'rolled-back';
-        }
-
-        if (record.directory.kind === 'absent') {
-          if (paths.status !== 'absent') {
+        } else {
+          if (record.version !== 2) {
             throw serviceError('deletion_recovery_compromised', sessionId);
           }
-        } else if (paths.status === 'staged') {
+          const physical =
+            await service.getSessionTranscriptLocationForLifecycle(
+              record.storageSessionId,
+            );
+          if (
+            physical === 'conflict' ||
+            (physical !== undefined && physical !== record.transcriptLocation)
+          ) {
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          if (physical === record.transcriptLocation) {
+            const removed = await service.removeSessionTranscriptForLifecycle(
+              record.storageSessionId,
+              record.transcriptLocation,
+              record.transcriptParent,
+              {
+                assertStorageUnchanged: () => lease.assertOwnedAndUnchanged(),
+                assertCanMutate: () =>
+                  this.options.assertRuntimeCurrent(runtime),
+              },
+            );
+            if (
+              !removed ||
+              (await service.getSessionTranscriptLocationForLifecycle(
+                record.storageSessionId,
+              )) !== undefined
+            ) {
+              throw serviceError('deletion_recovery_compromised', sessionId);
+            }
+          }
+          await service.confirmSessionTranscriptDeletionForLifecycle(
+            record.transcriptLocation,
+            record.transcriptParent,
+          );
+        }
+      } catch (error) {
+        await this.releaseLifecycleLease(lease, record.storageSessionId);
+        return mapRecoveryError(error);
+      }
+
+      if (durable.kind === 'standalone') {
+        if (
+          !(await this.releaseLifecycleLease(lease, record.storageSessionId))
+        ) {
+          throw serviceError(
+            'working_directory_recovery_failed',
+            sessionId,
+            true,
+          );
+        }
+        try {
+          await this.options.deletionJournal.clear(sessionId, root);
+        } catch (error) {
+          return mapRecoveryError(error);
+        }
+        return 'rolled-back';
+      }
+
+      let cleanupPending = false;
+      if (record.directory.kind === 'absent') {
+        if (paths.status !== 'absent') {
+          await this.releaseLifecycleLease(lease, record.storageSessionId);
+          throw serviceError('deletion_recovery_compromised', sessionId);
+        }
+        try {
+          await this.options.workspace.confirmStandaloneRootDurability(root);
+        } catch (error) {
+          if (error instanceof ConversationDirectoryIdentityError) {
+            await this.releaseLifecycleLease(lease, record.storageSessionId);
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          cleanupPending = true;
+        }
+      } else if (paths.status === 'staged') {
+        try {
           await this.options.workspace.removeStagedStandaloneDirectory(
             sessionId,
             expected!,
           );
-        } else if (paths.status !== 'absent') {
-          throw serviceError('deletion_recovery_compromised', sessionId);
+        } catch (error) {
+          if (error instanceof ConversationDirectoryIdentityError) {
+            await this.releaseLifecycleLease(lease, record.storageSessionId);
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          cleanupPending = true;
         }
-        await service.cleanupRemovedSessionState(record.storageSessionId, {
-          assertCanMutate: () => this.options.assertRuntimeCurrent(runtime),
-        });
+      } else if (paths.status !== 'absent') {
+        await this.releaseLifecycleLease(lease, record.storageSessionId);
+        throw serviceError('deletion_recovery_compromised', sessionId);
+      } else {
+        try {
+          await this.options.workspace.confirmStandaloneRootDurability(root);
+        } catch (error) {
+          if (error instanceof ConversationDirectoryIdentityError) {
+            await this.releaseLifecycleLease(lease, record.storageSessionId);
+            throw serviceError('deletion_recovery_compromised', sessionId);
+          }
+          cleanupPending = true;
+        }
+      }
+      try {
+        await service.cleanupRemovedSessionStateForLifecycle(
+          record.storageSessionId,
+          {
+            assertCanMutate: () => this.options.assertRuntimeCurrent(runtime),
+          },
+        );
+      } catch {
+        cleanupPending = true;
+      }
+      try {
         await runtime.bridge.deleteSessionAttachments(sessionId, {
           assertCanCommit: () => this.options.assertRuntimeCurrent(runtime),
         });
-        await this.options.deletionJournal.clear(sessionId, root);
-        this.directoryStates.delete(sessionId);
-        runtime.bridge.markSessionCatalogChanged();
-        this.options.invalidateSessionListCache(runtime);
-        return 'committed';
-      } catch (error) {
-        if (error instanceof StandaloneSessionServiceError) throw error;
-        if (
-          error instanceof ConversationDirectoryIdentityError ||
-          error instanceof StandaloneDeletionJournalError
-        ) {
-          throw serviceError('deletion_recovery_compromised', sessionId);
+      } catch {
+        cleanupPending = true;
+      }
+      if (!(await this.releaseLifecycleLease(lease, record.storageSessionId))) {
+        cleanupPending = true;
+      }
+      if (!cleanupPending) {
+        try {
+          await this.options.deletionJournal.clear(sessionId, root);
+        } catch {
+          cleanupPending = true;
         }
+      }
+      this.directoryStates.delete(sessionId);
+      runtime.bridge.markSessionCatalogChanged();
+      this.options.invalidateSessionListCache(runtime);
+      if (cleanupPending) {
+        if (allowCommittedCleanupPending) return 'cleanup-pending';
         throw serviceError(
           'working_directory_recovery_failed',
           sessionId,
           true,
         );
-      } finally {
-        await lease.release();
       }
+      return 'committed';
     });
   }
 
@@ -1084,6 +1302,16 @@ export class StandaloneSessionService {
     service: SessionService,
     storageSessionId: string,
   ): Promise<SessionWriterLease> {
+    const pendingKey = normalizeSessionIdForLookup(storageSessionId);
+    const pending = this.pendingLifecycleLeaseReleases.get(pendingKey);
+    if (
+      pending &&
+      !(await this.releaseLifecycleLease(pending, storageSessionId))
+    ) {
+      throw new SessionWriterUnavailableError({
+        message: 'A previous session writer lease is still being released.',
+      });
+    }
     const leaseOptions = {
       processKind: 'daemon' as const,
       reclaimPolicy: 'never' as const,
@@ -1106,6 +1334,30 @@ export class StandaloneSessionService {
         leaseOptions,
       );
     }
+  }
+
+  private async releaseLifecycleLease(
+    lease: SessionWriterLease,
+    storageSessionId: string,
+  ): Promise<boolean> {
+    const pendingKey = normalizeSessionIdForLookup(storageSessionId);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await lease.release();
+        if (this.pendingLifecycleLeaseReleases.get(pendingKey) === lease) {
+          this.pendingLifecycleLeaseReleases.delete(pendingKey);
+        }
+        return true;
+      } catch {
+        // The lease clears retryable terminal failures itself.
+      }
+    }
+    if (!lease.isReleased || lease.isReleaseDurabilityPending) {
+      this.pendingLifecycleLeaseReleases.set(pendingKey, lease);
+    } else if (this.pendingLifecycleLeaseReleases.get(pendingKey) === lease) {
+      this.pendingLifecycleLeaseReleases.delete(pendingKey);
+    }
+    return false;
   }
 
   private parseSessionIds(rawSessionIds: string[]): string[] {
@@ -1257,31 +1509,49 @@ export class StandaloneSessionService {
                   service,
                   durable.storageSessionId,
                 );
+                let archiveOutcome: 'archived' | 'alreadyArchived';
                 try {
                   const locked = await this.requireTopLevelStoredStandalone(
                     runtime,
                     sessionId,
                   );
-                  if (locked.location === 'archived') return 'alreadyArchived';
-                  await lease.assertOwnedAndUnchanged();
-                  const archived = await service.archiveSessions(
-                    [locked.storageSessionId],
-                    {
-                      knownLocation: 'active',
-                      resolveConflicts: false,
-                      assertStorageUnchanged: () =>
-                        lease.assertOwnedAndUnchanged(),
-                      assertCanMutate: () =>
-                        this.options.assertRuntimeCurrent(runtime),
-                    },
+                  if (locked.location === 'archived') {
+                    archiveOutcome = 'alreadyArchived';
+                  } else {
+                    await lease.assertOwnedAndUnchanged();
+                    const archived = await service.archiveSessions(
+                      [locked.storageSessionId],
+                      {
+                        knownLocation: 'active',
+                        resolveConflicts: false,
+                        assertStorageUnchanged: () =>
+                          lease.assertOwnedAndUnchanged(),
+                        assertCanMutate: () =>
+                          this.options.assertRuntimeCurrent(runtime),
+                      },
+                    );
+                    if (archived.errors[0]) throw archived.errors[0].error;
+                    archiveOutcome =
+                      archived.archived.length > 0
+                        ? 'archived'
+                        : 'alreadyArchived';
+                  }
+                } catch (error) {
+                  await this.releaseLifecycleLease(
+                    lease,
+                    durable.storageSessionId,
                   );
-                  if (archived.errors[0]) throw archived.errors[0].error;
-                  return archived.archived.length > 0
-                    ? 'archived'
-                    : 'alreadyArchived';
-                } finally {
-                  await lease.release();
+                  throw error;
                 }
+                if (
+                  !(await this.releaseLifecycleLease(
+                    lease,
+                    durable.storageSessionId,
+                  ))
+                ) {
+                  throw new SessionWriterUnavailableError();
+                }
+                return archiveOutcome;
               });
             },
           );
@@ -1339,31 +1609,49 @@ export class StandaloneSessionService {
                   service,
                   durable.storageSessionId,
                 );
+                let unarchiveOutcome: 'unarchived' | 'alreadyActive';
                 try {
                   const locked = await this.requireTopLevelStoredStandalone(
                     runtime,
                     sessionId,
                   );
-                  if (locked.location === 'active') return 'alreadyActive';
-                  await lease.assertOwnedAndUnchanged();
-                  const unarchived = await service.unarchiveSessions(
-                    [locked.storageSessionId],
-                    {
-                      knownLocation: 'archived',
-                      resolveConflicts: false,
-                      assertStorageUnchanged: () =>
-                        lease.assertOwnedAndUnchanged(),
-                      assertCanMutate: () =>
-                        this.options.assertRuntimeCurrent(runtime),
-                    },
+                  if (locked.location === 'active') {
+                    unarchiveOutcome = 'alreadyActive';
+                  } else {
+                    await lease.assertOwnedAndUnchanged();
+                    const unarchived = await service.unarchiveSessions(
+                      [locked.storageSessionId],
+                      {
+                        knownLocation: 'archived',
+                        resolveConflicts: false,
+                        assertStorageUnchanged: () =>
+                          lease.assertOwnedAndUnchanged(),
+                        assertCanMutate: () =>
+                          this.options.assertRuntimeCurrent(runtime),
+                      },
+                    );
+                    if (unarchived.errors[0]) throw unarchived.errors[0].error;
+                    unarchiveOutcome =
+                      unarchived.unarchived.length > 0
+                        ? 'unarchived'
+                        : 'alreadyActive';
+                  }
+                } catch (error) {
+                  await this.releaseLifecycleLease(
+                    lease,
+                    durable.storageSessionId,
                   );
-                  if (unarchived.errors[0]) throw unarchived.errors[0].error;
-                  return unarchived.unarchived.length > 0
-                    ? 'unarchived'
-                    : 'alreadyActive';
-                } finally {
-                  await lease.release();
+                  throw error;
                 }
+                if (
+                  !(await this.releaseLifecycleLease(
+                    lease,
+                    durable.storageSessionId,
+                  ))
+                ) {
+                  throw new SessionWriterUnavailableError();
+                }
+                return unarchiveOutcome;
               });
             },
           );
@@ -1434,8 +1722,10 @@ export class StandaloneSessionService {
     const recovered = await this.reconcileDeletionUnderExclusive(
       runtime,
       sessionId,
+      true,
     );
     if (recovered === 'committed') return 'removed';
+    if (recovered === 'cleanup-pending') return 'cleanupPending';
     let durable: Extract<StoredStandaloneState, { kind: 'standalone' }>;
     try {
       durable = await this.requireTopLevelStoredStandalone(runtime, sessionId);
@@ -1478,6 +1768,10 @@ export class StandaloneSessionService {
           throw serviceError('standalone_session_conflict', sessionId);
         }
         await lease.assertOwnedAndUnchanged();
+        const transcriptParent =
+          await service.getSessionTranscriptParentIdentityForLifecycle(
+            locked.location,
+          );
         const pinned = this.directoryStates.get(sessionId)?.pinned;
         const paths =
           await this.options.workspace.inspectStandaloneDeletionPaths(
@@ -1487,7 +1781,7 @@ export class StandaloneSessionService {
         if (paths.status === 'compromised' || paths.status === 'staged') {
           throw serviceError('working_directory_compromised', sessionId);
         }
-        const directory: StandaloneDeletionRecordV1['directory'] =
+        const directory: StandaloneDeletionRecordV2['directory'] =
           paths.status === 'normal'
             ? {
                 kind: 'present',
@@ -1498,12 +1792,13 @@ export class StandaloneSessionService {
                 inodeVerifiable: paths.identity.inode !== 0,
               }
             : { kind: 'absent' };
-        const prepared: StandaloneDeletionRecordV1 = {
-          version: 1,
+        const prepared: StandaloneDeletionRecordV2 = {
+          version: 2,
           phase: 'prepared',
           sessionId,
           storageSessionId: locked.storageSessionId,
           transcriptLocation: locked.location,
+          transcriptParent,
           root: {
             canonicalPath: root.canonicalRoot,
             device: root.device,
@@ -1539,19 +1834,32 @@ export class StandaloneSessionService {
             await service.removeSessionTranscriptForLifecycle(
               locked.storageSessionId,
               locked.location,
+              prepared.transcriptParent,
               {
                 assertStorageUnchanged: () => lease.assertOwnedAndUnchanged(),
                 assertCanMutate: () =>
                   this.options.assertRuntimeCurrent(runtime),
               },
             );
-        } catch {
-          const after = await this.inspectStoredStandalone(runtime, sessionId);
-          if (
-            after.kind === 'standalone' &&
-            after.storageSessionId === locked.storageSessionId &&
-            after.location === locked.location
-          ) {
+        } catch (error) {
+          if (error instanceof SessionTranscriptDurabilityError) {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+          let physical: SessionArchiveState | 'conflict' | undefined;
+          try {
+            physical = await service.getSessionTranscriptLocationForLifecycle(
+              locked.storageSessionId,
+            );
+          } catch {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+          if (physical === locked.location) {
             await this.rollbackPreparedDeletion(
               sessionId,
               root,
@@ -1559,7 +1867,18 @@ export class StandaloneSessionService {
             );
             throw serviceError('transcript_deletion_failed', sessionId, true);
           }
-          if (after.kind === 'missing') {
+          if (physical === undefined) {
+            try {
+              await service.confirmSessionTranscriptDeletionForLifecycle(
+                locked.location,
+                prepared.transcriptParent,
+              );
+            } catch {
+              throw serviceError(
+                'transcript_deletion_outcome_unknown',
+                sessionId,
+              );
+            }
             transcriptCommitted = true;
           } else {
             throw serviceError(
@@ -1569,14 +1888,31 @@ export class StandaloneSessionService {
           }
         }
         if (!transcriptCommitted) {
-          const after = await this.inspectStoredStandalone(runtime, sessionId);
-          if (after.kind === 'missing') {
+          let physical: SessionArchiveState | 'conflict' | undefined;
+          try {
+            physical = await service.getSessionTranscriptLocationForLifecycle(
+              locked.storageSessionId,
+            );
+          } catch {
+            throw serviceError(
+              'transcript_deletion_outcome_unknown',
+              sessionId,
+            );
+          }
+          if (physical === undefined) {
+            try {
+              await service.confirmSessionTranscriptDeletionForLifecycle(
+                locked.location,
+                prepared.transcriptParent,
+              );
+            } catch {
+              throw serviceError(
+                'transcript_deletion_outcome_unknown',
+                sessionId,
+              );
+            }
             transcriptCommitted = true;
-          } else if (
-            after.kind === 'standalone' &&
-            after.storageSessionId === locked.storageSessionId &&
-            after.location === locked.location
-          ) {
+          } else if (physical === locked.location) {
             await this.rollbackPreparedDeletion(
               sessionId,
               root,
@@ -1592,9 +1928,12 @@ export class StandaloneSessionService {
         }
 
         try {
-          await service.cleanupRemovedSessionState(locked.storageSessionId, {
-            assertCanMutate: () => this.options.assertRuntimeCurrent(runtime),
-          });
+          await service.cleanupRemovedSessionStateForLifecycle(
+            locked.storageSessionId,
+            {
+              assertCanMutate: () => this.options.assertRuntimeCurrent(runtime),
+            },
+          );
         } catch {
           cleanupPending = true;
         }
@@ -1615,9 +1954,9 @@ export class StandaloneSessionService {
             cleanupPending = true;
           }
         }
-        try {
-          await lease.release();
-        } catch {
+        if (
+          !(await this.releaseLifecycleLease(lease, durable.storageSessionId))
+        ) {
           cleanupPending = true;
         }
         leaseReleased = true;
@@ -1633,7 +1972,9 @@ export class StandaloneSessionService {
         this.options.invalidateSessionListCache(runtime);
         return cleanupPending ? 'cleanupPending' : 'removed';
       } finally {
-        if (!leaseReleased) await lease.release();
+        if (!leaseReleased) {
+          await this.releaseLifecycleLease(lease, durable.storageSessionId);
+        }
       }
     });
   }
@@ -1659,6 +2000,7 @@ export class StandaloneSessionService {
           throw serviceError('deletion_recovery_compromised', sessionId);
         }
       }
+      await this.options.workspace.confirmStandaloneRootDurability(root);
       await this.options.deletionJournal.clear(sessionId, root);
     } catch (error) {
       if (error instanceof StandaloneSessionServiceError) throw error;
@@ -1923,7 +2265,7 @@ export class StandaloneSessionService {
               }
             }
             this.options.assertRuntimeCurrent(runtime);
-            return {
+            const response: RestoredStandaloneSession = {
               ...restored,
               sessionId,
               workspaceCwd: runtime.workspaceCwd,
@@ -1942,6 +2284,8 @@ export class StandaloneSessionService {
                   : {}),
               },
             };
+            this.responseRestoreRuntimes.set(response, runtime);
+            return response;
           },
         );
       });
@@ -2035,17 +2379,22 @@ export class StandaloneSessionService {
             },
           );
         this.options.assertRuntimeCurrent(runtime);
-        const create = (persistedParentSessionId?: string) =>
-          this.options.lifecycle.runExclusiveAfterShared(sessionId, () =>
-            this.createUnderExclusive(
-              runtime,
-              sessionId,
-              request,
-              prompt,
-              promptId,
-              persistedParentSessionId,
-            ),
+        const create = async (persistedParentSessionId?: string) => {
+          const created = await this.options.lifecycle.runExclusiveAfterShared(
+            sessionId,
+            () =>
+              this.createUnderExclusive(
+                runtime,
+                sessionId,
+                request,
+                prompt,
+                promptId,
+                persistedParentSessionId,
+              ),
           );
+          this.responseCreateRuntimes.set(created, runtime);
+          return created;
+        };
         if (parentSessionId === undefined) return create();
         return this.options.lifecycle.runSharedMany(
           [parentSessionId],
@@ -2153,7 +2502,7 @@ export class StandaloneSessionService {
         } catch {
           this.beginTerminalQuarantine(runtime);
         }
-        throw serviceError('standalone_creation_rolled_back', sessionId);
+        throw serviceError('standalone_creation_rolled_back', sessionId, true);
       }
       this.beginTerminalQuarantine(runtime);
     }
@@ -2174,7 +2523,7 @@ export class StandaloneSessionService {
     }
     if (session.sourcePersisted !== true) {
       await this.cleanRollbackBeforePersistence(runtime, sessionId);
-      throw serviceError('standalone_creation_rolled_back', sessionId);
+      throw serviceError('standalone_creation_rolled_back', sessionId, true);
     }
 
     try {
@@ -2215,7 +2564,10 @@ export class StandaloneSessionService {
       // The durable session and admitted prompt are already committed.
     }
     return {
-      session,
+      session: {
+        ...session,
+        currentCwd: prepared.identity.canonicalPath,
+      },
       projectlessOutputDirectory: prepared.identity.canonicalPath,
       workingDirectory: { state: 'ready' },
       ...(initialPrompt ? { initialPrompt } : {}),

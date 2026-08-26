@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readdir, rename, rm, rmdir } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { open, readdir, rename, rm, rmdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -451,6 +452,7 @@ export class ConversationWorkspace {
     ) {
       throw new ConversationDirectoryIdentityError('child', 'identity_changed');
     }
+    await this.syncStandaloneRoot(root);
     return staged;
   }
 
@@ -482,6 +484,7 @@ export class ConversationWorkspace {
     ) {
       throw new ConversationDirectoryIdentityError('child', 'identity_changed');
     }
+    await this.syncStandaloneRoot(root);
     return restored;
   }
 
@@ -508,6 +511,68 @@ export class ConversationWorkspace {
       throw new ConversationDirectoryIdentityError('child', 'identity_changed');
     }
     await rm(confirmed.canonicalPath, { recursive: true });
-    await revalidateConversationRootIdentity(confirmed.root);
+    await this.syncStandaloneRoot(confirmed.root);
+  }
+
+  async confirmStandaloneRootDurability(
+    root: ConversationRootIdentity,
+  ): Promise<void> {
+    await this.syncStandaloneRoot(root);
+  }
+
+  private async syncStandaloneRoot(
+    root: ConversationRootIdentity,
+  ): Promise<void> {
+    await revalidateConversationRootIdentity(root);
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(
+        root.canonicalRoot,
+        fsConstants.O_RDONLY |
+          (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0)),
+      );
+      const stats = await handle.stat();
+      const inodeVerifiable = Number.isSafeInteger(stats.ino) && stats.ino > 0;
+      if (
+        !stats.isDirectory() ||
+        stats.dev !== root.device ||
+        inodeVerifiable !== root.inodeVerifiable ||
+        (root.inodeVerifiable && stats.ino !== root.inode)
+      ) {
+        throw new ConversationDirectoryIdentityError(
+          'root',
+          'identity_changed',
+        );
+      }
+      try {
+        await handle.sync();
+      } catch (error) {
+        if (
+          process.platform !== 'win32' ||
+          !['EACCES', 'EINVAL', 'EPERM'].includes(
+            (error as NodeJS.ErrnoException).code ?? '',
+          )
+        ) {
+          throw error;
+        }
+      }
+      const current = await stat(root.canonicalRoot);
+      const currentInodeVerifiable =
+        Number.isSafeInteger(current.ino) && current.ino > 0;
+      if (
+        !current.isDirectory() ||
+        current.dev !== root.device ||
+        currentInodeVerifiable !== root.inodeVerifiable ||
+        (root.inodeVerifiable && current.ino !== root.inode)
+      ) {
+        throw new ConversationDirectoryIdentityError(
+          'root',
+          'identity_changed',
+        );
+      }
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+    await revalidateConversationRootIdentity(root);
   }
 }

@@ -29,6 +29,12 @@ export interface StandaloneDeletionRootIdentity {
   inodeVerifiable: boolean;
 }
 
+export interface StandaloneDeletionTranscriptParentIdentity {
+  device: number;
+  inode: number;
+  inodeVerifiable: boolean;
+}
+
 export type StandaloneDeletionDirectory =
   | { kind: 'absent' }
   | {
@@ -40,8 +46,7 @@ export type StandaloneDeletionDirectory =
       inodeVerifiable: boolean;
     };
 
-export interface StandaloneDeletionRecordV1 {
-  version: 1;
+interface StandaloneDeletionRecordBase {
   phase: 'prepared' | 'staged';
   sessionId: string;
   storageSessionId: string;
@@ -50,9 +55,24 @@ export interface StandaloneDeletionRecordV1 {
   directory: StandaloneDeletionDirectory;
 }
 
+export interface StandaloneDeletionRecordV1
+  extends StandaloneDeletionRecordBase {
+  version: 1;
+}
+
+export interface StandaloneDeletionRecordV2
+  extends StandaloneDeletionRecordBase {
+  version: 2;
+  transcriptParent: StandaloneDeletionTranscriptParentIdentity;
+}
+
+export type StandaloneDeletionRecord =
+  | StandaloneDeletionRecordV1
+  | StandaloneDeletionRecordV2;
+
 export interface StandaloneDeletionJournalEntry {
-  prepared: StandaloneDeletionRecordV1;
-  staged?: StandaloneDeletionRecordV1;
+  prepared: StandaloneDeletionRecord;
+  staged?: StandaloneDeletionRecord;
 }
 
 export type StandaloneDeletionJournalErrorReason = 'conflict' | 'compromised';
@@ -69,6 +89,17 @@ interface DirectoryIdentity {
   device: number;
   inode: number;
   inodeVerifiable: boolean;
+}
+
+interface DurableDirectory {
+  path: string;
+  identity: DirectoryIdentity;
+  handle: fs.FileHandle;
+}
+
+interface PendingJournalClear {
+  entry: StandaloneDeletionJournalEntry;
+  directory: DurableDirectory;
 }
 
 function isMissing(error: unknown): boolean {
@@ -152,9 +183,11 @@ function parseRecord(
   expectedSessionId: string,
   expectedPhase: 'prepared' | 'staged',
   currentRoot: ConversationRootIdentity,
-): StandaloneDeletionRecordV1 {
+): StandaloneDeletionRecord {
+  const version = isRecord(value) ? value['version'] : undefined;
   if (
     !isRecord(value) ||
+    (version !== 1 && version !== 2) ||
     !exactKeys(value, [
       'directory',
       'phase',
@@ -162,9 +195,9 @@ function parseRecord(
       'sessionId',
       'storageSessionId',
       'transcriptLocation',
+      ...(version === 2 ? ['transcriptParent'] : []),
       'version',
     ]) ||
-    value['version'] !== 1 ||
     value['phase'] !== expectedPhase ||
     value['sessionId'] !== expectedSessionId ||
     typeof value['storageSessionId'] !== 'string' ||
@@ -192,6 +225,22 @@ function parseRecord(
     (root.inodeVerifiable && root.inode !== currentRoot.inode)
   ) {
     throw new StandaloneDeletionJournalError('compromised');
+  }
+
+  const transcriptParent =
+    version === 2 ? parseIdentity(value['transcriptParent'], false) : undefined;
+  if (version === 2) {
+    if (
+      !transcriptParent ||
+      !isRecord(value['transcriptParent']) ||
+      !exactKeys(value['transcriptParent'], [
+        'device',
+        'inode',
+        'inodeVerifiable',
+      ])
+    ) {
+      throw new StandaloneDeletionJournalError('compromised');
+    }
   }
 
   const rawDirectory = value['directory'];
@@ -232,20 +281,29 @@ function parseRecord(
     };
   }
 
-  return {
-    version: 1,
+  const base = {
     phase: expectedPhase,
     sessionId: expectedSessionId,
     storageSessionId: value['storageSessionId'],
-    transcriptLocation: value['transcriptLocation'],
+    transcriptLocation: value['transcriptLocation'] as 'active' | 'archived',
     root,
     directory,
+  };
+  if (version === 1) return { version: 1, ...base };
+  return {
+    version: 2,
+    ...base,
+    transcriptParent: {
+      device: transcriptParent!.device,
+      inode: transcriptParent!.inode,
+      inodeVerifiable: transcriptParent!.inodeVerifiable,
+    },
   };
 }
 
 function sameImmutableRecord(
-  prepared: StandaloneDeletionRecordV1,
-  staged: StandaloneDeletionRecordV1,
+  prepared: StandaloneDeletionRecord,
+  staged: StandaloneDeletionRecord,
 ): boolean {
   return (
     JSON.stringify({ ...prepared, phase: 'staged' }) === JSON.stringify(staged)
@@ -255,6 +313,7 @@ function sameImmutableRecord(
 export class StandaloneDeletionJournal {
   private readonly ownerDirectory: string;
   private readonly journalDirectory: string;
+  private readonly pendingClears = new Map<string, PendingJournalClear>();
 
   constructor(stableBaseDir: string) {
     if (!path.isAbsolute(stableBaseDir)) {
@@ -268,6 +327,7 @@ export class StandaloneDeletionJournal {
 
   async hasRecord(rawSessionId: string): Promise<boolean> {
     const sessionId = parseSessionId(rawSessionId);
+    if (this.pendingClears.has(sessionId)) return true;
     const identity = await this.inspectJournalDirectory();
     if (!identity) return false;
     const exists =
@@ -278,17 +338,21 @@ export class StandaloneDeletionJournal {
   }
 
   async listSessionIds(limit = 32): Promise<string[]> {
+    const ids = new Set(this.pendingClears.keys());
     const identity = await this.inspectJournalDirectory();
-    if (!identity) return [];
+    if (!identity) {
+      return [...ids].sort().slice(0, Math.max(0, limit));
+    }
     let names: string[];
     try {
       names = await fs.readdir(this.journalDirectory);
     } catch (error) {
-      if (isMissing(error)) return [];
+      if (isMissing(error)) {
+        return [...ids].sort().slice(0, Math.max(0, limit));
+      }
       throw error;
     }
     await this.assertDirectoryIdentity(this.journalDirectory, identity);
-    const ids = new Set<string>();
     for (const name of names) {
       const match = JOURNAL_FILE_PATTERN.exec(name);
       if (match?.[1]) ids.add(match[1]);
@@ -301,6 +365,10 @@ export class StandaloneDeletionJournal {
     currentRoot: ConversationRootIdentity,
   ): Promise<StandaloneDeletionJournalEntry | undefined> {
     const sessionId = parseSessionId(rawSessionId);
+    const pending = this.pendingClears.get(sessionId);
+    if (pending) {
+      return this.validatePendingEntry(pending.entry, currentRoot);
+    }
     const identity = await this.inspectJournalDirectory();
     if (!identity) return undefined;
     const prepared = await this.readPhase(sessionId, 'prepared', currentRoot);
@@ -314,7 +382,7 @@ export class StandaloneDeletionJournal {
   }
 
   async writePrepared(
-    record: StandaloneDeletionRecordV1,
+    record: StandaloneDeletionRecordV2,
     currentRoot: ConversationRootIdentity,
   ): Promise<void> {
     const validated = parseRecord(
@@ -323,6 +391,9 @@ export class StandaloneDeletionJournal {
       'prepared',
       currentRoot,
     );
+    if (validated.version !== 2) {
+      throw new StandaloneDeletionJournalError('compromised');
+    }
     if (await this.hasRecord(validated.sessionId)) {
       throw new StandaloneDeletionJournalError('conflict');
     }
@@ -330,11 +401,14 @@ export class StandaloneDeletionJournal {
   }
 
   async writeStaged(
-    record: StandaloneDeletionRecordV1,
+    record: StandaloneDeletionRecordV2,
     currentRoot: ConversationRootIdentity,
   ): Promise<void> {
     const sessionId = parseSessionId(record.sessionId);
     const validated = parseRecord(record, sessionId, 'staged', currentRoot);
+    if (validated.version !== 2) {
+      throw new StandaloneDeletionJournalError('compromised');
+    }
     const existing = await this.read(sessionId, currentRoot);
     if (!existing || existing.staged) {
       throw new StandaloneDeletionJournalError('conflict');
@@ -350,14 +424,61 @@ export class StandaloneDeletionJournal {
     currentRoot: ConversationRootIdentity,
   ): Promise<void> {
     const sessionId = parseSessionId(rawSessionId);
+    const pending = this.pendingClears.get(sessionId);
+    if (pending) {
+      this.validatePendingEntry(pending.entry, currentRoot);
+      await this.syncDurableDirectory(pending.directory);
+      this.pendingClears.delete(sessionId);
+      await pending.directory.handle.close().catch(() => undefined);
+      return;
+    }
     const existing = await this.read(sessionId, currentRoot);
     if (!existing) return;
     const identity = await this.inspectJournalDirectory();
     if (!identity) throw new StandaloneDeletionJournalError('compromised');
-    await this.unlinkIfExists(this.recordPath(sessionId, 'staged'));
-    await this.unlinkIfExists(this.recordPath(sessionId, 'prepared'));
-    await this.assertDirectoryIdentity(this.journalDirectory, identity);
-    await this.syncDirectory();
+    const directory = await this.openDurableDirectory(
+      this.journalDirectory,
+      identity,
+    );
+    let unlinksComplete = false;
+    let retained = false;
+    try {
+      await this.assertDirectoryIdentity(this.journalDirectory, identity);
+      await this.unlinkIfExists(this.recordPath(sessionId, 'staged'));
+      await this.unlinkIfExists(this.recordPath(sessionId, 'prepared'));
+      unlinksComplete = true;
+      await this.syncDurableDirectory(directory);
+    } catch (error) {
+      if (unlinksComplete) {
+        this.pendingClears.set(sessionId, { entry: existing, directory });
+        retained = true;
+      }
+      throw error;
+    } finally {
+      if (!retained) {
+        await directory.handle.close().catch(() => undefined);
+      }
+    }
+  }
+
+  private validatePendingEntry(
+    entry: StandaloneDeletionJournalEntry,
+    currentRoot: ConversationRootIdentity,
+  ): StandaloneDeletionJournalEntry {
+    const sessionId = entry.prepared.sessionId;
+    const prepared = parseRecord(
+      entry.prepared,
+      sessionId,
+      'prepared',
+      currentRoot,
+    );
+    const staged = entry.staged
+      ? parseRecord(entry.staged, sessionId, 'staged', currentRoot)
+      : undefined;
+    if (staged && !sameImmutableRecord(prepared, staged)) {
+      throw new StandaloneDeletionJournalError('compromised');
+    }
+    return { prepared, ...(staged ? { staged } : {}) };
   }
 
   private recordPath(sessionId: string, phase: 'prepared' | 'staged'): string {
@@ -371,7 +492,7 @@ export class StandaloneDeletionJournal {
     sessionId: string,
     phase: 'prepared' | 'staged',
     currentRoot: ConversationRootIdentity,
-  ): Promise<StandaloneDeletionRecordV1 | undefined> {
+  ): Promise<StandaloneDeletionRecord | undefined> {
     const filePath = this.recordPath(sessionId, phase);
     let pathStat: Awaited<ReturnType<typeof fs.lstat>>;
     try {
@@ -417,7 +538,7 @@ export class StandaloneDeletionJournal {
     }
   }
 
-  private async writePhase(record: StandaloneDeletionRecordV1): Promise<void> {
+  private async writePhase(record: StandaloneDeletionRecordV2): Promise<void> {
     const serialized = `${JSON.stringify(record)}\n`;
     if (Buffer.byteLength(serialized) > MAX_RECORD_BYTES) {
       throw new StandaloneDeletionJournalError('compromised');
@@ -429,8 +550,13 @@ export class StandaloneDeletionJournal {
       this.journalDirectory,
       `.${path.basename(target)}.${randomUUID()}.tmp`,
     );
+    const directory = await this.openDurableDirectory(
+      this.journalDirectory,
+      identity,
+    );
     let handle: fs.FileHandle | undefined;
     try {
+      await this.assertDirectoryIdentity(this.journalDirectory, identity);
       handle = await fs.open(
         temporary,
         fsConstants.O_CREAT |
@@ -447,8 +573,7 @@ export class StandaloneDeletionJournal {
       await this.assertPathAbsent(target);
       await fs.rename(temporary, target);
       if (process.platform !== 'win32') await fs.chmod(target, 0o600);
-      await this.assertDirectoryIdentity(this.journalDirectory, identity);
-      await this.syncDirectory();
+      await this.syncDurableDirectory(directory);
     } catch (error) {
       await handle?.close().catch(() => undefined);
       await fs.unlink(temporary).catch(() => undefined);
@@ -456,22 +581,32 @@ export class StandaloneDeletionJournal {
         throw new StandaloneDeletionJournalError('conflict');
       }
       throw error;
+    } finally {
+      await directory.handle.close().catch(() => undefined);
     }
   }
 
   private async ensureJournalDirectory(): Promise<DirectoryIdentity> {
     const owner = await this.inspectPrivateDirectory(this.ownerDirectory);
-    let created = false;
+    const ownerHandle = await this.openDurableDirectory(
+      this.ownerDirectory,
+      owner,
+    );
     try {
-      await fs.mkdir(this.journalDirectory, { mode: 0o700 });
-      created = true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      let created = false;
+      try {
+        await fs.mkdir(this.journalDirectory, { mode: 0o700 });
+        created = true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      if (created && process.platform !== 'win32') {
+        await fs.chmod(this.journalDirectory, 0o700);
+      }
+      await this.syncDurableDirectory(ownerHandle);
+    } finally {
+      await ownerHandle.handle.close().catch(() => undefined);
     }
-    if (created && process.platform !== 'win32') {
-      await fs.chmod(this.journalDirectory, 0o700);
-    }
-    await this.assertDirectoryIdentity(this.ownerDirectory, owner);
     return this.inspectPrivateDirectory(this.journalDirectory);
   }
 
@@ -561,11 +696,57 @@ export class StandaloneDeletionJournal {
     }
   }
 
-  private async syncDirectory(): Promise<void> {
+  private async openDurableDirectory(
+    directory: string,
+    expected: DirectoryIdentity,
+  ): Promise<DurableDirectory> {
     let handle: fs.FileHandle | undefined;
     try {
-      handle = await fs.open(this.journalDirectory, fsConstants.O_RDONLY);
-      await handle.sync();
+      handle = await fs.open(
+        directory,
+        fsConstants.O_RDONLY |
+          (process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0)),
+      );
+      const opened = await handle.stat();
+      const openedIdentity = {
+        device: opened.dev,
+        inode: opened.ino,
+        inodeVerifiable: hasVerifiableInode(opened.ino),
+      };
+      if (
+        !opened.isDirectory() ||
+        !sameDirectoryIdentity(openedIdentity, expected)
+      ) {
+        throw new StandaloneDeletionJournalError('compromised');
+      }
+      await this.assertDirectoryIdentity(directory, expected);
+      return { path: directory, identity: expected, handle };
+    } catch (error) {
+      await handle?.close().catch(() => undefined);
+      if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+        throw new StandaloneDeletionJournalError('compromised');
+      }
+      throw error;
+    }
+  }
+
+  private async syncDurableDirectory(
+    directory: DurableDirectory,
+  ): Promise<void> {
+    const opened = await directory.handle.stat();
+    const openedIdentity = {
+      device: opened.dev,
+      inode: opened.ino,
+      inodeVerifiable: hasVerifiableInode(opened.ino),
+    };
+    if (
+      !opened.isDirectory() ||
+      !sameDirectoryIdentity(openedIdentity, directory.identity)
+    ) {
+      throw new StandaloneDeletionJournalError('compromised');
+    }
+    try {
+      await directory.handle.sync();
     } catch (error) {
       if (
         process.platform !== 'win32' ||
@@ -575,8 +756,7 @@ export class StandaloneDeletionJournal {
       ) {
         throw error;
       }
-    } finally {
-      await handle?.close().catch(() => undefined);
     }
+    await this.assertDirectoryIdentity(directory.path, directory.identity);
   }
 }

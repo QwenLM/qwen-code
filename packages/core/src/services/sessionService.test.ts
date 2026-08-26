@@ -25,6 +25,7 @@ import { getProjectHash } from '../utils/paths.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   SessionService,
+  SessionTranscriptDurabilityError,
   buildApiHistoryFromConversation,
   computeUniqueBranchTitle,
   normalizeDerivedBranchTitle,
@@ -1762,6 +1763,12 @@ describe('SessionService', () => {
   });
 
   describe('removeSession', () => {
+    const lifecycleParent = {
+      device: 7,
+      inode: 9,
+      inodeVerifiable: true,
+    };
+
     it('should remove session file', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
 
@@ -2072,10 +2079,24 @@ describe('SessionService', () => {
         SessionOrganizationService.prototype,
         'removeSession',
       );
+      const sync = vi.fn(async () => undefined);
+      const close = vi.fn(async () => undefined);
+      const directoryStats = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(directoryStats);
+      const open = vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => directoryStats),
+        sync,
+        close,
+      } as unknown as fs.promises.FileHandle);
 
       const removed = await sessionService.removeSessionTranscriptForLifecycle(
         sessionIdA,
         'active',
+        lifecycleParent,
       );
 
       expect(removed).toBe(true);
@@ -2086,6 +2107,159 @@ describe('SessionService', () => {
       expect(commitUsageBeforeTranscriptDeletion).toHaveBeenCalledOnce();
       expect(rmSyncSpy).not.toHaveBeenCalled();
       expect(removeOrganizationSpy).not.toHaveBeenCalled();
+      expect(open).toHaveBeenCalledWith(
+        expect.stringContaining('/chats'),
+        expect.any(Number),
+      );
+      expect(sync).toHaveBeenCalledOnce();
+      expect(close).toHaveBeenCalledOnce();
+    });
+
+    it('surfaces transcript parent sync failure after lifecycle unlink', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+      existsSyncSpy.mockReturnValue(true);
+      const syncError = Object.assign(new Error('sync failed'), {
+        code: 'EIO',
+      });
+      const directoryStats = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(directoryStats);
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => directoryStats),
+        sync: vi.fn(async () => Promise.reject(syncError)),
+        close: vi.fn(async () => undefined),
+      } as unknown as fs.promises.FileHandle);
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toMatchObject({
+        name: 'SessionTranscriptDurabilityError',
+        cause: syncError,
+      } satisfies Partial<SessionTranscriptDurabilityError>);
+
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('rejects lifecycle durability when the transcript parent is replaced after unlink', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+      existsSyncSpy.mockReturnValue(true);
+      const original = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      const replacement = {
+        dev: 7,
+        ino: 10,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(replacement);
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => original),
+        sync: vi.fn(async () => undefined),
+        close: vi.fn(async () => undefined),
+      } as unknown as fs.promises.FileHandle);
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toBeInstanceOf(SessionTranscriptDurabilityError);
+
+      expect(unlinkSyncSpy).toHaveBeenCalledOnce();
+    });
+
+    it('rejects recovery confirmation for a replacement transcript parent', async () => {
+      const replacement = {
+        dev: 7,
+        ino: 10,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(replacement);
+      const sync = vi.fn(async () => undefined);
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => replacement),
+        sync,
+        close: vi.fn(async () => undefined),
+      } as unknown as fs.promises.FileHandle);
+
+      await expect(
+        sessionService.confirmSessionTranscriptDeletionForLifecycle(
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toBeInstanceOf(SessionTranscriptDurabilityError);
+
+      expect(sync).not.toHaveBeenCalled();
+    });
+
+    it('does not hide lifecycle directory I/O failures on Windows', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+      existsSyncSpy.mockReturnValue(true);
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const directoryStats = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(directoryStats);
+      const syncError = Object.assign(new Error('sync failed'), {
+        code: 'EIO',
+      });
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => directoryStats),
+        sync: vi.fn(async () => Promise.reject(syncError)),
+        close: vi.fn(async () => undefined),
+      } as unknown as fs.promises.FileHandle);
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+          lifecycleParent,
+        ),
+      ).rejects.toMatchObject({ cause: syncError });
     });
 
     it('rejects lifecycle deletion when active and archived transcripts conflict', async () => {
@@ -2095,6 +2269,7 @@ describe('SessionService', () => {
         sessionService.removeSessionTranscriptForLifecycle(
           sessionIdA,
           'active',
+          lifecycleParent,
         ),
       ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
 
@@ -2118,6 +2293,7 @@ describe('SessionService', () => {
         sessionService.removeSessionTranscriptForLifecycle(
           sessionIdA,
           'active',
+          lifecycleParent,
         ),
       ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
 
@@ -2153,6 +2329,103 @@ describe('SessionService', () => {
         { recursive: true, force: true },
       );
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA);
+    });
+
+    it('durably confirms lifecycle sidecar cleanup before returning', async () => {
+      const directoryStats = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy.mockResolvedValue(directoryStats);
+      const sync = vi.fn(async () => undefined);
+      const close = vi.fn(async () => undefined);
+      const open = vi.spyOn(fs.promises, 'open').mockImplementation(
+        async () =>
+          ({
+            stat: vi.fn(async () => directoryStats),
+            sync,
+            close,
+          }) as unknown as fs.promises.FileHandle,
+      );
+      vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      ).mockResolvedValue();
+
+      await sessionService.cleanupRemovedSessionStateForLifecycle(sessionIdA);
+
+      expect(open).toHaveBeenCalledTimes(4);
+      expect(sync).toHaveBeenCalledTimes(4);
+      expect(close).toHaveBeenCalledTimes(4);
+    });
+
+    it('rejects a replacement sidecar parent before lifecycle cleanup', async () => {
+      const original = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      const replacement = {
+        dev: 7,
+        ino: 10,
+        isDirectory: () => true,
+      } as fs.Stats;
+      statPromiseSpy
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(original)
+        .mockResolvedValueOnce(replacement);
+      vi.spyOn(fs.promises, 'open').mockImplementation(
+        async () =>
+          ({
+            stat: vi.fn(async () => original),
+            sync: vi.fn(async () => undefined),
+            close: vi.fn(async () => undefined),
+          }) as unknown as fs.promises.FileHandle,
+      );
+      const removeOrganization = vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      );
+
+      await expect(
+        sessionService.cleanupRemovedSessionStateForLifecycle(sessionIdA),
+      ).rejects.toThrow('Session transcript parent directory changed.');
+
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+      expect(rmSyncSpy).not.toHaveBeenCalled();
+      expect(removeOrganization).not.toHaveBeenCalled();
+    });
+
+    it('rejects a vanished sidecar parent after opening it', async () => {
+      const original = {
+        dev: 7,
+        ino: 9,
+        isDirectory: () => true,
+      } as fs.Stats;
+      const vanished = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      statPromiseSpy.mockRejectedValueOnce(vanished);
+      const close = vi.fn(async () => undefined);
+      vi.spyOn(fs.promises, 'open').mockResolvedValue({
+        stat: vi.fn(async () => original),
+        sync: vi.fn(async () => undefined),
+        close,
+      } as unknown as fs.promises.FileHandle);
+      const removeOrganization = vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      );
+
+      await expect(
+        sessionService.cleanupRemovedSessionStateForLifecycle(sessionIdA),
+      ).rejects.toBe(vanished);
+
+      expect(close).toHaveBeenCalledOnce();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+      expect(rmSyncSpy).not.toHaveBeenCalled();
+      expect(removeOrganization).not.toHaveBeenCalled();
     });
 
     it('surfaces lifecycle sidecar cleanup failures for retry', async () => {

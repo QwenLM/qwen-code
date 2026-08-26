@@ -3704,6 +3704,49 @@ describe('Server Config (config.ts)', () => {
       acquire.mockRestore();
     });
 
+    it('retries pending lease durability without reporting stale ownership', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const cleanupFailure = new SessionWriterUnavailableError();
+      let released = false;
+      let durabilityPending = false;
+      const release = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          released = true;
+          durabilityPending = true;
+          throw cleanupFailure;
+        })
+        .mockImplementationOnce(async () => {
+          durabilityPending = false;
+        });
+      const lease = {
+        release,
+        get isReleased() {
+          return released;
+        },
+        get isReleaseDurabilityPending() {
+          return durabilityPending;
+        },
+      } as unknown as SessionWriterLease;
+      (
+        config as unknown as {
+          pendingSessionWriterLease: SessionWriterLease;
+        }
+      ).pendingSessionWriterLease = lease;
+
+      await expect(config.closeSessionWriter()).rejects.toBe(cleanupFailure);
+      expect(config.hasSessionWriteOwnership()).toBe(false);
+
+      await expect(config.closeSessionWriter()).resolves.toBeUndefined();
+      expect(release).toHaveBeenCalledTimes(2);
+      expect(config.hasSessionWriteOwnership()).toBe(false);
+    });
+
     it('preserves activation and lease release failures', async () => {
       const config = new Config({
         ...baseParams,

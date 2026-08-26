@@ -3475,6 +3475,8 @@ export class Config {
       this.startPendingGoalRestore();
     } catch (error) {
       let failure: unknown = error;
+      const ownedLease = lease ?? this.pendingSessionWriterLease;
+      let releaseFailureAlreadyReported = false;
       if (
         !(failure instanceof SessionWriterError) &&
         failure &&
@@ -3484,11 +3486,11 @@ export class Config {
         failure = new SessionWriterUnavailableError({ cause: failure });
       }
       try {
-        const ownedLease = lease ?? this.pendingSessionWriterLease;
         await this.startPendingSessionWriterRelease(ownedLease);
         if (
           this.pendingSessionWriterLease === ownedLease &&
-          (ownedLease?.isReleased ?? true)
+          (ownedLease?.isReleased ?? true) &&
+          !ownedLease?.isReleaseDurabilityPending
         ) {
           this.pendingSessionWriterLease = undefined;
         }
@@ -3502,16 +3504,29 @@ export class Config {
       } catch (releaseError) {
         if (
           releaseError instanceof SessionWriterLostError ||
-          (lease ?? this.pendingSessionWriterLease)?.isReleased
+          (ownedLease?.isReleased && !ownedLease.isReleaseDurabilityPending)
         ) {
           this.pendingSessionWriterLease = undefined;
-        } else if (!containsErrorByIdentity(failure, releaseError)) {
-          failure = new SessionWriterUnavailableError({
-            cause: new AggregateError(
-              [failure, releaseError],
-              'Session writer lease release failed during activation cleanup',
-            ),
-          });
+        } else {
+          releaseFailureAlreadyReported = containsErrorByIdentity(
+            failure,
+            releaseError,
+          );
+          if (!releaseFailureAlreadyReported) {
+            failure = new SessionWriterUnavailableError({
+              cause: new AggregateError(
+                [failure, releaseError],
+                'Session writer lease release failed during activation cleanup',
+              ),
+            });
+          }
+        }
+      } finally {
+        if (
+          !releaseFailureAlreadyReported &&
+          this.pendingSessionWriterRelease?.lease === ownedLease
+        ) {
+          this.pendingSessionWriterRelease = undefined;
         }
       }
       // The writer never became available, so the deferred restore can never
@@ -8424,7 +8439,8 @@ export class Config {
   hasSessionWriteOwnership(): boolean {
     if (isDerivedConfig(this)) return false;
     return (
-      this.pendingSessionWriterLease !== undefined ||
+      (this.pendingSessionWriterLease !== undefined &&
+        !this.pendingSessionWriterLease.isReleased) ||
       this.chatRecordingService?.hasWriteOwnership() === true
     );
   }
@@ -8461,8 +8477,15 @@ export class Config {
       handoff: this.sessionWriterHandoffRequested,
     });
     this.startPendingSessionWriterRelease();
-    this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
-    return this.sessionWriterClosePromise;
+    if (this.sessionWriterClosePromise) return this.sessionWriterClosePromise;
+    const pending = this.closeSessionWriterOnce();
+    this.sessionWriterClosePromise = pending;
+    void pending.catch(() => {
+      if (this.sessionWriterClosePromise === pending) {
+        this.sessionWriterClosePromise = undefined;
+      }
+    });
+    return pending;
   }
 
   private async closeSessionWriterOnce(): Promise<void> {
@@ -8490,18 +8513,23 @@ export class Config {
         await this.startPendingSessionWriterRelease(pendingLease);
         if (
           this.pendingSessionWriterLease === pendingLease &&
-          pendingLease.isReleased
+          pendingLease.isReleased &&
+          !pendingLease.isReleaseDurabilityPending
         ) {
           this.pendingSessionWriterLease = undefined;
         }
       } catch (error) {
         if (
           error instanceof SessionWriterLostError ||
-          pendingLease.isReleased
+          (pendingLease.isReleased && !pendingLease.isReleaseDurabilityPending)
         ) {
           this.pendingSessionWriterLease = undefined;
         }
         failures.push(error);
+      } finally {
+        if (this.pendingSessionWriterRelease?.lease === pendingLease) {
+          this.pendingSessionWriterRelease = undefined;
+        }
       }
     }
     if (failures.length === 1) {
