@@ -157,6 +157,7 @@ function plan(
     effort?: 'low' | 'medium' | 'high';
     /** Override the fixture's 5000 — the low-signal floor reads this. */
     srcDiffLines?: number;
+    fullSrcDiffLines?: number;
     repositoryContext?: unknown;
     /** The PR identity fetch-pr records — anchors and bilingual recovery. */
     ownerRepo?: string;
@@ -164,6 +165,7 @@ function plan(
     host?: string;
     /** The head fetch-pr resolved — the ledger marker's incremental anchor. */
     fetchedSha?: string;
+    incremental?: { since: string; effective: boolean };
     reviewModelId?: string;
   } = {},
 ): string {
@@ -188,7 +190,13 @@ function plan(
       ...(opts.ownerRepo === undefined ? {} : { ownerRepo: opts.ownerRepo }),
       ...(opts.prNumber === undefined ? {} : { prNumber: opts.prNumber }),
       ...(opts.host === undefined ? {} : { host: opts.host }),
+      ...(opts.incremental === undefined
+        ? {}
+        : { incremental: opts.incremental }),
       srcDiffLines: opts.srcDiffLines ?? 5000,
+      ...(opts.fullSrcDiffLines === undefined
+        ? {}
+        : { fullSrcDiffLines: opts.fullSrcDiffLines }),
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
       // Real plans carry each chunk's files (`DiffChunk.files`) — the body
@@ -454,11 +462,13 @@ function coveredPlan(
     han?: boolean;
     effort?: 'low' | 'medium' | 'high';
     srcDiffLines?: number;
+    fullSrcDiffLines?: number;
     repositoryContext?: unknown;
     ownerRepo?: string;
     prNumber?: string | number;
     host?: string;
     fetchedSha?: string;
+    incremental?: { since: string; effective: boolean };
     reviewModelId?: string;
   } = {},
 ): string {
@@ -2945,6 +2955,74 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       expect((composed.cappedBy ?? []).join('\n')).not.toContain(
         'residual-risk',
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fires the persistently-critical advisory under a SIGNAL-engaged floor too (#9903)', async () => {
+    // The floor engaged early, on the flat-trend streak, at round 4 — two
+    // rounds before the round-6 schedule. Round 5 stands behind the same
+    // not-converging shape; the advisory's floor-engagement conjunct must
+    // read the signal engagement, not re-derive it from the schedule alone
+    // (which would suppress the advisory until round 7).
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-sig-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: { shape: string } };
+    try {
+      // Round 4 signal-engaged the floor: its marker carries the pinned
+      // streak and the `c` floor, Critical-only work list (no Suggestion —
+      // the enforcement moved them out before the marker was built).
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 4,
+          findings: [{ id: 'R4-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 1,
+          fresh: 1,
+          floor: 'c',
+          flatRounds: 2,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toMatchObject({
+        shape: 'persistently-critical',
+      });
+      const conv = stderr().filter((l) => l.startsWith('RESIDUAL-RISK: '));
+      expect(conv).toHaveLength(1);
+      expect(conv[0]).toContain('land-with-residual-risk');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -5638,6 +5716,7 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
         truncated: false,
       },
       lowSignal: null,
+      approachSignal: null,
       ...over,
     });
 
@@ -10101,6 +10180,521 @@ describe('composeReview — continuity renders on every verdict', () => {
   });
 });
 
+// Every finding this review emits is anchored to a `file:line` inside the
+// current diff, so it can report where an approach leaks but never that a
+// different approach would retire all of the leaks at once. When a change has
+// taken many rounds AND grown several times over, that limit is worth saying
+// to the human deciding what happens next. Measured: one change took three
+// attempts across two PRs and 74 individually-correct findings, growing 4x,
+// before the mechanism was replaced and every finding went away with it.
+describe('composeReview — approach signal', () => {
+  const prevLedger = (planPath: string, ledger: Record<string, unknown>) =>
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify(ledger),
+    );
+
+  /** Round 6 over a 4x-grown diff, composing a REQUEST_CHANGES. */
+  const ballooned = (over: Record<string, unknown> = {}) => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+      ...over,
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 228 });
+    return planPath;
+  };
+
+  it('says the approach is the open question, on the body and the verdict line', () => {
+    const planPath = ballooned();
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.approachSignal).toMatchObject({
+      round: 6,
+      src0: 228,
+      srcDiffLines: 920,
+    });
+    expect(r.body).toContain('⚠️ Round 6');
+    expect(r.body).toContain('4.0x');
+    expect(r.body).toContain('228 → 920 source diff lines');
+    expect(r.body).toContain('a human should decide whether the shape');
+    expect(r.body).toContain('Advisory only');
+    expect(verdictLine(r)).toContain(
+      'reconsider the approach, not only the findings',
+    );
+  });
+
+  // The signal is disclosure, exactly like `lowSignal`. If it ever moves an
+  // event or adds a cap it has become a blocker, which is the one thing it
+  // must not be.
+  it('moves no verdict: event, baseEvent and caps are identical without it', () => {
+    const withSignal = composeReview({
+      planPath: ballooned(),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    const withoutPlan = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+    });
+    prevLedger(withoutPlan, { v: 1, round: 5, findings: [] }); // no src0
+    const without = composeReview({
+      planPath: withoutPlan,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(without.approachSignal).toBeNull();
+    expect(withSignal.event).toBe(without.event);
+    expect(withSignal.baseEvent).toBe(without.baseEvent);
+    expect(withSignal.cappedBy).toEqual(without.cappedBy);
+  });
+
+  // An APPROVE is convergence. The posture composes a deferrals-only late
+  // Approve on purpose; telling that PR to reconsider itself would contradict
+  // the very outcome the loop is steering toward.
+  it('never fires on an APPROVE, however many rounds and however much growth', () => {
+    const planPath = ballooned();
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).not.toContain('⚠️ Round');
+    expect(verdictLine(r)).not.toContain('reconsider the approach');
+  });
+
+  it('never fires when an APPROVE is downgraded to COMMENT', () => {
+    const r = composeReview({
+      planPath: ballooned(),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+      presubmit: {
+        downgradeApprove: true,
+        downgradeReasons: ['self-PR'],
+      },
+    });
+    expect(r.baseEvent).toBe('APPROVE');
+    expect(r.event).toBe('COMMENT');
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).not.toContain('⚠️ Round');
+    expect(verdictLine(r)).not.toContain('reconsider the approach');
+  });
+
+  // No baseline on record means UNKNOWN growth, which must read as silence.
+  // Every PR already in flight when this ships is in exactly that state, so
+  // degrading to "no growth" instead would be silent-but-wrong at scale.
+  it('stays silent when the previous round recorded no baseline', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+    });
+    prevLedger(planPath, { v: 1, round: 9, findings: [] });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).not.toContain('⚠️ Round');
+  });
+
+  it('stays silent on an early round, even with large growth', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 2000,
+    });
+    prevLedger(planPath, { v: 1, round: 2, findings: [], src0: 100 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  // A long review is not the same thing as a ballooning one. A PR that took
+  // ten rounds without growing is converging slowly, not diverging.
+  it('stays silent on a late round that did not grow', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 250,
+    });
+    prevLedger(planPath, { v: 1, round: 9, findings: [], src0: 228 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  // Tripling a tiny diff is not the shape this describes. Reuses the module's
+  // existing "non-trivial diff" floor rather than inventing a second one.
+  it('stays silent below the absolute source-diff floor', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 60,
+    });
+    prevLedger(planPath, { v: 1, round: 9, findings: [], src0: 5 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  it('honours the operator round threshold, and falls back to the built-in on 0', () => {
+    reviewSettingsMock.mockReturnValue({ approachRounds: 8 });
+    expect(
+      composeReview({
+        planPath: ballooned(),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        severityFloor: 'auto',
+      }).approachSignal,
+    ).toBeNull();
+
+    reviewSettingsMock.mockReturnValue({ approachRounds: 0 });
+    expect(
+      composeReview({
+        planPath: ballooned(),
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 1,
+        suggestionsInline: 0,
+        severityFloor: 'auto',
+      }).approachSignal,
+    ).not.toBeNull();
+    reviewSettingsMock.mockReturnValue({});
+  });
+
+  // The baseline is a BASELINE. #9136 grew 228 -> 920 over six rounds, which
+  // is only ~1.3x per round — a per-round delta would never have noticed it.
+  // Re-measuring each round would also let a diff that shrinks rewrite its own
+  // baseline and erase the growth already on record.
+  it('carries the baseline forward unchanged, even when the diff shrinks', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 150,
+    });
+    prevLedger(planPath, { v: 1, round: 3, findings: [], src0: 228 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.body).toMatch(/"src0":228/);
+  });
+
+  it('compares the full-range size on an incremental round', () => {
+    const planPath = ballooned({
+      srcDiffLines: 138,
+      fullSrcDiffLines: 920,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toMatchObject({
+      src0: 228,
+      srcDiffLines: 920,
+    });
+    // The marker the NEXT round reads keeps the previous baseline — a
+    // same-round assertion cannot see a rewrite of it.
+    expect(r.body).toMatch(/"src0":228/);
+  });
+
+  it('baselines from the full-range size on an incremental round', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 80,
+      fullSrcDiffLines: 950,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    prevLedger(planPath, { v: 1, round: 1, findings: [] });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.body).toMatch(/"src0":950/);
+    expect(r.body).not.toMatch(/"src0":80/);
+  });
+
+  it('does not compare a large incremental delta as cumulative growth', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 350,
+      fullSrcDiffLines: 120,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 100 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  it('stays silent for a legacy incremental plan with no full-range size', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 350,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [] });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).not.toContain('"src0"');
+  });
+
+  it('baselines from this round when the previous ledger carries none', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 340,
+    });
+    prevLedger(planPath, { v: 1, round: 1, findings: [] });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.body).toMatch(/"src0":340/);
+  });
+
+  // The gate is `round >= rounds`: an off-by-one there makes every PR at
+  // exactly the threshold wait one more round, and nothing else notices.
+  it('fires at exactly the round threshold', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+    });
+    prevLedger(planPath, { v: 1, round: 4, findings: [], src0: 228 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toMatchObject({ round: 5, src0: 228 });
+  });
+
+  // `prevRound` can BE the cap (parseLedger accepts round == LEDGER_MAX_ROUND
+  // and a side file at the cap carries forward), so the signal clamps exactly
+  // as the marker stamp and the deferred-suggestions clause do. Unclamped, one
+  // body announced "Round 10001" beside a marker stamping round 10000 — the
+  // three consumers of this round disagreeing about which round this is.
+  it('names the round AT the ledger cap — the signal and the marker agree', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 920,
+    });
+    prevLedger(planPath, {
+      v: 1,
+      round: LEDGER_MAX_ROUND,
+      findings: [],
+      src0: 228,
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toMatchObject({
+      round: LEDGER_MAX_ROUND,
+      src0: 228,
+    });
+    expect(r.body).toContain(`⚠️ Round ${LEDGER_MAX_ROUND}, `);
+    expect(r.body).not.toContain(`Round ${LEDGER_MAX_ROUND + 1}`);
+    // The signal and the marker must name the SAME round — at the cap too.
+    expect(parseLedger(r.body)?.round).toBe(LEDGER_MAX_ROUND);
+  });
+
+  // `growth >= APPROACH_GROWTH_FACTOR` — exactly the documented "grown by
+  // at least 3x" must fire.
+  it('fires at exactly the growth factor', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 300,
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 100 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toMatchObject({
+      src0: 100,
+      srcDiffLines: 300,
+      growth: 3,
+    });
+  });
+
+  // The floor is STRICT — "past the floor": exactly 100 source diff lines
+  // stays silent even at 20x growth.
+  it('stays silent at exactly the source-diff floor', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 100,
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 5 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+  });
+
+  // The corroborating clause: the incident that motivated this feature was
+  // a round-cap stop beside a ballooned diff, the exact shape no other test
+  // composes — every other firing case has no stop file.
+  it('names a round-cap stop in the paragraph when one happened', () => {
+    const planPath = ballooned();
+    writeRoundCapStop(planPath, 5, 6);
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal?.nonConverged).toBe(true);
+    expect(r.body).toContain(
+      'the reverse audit also stopped at its round cap without converging',
+    );
+  });
+
+  // The zh half of the paragraph, rendered for a Han-character description
+  // like every other bilingual clause in this module — a broken or
+  // truncated translation would otherwise ship unseen.
+  it('renders the zh half of the paragraph for a Han-character description', () => {
+    const planPath = ballooned({ han: true });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.body).toContain('⚠️ 第 6 轮');
+    expect(r.body).toContain('228 → 920');
+    expect(r.body).toContain('仅供参考');
+  });
+
+  // A legacy incremental plan carries no full-range size, so the signal
+  // stays silent — but a baseline already on record must still ride the
+  // marker forward, or the next round loses the growth record.
+  it('keeps the previous baseline on a silent legacy incremental round', () => {
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      ownerRepo: 'QwenLM/qwen-code',
+      srcDiffLines: 350,
+      incremental: { since: 'a'.repeat(40), effective: true },
+    });
+    prevLedger(planPath, { v: 1, round: 5, findings: [], src0: 228 });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      severityFloor: 'auto',
+    });
+    expect(r.approachSignal).toBeNull();
+    expect(r.body).toMatch(/"src0":228/);
+  });
+});
+
 describe('floor enforcement — the posture, as code', () => {
   // SKILL Step 6 resolves the posting floor in prose and tells the MODEL to
   // defer; six live PRs measured 2026-08-16 posted double-digit Suggestions
@@ -10577,6 +11171,304 @@ describe('floor enforcement — the posture, as code', () => {
     expect(r.floorEnforced).toEqual([0]);
     expect(r.body).not.toContain('c.ts:2.5');
     expect(r.body).toContain('fractional line');
+  });
+});
+
+describe('the signal-driven early floor (#9903)', () => {
+  // The convergence diagnosis has named the remedy since round 3 — "drop
+  // this PR's reviews to `--severity-floor critical`" — but under `auto`
+  // the floor waited for the round-6 schedule, so rounds 3–5 kept posting
+  // Suggestions at full volume while the body printed the advice. The
+  // `flatRounds` streak closes that gap: two consecutive rounds of a
+  // not-falling first-time-finding rate engage the floor early, the
+  // engagement latches in the marker, and every case here is a row of the
+  // streak's state machine.
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'flat-floor-'));
+  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  const plan = (over: Record<string, unknown> = {}) => {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: 8255, ...over }));
+    return p;
+  };
+  const sideFile = (prev: Record<string, unknown>) =>
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({ v: 1, findings: [], ...prev }),
+    );
+  // A firing round: two FRESH drafts (the Critical and the unmarked
+  // Suggestion) against a predecessor that recorded one — the carried
+  // `R2-4:` re-post is the control that must NOT count. Prior findings sit
+  // in other files so the recurrence half cannot fire either: the streak
+  // reads the volume trend alone.
+  const firingPrev = (over: Record<string, unknown> = {}) => ({
+    round: 3,
+    posted: 3,
+    fresh: 1,
+    floor: 'o',
+    findings: [
+      { id: 'R2-4', sev: 'S', file: 'b.ts', title: 'still standing' },
+      { id: 'R3-1', sev: 'S', file: 'b.ts', title: 'retired' },
+    ],
+    ...over,
+  });
+  const drafts = () => [
+    { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+    { path: 'b.ts', line: 7, body: '**[Suggestion]** R2-4: tidy this' },
+    { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+  ];
+  const compose = (over: Partial<ComposeReviewInput> = {}) =>
+    composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      severityFloor: 'auto',
+      criticalsInline: 1,
+      suggestionsInline: 2,
+      draftedComments: drafts(),
+      ...over,
+    });
+
+  it('one flat round advances the streak but leaves the floor open', () => {
+    sideFile(firingPrev());
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    // The streak is on the record even though nothing engaged: the next
+    // round's trigger reads it back from the marker.
+    expect(parseLedger(r.body)?.flatRounds).toBe(1);
+    expect(parseLedger(r.body)?.floor).toBe('o');
+  });
+
+  it('a second consecutive flat round engages the floor — as auto-signaled, disclosed', () => {
+    sideFile(firingPrev({ round: 4, flatRounds: 1 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([1, 2]);
+    // The engagement says WHY: an unexplained critical floor at round 5
+    // would read as a pipeline fault.
+    expect(r.body).toContain(
+      'the floor engaged early: the first-time-finding rate has not fallen for 2 consecutive round(s)',
+    );
+    const ledger = parseLedger(r.body)!;
+    expect(ledger.flatRounds).toBe(2);
+    expect(ledger.floor).toBe('c');
+  });
+
+  it('latches: a quiet round past the bar keeps the floor engaged and the streak pinned', () => {
+    // The floor itself quiets the posted-set trend — re-measuring would
+    // release it the round after it engaged. `fresh` falls well below the
+    // predecessor here, so only the pin can keep the streak.
+    sideFile(firingPrev({ round: 4, flatRounds: 2, fresh: 9, posted: 9 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(parseLedger(r.body)?.flatRounds).toBe(2);
+    expect(parseLedger(r.body)?.floor).toBe('c');
+  });
+
+  it('discloses the early engagement in the deferral header when enforcement moved nothing', () => {
+    // The compliant latched round per SKILL's marker routing: the model
+    // deferred its Suggestions itself, so `reroute` is empty and
+    // `floorEnforcedNote` never renders — the deferral header is the ONLY
+    // disclosure site left, and an unexplained early floor reads as a
+    // pipeline fault. The header must carry the note on its own line.
+    sideFile(firingPrev({ round: 4, flatRounds: 2, fresh: 9, posted: 9 }));
+    const r = compose({
+      draftedComments: [{ path: 'a.ts', line: 3, body: '**[Critical]** boom' }],
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'c.ts',
+          line: 9,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'rename the flag',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain(
+      'Deferred under the convergence posture (round 5, not a blocker) — the floor engaged early: the first-time-finding rate has not fallen for 2 consecutive round(s)',
+    );
+  });
+
+  it('resets below the bar on a round whose rate fell — no carry-on-unmeasured', () => {
+    sideFile(firingPrev({ round: 4, flatRounds: 1, fresh: 9, posted: 9 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+  });
+
+  it('resets on a predecessor that posted under a closed floor — the trend is not comparable', () => {
+    // The streak's reliance on the trend's `floorChanged` guard is carried
+    // by the measurement's `floor: 'o'` argument: a predecessor that posted
+    // under an explicit `critical` floor recorded a suppressed fresh count,
+    // and a volume measured across that posture change is exactly what the
+    // rendered diagnosis calls non-comparable. The streak resets instead of
+    // advancing toward an engagement credited to it.
+    sideFile(firingPrev({ round: 4, flatRounds: 1, floor: 'c' }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+  });
+
+  it('reads FRESH drafts only — a round of carried re-posts is the steady state, not a streak', () => {
+    // Triage constraint: re-posts of unfixed findings are the loop holding
+    // its position, and counting them would engage the floor on the calmest
+    // shape there is. Both drafts re-post standing entries here.
+    sideFile(
+      firingPrev({
+        round: 4,
+        flatRounds: 1,
+        fresh: 2,
+        findings: [
+          { id: 'R2-4', sev: 'S', file: 'b.ts', title: 'still standing' },
+          { id: 'R3-2', sev: 'C', file: 'a.ts', title: 'still blocking' },
+        ],
+      }),
+    );
+    const r = compose({
+      draftedComments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** R3-2: boom' },
+        { path: 'b.ts', line: 7, body: '**[Suggestion]** R2-4: tidy this' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+  });
+
+  it('measures ONLY auto rounds — an explicit suggestion floor resets the streak', () => {
+    // The trigger lives ONLY in the `auto` arm, so its measurement must
+    // too: this round ran with the posture explicitly OFF, and a streak
+    // advanced here would engage the floor on a later auto round off a
+    // round the operator had taken out of the posture — the
+    // false-engagement direction the design's error asymmetry excludes.
+    // The marker stamps floor `o` exactly like an open auto round (the
+    // vocabulary has no letter for `suggestion`), so the trend's own
+    // `floorChanged` guard cannot see the change — only this gate can.
+    sideFile(firingPrev({ round: 4, flatRounds: 1 }));
+    const r = compose({ severityFloor: 'suggestion' });
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+    expect(parseLedger(r.body)?.floor).toBe('o');
+  });
+
+  it('measures ONLY auto rounds — an explicit critical floor resets the streak', () => {
+    // Same gate, the other posture variant: under an explicit `critical`
+    // floor the posted set is suppressed, and the round's own rendered
+    // diagnosis calls the trend non-comparable — the streak must not
+    // advance off a volume measured across that posture change.
+    // Enforcement still fires here, but on the explicit floor itself.
+    sideFile(firingPrev({ round: 4, flatRounds: 1 }));
+    const r = compose({ severityFloor: 'critical' });
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+    expect(parseLedger(r.body)?.floor).toBe('c');
+  });
+
+  it('a streak reset under an explicit floor engages nothing when auto returns', () => {
+    // The witness chain: rounds 1–3 under `auto` with round 3 firing
+    // (`flatRounds: 1`), round 4 under an explicit `suggestion` floor
+    // resets the streak, and round 5 back on `auto` starts below the bar
+    // again — no latch, no early engagement, the round-6 schedule intact.
+    sideFile(firingPrev({ round: 3, flatRounds: 1 }));
+    const explicit = compose({ severityFloor: 'suggestion' });
+    expect(parseLedger(explicit.body)?.flatRounds).toBeUndefined();
+    sideFile({ ...parseLedger(explicit.body)! });
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('the floor engaged early');
+    expect(parseLedger(r.body)?.flatRounds).toBe(1);
+  });
+
+  it('measures ONLY rounds the signal can measure — a planted round-2 streak clamps below the bar', () => {
+    // The signal gates on round >= 3, so no honest run carries a streak at
+    // round 2 — the honest maximum at round N is N - 2. A planted side file
+    // claiming the bar at round 2 would otherwise latch and engage at round
+    // 3, a full round ahead of the earliest honest engagement (round 4).
+    sideFile(firingPrev({ round: 2, flatRounds: 2 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('the floor engaged early');
+    // The round re-measures honestly from zero: one firing round, one step.
+    expect(parseLedger(r.body)?.flatRounds).toBe(1);
+  });
+
+  it('an explicit suggestion floor overrides the latch — the operator keeps the posture', () => {
+    sideFile(firingPrev({ round: 4, flatRounds: 2 }));
+    const r = compose({ severityFloor: 'suggestion' });
+    expect(r.floorEnforced).toEqual([]);
+    // The streak stays pinned in the record — the override is per-invocation,
+    // not a measured convergence — but it engages nothing while it stands.
+    expect(parseLedger(r.body)?.flatRounds).toBe(2);
+    expect(parseLedger(r.body)?.floor).toBe('o');
+  });
+
+  it('fails open in the context-unavailable state — the round is unknowable', () => {
+    sideFile(firingPrev({ round: 4, flatRounds: 1 }));
+    const r = compose({ contextUnavailable: true });
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBeUndefined();
+  });
+
+  it('the latch survives a context-unavailable blip — the pinned streak holds', () => {
+    // A transient GitHub outage on a LATCHED PR must not wipe the pinned
+    // streak from the marker: released here, the floor disengages and
+    // rounds 4–5 return to full-volume Suggestion posting until the streak
+    // rebuilds from zero — contradicting the pin's own contract. The floor
+    // itself still fails open for the unknowable round.
+    sideFile(firingPrev({ round: 4, flatRounds: 2 }));
+    const r = compose({ contextUnavailable: true });
+    expect(r.floorEnforced).toEqual([]);
+    expect(parseLedger(r.body)?.flatRounds).toBe(2);
+  });
+
+  it('does not pre-empt the round-6 schedule — auto-resolved stays its own kind', () => {
+    // Round 6 engages with a sub-bar streak that ALSO reaches the bar this
+    // round — exactly the scenario where the two arms diverge. The schedule
+    // must win, and the body must not credit the signal for what the
+    // schedule did.
+    sideFile({
+      round: 5,
+      posted: 1,
+      fresh: 1,
+      floor: 'o',
+      flatRounds: 1,
+      findings: [],
+    });
+    const r = compose({
+      draftedComments: [
+        { path: 'a.ts', line: 3, body: '**[Critical]** boom' },
+        { path: 'c.ts', line: 9, body: '**[Suggestion]** rename the flag' },
+      ],
+      suggestionsInline: 1,
+    });
+    expect(r.floorEnforced).toEqual([1]);
+    expect(r.body).not.toContain('engaged early');
+  });
+
+  it('clamps a planted streak to the honest maximum the round it rides can carry', () => {
+    // The side file is the same untrusted shape as the marker. A planted
+    // `flatRounds` reaches at most the HONEST maximum of the round it rides
+    // — round N can have measured N - 2 firing rounds — and the engaging
+    // round then adds its own measurement to THAT value, never to the
+    // plant: the disclosure names the clamped count, and the latch pins it.
+    sideFile(firingPrev({ round: 3, flatRounds: 9999 }));
+    const r = compose();
+    expect(r.floorEnforced).toEqual([1, 2]);
+    expect(r.body).toContain('for 2 consecutive round(s)');
+    expect(r.body).not.toContain('9999');
+    expect(parseLedger(r.body)?.flatRounds).toBe(2);
+  });
+
+  it('reads no streak off a round-0 side file — the trigger cannot engage round 1', () => {
+    // A side file with no usable round names rounds this PR never ran; its
+    // streak must not engage anything, exactly as the churn streak's
+    // round-0 zero rule does.
+    sideFile({ round: 0, flatRounds: 9, findings: [] });
+    const r = compose();
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('the floor engaged early');
   });
 });
 
@@ -11776,6 +12668,145 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
     });
     expect(anchored.body).not.toContain('re-reads the whole diff');
+  });
+
+  it('discloses a grafted anchor the running model cannot use', () => {
+    // Issue #9902's recovery grafts a fail-closed winner onto the most
+    // recent anchored own marker, and the side file persists the graft.
+    // When the graft's certifier mismatches the identity this round runs
+    // under, Step 1's same-model gate refuses it and the round re-reads
+    // the full diff — the chain is STILL broken, so persisting the graft
+    // must not silence the disclosure that names the loop.
+    const input = {
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    };
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      sha: 'deadbeef00112233',
+      model: 'model-a@aaaaaaaa',
+      anchorFromRound: 2,
+      findings: [],
+    });
+    const mismatched = composeReview(
+      input,
+      'unknown',
+      true,
+      'model-b@bbbbbbbb',
+    );
+    expect(mismatched.body).toContain('re-reads the whole diff');
+    // …and it names WHY — the split clause, never the false "the round it
+    // recovered had none either": this side file visibly holds the grafted
+    // sha, and the operator reading it must be pointed at the identity
+    // mismatch, not away from it.
+    expect(mismatched.body).toContain(
+      'one certified by an identity other than',
+    );
+    expect(mismatched.body).not.toContain('had none either');
+    // …and the same graft under a MATCHING identity is usable — the graft
+    // breaks the loop, so the disclosure stays silent.
+    const matched = composeReview(input, 'unknown', true, 'model-a@aaaaaaaa');
+    expect(matched.body).not.toContain('re-reads the whole diff');
+    // A graft with NO certifier (an attribution-off source round) is a
+    // mismatch by construction — the fallback is the full review, and the
+    // disclosure fires.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      sha: 'deadbeef00112233',
+      anchorFromRound: 2,
+      findings: [],
+    });
+    const uncertified = composeReview(
+      input,
+      'unknown',
+      true,
+      'model-a@aaaaaaaa',
+    );
+    expect(uncertified.body).toContain('re-reads the whole diff');
+  });
+
+  it('discloses a grafted anchor this round could not use even under a matching certifier', () => {
+    // The same-model gate is only one of Step 1's refusal reasons. A
+    // fail-closed winner never posts a sha, so the graft re-derives
+    // identically every later round: when this round's fetch REFUSED the
+    // re-run it licensed (a deterministic history refusal) or resolved it
+    // to the head (upToDate), the round re-read the full diff and every
+    // later round re-derives the same unusable anchor — the chain is still
+    // broken, and reading the certifier match alone would silence the
+    // disclosure for the whole streak.
+    const input = {
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    };
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      sha: 'deadbeef00112233',
+      model: 'model-a@aaaaaaaa',
+      anchorFromRound: 2,
+      findings: [],
+    });
+    // History-refused: the plan records the re-run's refusal.
+    writeFileSync(
+      input.planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        incremental: {
+          since: 'deadbeef00112233',
+          effective: false,
+          reason: 'not-an-ancestor',
+        },
+      }),
+    );
+    const refused = composeReview(input, 'unknown', true, 'model-a@aaaaaaaa');
+    expect(refused.body).toContain('re-reads the whole diff');
+    // upToDate: the graft resolved to the head — the fence routes the round
+    // onto the full-range plan, which the disclosure must still name.
+    writeFileSync(
+      input.planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        incremental: {
+          since: 'deadbeef00112233',
+          effective: true,
+          upToDate: true,
+        },
+      }),
+    );
+    const upToDate = composeReview(input, 'unknown', true, 'model-a@aaaaaaaa');
+    expect(upToDate.body).toContain('re-reads the whole diff');
+    // A re-run that NARROWED is a usable graft — the loop is broken and the
+    // disclosure stays silent.
+    writeFileSync(
+      input.planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        incremental: { since: 'deadbeef00112233', effective: true },
+      }),
+    );
+    const narrowed = composeReview(input, 'unknown', true, 'model-a@aaaaaaaa');
+    expect(narrowed.body).not.toContain('re-reads the whole diff');
+    // And a plan with NO recorded incremental outcome keeps the same-model
+    // gate as the only witness — nothing says the graft was unusable.
+    writeFileSync(input.planPath, JSON.stringify({ prNumber: 8255 }));
+    const unrecorded = composeReview(
+      input,
+      'unknown',
+      true,
+      'model-a@aaaaaaaa',
+    );
+    expect(unrecorded.body).not.toContain('re-reads the whole diff');
   });
 
   it('agrees with the ledger about an out-of-bounds claimed id', () => {

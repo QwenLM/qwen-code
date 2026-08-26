@@ -1318,13 +1318,15 @@ jobs:
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
             git status --short
-            cat "${WORKDIR}/failure.md"
+            # Agent-written content on step stdout: neutralize both command
+            # syntaxes (`##[` parses mid-line too — #9761).
+            sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
             exit 1
           fi
 
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             echo "🛑 Agent aborted intentionally:"
-            cat "${WORKDIR}/failure.md"
+            sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/failure.md"
             exit 1
           fi
 
@@ -1395,12 +1397,14 @@ jobs:
           for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md failure.zh.md fix.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
-              # Agent-written content on step STDOUT: a line-start `::` would
-              # be parsed as a workflow command (::error::, ::add-mask::), the
-              # same reason the PR-lane dump loop neutralizes it. (The two
-              # step-SUMMARY loops write to a file, where `::` is not
+              # Agent-written content on step STDOUT: both workflow-command
+              # syntaxes parse here — a line-start `::` (::error::,
+              # ::add-mask::) AND `##[` even mid-line (a quoted
+              # `##[add-matcher]` fails THIS step; measured on #9761). The
+              # same reason the PR-lane dump loop neutralizes both. (The two
+              # step-SUMMARY loops write to a file, where commands are not
               # parsed.)
-              sed 's/::/;;/g' "${WORKDIR}/${f}"
+              sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/${f}"
               echo
             fi
           done
@@ -4699,7 +4703,17 @@ jobs:
             fi
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
-          cat "${WORKDIR}/feedback.md"
+          # Reviewer/bot comment bodies ride this file VERBATIM and this echo
+          # puts them on step stdout, which the runner scans for workflow
+          # commands in BOTH syntaxes: `::name::` AND the legacy `##[name]`,
+          # the latter parsed MID-line too — a quoted `##[add-matcher]` makes
+          # the runner load the rest of the line as a matcher file and fail
+          # THIS step before the agent runs. Measured on #9761: a review
+          # finding about that injection channel carried the payload strings
+          # as its example text, and five consecutive pre-agent crashes
+          # burned the takeover window in ~70 minutes. Neutralize both
+          # prefixes like every other untrusted echo.
+          cat "${WORKDIR}/feedback.md" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
 
       # The agent below runs for up to 130 minutes and the verification gate adds
       # more, but nothing reaches the PR thread until "Push and report" at the
@@ -5072,7 +5086,9 @@ jobs:
                 else
                   echo "::warning::could not merge carried deferrals across the repair (one of the two sets is unparseable); keeping the carried set and preserving this round's as deferred-findings.unmerged.json. Raw content follows:"
                 fi
-                head -c 4000 "${WORKDIR}/deferred-findings.json" | sed 's/::/;;/g'
+                # Both command syntaxes, like every other untrusted echo
+                # (`##[` parses mid-line too — #9761).
+                head -c 4000 "${WORKDIR}/deferred-findings.json" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
                 echo
                 rm -f "${WORKDIR}/deferred-findings.carry.next"
                 # Keep the discarded set ON DISK so the warning's pointer at
@@ -5300,10 +5316,12 @@ jobs:
           for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
-              # Agent-written content: a line-start `::` would be parsed as a
-              # workflow command (::error::, ::add-mask::), the same reason
-              # every other echo of these files neutralizes it.
-              sed 's/::/;;/g' "${WORKDIR}/${f}"
+              # Agent/reviewer-written content: both workflow-command syntaxes
+              # parse here — a line-start `::` (::error::, ::add-mask::) AND
+              # `##[` even mid-line (a quoted `##[add-matcher]` fails THIS
+              # step; measured on #9761 via the prepare echo of this same
+              # file). Neutralize both, like every other echo of these files.
+              sed -e 's/::/;;/g' -e 's/##\[/##［/g' "${WORKDIR}/${f}"
               echo
             fi
           done
@@ -5995,7 +6013,11 @@ jobs:
                 elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
                   printf '%s\n' "${_upsert_line#__upsert_trusted__}"
                 else
-                  printf '%s\n' "${_upsert_line//::/;;}"
+                  # The canonical two-expression neutralizer, identical to
+                  # every other echo site — one spelling for the whole
+                  # family, so a syntax change cannot drift across two
+                  # implementations (`##[` parses mid-line too — #9761).
+                  printf '%s\n' "${_upsert_line}" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
                 fi
               done <<< "${UPSERT_OUT}"
             fi

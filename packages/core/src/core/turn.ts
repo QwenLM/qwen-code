@@ -394,6 +394,15 @@ export type CompactionTriggerReason =
 export interface ChatCompressionInfo {
   originalTokenCount: number;
   newTokenCount: number;
+  /**
+   * Whether originalTokenCount came from a local estimate rather than an
+   * API-reported prompt count. The two compression paths measure on
+   * different scales (see #9309): /compress-fast anchors on the last
+   * API-reported prompt count (system prompt + tools + history) while a
+   * later /compress re-estimates history-only once the stored count is
+   * estimate-derived, so UIs must not present the numbers as one chain.
+   */
+  originalTokenCountIsEstimated?: boolean;
   /** Whether newTokenCount ultimately came from a local estimate. */
   newTokenCountIsEstimated?: boolean;
   compressionStatus: CompressionStatus;

@@ -86,6 +86,22 @@ export function classifyPath(path: string): PathKind {
   return 'source';
 }
 
+/**
+ * The vocabulary of a wrapping type's name — a cache, proxy, decorator,
+ * adapter, delegate, facade. The roster's Agent 1e gate keys on it
+ * (`hasWrapperTypes`), so the signal is computed here, where the diff's lines
+ * are already walking past.
+ *
+ * Case-insensitive SUBSTRING, not word-boundary: a wrapping type is usually
+ * PascalCase (`CachedModelProvider`, `RetryDecorator`), and camelCase carries
+ * no word boundary between the words, so `\bwrapper\b` would miss exactly the
+ * names the gate exists for. Bare `cache` is deliberately out — too common an
+ * ordinary identifier for the gate to stay a gate; `cached`/`caching` keep the
+ * wrapping-type shapes (`CachedProvider`, `CachingLayer`).
+ */
+export const WRAPPER_SIGNAL_RE =
+  /(wrapper|proxy|decorator|adapter|delegate|facade|cached|caching)/i;
+
 /** One file's section of the diff, from `diff --git` to the next one. */
 export interface DiffFile {
   /** New-side path, or the old path for a deletion. */
@@ -116,6 +132,12 @@ export interface DiffFile {
   removedLines: number;
   /** True for `Binary files ... differ` sections (no hunks to review). */
   binary: boolean;
+  /**
+   * The path or an added line matched `WRAPPER_SIGNAL_RE` — the diff may add
+   * or modify a wrapping type. A hint for the roster's 1e gate, not a verdict:
+   * the gate fails safe, and the agent confirms (see `hasWrapperTypes`).
+   */
+  wrapperSignal: boolean;
 }
 
 /** A contiguous slice of the diff file assigned to exactly one agent. */
@@ -182,6 +204,14 @@ export interface DiffPlan {
   testDiffLines: number;
   generatedDiffLines: number;
   docsDiffLines: number;
+  /**
+   * Any file's path or added lines matched the wrapper vocabulary. Written
+   * into the plan report so the roster's 1e gate reads one value everywhere;
+   * only an explicit `false` keeps Agent 1e out of the roster (see
+   * `hasWrapperTypes` — a plan an older CLI wrote carries no field, and an
+   * absent signal must roster the check, not drop it).
+   */
+  wrapperSignal: boolean;
   files: DiffFile[];
   chunks: DiffChunk[];
 }
@@ -340,6 +370,11 @@ export function parseDiff(diffText: string): {
       // Binary and mode-only sections carry no `+++` header, so classify here
       // as well; for the common case this just re-confirms what `+++` set.
       cur.kind = classifyPath(cur.path);
+      // The path is only final here — `+++` / `rename to` refine it after the
+      // header. A wrapping type usually lives in a file named after it, and
+      // the path catches a MODIFIED wrapper whose changed lines never spell
+      // the name.
+      if (WRAPPER_SIGNAL_RE.test(cur.path)) cur.wrapperSignal = true;
       files.push(cur);
       cur = null;
     }
@@ -366,6 +401,7 @@ export function parseDiff(diffText: string): {
         addedLines: 0,
         removedLines: 0,
         binary: false,
+        wrapperSignal: false,
       };
       continue;
     }
@@ -436,6 +472,9 @@ export function parseDiff(diffText: string): {
         cur.addedLines++;
         noteAdded(cur, newCursor);
         newCursor++;
+        if (!cur.wrapperSignal) {
+          cur.wrapperSignal = WRAPPER_SIGNAL_RE.test(line);
+        }
       } else if (line.startsWith('-')) {
         cur.removedLines++;
       } else if (line === '' || line.startsWith(' ')) {
@@ -738,6 +777,7 @@ export function buildDiffPlan(
     testDiffLines: linesOf('test'),
     generatedDiffLines: linesOf('generated'),
     docsDiffLines: linesOf('docs'),
+    wrapperSignal: files.some((f) => f.wrapperSignal),
     files,
     chunks,
   };
