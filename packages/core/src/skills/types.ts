@@ -46,8 +46,10 @@ export interface SkillConfig {
    *
    * This is an additive grant only: it never hides or restricts the tools the
    * model can see. Under an active `permissions.allow` registry allowlist it
-   * still cannot register a tool the startup allowlist skipped — that tool
-   * needs the rule in settings `permissions.allow` plus a restart (#9827).
+   * cannot promote a deferred tool into the eager model request — a tool the
+   * startup allowlist left uncovered stays deferred (still registered and
+   * loadable via `tool_search`) until the rule is added to settings
+   * `permissions.allow` plus a restart (#9827, #10075).
    * Malformed entries are ignored. See `applySkillAllowedTools`.
    */
   allowedTools?: string[];
