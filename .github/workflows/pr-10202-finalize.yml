@@ -1,0 +1,137 @@
+name: PR 10202 finalize review fixes
+
+on:
+  push:
+    branches:
+      - fix/10199-mcp-permission-collisions
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply production review fixes
+        shell: bash
+        run: |
+          python3 - <<'BOOT'
+          from pathlib import Path
+          from textwrap import dedent
+
+          workflow = Path('.github/workflows/pr-10202-fix.yml').read_text()
+          marker = "          python3 <<'PY'\n"
+          start = workflow.index(marker) + len(marker)
+          end = workflow.index("\n          PY\n", start)
+          Path('/tmp/apply-pr-10202-fixes.py').write_text(
+              dedent(workflow[start:end]) + '\n'
+          )
+          BOOT
+          python3 /tmp/apply-pr-10202-fixes.py
+
+      - name: Update legacy MCP regression tests
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('packages/core/src/permissions/permission-manager.test.ts')
+          text = path.read_text()
+
+          marker = "  // MCP tool matching\n"
+          helper = """  const matchesMcpRuleWithRawIdentity = (\n    ruleText: string,\n    rawToolName: string,\n  ): boolean =>\n    matchesRule(\n      parseRule(ruleText),\n      normalizeToolNameForProvider(rawToolName),\n      undefined,\n      undefined,\n      undefined,\n      undefined,\n      undefined,\n      undefined,\n      [rawToolName],\n    );\n\n"""
+          if text.count(marker) != 1:
+              raise SystemExit(f'permission-manager.test.ts: MCP marker count={text.count(marker)}')
+          text = text.replace(marker, helper + marker, 1)
+
+          replacements = [
+              (
+                  "expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);",
+                  "expect(matchesMcpRuleWithRawIdentity(legacyName, legacyName)).toBe(true);",
+              ),
+              (
+                  "expect(matchesRule(parseRule(dottedName), dottedProviderName)).toBe(true);\n    expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);",
+                  "expect(matchesMcpRuleWithRawIdentity(dottedName, dottedName)).toBe(true);\n    expect(matchesMcpRuleWithRawIdentity(dottedName, slashedName)).toBe(false);",
+              ),
+              (
+                  """    expect(\n      matchesRule(\n        rule,\n        normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),\n      ),\n    ).toBe(true);\n    expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);""",
+                  """    expect(\n      matchesMcpRuleWithRawIdentity(\n        rule.raw,\n        'mcp__zybio.db__query_uniprot',\n      ),\n    ).toBe(true);\n    expect(\n      matchesMcpRuleWithRawIdentity(rule.raw, 'mcp__other__query_uniprot'),\n    ).toBe(false);""",
+              ),
+          ]
+
+          # The server-level and wildcard test bodies are textually identical,
+          # so the third replacement must occur exactly twice.
+          for index, (old, new) in enumerate(replacements):
+              expected = 2 if index == 2 else 1
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(
+                      f'permission-manager.test.ts: replacement {index} expected {expected}, found {count}'
+                  )
+              text = text.replace(old, new, expected)
+
+          old_eval = """        await pm2.evaluate({\n          toolName: providerSafeName,\n        }),"""
+          new_eval = """        await pm2.evaluate({\n          toolName: providerSafeName,\n          toolAliases: [legacyName],\n        }),"""
+          if text.count(old_eval) != 1:
+              raise SystemExit(
+                  f'permission-manager.test.ts: wildcard PM context count={text.count(old_eval)}'
+              )
+          text = text.replace(old_eval, new_eval, 1)
+
+          path.write_text(text)
+          PY
+
+      - name: Install dependencies and build workspace
+        run: npm ci
+
+      - name: Format patched files
+        run: >-
+          npx prettier --write
+          packages/core/src/permissions/rule-parser.ts
+          packages/core/src/tools/tool-registry.ts
+          packages/core/src/core/permissionFlow.ts
+          packages/core/src/core/permissionFlow.test.ts
+          packages/core/src/permissions/mcp-permission-collision.test.ts
+          packages/core/src/permissions/permission-manager.test.ts
+
+      - name: Run focused regression suite
+        run: >-
+          npx vitest run
+          packages/core/src/permissions/mcp-permission-collision.test.ts
+          packages/core/src/permissions/permission-manager.test.ts
+          packages/core/src/core/permissionFlow.test.ts
+          packages/core/src/core/coreToolScheduler.test.ts
+
+      - name: Check formatting
+        run: >-
+          npx prettier --check
+          packages/core/src/permissions/rule-parser.ts
+          packages/core/src/tools/tool-registry.ts
+          packages/core/src/core/permissionFlow.ts
+          packages/core/src/core/permissionFlow.test.ts
+          packages/core/src/permissions/mcp-permission-collision.test.ts
+          packages/core/src/permissions/permission-manager.test.ts
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/core/src/permissions/rule-parser.ts \
+                  packages/core/src/tools/tool-registry.ts \
+                  packages/core/src/core/permissionFlow.ts \
+                  packages/core/src/core/permissionFlow.test.ts \
+                  packages/core/src/permissions/mcp-permission-collision.test.ts \
+                  packages/core/src/permissions/permission-manager.test.ts
+          git commit -m "fix(permissions): match MCP rules against raw identity"
+          git push origin HEAD:fix/10199-mcp-permission-collisions
