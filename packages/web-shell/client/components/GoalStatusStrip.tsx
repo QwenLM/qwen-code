@@ -50,10 +50,6 @@ export function GoalStatusStrip({
   if (!goal || goal.status === 'complete') return null;
 
   const canPause = goal.status === 'active';
-  // An evidence-limited stop is terminal for resume: the reducer rejects it
-  // with an invalid-transition 409, so the control must not be offered. The
-  // reducer's own rule lives in `canResumeGoal` -- keying off `limitKind`
-  // alone here missed Goals persisted before that field existed.
   const canResume = canResumeGoal(goal);
 
   return (

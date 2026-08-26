@@ -26,7 +26,7 @@ describe('workspace helpers', () => {
     for (const packagePath of [
       'packages/cli/package.json',
       'packages/core/package.json',
-      'packages/desktop/package.json',
+      'packages/desktop-shell/package.json',
       'packages/channels/base/package.json',
     ]) {
       writeFile(root, packagePath, '{}\n');
@@ -36,7 +36,7 @@ describe('workspace helpers', () => {
       getWorkspacePackageJsonPaths(root, [
         'packages/*',
         'packages/channels/base',
-        '!packages/desktop',
+        '!packages/desktop-shell',
       ]),
     ).toEqual([
       'packages/channels/base/package.json',
@@ -52,7 +52,7 @@ describe('workspace helpers', () => {
     for (const packagePath of [
       'packages/cli/package.json',
       'packages/core/package.json',
-      'packages/desktop/package.json',
+      'packages/desktop-shell/package.json',
       'packages/channels/base/package.json',
     ]) {
       writeFile(root, packagePath, '{}\n');
@@ -62,7 +62,7 @@ describe('workspace helpers', () => {
       getWorkspacePackageJsonPaths(root, [
         'packages\\*',
         'packages\\channels\\base',
-        '!packages\\desktop',
+        '!packages\\desktop-shell',
       ]),
     ).toEqual([
       'packages/channels/base/package.json',

@@ -1,7 +1,0 @@
-# Rewrite /s/assets/* to /assets/* (must be before SPA fallback)
-/s/assets/*  /assets/:splat  200
-
-# SPA routing - serve index.html for /s/* routes
-/s/*  /index.html  200
-
-# API routes are handled by functions (automatic in Cloudflare Pages)

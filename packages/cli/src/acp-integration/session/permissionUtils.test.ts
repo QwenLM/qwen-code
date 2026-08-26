@@ -129,6 +129,35 @@ describe('permissionUtils', () => {
         }),
       ]);
     });
+
+    it('can hide project persistence while keeping user persistence', () => {
+      const options = toPermissionOptions(
+        {
+          type: 'exec',
+          title: 'Confirm Shell Command',
+          command: 'git status',
+          rootCommand: 'git',
+          permissionRules: ['Bash(git status)'],
+          onConfirm: async () => undefined,
+        },
+        false,
+        {
+          allowProjectPersistence: false,
+          allowUserPersistence: true,
+        },
+      );
+
+      expect(options).not.toContainEqual(
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+        }),
+      );
+      expect(options).toContainEqual(
+        expect.objectContaining({
+          optionId: ToolConfirmationOutcome.ProceedAlwaysUser,
+        }),
+      );
+    });
   });
 
   describe('interactionMetaFields', () => {

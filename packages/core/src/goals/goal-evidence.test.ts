@@ -108,7 +108,7 @@ function complete(evidenceRefs: string[]): GoalTerminalProposal {
 }
 
 function blocked(
-  blockerKind: 'authority' | 'external' | 'repeated',
+  blockerKind: NonNullable<GoalTerminalProposal['blockerKind']>,
   evidenceRefs: string[],
 ): GoalTerminalProposal {
   return {
@@ -1041,6 +1041,59 @@ describe('Goal evidence lineage and blockers', () => {
       );
     },
   );
+
+  it('holds an infeasible blocker to external facts, not user input or prose', () => {
+    // Infeasibility is a claim about the world. A user can authorise a stop
+    // (that is `authority`), but cannot make an objective impossible, and
+    // the assistant saying it is impossible is exactly the exit this kind
+    // must not become -- so only a tool result can carry it.
+    const records = [
+      record('cursor', 'system'),
+      record('user', 'user', {
+        provenance: 'real_user',
+        turnId: 'turn-2',
+        text: 'Please target the v9 branch',
+      }),
+      record('probe', 'tool_result', {
+        provenance: 'tool_result',
+        turnId: 'turn-3',
+        toolResponse: { output: "fatal: branch 'v9' not found" },
+      }),
+      record('assistant', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+        text: 'The v9 branch does not exist, so this objective cannot be met.',
+      }),
+    ];
+
+    expect(() =>
+      validate(records, blocked('infeasible', ['assistant'])),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'infeasible_blocker_external_fact_required',
+      }),
+    );
+    expect(() =>
+      validate(records, blocked('infeasible', ['user', 'assistant'])),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'infeasible_blocker_external_fact_required',
+      }),
+    );
+    expect(
+      validate(records, blocked('infeasible', ['probe', 'assistant']))
+        .citedRecords[0],
+    ).toMatchObject({ uuid: 'probe', proofKind: 'external_fact' });
+    // Like the other immediate blockers, it cannot leave newer evidence
+    // uncited: a later record could contradict the impossibility.
+    expect(() =>
+      validate(records, blocked('infeasible', ['probe'])),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'immediate_blocker_newer_evidence_required',
+      }),
+    );
+  });
 
   it.each(['authority', 'external'] as const)(
     'gates an immediate %s blocker on checkpoint claims like raw evidence',

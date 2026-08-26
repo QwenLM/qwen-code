@@ -2257,14 +2257,22 @@ export const useGeminiStream = (
       const warningSuffix = eventValue?.warning
         ? `\n⚠️ ${eventValue.warning}`
         : '';
+      // Estimated counts (#9309) get a '~' prefix so the notice doesn't read
+      // as an API-reported figure on a different scale than a later banner.
+      const formatCount = (count?: number, isEstimated?: boolean) =>
+        count === undefined
+          ? 'unknown'
+          : isEstimated
+            ? `~${count}`
+            : String(count);
       return addItem(
         {
           type: 'info',
           text:
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${eventValue?.originalTokenCount ?? 'unknown'} to ` +
-            `${eventValue?.newTokenCount ?? 'unknown'} tokens).` +
+            `${formatCount(eventValue?.originalTokenCount, eventValue?.originalTokenCountIsEstimated)} to ` +
+            `${formatCount(eventValue?.newTokenCount, eventValue?.newTokenCountIsEstimated)} tokens).` +
             warningSuffix,
         },
         Date.now(),
@@ -3573,6 +3581,7 @@ export const useGeminiStream = (
                       goalId: queuedGoal.permit.goalId,
                       revision: queuedGoal.permit.revision,
                       objective: queuedGoal.continuationContext,
+                      windDown: queuedGoal.windDown,
                       verifierFeedback: queuedGoal.verifierFeedback,
                     }),
                     shouldProceed: true,
