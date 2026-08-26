@@ -2355,7 +2355,7 @@ describe('ResponsesPipeline', () => {
   });
 
   describe('SSE content-type guard', () => {
-    function respondWith(contentType: string, lines: string[]) {
+    function respondWith(contentType: string | null, lines: string[]) {
       fetchMock.mockResolvedValue({
         ok: true,
         status: 200,
@@ -2398,6 +2398,14 @@ describe('ResponsesPipeline', () => {
         await expect(collect()).rejects.toThrow(/non-SSE content-type/);
       },
     );
+
+    // A response that declares nothing is not a response that declares SSE:
+    // the same NDJSON body the labelled cases reject was accepted whenever
+    // the header was simply absent, and framed into zero candidates.
+    it('rejects a 200 response that declares no content-type at all', async () => {
+      respondWith(null, NDJSON_LINES);
+      await expect(collect()).rejects.toThrow(/non-SSE content-type/);
+    });
 
     it('control: accepts text/event-stream case-insensitively and with parameters', async () => {
       respondWith('Text/Event-Stream; charset=utf-8', [

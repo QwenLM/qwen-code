@@ -695,10 +695,14 @@ export class ResponsesPipeline {
     // Only real SSE: this reader parses `event:`/`data:` frames and nothing
     // else, so accepting a line-delimited-JSON media type it cannot frame
     // yielded an empty, silently successful turn. Matched case-insensitively
-    // and with the usual parameters (`; charset=utf-8`) allowed.
-    if (contentType && !/^\s*text\/event-stream\s*(?:;|$)/i.test(contentType)) {
+    // and with the usual parameters (`; charset=utf-8`) allowed. An absent
+    // header is not an SSE declaration either -- an unlabelled NDJSON body
+    // reaches the same reader and produces the same silent empty turn.
+    if (!/^\s*text\/event-stream\s*(?:;|$)/i.test(contentType)) {
       throw new Error(
-        `Responses API returned non-SSE content-type: ${contentType}`,
+        `Responses API returned non-SSE content-type: ${
+          contentType || '<missing>'
+        }`,
       );
     }
 
