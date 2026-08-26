@@ -1714,7 +1714,10 @@ export function composeReview(
   // write time (and again at read), so a build-side projection over the
   // uncapped title never meets a previous locator that outruns the cap —
   // and every entry side below caps BEFORE projecting, the serializer's
-  // order, never after.
+  // order, never after. The two channels that CARRY an id — a re-filed
+  // deferral title, a re-voiced reroute title — strip it BEFORE the window
+  // too: windowing with the id still on shortens the window by the prefix,
+  // and the id-less previous locator never meets it.
   const standingClaims = new Set(
     (postedLedger?.findings ?? [])
       .map((g) => claimLocator(g.title.slice(0, LEDGER_MAX_TITLE)))
@@ -1726,16 +1729,18 @@ export function composeReview(
   // `file:line` locator under `claimLocator` while an inline-drafted
   // predecessor's title projects to the claim text — the two projections
   // never meet. Join the previous list against the typed entries
-  // themselves, on (file, claim), the entry side capped the way the
-  // previous list was normalised. Read ONLY where the build above already
-  // parsed the same channel — a null build returned before any parse, so
-  // this adds no throw the round did not already have.
+  // themselves, on (file, claim), the entry side stripped of its carried id
+  // and capped the way the previous list was normalised. Read ONLY where
+  // the build above already parsed the same channel — a null build returned
+  // before any parse, so this adds no throw the round did not already have.
   const relocatedClaims = new Set(
     (postedLedger === null ? [] : toDeferredEntries(input.deferredSuggestions))
       .filter((e) => e.severity === 'Critical')
       .map(
         (e) =>
-          `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(e.title.slice(0, LEDGER_MAX_TITLE))}`,
+          `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(
+            e.title.replace(LEDGER_ID_READBACK, '').slice(0, LEDGER_MAX_TITLE),
+          )}`,
       ),
   );
   // The reroute output is a third channel the joins above are blind to: a
@@ -1747,7 +1752,9 @@ export function composeReview(
   const reroutedClaims = new Set(
     reroute.entries.map(
       (e) =>
-        `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(e.title.slice(0, LEDGER_MAX_TITLE))}`,
+        `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(
+          e.title.replace(LEDGER_ID_READBACK, '').slice(0, LEDGER_MAX_TITLE),
+        )}`,
     ),
   );
   const closuresThisRound: LedgerClosure[] =

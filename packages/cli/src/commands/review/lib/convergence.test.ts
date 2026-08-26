@@ -782,6 +782,45 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
     ).toBeNull();
   });
 
+  it('stays silent when the previous generation is offered a STALE closure', () => {
+    // Side-file admission accepts any closure with `1 ≤ r ≤ markerRound`,
+    // so a hand-edited or planted file — the route `compose-review.ts`
+    // itself names — can carry one from an EARLIER round. It must not
+    // stand in for the missing previous generation, or the note fires on
+    // one real closure plus a stale one.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(1, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R3-1', 'src/a.ts'), title: 'gen 2' }],
+      }),
+    ).toBeNull();
+  });
+
+  it('stays silent when the current generation is offered a STALE closure', () => {
+    // The mirror: a previous-round `r` inside THIS round's minted set does
+    // not supply the current generation either.
+    expect(
+      diagnoseConvergence({
+        round: 3,
+        posted: 1,
+        prev: {
+          findings: [c('R2-1', 'src/a.ts')],
+          closed: [closedAt(2, 'R1-1', 'src/a.ts')],
+        },
+        drafts: [],
+        closuresThisRound: [closedAt(2, 'R2-1', 'src/a.ts')],
+        thisRoundFindings: [{ ...c('R3-1', 'src/a.ts'), title: 'gen 2' }],
+      }),
+    ).toBeNull();
+  });
+
   it('stays silent when the same-file finding is CARRIED, not new', () => {
     // A still-standing Critical keeps its original id; the chain needs a
     // FRESH one — otherwise the note would fire every round over a file

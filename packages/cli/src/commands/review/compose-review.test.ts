@@ -13546,6 +13546,51 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
   });
 
+  it('mints no closure for a long claim re-filed under its carried id through the deferral channel', () => {
+    // The typed-channel join's projection symmetry, same root as the reroute
+    // arm: a re-filed deferral title can CARRY the id, so a window taken
+    // BEFORE the id is stripped is short by the prefix — the previous
+    // list's id-less, write-capped locator never meets it, and the
+    // still-standing claim mints a closure in the body that re-posts it.
+    // The lead again puts the dash across the cap boundary, so the entry
+    // side must cap BEFORE locating, the serializer's order.
+    const lead = `the re-filed claim ${'x'.repeat(LEDGER_MAX_TITLE - 21)}`;
+    expect(lead).toHaveLength(LEDGER_MAX_TITLE - 2);
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/auth.ts',
+            title: `${lead} — the original wording`,
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/auth.ts',
+          line: 88,
+          source: 'test',
+          severity: 'Critical',
+          title: `R10-1: ${lead} — re-filed under the channel`,
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    // The re-filed claim rides the work list, fresh-stamped …
+    expect(marker.findings.some((f) => f.sev === 'C')).toBe(true);
+    // … so its still-standing original mints no closure — while a truly
+    // vanished same-file Critical beside it still does.
+    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
+  });
+
   it('mints no closure for a Critical re-voiced as a floor-stripped Suggestion', () => {
     // The floor reroute strips a drafted Suggestion that RE-VOICES a
     // previous Critical back to the deferral channel: the claim leaves the
@@ -13589,6 +13634,54 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // is NOT in the chain's second generation.
     expect(r.body).toContain('R9-1 → R10-2 → R11-1');
     expect(r.body).not.toContain('R10-1/R10-2');
+  });
+
+  it('mints no closure for a long claim re-voiced as a floor-stripped Suggestion', () => {
+    // The reroute join's projection symmetry, at the boundary: the rerouted
+    // entry's title CARRIES the id (`R10-1: …`) by construction, so a window
+    // taken BEFORE the id is stripped is short by the prefix — the previous
+    // list's id-less, write-capped locator never meets it, and the
+    // still-standing claim mints a closure in the very body whose deferral
+    // line still carries it. The lead is chosen so the dash also straddles
+    // the cap boundary: the stored title's window ends mid-dash, so the
+    // entry side must cap BEFORE locating — the serializer's order — or the
+    // two windows disagree again at exactly this lead length.
+    const lead = `the re-voiced claim ${'x'.repeat(LEDGER_MAX_TITLE - 22)}`;
+    expect(lead).toHaveLength(LEDGER_MAX_TITLE - 2);
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: `${lead} — the original wording`,
+          },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 5, body: '**[Critical]** gen 2' },
+        {
+          path: 'src/f.ts',
+          line: 5,
+          body: `**[Suggestion]** R10-1: ${lead} — now looks minor`,
+        },
+      ],
+    });
+    // The reroute fired — the claim is gone from the posting set …
+    expect(r.floorEnforced).toEqual([1]);
+    // … and still it mints no closure …
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    // … and the sentinel carries no fabricated lineage for it: the false
+    // closure would have fired the chain over the round-10 generation.
+    expect(r.body).not.toContain('⚠️ Divergence:');
   });
 
   it("names no re-minted re-post as the chain's fresh generation", () => {
@@ -13724,7 +13817,8 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // into the chain join and builds unbounded id arrays in the diagnosis.
     // Sixty planted entries, cap fifty: the chain's first generation shows
     // six ids and names the forty-four the cap shed — not the uncapped
-    // fifty-four.
+    // fifty-four. And WHICH fifty: the NEWEST — an oldest-kept cap renders
+    // the very same tail while shedding the end the chain exists to read.
     const closed = Array.from({ length: LEDGER_MAX_CLOSED + 10 }, (_, i) => ({
       r: 10,
       id: `R9-${i}`,
@@ -13747,6 +13841,10 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('⚠️ Divergence:');
     expect(r.body).toContain('… (+44)');
     expect(r.body).not.toContain('… (+54)');
+    // The rendered ids themselves pin the keeping-the-NEWEST direction:
+    // `R9-10` is the first survivor of the cap, `R9-9` the first shed.
+    expect(r.body).toContain('R9-10');
+    expect(r.body).not.toContain('R9-9');
   });
 });
 

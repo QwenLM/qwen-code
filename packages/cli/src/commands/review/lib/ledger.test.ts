@@ -751,14 +751,21 @@ describe('ledger marker — the closure list (#9905)', () => {
   });
 
   it('binds the count cap on read, keeping the NEWEST entries', () => {
+    // Fed a RAW marker, not a serialize round-trip: the write side already
+    // sheds to the cap, so a round-tripped list never reaches the
+    // parse-side slice — the half that binds a hand-edited or planted
+    // marker no serializer ever capped.
     const closed = Array.from({ length: LEDGER_MAX_CLOSED + 10 }, (_, i) => ({
       r: 2,
       id: `R1-${i}`,
       f: 'a.ts',
     }));
-    const back = parseLedger(serializeLedger({ ...LEDGER, closed }))!;
+    const back = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":2,"findings":[],"closed":${JSON.stringify(closed)}} -->`,
+    )!;
     expect(back.closed).toHaveLength(LEDGER_MAX_CLOSED);
     expect(back.closed![0]!.id).toBe('R1-10');
+    expect(back.closed![LEDGER_MAX_CLOSED - 1]!.id).toBe('R1-59');
   });
 
   it('refuses closure ids the finding grammar refuses — squats, links, empty', () => {
@@ -790,6 +797,26 @@ describe('ledger marker — the closure list (#9905)', () => {
     expect(back.closed).toEqual([{ r: 2, id: 'R1-2', f: 'a.ts' }]);
   });
 
+  it('admits a same-round closure id ONLY at the round cap — the escape hatch', () => {
+    // At the cap, consecutive rounds re-stamp the same `R<cap>-*` id space,
+    // so a minted closure's id round EQUALS its closure round — admitted
+    // only via the escape hatch. Below the cap the same shape spells a
+    // finding closed the very round it was minted, and the admission test
+    // refuses it like the planted `R2-1` above.
+    const atCap = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":${LEDGER_MAX_ROUND},"findings":[],` +
+        `"closed":[{"r":${LEDGER_MAX_ROUND},"id":"R${LEDGER_MAX_ROUND}-1","f":"a.ts"}]} -->`,
+    )!;
+    expect(atCap.closed).toEqual([
+      { r: LEDGER_MAX_ROUND, id: `R${LEDGER_MAX_ROUND}-1`, f: 'a.ts' },
+    ]);
+    const belowCap = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":${LEDGER_MAX_ROUND},"findings":[],` +
+        `"closed":[{"r":${LEDGER_MAX_ROUND - 1},"id":"R${LEDGER_MAX_ROUND}-1","f":"a.ts"}]} -->`,
+    )!;
+    expect(belowCap.closed ?? []).toEqual([]);
+  });
+
   it('sheds closures BEFORE the anchor pair, and never sets `dropped` for them', () => {
     // The cascade order is the priority order: advisory history goes before
     // the anchor (a full re-review) and the work list (a ruling owed). A
@@ -809,9 +836,13 @@ describe('ledger marker — the closure list (#9905)', () => {
         line: 99999,
         title: 'x'.repeat(LEDGER_MAX_TITLE),
       })),
+      // Ids the admission test ADMITS — the shape and length legal, the
+      // id round below the closure round: an invalid id is dropped by the
+      // serializer's admission filter before the byte cascade ever runs,
+      // and this test would pass vacuously over the shed stage it names.
       closed: Array.from({ length: LEDGER_MAX_CLOSED }, (_, i) => ({
         r: 9,
-        id: `R8-${i}-${'y'.repeat(LEDGER_MAX_TITLE)}`,
+        id: `R8-${i}`,
         f: 'p/'.repeat(100).slice(0, LEDGER_MAX_FILE),
       })),
       sha: 'deadbeef00112233',
