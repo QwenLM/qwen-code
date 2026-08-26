@@ -2319,6 +2319,15 @@ describe.skipIf(!loaderOracleAvailable)('describeWorkerTlsTrustGaps', () => {
     const blocks = TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT.match(
       /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
     );
+    // Index 1 must hold the short-lived twin the boundary clock sits on;
+    // a reordered fixture would silently un-pin the notAfter edge below.
+    const shortTwin = new X509Certificate(blocks![1]);
+    if (
+      new Date(shortTwin.validTo).getTime() !==
+      new Date('2026-08-22T12:12:20Z').getTime()
+    ) {
+      throw new Error('renewed-root fixture order changed');
+    }
     return `${blocks![0]}\n${blocks![1]}\n`;
   };
 
