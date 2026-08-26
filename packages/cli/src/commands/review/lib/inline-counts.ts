@@ -103,16 +103,26 @@ export function carriedClaimLine(body: string): string | null {
  * restatement of the marker slice in either consumer is the drift class
  * this file's header exists to prevent. Null when the body opens with
  * neither marker.
+ *
+ * The strip iterates the WHOLE stacked marker run: a looping model drafts
+ * stacked markers, and every strip that decides what POSTS iterates them to
+ * a fixpoint (`stripSeverityPrefix`) — a readback that stopped at the first
+ * marker hid a carried id behind the second, so the gate saw no re-post
+ * while the Aone relocate leg carried the id standing (#9940 review).
  */
 export function markerStrippedBody(body: string): string | null {
-  const sev = severityOf({ body });
-  if (!sev) return null;
-  const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
-  return body
-    .replace(LEADING_INVISIBLE_RE, '')
-    .slice(marker.length)
-    .replace(LEADING_INVISIBLE_RE, '')
-    .replace(/^\s*[:：]?\s*/, '');
+  if (severityOf({ body }) === null) return null;
+  let current = body;
+  for (;;) {
+    const sev = severityOf({ body: current });
+    if (sev === null) return current;
+    const marker = sev === 'critical' ? CRITICAL_PREFIX : SUGGESTION_PREFIX;
+    current = current
+      .replace(LEADING_INVISIBLE_RE, '')
+      .slice(marker.length)
+      .replace(LEADING_INVISIBLE_RE, '')
+      .replace(/^\s*[:：]?\s*/, '');
+  }
 }
 
 /** How many drafted comments open with each severity marker. */

@@ -105,7 +105,6 @@ import {
   carriedClaimLine,
   countInlineFindings,
   severityOf,
-  stripSeverityPrefix,
 } from './lib/inline-counts.js';
 import { validateNewSideAnchors } from './lib/anchors.js';
 import {
@@ -211,11 +210,10 @@ function relocatedAoneCriticalEntry(c: ReviewComment): string {
   // footer text and post it as the claim (the separator strip eats the
   // newline+colon and the footer's first line becomes the "claim").
   const body = typeof c.body === 'string' ? stripReviewFooter(c.body) : null;
-  const rawClaim = body === null ? null : carriedClaimLine(body);
-  // A looping model drafts stacked markers and every other strip iterates
-  // to a fixpoint; compose quotes this entry as-is behind the template
+  // The readback strip iterates the WHOLE stacked-marker run a looping
+  // model drafts; compose quotes this entry as-is behind the template
   // marker, so a carried second marker would post inside the blocker line.
-  const claim = rawClaim === null ? null : stripSeverityPrefix(rawClaim);
+  const claim = body === null ? null : carriedClaimLine(body);
   // The gate only relocates bodies with substance past the marker, but the
   // claim line itself can still be empty (content on a later line) or a
   // fence delimiter (a marker-alone body leading into a fence) — junk the
@@ -732,19 +730,22 @@ function inconsistencies(
     // The still-standing re-post's other channel — Step 6's rule for an
     // UNANCHORABLE carried finding sends it to the body with its id, and
     // buildLedger carries it from there. The same read the builder
-    // performs: the id LEADS the entry, or the entry carries none.
-    const bodyCriticals = authored
-      ? authored.bodyCriticals
-      : payload.state?.bodyCriticals;
-    if (Array.isArray(bodyCriticals)) {
-      bodyCriticals.forEach((entry, i) => {
-        if (typeof entry !== 'string') return;
-        const { id } = bodyCriticalClaim(entry);
-        if (id !== undefined && fixedIds.has(id)) {
-          problems.push(contradiction(`state.bodyCriticals[${i}]`, id));
-        }
-      });
-    }
+    // performs: the entries pass through compose's ingestion first — the
+    // collapsed one-line shape whose rejoined forged footer span strips,
+    // where the raw multi-line entry can hide the id behind a hard break
+    // (#9940 review) — and the id LEADS the entry, or the entry carries
+    // none. Ingestion is index-preserving, so the refusal cites the
+    // authored position; a field compose itself refuses carries nothing
+    // this gate could contradict.
+    const ingestedCriticals = tryIngestBodyCriticals(
+      authored ? authored.bodyCriticals : payload.state?.bodyCriticals,
+    );
+    ingestedCriticals?.forEach((entry, i) => {
+      const { id } = bodyCriticalClaim(entry);
+      if (id !== undefined && fixedIds.has(id)) {
+        problems.push(contradiction(`state.bodyCriticals[${i}]`, id));
+      }
+    });
   }
 
   if (!EVENTS.has(event)) {

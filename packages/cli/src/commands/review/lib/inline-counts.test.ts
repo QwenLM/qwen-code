@@ -96,6 +96,22 @@ describe('carriedClaimLine — the shared readback strip', () => {
     expect(carriedClaimLine('**[Critical]** first\nsecond')).toBe('first');
     expect(carriedClaimLine('no marker')).toBe(null);
   });
+
+  it('strips the WHOLE stacked marker run — the readback and the post-time strip agree (#9940 review)', () => {
+    // A looping model drafts stacked markers, and the strips that decide
+    // what POSTS iterate them to a fixpoint; a readback that stopped at
+    // the first marker hid a carried id behind the second — the gate saw
+    // no re-post while the relocate leg carried the id standing.
+    expect(
+      carriedClaimLine('**[Critical]** **[Suggestion]** R1-2: still stands'),
+    ).toBe('R1-2: still stands');
+    expect(
+      carriedClaimLine('**[Suggestion]** **[Critical]** R3-4: the claim'),
+    ).toBe('R3-4: the claim');
+    expect(
+      carriedClaimLine('**[Critical]**<!-- x -->**[Suggestion]** R1-2: claim'),
+    ).toBe('R1-2: claim');
+  });
 });
 
 describe('severityOf — one acceptance set with the strip', () => {

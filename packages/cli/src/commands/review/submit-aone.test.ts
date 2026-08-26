@@ -2315,6 +2315,39 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(submitAoneMock).not.toHaveBeenCalled();
   });
 
+  it('a stacked-marker carried re-post is refused — the gate reads the whole marker run the relocate leg strips (#9940 review)', () => {
+    // The relocate leg strips markers to a fixpoint, so the relocated
+    // entry leads with R1-2 and the ledger carries it standing; the gate
+    // stopped at ONE marker and saw no id, posting a body that re-asserts
+    // R1-2 as a blocker while the same pass resolves R1-2's thread fixed.
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+    });
+    const review = writeReview({
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 4,
+          body: '**[Critical]** **[Suggestion]** R1-2: still stands',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    });
+    let message = '';
+    try {
+      runSubmit(base({ review }), 'unknown', { defaultComment: false });
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/comments\[0\] re-posts R1-2/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
   it('discloses the anomalous shape when the captured diff parses to no files', () => {
     // A corrupt capture validates nothing: every anchor fails as "file is
     // not in the diff" and the degrade names the zero-file anomaly — safe,

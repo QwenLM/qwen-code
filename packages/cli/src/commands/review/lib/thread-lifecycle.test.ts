@@ -481,6 +481,20 @@ describe('stampCarriedId — the write side of the readback', () => {
     expect(stripSeverityPrefix(stamped)).toBe('R2-3: the claim');
   });
 
+  it('reads a carried id past a stacked-marker run — no re-mint into a double-id line (#9940 review)', () => {
+    // The readback strips the whole marker run: a stop at the first
+    // marker left the carry unrecognized, so the stamp spliced a fresh id
+    // in front of it (`R2-3: R1-2: …`) while the Aone relocate leg —
+    // which iterates — carried the id standing and the gate saw none.
+    const stacked = '**[Critical]** **[Suggestion]** R1-2: still stands';
+    expect(carriedFindingOf(stacked)).toEqual({
+      id: 'R1-2',
+      fixInduced: false,
+    });
+    // The model's carry stays verbatim — no double-id stamp.
+    expect(stampCarriedId(stacked, 'R2-3')).toBe(stacked);
+  });
+
   it('stamps a glued multi-line comment — the id still reads back', () => {
     const stamped = stampCarriedId(
       '**[Critical]**<!--\nrender-note\n-->the claim',

@@ -4226,6 +4226,45 @@ describe('the thread lifecycle', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
+  it('refuses a body Critical whose forged footer span splits at a hard break (#9940 review)', () => {
+    // The raw entry splits the forged footer span across a CommonMark
+    // hard break: no span strips on the raw multi-line form, so a raw
+    // read sees no id past it. Compose's ingestion collapses the entry
+    // onto one line — the span rejoins, strips, and the ledger carries
+    // R1-2 standing. The gate reads that same ingested shape buildLedger
+    // reads, so a fixed ruling beside it is refused at the authored index.
+    const review = payload([], {
+      bodyCriticals: [
+        '**[Critical]** _— x via Qwen  \nCode /review_ R1-2: still stands',
+      ],
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+    });
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /state\.bodyCriticals\[0\] re-posts R1-2/,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('the same hard-break entry posts without the fixed ruling — and the ledger carries its id (#9940 review)', () => {
+    // The flip half of the refusal cell: the entry alone is a standing
+    // re-post, and the marker records the id the raw read missed.
+    const planPath = file('lifecycle-plan.json', { prNumber: 6771 });
+    const review = payload([], {
+      planPath,
+      bodyCriticals: [
+        '**[Critical]** _— x via Qwen  \nCode /review_ R1-2: still stands',
+      ],
+    });
+    runSubmit(authorizedPost({ review }));
+    const body = reviewPost().body as string;
+    expect(body).toContain('R1-2: still stands');
+    const ledger = parseLedger(body);
+    expect(ledger?.findings).toEqual([
+      { id: 'R1-2', sev: 'C', file: '(body)', title: 'still stands' },
+    ]);
+    expect(stdoutJson()).toMatchObject({ posted: true });
+  });
+
   // A retired id MENTIONED in prose is a cross-reference, not a re-report:
   // the ledger does not carry it, the next round rules on nothing under it,
   // and the thread it names is legitimately closed. Rounds 3-5 of this
