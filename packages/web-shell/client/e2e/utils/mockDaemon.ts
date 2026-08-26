@@ -725,7 +725,7 @@ function isDaemonPath(path: string): boolean {
     /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/publish(?:-config)?\/?$/.test(
       path,
     ) ||
-    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/(?:cloudflare|vercel|netlify)\/setup\/?$/.test(
+    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/(?:cloudflare|vercel|netlify|oss)\/setup\/?$/.test(
       path,
     ) ||
     /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
@@ -917,7 +917,7 @@ function isDaemonRoute(method: string, path: string): boolean {
   if (method === 'POST' && path === '/workspace/artifact/publish') return true;
   if (
     method === 'POST' &&
-    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/(?:cloudflare|vercel|netlify)\/setup\/?$/.test(
+    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/(?:cloudflare|vercel|netlify|oss)\/setup\/?$/.test(
       path,
     )
   ) {
@@ -1056,7 +1056,7 @@ async function handleDaemonRoute(
   }
   if (
     method === 'POST' &&
-    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/(?:cloudflare|vercel|netlify)\/setup\/?$/.test(
+    /^(?:\/workspaces\/[^/]+)?\/(?:workspace\/)?artifact\/(?:cloudflare|vercel|netlify|oss)\/setup\/?$/.test(
       path,
     )
   ) {

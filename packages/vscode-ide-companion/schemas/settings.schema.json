@@ -3692,7 +3692,8 @@
                     "enum": [
                       "cloudflare",
                       "vercel",
-                      "netlify"
+                      "netlify",
+                      "oss"
                     ]
                   },
                   "targetId": {

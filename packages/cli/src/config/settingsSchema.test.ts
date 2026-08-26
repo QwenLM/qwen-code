@@ -171,6 +171,13 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('allows OSS publication history records', () => {
+      expect(
+        getSettingsSchema().artifact.properties.share.properties.publications
+          .items.properties?.provider?.enum,
+      ).toContain('oss');
+    });
+
     it('should expose cumulative tool result threshold in clearContextOnIdle', () => {
       const threshold =
         getSettingsSchema().context.properties.clearContextOnIdle.properties

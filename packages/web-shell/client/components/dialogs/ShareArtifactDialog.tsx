@@ -16,6 +16,7 @@ import {
   ExternalLinkIcon,
   RefreshCwIcon,
   RocketIcon,
+  ServerIcon,
   Share2Icon,
   SquareIcon,
 } from 'lucide-react';
@@ -40,10 +41,14 @@ interface ShareArtifactDialogProps {
   onClose: () => void;
 }
 
-const PROVIDERS: DaemonArtifactPublishProviderKind[] = [
+const QUICK_PROVIDERS: DaemonArtifactPublishProviderKind[] = [
   'cloudflare',
   'vercel',
   'netlify',
+];
+const PROVIDERS: DaemonArtifactPublishProviderKind[] = [
+  ...QUICK_PROVIDERS,
+  'oss',
 ];
 const SETUP_STAGES: DaemonArtifactProviderSetupStage[] = [
   'install',
@@ -111,9 +116,11 @@ function formatPublishedAt(value: string | undefined): string | undefined {
 function SetupProgress({
   stage,
   hasError,
+  provider,
 }: {
   stage: DaemonArtifactProviderSetupStage;
   hasError: boolean;
+  provider: DaemonArtifactPublishProviderKind;
 }) {
   const { t } = useI18n();
   const current = SETUP_STAGES.indexOf(stage);
@@ -171,7 +178,11 @@ function SetupProgress({
                   : 'text-muted-foreground'
               }`}
             >
-              {t(`share.stage.${item}`)}
+              {t(
+                provider === 'oss'
+                  ? `share.oss.stage.${item}`
+                  : `share.stage.${item}`,
+              )}
             </span>
           </li>
         );
@@ -203,6 +214,15 @@ export function ShareArtifactDialog({
   const [result, setResult] = useState<DaemonArtifactPublishResult | null>(
     null,
   );
+  const [ossForm, setOssForm] = useState({
+    endpoint: '',
+    bucket: '',
+    publicBaseUrl: '',
+    keyPrefix: 'artifacts',
+    accessKeyId: '',
+    accessKeySecret: '',
+    securityToken: '',
+  });
 
   const mountedRef = useRef(true);
   const activeOperationRef = useRef<AbortController | null>(null);
@@ -271,6 +291,7 @@ export function ShareArtifactDialog({
         cloudflare: message,
         vercel: message,
         netlify: message,
+        oss: message,
       });
     } finally {
       if (mountedRef.current) setCheckingConfig(false);
@@ -280,6 +301,18 @@ export function ShareArtifactDialog({
   useEffect(() => {
     void loadConfig();
   }, [loadConfig]);
+
+  const ossTarget = config?.setups.oss?.oss;
+  useEffect(() => {
+    if (!ossTarget) return;
+    setOssForm((current) => ({
+      ...current,
+      endpoint: ossTarget.endpoint,
+      bucket: ossTarget.bucket,
+      publicBaseUrl: ossTarget.publicBaseUrl,
+      keyPrefix: ossTarget.keyPrefix || 'artifacts',
+    }));
+  }, [ossTarget]);
 
   useEffect(() => {
     if (!pollingProvider) return undefined;
@@ -404,6 +437,53 @@ export function ShareArtifactDialog({
     }
   };
 
+  const configureOss = async () => {
+    const controller = new AbortController();
+    activeOperationRef.current?.abort();
+    activeOperationRef.current = controller;
+    setSetupBusy(true);
+    setCurrentError();
+    setConfigError(false);
+    try {
+      const prepared = await workspaceActions.setupArtifactProvider(
+        'oss',
+        {
+          action: 'connect',
+          endpoint: ossForm.endpoint,
+          bucket: ossForm.bucket,
+          publicBaseUrl: ossForm.publicBaseUrl,
+          keyPrefix: ossForm.keyPrefix,
+          ...(ossForm.accessKeyId ? { accessKeyId: ossForm.accessKeyId } : {}),
+          ...(ossForm.accessKeySecret
+            ? { accessKeySecret: ossForm.accessKeySecret }
+            : {}),
+          ...(ossForm.securityToken
+            ? { securityToken: ossForm.securityToken }
+            : {}),
+        },
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || !mountedRef.current) return;
+      applyConfig(prepared);
+      setOssForm((current) => ({
+        ...current,
+        accessKeyId: '',
+        accessKeySecret: '',
+        securityToken: '',
+      }));
+    } catch (err) {
+      if (controller.signal.aborted || !mountedRef.current) return;
+      setCurrentError(
+        t('share.oss.setupFailed', { message: extractErrorDetail(err) }),
+      );
+    } finally {
+      if (activeOperationRef.current === controller) {
+        activeOperationRef.current = null;
+        if (mountedRef.current) setSetupBusy(false);
+      }
+    }
+  };
+
   const ready = setup?.stage === 'ready';
   const upload = async (force = false) => {
     if (!ready) {
@@ -450,21 +530,37 @@ export function ShareArtifactDialog({
   const stage = setup?.stage ?? 'install';
   const statusText = checkingConfig
     ? t('share.checking', { provider: providerName })
-    : stage === 'install'
-      ? t('share.installStatus', { provider: providerName })
-      : stage === 'authenticate'
-        ? t(polling ? 'share.authorizationPending' : 'share.authorizeStatus', {
-            provider: providerName,
-          })
-        : stage === 'connect'
-          ? setup?.accounts && setup.accounts.length > 1
-            ? t('share.chooseAccount', { provider: providerName })
-            : t('share.connectStatus', { provider: providerName })
-          : t('share.ready', { provider: providerName });
+    : selectedProvider === 'oss'
+      ? stage === 'install'
+        ? t('share.oss.storageStatus')
+        : stage === 'authenticate'
+          ? t('share.oss.credentialsStatus')
+          : stage === 'connect'
+            ? t('share.oss.domainStatus')
+            : t('share.ready', { provider: providerName })
+      : stage === 'install'
+        ? t('share.installStatus', { provider: providerName })
+        : stage === 'authenticate'
+          ? t(
+              polling ? 'share.authorizationPending' : 'share.authorizeStatus',
+              {
+                provider: providerName,
+              },
+            )
+          : stage === 'connect'
+            ? setup?.accounts && setup.accounts.length > 1
+              ? t('share.chooseAccount', { provider: providerName })
+              : t('share.connectStatus', { provider: providerName })
+            : t('share.ready', { provider: providerName });
   const detailCurrent = checkingConfig
     ? t('share.details.current.checking')
     : setupBusy
-      ? t('share.details.current.running', { provider: providerName })
+      ? t(
+          selectedProvider === 'oss'
+            ? 'share.oss.details.running'
+            : 'share.details.current.running',
+          { provider: providerName },
+        )
       : polling
         ? t('share.details.current.authorizing', { provider: providerName })
         : statusText;
@@ -475,12 +571,21 @@ export function ShareArtifactDialog({
         target: setup.project.name,
       })
     : targetType;
+  const ossReady = config?.setups.oss?.stage === 'ready';
+  const ossPublication = config?.publications?.oss;
+  const ossProviderStatusKey = ossPublication
+    ? ossPublication.upToDate
+      ? 'share.providerStatus.published'
+      : 'share.providerStatus.updated'
+    : ossReady
+      ? 'share.providerStatus.ready'
+      : 'share.providerStatus.setup';
 
   return (
     <DialogShell
       title={t('share.title')}
       subtitle={title}
-      size="md"
+      size="lg"
       onClose={handleClose}
     >
       {result ? (
@@ -570,71 +675,121 @@ export function ShareArtifactDialog({
           className="flex flex-col gap-5"
           onSubmit={(event) => {
             event.preventDefault();
-            void upload();
+            void (selectedProvider === 'oss' ? configureOss() : upload());
           }}
         >
-          <div
-            className="grid grid-cols-3 gap-1.5 rounded-xl border border-border bg-muted/25 p-1.5"
-            role="group"
-            aria-label={t('share.providerLabel')}
-          >
-            {PROVIDERS.map((provider) => {
-              const selected = selectedProvider === provider;
-              const providerReady = config?.setups[provider]?.stage === 'ready';
-              const providerPublication = config?.publications?.[provider];
-              const providerStatusKey = providerPublication
-                ? providerPublication.upToDate
-                  ? 'share.providerStatus.published'
-                  : 'share.providerStatus.updated'
-                : providerReady
-                  ? 'share.providerStatus.ready'
-                  : 'share.providerStatus.setup';
-              return (
-                <Button
-                  key={provider}
-                  type="button"
-                  variant="ghost"
-                  className={`h-auto min-w-0 justify-start gap-2 rounded-lg px-2.5 py-2 text-xs sm:px-3 ${
-                    selected
-                      ? 'border-border bg-background text-foreground shadow-sm hover:bg-background'
-                      : 'text-muted-foreground'
-                  }`}
-                  onClick={() => setSelectedProvider(provider)}
-                  disabled={setupBusy || uploading}
-                  data-share-provider={provider}
-                  aria-pressed={selected}
-                >
-                  <span
-                    className={`size-1.5 shrink-0 rounded-full ${
-                      providerReady
-                        ? 'bg-[var(--success-color)]'
-                        : selected
-                          ? 'bg-primary'
-                          : 'bg-muted-foreground/45'
+          <div role="group" aria-label={t('share.providerLabel')}>
+            <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-border bg-muted/25 p-1.5">
+              {QUICK_PROVIDERS.map((provider) => {
+                const selected = selectedProvider === provider;
+                const providerReady =
+                  config?.setups[provider]?.stage === 'ready';
+                const providerPublication = config?.publications?.[provider];
+                const providerStatusKey = providerPublication
+                  ? providerPublication.upToDate
+                    ? 'share.providerStatus.published'
+                    : 'share.providerStatus.updated'
+                  : providerReady
+                    ? 'share.providerStatus.ready'
+                    : 'share.providerStatus.setup';
+                return (
+                  <Button
+                    key={provider}
+                    type="button"
+                    variant="ghost"
+                    className={`h-auto min-w-0 justify-start gap-2 rounded-lg px-2.5 py-2 text-xs sm:px-3 ${
+                      selected
+                        ? 'border-border bg-background text-foreground shadow-sm hover:bg-background'
+                        : 'text-muted-foreground'
                     }`}
-                    aria-hidden="true"
-                  />
-                  <span className="min-w-0 flex-1 text-left">
-                    <span className="block truncate text-sm font-medium">
-                      {t(`share.provider.${provider}`)}
-                    </span>
-                    <span className="hidden truncate text-[11px] font-normal text-muted-foreground sm:block">
-                      {t(providerStatusKey)}
-                    </span>
-                  </span>
-                  {providerReady && (
-                    <CheckIcon
-                      className="ml-auto hidden size-3.5 text-[var(--success-color)] sm:block"
-                      data-share-provider-ready
+                    onClick={() => setSelectedProvider(provider)}
+                    disabled={setupBusy || uploading}
+                    data-share-provider={provider}
+                    aria-pressed={selected}
+                  >
+                    <span
+                      className={`size-1.5 shrink-0 rounded-full ${
+                        providerReady
+                          ? 'bg-[var(--success-color)]'
+                          : selected
+                            ? 'bg-primary'
+                            : 'bg-muted-foreground/45'
+                      }`}
                       aria-hidden="true"
                     />
-                  )}
-                </Button>
-              );
-            })}
+                    <span className="min-w-0 flex-1 text-left">
+                      <span className="block truncate text-sm font-medium">
+                        {t(`share.provider.${provider}`)}
+                      </span>
+                      <span className="hidden truncate text-[11px] font-normal text-muted-foreground sm:block">
+                        {t(providerStatusKey)}
+                      </span>
+                    </span>
+                    {providerReady && (
+                      <CheckIcon
+                        className="ml-auto hidden size-3.5 text-[var(--success-color)] sm:block"
+                        data-share-provider-ready
+                        aria-hidden="true"
+                      />
+                    )}
+                  </Button>
+                );
+              })}
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              className={`mt-2 h-auto w-full justify-start gap-3 rounded-xl px-3 py-2.5 text-xs ${
+                selectedProvider === 'oss'
+                  ? 'border-primary/35 bg-primary/5 text-foreground shadow-sm hover:bg-primary/5'
+                  : 'text-muted-foreground'
+              }`}
+              onClick={() => setSelectedProvider('oss')}
+              disabled={setupBusy || uploading}
+              data-share-provider="oss"
+              aria-pressed={selectedProvider === 'oss'}
+            >
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-background">
+                <ServerIcon className="size-4" aria-hidden="true" />
+              </span>
+              <span className="min-w-0 flex-1 text-left">
+                <span className="flex items-center gap-2">
+                  <span className="truncate text-sm font-medium">
+                    {t('share.provider.oss')}
+                  </span>
+                  <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground">
+                    {t('share.oss.customBadge')}
+                  </span>
+                </span>
+                <span className="block truncate text-[11px] font-normal text-muted-foreground">
+                  {t(ossProviderStatusKey)} · {t('share.oss.subtitle')}
+                </span>
+              </span>
+              <span
+                className={`size-1.5 shrink-0 rounded-full ${
+                  ossReady
+                    ? 'bg-[var(--success-color)]'
+                    : selectedProvider === 'oss'
+                      ? 'bg-primary'
+                      : 'bg-muted-foreground/45'
+                }`}
+                aria-hidden="true"
+              />
+              {ossReady && (
+                <CheckIcon
+                  className="size-3.5 text-[var(--success-color)]"
+                  data-share-provider-ready
+                  aria-hidden="true"
+                />
+              )}
+            </Button>
           </div>
 
-          <SetupProgress stage={stage} hasError={Boolean(currentError)} />
+          <SetupProgress
+            stage={stage}
+            hasError={Boolean(currentError)}
+            provider={selectedProvider}
+          />
 
           <div
             className={`rounded-xl border p-4 transition-colors ${
@@ -762,6 +917,169 @@ export function ShareArtifactDialog({
             </Alert>
           )}
 
+          {selectedProvider === 'oss' && (
+            <FieldGroup
+              className="rounded-xl border border-border bg-muted/10 p-4"
+              data-share-oss-form
+            >
+              <div>
+                <div className="text-sm font-medium">
+                  {t('share.oss.formTitle')}
+                </div>
+                <FieldDescription className="mt-1">
+                  {t('share.oss.formDescription')}
+                </FieldDescription>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field>
+                  <FieldLabel htmlFor="share-oss-endpoint">
+                    {t('share.oss.endpoint')}
+                  </FieldLabel>
+                  <Input
+                    id="share-oss-endpoint"
+                    value={ossForm.endpoint}
+                    placeholder="oss-cn-hangzhou.aliyuncs.com"
+                    spellCheck={false}
+                    onChange={(event) =>
+                      setOssForm((current) => ({
+                        ...current,
+                        endpoint: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="share-oss-bucket">
+                    {t('share.oss.bucket')}
+                  </FieldLabel>
+                  <Input
+                    id="share-oss-bucket"
+                    value={ossForm.bucket}
+                    placeholder="my-artifacts"
+                    spellCheck={false}
+                    onChange={(event) =>
+                      setOssForm((current) => ({
+                        ...current,
+                        bucket: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+              </div>
+              <Field>
+                <FieldLabel htmlFor="share-oss-public-base-url">
+                  {t('share.oss.publicBaseUrl')}
+                </FieldLabel>
+                <Input
+                  id="share-oss-public-base-url"
+                  type="url"
+                  value={ossForm.publicBaseUrl}
+                  placeholder="https://artifacts.example.com"
+                  spellCheck={false}
+                  onChange={(event) =>
+                    setOssForm((current) => ({
+                      ...current,
+                      publicBaseUrl: event.target.value,
+                    }))
+                  }
+                />
+                <FieldDescription>
+                  {t('share.oss.publicBaseUrlDescription')}
+                </FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel htmlFor="share-oss-key-prefix">
+                  {t('share.oss.keyPrefix')}
+                </FieldLabel>
+                <Input
+                  id="share-oss-key-prefix"
+                  value={ossForm.keyPrefix}
+                  spellCheck={false}
+                  onChange={(event) =>
+                    setOssForm((current) => ({
+                      ...current,
+                      keyPrefix: event.target.value,
+                    }))
+                  }
+                />
+              </Field>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field>
+                  <FieldLabel htmlFor="share-oss-access-key-id">
+                    {t('share.oss.accessKeyId')}
+                  </FieldLabel>
+                  <Input
+                    id="share-oss-access-key-id"
+                    value={ossForm.accessKeyId}
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(event) =>
+                      setOssForm((current) => ({
+                        ...current,
+                        accessKeyId: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="share-oss-access-key-secret">
+                    {t('share.oss.accessKeySecret')}
+                  </FieldLabel>
+                  <Input
+                    id="share-oss-access-key-secret"
+                    type="password"
+                    value={ossForm.accessKeySecret}
+                    autoComplete="off"
+                    spellCheck={false}
+                    onChange={(event) =>
+                      setOssForm((current) => ({
+                        ...current,
+                        accessKeySecret: event.target.value,
+                      }))
+                    }
+                  />
+                </Field>
+              </div>
+              <Field>
+                <FieldLabel htmlFor="share-oss-security-token">
+                  {t('share.oss.securityToken')}
+                </FieldLabel>
+                <Input
+                  id="share-oss-security-token"
+                  type="password"
+                  value={ossForm.securityToken}
+                  autoComplete="off"
+                  spellCheck={false}
+                  onChange={(event) =>
+                    setOssForm((current) => ({
+                      ...current,
+                      securityToken: event.target.value,
+                    }))
+                  }
+                />
+                <FieldDescription>
+                  {t(
+                    ossTarget?.credentialsSource === 'environment'
+                      ? 'share.oss.credentialsFromEnvironment'
+                      : 'share.oss.credentialsDescription',
+                  )}
+                </FieldDescription>
+              </Field>
+              <div className="flex justify-end">
+                <Button
+                  type="button"
+                  variant={ready ? 'outline' : 'default'}
+                  onClick={() => void configureOss()}
+                  disabled={setupBusy || uploading}
+                  data-share-action="configure-oss"
+                >
+                  {setupBusy && <Spinner data-icon="inline-start" />}
+                  {t(ready ? 'share.oss.saveChanges' : 'share.oss.save')}
+                </Button>
+              </div>
+            </FieldGroup>
+          )}
+
           {stage === 'connect' &&
             setup?.accounts &&
             setup.accounts.length > 1 && (
@@ -784,9 +1102,16 @@ export function ShareArtifactDialog({
             className="rounded-lg border border-border/70 bg-muted/15 px-3 py-2 text-xs"
             data-share-storage-note
           >
-            {t(ready ? 'share.publicNote' : 'share.storageNote', {
-              provider: providerName,
-            })}
+            {t(
+              selectedProvider === 'oss'
+                ? ready
+                  ? 'share.oss.publicNote'
+                  : 'share.oss.storageNote'
+                : ready
+                  ? 'share.publicNote'
+                  : 'share.storageNote',
+              { provider: providerName },
+            )}
           </FieldDescription>
 
           <details
@@ -817,8 +1142,20 @@ export function ShareArtifactDialog({
                 <dd>{t(`share.details.saved.${selectedProvider}`)}</dd>
               </dl>
               <div className="mt-3 space-y-1 border-t border-border pt-3 text-xs text-muted-foreground">
-                <p>{t('share.details.installNote')}</p>
-                <p>{t('share.details.credentialsNote')}</p>
+                <p>
+                  {t(
+                    selectedProvider === 'oss'
+                      ? 'share.oss.details.domainNote'
+                      : 'share.details.installNote',
+                  )}
+                </p>
+                <p>
+                  {t(
+                    selectedProvider === 'oss'
+                      ? 'share.oss.details.credentialsNote'
+                      : 'share.details.credentialsNote',
+                  )}
+                </p>
               </div>
             </div>
           </details>
@@ -841,6 +1178,7 @@ export function ShareArtifactDialog({
             )}
             {!checkingConfig &&
               !ready &&
+              selectedProvider !== 'oss' &&
               !(stage === 'connect' && (setup?.accounts?.length ?? 0) > 1) && (
                 <Button
                   type="button"
@@ -872,7 +1210,7 @@ export function ShareArtifactDialog({
                   type="button"
                   variant="outline"
                   onClick={() => void upload(true)}
-                  disabled={uploading}
+                  disabled={uploading || setupBusy || polling}
                   data-share-action="republish"
                 >
                   {uploading ? (
@@ -899,8 +1237,13 @@ export function ShareArtifactDialog({
               </>
             ) : (
               <Button
-                type="submit"
-                disabled={uploading || checkingConfig || !ready}
+                type={selectedProvider === 'oss' ? 'button' : 'submit'}
+                onClick={
+                  selectedProvider === 'oss' ? () => void upload() : undefined
+                }
+                disabled={
+                  uploading || setupBusy || polling || checkingConfig || !ready
+                }
                 data-share-action="publish"
               >
                 {uploading && <Spinner data-icon="inline-start" />}

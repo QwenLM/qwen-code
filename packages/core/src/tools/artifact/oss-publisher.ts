@@ -211,6 +211,8 @@ export class OssPublisher implements ArtifactPublisher {
         Date: date,
         'Content-MD5': contentMd5,
         'Content-Type': CONTENT_TYPE,
+        'Content-Disposition': 'inline',
+        'Cache-Control': 'no-cache, max-age=0, must-revalidate',
         Authorization: authorization,
         ...ossHeaders,
       },

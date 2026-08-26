@@ -1786,7 +1786,8 @@ export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
 export type DaemonArtifactPublishProviderKind =
   | 'cloudflare'
   | 'vercel'
-  | 'netlify';
+  | 'netlify'
+  | 'oss';
 
 export interface DaemonArtifactPublishProvider {
   kind: DaemonArtifactPublishProviderKind;
@@ -1807,6 +1808,14 @@ export interface DaemonArtifactProviderProject {
   accountName?: string;
 }
 
+export interface DaemonArtifactOssSetupTarget {
+  bucket: string;
+  endpoint: string;
+  keyPrefix: string;
+  publicBaseUrl: string;
+  credentialsSource: 'environment' | 'memory' | 'none';
+}
+
 export interface DaemonArtifactProviderSetupStatus {
   provider: DaemonArtifactPublishProviderKind;
   stage: DaemonArtifactProviderSetupStage;
@@ -1817,6 +1826,8 @@ export interface DaemonArtifactProviderSetupStatus {
   authorizationPending?: boolean;
   project?: DaemonArtifactProviderProject;
   accounts?: DaemonArtifactProviderProject[];
+  /** Sanitized Aliyun OSS destination. Credentials are never returned. */
+  oss?: DaemonArtifactOssSetupTarget;
 }
 
 /** @deprecated Use DaemonArtifactProviderSetupStage. */
@@ -1846,6 +1857,18 @@ export interface DaemonArtifactProviderSetupRequest {
   action: 'prepare' | 'poll' | 'connect';
   targetId?: string;
   accountId?: string;
+  /** Aliyun OSS bucket name. */
+  bucket?: string;
+  /** Aliyun OSS public endpoint host. */
+  endpoint?: string;
+  /** Stable object path prefix. */
+  keyPrefix?: string;
+  /** Custom HTTPS domain bound to the bucket. */
+  publicBaseUrl?: string;
+  /** Optional in-memory credentials for Aliyun OSS setup. */
+  accessKeyId?: string;
+  accessKeySecret?: string;
+  securityToken?: string;
 }
 
 export interface DaemonArtifactProviderSetupResult

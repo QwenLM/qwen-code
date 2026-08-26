@@ -9,14 +9,18 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { platform as hostPlatform } from 'node:os';
+import { isIP } from 'node:net';
 import { promisify } from 'node:util';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   HostPublisher,
+  OssPublisher,
   Storage,
   artifactIdFromPath,
+  ossCredentialsFromEnv,
   tokenizeCommand,
   type ArtifactHostConfig,
+  type ArtifactPublisher,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { getNpmCliPath } from '../../utils/installationInfo.js';
@@ -54,8 +58,9 @@ const LOGIN_TIMEOUT_MS = 10 * 60_000;
 const MAX_LOGIN_TICKETS = 32;
 const MAX_PUBLICATION_RECORDS = 50;
 
-const PROVIDERS = ['cloudflare', 'vercel', 'netlify'] as const;
+const PROVIDERS = ['cloudflare', 'vercel', 'netlify', 'oss'] as const;
 type ProviderKind = (typeof PROVIDERS)[number];
+type CliProviderKind = Exclude<ProviderKind, 'netlify' | 'oss'>;
 
 interface ProviderStatus {
   kind: ProviderKind;
@@ -97,6 +102,26 @@ interface ShareSettings {
   netlify: {
     siteId: string;
   };
+  oss: {
+    bucket: string;
+    endpoint: string;
+    keyPrefix: string;
+    publicBaseUrl: string;
+  };
+}
+
+interface OssCredentials {
+  accessKeyId: string;
+  accessKeySecret: string;
+  securityToken?: string;
+}
+
+interface OssSetupTarget {
+  bucket: string;
+  endpoint: string;
+  keyPrefix: string;
+  publicBaseUrl: string;
+  credentialsSource: 'environment' | 'memory' | 'none';
 }
 
 interface NetlifySite {
@@ -147,6 +172,7 @@ interface ProviderSetupStatus {
   authorizationPending?: boolean;
   project?: ProviderProject;
   accounts?: ProviderProject[];
+  oss?: OssSetupTarget;
 }
 
 interface CommandOptions {
@@ -197,11 +223,13 @@ class SetupError extends Error {
 
 const loginTickets = new Map<string, LoginTicket>();
 const publishQueues = new Map<string, Promise<unknown>>();
+let ossCredentialsByRuntime = new WeakMap<WorkspaceRuntime, OssCredentials>();
 let setupQueue: Promise<unknown> = Promise.resolve();
 
 export function resetArtifactNetlifySetupStateForTesting(): void {
   loginTickets.clear();
   publishQueues.clear();
+  ossCredentialsByRuntime = new WeakMap();
   setupQueue = Promise.resolve();
 }
 
@@ -416,6 +444,12 @@ function readShareSettings(workspaceCwd: string): ShareSettings {
     netlify: {
       siteId: str('artifact.share.netlify.siteId'),
     },
+    oss: {
+      bucket: str('artifact.oss.bucket'),
+      endpoint: str('artifact.oss.endpoint'),
+      keyPrefix: str('artifact.oss.keyPrefix') || 'artifacts',
+      publicBaseUrl: str('artifact.oss.publicBaseUrl'),
+    },
   };
 }
 
@@ -433,6 +467,123 @@ function requireArtifactSharingEnabled(
 
 function effectiveEnv(runtime: WorkspaceRuntime): Readonly<NodeJS.ProcessEnv> {
   return runtime.env.effectiveEnv ?? {};
+}
+
+function ossCredentialsForRuntime(runtime: WorkspaceRuntime): {
+  credentials?: OssCredentials;
+  source: OssSetupTarget['credentialsSource'];
+} {
+  const remembered = ossCredentialsByRuntime.get(runtime);
+  if (remembered) return { credentials: remembered, source: 'memory' };
+  const environment = ossCredentialsFromEnv(
+    effectiveEnv(runtime) as NodeJS.ProcessEnv,
+  );
+  return environment
+    ? { credentials: environment, source: 'environment' }
+    : { source: 'none' };
+}
+
+function normalizeOssEndpoint(value: string): string {
+  const endpoint = value
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '');
+  if (!/^[a-z0-9.-]+\.aliyuncs\.com$/i.test(endpoint)) {
+    throw new SetupError(
+      400,
+      'oss_endpoint_invalid',
+      'Enter a valid Aliyun OSS endpoint, such as oss-cn-hangzhou.aliyuncs.com.',
+    );
+  }
+  return endpoint;
+}
+
+function normalizeOssBucket(value: string): string {
+  const bucket = value.trim();
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket)) {
+    throw new SetupError(
+      400,
+      'oss_bucket_invalid',
+      'Enter a valid Aliyun OSS bucket name.',
+    );
+  }
+  return bucket;
+}
+
+function normalizeOssKeyPrefix(value: string): string {
+  const keyPrefix = (value.trim() || 'artifacts').replace(/^\/+|\/+$/g, '');
+  if (
+    !/^[a-z0-9][a-z0-9._/-]*$/i.test(keyPrefix) ||
+    keyPrefix.includes('//') ||
+    keyPrefix.split('/').some((segment) => segment === '.' || segment === '..')
+  ) {
+    throw new SetupError(
+      400,
+      'oss_key_prefix_invalid',
+      'Use letters, numbers, dots, dashes, underscores, and single slashes in the OSS path prefix.',
+    );
+  }
+  return keyPrefix;
+}
+
+function normalizeOssPublicBaseUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    throw new SetupError(
+      400,
+      'oss_public_url_invalid',
+      'Enter the HTTPS domain bound to this OSS bucket.',
+    );
+  }
+  if (
+    url.protocol !== 'https:' ||
+    !url.hostname ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.hostname.toLowerCase().endsWith('.aliyuncs.com') ||
+    url.hostname.toLowerCase() === 'localhost' ||
+    url.hostname.toLowerCase().endsWith('.local') ||
+    isIP(url.hostname) !== 0
+  ) {
+    throw new SetupError(
+      400,
+      'oss_public_url_invalid',
+      'Use a custom HTTPS domain bound to this OSS bucket, not the default OSS endpoint.',
+    );
+  }
+  return url.toString().replace(/\/+$/, '');
+}
+
+function rememberOssCredentials(
+  runtime: WorkspaceRuntime,
+  credentials: OssCredentials,
+): void {
+  ossCredentialsByRuntime.set(runtime, credentials);
+}
+
+function readOssCredentials(
+  body: Record<string, unknown>,
+): OssCredentials | undefined {
+  const accessKeyId = readString(body, 'accessKeyId');
+  const accessKeySecret = readString(body, 'accessKeySecret');
+  const securityToken = readString(body, 'securityToken');
+  if (!accessKeyId && !accessKeySecret && !securityToken) return undefined;
+  if (!accessKeyId || !accessKeySecret) {
+    throw new SetupError(
+      400,
+      'oss_credentials_invalid',
+      'AccessKey ID and AccessKey Secret are both required.',
+    );
+  }
+  return {
+    accessKeyId,
+    accessKeySecret,
+    ...(securityToken ? { securityToken } : {}),
+  };
 }
 
 function providerEnv(runtime: WorkspaceRuntime): NodeJS.ProcessEnv {
@@ -637,7 +788,7 @@ async function resolveNetlifyCommand(
 }
 
 function providerCommandForPrefix(
-  provider: Exclude<ProviderKind, 'netlify'>,
+  provider: CliProviderKind,
   prefix: string,
   platform: NodeJS.Platform,
 ): ProviderCommand | undefined {
@@ -659,7 +810,7 @@ function providerCommandForPrefix(
 }
 
 async function resolveProviderCommand(
-  provider: ProviderKind,
+  provider: Exclude<ProviderKind, 'oss'>,
   runtime: WorkspaceRuntime,
   run: ArtifactRouteCommandRunner,
   platform: NodeJS.Platform,
@@ -893,6 +1044,12 @@ function netlifyProviderSetup(status: NetlifySetupStatus): ProviderSetupStatus {
 }
 
 function providerUnavailableReason(status: ProviderSetupStatus): string {
+  if (status.provider === 'oss') {
+    if (!status.cliInstalled) return 'oss_storage_required';
+    if (!status.authenticated) return 'oss_credentials_required';
+    if (!status.linked) return 'oss_domain_required';
+    return 'oss_not_configured';
+  }
   if (!status.cliInstalled) return `${status.provider}_cli_missing`;
   if (!status.authenticated) return `${status.provider}_auth_required`;
   if (!status.linked) return `${status.provider}_project_unlinked`;
@@ -1303,6 +1460,69 @@ async function loadVercelStatus(
   };
 }
 
+function loadOssStatus(runtime: WorkspaceRuntime): ProviderSetupStatus {
+  const settings = readShareSettings(runtime.workspaceCwd);
+  const { source } = ossCredentialsForRuntime(runtime);
+  let endpoint = settings.oss.endpoint;
+  let bucket = settings.oss.bucket;
+  let keyPrefix = settings.oss.keyPrefix;
+  let publicBaseUrl = settings.oss.publicBaseUrl;
+  let storageConfigured = false;
+  let domainConfigured = false;
+  try {
+    endpoint = normalizeOssEndpoint(endpoint);
+    bucket = normalizeOssBucket(bucket);
+    keyPrefix = normalizeOssKeyPrefix(keyPrefix);
+    storageConfigured = true;
+  } catch {
+    storageConfigured = false;
+  }
+  try {
+    publicBaseUrl = normalizeOssPublicBaseUrl(publicBaseUrl);
+    domainConfigured = true;
+  } catch {
+    domainConfigured = false;
+  }
+  const authenticated = source !== 'none';
+  const configured = storageConfigured && authenticated && domainConfigured;
+  const stage = !storageConfigured
+    ? 'install'
+    : !authenticated
+      ? 'authenticate'
+      : !domainConfigured
+        ? 'connect'
+        : 'ready';
+  return {
+    provider: 'oss',
+    stage,
+    cliInstalled: storageConfigured,
+    authenticated,
+    linked: domainConfigured,
+    configured,
+    ...(configured
+      ? {
+          project: {
+            id: createHash('sha256')
+              .update(
+                JSON.stringify([endpoint, bucket, keyPrefix, publicBaseUrl]),
+              )
+              .digest('hex'),
+            name: bucket,
+            url: publicBaseUrl,
+            accountName: endpoint,
+          },
+        }
+      : {}),
+    oss: {
+      bucket,
+      endpoint,
+      keyPrefix,
+      publicBaseUrl,
+      credentialsSource: source,
+    },
+  };
+}
+
 async function loadProviderSetups(
   runtime: WorkspaceRuntime,
   deps: ArtifactPublishRouteDeps,
@@ -1320,6 +1540,7 @@ async function loadProviderSetups(
       cloudflare: cloudflare.status,
       vercel: vercel.status,
       netlify: netlifyProviderSetup(netlify.status),
+      oss: loadOssStatus(runtime),
     },
     netlify: netlify.status,
   };
@@ -1922,7 +2143,7 @@ async function handleSetup(
 }
 
 async function installProvider(
-  provider: Exclude<ProviderKind, 'netlify'>,
+  provider: CliProviderKind,
   runtime: WorkspaceRuntime,
   deps: ArtifactPublishRouteDeps,
 ): Promise<ProviderCommand> {
@@ -1973,7 +2194,7 @@ async function installProvider(
 }
 
 async function loginProvider(
-  provider: Exclude<ProviderKind, 'netlify'>,
+  provider: CliProviderKind,
   command: ProviderCommand,
   runtime: WorkspaceRuntime,
   deps: ArtifactPublishRouteDeps,
@@ -2009,7 +2230,7 @@ async function persistProviderTarget(
   runtime: WorkspaceRuntime,
   deps: ArtifactPublishRouteDeps,
   writes: Array<{ key: string; value: string }>,
-  provider: Exclude<ProviderKind, 'netlify'>,
+  provider: CliProviderKind,
 ): Promise<void> {
   if (!deps.persistSettings) {
     throw new SetupError(
@@ -2242,7 +2463,7 @@ async function connectVercel(
 }
 
 async function prepareProvider(
-  provider: Exclude<ProviderKind, 'netlify'>,
+  provider: CliProviderKind,
   action: 'prepare' | 'poll' | 'connect',
   accountId: string | undefined,
   runtime: WorkspaceRuntime,
@@ -2281,7 +2502,7 @@ async function prepareProvider(
 }
 
 async function handleProviderSetup(
-  provider: Exclude<ProviderKind, 'netlify'>,
+  provider: CliProviderKind,
   req: Request,
   res: Response,
   runtime: WorkspaceRuntime,
@@ -2337,6 +2558,142 @@ async function handleProviderSetup(
   }
 }
 
+async function handleOssSetup(
+  req: Request,
+  res: Response,
+  runtime: WorkspaceRuntime,
+  deps: ArtifactPublishRouteDeps,
+  route: string,
+): Promise<void> {
+  if (!requireArtifactSharingEnabled(runtime, res)) return;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const action = body['action'];
+  if (action !== 'prepare' && action !== 'poll' && action !== 'connect') {
+    res.status(400).json({
+      error: '`action` must be "prepare", "poll", or "connect"',
+      code: 'invalid_request',
+    });
+    return;
+  }
+  const abortScope = requestAbortScope(req, res);
+  const operationDeps = withCommandSignal(deps, abortScope.signal);
+  try {
+    abortScope.signal.throwIfAborted();
+    if (action === 'poll') {
+      const loaded = await loadProviderSetups(runtime, operationDeps);
+      const status = loaded.setups.oss;
+      abortScope.signal.throwIfAborted();
+      applyReadHeaders(res);
+      res.status(200).json({
+        ...configPayload(runtime, loaded.setups, loaded.netlify),
+        provider: 'oss',
+        setup: status,
+      });
+      return;
+    }
+    const bucket = normalizeOssBucket(readString(body, 'bucket'));
+    const endpoint = normalizeOssEndpoint(readString(body, 'endpoint'));
+    const keyPrefix = normalizeOssKeyPrefix(readString(body, 'keyPrefix'));
+    const publicBaseUrl = normalizeOssPublicBaseUrl(
+      readString(body, 'publicBaseUrl'),
+    );
+    const requestedCredentials = readOssCredentials(body);
+    const currentCredentials = ossCredentialsForRuntime(runtime);
+    const credentials = requestedCredentials ?? currentCredentials.credentials;
+    if (!credentials) {
+      throw new SetupError(
+        400,
+        'oss_credentials_required',
+        'Enter OSS credentials or provide them through the workspace environment.',
+      );
+    }
+    if (!deps.persistSettings) {
+      throw new SetupError(
+        503,
+        'oss_config_unavailable',
+        'Qwen Code could not save the OSS sharing setup. Try again.',
+      );
+    }
+    try {
+      await deps.persistSettings(
+        runtime.workspaceCwd,
+        [
+          ['artifact.oss.bucket', bucket],
+          ['artifact.oss.endpoint', endpoint],
+          ['artifact.oss.keyPrefix', keyPrefix],
+          ['artifact.oss.acl', 'public-read'],
+          ['artifact.oss.publicBaseUrl', publicBaseUrl],
+        ].map(([key, value]) => ({
+          scope: SettingScope.Workspace,
+          key,
+          value,
+        })),
+        () => {
+          abortScope.signal.throwIfAborted();
+          assertRuntimeOpen(runtime);
+        },
+      );
+    } catch {
+      abortScope.signal.throwIfAborted();
+      assertRuntimeOpen(runtime);
+      throw new SetupError(
+        500,
+        'oss_config_failed',
+        'Qwen Code could not save the OSS sharing setup. Try again.',
+      );
+    }
+    abortScope.signal.throwIfAborted();
+    assertRuntimeOpen(runtime);
+    const credentialsSource = requestedCredentials
+      ? 'memory'
+      : currentCredentials.source;
+    const status: ProviderSetupStatus = {
+      provider: 'oss',
+      stage: 'ready',
+      cliInstalled: true,
+      authenticated: true,
+      linked: true,
+      configured: true,
+      project: {
+        id: createHash('sha256')
+          .update(JSON.stringify([endpoint, bucket, keyPrefix, publicBaseUrl]))
+          .digest('hex'),
+        name: bucket,
+        url: publicBaseUrl,
+        accountName: endpoint,
+      },
+      oss: {
+        bucket,
+        endpoint,
+        keyPrefix,
+        publicBaseUrl,
+        credentialsSource,
+      },
+    };
+    const loaded = await loadProviderSetups(runtime, operationDeps);
+    abortScope.signal.throwIfAborted();
+    if (requestedCredentials) {
+      rememberOssCredentials(runtime, requestedCredentials);
+    }
+    loaded.setups.oss = status;
+    applyReadHeaders(res);
+    res.status(200).json({
+      ...configPayload(runtime, loaded.setups, loaded.netlify),
+      provider: 'oss',
+      setup: status,
+    });
+  } catch (err) {
+    if (abortScope.signal.aborted || res.destroyed) return;
+    if (err instanceof SetupError) {
+      res.status(err.status).json({ error: err.message, code: err.code });
+      return;
+    }
+    deps.sendBridgeError(res, err, { route });
+  } finally {
+    abortScope.dispose();
+  }
+}
+
 function readString(source: Record<string, unknown>, key: string): string {
   const value = source[key];
   return typeof value === 'string' ? value.trim() : '';
@@ -2369,16 +2726,27 @@ function configuredTargetId(
   settings: ShareSettings,
   provider: ProviderKind,
 ): string {
-  const identity =
-    provider === 'cloudflare'
-      ? [settings.cloudflare.accountId, settings.cloudflare.projectName]
-      : provider === 'vercel'
-        ? [settings.vercel.scope, settings.vercel.projectId]
-        : [
-            settings.netlify.siteId ||
-              netlifyConfiguredSiteId(settings.host) ||
-              '',
-          ];
+  let identity: string[];
+  if (provider === 'cloudflare') {
+    identity = [settings.cloudflare.accountId, settings.cloudflare.projectName];
+  } else if (provider === 'vercel') {
+    identity = [settings.vercel.scope, settings.vercel.projectId];
+  } else if (provider === 'netlify') {
+    identity = [
+      settings.netlify.siteId || netlifyConfiguredSiteId(settings.host) || '',
+    ];
+  } else {
+    try {
+      identity = [
+        normalizeOssEndpoint(settings.oss.endpoint),
+        normalizeOssBucket(settings.oss.bucket),
+        normalizeOssKeyPrefix(settings.oss.keyPrefix),
+        normalizeOssPublicBaseUrl(settings.oss.publicBaseUrl),
+      ];
+    } catch {
+      return '';
+    }
+  }
   if (identity.some((part) => !part)) return '';
   return createHash('sha256')
     .update(JSON.stringify([provider, ...identity]))
@@ -2484,8 +2852,8 @@ function makeNetlifyPublisher(
 
 interface ResolvedPublisher {
   provider: ProviderKind;
-  publisher: HostPublisher;
-  command: ProviderCommand;
+  publisher: ArtifactPublisher;
+  command?: ProviderCommand;
   targetId: string;
   accountId?: string;
   scope?: string;
@@ -2570,7 +2938,7 @@ function vercelDeployUrl(output: string): string {
 }
 
 function makeProviderPublisher(
-  provider: Exclude<ProviderKind, 'netlify'>,
+  provider: CliProviderKind,
   command: ProviderCommand,
   target: { id: string; scope?: string; accountId?: string },
   runtime: WorkspaceRuntime,
@@ -2614,6 +2982,36 @@ async function resolvePublisher(
   runtime: WorkspaceRuntime,
   deps: ArtifactPublishRouteDeps,
 ): Promise<ResolvedPublisher | undefined> {
+  if (provider === 'oss') {
+    const { credentials } = ossCredentialsForRuntime(runtime);
+    if (!credentials) return undefined;
+    let endpoint: string;
+    let bucket: string;
+    let keyPrefix: string;
+    let publicBaseUrl: string;
+    try {
+      endpoint = normalizeOssEndpoint(settings.oss.endpoint);
+      bucket = normalizeOssBucket(settings.oss.bucket);
+      keyPrefix = normalizeOssKeyPrefix(settings.oss.keyPrefix);
+      publicBaseUrl = normalizeOssPublicBaseUrl(settings.oss.publicBaseUrl);
+    } catch {
+      return undefined;
+    }
+    return {
+      provider,
+      publisher: new OssPublisher(
+        {
+          bucket,
+          endpoint,
+          keyPrefix,
+          publicBaseUrl,
+          acl: 'public-read',
+        },
+        { credentials: () => credentials },
+      ),
+      targetId: configuredTargetId(settings, provider),
+    };
+  }
   const run = commandRunner(deps);
   const command = await resolveProviderCommand(
     provider,
@@ -2794,7 +3192,15 @@ async function verifyProviderTarget(
   runtime: WorkspaceRuntime,
   deps: ArtifactPublishRouteDeps,
 ): Promise<void> {
+  if (resolved.provider === 'oss') return;
   const run = commandRunner(deps);
+  if (!resolved.command) {
+    throw new SetupError(
+      409,
+      `${resolved.provider}_project_unavailable`,
+      `The dedicated ${resolved.provider} project is no longer available. Set up sharing again.`,
+    );
+  }
   if (resolved.provider === 'netlify') {
     const approvedSite = siteFromRecord(
       await readSiteRecord(resolved.command, resolved.targetId, runtime, run),
@@ -2863,7 +3269,7 @@ async function handlePublish(
   }
   if (!PROVIDERS.includes(provider as ProviderKind)) {
     res.status(400).json({
-      error: '`provider` must be "cloudflare", "vercel", or "netlify"',
+      error: '`provider` must be "cloudflare", "vercel", "netlify", or "oss"',
       code: 'invalid_request',
     });
     return;
@@ -2948,7 +3354,7 @@ async function handlePublish(
             `Could not publish the artifact through ${selectedProvider}. Try again.`,
           );
         });
-      if (selectedProvider === 'netlify') {
+      if (selectedProvider === 'netlify' && resolvedPublisher.command) {
         await makeSitePublic(
           resolvedPublisher.command,
           resolvedPublisher.targetId,
@@ -3089,6 +3495,8 @@ export function registerWorkspaceArtifactPublishRoutes(
       if (!runtime) return;
       if (selectedProvider === 'netlify') {
         void handleSetup(req, res, runtime, deps, route);
+      } else if (selectedProvider === 'oss') {
+        void handleOssSetup(req, res, runtime, deps, route);
       } else {
         void handleProviderSetup(
           selectedProvider,
@@ -3153,6 +3561,8 @@ export function registerWorkspaceQualifiedArtifactPublishRoutes(
       const route = 'POST /workspaces/:workspace/artifact/:provider/setup';
       if (selectedProvider === 'netlify') {
         void handleSetup(req, res, runtime, deps, route);
+      } else if (selectedProvider === 'oss') {
+        void handleOssSetup(req, res, runtime, deps, route);
       } else {
         void handleProviderSetup(
           selectedProvider,

@@ -404,6 +404,9 @@ const EN: Messages = {
   'share.provider.cloudflare': 'Cloudflare',
   'share.provider.vercel': 'Vercel',
   'share.provider.netlify': 'Netlify',
+  'share.provider.oss': 'Aliyun OSS',
+  'share.oss.customBadge': 'Custom hosting',
+  'share.oss.subtitle': 'Your bucket and domain',
   'share.providerStatus.published': 'Published',
   'share.providerStatus.updated': 'Changes ready',
   'share.providerStatus.ready': 'Ready',
@@ -413,6 +416,14 @@ const EN: Messages = {
   'share.stage.authenticate': 'Authorize',
   'share.stage.connect': 'Connect',
   'share.stage.ready': 'Ready',
+  'share.oss.stage.install': 'Storage',
+  'share.oss.stage.authenticate': 'Credentials',
+  'share.oss.stage.connect': 'Domain',
+  'share.oss.stage.ready': 'Ready',
+  'share.oss.storageStatus': 'Enter the OSS bucket and endpoint.',
+  'share.oss.credentialsStatus':
+    'Provide OSS credentials or configure them in the workspace environment.',
+  'share.oss.domainStatus': 'Bind and enter a custom HTTPS domain.',
   'share.checking': (v) => `Checking ${v?.provider ?? ''} setup…`,
   'share.ready': (v) => `Ready to publish with ${v?.provider ?? ''}.`,
   'share.notReady': (v) =>
@@ -450,15 +461,19 @@ const EN: Messages = {
   'share.details.cli.cloudflare': 'Wrangler CLI',
   'share.details.cli.vercel': 'Vercel CLI',
   'share.details.cli.netlify': 'Netlify CLI',
+  'share.details.cli.oss': 'Native OSS API',
   'share.details.target.cloudflare': 'Dedicated Cloudflare Pages project',
   'share.details.target.vercel': 'Dedicated Vercel project',
   'share.details.target.netlify': 'Dedicated Netlify site',
+  'share.details.target.oss': 'Aliyun OSS bucket and custom domain',
   'share.details.targetReady': (v) =>
     `${v?.type ?? 'Dedicated project'}: ${v?.target ?? ''}`,
   'share.details.saved.cloudflare':
     'Cloudflare account ID and Pages project name',
   'share.details.saved.vercel': 'Vercel project ID, project name, and scope',
   'share.details.saved.netlify': 'Netlify site ID',
+  'share.details.saved.oss':
+    'Bucket, endpoint, custom domain, and object path prefix',
   'share.details.installNote':
     'If the CLI is missing, Qwen Code installs it on this machine without changing the current project dependencies.',
   'share.details.credentialsNote':
@@ -467,6 +482,36 @@ const EN: Messages = {
     `Authorization is completed securely by ${v?.provider ?? 'the provider'} in your browser.`,
   'share.publicNote': (v) =>
     `Publishing uses a public ${v?.provider ?? ''} project. Anyone with the link can view it.`,
+  'share.oss.formTitle': 'OSS destination',
+  'share.oss.formDescription':
+    'Qwen Code uploads directly to your bucket and returns a stable link on your domain.',
+  'share.oss.endpoint': 'OSS endpoint',
+  'share.oss.bucket': 'Bucket',
+  'share.oss.publicBaseUrl': 'Custom HTTPS domain',
+  'share.oss.publicBaseUrlDescription':
+    'Bind this domain to the bucket first. Default aliyuncs.com links are not accepted because browsers may download HTML instead of opening it.',
+  'share.oss.keyPrefix': 'Object path prefix',
+  'share.oss.accessKeyId': 'AccessKey ID',
+  'share.oss.accessKeySecret': 'AccessKey Secret',
+  'share.oss.securityToken': 'STS security token (optional)',
+  'share.oss.credentialsDescription':
+    'Credentials stay in daemon memory for this run and are never written to workspace settings.',
+  'share.oss.credentialsFromEnvironment':
+    'Workspace environment credentials are available. Leave these fields empty to use them.',
+  'share.oss.save': 'Save configuration',
+  'share.oss.saveChanges': 'Save changes',
+  'share.oss.setupFailed': (v) =>
+    `Could not save the OSS setup: ${v?.message ?? ''}`,
+  'share.oss.storageNote':
+    'You manage the OSS bucket, custom domain, DNS, and certificate. Qwen Code only uploads the artifact.',
+  'share.oss.publicNote':
+    'Publishing writes a public-read HTML object to your OSS bucket. Anyone with the custom-domain link can view it.',
+  'share.oss.details.running':
+    'Validating the OSS destination and keeping credentials in daemon memory.',
+  'share.oss.details.domainNote':
+    'Domain binding, DNS, and HTTPS certificates remain managed in Alibaba Cloud.',
+  'share.oss.details.credentialsNote':
+    'AccessKey secrets and STS tokens are never returned or written to workspace settings.',
   'share.publication.currentTitle': 'Current version is published',
   'share.publication.currentDescription':
     'Nothing has changed since the last publish, so the existing link is still current.',
@@ -3580,6 +3625,9 @@ const ZH: Messages = {
   'share.provider.cloudflare': 'Cloudflare',
   'share.provider.vercel': 'Vercel',
   'share.provider.netlify': 'Netlify',
+  'share.provider.oss': '阿里云 OSS',
+  'share.oss.customBadge': '自定义托管',
+  'share.oss.subtitle': '你的 Bucket 和域名',
   'share.providerStatus.published': '已发布',
   'share.providerStatus.updated': '有更新',
   'share.providerStatus.ready': '已就绪',
@@ -3589,6 +3637,13 @@ const ZH: Messages = {
   'share.stage.authenticate': '授权',
   'share.stage.connect': '连接',
   'share.stage.ready': '可用',
+  'share.oss.stage.install': '存储',
+  'share.oss.stage.authenticate': '凭证',
+  'share.oss.stage.connect': '域名',
+  'share.oss.stage.ready': '可用',
+  'share.oss.storageStatus': '填写 OSS Bucket 和 Endpoint。',
+  'share.oss.credentialsStatus': '填写 OSS 凭证，或通过工作区环境提供。',
+  'share.oss.domainStatus': '绑定并填写自定义 HTTPS 域名。',
   'share.checking': (v) => `正在检查 ${v?.provider ?? ''} 配置…`,
   'share.ready': (v) => `已准备好通过 ${v?.provider ?? ''} 发布。`,
   'share.notReady': (v) => `请先完成 ${v?.provider ?? ''} 配置再发布。`,
@@ -3623,14 +3678,17 @@ const ZH: Messages = {
   'share.details.cli.cloudflare': 'Wrangler CLI',
   'share.details.cli.vercel': 'Vercel CLI',
   'share.details.cli.netlify': 'Netlify CLI',
+  'share.details.cli.oss': '原生 OSS API',
   'share.details.target.cloudflare': '专用 Cloudflare Pages 项目',
   'share.details.target.vercel': '专用 Vercel 项目',
   'share.details.target.netlify': '专用 Netlify 站点',
+  'share.details.target.oss': '阿里云 OSS Bucket 和自定义域名',
   'share.details.targetReady': (v) =>
     `${v?.type ?? '专用项目'}：${v?.target ?? ''}`,
   'share.details.saved.cloudflare': 'Cloudflare 账号标识和 Pages 项目名',
   'share.details.saved.vercel': 'Vercel 项目标识、项目名和 Scope',
   'share.details.saved.netlify': 'Netlify Site ID',
+  'share.details.saved.oss': 'Bucket、Endpoint、自定义域名和对象路径前缀',
   'share.details.installNote':
     '如果本机缺少 CLI，Qwen Code 会自动安装，但不会修改当前项目依赖。',
   'share.details.credentialsNote':
@@ -3639,6 +3697,35 @@ const ZH: Messages = {
     `授权会由 ${v?.provider ?? '平台'} 在浏览器中安全完成。`,
   'share.publicNote': (v) =>
     `发布会使用公开的 ${v?.provider ?? ''} 项目，任何拿到链接的人都可以查看。`,
+  'share.oss.formTitle': 'OSS 发布目标',
+  'share.oss.formDescription':
+    'Qwen Code 会直接上传到你的 Bucket，并返回自有域名下的稳定链接。',
+  'share.oss.endpoint': 'OSS Endpoint',
+  'share.oss.bucket': 'Bucket',
+  'share.oss.publicBaseUrl': '自定义 HTTPS 域名',
+  'share.oss.publicBaseUrlDescription':
+    '请先把域名绑定到 Bucket。默认 aliyuncs.com 链接可能让浏览器下载 HTML，因此这里不接受。',
+  'share.oss.keyPrefix': '对象路径前缀',
+  'share.oss.accessKeyId': 'AccessKey ID',
+  'share.oss.accessKeySecret': 'AccessKey Secret',
+  'share.oss.securityToken': 'STS Security Token（可选）',
+  'share.oss.credentialsDescription':
+    '凭证仅保存在本次 daemon 运行内存中，不会写入工作区设置。',
+  'share.oss.credentialsFromEnvironment':
+    '已检测到工作区环境凭证，留空即可直接使用。',
+  'share.oss.save': '保存配置',
+  'share.oss.saveChanges': '保存修改',
+  'share.oss.setupFailed': (v) => `无法保存 OSS 配置：${v?.message ?? ''}`,
+  'share.oss.storageNote':
+    'Bucket、自定义域名、DNS 和证书由你管理；Qwen Code 只负责上传 Artifact。',
+  'share.oss.publicNote':
+    '发布会向 OSS 写入 public-read HTML 对象，任何拿到自定义域名链接的人都可以查看。',
+  'share.oss.details.running':
+    '正在校验 OSS 发布目标，并把凭证保存在 daemon 内存中。',
+  'share.oss.details.domainNote':
+    '域名绑定、DNS 和 HTTPS 证书仍由阿里云侧管理。',
+  'share.oss.details.credentialsNote':
+    'AccessKey Secret 和 STS Token 不会返回给页面，也不会写入工作区设置。',
   'share.publication.currentTitle': '当前版本已发布',
   'share.publication.currentDescription':
     '内容与上次发布一致，可以继续使用现有链接，不会重复创建部署。',

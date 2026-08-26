@@ -8692,5 +8692,38 @@ describe('DaemonClient', () => {
       expect(calls[1]?.signal).toBe(setupController.signal);
       expect(calls[2]?.signal).toBe(publishController.signal);
     });
+
+    it('sends OSS setup fields through the selected-workspace route', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const workspace = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+      }).workspaceByCwd('/tmp/oss workspace');
+
+      await workspace.setupArtifactProvider('oss', {
+        action: 'connect',
+        endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+        bucket: 'qwen-artifacts',
+        keyPrefix: 'artifacts',
+        publicBaseUrl: 'https://artifacts.example.com',
+        accessKeyId: 'temporary-id',
+        accessKeySecret: 'temporary-secret',
+        securityToken: 'temporary-token',
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspaces/%2Ftmp%2Foss%20workspace/artifact/oss/setup',
+      );
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        action: 'connect',
+        endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+        bucket: 'qwen-artifacts',
+        keyPrefix: 'artifacts',
+        publicBaseUrl: 'https://artifacts.example.com',
+        accessKeyId: 'temporary-id',
+        accessKeySecret: 'temporary-secret',
+        securityToken: 'temporary-token',
+      });
+    });
   });
 });

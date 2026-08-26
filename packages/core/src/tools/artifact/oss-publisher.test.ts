@@ -101,6 +101,10 @@ describe('OssPublisher', () => {
     expect(captured?.headers['Authorization']).toMatch(/^OSS AKID:/);
     expect(captured?.headers['Content-MD5']).toMatch(/^[A-Za-z0-9+/]+=*$/);
     expect(captured?.headers['Content-Type']).toBe('text/html');
+    expect(captured?.headers['Content-Disposition']).toBe('inline');
+    expect(captured?.headers['Cache-Control']).toBe(
+      'no-cache, max-age=0, must-revalidate',
+    );
     expect(captured?.headers['x-oss-object-acl']).toBe('public-read');
     expect(captured?.headers['Date']).toBeTruthy();
     expect(captured?.body).toBe('<p>hi</p>');

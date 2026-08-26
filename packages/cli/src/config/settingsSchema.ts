@@ -3942,7 +3942,7 @@ const SETTINGS_SCHEMA = {
               properties: {
                 provider: {
                   type: 'string',
-                  enum: ['cloudflare', 'vercel', 'netlify'],
+                  enum: ['cloudflare', 'vercel', 'netlify', 'oss'],
                   required: true,
                 },
                 targetId: { type: 'string', required: true },

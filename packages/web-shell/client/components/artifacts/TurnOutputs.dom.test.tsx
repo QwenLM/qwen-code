@@ -887,6 +887,7 @@ describe('TurnOutputs artifact sharing', () => {
       'cloudflare',
       'vercel',
       'netlify',
+      'oss',
     ]);
     expect(providers[0]?.getAttribute('aria-pressed')).toBe('true');
     expect(providers[1]?.getAttribute('aria-pressed')).toBe('false');
@@ -919,6 +920,90 @@ describe('TurnOutputs artifact sharing', () => {
     );
     expect(artifactPublishConfig).toHaveBeenCalledTimes(1);
     expect(artifactPublishConfig).toHaveBeenCalledWith('output/report.html');
+
+    act(() => root.unmount());
+  });
+
+  it('configures Aliyun OSS as custom hosting without requiring a CLI', async () => {
+    const ossSetup = {
+      provider: 'oss' as const,
+      stage: 'authenticate' as const,
+      cliInstalled: true,
+      authenticated: false,
+      linked: true,
+      configured: false,
+      oss: {
+        endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+        bucket: 'my-artifacts',
+        publicBaseUrl: 'https://artifacts.example.com',
+        keyPrefix: 'qwen-artifacts',
+        credentialsSource: 'none' as const,
+      },
+    };
+    artifactPublishConfig.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [{ kind: 'oss', configured: false }],
+      setups: { oss: ossSetup },
+    });
+    setupArtifactNetlify.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/primary',
+      providers: [{ kind: 'oss', configured: true }],
+      setups: {
+        oss: { ...ossSetup, stage: 'ready', authenticated: true },
+      },
+      provider: 'oss',
+      setup: { ...ossSetup, stage: 'ready', authenticated: true },
+    });
+
+    const { container, root } = renderHtmlArtifact();
+    await act(async () => shareButtons(container)[0]?.click());
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('[data-share-provider="oss"]')
+        ?.click();
+    });
+
+    expect(
+      document.body.querySelector<HTMLInputElement>('#share-oss-endpoint')
+        ?.value,
+    ).toBe('oss-cn-hangzhou.aliyuncs.com');
+    expect(
+      document.body.querySelector<HTMLInputElement>('#share-oss-bucket')?.value,
+    ).toBe('my-artifacts');
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        '#share-oss-public-base-url',
+      )?.value,
+    ).toBe('https://artifacts.example.com');
+    expect(
+      document.body.querySelector<HTMLInputElement>(
+        '#share-oss-access-key-secret',
+      )?.type,
+    ).toBe('password');
+    expect(document.body.textContent).toContain('Native OSS API');
+    expect(document.body.textContent).toContain(
+      'Domain binding, DNS, and HTTPS certificates',
+    );
+
+    await act(async () => {
+      document.body
+        .querySelector<HTMLButtonElement>('[data-share-action="configure-oss"]')
+        ?.click();
+    });
+
+    expect(setupArtifactNetlify).toHaveBeenCalledWith(
+      'oss',
+      {
+        action: 'connect',
+        endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+        bucket: 'my-artifacts',
+        publicBaseUrl: 'https://artifacts.example.com',
+        keyPrefix: 'qwen-artifacts',
+      },
+      { signal: expect.anything() },
+    );
 
     act(() => root.unmount());
   });
@@ -1139,7 +1224,6 @@ describe('TurnOutputs artifact sharing', () => {
       document.body.querySelector('[data-share-storage-note]')?.textContent,
     ).toContain('Anyone with the link can view it');
     expect(document.body.querySelector('#share-provider')).toBeNull();
-    expect(document.body.textContent).not.toContain('Aliyun OSS');
     await submitShare();
 
     expect(publishArtifact).toHaveBeenCalledTimes(1);
@@ -1300,7 +1384,6 @@ describe('TurnOutputs artifact sharing', () => {
     expect(steps[1]?.getAttribute('data-state')).toBe('pending');
     expect(document.body.textContent).not.toContain('npm install');
     expect(document.body.textContent).not.toContain('netlify deploy');
-    expect(document.body.textContent).not.toContain('Aliyun OSS');
 
     const publish = document.body.querySelector<HTMLButtonElement>(
       '[data-share-action="publish"]',

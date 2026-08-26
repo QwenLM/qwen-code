@@ -36,6 +36,8 @@ type CommandRunner = (
 const mocked = vi.hoisted(() => ({
   hostPublish: vi.fn(),
   hostConstructors: [] as Array<{ config: unknown; run: CommandRunner }>,
+  ossPublish: vi.fn(),
+  ossConstructors: [] as Array<{ config: unknown; deps: unknown }>,
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -48,6 +50,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         mocked.hostConstructors.push({ config, run });
       }
       publish = mocked.hostPublish;
+    },
+    OssPublisher: class {
+      constructor(config: unknown, deps: unknown) {
+        mocked.ossConstructors.push({ config, deps });
+      }
+      publish = mocked.ossPublish;
     },
   };
 });
@@ -301,16 +309,21 @@ function setArtifactSetting(
 beforeEach(() => {
   vi.clearAllMocks();
   mocked.hostConstructors.length = 0;
+  mocked.ossConstructors.length = 0;
   mocked.hostPublish.mockResolvedValue({
     id: 'host-id',
     url: 'https://preview.example.com/report',
+  });
+  mocked.ossPublish.mockResolvedValue({
+    id: 'oss-id',
+    url: 'https://artifacts.example.com/artifacts/abc/index.html',
   });
   mockSettings({});
   resetArtifactNetlifySetupStateForTesting();
 });
 
 describe('GET /workspace/artifact/publish-config', () => {
-  it('reports Netlify availability without exposing its command', async () => {
+  it('reports Netlify and sanitized OSS availability', async () => {
     const primary = runtime('primary', '/workspace', { primary: true });
     mockSettings({
       '/workspace': {
@@ -339,9 +352,21 @@ describe('GET /workspace/artifact/publish-config', () => {
         unavailableReason: 'vercel_auth_required',
       },
       { kind: 'netlify', configured: true },
+      {
+        kind: 'oss',
+        configured: false,
+        unavailableReason: 'oss_credentials_required',
+      },
     ]);
     expect(JSON.stringify(response.body)).not.toContain('deploy --dir');
-    expect(JSON.stringify(response.body)).not.toContain('my-bucket');
+    expect(response.body.setups.oss.oss).toEqual({
+      bucket: 'my-bucket',
+      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+      keyPrefix: 'artifacts',
+      publicBaseUrl: '',
+      credentialsSource: 'none',
+    });
+    expect(JSON.stringify(response.body)).not.toContain('AccessKeySecret');
   });
 
   it('accepts the --dir={dir} Netlify form', async () => {
@@ -372,6 +397,11 @@ describe('GET /workspace/artifact/publish-config', () => {
         unavailableReason: 'vercel_auth_required',
       },
       { kind: 'netlify', configured: true },
+      {
+        kind: 'oss',
+        configured: false,
+        unavailableReason: 'oss_storage_required',
+      },
     ]);
   });
 
@@ -445,6 +475,13 @@ describe('GET /workspace/artifact/publish-config', () => {
           kind: 'netlify',
           configured: false,
           unavailableReason: 'netlify_not_configured',
+        },
+        {
+          kind: 'oss',
+          configured: false,
+          unavailableReason: artifact.oss
+            ? 'oss_credentials_required'
+            : 'oss_storage_required',
         },
       ]);
     },
@@ -1859,7 +1896,356 @@ describe('multi-provider artifact setup', () => {
   });
 });
 
+describe('POST /workspace/artifact/oss/setup', () => {
+  it('saves only the OSS destination and keeps STS credentials in memory', async () => {
+    const artifact: Record<string, unknown> = {};
+    const primary = runtime('primary', '/oss-workspace', { primary: true });
+    mockSettings({ '/oss-workspace': artifact });
+    const persistSettings = vi.fn(
+      async (
+        _workspace: string,
+        writes: Array<{ key: string; value: unknown }>,
+      ) => {
+        for (const write of writes) {
+          setArtifactSetting(artifact, write.key, write.value);
+        }
+      },
+    );
+
+    const response = await request(
+      makePrimaryApp(
+        primary,
+        readyNetlify,
+        async () => true,
+        undefined,
+        persistSettings,
+      ),
+    )
+      .post('/workspace/artifact/oss/setup')
+      .send({
+        action: 'connect',
+        endpoint: 'https://oss-cn-hangzhou.aliyuncs.com/',
+        bucket: 'my-artifacts',
+        publicBaseUrl: 'https://artifacts.example.com/',
+        keyPrefix: '/qwen-artifacts/',
+        accessKeyId: 'temporary-id',
+        accessKeySecret: 'temporary-secret',
+        securityToken: 'temporary-token',
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.setup).toMatchObject({
+      provider: 'oss',
+      stage: 'ready',
+      configured: true,
+      oss: {
+        endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+        bucket: 'my-artifacts',
+        publicBaseUrl: 'https://artifacts.example.com',
+        keyPrefix: 'qwen-artifacts',
+        credentialsSource: 'memory',
+      },
+    });
+    const serialized = JSON.stringify(response.body);
+    expect(serialized).not.toContain('temporary-id');
+    expect(serialized).not.toContain('temporary-secret');
+    expect(serialized).not.toContain('temporary-token');
+    const writes = persistSettings.mock.calls[0]?.[1] ?? [];
+    expect(writes.map((write) => write.key)).toEqual([
+      'artifact.oss.bucket',
+      'artifact.oss.endpoint',
+      'artifact.oss.keyPrefix',
+      'artifact.oss.acl',
+      'artifact.oss.publicBaseUrl',
+    ]);
+    expect(JSON.stringify(writes)).not.toContain('temporary-secret');
+    expect(JSON.stringify(writes)).not.toContain('temporary-token');
+  });
+
+  it('uses workspace environment credentials without returning them', async () => {
+    const primary = runtime('primary', '/oss-env', {
+      primary: true,
+      env: {
+        OSS_ACCESS_KEY_ID: 'environment-id',
+        OSS_ACCESS_KEY_SECRET: 'environment-secret',
+        OSS_SESSION_TOKEN: 'environment-token',
+      },
+    });
+    const artifact: Record<string, unknown> = {};
+    mockSettings({ '/oss-env': artifact });
+    const persistSettings = vi.fn(
+      async (
+        _workspace: string,
+        writes: Array<{ key: string; value: unknown }>,
+      ) => {
+        for (const write of writes) {
+          setArtifactSetting(artifact, write.key, write.value);
+        }
+      },
+    );
+
+    const response = await request(
+      makePrimaryApp(
+        primary,
+        readyNetlify,
+        async () => true,
+        undefined,
+        persistSettings,
+      ),
+    )
+      .post('/workspace/artifact/oss/setup')
+      .send({
+        action: 'connect',
+        endpoint: 'oss-cn-shanghai.aliyuncs.com',
+        bucket: 'shared-pages',
+        publicBaseUrl: 'https://pages.example.com',
+        keyPrefix: 'artifacts',
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.setup.oss.credentialsSource).toBe('environment');
+    expect(JSON.stringify(response.body)).not.toContain('environment-id');
+    expect(JSON.stringify(response.body)).not.toContain('environment-secret');
+    expect(JSON.stringify(response.body)).not.toContain('environment-token');
+  });
+
+  it('rejects a default OSS URL instead of creating a download link', async () => {
+    const primary = runtime('primary', '/oss-invalid', { primary: true });
+    const persistSettings = vi.fn(async () => undefined);
+
+    const response = await request(
+      makePrimaryApp(
+        primary,
+        readyNetlify,
+        async () => true,
+        undefined,
+        persistSettings,
+      ),
+    )
+      .post('/workspace/artifact/oss/setup')
+      .send({
+        action: 'connect',
+        endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+        bucket: 'my-artifacts',
+        publicBaseUrl: 'https://my-artifacts.oss-cn-hangzhou.aliyuncs.com',
+        accessKeyId: 'temporary-id',
+        accessKeySecret: 'temporary-secret',
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('oss_public_url_invalid');
+    expect(persistSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'http://artifacts.example.com',
+    'https://127.0.0.1',
+    'https://artifacts.example.com?token=secret',
+  ])('rejects an unsafe OSS public URL: %s', async (publicBaseUrl) => {
+    const primary = runtime('primary', '/oss-unsafe', { primary: true });
+    const persistSettings = vi.fn(async () => undefined);
+
+    const response = await request(
+      makePrimaryApp(
+        primary,
+        readyNetlify,
+        async () => true,
+        undefined,
+        persistSettings,
+      ),
+    )
+      .post('/workspace/artifact/oss/setup')
+      .send({
+        action: 'connect',
+        endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+        bucket: 'my-artifacts',
+        publicBaseUrl,
+        accessKeyId: 'temporary-id',
+        accessKeySecret: 'temporary-secret',
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('oss_public_url_invalid');
+    expect(persistSettings).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /workspace/artifact/publish', () => {
+  it('publishes through Aliyun OSS with the configured custom domain', async () => {
+    const primary = runtime('primary', '/oss-publish', {
+      primary: true,
+      env: {
+        OSS_ACCESS_KEY_ID: 'environment-id',
+        OSS_ACCESS_KEY_SECRET: 'environment-secret',
+        OSS_SESSION_TOKEN: 'environment-token',
+      },
+    });
+    mockSettings({
+      '/oss-publish': {
+        oss: {
+          endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+          bucket: 'my-artifacts',
+          publicBaseUrl: 'https://artifacts.example.com',
+          keyPrefix: 'qwen-artifacts',
+        },
+      },
+    });
+    mocked.ossPublish.mockResolvedValueOnce({
+      id: 'oss-id',
+      url: 'https://artifacts.example.com/qwen-artifacts/id/index.html',
+    });
+    const persistSettings = vi.fn(async () => undefined);
+
+    const response = await request(
+      makePrimaryApp(
+        primary,
+        readyNetlify,
+        async () => true,
+        undefined,
+        persistSettings,
+      ),
+    )
+      .post('/workspace/artifact/publish')
+      .send({ path: 'out/report.html', provider: 'oss' });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      provider: 'oss',
+      id: 'oss-id',
+      url: 'https://artifacts.example.com/qwen-artifacts/id/index.html',
+      reused: false,
+      recorded: true,
+    });
+    expect(mocked.ossPublish).toHaveBeenCalledWith(
+      expect.objectContaining({ html: HTML, title: 'report.html' }),
+      expect.any(AbortSignal),
+    );
+    expect(mocked.ossConstructors[0]?.config).toEqual({
+      bucket: 'my-artifacts',
+      endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+      keyPrefix: 'qwen-artifacts',
+      publicBaseUrl: 'https://artifacts.example.com',
+      acl: 'public-read',
+    });
+    expect(persistSettings).toHaveBeenCalledWith(
+      '/oss-publish',
+      [
+        expect.objectContaining({
+          key: 'artifact.share.publications',
+          value: [
+            expect.objectContaining({
+              provider: 'oss',
+              url: 'https://artifacts.example.com/qwen-artifacts/id/index.html',
+            }),
+          ],
+        }),
+      ],
+      expect.any(Function),
+    );
+  });
+
+  it('reuses an unchanged OSS publication for the same target', async () => {
+    const artifact: Record<string, unknown> = {
+      oss: {
+        endpoint: 'https://oss-cn-hangzhou.aliyuncs.com/',
+        bucket: 'my-artifacts',
+        publicBaseUrl: 'https://artifacts.example.com/',
+        keyPrefix: 'artifacts',
+      },
+    };
+    const primary = runtime('primary', '/oss-reuse', {
+      primary: true,
+      env: {
+        OSS_ACCESS_KEY_ID: 'environment-id',
+        OSS_ACCESS_KEY_SECRET: 'environment-secret',
+      },
+    });
+    mockSettings({ '/oss-reuse': artifact });
+    const persistSettings = vi.fn(
+      async (
+        _workspace: string,
+        writes: Array<{ key: string; value: unknown }>,
+      ) => {
+        for (const write of writes) {
+          setArtifactSetting(artifact, write.key, write.value);
+        }
+      },
+    );
+    const app = makePrimaryApp(
+      primary,
+      readyNetlify,
+      async () => true,
+      undefined,
+      persistSettings,
+    );
+
+    const first = await request(app)
+      .post('/workspace/artifact/publish')
+      .send({ path: 'out/report.html', provider: 'oss' });
+    const oss = artifact['oss'] as Record<string, unknown>;
+    oss['endpoint'] = 'oss-cn-hangzhou.aliyuncs.com';
+    oss['publicBaseUrl'] = 'https://artifacts.example.com';
+    const second = await request(app)
+      .post('/workspace/artifact/publish')
+      .send({ path: 'out/report.html', provider: 'oss' });
+
+    expect(first.body).toMatchObject({ provider: 'oss', reused: false });
+    expect(second.body).toMatchObject({
+      provider: 'oss',
+      reused: true,
+      url: first.body.url,
+    });
+    expect(mocked.ossPublish).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not reuse an OSS publication after changing its object prefix', async () => {
+    const artifact: Record<string, unknown> = {
+      oss: {
+        endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+        bucket: 'my-artifacts',
+        publicBaseUrl: 'https://artifacts.example.com',
+        keyPrefix: 'first',
+      },
+    };
+    const primary = runtime('primary', '/oss-prefix', {
+      primary: true,
+      env: {
+        OSS_ACCESS_KEY_ID: 'environment-id',
+        OSS_ACCESS_KEY_SECRET: 'environment-secret',
+      },
+    });
+    mockSettings({ '/oss-prefix': artifact });
+    const persistSettings = vi.fn(
+      async (
+        _workspace: string,
+        writes: Array<{ key: string; value: unknown }>,
+      ) => {
+        for (const write of writes) {
+          setArtifactSetting(artifact, write.key, write.value);
+        }
+      },
+    );
+    const app = makePrimaryApp(
+      primary,
+      readyNetlify,
+      async () => true,
+      undefined,
+      persistSettings,
+    );
+
+    const first = await request(app)
+      .post('/workspace/artifact/publish')
+      .send({ path: 'out/report.html', provider: 'oss' });
+    (artifact['oss'] as Record<string, unknown>)['keyPrefix'] = 'second';
+    const second = await request(app)
+      .post('/workspace/artifact/publish')
+      .send({ path: 'out/report.html', provider: 'oss' });
+
+    expect(first.body.reused).toBe(false);
+    expect(second.body.reused).toBe(false);
+    expect(mocked.ossPublish).toHaveBeenCalledTimes(2);
+  });
+
   it('publishes the workspace file through Netlify', async () => {
     const readBytesWindow = windowReader(HTML);
     const primary = runtime('primary', '/workspace', {
@@ -2776,6 +3162,83 @@ describe('workspace-qualified artifact publishing', () => {
       artifactSiteDir,
     ]);
     expect(stdout).toBe(`${artifactSiteDir}|secondary-token`);
+  });
+
+  it('keeps OSS destination and in-memory credentials in the selected runtime', async () => {
+    const primaryReader = windowReader('primary');
+    const secondaryReader = windowReader('secondary');
+    const primary = runtime('primary', '/primary', {
+      primary: true,
+      readBytesWindow: primaryReader,
+    });
+    const secondary = runtime('secondary', '/secondary', {
+      readBytesWindow: secondaryReader,
+    });
+    const primaryArtifact: Record<string, unknown> = {};
+    const secondaryArtifact: Record<string, unknown> = {};
+    mockSettings({
+      '/primary': primaryArtifact,
+      '/secondary': secondaryArtifact,
+    });
+    const persistSettings = vi.fn(
+      async (
+        workspace: string,
+        writes: Array<{ key: string; value: unknown }>,
+      ) => {
+        const artifact =
+          workspace === '/secondary' ? secondaryArtifact : primaryArtifact;
+        for (const write of writes) {
+          setArtifactSetting(artifact, write.key, write.value);
+        }
+      },
+    );
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedArtifactPublishRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+      sendBridgeError,
+      mutate: allowMutations,
+      runCommand: adaptTestRunner(readyNetlify),
+      checkPublicUrl: async () => true,
+      persistSettings,
+    });
+
+    const setupResponse = await request(app)
+      .post('/workspaces/secondary/artifact/oss/setup')
+      .send({
+        action: 'connect',
+        endpoint: 'oss-cn-hangzhou.aliyuncs.com',
+        bucket: 'secondary-pages',
+        publicBaseUrl: 'https://secondary.example.com',
+        keyPrefix: 'artifacts',
+        accessKeyId: 'secondary-id',
+        accessKeySecret: 'secondary-secret',
+        securityToken: 'secondary-token',
+      });
+    expect(setupResponse.status).toBe(200);
+
+    const publishResponse = await request(app)
+      .post('/workspaces/secondary/artifact/publish')
+      .send({ path: 'out/report.html', provider: 'oss' });
+
+    expect(publishResponse.status).toBe(200);
+    expect(mocked.ossPublish.mock.calls[0]?.[0].html).toBe('secondary');
+    expect(primaryReader).not.toHaveBeenCalled();
+    const deps = mocked.ossConstructors[0]?.deps as
+      | { credentials: () => unknown }
+      | undefined;
+    expect(deps?.credentials()).toEqual({
+      accessKeyId: 'secondary-id',
+      accessKeySecret: 'secondary-secret',
+      securityToken: 'secondary-token',
+    });
+    expect(primaryArtifact).toEqual({});
+    expect(secondaryArtifact).toMatchObject({
+      oss: {
+        bucket: 'secondary-pages',
+        publicBaseUrl: 'https://secondary.example.com',
+      },
+    });
   });
 
   it('rejects an untrusted selected runtime', async () => {
