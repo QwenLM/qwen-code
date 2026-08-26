@@ -133,11 +133,11 @@ interface WebShellSidebarFooterOptions {
 }
 ```
 
-| Value                                          | Effect                  |
-| ---------------------------------------------- | ----------------------- |
-| `undefined` (default)                          | All items shown         |
-| `false`                                        | Footer hidden entirely  |
-| `{ items: ['settings', 'theme', 'collapse'] }` | Only listed items shown |
+| Value                                          | Effect                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------- |
+| `undefined` (default)                          | All items shown                                                           |
+| `false`                                        | Footer hidden; the mobile drawer keeps only its close control             |
+| `{ items: ['settings', 'theme', 'collapse'] }` | Only listed items shown; the mobile drawer always keeps its close control |
 
 The footer auto-adapts to narrow widths: labels are hidden and version is
 dropped below certain thresholds.

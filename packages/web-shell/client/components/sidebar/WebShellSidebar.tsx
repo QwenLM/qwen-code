@@ -3680,7 +3680,7 @@ export function WebShellSidebar({
 
   const handleResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (collapsed) return;
+      if (collapsed || mobileOpen) return;
       event.preventDefault();
       resizeTeardownRef.current?.(true);
       setIsResizing(true);
@@ -3752,7 +3752,7 @@ export function WebShellSidebar({
         once: true,
       });
     },
-    [collapsed, onCollapsedChange, sidebarWidth],
+    [collapsed, mobileOpen, onCollapsedChange, sidebarWidth],
   );
 
   const deleteCandidateLabel = deleteCandidate

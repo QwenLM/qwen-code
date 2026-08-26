@@ -345,6 +345,26 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       sidebar?.style.getPropertyValue('--web-shell-sidebar-max-width'),
     ).toBe('512px');
 
+    const resizeHandle =
+      container.querySelector<HTMLElement>('[role="separator"]');
+    expect(resizeHandle).not.toBeNull();
+    act(() => {
+      resizeHandle!.dispatchEvent(
+        new PointerEvent('pointerdown', {
+          bubbles: true,
+          clientX: 300,
+          pointerId: 1,
+        }),
+      );
+      window.dispatchEvent(
+        new PointerEvent('pointerup', { clientX: 100, pointerId: 1 }),
+      );
+    });
+    expect(onCollapsedChange).not.toHaveBeenCalled();
+    expect(
+      window.localStorage.getItem('qwen-code-web-shell-sidebar-width'),
+    ).toBeNull();
+
     const close = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Collapse"]',
     );

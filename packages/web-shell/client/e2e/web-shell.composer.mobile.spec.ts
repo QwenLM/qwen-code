@@ -145,6 +145,25 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
       ),
     )
     .toBe('512');
+
+  await page.setViewportSize({ width: 700, height: 915 });
+  await page.getByRole('button', { name: 'Toggle menu' }).click();
+  await expect(drawer).toBeVisible();
+  await expect
+    .poll(() =>
+      sidebar.evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBeCloseTo(420, 0);
+  await page.getByRole('button', { name: 'Collapse' }).click();
+  await expect(drawer).toBeHidden();
+
+  await page.setViewportSize({ width: 1000, height: 915 });
+  await expect(sidebar).toBeVisible();
+  await expect
+    .poll(() =>
+      sidebar.evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBeCloseTo(420, 0);
 });
 
 test('tap, type, and Send submit through the shared prompt pipeline', async ({

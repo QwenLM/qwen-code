@@ -40,6 +40,10 @@
   );
 }
 
+.sidebar.mobileOpen .resizeHandle {
+  display: none;
+}
+
 .newChatButton,
 .pluginButton,
 .footerButton,
