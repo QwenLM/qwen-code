@@ -55,11 +55,30 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 'Set up Node'
+      # Hosted-only, mirroring ci.yml: on the pool, nodejs.org may be
+      # unreachable through the egress proxy, and the action's post step
+      # uploads the npm cache to GitHub — a save that ran 14+ minutes on the
+      # pool's slow link and timed out this job's first pool run
+      # (2026-08-26, ecs-qwen-runner-sg-1). The pool reuses the machine's
+      # Node and its persistent npm cache instead.
+      - name: 'Set up Node (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
 
       # --ignore-scripts: CI must not run dependency install hooks. The audit
       # only needs the resolved dependency tree, so skipping postinstall

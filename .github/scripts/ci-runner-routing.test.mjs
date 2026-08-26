@@ -532,4 +532,23 @@ describe('security-checks.yml runner routing', () => {
       );
     });
   }
+
+  it('dependency-cve keeps setup-node off the pool', () => {
+    // The action's post step uploads the npm cache to GitHub; on the
+    // pool's slow egress that save ran 14+ minutes and timed out the
+    // job's first pool run (2026-08-26, ecs-qwen-runner-sg-1). Hosted
+    // keeps the action; the pool reuses the machine's Node and its
+    // persistent npm cache, exactly as ci.yml does.
+    const steps = securityDoc.jobs['dependency-cve'].steps;
+    const setup = steps.find((s) =>
+      String(s.uses || '').startsWith('actions/setup-node'),
+    );
+    assert.ok(setup, 'the hosted setup-node step must exist');
+    assert.equal(setup.if, "${{ runner.environment == 'github-hosted' }}");
+    const preflight = steps.find(
+      (s) => s.uses === './.github/actions/self-hosted-node',
+    );
+    assert.ok(preflight, 'the pool lane must use the pre-installed Node');
+    assert.equal(preflight.if, "${{ runner.environment == 'self-hosted' }}");
+  });
 });
