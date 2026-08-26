@@ -134,6 +134,7 @@ async function switchMainModel(
   currentAuthType: AuthType,
   modelArg: string,
   scopeOverride?: SettingScope,
+  persistSelection = true,
 ): Promise<string> {
   const parsed = parseAcpModelOption(modelArg);
 
@@ -146,25 +147,29 @@ async function switchMainModel(
         ? { requireCachedCredentials: true }
         : undefined,
     );
-    persistSetting(
-      settings,
-      'security.auth.selectedType',
-      parsed.authType,
-      scopeOverride,
-    );
-    persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
-    // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
-    // by a previous model-picker selection — otherwise next launch would
-    // resolve to a different provider than this switch just chose. Use an
-    // empty-string tombstone so the clear overrides a lower-scope value (an
-    // undefined write is dropped from JSON and would not override on merge).
-    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+    if (persistSelection) {
+      persistSetting(
+        settings,
+        'security.auth.selectedType',
+        parsed.authType,
+        scopeOverride,
+      );
+      persistSetting(settings, 'model.name', parsed.modelId, scopeOverride);
+      // `/model <id>` selects by id only, so clear any baseUrl disambiguator left
+      // by a previous model-picker selection — otherwise next launch would
+      // resolve to a different provider than this switch just chose. Use an
+      // empty-string tombstone so the clear overrides a lower-scope value (an
+      // undefined write is dropped from JSON and would not override on merge).
+      persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+    }
     return parsed.modelId;
   }
 
   await config.switchModel(currentAuthType, modelArg, undefined);
-  persistSetting(settings, 'model.name', modelArg, scopeOverride);
-  persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+  if (persistSelection) {
+    persistSetting(settings, 'model.name', modelArg, scopeOverride);
+    persistSetting(settings, 'model.baseUrl', '', scopeOverride);
+  }
   return modelArg;
 }
 
@@ -500,6 +505,20 @@ export const modelCommand: SlashCommand = {
         content: t(
           'Cannot use both --project and --global. Choose one scope flag.',
         ),
+      };
+    }
+    const auxiliarySelection =
+      /(?:^|\s)--(?:fast|voice|vision|compaction|image)(?:\s|$)/.test(rawArgs);
+    if (
+      (hasProject &&
+        context.executionPolicy?.allowWorkspaceSettingsWrite === false) ||
+      (context.executionPolicy?.persistModelSelection === false &&
+        (hasProject || hasGlobal || auxiliarySelection))
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('This model selection is not available in this session.'),
       };
     }
     // Reject --project when workspace is untrusted — workspace settings are
@@ -1136,6 +1155,7 @@ export const modelCommand: SlashCommand = {
         authType,
         modelName,
         scopeOverride,
+        context.executionPolicy?.persistModelSelection !== false,
       );
       if (context.executionMode === 'acp') {
         await recordDaemonSessionModelFromConfig(config);
