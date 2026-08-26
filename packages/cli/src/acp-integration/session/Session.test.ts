@@ -19567,6 +19567,89 @@ describe('Session', () => {
         expect(publishedActivities).toEqual(['idle', 'running']);
       });
 
+      it('stamps a Goal turn’s tool results with the permit, and its own reads as bookkeeping', async () => {
+        // The evidence catalog derives provenance from this stamp: an
+        // unstamped tool result yields no catalog entry at all, so an ACP
+        // Goal could never cite an external_fact and could never prove a
+        // completion with anything but the model's own words.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-stamp',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-stamp' ? permit : undefined,
+        );
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockImplementation((name: string) => ({
+          name,
+          displayName: name,
+          kind: core.Kind.Read,
+          schema: { name, description: name, parameters: {} },
+          validateToolParams: vi.fn().mockReturnValue(null),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(name),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'ok',
+            returnDisplay: 'ok',
+          }),
+        }));
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-read', name: 'read_file', args: {} },
+                    { id: 'call-goal', name: 'get_goal', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValue(createEmptyStream());
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+
+        const optionsFor = (callId: string) =>
+          mockChatRecordingService.recordToolResult.mock.calls.find(
+            (call: unknown[]) =>
+              (call[1] as { callId?: string } | undefined)?.callId === callId,
+          )?.[2];
+        expect(optionsFor('call-read')).toEqual({ goalContext: permit });
+        expect(optionsFor('call-goal')).toEqual({
+          goalContext: permit,
+          provenance: 'goal_runtime',
+        });
+      });
+
       it('runs a host-scheduled Goal turn with the canonical permit', async () => {
         const permit: core.GoalTurnPermit = {
           goalId: 'goal-1',

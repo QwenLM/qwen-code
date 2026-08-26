@@ -169,6 +169,7 @@ import {
   refreshMemoryAfterManagedWrite,
   refreshMemoryInstruction,
   GoalPersistenceUnavailableError,
+  ambientGoalToolResultProvenance,
   goalTurnContext,
   sessionIdContext,
   promptIdContext,
@@ -9731,13 +9732,19 @@ export class Session implements SessionContext {
         ) {
           return;
         }
-        this.config
-          .getChatRecordingService()
-          ?.recordToolResult(finalized[index].responseParts, {
+        const goalProvenance = ambientGoalToolResultProvenance(record.toolName);
+        this.config.getChatRecordingService()?.recordToolResult(
+          finalized[index].responseParts,
+          {
             ...record.metadata,
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
-          });
+          },
+          // Passed only inside a Goal turn: outside one this call keeps its
+          // former two-argument shape, so nothing about ordinary recording
+          // changes.
+          ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+        );
       });
       return {
         ...result,
