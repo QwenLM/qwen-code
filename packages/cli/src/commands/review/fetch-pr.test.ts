@@ -7,7 +7,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import type { Argv, CommandModule } from 'yargs';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import {
   fetchPrCommand,
   countDiffChangedLines,
@@ -1448,6 +1449,10 @@ describe('fetch-pr report assembly', () => {
     // …and the PLAN is the delta's, not the full range's: a re-plan over
     // fullText would pair a 200-line plan with an 8-line published diff.
     expect(report.diffLines).toBe(NARROWED.trimEnd().split('\n').length);
+    const narrowedSrcDiffLines = buildDiffPlan(NARROWED).srcDiffLines;
+    const fullSrcDiffLines = buildDiffPlan(FULL_DIFF).srcDiffLines;
+    expect(fullSrcDiffLines).toBeGreaterThan(narrowedSrcDiffLines);
+    expect(report.fullSrcDiffLines).toBe(fullSrcDiffLines);
     expect(report.emptyDiff).toBeUndefined();
     expect(report.collapsedFromUpstream).toBeUndefined();
     // The probe wiring, pinned by invocation shape: a transposed
@@ -4179,7 +4184,11 @@ describe('fetch-pr --resume', () => {
 });
 
 describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
-  const OUT = '/tmp/fetch-report.json';
+  // The deadline helpers derive the record dir through resolve(OUT), so OUT
+  // must be a native absolute path: a POSIX literal gains a drive letter and
+  // backslashes on Windows, the disk-routing mock below stops matching, and
+  // /tmp also maps to an unwritable drive root there.
+  const OUT = join(tmpdir(), 'fetch-report.json');
   const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
 
   function prevReport(over: Record<string, unknown> = {}): string {
@@ -4470,7 +4479,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       actualDeadline.writeRoundCapStop(OUT, 2, 2, now + 2000);
 
       await run();
-      const stampsFile = `${recordDir}/budget-rounds.json`;
+      const stampsFile = join(recordDir, 'budget-rounds.json');
       // Resume 1 kept the stop — and the stamps that price its rounds.
       expect(actualDeadline.readBudgetStop(OUT)).not.toBeNull();
       expect(realFs.existsSync(stampsFile)).toBe(true);

@@ -702,6 +702,10 @@ async function runSingleDispatch(
       // P-stall: the stall-watchdog emitter observes reasoning-loop events
       // (round/tool/usage) to detect a hang and abort `attemptSignal`.
       emitter,
+      undefined,
+      undefined,
+      prompt,
+      workflowAgentId,
     );
     // P5 R3 (wenshao #6): wrap `execute()` in try/finally so tokens
     // are reported even when `subagent.execute()` THROWS. R1 #3 moved
@@ -1063,6 +1067,8 @@ async function runOverridePath(
           max_time_minutes: resolveSubagentMaxTimeMinutes(),
         },
         eventEmitter,
+        taskName: String(ctx.get('task_prompt')),
+        subagentId: workflowAgentId,
       },
     );
 

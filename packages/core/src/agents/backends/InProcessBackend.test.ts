@@ -115,6 +115,8 @@ function destructureAgentCoreCall(call: unknown[]) {
           contentGeneratorConfig: { authType: string; model?: string };
         }
       | undefined,
+    taskName: call[9] as string | undefined,
+    subagentId: call[10] as string | undefined,
   };
 }
 
@@ -223,6 +225,9 @@ describe('InProcessBackend', () => {
 
     expect(backend.getActiveAgentId()).toBe('agent-1');
     expect(backend.getAgent('agent-1')).toBeDefined();
+    const call = destructureAgentCoreCall(vi.mocked(AgentCore).mock.calls[0]!);
+    expect(call.taskName).toBe('Do something');
+    expect(call.subagentId).toBe('agent-1');
   });
 
   it('routes owned monitor notifications into the agent message queue', async () => {

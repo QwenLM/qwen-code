@@ -39,7 +39,6 @@ import {
   type DaemonTurnCompleteData,
   type DaemonUiEvent,
   type DaemonUnrecognizedDiagnostic,
-  type GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
@@ -1037,7 +1036,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const next =
         typeof update === 'function' ? update(connectionRef.current) : update;
       connectionRef.current = next;
-      setConnection(next);
+      setConnection(update);
     },
     [],
   );
@@ -2288,13 +2287,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             : activeSession.workspaceCwd
               ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
               : client.workspaceGit();
-          const [
-            providerResult,
-            commandResult,
-            contextResult,
-            gitResult,
-            goalResult,
-          ] = await Promise.allSettled([
+          const metadataPromise = Promise.allSettled([
             canReuseSessionMetadata
               ? Promise.resolve(undefined)
               : client.workspaceProviders(),
@@ -2305,8 +2298,55 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? Promise.resolve(undefined)
               : activeSession.context(),
             gitPromise,
-            activeSession.goal(),
           ]);
+          // Hydrate Goal ownership independently so unrelated metadata cannot
+          // leave Slash commands blocked. Reconcile against any Goal frame
+          // that landed while the read was in flight.
+          const goalPromise = activeSession
+            .goal()
+            .then(
+              (response) => response.snapshot,
+              () => undefined,
+            )
+            .then((goalState) => {
+              if (
+                disposed ||
+                abort.signal.aborted ||
+                sessionRef.current !== activeSession
+              ) {
+                return goalState;
+              }
+              setConnection((current) => {
+                if (
+                  sessionRef.current !== activeSession ||
+                  current.sessionId !== activeSession.sessionId
+                ) {
+                  return current;
+                }
+                if (!goalState && goalStateAtLoadStart !== undefined) {
+                  return current;
+                }
+                return {
+                  ...current,
+                  goalState: goalState
+                    ? selectGoalStateFromRead(
+                        current.goalState,
+                        goalState,
+                        goalStateAtLoadStart?.goal?.goalId,
+                      )
+                    : (current.goalState ?? {
+                        v: 2,
+                        goal: null,
+                        activity: 'idle',
+                      }),
+                };
+              });
+              return goalState;
+            });
+          const [
+            [providerResult, commandResult, contextResult, gitResult],
+            goalState,
+          ] = await Promise.all([metadataPromise, goalPromise]);
           if (
             disposed ||
             abort.signal.aborted ||
@@ -2330,22 +2370,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             gitResult?.status === 'fulfilled'
               ? (gitResult.value.branch ?? undefined)
               : undefined;
-          const goalState =
-            goalResult.status === 'fulfilled'
-              ? goalResult.value.snapshot
-              : undefined;
-          // A failed goal fetch on a session with no known state still needs a
-          // snapshot so consumers stop treating the state as hydrating; it must
-          // never reconcile against a state a frame installed meanwhile.
           const goalStateFallback =
-            goalResult.status === 'fulfilled' ||
-            goalStateAtLoadStart !== undefined
-              ? undefined
-              : ({
-                  v: 2,
-                  goal: null,
-                  activity: 'idle',
-                } satisfies GoalSnapshotV2);
+            goalState === undefined && goalStateAtLoadStart === undefined
+              ? ({ v: 2, goal: null, activity: 'idle' } as const)
+              : undefined;
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
               ? loadWarningsRef.current?.models
@@ -2383,7 +2411,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
           setConnection((current) => {
             if (
-              sessionRef.current !== activeSession ||
+              abort.signal.aborted ||
+              (sessionRef.current !== undefined &&
+                sessionRef.current !== activeSession) ||
               current.sessionId !== activeSession.sessionId
             ) {
               return current;
@@ -2599,12 +2629,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 activeSession.clientId,
                 eventOptionsRef.current,
                 (update) => {
-                  setConnectionSynchronous((current) => {
-                    if (sessionRef.current !== activeSession) return current;
-                    return typeof update === 'function'
-                      ? update(current)
-                      : update;
-                  });
+                  if (sessionRef.current !== activeSession) return;
+                  setConnectionSynchronous(update);
                 },
               );
               const uiEvents = filterDaemonUiEventsForTranscript(
