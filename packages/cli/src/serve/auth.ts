@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { isLoopbackBind } from './loopback-binds.js';
+import {
+  singleTokenCredentials,
+  type ListenerScopedCredentials,
+} from './local-control/credentials.js';
+import { listenerIdentityOf } from './local-control/listener-identity.js';
 
 /**
  * Reject any request that carries an `Origin` header. CLI/SDK clients never
@@ -112,6 +116,69 @@ export function parseAllowOriginPatterns(
 }
 
 /**
+ * The read side of the CORS allowlist, so the middleware can be built once at
+ * app construction over a set that changes later.
+ */
+export interface OriginMatcher {
+  allows(origin: string): boolean;
+}
+
+/**
+ * A CORS allowlist that accepts runtime additions.
+ *
+ * `--allow-origin` entries are fixed at boot, but a Local Control session
+ * advertises a LAN origin that does not exist until it is enabled and must
+ * stop being honored the moment it is disabled. Registering a second CORS
+ * middleware at that point would not work — Express middleware order is fixed
+ * once the app is built — so the middleware is installed once over this
+ * object and the set behind it moves instead.
+ *
+ * Dynamic entries are keyed so a caller revokes exactly what it added,
+ * without needing to know whether the same origin was also configured
+ * statically (in which case removing it must not revoke the operator's entry).
+ */
+export class MutableOriginAllowlist implements OriginMatcher {
+  readonly #allowAny: boolean;
+  readonly #static: ReadonlySet<string>;
+  readonly #dynamic = new Map<string, string>();
+
+  constructor(base: ParsedAllowOriginPatterns) {
+    this.#allowAny = base.allowAny;
+    this.#static = new Set(base.origins);
+  }
+
+  allows(origin: string): boolean {
+    if (this.#allowAny) return true;
+    const normalized = origin.toLowerCase();
+    if (this.#static.has(normalized)) return true;
+    for (const value of this.#dynamic.values()) {
+      if (value === normalized) return true;
+    }
+    return false;
+  }
+
+  /** Add a runtime origin under `key`; re-adding the same key replaces it. */
+  add(key: string, origin: string): void {
+    this.#dynamic.set(key, origin.toLowerCase());
+  }
+
+  remove(key: string): void {
+    this.#dynamic.delete(key);
+  }
+}
+
+function toMatcher(
+  patterns: ParsedAllowOriginPatterns | OriginMatcher,
+): OriginMatcher {
+  return 'allows' in patterns
+    ? patterns
+    : {
+        allows: (origin: string) =>
+          patterns.allowAny || patterns.origins.has(origin.toLowerCase()),
+      };
+}
+
+/**
  * Build the CORS allowlist middleware. Replaces
  * `denyBrowserOriginCors` when `--allow-origin` is configured — owns both
  * halves of the policy (match → allow with CORS headers, unmatched →
@@ -133,8 +200,9 @@ export function parseAllowOriginPatterns(
  * (CORS spec forbids `*` with credentials).
  */
 export function allowOriginCors(
-  patterns: ParsedAllowOriginPatterns,
+  patterns: ParsedAllowOriginPatterns | OriginMatcher,
 ): RequestHandler {
+  const matcher = toMatcher(patterns);
   const allowedMethods = 'GET, POST, PATCH, DELETE, OPTIONS';
   // `X-Qwen-Event-Epoch` pairs with `Last-Event-ID` on SSE reconnects
   // (DAEMON-001): it must survive preflight AND be readable from the
@@ -163,8 +231,7 @@ export function allowOriginCors(
       res.status(403).json({ error: 'Request denied by CORS policy' });
       return;
     }
-    const matched =
-      patterns.allowAny || patterns.origins.has(origin.toLowerCase());
+    const matched = matcher.allows(origin);
     if (matched) {
       // Echo the request's origin verbatim (not literal `*`) even under
       // the any-origin pattern. Browser caches use the echo paired with
@@ -207,6 +274,41 @@ export function allowOriginCors(
  * and only learn the actual port once `listen()` has resolved.
  */
 export function hostAllowlist(
+  bind: string,
+  getPort: () => number,
+): RequestHandler {
+  const primaryGate = buildPrimaryHostGate(bind, getPort);
+  return (req: Request, res: Response, next: NextFunction) => {
+    const listener = listenerIdentityOf(req);
+    if (listener.kind !== 'local-control') {
+      primaryGate(req, res, next);
+      return;
+    }
+    // The LAN listener always carries a real Host gate, whatever the primary
+    // bind is. This is the DNS-rebinding defense the CLI path lacked: it bound
+    // the daemon itself to `0.0.0.0`, which took the non-loopback opt-out
+    // below and left the LAN with no Host check at all, while the Rust proxy
+    // enforced one per request.
+    //
+    // Accept the exact bind authority plus the canonical authority browsers
+    // send when the scheme uses its default port.
+    const host = (req.headers.host || '').toLowerCase();
+    const browserHost =
+      listener.origin === undefined
+        ? undefined
+        : new URL(listener.origin).host.toLowerCase();
+    if (
+      listener.authority === undefined ||
+      (host !== listener.authority && host !== browserHost)
+    ) {
+      res.status(403).json({ error: 'Invalid Host header' });
+      return;
+    }
+    next();
+  };
+}
+
+function buildPrimaryHostGate(
   bind: string,
   getPort: () => number,
 ): RequestHandler {
@@ -263,21 +365,28 @@ export function hostAllowlist(
 }
 
 /**
- * Bearer token middleware. When `token` is undefined the gate is open — used
- * for the loopback-only developer default. `runQwenServe` enforces that any
- * non-loopback bind has a token, and that `--require-auth` boots only with a
- * token configured, so this no-token branch is reachable only on loopback
- * developer setups that opted out of `--require-auth`.
+ * Bearer token middleware. Primary loopback requests may be open when the
+ * configured source has no token; Local Control always requires its pairing
+ * credential. `runQwenServe` still enforces that any non-loopback primary bind
+ * has a token, and that `--require-auth` boots only with a token configured.
  */
-export function bearerAuth(token: string | undefined): RequestHandler {
-  if (!token) {
-    return (_req: Request, _res: Response, next: NextFunction) => next();
-  }
-  // Pre-hash the configured token once. Per-request we hash the candidate and
-  // constant-time compare; this avoids leaking byte positions through string
-  // inequality short-circuiting.
-  const expected = createHash('sha256').update(token, 'utf8').digest();
+export function bearerAuth(
+  source: string | undefined | ListenerScopedCredentials,
+): RequestHandler {
+  const credentials =
+    typeof source === 'object' && source !== null
+      ? source
+      : singleTokenCredentials(source);
   return (req: Request, res: Response, next: NextFunction) => {
+    // Resolved per request rather than once at construction: the same app is
+    // served by both the primary listener and, while Local Control is on, the
+    // LAN listener — and they accept different credentials. See
+    // `local-control/credentials.ts` for the scoping table.
+    const listener = listenerIdentityOf(req);
+    if (credentials.isOpen(listener)) {
+      next();
+      return;
+    }
     const header = req.headers.authorization;
     if (!header) {
       res.status(401).json({ error: 'Unauthorized' });
@@ -319,18 +428,37 @@ export function bearerAuth(token: string | undefined): RequestHandler {
     ) {
       credStart++;
     }
-    const credentials = header.slice(credStart);
-    if (credentials.length === 0) {
+    const presented = header.slice(credStart);
+    if (presented.length === 0) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    const candidate = createHash('sha256').update(credentials, 'utf8').digest();
-    if (!timingSafeEqual(candidate, expected)) {
+    if (!credentials.verify(presented, listener)) {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
+    (req as Request & { [AUTHENTICATED_REQUEST]?: true })[
+      AUTHENTICATED_REQUEST
+    ] = true;
     next();
   };
+}
+
+export const AUTHENTICATED_REQUEST = Symbol('qwen.serve.authenticatedRequest');
+
+/**
+ * Whether the request presented credentials that `bearerAuth` verified.
+ * NOTE: "open" loopback requests on a no-token daemon pass `bearerAuth`
+ * without being authenticated — this helper tells the two apart, which is
+ * what the Local Control routes use to decide whether a response may carry
+ * the pairing secret (#9106).
+ */
+export function requestWasAuthenticated(req: Request): boolean {
+  return (
+    (req as Request & { [AUTHENTICATED_REQUEST]?: true })[
+      AUTHENTICATED_REQUEST
+    ] === true
+  );
 }
 
 /**
@@ -348,7 +476,8 @@ export function bearerAuth(token: string | undefined): RequestHandler {
  * | requireAuth=true           | any               | passthrough (1) |
  * | token configured           | any               | passthrough (2) |
  * | no token (loopback dev)    | strict=false      | passthrough     |
- * | no token (loopback dev)    | strict=true       | 401 + code      |
+ * | no token, authenticated LAN| strict=true       | passthrough     |
+ * | no token, open loopback    | strict=true       | 401 + code      |
  *
  * (1) `--require-auth` boots only with a token, so the global
  *     `bearerAuth` middleware already 401'd unauthenticated requests
@@ -368,12 +497,25 @@ export function bearerAuth(token: string | undefined): RequestHandler {
  */
 export interface MutationGateOptions {
   /**
-   * When true, this route refuses to serve unauthenticated callers
-   * even on loopback no-token defaults. Used by mutation routes
+   * When true, this route refuses to serve unauthenticated callers even on
+   * loopback no-token defaults, while allowing requests that passed a
+   * listener-scoped pairing credential. Used by mutation routes
    * (memory, file edit, tool enable, MCP restart, device-flow auth)
    * that should never be reachable without explicit operator opt-in.
    * Defaults to false so existing routes can adopt the helper without
    * behavior change.
+   *
+   * Resolved caveat (#9106): the pairing credential used to be minted and
+   * read back by any unauthenticated loopback caller through the Local
+   * Control enable/status routes, letting a local process present the
+   * credential on the LAN listener and pass this gate. The Local Control
+   * routes no longer return the pairing URL or QR to unauthenticated
+   * callers (`requestWasAuthenticated` gate in
+   * `routes/workspace-local-control.ts`); on a no-token daemon the pairing
+   * URL is printed to the daemon's own terminal instead. Obtaining the
+   * credential therefore requires the daemon token (or terminal access),
+   * so the strict surface no longer inherits the loopback trust boundary
+   * through these routes.
    */
   strict?: boolean;
 }
@@ -439,7 +581,15 @@ export function createMutationGate(
   // routes doesn't allocate N identical closures. The auth.test.ts
   // identity assertion anchors this — a future change that loses the
   // cache is visible.
-  const strictDenier: RequestHandler = (_req: Request, res: Response) => {
+  const strictDenier: RequestHandler = (
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ) => {
+    if (requestWasAuthenticated(req)) {
+      next();
+      return;
+    }
     // Only list remediations that work standalone. `--require-auth` is
     // paired-required-with-a-token at boot (`run-qwen-serve.ts` refuses
     // to start with the flag set but no token), so naming it as a

@@ -13,10 +13,67 @@ import {
 import {
   apiActivityTracker,
   getActiveGoal,
-  type GoalTerminalEvent,
+  projectGoalStateToLegacy,
+  type GoalRecord,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import { BaseEmitter } from './base-emitter.js';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { HistoryItemGoalStatus } from '../../../ui/types.js';
+
+/**
+ * Build the `goalStatus` card without sending it.
+ *
+ * Split out of {@link MessageEmitter.emitGoalStatus} so the bulk load-replay
+ * path can place the card inside its `LOAD_REPLAY` envelope instead of
+ * streaming it. See `Session.renderRecoveredGoalUpdates`.
+ */
+export function buildGoalStatusUpdate(
+  status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
+): SessionUpdate {
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: {
+      goalStatus: status,
+    },
+  };
+}
+
+/**
+ * Build the `goalState` card without sending it.
+ *
+ * Split out of {@link MessageEmitter.emitGoalState}; see
+ * {@link buildGoalStatusUpdate} for why the render/send split exists.
+ */
+export function buildGoalStateUpdate(
+  snapshot: GoalSnapshotV2,
+  cause?: GoalStateCause,
+  previousGoal: GoalRecord | null = null,
+): SessionUpdate {
+  const projection = cause
+    ? projectGoalStateToLegacy({ v: 2, cause, snapshot }, previousGoal)
+    : undefined;
+  const goalStatus = projection
+    ? (() => {
+        const { type: _type, ...status } = projection.goalStatus;
+        return status;
+      })()
+    : undefined;
+  return {
+    sessionUpdate: 'agent_message_chunk',
+    content: { type: 'text', text: '' },
+    _meta: {
+      goalState: snapshot,
+      ...(goalStatus ? { goalStatus } : {}),
+      ...(projection?.goalTerminal
+        ? { goalTerminal: projection.goalTerminal }
+        : {}),
+    },
+  };
+}
 
 /**
  * Handles emission of text message chunks (user, agent, thought).
@@ -63,26 +120,23 @@ export class MessageEmitter extends BaseEmitter {
     });
   }
 
-  async emitGoalTerminal(event: GoalTerminalEvent): Promise<void> {
-    await this.sendUpdate({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: '' },
-      _meta: {
-        goalTerminal: event,
-      },
-    });
-  }
-
   async emitGoalStatus(
     status: Omit<HistoryItemGoalStatus, 'id' | 'type'>,
+    goalState?: unknown,
   ): Promise<void> {
-    await this.sendUpdate({
-      sessionUpdate: 'agent_message_chunk',
-      content: { type: 'text', text: '' },
-      _meta: {
-        goalStatus: status,
-      },
-    });
+    const update = buildGoalStatusUpdate(status);
+    if (goalState) {
+      update._meta = { ...update._meta, goalState };
+    }
+    await this.sendUpdate(update);
+  }
+
+  async emitGoalState(
+    snapshot: GoalSnapshotV2,
+    cause?: GoalStateCause,
+    previousGoal: GoalRecord | null = null,
+  ): Promise<void> {
+    await this.sendUpdate(buildGoalStateUpdate(snapshot, cause, previousGoal));
   }
 
   /**
@@ -145,6 +199,34 @@ export class MessageEmitter extends BaseEmitter {
         text,
         timestamp,
         ...(subagentMeta ? { extra: { ...subagentMeta } } : {}),
+      }),
+    );
+  }
+
+  async emitVisionBridgeNotice(
+    text: string,
+    result: VisionBridgeResult,
+  ): Promise<void> {
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'assistant',
+        text,
+        extra: {
+          source: 'vision_bridge_notice',
+          qwenDiscreteMessage: true,
+          visionBridgeNotice: {
+            status: result.status,
+            convertedCount: result.convertedCount,
+            omittedCount: result.omittedCount,
+            ...(result.modelId
+              ? { modelName: result.modelId.replace(/^[^:]+:/, '') }
+              : {}),
+            ...(result.modelEndpoint
+              ? { modelEndpoint: result.modelEndpoint }
+              : {}),
+            egressOccurred: result.egressOccurred === true,
+          },
+        },
       }),
     );
   }

@@ -1160,8 +1160,25 @@ function classifyContentOnlyThinkingTagPrefix(
   for (const closing of [false, true, false]) {
     const tagLength = consumeTag(rest, closing);
     if (tagLength === null) return 'pending';
-    if (tagLength === undefined) return 'clean';
+    if (tagLength === undefined) {
+      if (!closing) return 'clean';
+      break;
+    }
     rest = rest.slice(tagLength).trimStart();
+    if (closing && !rest) return 'clean';
+    // An opening tag followed by ordinary text is only a legitimate literal
+    // if a closing tag still balances it later. Without one, the turn is an
+    // unclosed thinking block — the exact shape of the recorded production
+    // leaks (issue #6666). Hold it mid-stream (a closing tag may still
+    // arrive) and reject it once the stream finishes. Whitespace-only tails
+    // stay undecided: they may still resolve into a closing tag.
+    if (
+      closing === false &&
+      /\S/.test(rest) &&
+      !/<\/think(?:ing)?\s*>/i.test(rest)
+    ) {
+      return streamFinished ? 'leaked' : 'pending';
+    }
   }
 
   let depth = 1;
@@ -1564,8 +1581,18 @@ export function convertOpenAIChunkToGemini(
         Boolean(choice.finish_reason) &&
         !closingTagName &&
         !/\S/.test(combinedCandidateText);
+      // The length cap releases undecided prefixes (e.g. a literal "<t" that
+      // never resolves) so ordinary content is not buffered forever. Once the
+      // candidate has committed to a complete opening tag, though, releasing
+      // it can leak the whole block — production thinking-tag leaks are longer
+      // than the cap (issue #6666). Keep those held until a closing tag arrives
+      // or the finished-stream check rejects an unclosed block.
+      const confirmedOpeningTagCandidate =
+        LEADING_THINKING_TAG_PATTERN.test(combinedCandidateText) &&
+        !combinedCandidateText.trimStart().startsWith('</');
       const releaseContentOnlyCandidate =
         contentOnlyThinkingState === 'pending' &&
+        !confirmedOpeningTagCandidate &&
         (Boolean(choice.finish_reason) ||
           combinedCandidateText.trimStart().length >
             MAX_THINKING_TAG_CANDIDATE_LENGTH);
@@ -1591,6 +1618,7 @@ export function convertOpenAIChunkToGemini(
         requestContext.pendingThinkingTagCandidate = undefined;
       } else if (isPossibleTag) {
         if (
+          !confirmedOpeningTagCandidate &&
           !closingTagName &&
           combinedCandidateText.trimStart().length >
             MAX_THINKING_TAG_CANDIDATE_LENGTH
@@ -1809,15 +1837,21 @@ export function convertOpenAIChunkToGemini(
 function mapOpenAIFinishReasonToGemini(
   openaiReason: string | null,
 ): FinishReason {
-  if (!openaiReason) return FinishReason.FINISH_REASON_UNSPECIFIED;
+  if (typeof openaiReason !== 'string') {
+    return FinishReason.FINISH_REASON_UNSPECIFIED;
+  }
   const mapping: Record<string, FinishReason> = {
     stop: FinishReason.STOP,
     length: FinishReason.MAX_TOKENS,
+    max_tokens: FinishReason.MAX_TOKENS,
     content_filter: FinishReason.SAFETY,
     function_call: FinishReason.STOP,
     tool_calls: FinishReason.STOP,
   };
-  return mapping[openaiReason] || FinishReason.FINISH_REASON_UNSPECIFIED;
+  return (
+    mapping[openaiReason.toLowerCase()] ||
+    FinishReason.FINISH_REASON_UNSPECIFIED
+  );
 }
 
 function mapGeminiFinishReasonToOpenAI(

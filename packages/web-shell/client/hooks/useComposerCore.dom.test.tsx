@@ -27,17 +27,21 @@ function Harness({
   onSubmit,
   renderComposerTag,
   renderComposerTagTooltip,
+  onFileTagClick,
   parseUserMessageContent,
   followupState,
   sessionId,
   atWorkspaceCwd,
   commands,
   onImageIngestionNotice,
+  workspaceUploadBusy,
+  fileDragEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
+  onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
   parseUserMessageContent?: UserMessageContentParser;
   followupState?: {
     isVisible: boolean;
@@ -48,6 +52,8 @@ function Harness({
   atWorkspaceCwd?: string;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
+  fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -55,6 +61,7 @@ function Harness({
     editorTheme: {},
     renderComposerTag,
     renderComposerTagTooltip,
+    onFileTagClick,
     parseUserMessageContent,
     followupState,
     sessionId,
@@ -62,6 +69,8 @@ function Harness({
     composerInput,
     composerInputVersion: composerInput ? 1 : undefined,
     onImageIngestionNotice,
+    workspaceUploadBusy,
+    fileDragEnabled,
   });
   latest = composer;
 
@@ -77,17 +86,21 @@ async function mount({
   onSubmit = vi.fn(),
   renderComposerTag,
   renderComposerTagTooltip,
+  onFileTagClick,
   parseUserMessageContent,
   followupState,
   sessionId,
   atWorkspaceCwd,
   commands,
   onImageIngestionNotice,
+  workspaceUploadBusy,
+  fileDragEnabled,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
+  onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
   parseUserMessageContent?: UserMessageContentParser;
   followupState?: {
     isVisible: boolean;
@@ -98,6 +111,8 @@ async function mount({
   atWorkspaceCwd?: string;
   commands?: UseComposerCoreOptions['commands'];
   onImageIngestionNotice?: UseComposerCoreOptions['onImageIngestionNotice'];
+  workspaceUploadBusy?: boolean;
+  fileDragEnabled?: UseComposerCoreOptions['fileDragEnabled'];
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -115,12 +130,15 @@ async function mount({
             onSubmit={onSubmit}
             renderComposerTag={renderComposerTag}
             renderComposerTagTooltip={renderComposerTagTooltip}
+            onFileTagClick={onFileTagClick}
             parseUserMessageContent={parseUserMessageContent}
             followupState={followupState}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
             commands={commands}
             onImageIngestionNotice={onImageIngestionNotice}
+            workspaceUploadBusy={workspaceUploadBusy}
+            fileDragEnabled={fileDragEnabled}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -148,6 +166,15 @@ async function mount({
       act(() => render());
     },
   };
+}
+
+async function waitForImageIngestion() {
+  await vi.waitFor(async () => {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(latest!.pendingImageBatchCount).toBe(0);
+  });
 }
 
 afterEach(() => {
@@ -266,6 +293,42 @@ describe('useComposerCore history and drafts', () => {
     mounted.rerender();
 
     expect(getItem).toHaveBeenCalledTimes(readsAfterMount);
+  });
+
+  it('blocks submission while an external ingestion lane is busy', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit, workspaceUploadBusy: true });
+
+    act(() => {
+      latest!.setText('review the upload');
+      latest!.submitText();
+    });
+
+    expect(latest!.canSubmit).toBe(false);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('blocks history retry and search-match submit while an upload is busy', async () => {
+    const workspaceCwd = '/workspace/upload-busy';
+    localStorage.setItem(
+      getPromptHistoryStorageKey(workspaceCwd),
+      JSON.stringify(['previous prompt']),
+    );
+    const onSubmit = vi.fn();
+    await mount({
+      onSubmit,
+      sessionId: 'session-upload-busy',
+      atWorkspaceCwd: workspaceCwd,
+      workspaceUploadBusy: true,
+    });
+
+    act(() => latest!.retryLast());
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    act(() => latest!.searchState.openHistorySearch());
+    expect(latest!.searchState.searchMatches).toEqual(['previous prompt']);
+    act(() => latest!.searchState.submitSearchMatch('previous prompt'));
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it('falls back to legacy prompt history until the workspace has its own history', async () => {
@@ -486,7 +549,7 @@ describe('useComposerCore history and drafts', () => {
   it('commits a new-task prompt after its session is allocated', async () => {
     let commitPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitPrompt = commitAccepted;
         return false;
       },
@@ -516,7 +579,7 @@ describe('useComposerCore history and drafts', () => {
   it('commits a delayed queued prompt to history exactly once', async () => {
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -562,7 +625,7 @@ describe('useComposerCore history and drafts', () => {
     vi.useFakeTimers();
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -607,7 +670,7 @@ describe('useComposerCore history and drafts', () => {
   it('does not clear retyped identical input after delayed acceptance', async () => {
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -632,7 +695,7 @@ describe('useComposerCore history and drafts', () => {
   it('does not clear the next session when a delayed prompt is accepted', async () => {
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -672,7 +735,7 @@ describe('useComposerCore history and drafts', () => {
     vi.useFakeTimers();
     let commitQueuedPrompt: ComposerSubmitCommit | undefined;
     const onSubmit = vi.fn<UseComposerCoreOptions['onSubmit']>(
-      (_text, _images, commitAccepted) => {
+      (_text, _images, _files, commitAccepted) => {
         commitQueuedPrompt = commitAccepted;
         return false;
       },
@@ -775,6 +838,24 @@ describe('useComposerCore paste', () => {
     expect(latest!.getText()).not.toContain('Pasted Content');
   });
 
+  it('ingests copied file references after a drop intent choice', async () => {
+    await mount();
+    const files = [
+      new File(['png'], 'photo.png', { type: 'image/png' }),
+      new File(['hello'], 'notes.txt', { type: 'text/plain' }),
+    ];
+
+    await act(async () => {
+      expect(latest!.ingestFiles(files)).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
+    expect(latest!.pastedFiles).toMatchObject([
+      { name: 'notes.txt', data: files[1] },
+    ]);
+  });
+
   it('claims image drops, blocks submit while reading, and submits image-only', async () => {
     const onSubmit = vi.fn();
     await mount({ onSubmit });
@@ -794,9 +875,7 @@ describe('useComposerCore paste', () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(latest!.pendingImageBatchCount).toBe(1);
 
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    });
+    await waitForImageIngestion();
     expect(latest!.pendingImageBatchCount).toBe(0);
     expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
 
@@ -804,9 +883,94 @@ describe('useComposerCore paste', () => {
     expect(onSubmit).toHaveBeenCalledWith(
       '',
       [expect.objectContaining({ media_type: 'image/png' })],
+      undefined,
       expect.any(Function),
       undefined,
     );
+  });
+
+  it('ingests dropped text files, sanitizes names, and submits them', async () => {
+    const onSubmit = vi.fn();
+    await mount({ onSubmit });
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      drop([
+        new File(['line1\nline2'], 'my app.log', { type: 'text/plain' }),
+        new File(['second'], 'my app.log', { type: '' }),
+      ]);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+
+    expect(latest!.pastedFiles).toMatchObject([
+      { name: 'my app.log', data: expect.any(File) },
+      { name: 'my app (1).log', data: expect.any(File) },
+    ]);
+    expect(latest!.hasAttachments).toBe(true);
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledWith(
+      '',
+      undefined,
+      [
+        expect.objectContaining({ name: 'my app.log' }),
+        expect.objectContaining({ name: 'my app (1).log' }),
+      ],
+      expect.any(Function),
+      undefined,
+    );
+  });
+
+  it('removes a pasted file via its chip index', async () => {
+    await mount();
+    const drop = (files: File[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { files, items: [], types: ['Files'], dropEffect: 'none' },
+      });
+      container!
+        .querySelector('[data-web-shell-composer-surface]')!
+        .dispatchEvent(event);
+    };
+
+    act(() => {
+      drop([
+        new File(['one'], 'one.log', { type: 'text/plain' }),
+        new File(['two'], 'two.log', { type: 'text/plain' }),
+      ]);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(latest!.pastedFiles).toHaveLength(2);
+
+    act(() => latest!.removeFile(0));
+    expect(latest!.pastedFiles).toMatchObject([{ name: 'two.log' }]);
+  });
+
+  it('restores files with sanitized deduped names', async () => {
+    await mount();
+    act(() => {
+      latest!.handle.restoreFiles([
+        { name: 'app.log', media_type: 'text/plain', text: 'a' },
+        { name: 'app.log', media_type: 'text/plain', text: 'b' },
+      ]);
+    });
+
+    expect(latest!.pastedFiles).toMatchObject([
+      { name: 'app.log', text: 'a' },
+      { name: 'app (1).log', text: 'b' },
+    ]);
   });
 
   it('keeps drag feedback across composer children and clears it globally', async () => {
@@ -853,13 +1017,61 @@ describe('useComposerCore paste', () => {
     expect(latest!.imageDragActive).toBe(false);
   });
 
+  it('fileDragEnabled={false} leaves file drag-and-drop inert', async () => {
+    await mount({ fileDragEnabled: false });
+    const surface = container!.querySelector(
+      '[data-web-shell-composer-surface]',
+    )!;
+    const editor = container!.querySelector('.cm-content')!;
+    const dataTransfer = {
+      files: [],
+      items: [{ kind: 'file', type: 'image/png', getAsFile: () => null }],
+      types: ['Files'],
+      dropEffect: 'none',
+    };
+    const dispatchDrag = (target: Element, type: string) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', { value: dataTransfer });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    act(() => {
+      dispatchDrag(editor, 'dragenter');
+      dispatchDrag(editor, 'dragover');
+    });
+    // No drag highlight, no drop-target feedback.
+    expect(latest!.imageDragActive).toBe(false);
+    expect(dataTransfer.dropEffect).toBe('none');
+
+    const drop = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', {
+      value: {
+        files: [new File(['png'], 'photo.png', { type: 'image/png' })],
+        items: [],
+        types: ['Files'],
+        dropEffect: 'none',
+      },
+    });
+    act(() => {
+      surface.dispatchEvent(drop);
+    });
+    await waitForImageIngestion();
+    // Nothing is ingested on the inline lane, and the drop itself is
+    // cancelled so the browser cannot navigate to the dropped file.
+    expect(drop.defaultPrevented).toBe(true);
+    expect(latest!.pastedImages).toEqual([]);
+    expect(latest!.pastedFiles).toEqual([]);
+  });
+
   it('keeps batch order, normalizes BMP, and aggregates rejected drops', async () => {
     const onImageIngestionNotice = vi.fn();
     await mount({ onImageIngestionNotice });
     const first = new File(['first'], 'first.bmp', { type: 'image/x-bmp' });
-    const unsupported = new File(['text'], 'notes.txt', {
-      type: 'text/plain',
+    const tooLarge = new File(['zip'], 'archive.zip', {
+      type: 'application/zip',
     });
+    Object.defineProperty(tooLarge, 'size', { value: 8 * 1024 * 1024 + 1 });
     const second = new File(['second'], 'second.png', { type: 'image/png' });
     const drop = (files: File[]) => {
       const event = new Event('drop', { bubbles: true, cancelable: true });
@@ -872,12 +1084,10 @@ describe('useComposerCore paste', () => {
     };
 
     act(() => {
-      drop([first, unsupported]);
+      drop([first, tooLarge]);
       drop([second]);
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    });
+    await waitForImageIngestion();
 
     expect(latest!.pastedImages.map((image) => image.media_type)).toEqual([
       'image/bmp',
@@ -907,12 +1117,16 @@ describe('useComposerCore paste', () => {
     };
 
     act(() => {
-      drop([new File(['text'], 'notes.txt', { type: 'text/plain' })]);
+      const tooLarge = new File(['zip'], 'archive.zip', {
+        type: 'application/zip',
+      });
+      Object.defineProperty(tooLarge, 'size', {
+        value: 8 * 1024 * 1024 + 1,
+      });
+      drop([tooLarge]);
       drop([new File(['png'], 'photo.png', { type: 'image/png' })]);
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
-    });
+    await waitForImageIngestion();
 
     expect(onImageIngestionNotice).toHaveBeenCalledOnce();
     expect(latest!.pastedImages).toMatchObject([{ media_type: 'image/png' }]);
@@ -965,6 +1179,31 @@ describe('useComposerCore paste', () => {
 });
 
 describe('useComposerCore tags', () => {
+  it('makes only inline file tags previewable with the file click handler', async () => {
+    const onFileTagClick = vi.fn();
+    await mount({
+      composerInput: {
+        tags: [
+          { id: 'file:notes.txt', kind: 'file', value: 'notes.txt' },
+          { id: 'table:orders', kind: 'table', value: 'orders' },
+        ],
+        tagPlacement: 'inline',
+      },
+      onFileTagClick,
+    });
+
+    const chips = document.body.querySelectorAll('span[role="button"]');
+    expect(chips).toHaveLength(1);
+    act(() => (chips[0] as HTMLElement).click());
+    expect(onFileTagClick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tag: expect.objectContaining({ kind: 'file', value: 'notes.txt' }),
+        placement: 'composer',
+        readonly: false,
+      }),
+    );
+  });
+
   it('resubmits restored input annotations with the draft', async () => {
     const { onSubmit } = await mount();
     const inputAnnotations = [
@@ -985,6 +1224,7 @@ describe('useComposerCore tags', () => {
 
     expect(onSubmit).toHaveBeenCalledWith(
       '@file.ts\n\nfix it',
+      undefined,
       undefined,
       expect.any(Function),
       { inputAnnotations },
@@ -1021,6 +1261,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenCalledWith(
       '@b new\n@a old',
       undefined,
+      undefined,
       expect.any(Function),
       {
         inputAnnotations: [
@@ -1053,6 +1294,7 @@ describe('useComposerCore tags', () => {
 
     expect(onSubmit).toHaveBeenCalledWith(
       'please @file.ts\n\nfix it',
+      undefined,
       undefined,
       expect.any(Function),
       {
@@ -1089,6 +1331,7 @@ describe('useComposerCore tags', () => {
 
     expect(onSubmit).toHaveBeenCalledWith(
       '@Xile.ts\n\nfix it',
+      undefined,
       undefined,
       expect.any(Function),
       undefined,
@@ -1291,6 +1534,88 @@ describe('useComposerCore tags', () => {
     });
     expect(latest!.handle.hasAttachments()).toBe(false);
     expect(latest!.hasAttachments).toBe(false);
+    expect(latest!.viewRef.current!.state.doc.toString()).toBe('');
+    expect(document.body.querySelector('.cm-placeholder')).not.toBeNull();
+  });
+
+  it('preserves surrounding text when an inline tag chip is removed', async () => {
+    await mount();
+
+    act(() => {
+      latest!.insertText('please review ');
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline' },
+      );
+      latest!.insertText(' now');
+    });
+    expect(latest!.hasAttachments).toBe(true);
+
+    const removeButton = document.body.querySelector(
+      'button[aria-label="Remove orders"]',
+    ) as HTMLButtonElement | null;
+    expect(removeButton).not.toBeNull();
+    act(() => {
+      removeButton!.click();
+    });
+
+    const text = latest!.viewRef.current!.state.doc.toString();
+    expect(text).toContain('please review');
+    expect(text).toContain('now');
+    // The chip's serialized text must be removed from the doc, not just its
+    // decoration — uncovered text would be submitted as plain prompt text.
+    expect(text).not.toContain('@orders');
+    expect(latest!.hasAttachments).toBe(false);
+  });
+
+  it('appends end-placed inline tags without stealing focus', async () => {
+    await mount();
+
+    act(() => {
+      latest!.insertText('draft text');
+    });
+    const view = latest!.viewRef.current!;
+    // Caret sits mid-text; an end-placement insert must still append.
+    act(() => {
+      view.dispatch({ selection: { anchor: 5 } });
+    });
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+
+    act(() => {
+      latest!.addTags(
+        [{ id: 'orders', value: 'orders', serialized: '@orders' }],
+        { placement: 'inline', position: 'end' },
+      );
+    });
+
+    const doc = view.state.doc.toString();
+    // A boundary separates the appended reference from the preceding text,
+    // and the caret stays where the user left it (no teleport to doc end).
+    expect(doc).toBe('draft text @orders ');
+    expect(view.state.selection.main.from).toBe(5);
+    expect(document.activeElement).toBe(outside);
+
+    // The end-placed tag must become a real chip decoration: a wrong
+    // effect-range offset would leave the doc text correct but decorate the
+    // wrong span, breaking the remove button and atomic-range behavior.
+    expect(latest!.hasAttachments).toBe(true);
+    const removeButton = document.body.querySelector(
+      'button[aria-label="Remove orders"]',
+    ) as HTMLButtonElement | null;
+    expect(removeButton).not.toBeNull();
+    act(() => {
+      removeButton!.click();
+    });
+    // The remove button deletes the chip's serialized text (separator
+    // spacing aside), restoring the pre-upload content.
+    const removed = view.state.doc.toString();
+    expect(removed).not.toContain('@orders');
+    expect(removed.trim()).toBe('draft text');
+    expect(latest!.hasAttachments).toBe(false);
+    outside.remove();
   });
 
   it('updates inline tag state when a document change removes the last tag', async () => {
@@ -1329,6 +1654,7 @@ describe('useComposerCore tags', () => {
 
     expect(onSubmit).toHaveBeenCalledWith(
       '<table /> explain',
+      undefined,
       undefined,
       expect.any(Function),
       {
@@ -1389,6 +1715,7 @@ describe('useComposerCore tags', () => {
     act(() => latest!.submitText());
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
+      undefined,
       undefined,
       expect.any(Function),
       {
@@ -1569,6 +1896,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
       undefined,
+      undefined,
       expect.any(Function),
       {
         inputAnnotations: [
@@ -1629,6 +1957,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
       undefined,
+      undefined,
       expect.any(Function),
       {
         inputAnnotations: [
@@ -1665,6 +1994,7 @@ describe('useComposerCore tags', () => {
 
     expect(onSubmit).toHaveBeenLastCalledWith(
       historyText,
+      undefined,
       undefined,
       expect.any(Function),
       undefined,
@@ -1710,6 +2040,7 @@ describe('useComposerCore tags', () => {
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
       undefined,
+      undefined,
       expect.any(Function),
       undefined,
     );
@@ -1744,6 +2075,7 @@ describe('useComposerCore tags', () => {
     const editor = container!.querySelector('.cm-content')!;
     expect(onSubmit).toHaveBeenLastCalledWith(
       prompt,
+      undefined,
       undefined,
       expect.any(Function),
       {

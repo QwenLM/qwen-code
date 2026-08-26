@@ -59,9 +59,12 @@ import {
   hasControlCharacter,
   hasUnsafeDisplayPayload,
 } from './record-artifact.js';
+import { OFFICE_DOCUMENT_EXTENSIONS } from '../utils/workspace-artifact-directory.js';
+import { toCanonicalWorkspaceArtifactPath } from '../utils/workspace-artifact-path.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
 const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
+  ['.csv', 'file'],
   ['.htm', 'html'],
   ['.html', 'html'],
   ['.ipynb', 'notebook'],
@@ -72,6 +75,9 @@ const ARTIFACT_KIND_BY_EXTENSION = new Map<string, ToolArtifactKind>([
   ['.svg', 'image'],
   ['.webp', 'image'],
 ]);
+for (const ext of OFFICE_DOCUMENT_EXTENSIONS) {
+  ARTIFACT_KIND_BY_EXTENSION.set(ext, 'document');
+}
 
 type WorkspaceToolArtifact = ToolArtifact & {
   storage: 'workspace';
@@ -689,11 +695,11 @@ export function buildWorkspaceArtifactMetadata(
   filePath: string,
   sizeBytes?: number,
 ): WorkspaceToolArtifact | null {
-  const workspacePath = getRecordArtifactWorkspacePath(config, filePath);
-  if (!workspacePath) {
+  const recorded = resolveRecordedWorkspaceFile(config, filePath);
+  if (!recorded) {
     return null;
   }
-  const title = path.basename(filePath);
+  const title = path.basename(recorded.filePath);
   // The daemon store rejects titles and paths that are too long, carry control
   // characters, or contain markup; skip the artifact rather than tell the model
   // it was recorded when it will be dropped.
@@ -701,9 +707,9 @@ export function buildWorkspaceArtifactMetadata(
     title.length > ARTIFACT_TITLE_MAX_LENGTH ||
     hasControlCharacter(title) ||
     hasUnsafeDisplayPayload(title) ||
-    workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
-    hasControlCharacter(workspacePath) ||
-    hasUnsafeDisplayPayload(workspacePath)
+    recorded.workspacePath.length > ARTIFACT_WORKSPACE_PATH_MAX_LENGTH ||
+    hasControlCharacter(recorded.workspacePath) ||
+    hasUnsafeDisplayPayload(recorded.workspacePath)
   ) {
     debugLogger.debug('workspace artifact skipped (safety checks)', {
       path: filePath,
@@ -712,48 +718,46 @@ export function buildWorkspaceArtifactMetadata(
   }
   return {
     title,
-    kind: inferWorkspaceArtifactKind(filePath),
+    kind: inferWorkspaceArtifactKind(recorded.filePath),
     storage: 'workspace',
-    workspacePath,
+    workspacePath: recorded.workspacePath,
     mimeType:
-      getSpecificMimeType(filePath) ??
-      (filePath.toLowerCase().endsWith('.ipynb')
+      getSpecificMimeType(recorded.filePath) ??
+      (recorded.filePath.toLowerCase().endsWith('.ipynb')
         ? 'application/x-ipynb+json'
         : undefined),
     sizeBytes,
   };
 }
 
-function getRecordArtifactWorkspacePath(
+function resolveRecordedWorkspaceFile(
   config: Config,
   filePath: string,
-): string | null {
+): { filePath: string; workspacePath: string } | null {
   if (!config.isRecordArtifactEnabled()) {
     return null;
   }
-  if (!ARTIFACT_KIND_BY_EXTENSION.has(path.extname(filePath).toLowerCase())) {
-    return null;
+  let resolvedFile = filePath;
+  let resolvedRoot = config.getTargetDir();
+  try {
+    resolvedFile = fs.realpathSync(filePath);
+    resolvedRoot = fs.realpathSync(resolvedRoot);
+  } catch {
+    // Keep the lexical path when the file or root cannot be realpath'd yet.
   }
-  // The daemon's file-read route resolves workspacePath against the
-  // original workspace root, not the session cwd. When the session
-  // runs inside a worktree (<root>/.qwen/worktrees/<slug>), anchor
-  // the relative path at the workspace root so artifact previews
-  // resolve correctly.
-  const targetDir = config.getTargetDir();
-  const wtMatch = targetDir.match(
-    /^(.+)[\\/]\.qwen[\\/]worktrees[\\/][^\\/]+$/,
-  );
-  const baseDir = wtMatch ? wtMatch[1] : targetDir;
-  const relativePath = path.relative(baseDir, filePath);
   if (
-    !relativePath ||
-    relativePath === '..' ||
-    relativePath.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relativePath)
+    !ARTIFACT_KIND_BY_EXTENSION.has(path.extname(resolvedFile).toLowerCase())
   ) {
     return null;
   }
-  return relativePath.split(path.sep).join('/');
+  const workspacePath = toCanonicalWorkspaceArtifactPath(
+    resolvedFile,
+    resolvedRoot,
+  );
+  if (!workspacePath) {
+    return null;
+  }
+  return { filePath: resolvedFile, workspacePath };
 }
 
 function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {

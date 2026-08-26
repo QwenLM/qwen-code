@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Context } from '@opentelemetry/api';
+import { createContextKey, type Context } from '@opentelemetry/api';
+
+const sessionIdContextKey = createContextKey('qwen-code.telemetry.session-id');
 
 let sessionRootContext: Context | undefined;
 let currentSessionId: string | undefined;
@@ -23,9 +25,22 @@ export function getSessionContext(): Context | undefined {
 
 /**
  * Returns the most recent session ID passed to setSessionContext.
- * Used by LogToSpanProcessor as a fallback to derive the correct traceId
- * when a log record has no session.id attribute (e.g. after /clear or /resume).
+ * This remains the final compatibility fallback for single-session telemetry
+ * paths that have no explicit owner or scoped context.
  */
 export function getCurrentSessionId(): string | undefined {
   return currentSessionId;
+}
+
+export function setSessionIdOnContext(
+  ctx: Context,
+  sessionId: string | undefined,
+): Context {
+  if (!sessionId) return ctx;
+  return ctx.setValue(sessionIdContextKey, sessionId);
+}
+
+export function getSessionIdFromContext(ctx: Context): string | undefined {
+  const sessionId = ctx.getValue(sessionIdContextKey);
+  return typeof sessionId === 'string' && sessionId ? sessionId : undefined;
 }

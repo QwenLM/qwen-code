@@ -139,12 +139,16 @@ function assertNumberRecord(
   }
 }
 
-function assertSharedField(key: string, value: unknown): boolean {
+function assertSharedField(
+  key: string,
+  value: unknown,
+  previous?: unknown,
+): boolean {
   const enumValues: Record<string, ReadonlySet<string>> = {
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
-    sessionScope: new Set(['user', 'thread', 'single']),
+    sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
     dispatchMode: new Set(['steer', 'followup', 'collect']),
     blockStreaming: new Set(['on', 'off']),
   };
@@ -166,6 +170,64 @@ function assertSharedField(key: string, value: unknown): boolean {
       value.some((item) => typeof item !== 'string')
     ) {
       throw invalidConfig(`Channel field "${key}" must be a string array.`);
+    }
+    return true;
+  }
+  if (key === 'groups') {
+    if (!isRecord(value)) {
+      if (
+        containsUnsafeObjectKey(value) ||
+        !isDeepStrictEqual(previous, value)
+      ) {
+        throw invalidConfig(`Channel field "${key}" must be an object.`);
+      }
+      return true;
+    }
+    const previousGroups = isRecord(previous) ? previous : {};
+    for (const [groupId, groupConfig] of Object.entries(value)) {
+      if (UNSAFE_OBJECT_KEYS.has(groupId) || !isRecord(groupConfig)) {
+        throw invalidConfig(`Channel field "${key}.${groupId}" is invalid.`);
+      }
+      const previousGroup = isRecord(previousGroups[groupId])
+        ? previousGroups[groupId]
+        : {};
+      for (const [nestedKey, nestedValue] of Object.entries(groupConfig)) {
+        const known = [
+          'requireMention',
+          'dispatchMode',
+          'groupHistoryLimit',
+        ].includes(nestedKey);
+        const valid =
+          (nestedKey === 'requireMention' &&
+            typeof nestedValue === 'boolean') ||
+          (nestedKey === 'dispatchMode' &&
+            typeof nestedValue === 'string' &&
+            ['collect', 'steer', 'followup'].includes(nestedValue)) ||
+          (nestedKey === 'groupHistoryLimit' &&
+            typeof nestedValue === 'number' &&
+            Number.isFinite(nestedValue));
+        if (
+          known &&
+          !valid &&
+          !(
+            Object.hasOwn(previousGroup, nestedKey) &&
+            isDeepStrictEqual(previousGroup[nestedKey], nestedValue) &&
+            !containsUnsafeObjectKey(nestedValue)
+          )
+        ) {
+          throw invalidConfig(
+            `Channel field "${key}.${groupId}.${nestedKey}" is invalid.`,
+          );
+        }
+        if (!known) {
+          assertPreservedUnknownField(
+            `${key}.${groupId}`,
+            nestedKey,
+            nestedValue,
+            previousGroup,
+          );
+        }
+      }
     }
     return true;
   }
@@ -345,7 +407,15 @@ function assertManagedConfig(
       );
       continue;
     }
-    if (assertSharedField(key, value)) continue;
+    if (
+      assertSharedField(
+        key,
+        value,
+        Object.hasOwn(previous, key) ? previous[key] : undefined,
+      )
+    ) {
+      continue;
+    }
     assertPreservedUnknownField(undefined, key, value, previous);
   }
   assertRequiredFields(fields, config);

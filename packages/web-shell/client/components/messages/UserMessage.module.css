@@ -246,6 +246,7 @@
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
+  justify-content: flex-end;
 }
 
 .chatImageThumb {
@@ -263,4 +264,43 @@
 
 .chatImageThumbInteractive:hover {
   opacity: 0.85;
+}
+
+.chatFiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+  justify-content: flex-end;
+}
+
+.chatFileChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  background: var(--background);
+  font-size: 14px;
+  line-height: 20px;
+  max-width: 100%;
+}
+
+.chatFileChipPreviewable {
+  cursor: pointer;
+}
+
+.chatFileChipPreviewable:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.chatFileIcon {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+.chatFileName {
+  overflow-wrap: anywhere;
 }

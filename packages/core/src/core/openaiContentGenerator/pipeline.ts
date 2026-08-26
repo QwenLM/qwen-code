@@ -20,6 +20,7 @@ import {
   isOfficialOpenAIEndpoint,
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
+import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
@@ -56,6 +57,101 @@ import { getCurrentAgentId } from '../../agents/runtime/agent-context.js';
 import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+const OPENAI_STRICT_SCHEMA_KEYS = new Set([
+  'type',
+  'properties',
+  'required',
+  'additionalProperties',
+  'items',
+  'description',
+  'enum',
+]);
+const OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS = new Set([
+  'minLength',
+  'maxLength',
+  'minItems',
+  'maxItems',
+  'uniqueItems',
+]);
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+function normalizeSchemaType(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.toLowerCase();
+  return [
+    'object',
+    'array',
+    'string',
+    'number',
+    'integer',
+    'boolean',
+    'null',
+  ].includes(normalized)
+    ? normalized
+    : undefined;
+}
+
+function normalizeOpenAIStrictSchema(
+  schema: unknown,
+): Record<string, unknown> | undefined {
+  const source = asObject(schema);
+  if (!source) return undefined;
+
+  const type = normalizeSchemaType(source['type']);
+  if (!type) return undefined;
+
+  const normalized: Record<string, unknown> = { type };
+  for (const [key, value] of Object.entries(source)) {
+    if (
+      key === 'type' ||
+      OPENAI_STRICT_UNSUPPORTED_SCHEMA_KEYS.has(key) ||
+      !OPENAI_STRICT_SCHEMA_KEYS.has(key)
+    ) {
+      continue;
+    }
+    normalized[key] = value;
+  }
+
+  if (type === 'object') {
+    const properties = asObject(source['properties']);
+    if (!properties) return undefined;
+
+    const normalizedProperties: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(properties)) {
+      const property = normalizeOpenAIStrictSchema(value);
+      if (!property) return undefined;
+      normalizedProperties[key] = property;
+    }
+
+    const propertyKeys = Object.keys(normalizedProperties);
+    const required = source['required'];
+    if (
+      !Array.isArray(required) ||
+      !propertyKeys.every((key) => required.includes(key)) ||
+      required.length !== propertyKeys.length
+    ) {
+      return undefined;
+    }
+
+    normalized['properties'] = normalizedProperties;
+    normalized['required'] = required;
+    normalized['additionalProperties'] = false;
+  }
+
+  if (type === 'array') {
+    const items = normalizeOpenAIStrictSchema(source['items']);
+    if (!items) return undefined;
+    normalized['items'] = items;
+  }
+
+  return normalized;
+}
 
 function isRequiredThinkingError(error: unknown): boolean {
   if (getErrorStatus(error) !== 400) return false;
@@ -963,6 +1059,7 @@ export class ContentGenerationPipeline {
       model: context.model,
       messages,
       ...this.buildGenerateContentConfig(request),
+      ...this.buildResponseFormat(request),
     };
 
     if (isStreaming) {
@@ -1119,6 +1216,30 @@ export class ContentGenerationPipeline {
       if (isDeepSeekHostname(this.contentGeneratorConfig)) {
         typed['thinking'] = { type: 'disabled' };
       }
+      // OpenRouter's thinking switch is the provider-level `reasoning`
+      // parameter (`reasoning: { enabled: false }`, see
+      // https://openrouter.ai/docs/features/reasoning-tokens). The shapes
+      // emitted above are ignored by the gateway, and the strip just above
+      // removes any `reasoning` object a provider hook injected — so
+      // thinking-capable models routed through OpenRouter keep thinking on.
+      // That breaks the AUTO-mode classifier's stage-1 side query (#9757):
+      // the 256-token budget is spent on reasoning, the forced
+      // respond_in_schema tool call never ships, and the classifier
+      // fail-closes. Must be emitted after the strip, which runs later
+      // than the provider buildRequest hook.
+      //
+      // Provider-level, not model-family-gated: unlike `enable_thinking`
+      // (a qwen-family wire field that leaks upstream on non-qwen
+      // routings), `reasoning` is an OpenRouter API parameter the gateway
+      // applies to whatever model supports it. `thinkingMandatory` models
+      // stay exempt: a disable shape they reject would be a guaranteed
+      // request failure.
+      if (
+        !thinkingMandatory &&
+        isOpenRouterHostname(this.contentGeneratorConfig)
+      ) {
+        typed['reasoning'] = { enabled: false };
+      }
     }
 
     if (thinkingMandatory) {
@@ -1177,6 +1298,35 @@ export class ContentGenerationPipeline {
     }
 
     return providerRequest;
+  }
+
+  private buildResponseFormat(
+    request: PromptCacheSharingParameters,
+  ): Pick<OpenAI.Chat.ChatCompletionCreateParams, 'response_format'> {
+    // `response_format` (both `json_object` and the strict `json_schema`
+    // variant) is official-OpenAI-specific wire shape. Third-party
+    // OpenAI-compatible endpoints reject it (DeepSeek accepts only
+    // text/json_object; older vLLM builds and validating gateways refuse
+    // unknown fields), and this pipeline never sent the field before this
+    // feature. Gate on the official endpoint, same precedent as the
+    // prompt-caching feature above.
+    if (!isOfficialOpenAIEndpoint(this.contentGeneratorConfig)) return {};
+    if (request.config?.responseMimeType !== 'application/json') return {};
+    const schema =
+      request.config.responseJsonSchema ?? request.config.responseSchema;
+    if (!schema) return { response_format: { type: 'json_object' } };
+    const strictSchema = normalizeOpenAIStrictSchema(schema);
+    if (!strictSchema) return { response_format: { type: 'json_object' } };
+    return {
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'response',
+          schema: strictSchema,
+          strict: true,
+        },
+      },
+    };
   }
 
   private requiresThinking(model: string): boolean {

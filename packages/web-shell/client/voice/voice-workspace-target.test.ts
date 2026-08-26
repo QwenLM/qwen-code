@@ -141,6 +141,22 @@ describe('resolveVoiceWorkspaceTarget', () => {
     ).toBeUndefined();
   });
 
+  it('does not expose the internal Live workspace as a voice target', () => {
+    const live = {
+      ...secondary,
+      id: 'live',
+      cwd: '/repo/conversations',
+      kind: 'live' as const,
+    };
+
+    expect(
+      resolveVoiceWorkspaceTarget({
+        capabilities: capabilities({ workspaces: [primary, live] }),
+        intendedCwd: live.cwd,
+      }),
+    ).toBeUndefined();
+  });
+
   it('fails closed for unknown and ambiguous secondary targets', () => {
     const duplicate = { ...secondary, id: 'other' };
     const caps = capabilities({

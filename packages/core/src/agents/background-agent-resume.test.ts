@@ -89,6 +89,7 @@ describe('BackgroundAgentResumeService', () => {
               name: 'researcher',
               color: 'cyan',
               model: undefined as string | undefined,
+              approvalMode: undefined as string | undefined,
             }
           : null,
       ),
@@ -178,6 +179,7 @@ describe('BackgroundAgentResumeService', () => {
       getMaxToolCalls: () => -1,
       isTrustedFolder: () => true,
       isInteractive: () => false,
+      getSessionId: () => 'session-1',
       getProjectRoot: () => tempDir,
       getCliVersion: () => 'test-version',
       getGeminiClient: () =>
@@ -690,6 +692,187 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Legacy background task',
     });
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
+  });
+
+  it('stamps the resumed prompt-avoidance policy where nested launches inherit it', async () => {
+    // The policy must sit on the config the rebuilt tool registry binds to
+    // (the createToolRegistry receiver) — not on a wrapper above it — so a
+    // nested AgentTool launched by the resumed agent inherits it through its
+    // own config prototype chain. Mirrors the launch path in agent.ts.
+    const sessionId = 'session-policy';
+    const agentId = 'agent-policy';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume policy stamp',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume policy stamp' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume policy stamp',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume policy stamp',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => {}),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+    expect(resumed).toBeDefined();
+
+    const createCall = subagentManager.createAgentHeadless.mock.calls.at(-1);
+    expect(createCall).toBeDefined();
+    const bgConfig = createCall![1] as Config;
+    const contexts = vi.mocked(bgConfig.createToolRegistry).mock.contexts;
+    // The runtime config IS the createToolRegistry receiver — the config
+    // whose rebuilt registry a nested AgentTool binds to. A wrapper-only
+    // stamp would leave these two distinct objects.
+    expect(contexts[contexts.length - 1]).toBe(bgConfig);
+    // Non-interactive harness → auto-deny, visible on the tool-bound config
+    // itself and through any derived config's prototype chain.
+    expect(bgConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+    expect(
+      (Object.create(bgConfig) as Config).getShouldAvoidPermissionPrompts(),
+    ).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+  });
+
+  it('keeps prompts allowed through the chain for a resumed bubble-mode agent in an interactive session', async () => {
+    // Mirror of the launch-path bubble test (agent.ts): a resumed agent of
+    // a `bubble` definition in an INTERACTIVE session surfaces
+    // confirmations to the Background-tasks dialog instead of auto-denying
+    // them, and nested launches under it must inherit the same policy
+    // through their config prototype chains.
+    const sessionId = 'session-bubble';
+    const agentId = 'agent-bubble';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume bubble policy',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume bubble policy' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume bubble policy',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume bubble policy',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => {}),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager, config } = createService();
+    config.isInteractive = () => true;
+    subagentManager.loadSubagent.mockResolvedValue({
+      name: 'researcher',
+      color: 'cyan',
+      model: undefined,
+      approvalMode: 'bubble',
+    });
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+    expect(resumed).toBeDefined();
+
+    const createCall = subagentManager.createAgentHeadless.mock.calls.at(-1);
+    expect(createCall).toBeDefined();
+    const bgConfig = createCall![1] as Config;
+    // Bubbling: prompts stay allowed (they park on the entry), and nested
+    // launches inherit the same policy through the prototype chain.
+    expect(bgConfig.getShouldAvoidPermissionPrompts()).toBe(false);
+    expect(
+      (Object.create(bgConfig) as Config).getShouldAvoidPermissionPrompts(),
+    ).toBe(false);
+
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
   });
 
   it('fires SubagentStart hooks when resuming and injects hook context', async () => {
@@ -1515,6 +1698,7 @@ describe('BackgroundAgentResumeService', () => {
       name: 'researcher',
       color: 'cyan',
       model: 'configured-model',
+      approvalMode: undefined,
     });
     subagentManager.createAgentHeadless = createAgentHeadless;
 
@@ -3140,6 +3324,128 @@ describe('BackgroundAgentResumeService', () => {
 
     expect(dispose).toHaveBeenCalledTimes(1);
     expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+  });
+
+  // The resume attach recomputes the transcript path instead of reusing the
+  // registered outputFile; the recomputed path must follow
+  // meta.parentSessionId, not the current session (the divergence a CLI
+  // restart produces, reachable via send-message revive). The registered
+  // outputFile is a decoy the attach must NOT write to — seeded with the
+  // same chain, so a regression back to attaching the registered
+  // outputFile would land the resumed record in the decoy and fail here.
+  it('appends resumed records to the launch-session transcript when the current session differs', async () => {
+    const launchSessionId = 'session-launch'; // config.getSessionId() is 'session-1'
+    const agentId = 'agent-cross-session';
+    const metaPath = getAgentMetaPath(tempDir, launchSessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, launchSessionId, agentId);
+    // Diverges from the recomputed path the way a future registration path
+    // could when it builds outputFile under a session dir other than
+    // meta.parentSessionId.
+    const decoyOutputFile = getAgentJsonlPath(
+      tempDir,
+      'session-registry-decoy',
+      agentId,
+    );
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Cross-session resume',
+      parentSessionId: launchSessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    const seedRecords =
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: launchSessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original task' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId: launchSessionId,
+          timestamp: '2026-04-20T00:00:01.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'partial answer' }] },
+        }),
+      ].join('\n') + '\n';
+    fs.writeFileSync(outputFile, seedRecords, 'utf8');
+    // The revive gate and the recovery read the registered outputFile, so
+    // the decoy carries the same seed chain.
+    fs.mkdirSync(path.dirname(decoyOutputFile), { recursive: true });
+    fs.writeFileSync(decoyOutputFile, seedRecords, 'utf8');
+
+    registry.register({
+      agentId,
+      description: 'Cross-session resume',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'original task',
+      outputFile: decoyOutputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'partial answer');
+
+    const subagent = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'continued',
+    };
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose,
+    });
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
+    ).resolves.toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+
+    // Resumed records land in the LAUNCH session's transcript, chained onto
+    // its last stable record — the current session's dir stays untouched and
+    // the decoy keeps exactly its seed records.
+    const records = fs
+      .readFileSync(outputFile, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toHaveLength(3);
+    expect(records[2]).toMatchObject({
+      type: 'user',
+      sessionId: launchSessionId,
+      parentUuid: 'a1',
+      message: { role: 'user', parts: [{ text: 'keep going' }] },
+    });
+    const decoyRecords = fs
+      .readFileSync(decoyOutputFile, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim());
+    expect(decoyRecords).toHaveLength(2);
+    expect(
+      fs.existsSync(getAgentJsonlPath(tempDir, 'session-1', agentId)),
+    ).toBe(false);
   });
 
   it('cold-revives a completed worktree-isolated agent without retaining it', async () => {

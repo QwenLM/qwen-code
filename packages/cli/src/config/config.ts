@@ -6,6 +6,8 @@
 
 import {
   ApprovalMode,
+  APPROVAL_MODE_INFO,
+  APPROVAL_MODES,
   AuthType,
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
@@ -23,6 +25,7 @@ import {
   SessionService,
   ideContextStore,
   type ResumedSessionData,
+  type SessionRestoreProjection,
   type LspClient,
   type ToolName,
   type ToolInvocationGuard,
@@ -42,6 +45,7 @@ import {
   type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
+  addDaemonRequestAttribute,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -72,7 +76,7 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
-import { isValidSessionId } from './session-id.js';
+import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
@@ -98,14 +102,6 @@ function resolveLocaleForExtensions(settings: Settings): string {
   return detectSystemLanguage();
 }
 
-const VALID_APPROVAL_MODE_VALUES = [
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-] as const;
-
 const SKILL_LEVELS: readonly SkillLevel[] = [
   'project',
   'user',
@@ -119,7 +115,7 @@ function isSkillLevel(value: unknown): value is SkillLevel {
 
 function formatApprovalModeError(value: string): Error {
   return new Error(
-    `Invalid approval mode: ${value}. Valid values are: ${VALID_APPROVAL_MODE_VALUES.join(
+    `Invalid approval mode: ${value}. Valid values are: ${APPROVAL_MODES.join(
       ', ',
     )}`,
   );
@@ -127,22 +123,15 @@ function formatApprovalModeError(value: string): Error {
 
 function parseApprovalModeValue(value: string): ApprovalMode {
   const normalized = value.trim().toLowerCase();
-  switch (normalized) {
-    case 'plan':
-      return ApprovalMode.PLAN;
-    case 'default':
-      return ApprovalMode.DEFAULT;
-    case 'yolo':
-      return ApprovalMode.YOLO;
-    case 'auto_edit':
-    case 'autoedit':
-    case 'auto-edit':
-      return ApprovalMode.AUTO_EDIT;
-    case 'auto':
-      return ApprovalMode.AUTO;
-    default:
-      throw formatApprovalModeError(value);
+  const canonical =
+    normalized === 'auto_edit' || normalized === 'autoedit'
+      ? ApprovalMode.AUTO_EDIT
+      : normalized;
+  const approvalMode = APPROVAL_MODES.find((mode) => mode === canonical);
+  if (approvalMode === undefined) {
+    throw formatApprovalModeError(value);
   }
+  return approvalMode;
 }
 
 export interface CliArgs {
@@ -172,6 +161,7 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalLsp: boolean | undefined;
+  restoreAskUserQuestion: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -544,6 +534,9 @@ function normalizeOutputFormat(
 
 export async function parseArguments(): Promise<CliArgs> {
   let rawArgv = hideBin(process.argv);
+  const approvalModeDescription = APPROVAL_MODES.map(
+    (mode) => `${mode} (${APPROVAL_MODE_INFO[mode].description})`,
+  ).join(', ');
 
   // hack: if the first argument is the CLI entry point, remove it
   if (
@@ -712,9 +705,8 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('approval-mode', {
           type: 'string',
-          choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
-          description:
-            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
+          choices: APPROVAL_MODES,
+          description: `Set the approval mode: ${approvalModeDescription}`,
         })
         .option('acp', {
           type: 'boolean',
@@ -736,6 +728,12 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean',
           description:
             'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
+          default: false,
+        })
+        .option('restore-ask-user-question', {
+          type: 'boolean',
+          description:
+            'On daemon session load/resume, re-hang a trailing unanswered ask_user_question instead of synthesizing a failed tool result',
           default: false,
         })
         .option('channel', {
@@ -1557,6 +1555,11 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    sessionRestore?: {
+      projectionSource: (
+        sessionId: string,
+      ) => Promise<SessionRestoreProjection | undefined>;
+    };
   },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
@@ -1975,6 +1978,10 @@ export async function loadCliConfig(
 
   let sessionId: string | undefined;
   let sessionData: ResumedSessionData | undefined;
+  let sessionRestoreProjection: SessionRestoreProjection | undefined;
+  const sessionRestoreProjectionSource =
+    hostPolicy?.sessionRestore?.projectionSource;
+  let deferProjectionUntilWriterLease = false;
 
   if (argv.continue || argv.resume) {
     const sessionService = new SessionService(cwd);
@@ -1995,8 +2002,24 @@ export async function loadCliConfig(
       // session UUID by gemini.tsx (which handles custom title lookup and
       // the interactive picker for ambiguous matches).
       sessionId = argv.resume;
-      sessionData = await sessionService.loadSession(argv.resume);
-      if (!sessionData) {
+      deferProjectionUntilWriterLease =
+        sessionRestoreProjectionSource !== undefined &&
+        (argv.chatRecording ?? settings.general?.chatRecording ?? true) &&
+        isAcpMode === true &&
+        settings.experimental?.sessionWriterLease === true;
+      if (sessionRestoreProjectionSource) {
+        if (!deferProjectionUntilWriterLease && !argv.forkSession) {
+          addDaemonRequestAttribute(
+            'qwen-code.daemon.session_restore.projection_acquisition',
+            'preloaded',
+          );
+          sessionRestoreProjection =
+            await sessionRestoreProjectionSource(sessionId);
+        }
+      } else {
+        sessionData = await sessionService.loadSession(argv.resume);
+      }
+      if (!sessionRestoreProjectionSource && !sessionData) {
         const message = `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`;
         writeStderrLine(message);
         process.exit(1);
@@ -2015,10 +2038,22 @@ export async function loadCliConfig(
         process.exit(1);
       }
       sessionId = forkedSessionId;
-      sessionData = await sessionService.loadSession(forkedSessionId);
-      if (!sessionData) {
-        writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
-        process.exit(1);
+      if (sessionRestoreProjectionSource) {
+        sessionData = undefined;
+        if (!deferProjectionUntilWriterLease) {
+          addDaemonRequestAttribute(
+            'qwen-code.daemon.session_restore.projection_acquisition',
+            'preloaded',
+          );
+          sessionRestoreProjection =
+            await sessionRestoreProjectionSource(forkedSessionId);
+        }
+      } else {
+        sessionData = await sessionService.loadSession(forkedSessionId);
+        if (!sessionData) {
+          writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
+          process.exit(1);
+        }
       }
     }
   } else if (argv.sandboxSessionId) {
@@ -2029,12 +2064,26 @@ export async function loadCliConfig(
     sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
-    // Check if session ID is already in use
+    // Check if session ID is already in use — case-insensitively: a legacy
+    // mixed-case transcript still occupies the id, and creating a
+    // case-only twin would make both spellings permanently unrestorable.
     const sessionService = new SessionService(cwd);
-    const exists = await sessionService.sessionExistsInAnyState(
-      argv['sessionId'],
-    );
-    if (exists) {
+    let occupied: boolean;
+    try {
+      occupied =
+        (await sessionService.findSessionIdIgnoringCase(argv['sessionId'])) !==
+        undefined;
+    } catch (error) {
+      // Any read failure leaves the id unproven, and the resolver propagates
+      // non-ENOENT errors. Assume occupied, as the previous existence check
+      // did: startup must reach the guarded conflict message and honour
+      // `throwOnSessionIdConflict` rather than die on a raw errno.
+      debugLogger.debug(
+        `Session id occupancy check failed for ${argv['sessionId']}: ${error}`,
+      );
+      occupied = true;
+    }
+    if (occupied) {
       const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       if (throwOnSessionIdConflict) {
         throw new SessionIdConflictError(argv['sessionId'], message);
@@ -2042,11 +2091,16 @@ export async function loadCliConfig(
       writeStderrLine(message);
       process.exit(1);
     }
-    sessionId = argv['sessionId'];
+    sessionId = normalizeSessionIdForLookup(argv['sessionId']);
   }
 
   const modelProvidersConfig = settings.modelProviders;
   const providerProtocolConfig = settings.providerProtocol;
+  const restoreSessionId = sessionId;
+  const boundSessionRestoreProjectionSource =
+    sessionRestoreProjectionSource && restoreSessionId
+      ? () => sessionRestoreProjectionSource(restoreSessionId)
+      : undefined;
 
   // Assemble MCP servers across all sources in precedence order (user/default
   // settings < project `.mcp.json` < workspace/system settings < `--mcp-config`)
@@ -2083,6 +2137,8 @@ export async function loadCliConfig(
   const configParams: ConfigParameters = {
     sessionId,
     sessionData,
+    sessionRestoreProjection,
+    sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
@@ -2142,6 +2198,16 @@ export async function loadCliConfig(
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
+      // Only `settings.permissions.allow` (never `--allowed-tools` nor the
+      // legacy `tools.allowed` key, which stay pure auto-approval grants)
+      // activates the registry-level allowlist that hides unlisted built-in
+      // tools from the model request (#9827).
+      registryAllowList:
+        bareMode || safeMode
+          ? undefined
+          : settings.permissions?.allow?.length
+            ? settings.permissions.allow
+            : undefined,
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
@@ -2222,10 +2288,18 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    // ACP/serve-scoped: only the spawned ACP child can re-hang a restored
+    // ask_user_question. In the plain TUI the flag would skip load-time
+    // orphan repair (client.ts) with nothing able to re-hang the question,
+    // leaving the resumed session wedged until the next send repairs it.
+    restoreAskUserQuestion:
+      (argv.acp || argv.experimentalAcp || false) &&
+      argv.restoreAskUserQuestion === true,
     sessionWriterLeaseEnabled:
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
+    lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
@@ -2246,25 +2320,6 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
-    // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
-    // through the CDP tunnel (far lighter than the OS-level computer-use
-    // driver), so disable computer-use to keep the agent off that heavy path.
-    computerUseEnabled: (() => {
-      const tunnelOn = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1';
-      // Surface the override when it contradicts an explicit opt-in, so the
-      // effective config isn't a silent surprise during debugging.
-      if (tunnelOn && settings.tools?.computerUse?.enabled === true) {
-        writeStderrLine(
-          'qwen serve: ignoring tools.computerUse.enabled=true — the CDP ' +
-            'tunnel (QWEN_SERVE_CDP_TUNNEL_OVER_WS) routes browser automation ' +
-            'through the CDP tunnel, so computer-use stays disabled.',
-        );
-      }
-      return tunnelOn ? false : (settings.tools?.computerUse?.enabled ?? true);
-    })(),
-    computerUseMaxImageDimension:
-      settings.tools?.computerUse?.maxImageDimension,
-    computerUseIdleTimeoutMs: settings.tools?.computerUse?.idleTimeoutMs,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
@@ -2299,6 +2354,7 @@ export async function loadCliConfig(
     trustedFolder,
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
+    workflowsEnabled: settings.tools?.workflowsEnabled,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     shellDefaultTimeoutMs: settings.tools?.shell?.defaultTimeoutMs,
     shellHeartbeatIntervalMs: settings.tools?.shell?.heartbeatIntervalMs,

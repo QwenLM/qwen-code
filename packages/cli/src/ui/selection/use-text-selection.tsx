@@ -70,6 +70,8 @@ export interface TextSelectionControllerProps {
   isActive: boolean;
   /** Reads from the history viewport; called at event time (may be null early). */
   getViewportRect: () => ViewportRect | null;
+  /** Additional selectable regions outside the history viewport. */
+  getAdditionalSelectableRects?: () => readonly ViewportRect[];
   getScrollState: () => ScrollState;
   hitTestScrollbar: (location: { col: number; row: number }) => boolean;
 }
@@ -86,12 +88,13 @@ interface ClickRecord {
 }
 
 /**
- * Headless controller that turns mouse press/drag/release in the VP history
- * viewport into a text selection: it maps terminal coordinates to the
+ * Headless controller that turns mouse press/drag/release in selectable VP
+ * regions into a text selection: it maps terminal coordinates to the
  * composited frame, drives the {@link SelectionState}, highlights the range
  * through the frame controller, and copies on release. Double/triple click
- * select a word/line. B1 scope: visible-region only, cleared on any scroll,
- * resize, or streaming content change.
+ * select a word/line. B1 scope: visible-region only; history selections clear
+ * on scroll, while every selection clears when its owning content or layout
+ * changes.
  */
 export function TextSelectionController(
   props: TextSelectionControllerProps,
@@ -102,7 +105,12 @@ export function TextSelectionController(
   const baselineScrollTopRef = useRef<number>(0);
   const baselineScrollHeightRef = useRef<number>(0);
   const baselineFrameRef = useRef<ReadonlyFrame | null>(null);
-  const baselineViewportRectRef = useRef<ViewportRect | null>(null);
+  const baselineRectRef = useRef<ViewportRect | null>(null);
+  const activeRectIndexRef = useRef<number | null>(null);
+  const selectionGenerationRef = useRef(0);
+  // Generation of a queued frame-invalidation that has not run yet; a release
+  // in the same generation must not copy content the repaint already replaced.
+  const pendingInvalidationGenRef = useRef<number | null>(null);
   const lastClickRef = useRef<ClickRecord | null>(null);
   // Anchor span and mode of an active word/line drag; null for char drags.
   const anchorSpanRef = useRef<{
@@ -121,6 +129,8 @@ export function TextSelectionController(
   }, [stdout]);
 
   const clearSelection = useCallback(() => {
+    selectionGenerationRef.current += 1;
+    activeRectIndexRef.current = null;
     const selection = selectionRef.current;
     anchorSpanRef.current = null;
     if (selection.isEmpty) {
@@ -138,13 +148,31 @@ export function TextSelectionController(
     );
   }, [getBuffer]);
 
-  const recordBaseline = useCallback(() => {
-    const scrollState = propsRef.current.getScrollState();
-    baselineScrollTopRef.current = scrollState.scrollTop;
-    baselineScrollHeightRef.current = scrollState.scrollHeight;
-    baselineFrameRef.current = getBuffer()?.frame ?? null;
-    baselineViewportRectRef.current = propsRef.current.getViewportRect();
-  }, [getBuffer]);
+  const getSelectableRects = useCallback((): readonly ViewportRect[] => {
+    const viewportRect = propsRef.current.getViewportRect();
+    if (!viewportRect) {
+      return [];
+    }
+    const additionalRects =
+      propsRef.current.getAdditionalSelectableRects?.() ?? [];
+    return [viewportRect, ...additionalRects];
+  }, []);
+
+  const getActiveRect = useCallback((): ViewportRect | null => {
+    const index = activeRectIndexRef.current;
+    return index === null ? null : (getSelectableRects()[index] ?? null);
+  }, [getSelectableRects]);
+
+  const recordBaseline = useCallback(
+    (rect: ViewportRect) => {
+      const scrollState = propsRef.current.getScrollState();
+      baselineScrollTopRef.current = scrollState.scrollTop;
+      baselineScrollHeightRef.current = scrollState.scrollHeight;
+      baselineFrameRef.current = getBuffer()?.frame ?? null;
+      baselineRectRef.current = rect;
+    },
+    [getBuffer],
+  );
 
   const copySelection = useCallback(() => {
     const normalized = selectionRef.current.normalized();
@@ -159,15 +187,9 @@ export function TextSelectionController(
   }, [getBuffer]);
 
   const mapEvent = useCallback(
-    (
-      event: MouseEvent,
-    ): {
-      point: ReturnType<typeof terminalToGrid>;
-      rect: ViewportRect;
-    } | null => {
+    (event: MouseEvent): ReturnType<typeof terminalToGrid> | null => {
       const buffer = getBuffer();
-      const rect = propsRef.current.getViewportRect();
-      if (!buffer || !rect) {
+      if (!buffer) {
         return null;
       }
       const frameHeight = buffer.dimensions.height;
@@ -186,7 +208,7 @@ export function TextSelectionController(
         row[point.x - 1]?.fullWidth
           ? { ...point, x: point.x - 1 }
           : point;
-      return { point: snappedPoint, rect };
+      return snappedPoint;
     },
     [getBuffer, stdout],
   );
@@ -234,25 +256,34 @@ export function TextSelectionController(
     (event: MouseEvent) => {
       const selection = selectionRef.current;
 
-      // Any scroll drops the selection (B1: visible-region only).
+      // History scrolls invalidate history-owned selection coordinates. Footer
+      // selections live outside the scrollable viewport and remain valid.
       if (event.name.startsWith('scroll-')) {
-        clearSelection();
+        if (activeRectIndexRef.current === 0) {
+          clearSelection();
+        }
         return;
       }
 
       if (event.name === 'left-press') {
+        selectionGenerationRef.current += 1;
         if (
           propsRef.current.hitTestScrollbar({ col: event.col, row: event.row })
         ) {
           clearSelection();
           return;
         }
-        const mapped = mapEvent(event);
-        if (!mapped || !pointInViewport(mapped.point, mapped.rect)) {
+        const point = mapEvent(event);
+        const rects = getSelectableRects();
+        const rectIndex = point
+          ? rects.findIndex((rect) => pointInViewport(point, rect))
+          : -1;
+        if (!point || rectIndex < 0) {
           clearSelection();
           return;
         }
-        const { point } = mapped;
+        const rect = rects[rectIndex];
+        activeRectIndexRef.current = rectIndex;
 
         // Multi-click detection (double = word, triple = line).
         const now = Date.now();
@@ -280,7 +311,7 @@ export function TextSelectionController(
             anchorSpanRef.current = { span, mode };
             dragScrollTopRef.current =
               propsRef.current.getScrollState().scrollTop;
-            recordBaseline();
+            recordBaseline(rect);
             applyHighlight();
             copySelection();
             return;
@@ -290,7 +321,7 @@ export function TextSelectionController(
         anchorSpanRef.current = null;
         selection.start(point);
         dragScrollTopRef.current = propsRef.current.getScrollState().scrollTop;
-        recordBaseline();
+        recordBaseline(rect);
         applyHighlight();
         return;
       }
@@ -304,19 +335,22 @@ export function TextSelectionController(
         if (!anchorSpanRef.current) {
           lastClickRef.current = null;
         }
-        // A scroll under the drag invalidates coordinates in B1.
+        // A scroll under a history drag invalidates its viewport coordinates.
         if (
+          activeRectIndexRef.current === 0 &&
           propsRef.current.getScrollState().scrollTop !==
-          dragScrollTopRef.current
+            dragScrollTopRef.current
         ) {
           clearSelection();
           return;
         }
-        const mapped = mapEvent(event);
-        if (!mapped) {
+        const point = mapEvent(event);
+        const rect = getActiveRect();
+        if (!point || !rect) {
+          clearSelection();
           return;
         }
-        extendActiveDrag(clampToViewport(mapped.point, mapped.rect));
+        extendActiveDrag(clampToViewport(point, rect));
         applyHighlight();
         return;
       }
@@ -325,9 +359,18 @@ export function TextSelectionController(
         if (!selection.dragging) {
           return;
         }
-        const mapped = mapEvent(event);
-        if (mapped) {
-          extendActiveDrag(clampToViewport(mapped.point, mapped.rect));
+        // A repaint invalidated this selection but the deferred clear has not
+        // run yet; drop it without extending or copying the stale content.
+        if (
+          pendingInvalidationGenRef.current === selectionGenerationRef.current
+        ) {
+          clearSelection();
+          return;
+        }
+        const point = mapEvent(event);
+        const rect = getActiveRect();
+        if (point && rect) {
+          extendActiveDrag(clampToViewport(point, rect));
         }
         // Clear the span drag only after extending, so the release cell still
         // applies to a word/line drag when no move covered it.
@@ -349,6 +392,8 @@ export function TextSelectionController(
       recordBaseline,
       mapEvent,
       getBuffer,
+      getSelectableRects,
+      getActiveRect,
       extendActiveDrag,
     ],
   );
@@ -375,17 +420,26 @@ export function TextSelectionController(
         return;
       }
       const { scrollTop, scrollHeight } = propsRef.current.getScrollState();
-      const viewportRect = propsRef.current.getViewportRect();
+      const activeRect = getActiveRect();
+      const isViewportSelection = activeRectIndexRef.current === 0;
       if (
-        scrollTop !== baselineScrollTopRef.current ||
-        scrollHeight !== baselineScrollHeightRef.current ||
-        !sameViewportRect(baselineViewportRectRef.current, viewportRect) ||
-        !sameViewportContent(baselineFrameRef.current, frame, viewportRect)
+        (isViewportSelection &&
+          (scrollTop !== baselineScrollTopRef.current ||
+            scrollHeight !== baselineScrollHeightRef.current)) ||
+        !sameViewportRect(baselineRectRef.current, activeRect) ||
+        !sameViewportContent(baselineFrameRef.current, frame, activeRect)
       ) {
-        clearSelection();
+        const invalidatedGeneration = selectionGenerationRef.current;
+        pendingInvalidationGenRef.current = invalidatedGeneration;
+        queueMicrotask(() => {
+          pendingInvalidationGenRef.current = null;
+          if (selectionGenerationRef.current === invalidatedGeneration) {
+            clearSelection();
+          }
+        });
       }
     });
-  }, [getBuffer, clearSelection]);
+  }, [getBuffer, getActiveRect, clearSelection]);
 
   useEffect(() => {
     if (!props.isActive) {

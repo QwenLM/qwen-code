@@ -21,15 +21,16 @@ import {
 import {
   DiscoveredMCPTool,
   uiTelemetryService,
-  getCoreSystemPrompt,
-  resolveInteractionMode,
+  getMainSessionBaseSystemPrompt,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildSkillLlmContent,
   computeThresholds,
+  formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import * as path from 'node:path';
 
 /**
  * Classify a token count against the three-tier compaction ladder. Mirrors
@@ -71,7 +72,10 @@ function estimateTokens(text: string): number {
  * Parse concatenated memory content into individual file entries.
  * Memory content format: "--- Context from: <path> ---\n<content>\n--- End of Context from: <path> ---"
  */
-function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
+function parseMemoryFiles(
+  memoryContent: string,
+  workingDir: string,
+): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
@@ -84,7 +88,14 @@ function parseMemoryFiles(memoryContent: string): ContextMemoryDetail[] {
     const filePath = match[1]!;
     const content = match[2]!;
     results.push({
-      path: filePath,
+      // Marker paths are relative to the session working directory (where
+      // memory discovery ran, which may differ from process.cwd() in
+      // ACP/daemon-served sessions); shorten home-dir files to `~/...` so
+      // global memory files don't render as `../../..` chains.
+      path: formatContextFileDisplayPath(
+        path.resolve(workingDir, filePath),
+        workingDir,
+      ),
       tokens: estimateTokens(content),
     });
   }
@@ -127,12 +138,7 @@ export async function collectContextData(
   // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
-  const systemPromptText = getCoreSystemPrompt(
-    undefined,
-    modelName,
-    undefined,
-    resolveInteractionMode(config),
-  );
+  const systemPromptText = getMainSessionBaseSystemPrompt(config);
   const systemPromptTokens = estimateTokens(systemPromptText);
 
   const toolRegistry = config.getToolRegistry();
@@ -171,7 +177,7 @@ export async function collectContextData(
   }
 
   const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(memoryContent);
+  const memoryFiles = parseMemoryFiles(memoryContent, config.getWorkingDir());
   const autoMemoryPrompt = config.getAutoMemoryPrompt();
   if (autoMemoryPrompt) {
     memoryFiles.push({
@@ -195,6 +201,7 @@ export async function collectContextData(
 
   const skillManager = config.getSkillManager();
   const skillConfigs = skillManager ? await skillManager.listSkills() : [];
+  const disabledSkillNames = config.getDisabledSkillNames();
   let loadedBodiesTokens = 0;
   const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
     const listingTokens = estimateTokens(
@@ -382,7 +389,11 @@ export async function collectContextData(
     builtinTools: showDetails ? detailBuiltinTools : [],
     mcpTools: showDetails ? detailMcpTools : [],
     memoryFiles: showDetails ? detailMemoryFiles : [],
-    skills: showDetails ? detailSkills : [],
+    skills: showDetails
+      ? detailSkills.filter(
+          (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+        )
+      : [],
     isEstimated,
     showDetails,
   };

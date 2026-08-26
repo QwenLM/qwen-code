@@ -15,16 +15,31 @@ import type {
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
-import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import {
   isQwenFamilyWireModel,
   isTieredEffortWireModel,
 } from '../../modalityDefaults.js';
+import type { ReasoningEffort } from '../../reasoning-effort.js';
+import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
+
+/**
+ * Tiers the qwen3.8-max family accepts in `reasoning_effort`. This family's
+ * ladder stops at `xhigh`, and a `max` above it is rejected with a 400 that
+ * then repeats on every later request in the session. Declaring the supported
+ * subset lets `clampReasoningEffort` cap the tier the same way the Anthropic
+ * generator caps tiers its model lacks.
+ */
+const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+] as const;
 
 export type DashScopeThinkingKnobSelection = {
   source: 'extra_body' | 'samplingParams' | 'reasoning';
@@ -166,16 +181,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     super(contentGeneratorConfig, cliConfig);
   }
 
-  getResponseParsingOptions(): OpenAIResponseParsingOptions {
-    // ponytail: DashScope-only fallback; remove after provider output stabilizes.
-    return { contentOnlyThinkingTagLeaks: true };
-  }
-
   /**
    * Determines whether to use the DashScope-compatible provider.
    * Covers the official regional hosts (DASHSCOPE_REGIONAL_HOSTS),
    * Token Plan endpoints under token-plan.<region>.maas.aliyuncs.com,
    * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
+   * Alibaba Cloud API Gateway domains (*.alicloudapi.com),
    * and proxy matches.
    *
    * Note: any *.alibaba-inc.com / *.aliyun-inc.com host is treated as a
@@ -223,6 +234,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       (hostname.endsWith('.alibaba-inc.com') ||
         hostname.endsWith('.aliyun-inc.com'));
 
+    // Alibaba Cloud API Gateway domains proxying to DashScope-compatible
+    // APIs. Covers *.alicloudapi.com.
+    const isAliCloudApiOrigin =
+      hostname !== null && hostname.endsWith('.alicloudapi.com');
+
     // Check if proxy is configured and matches
     const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
       ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
@@ -238,6 +254,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       !isDashscopeOrigin &&
       !isTokenPlanOrigin &&
       !isInternalOrigin &&
+      !isAliCloudApiOrigin &&
       !isProxyMatch
     ) {
       debugLogger.debug(
@@ -251,8 +268,18 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       );
     }
 
+    if (isAliCloudApiOrigin) {
+      debugLogger.debug(
+        `DashScope provider activated via alicloudapi origin: ${hostname}`,
+      );
+    }
+
     return (
-      isDashscopeOrigin || isTokenPlanOrigin || isInternalOrigin || isProxyMatch
+      isDashscopeOrigin ||
+      isTokenPlanOrigin ||
+      isInternalOrigin ||
+      isAliCloudApiOrigin ||
+      isProxyMatch
     );
   }
 
@@ -413,7 +440,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         delete visionResult['reasoning'];
       }
       return this.mergeExtraBodyAndResolveKnobs(
-        visionResult,
+        hasQwenEffortConfig
+          ? visionResult
+          : this.clampConfiguredReasoningEffort(visionResult),
         extraBody,
         request.model,
         selectedThinkingKnob,
@@ -439,8 +468,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     if (hasQwenEffortConfig && 'reasoning' in result) {
       delete result['reasoning'];
     }
+    // No qwen effort field means the nested `reasoning` object is what ships,
+    // so it needs the same ceiling any other OpenAI-compatible request gets.
     return this.mergeExtraBodyAndResolveKnobs(
-      result,
+      hasQwenEffortConfig
+        ? result
+        : this.clampConfiguredReasoningEffort(result),
       extraBody,
       request.model,
       selectedThinkingKnob,
@@ -513,12 +546,33 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
     const wireModel = this.resolveWireModel(model);
     if (isTieredEffortWireModel(wireModel)) {
-      return { reasoning_effort: reasoning.effort };
+      return { reasoning_effort: this.clampTieredEffort(reasoning.effort) };
     }
     if (isQwenFamilyWireModel(wireModel)) {
       return { enable_thinking: true };
     }
     return {};
+  }
+
+  /**
+   * Cap a configured tier at what the qwen3.8-max family actually accepts.
+   * This family does not take `max`, and the rejection is a 400 on every
+   * subsequent request rather than a one-off, so the tier is clamped to the
+   * strongest supported tier and reported once. Only the
+   * configured `reasoning.effort` passes through here: an explicit
+   * `extra_body` / `samplingParams` `reasoning_effort` is a documented
+   * verbatim override and is merged after this, so it still ships unchanged.
+   */
+  private clampTieredEffort(effort: ReasoningEffort): ReasoningEffort {
+    const clamped = clampReasoningEffort(effort, DASHSCOPE_TIERED_EFFORTS);
+    if (clamped !== effort && !this.effortClampWarned) {
+      debugLogger.warn(
+        `reasoning.effort='${effort}' is not accepted by the DashScope ` +
+          `tiered-effort family; using '${clamped}'.`,
+      );
+      this.effortClampWarned = true;
+    }
+    return clamped;
   }
 
   /**

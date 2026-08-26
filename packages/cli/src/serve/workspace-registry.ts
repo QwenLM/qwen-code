@@ -12,6 +12,7 @@ import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-regis
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
+import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
 export interface WorkspaceRuntimeEnvMetadata {
   readonly mode: 'parent-process' | 'runtime-overlay';
@@ -99,6 +100,7 @@ export interface WorkspaceEntry {
   displayName?: string;
   readonly primary: boolean;
   readonly removable: boolean;
+  readonly internal: boolean;
   registrationIds: readonly string[];
   lastGenerationId: number;
   state: WorkspaceEntryState;
@@ -111,6 +113,7 @@ export interface WorkspaceEntry {
 export type WorkspaceSessionOwnerResolution =
   | { readonly kind: 'found'; readonly runtime: WorkspaceRuntime }
   | { readonly kind: 'not_found' }
+  | { readonly kind: 'unavailable' }
   | {
       readonly kind: 'ambiguous';
       readonly runtimes: readonly WorkspaceRuntime[];
@@ -141,8 +144,14 @@ export interface WorkspaceRegistry {
   readonly primaryEntry: WorkspaceEntry;
   list(): readonly WorkspaceRuntime[];
   listEntries(): readonly WorkspaceEntry[];
+  listAll(): readonly WorkspaceRuntime[];
+  listAllEntries(): readonly WorkspaceEntry[];
   getEntryByWorkspaceCwd(workspaceCwd: string): WorkspaceEntry | undefined;
   getEntryByWorkspaceId(workspaceId: string): WorkspaceEntry | undefined;
+  getManagedEntryByWorkspaceCwd(
+    workspaceCwd: string,
+  ): WorkspaceEntry | undefined;
+  getManagedEntryByWorkspaceId(workspaceId: string): WorkspaceEntry | undefined;
   beginReplacement(entry: WorkspaceEntry, configuredRevision: string): boolean;
   activateReplacement(
     entry: WorkspaceEntry,
@@ -248,6 +257,7 @@ export function createWorkspaceRegistry(
       : {}),
     primary: runtime.primary,
     removable: runtime.removable === true,
+    internal: isInternalWorkspaceRuntime(runtime),
     registrationIds: Object.freeze([...(runtime.registrationIds ?? [])]),
     lastGenerationId: generationId,
     state: 'active',
@@ -340,10 +350,21 @@ export function createWorkspaceRegistry(
       Object.freeze(
         entries.flatMap((entry) => {
           const runtime = activeRuntime(entry);
-          return runtime ? [runtime] : [];
+          return runtime && !entry.internal ? [runtime] : [];
         }),
       ) as readonly WorkspaceRuntime[],
     listEntries: () =>
+      Object.freeze(
+        entries.filter((entry) => entry.state !== 'removed' && !entry.internal),
+      ) as readonly WorkspaceEntry[],
+    listAll: () =>
+      Object.freeze(
+        entries.flatMap((entry) => {
+          const runtime = activeRuntime(entry);
+          return runtime ? [runtime] : [];
+        }),
+      ) as readonly WorkspaceRuntime[],
+    listAllEntries: () =>
       Object.freeze(
         entries.filter((entry) => entry.state !== 'removed'),
       ) as readonly WorkspaceEntry[],
@@ -353,14 +374,24 @@ export function createWorkspaceRegistry(
           entry.current?.runtime ? [entry.current.runtime] : [],
         ),
       ) as readonly WorkspaceRuntime[],
-    getEntryByWorkspaceCwd: (workspaceCwd) => byCwd.get(workspaceCwd),
-    getEntryByWorkspaceId: (workspaceId) => byId.get(workspaceId),
+    getEntryByWorkspaceCwd: (workspaceCwd) => {
+      const entry = byCwd.get(workspaceCwd);
+      return entry?.internal ? undefined : entry;
+    },
+    getEntryByWorkspaceId: (workspaceId) => {
+      const entry = byId.get(workspaceId);
+      return entry?.internal ? undefined : entry;
+    },
+    getManagedEntryByWorkspaceCwd: (workspaceCwd) => byCwd.get(workspaceCwd),
+    getManagedEntryByWorkspaceId: (workspaceId) => byId.get(workspaceId),
     beginReplacement: (entry, configuredRevision) => {
       if (entry.state === 'blocked') {
         entry.configuredRevision = configuredRevision;
         entry.state = 'transitioning';
         entry.current?.guard.close();
-        sessionOwnerIndex?.removeWorkspace(entry.workspaceCwd);
+        if (!entry.internal) {
+          sessionOwnerIndex?.removeWorkspace(entry.workspaceCwd);
+        }
         delete entry.applyError;
         return true;
       }
@@ -368,7 +399,9 @@ export function createWorkspaceRegistry(
       entry.configuredRevision = configuredRevision;
       entry.state = 'transitioning';
       entry.current.guard.close();
-      sessionOwnerIndex?.removeWorkspace(entry.workspaceCwd);
+      if (!entry.internal) {
+        sessionOwnerIndex?.removeWorkspace(entry.workspaceCwd);
+      }
       delete entry.applyError;
       return true;
     },
@@ -381,7 +414,8 @@ export function createWorkspaceRegistry(
       if (
         runtime.workspaceId !== entry.workspaceId ||
         runtime.workspaceCwd !== entry.workspaceCwd ||
-        runtime.primary !== entry.primary
+        runtime.primary !== entry.primary ||
+        isInternalWorkspaceRuntime(runtime) !== entry.internal
       ) {
         throw new Error('Replacement runtime identity does not match entry.');
       }
@@ -420,8 +454,14 @@ export function createWorkspaceRegistry(
       entry.appliedRevision = null;
       entry.applyError = error;
     },
-    getByWorkspaceCwd: (workspaceCwd) => activeRuntime(byCwd.get(workspaceCwd)),
-    getByWorkspaceId: (workspaceId) => activeRuntime(byId.get(workspaceId)),
+    getByWorkspaceCwd: (workspaceCwd) => {
+      const entry = byCwd.get(workspaceCwd);
+      return entry?.internal ? undefined : activeRuntime(entry);
+    },
+    getByWorkspaceId: (workspaceId) => {
+      const entry = byId.get(workspaceId);
+      return entry?.internal ? undefined : activeRuntime(entry);
+    },
     getManagedByWorkspaceCwd: (workspaceCwd) =>
       byCwd.get(workspaceCwd)?.current?.runtime,
     getManagedByWorkspaceId: (workspaceId) =>
@@ -449,7 +489,10 @@ export function createWorkspaceRegistry(
     resolveWorkspaceCwd: (workspaceCwd) =>
       workspaceCwd === undefined
         ? activeRuntime(primaryEntry)
-        : activeRuntime(byCwd.get(workspaceCwd)),
+        : (() => {
+            const entry = byCwd.get(workspaceCwd);
+            return entry?.internal ? undefined : activeRuntime(entry);
+          })(),
     add: (runtime) => {
       if (byCwd.has(runtime.workspaceCwd)) {
         throw new Error(
@@ -482,7 +525,9 @@ export function createWorkspaceRegistry(
       const entry = entryForRuntime(runtime);
       if (!entry || runtime.primary || entry.state !== 'draining') return;
       entry.current?.guard.close();
-      sessionOwnerIndex?.removeWorkspace(runtime.workspaceCwd);
+      if (!entry.internal) {
+        sessionOwnerIndex?.removeWorkspace(runtime.workspaceCwd);
+      }
     },
     completeDrain: (runtime) => {
       const entry = entryForRuntime(runtime);
@@ -499,6 +544,7 @@ export function createWorkspaceRegistry(
       const indexedCwds = sessionOwnerIndex?.getWorkspaceCwds(sessionId) ?? [];
       if (indexedCwds.length > 0) {
         const matches: WorkspaceRuntime[] = [];
+        let internalUnavailable = false;
         for (const workspaceCwd of indexedCwds) {
           const entry = byCwd.get(workspaceCwd);
           const runtime = entry?.current?.runtime;
@@ -506,7 +552,10 @@ export function createWorkspaceRegistry(
             sessionOwnerIndex?.remove(sessionId, workspaceCwd);
             continue;
           }
-          if (entry.state !== 'active') continue;
+          if (entry.state !== 'active') {
+            internalUnavailable ||= entry.internal;
+            continue;
+          }
           try {
             runtime.bridge.getSessionSummary(sessionId);
             matches.push(runtime);
@@ -518,6 +567,7 @@ export function createWorkspaceRegistry(
             throw err;
           }
         }
+        if (internalUnavailable) return { kind: 'unavailable' };
         if (matches.length === 1) {
           return { kind: 'found', runtime: matches[0]! };
         }

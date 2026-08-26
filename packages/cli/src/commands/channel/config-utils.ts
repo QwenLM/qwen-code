@@ -4,17 +4,12 @@ import type {
   ChannelWebhookSourceConfig,
   ChannelWebhookTargetConfig,
 } from '@qwen-code/channel-base';
+import { APPROVAL_MODES } from '@qwen-code/qwen-code-core';
 import { resolveChannelCwd } from './channel-cwd.js';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
 const ENV_VAR_NAME_PATTERN = /^[A-Z_][A-Z0-9_]*$/;
-const CHANNEL_APPROVAL_MODES = new Set([
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-]);
+const CHANNEL_APPROVAL_MODES = new Set<string>(APPROVAL_MODES);
 
 export { findCliEntryPath } from './cli-entry-path.js';
 
@@ -451,6 +446,10 @@ export async function parseChannelConfig(
     'clientSecret',
     envResolution,
   );
+  const configuredSessionScope =
+    (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
+    plugin.defaultSessionScope ||
+    'user';
 
   return {
     ...resolvedRawConfig,
@@ -462,10 +461,7 @@ export async function parseChannelConfig(
       (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
       'allowlist',
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
-    sessionScope:
-      (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) ||
-      plugin?.defaultSessionScope ||
-      'user',
+    sessionScope: configuredSessionScope,
     cwd: resolveChannelCwd(rawConfig['cwd'] as string | undefined, defaultCwd),
     approvalMode: parseApprovalModeConfig(name, rawConfig),
     instructions: rawConfig['instructions'] as string | undefined,

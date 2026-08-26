@@ -214,6 +214,21 @@ export class QQChannel extends ChannelBase {
   private _reconnectId: number = 0;
   private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
+  /**
+   * Sessions with a prompt turn currently in flight, tracked via
+   * onPromptStart/onPromptEnd.
+   *
+   * This is the discriminator the cron textChunk handler uses to tell
+   * "prompt-response chunk" from "cron/non-prompt chunk". streamState
+   * cannot serve that role (#6094): it is never populated when
+   * blockStreaming is 'on' (onResponseChunk early-returns), so prompt
+   * chunks leak into cronBuffer; and a residual entry from a finished
+   * turn's unsettled flush silently blocks cron delivery. This set is
+   * reliable because ChannelBase always brackets a prompt turn with
+   * onPromptStart and onPromptEnd (onPromptEnd runs in the prompt path's
+   * finally, even on error/cancel), independent of streaming config.
+   */
+  private activePromptSessions: Set<string> = new Set();
   private readonly qqStatePath: string;
   /**
    * Path to the global sessions.json managed by start.ts.
@@ -302,7 +317,13 @@ export class QQChannel extends ChannelBase {
         return;
       }
       if (!wasInCronFlow) return;
-      if (this.streamState.has(sessionId)) return;
+      // Sessions with an active prompt turn belong to the prompt path
+      // (which delivers the response itself) — never capture their chunks
+      // into the cron buffer. Keyed on activePromptSessions rather than
+      // streamState (#6094): streamState is empty under blockStreaming:'on'
+      // (prompt chunks would be duplicated) and can linger after a turn
+      // ends (cron chunks would be silently dropped).
+      if (this.activePromptSessions.has(sessionId)) return;
       let entry = this.cronBuffer.get(sessionId);
       if (!entry) {
         entry = { buffer: '', timer: null };
@@ -968,24 +989,31 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
+    this.activePromptSessions.clear();
   }
 
   /**
-   * QQ Bot API V2 does not provide a typing indicator endpoint.
-   * ChannelBase calls these hooks to signal prompt start/end;
-   * they are intentionally no-ops for this channel.
+   * QQ Bot API V2 does not provide a typing indicator endpoint, but these
+   * hooks still maintain activePromptSessions — the cron textChunk
+   * discriminator (see activePromptSessions). ChannelBase always pairs the
+   * two calls per prompt turn (onPromptEnd runs in the prompt path's
+   * finally, even on error/cancel).
    */
   protected override onPromptStart(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     _messageId?: string,
-  ): void {}
+  ): void {
+    this.activePromptSessions.add(sessionId);
+  }
 
   protected override onPromptEnd(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     _messageId?: string,
-  ): void {}
+  ): void {
+    this.activePromptSessions.delete(sessionId);
+  }
 
   // ── Streaming (idle-flush with per-session buffers) ────────────
 
@@ -1290,6 +1318,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.delete(sessionId);
     this.pendingStreamDelete.delete(sessionId);
     this.flushedSessions.delete(sessionId);
+    this.activePromptSessions.delete(sessionId);
     super.onSessionDied(sessionId);
   }
   // ── State Persistence (cross-server context continuation) ──────
@@ -2292,6 +2321,7 @@ export class QQChannel extends ChannelBase {
     safeName: string;
     cleanText: string;
     text: string;
+    displayText: string;
     senderName: string;
   } | null {
     // Keep identity values out of the display-name position. In particular,
@@ -2305,12 +2335,23 @@ export class QQChannel extends ChannelBase {
 
     const content = (event.content || '').trim();
     const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
+    let mentionIndex = 0;
+    const displayContent = content
+      .replace(/<@[^>]{1,64}>/g, (mention) =>
+        event.mentions?.[mentionIndex++]?.is_you ? '' : mention,
+      )
+      .trim();
     // Strip trusted tags that could be forged by users
     const safeContent = content
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '');
     const safeCleanText = cleanText
+      .replace(/\[atMention=[^\]]*]/g, '')
+      .replace(/\[botOpenId:[^\]]*]/g, '')
+      .replace(/\[bot]/g, '')
+      .trim();
+    const safeDisplayText = displayContent
       .replace(/\[atMention=[^\]]*]/g, '')
       .replace(/\[botOpenId:[^\]]*]/g, '')
       .replace(/\[bot]/g, '')
@@ -2397,6 +2438,7 @@ export class QQChannel extends ChannelBase {
     const text = isSlash
       ? sanitizePromptText(safeCleanText)
       : `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? safeContent : safeCleanText)}${suffixFromBotOpenId}`;
+    const displayText = sanitizePromptText(safeDisplayText);
 
     return {
       isAtBot: effectiveIsAtBot,
@@ -2404,6 +2446,7 @@ export class QQChannel extends ChannelBase {
       safeName,
       cleanText,
       text,
+      displayText,
       senderName,
     };
   }
@@ -2454,6 +2497,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      displayText: sanitizePromptText(safeContent),
       messageId: event.id,
       isGroup: false,
       isMentioned: true,
@@ -2506,7 +2550,8 @@ export class QQChannel extends ChannelBase {
       forceAtMention: true,
     });
     if (!result) return;
-    const { isSlash, text, senderName, safeName, cleanText } = result;
+    const { isSlash, text, displayText, senderName, safeName, cleanText } =
+      result;
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
     // so side effects (extractBotOpenId) are applied regardless of dedup.
@@ -2540,6 +2585,7 @@ export class QQChannel extends ChannelBase {
       senderName,
       chatId,
       text,
+      displayText,
       messageId: event.id,
       isGroup: true,
       isMentioned: true,
@@ -2585,7 +2631,15 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const { isSlash, text, senderName, isAtBot, safeName, cleanText } = result;
+    const {
+      isSlash,
+      text,
+      displayText,
+      senderName,
+      isAtBot,
+      safeName,
+      cleanText,
+    } = result;
 
     // @-bot messages always pass through (passive reply).
     // Non-@-bot messages are subject to active-message and keyword policies.
@@ -2683,6 +2737,7 @@ export class QQChannel extends ChannelBase {
       channelName: this.name,
       chatId,
       text,
+      displayText,
       senderId,
       senderName,
       messageId: event.id,

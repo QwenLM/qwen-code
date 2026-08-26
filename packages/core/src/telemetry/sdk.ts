@@ -24,9 +24,10 @@ import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import { initializeMetrics } from './metrics.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { createSessionRootContext } from './tracer.js';
-import { setSessionContext } from './session-context.js';
+import { getCurrentSessionId, setSessionContext } from './session-context.js';
 import { setShellTracePropagation } from './trace-context.js';
-import { endInteractionSpan } from './session-tracing.js';
+import { endAllInteractionSpans } from './session-tracing.js';
+import { emitSessionEnd, emitSessionStart } from './session-events.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
   const debugLogger = createDebugLogger('OTEL');
@@ -121,6 +122,11 @@ export function initializeTelemetry(
       activeMetricReader = started.metricReader;
       const sessionId = config.getSessionId();
       setSessionContext(createSessionRootContext(sessionId), sessionId);
+      // Unconditional catch-up: in every init mode `logStartSession` can run
+      // before the SDK settles and get dropped by its initialization gate,
+      // while shutdown still emits `session.end`. The session-events guard
+      // dedupes the race-won case.
+      emitSessionStart(sessionId);
       setShellTracePropagation(
         config.getOutboundCorrelationPropagateTraceContext(),
       );
@@ -172,7 +178,11 @@ export function shutdownTelemetry(): Promise<void> {
       telemetryShutdownPromise = undefined;
       return;
     }
-    endInteractionSpan('cancelled');
+    endAllInteractionSpans('cancelled');
+    const currentSessionId = getCurrentSessionId();
+    if (currentSessionId) {
+      emitSessionEnd(currentSessionId);
+    }
     const currentSdk = sdk;
     const debugLogger = createDebugLogger('OTEL');
     let timer: ReturnType<typeof setTimeout> | undefined;

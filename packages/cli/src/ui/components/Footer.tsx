@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useRef } from 'react';
+import { type RefObject, useRef } from 'react';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
@@ -49,7 +49,11 @@ const PasteProgressBar: React.FC<{ progress: PasteProgress }> = ({
   );
 };
 
-export const Footer: React.FC = () => {
+interface FooterProps {
+  containerRef?: RefObject<DOMElement | null>;
+}
+
+export const Footer: React.FC<FooterProps> = ({ containerRef }) => {
   const uiState = useUIState();
   const config = useConfig();
   const settings = useSettings();
@@ -209,6 +213,7 @@ export const Footer: React.FC = () => {
   // (bottom), right section has indicators. Status line and hints coexist.
   return (
     <Box
+      ref={containerRef}
       flexDirection={isNarrow ? 'column' : 'row'}
       justifyContent={isNarrow ? 'flex-start' : 'space-between'}
       width="100%"

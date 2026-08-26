@@ -726,7 +726,7 @@ describe('ScheduledTasksDialog run now', () => {
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
     // Server-side run record (updates last-run) + client run in the bound session.
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
   });
 
@@ -834,7 +834,7 @@ describe('ScheduledTasksDialog run now', () => {
     );
     click(document.querySelector('[aria-label="Run now"]'));
     await flush();
-    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined); // consumed
+    expect(actions.runScheduledTask).toHaveBeenCalledWith('t1', undefined);
     expect(onRunPrompt).toHaveBeenCalledWith('do it', 'sess-9');
     expect(onError).toHaveBeenCalledWith(
       expect.any(Error),

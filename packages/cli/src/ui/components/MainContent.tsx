@@ -4,8 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Static } from 'ink';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Box, Static, type DOMElement } from 'ink';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 import {
   isHistoryItemVisibleAfterRestore,
@@ -32,6 +40,7 @@ import {
   type ScrollableListRef,
 } from './shared/ScrollableList.js';
 import { TextSelectionController } from '../selection/use-text-selection.js';
+import { measureElementPosition } from '../utils/measure-element-position.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -114,7 +123,11 @@ const virtualKeyExtractor = (item: VpItem) =>
 const virtualIsStaticItem = (item: VpItem) =>
   item.type === 'vp-banner' || item.id > 0;
 
-export const MainContent = () => {
+interface MainContentProps {
+  footerRef?: RefObject<DOMElement | null>;
+}
+
+export const MainContent = ({ footerRef }: MainContentProps) => {
   const { version } = useAppContext();
   const uiState = useUIState();
   const { allExpanded: fullDetail } = useThoughtExpanded();
@@ -276,14 +289,55 @@ export const MainContent = () => {
   // Combine completed history + live pending items for the virtualized list.
   // The banner sentinel is prepended so it scrolls with content (not pinned).
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
-  const allVirtualItems = useMemo(
-    (): VpItem[] => [
+  const allVirtualItems = useMemo((): VpItem[] => {
+    const combined: VpItem[] = [
       VP_BANNER_ITEM,
       ...visibleHistory,
       ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
-    ],
-    [visibleHistory, pendingHistoryItems],
-  );
+    ];
+    // Collapse duplicate tool_group rows (#9420): the same in-flight batch
+    // renders from both committed history and the live pending list between
+    // the onComplete commit and the scheduler clearing its display state.
+    // Continuation thought/content items can land between the copies, so
+    // match across the whole list — never by adjacency — on the scheduler-
+    // minted batchId stamped on both copies of one batch, and only when a
+    // live pending counterpart exists (it keeps updating, so it wins).
+    // callIds are NOT an identity (ids are re-minted after core-history
+    // compaction and providers can reuse wire ids), so unrelated batches
+    // whose callIds collide keep rendering. Groups without a batchId
+    // (adapters) are never collapsed; restored-history ids are unique per
+    // mount, so they can never match a live pending batch either.
+    const livePendingBatchIds = new Set<string>();
+    for (const item of pendingHistoryItems) {
+      if (item.type === 'tool_group' && item.batchId !== undefined) {
+        livePendingBatchIds.add(item.batchId);
+      }
+    }
+    if (livePendingBatchIds.size === 0) return combined;
+    const dropped = new Set<VpItem>();
+    const committedByBatchId = new Map<string, VpItem>();
+    // Same batch twice within the pending list: keep the latest copy only.
+    const keptPendingByBatchId = new Map<string, VpItem>();
+    for (const item of combined) {
+      if (
+        item.type !== 'tool_group' ||
+        item.batchId === undefined ||
+        !livePendingBatchIds.has(item.batchId)
+      ) {
+        continue;
+      }
+      if (item.id > 0) {
+        committedByBatchId.set(item.batchId, item);
+      } else {
+        const kept = keptPendingByBatchId.get(item.batchId);
+        if (kept) dropped.add(kept);
+        keptPendingByBatchId.set(item.batchId, item);
+      }
+    }
+    for (const item of committedByBatchId.values()) dropped.add(item);
+    if (dropped.size === 0) return combined;
+    return combined.filter((item) => !dropped.has(item));
+  }, [visibleHistory, pendingHistoryItems]);
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
   // per-item offsets so `/copy mermaid N` / `/copy latex N` hints under each
@@ -460,6 +514,11 @@ export const MainContent = () => {
         <TextSelectionController
           isActive={!uiState.dialogsVisible}
           getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getAdditionalSelectableRects={() =>
+            footerRef?.current
+              ? [measureElementPosition(footerRef.current)]
+              : []
+          }
           getScrollState={() =>
             scrollRef.current?.getScrollState() ?? {
               scrollTop: 0,

@@ -3920,6 +3920,17 @@ describe('AnthropicContentConverter', () => {
       );
     });
 
+    it('maps refusal into the content-filter family (#9026)', () => {
+      // A refusal stop_reason is a provider safety decision. It must map
+      // to SAFETY so the quiet post-tool-result acceptance gate in
+      // geminiChat keeps it fatal; falling through to
+      // FINISH_REASON_UNSPECIFIED would let an armed attempt accept the
+      // refusal as a quiet "(empty content)" completion.
+      expect(converter.mapAnthropicFinishReasonToGemini('refusal')).toBe(
+        FinishReason.SAFETY,
+      );
+    });
+
     it('returns undefined for null/empty', () => {
       expect(converter.mapAnthropicFinishReasonToGemini(null)).toBeUndefined();
       expect(converter.mapAnthropicFinishReasonToGemini('')).toBeUndefined();

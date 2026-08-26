@@ -9,12 +9,37 @@ prompt, or inject a mid-turn message. An explicit user Stop remains allowed to
 send one cancellation while a transition is preparing.
 
 The WebShell therefore blocks prompt writes as soon as a desired target is
-pending or the daemon transition enters `queued` or `preparing`. A prompt that
-is awaiting an asynchronous host admission hook records the write-gate
-generation and rechecks it before any composer commit, follow-up clear, session
-allocation, send, or enqueue. If the gate closes at any point while the hook is
-pending, the draft and retry state remain owned by the source composer even if
-navigation completes or fails before the hook returns.
+pending or the daemon transition enters `queued` or `preparing`. Every prompt
+records its owner and the write-gate generation before asynchronous host
+admission, session preparation, or a prompt prerequisite such as switching to
+plan mode, then rechecks them before any composer commit, follow-up clear, send,
+or enqueue.
+Any prompt that joins an existing lazy-session preparation likewise defers its
+composer commit until the shared preparation passes the same check.
+It invalidates the continuation when its App instance unmounts. If the gate
+closes at any point while admission or preparation is pending, the draft and
+retry state remain owned by the source composer even if navigation completes
+or fails before the continuation returns. A cancelled retry is consumed only
+after navigation settles and its source session becomes current again. A retry
+started later supersedes an older retry of the same kind even when their
+asynchronous admission callbacks settle out of order. A retry
+whose workspace is known may settle across an attachment replacement of the
+same logical session. A retry captured before its workspace is known may be
+restored only while the captured live owner remains current, or after that same
+owner supplies its workspace. An owner change discards it; transcript block IDs
+are local to a reducer and cannot establish identity across transcript
+replacement. Failed-message restoration therefore requires the same in-memory
+block or stable persisted source-record identities. Rehydration is allowed only
+when the preceding message has equivalent identity, including an empty
+transcript with no preceding message.
+Accepting a newer prompt refreshes the retry owner before its send begins, so a
+replacement attachment cannot leave its eventual failure tied to a stale live
+owner. If navigation resets the transcript after a locally rejected prompt,
+the local user message may be restored only when the preceding user-message
+anchor still matches. Turn-error retries likewise require the same block or a
+stable prompt/event identity after transcript replacement. A missing or changed
+identity fails closed instead of offering a retry for a potentially different
+transcript.
 
 ## Queued prompts
 

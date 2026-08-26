@@ -68,13 +68,193 @@ describe('PersistedSessionListCache', () => {
       'single_flight',
     ]);
     for (const lookup of lookups.slice(1)) {
-      expect(lookup.promise).toBe(lookups[0]!.promise);
+      expect(lookup.promise).not.toBe(lookups[0]!.promise);
     }
     expect(loader).not.toHaveBeenCalled();
     load.resolve(snapshot());
     await expect(
       Promise.all(lookups.map((lookup) => lookup.promise)),
     ).resolves.toHaveLength(5);
+    expect(loader).toHaveBeenCalledTimes(1);
+    cache.clear();
+  });
+
+  it('cancels one waiter without aborting the shared load', async () => {
+    const cache = new PersistedSessionListCache(2_000, 50_000);
+    const load = deferred<PersistedSessionListSnapshot>();
+    let loadSignal: AbortSignal | undefined;
+    const loader = vi.fn((signal: AbortSignal) => {
+      loadSignal = signal;
+      return load.promise;
+    });
+    const leaderController = new AbortController();
+    const reason = new Error('leader disconnected');
+    const leader = cache.lookup(SCOPE, loader, {
+      signal: leaderController.signal,
+    });
+    const follower = cache.lookup(SCOPE, loader);
+
+    await Promise.resolve();
+    leaderController.abort(reason);
+    await expect(leader.promise).rejects.toBe(reason);
+    expect(loadSignal?.aborted).toBe(false);
+
+    load.resolve(snapshot());
+    await expect(follower.promise).resolves.toEqual(snapshot());
+    expect(cache.lookup(SCOPE, loader).status).toBe('cache_hit');
+    cache.clear();
+  });
+
+  it('preserves a null caller abort reason', async () => {
+    const cache = new PersistedSessionListCache(2_000, 50_000);
+    const controller = new AbortController();
+    const lookup = cache.lookup(SCOPE, async () => snapshot(), {
+      signal: controller.signal,
+    });
+
+    controller.abort(null);
+
+    await expect(lookup.promise).rejects.toBeNull();
+    cache.clear();
+  });
+
+  it('keeps the load result when it settles before caller cancellation', async () => {
+    const cache = new PersistedSessionListCache(2_000, 50_000);
+    const load = deferred<PersistedSessionListSnapshot>();
+    const controller = new AbortController();
+    const reason = new Error('late caller cancellation');
+    const completed = snapshot();
+    const sessions = completed.sessions;
+    Object.defineProperty(completed, 'sessions', {
+      get() {
+        controller.abort(reason);
+        return sessions;
+      },
+    });
+    const lookup = cache.lookup(SCOPE, () => load.promise, {
+      signal: controller.signal,
+    });
+
+    load.resolve(completed);
+
+    await expect(lookup.promise).resolves.toBe(completed);
+    expect(controller.signal.aborted).toBe(true);
+    cache.clear();
+  });
+
+  it('does not start a load when its only waiter cancels before the loader microtask', async () => {
+    const cache = new PersistedSessionListCache(2_000, 50_000);
+    const controller = new AbortController();
+    const reason = new Error('cancel before start');
+    const loader = vi.fn(async () => snapshot());
+    const lookup = cache.lookup(SCOPE, loader, {
+      signal: controller.signal,
+    });
+
+    controller.abort(reason);
+    await expect(lookup.promise).rejects.toBe(reason);
+    await Promise.resolve();
+    expect(loader).not.toHaveBeenCalled();
+
+    const retry = cache.lookup(SCOPE, loader);
+    expect(retry.status).toBe('scan');
+    await retry.promise;
+    cache.clear();
+  });
+
+  it('detaches an aborted load so a new scan can start immediately', async () => {
+    const cache = new PersistedSessionListCache(2_000, 50_000);
+    const oldLoad = deferred<PersistedSessionListSnapshot>();
+    const newLoad = deferred<PersistedSessionListSnapshot>();
+    let oldLoadSignal: AbortSignal | undefined;
+    const loader = vi
+      .fn<(signal: AbortSignal) => Promise<PersistedSessionListSnapshot>>()
+      .mockImplementationOnce((signal) => {
+        oldLoadSignal = signal;
+        return oldLoad.promise;
+      })
+      .mockImplementationOnce(() => newLoad.promise);
+    const controller = new AbortController();
+    const reason = new Error('last waiter disconnected');
+    const oldLookup = cache.lookup(SCOPE, loader, {
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+
+    controller.abort(reason);
+    await expect(oldLookup.promise).rejects.toBe(reason);
+    expect(oldLoadSignal?.aborted).toBe(true);
+    const newLookup = cache.lookup(SCOPE, loader);
+    expect(newLookup.status).toBe('scan');
+    await Promise.resolve();
+    expect(loader).toHaveBeenCalledTimes(2);
+
+    oldLoad.resolve(snapshot(1));
+    await Promise.resolve();
+    expect(cache.lookup(SCOPE, loader).status).toBe('single_flight');
+    newLoad.resolve(snapshot(2));
+    await newLookup.promise;
+    expect(cache.lookup(SCOPE, loader).status).toBe('cache_hit');
+    cache.clear();
+  });
+
+  it('does not let a detached load rejection clear its replacement', async () => {
+    const cache = new PersistedSessionListCache(2_000, 50_000);
+    const oldLoad = deferred<PersistedSessionListSnapshot>();
+    const newLoad = deferred<PersistedSessionListSnapshot>();
+    const loader = vi
+      .fn<(signal: AbortSignal) => Promise<PersistedSessionListSnapshot>>()
+      .mockImplementationOnce(() => oldLoad.promise)
+      .mockImplementationOnce(() => newLoad.promise);
+    const controller = new AbortController();
+    const reason = new Error('old waiter gone');
+    const oldLookup = cache.lookup(SCOPE, loader, {
+      signal: controller.signal,
+    });
+    await Promise.resolve();
+
+    controller.abort(reason);
+    await expect(oldLookup.promise).rejects.toBe(reason);
+    const newLookup = cache.lookup(SCOPE, loader);
+    await Promise.resolve();
+    oldLoad.reject(new Error('late old failure'));
+    await Promise.resolve();
+    expect(cache.lookup(SCOPE, loader).status).toBe('single_flight');
+
+    newLoad.resolve(snapshot());
+    await newLookup.promise;
+    cache.clear();
+  });
+
+  it('rejects an already-aborted caller without creating a slot or load', async () => {
+    const cache = new PersistedSessionListCache(2_000, 50_000);
+    const controller = new AbortController();
+    const reason = new Error('already gone');
+    controller.abort(reason);
+    const loader = vi.fn(async () => snapshot());
+
+    expect(() =>
+      cache.lookup(SCOPE, loader, { signal: controller.signal }),
+    ).toThrow(reason);
+    expect(loader).not.toHaveBeenCalled();
+    const lookup = cache.lookup(SCOPE, loader);
+    expect(lookup.status).toBe('scan');
+    await lookup.promise;
+    cache.clear();
+  });
+
+  it('honors cancellation before delivering a cache hit', async () => {
+    const cache = new PersistedSessionListCache(2_000, 50_000);
+    const loader = vi.fn(async () => snapshot());
+    await cache.lookup(SCOPE, loader).promise;
+    const controller = new AbortController();
+    const reason = new Error('cache-hit caller disconnected');
+    const lookup = cache.lookup(SCOPE, loader, {
+      signal: controller.signal,
+    });
+
+    controller.abort(reason);
+    await expect(lookup.promise).rejects.toBe(reason);
     expect(loader).toHaveBeenCalledTimes(1);
     cache.clear();
   });
@@ -153,13 +333,19 @@ describe('PersistedSessionListCache', () => {
     const cache = new PersistedSessionListCache(2_000, 50_000);
     const oldLoad = deferred<PersistedSessionListSnapshot>();
     const newLoad = deferred<PersistedSessionListSnapshot>();
+    let oldLoadSignal: AbortSignal | undefined;
     const loader = vi
-      .fn<() => Promise<PersistedSessionListSnapshot>>()
-      .mockImplementationOnce(() => oldLoad.promise)
+      .fn<(signal: AbortSignal) => Promise<PersistedSessionListSnapshot>>()
+      .mockImplementationOnce((signal) => {
+        oldLoadSignal = signal;
+        return oldLoad.promise;
+      })
       .mockImplementationOnce(() => newLoad.promise);
 
     const oldLookup = cache.lookup(SCOPE, loader);
+    await Promise.resolve();
     cache.invalidate(SCOPE);
+    expect(oldLoadSignal?.aborted).toBe(false);
     const newLookup = cache.lookup(SCOPE, loader);
     expect(newLookup.status).toBe('scan');
     oldLoad.resolve(snapshot(1));

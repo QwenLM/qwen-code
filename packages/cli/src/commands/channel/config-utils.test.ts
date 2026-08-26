@@ -325,7 +325,7 @@ describe('parseChannelConfig', () => {
       token: 'literal-tok',
       senderPolicy: 'open',
       allowedUsers: ['alice'],
-      sessionScope: 'thread',
+      sessionScope: 'chat_thread',
       cwd: '/custom',
       approvalMode: 'auto',
       instructions: 'Be helpful',
@@ -340,7 +340,7 @@ describe('parseChannelConfig', () => {
     expect(result.token).toBe('literal-tok');
     expect(result.senderPolicy).toBe('open');
     expect(result.allowedUsers).toEqual(['alice']);
-    expect(result.sessionScope).toBe('thread');
+    expect(result.sessionScope).toBe('chat_thread');
     expect(result.cwd).toBe(path.resolve('/custom'));
     expect(result.approvalMode).toBe('auto');
     expect(result.instructions).toBe('Be helpful');
@@ -356,6 +356,15 @@ describe('parseChannelConfig', () => {
     expect(result.groupPolicy).toBe('open');
     expect(result.dmPolicy).toBe('disabled');
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
+  });
+
+  it('preserves the deprecated thread scope for existing routes', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      sessionScope: 'thread',
+    });
+
+    expect(result.sessionScope).toBe('thread');
   });
 
   it('uses plugin defaultSessionScope when sessionScope is not configured', async () => {

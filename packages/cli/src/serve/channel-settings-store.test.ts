@@ -189,6 +189,28 @@ describe('WorkspaceChannelSettingsStore', () => {
     ).toBe('$BOT_TOKEN');
   });
 
+  it('accepts chat-and-thread session scope', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        sessionScope: 'chat_thread',
+      },
+    });
+
+    expect(
+      (
+        readWorkspaceSettings()['channels'] as Record<
+          string,
+          Record<string, unknown>
+        >
+      )['bot']?.['sessionScope'],
+    ).toBe('chat_thread');
+  });
+
   it('replaces and clears secrets only through explicit operations', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
@@ -398,6 +420,28 @@ describe('WorkspaceChannelSettingsStore', () => {
       },
     },
     {
+      label: 'invalid group allowlist entry',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        groups: { 'group-1': { dispatchMode: 'invalid' } },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
+      label: 'wrong nested dispatch mode kind',
+      config: {
+        type: 'management-validation-test',
+        clientId: 'client-id',
+        groups: { 'group-1': { dispatchMode: ['collect'] } },
+      },
+      secrets: {
+        clientSecret: { operation: 'replace', value: 'secret' } as const,
+      },
+    },
+    {
       label: 'string-list with non-string items',
       config: {
         type: 'management-validation-test',
@@ -459,7 +503,12 @@ describe('WorkspaceChannelSettingsStore', () => {
         mode: 'safe',
         senderPolicy: 'open',
         groupPolicy: 'pairing',
+        sessionScope: 'chat_thread',
         allowedUsers: ['user-1'],
+        groups: {
+          '*': { requireMention: false },
+          'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+        },
         groupHistoryLimit: 25,
         blockStreaming: 'on',
         identity: { id: 'ops', displayName: 'Ops' },
@@ -481,7 +530,12 @@ describe('WorkspaceChannelSettingsStore', () => {
       mode: 'safe',
       senderPolicy: 'open',
       groupPolicy: 'pairing',
+      sessionScope: 'chat_thread',
       allowedUsers: ['user-1'],
+      groups: {
+        '*': { requireMention: false },
+        'group-1': { dispatchMode: 'collect', groupHistoryLimit: 25 },
+      },
       groupHistoryLimit: 25,
       blockStreaming: 'on',
       identity: { id: 'ops', displayName: 'Ops' },
@@ -598,6 +652,191 @@ describe('WorkspaceChannelSettingsStore', () => {
         'Channel field "interactiveCards.questionCard.timeoutMs" has an invalid value.',
     });
     expect(fs.readFileSync(settingsPath, 'utf8')).toBe(beforeRejectedWrite);
+  });
+
+  it('preserves unchanged legacy group settings while editing another field', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "groups": { "group-1": { "mentionKeywords": ["@bot"] } }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'updated-id',
+        groups: { 'group-1': { mentionKeywords: ['@bot'] } },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'updated-id',
+      groups: { 'group-1': { mentionKeywords: ['@bot'] } },
+    });
+  });
+
+  it.each([
+    { stored: null, changed: [] },
+    { stored: [], changed: null },
+  ])(
+    'preserves unchanged non-record groups but rejects a changed value',
+    async ({ stored, changed }) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: {
+            bot: {
+              type: 'management-validation-test',
+              clientId: 'client-id',
+              clientSecret: 'existing-secret',
+              groups: stored,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups: stored,
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      });
+
+      expect(next.channels['bot']).toMatchObject({
+        clientId: 'updated-id',
+        groups: stored,
+      });
+
+      await expect(
+        store.upsert('bot', {
+          expectedRevision: next.revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'updated-id',
+            groups: changed,
+          },
+          secrets: { clientSecret: { operation: 'preserve' } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    },
+  );
+
+  it('rejects unchanged non-record groups containing an unsafe key', async () => {
+    const groups = [JSON.parse('{"__proto__":{"polluted":true}}') as unknown];
+    writeWorkspaceSettings(
+      JSON.stringify({
+        $version: 4,
+        channels: {
+          bot: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+            clientSecret: 'existing-secret',
+            groups,
+          },
+        },
+      }),
+    );
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups,
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+  });
+
+  it('preserves unchanged legacy values in known group fields', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "groups": {
+      "*": { "requireMention": "yes", "dispatchMode": "collect" }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'management-validation-test',
+        clientId: 'updated-id',
+        groups: { '*': { requireMention: 'yes', dispatchMode: 'steer' } },
+      },
+      secrets: { clientSecret: { operation: 'preserve' } },
+    });
+
+    expect(next.channels['bot']).toMatchObject({
+      clientId: 'updated-id',
+      groups: { '*': { requireMention: 'yes', dispatchMode: 'steer' } },
+    });
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups: { '*': { requireMention: 'no', dispatchMode: 'steer' } },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+  });
+
+  it('rejects reserved keys inside unchanged known group fields', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "groups": {
+      "*": { "requireMention": { "__proto__": { "legacy": true } } }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups: {
+            '*': {
+              requireMention: JSON.parse(
+                '{"__proto__":{"legacy":true}}',
+              ) as unknown,
+            },
+          },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
   });
 
   it('re-validates an unchanged stored scalar instead of preserving it', async () => {

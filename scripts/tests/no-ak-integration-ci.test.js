@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -12,6 +20,7 @@ import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const NO_AK_SCRIPT = 'test:integration:no-ak:sandbox:none';
+const INTEGRATION_TYPECHECK_SCRIPT = 'typecheck:integration';
 const GUARD_ACTION_PATH = '.github/actions/verify-checkout-head/action.yml';
 const CONFIGURE_ACTION_PATH =
   '.github/actions/configure-windows-runner/action.yml';
@@ -19,16 +28,121 @@ const NODE_ACTION_PATH = '.github/actions/self-hosted-node/action.yml';
 const GUARD_STEP = 'Verify checkout includes expected head commit';
 
 describe('no-AK integration CI wiring', () => {
+  it.runIf(process.platform === 'linux')(
+    'keeps Linux Unix socket paths short and identity-stable',
+    () => {
+      const workflow = readFileSync(
+        path.join(ROOT, '.github/workflows/ci.yml'),
+        'utf8',
+      );
+      const routingBlocks = ['test', 'test_macos', 'test_windows'].map(
+        (jobName) => {
+          const testStep = getWorkflowStep(
+            getWorkflowJob(workflow, jobName),
+            'Run tests and generate reports',
+          );
+          const start = testStep.indexOf('export TMPDIR=');
+          expect(
+            start,
+            `${jobName}: TMPDIR routing block`,
+          ).toBeGreaterThanOrEqual(0);
+          const end = testStep.indexOf('\n          ( while true', start);
+          expect(end, `${jobName}: sampler sentinel`).toBeGreaterThan(start);
+          return testStep.slice(start, end);
+        },
+      );
+      expect(new Set(routingBlocks)).toHaveLength(1);
+      const [routeTemp] = routingBlocks;
+      const root = mkdtempSync(path.join(tmpdir(), 'ci-temp-routing-'));
+      const longRunnerTemp = path.join(root, 'x'.repeat(180));
+
+      try {
+        mkdirSync(longRunnerTemp);
+        const [routedTemp, resolvedTemp] = execFileSync(
+          'bash',
+          [
+            '-c',
+            `${routeTemp}\nprintf '%s\\n%s\\n' "$TMPDIR" "$(cd "$TMPDIR" && pwd -P)"`,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              RUNNER_OS: 'Linux',
+              RUNNER_TEMP: longRunnerTemp,
+            },
+          },
+        )
+          .trim()
+          .split('\n');
+
+        expect(resolvedTemp).toBe(routedTemp);
+        expect(routedTemp).toMatch(/^\/var\/tmp\/qwen-ci-/);
+        expect(existsSync(routedTemp)).toBe(false);
+        expect(
+          Buffer.byteLength(
+            path.join(routedTemp, 'qwen-agent-view-XXXXXX', 'supervisor.sock'),
+          ),
+        ).toBeLessThan(108);
+        expect(
+          workflow.match(/mktemp -d \/var\/tmp\/qwen-ci-XXXXXX/g),
+        ).toHaveLength(3);
+        expect(workflow).toContain('QWEN_CI_TMPDIR="$(mktemp -d');
+        expect(workflow).toContain('if [ -n "$QWEN_CI_TMPDIR" ]; then');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('preserves test failures in every wrapped OS job', () => {
+    const workflow = readFileSync(
+      path.join(ROOT, '.github/workflows/ci.yml'),
+      'utf8',
+    );
+
+    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+      const testStep = getWorkflowStep(
+        getWorkflowJob(workflow, jobName),
+        'Run tests and generate reports',
+      );
+      expect(testStep).toContain(
+        'trap \'rm -rf "$TMPDIR" 2>/dev/null || true\' EXIT',
+      );
+      let previous = -1;
+      for (const command of [
+        'set +e',
+        'npm run test:ci',
+        'RC=$?',
+        'set -e',
+        'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
+        'kill "$SAMPLER_PID" 2>/dev/null || true',
+        'exit "$RC"',
+      ]) {
+        const index = testStep.indexOf(command);
+        expect(index, `${jobName}: ${command}`).toBeGreaterThan(previous);
+        previous = index;
+      }
+    }
+  });
+
   it('defines a focused no-AK integration script', () => {
     const packageJson = JSON.parse(
       readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
     );
 
+    expect(packageJson.scripts[INTEGRATION_TYPECHECK_SCRIPT]).toBe(
+      'tsc -p integration-tests/tsconfig.json --pretty false',
+    );
+    expect(packageJson.scripts.typecheck).toContain(
+      `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`,
+    );
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
         'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2',
         './fake-openai-server.test.ts',
         './test-helper.test.ts',
+        './chat-transcript-contract.test.ts',
         './cli/daemon-invocation-context.test.ts',
         './cli/list_directory.test.ts',
         './cli/qwen-serve-routes.test.ts',
@@ -73,7 +187,12 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
     );
+    const integrationTypecheckCommand = `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`;
+    expect(gateStep).toContain(integrationTypecheckCommand);
     expect(gateStep).toContain(`npm run ${NO_AK_SCRIPT}`);
+    expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
+      gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
+    );
     expect(gateStep).toContain(
       "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
     );
@@ -100,6 +219,7 @@ describe('no-AK integration CI wiring', () => {
       'IDEALAB_API_KEY',
       'MINIMAX_API_KEY',
       'MODELSCOPE_API_KEY',
+      'MOONSHOT_API_KEY',
       'OPENAI_API_KEY',
       'OPENAI_BASE_URL',
       'OPENAI_MODEL',
@@ -197,7 +317,7 @@ describe('no-AK integration CI wiring', () => {
       "expected_sha: '${{ github.event.pull_request.head.sha }}'",
     );
     expect(guardCalls.test_windows).toContain(
-      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
     expect(guardCalls.integration_cli).toContain(
       "expected_sha: '${{ github.event.merge_group.head_sha }}'",
@@ -214,7 +334,7 @@ describe('no-AK integration CI wiring', () => {
       'if: "${{ github.event_name == \'pull_request\' }}"',
     );
     expect(guardCalls.test_windows).toContain(
-      'if: "${{ needs.classify_pr.outputs.skip_ci != \'true\' }}"',
+      "if: \"${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\"",
     );
     expect(guardCalls.integration_cli).not.toContain('if:');
   });
@@ -226,23 +346,27 @@ describe('no-AK integration CI wiring', () => {
     );
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
 
-    // The runs-on expression is the Windows gate's escape hatch. Pin the
-    // whole line so a variable typo, a quoting regression in the nested
-    // ''true'' escapes, or an && / || regrouping fails here instead of
-    // surfacing only when the switch is flipped.
+    // The runs-on expression is the Windows gate's escape hatch and its fork
+    // trust policy: pull requests never reach the pool, because a
+    // pull_request run executes the PR's own YAML and could rewrite runs-on
+    // itself. Pin the whole line so a variable typo, a quoting regression in
+    // the nested ''true'' escapes, or an && / || regrouping fails here
+    // instead of surfacing only when the switch is flipped — or when a fork
+    // PR finds the persistent pool.
     const windowsRunsOn = windowsJob
       .split('\n')
       .find((line) => line.startsWith('    runs-on:'));
     expect(windowsRunsOn).toBe(
-      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
+      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
     );
     expect(windowsJob.split('\n')).toContain('    timeout-minutes: 60');
 
-    // The guard must stay wired to the merge-queue head for this job.
+    // The guard must stay wired to the expected head for this job: the
+    // event-aware shape, since the revived triggers have no merge-queue head.
     const guard = getWorkflowStep(windowsJob, GUARD_STEP);
     expect(guard).toContain("uses: './.github/actions/verify-checkout-head'");
     expect(guard).toContain(
-      "expected_sha: '${{ github.event.merge_group.head_sha }}'",
+      'expected_sha: "${{ github.event_name == \'merge_group\' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"',
     );
 
     // The self-hosted-only tuning comes from the composite action shared with

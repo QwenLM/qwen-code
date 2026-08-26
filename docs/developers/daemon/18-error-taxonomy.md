@@ -105,7 +105,7 @@ These are surfaced through the preflight cell's `errorKind` so client UIs render
 | ------ | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | `401`  | `{ error: 'Unauthorized' }`                  | Missing / wrong / no-scheme bearer token. Uniform across `missing header` / `wrong scheme` / `wrong token` so probing cannot distinguish. |
 | `401`  | `{ error: '...', code: 'token_required' }`   | Mutation-gate strict route on a no-token loopback daemon. SDKs render "configure --token / --require-auth" hint.                          |
-| `403`  | `{ error: 'Request denied by CORS policy' }` | `denyBrowserOriginCors` rejected an `Origin`-bearing request.                                                                             |
+| `403`  | `{ error: 'Request denied by CORS policy' }` | `allowOriginCors` (runtime) / `denyBrowserOriginCors` (bootstrap) rejected an `Origin`-bearing request.                                   |
 | `403`  | `{ error: 'Invalid Host header' }`           | `hostAllowlist` rejected the `Host` header (DNS rebinding defense).                                                                       |
 
 See [`12-auth-security.md`](./12-auth-security.md) for the full auth model.

@@ -4,10 +4,13 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   type AvailableCommand,
   type BridgeSessionInfo,
   type ChannelAgentBridge,
+  type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
   type ToolCallEvent,
@@ -86,6 +89,8 @@ export interface DaemonChannelBridgeOptions {
   modelServiceId?: string;
   sessionScope?: SessionScope;
   channelLoopMcpHost?: DaemonChannelLoopMcpHost;
+  deleteSessionData?: (sessionId: string) => Promise<void>;
+  promptAuthorization?: string;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -233,10 +238,18 @@ export class DaemonChannelBridge
   private lifecycleGeneration = 0;
   private latestAvailableCommandsSessionId: string | undefined;
   private lastError: unknown;
+  readonly deleteSessionData?: (sessionId: string) => Promise<void>;
 
   constructor(options: DaemonChannelBridgeOptions) {
     super();
     this.options = options;
+    const deleteSessionData = options.deleteSessionData;
+    if (deleteSessionData) {
+      this.deleteSessionData = async (sessionId) => {
+        await deleteSessionData(sessionId);
+        this.removeSessionBinding(sessionId);
+      };
+    }
     this.on('error', (error) => {
       this.lastError = error;
     });
@@ -348,7 +361,7 @@ export class DaemonChannelBridge
   async prompt(
     sessionId: string,
     text: string,
-    options?: { imageBase64?: string; imageMimeType?: string },
+    options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const session = this.ensureSession(sessionId);
     if (this.activePrompts.has(sessionId)) {
@@ -404,12 +417,28 @@ export class DaemonChannelBridge
       });
     }
     prompt.push({ type: 'text', text });
+    // Always presented: the daemon validates it for the channel-turn
+    // classification as well as the display projection, and channel
+    // prompts without display text still need the classification.
+    const promptAuthorization = this.options.promptAuthorization;
 
     try {
       const result = await session.prompt(
         {
           prompt,
-          _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+          _meta: {
+            [CHANNEL_PROMPT_META_KEY]: true,
+            ...(promptAuthorization
+              ? {
+                  [CHANNEL_PROMPT_AUTHORIZATION_META_KEY]: promptAuthorization,
+                }
+              : {}),
+            ...(options?.displayText !== undefined
+              ? {
+                  [CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY]: options.displayText,
+                }
+              : {}),
+          },
         },
         controller.signal,
       );
@@ -708,6 +737,8 @@ export class DaemonChannelBridge
             text
           ) {
             this.emit('backgroundResponse', sessionId, text);
+          } else if (meta['source'] === 'vision_bridge_notice' && text) {
+            this.emit('textChunk', sessionId, text);
           }
           break;
         }

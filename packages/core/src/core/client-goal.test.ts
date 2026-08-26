@@ -123,6 +123,7 @@ function setupGoalClient() {
       evidenceCursor: { recordId: 'create-record' },
       turnCount: 0,
       activeTimeMs: 0,
+      tokensUsed: 0,
       createdAt: 1,
       updatedAt: 1,
     },

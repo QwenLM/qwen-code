@@ -17,6 +17,7 @@ import { EventEmitter } from 'events';
 import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
+  ToolResultBoundaryArtifact,
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
@@ -136,6 +137,7 @@ export interface AgentToolResultEvent {
   resultDisplay?: ToolResultDisplay;
   /** Path to the temp file where oversized output was saved. */
   outputFile?: string;
+  boundaryArtifact?: ToolResultBoundaryArtifact;
   durationMs?: number;
   timestamp: number;
 }
@@ -251,6 +253,10 @@ export interface AgentEventMap {
   [AgentEventType.STATUS_CHANGE]: AgentStatusChangeEvent;
 }
 
+export type AgentEventListener<E extends keyof AgentEventMap> = (
+  payload: AgentEventMap[E],
+) => void;
+
 // ─── Event Emitter ──────────────────────────────────────────
 
 export class AgentEventEmitter {
@@ -258,16 +264,22 @@ export class AgentEventEmitter {
 
   on<E extends keyof AgentEventMap>(
     event: E,
-    listener: (payload: AgentEventMap[E]) => void,
+    listener: AgentEventListener<E>,
   ): void {
     this.ee.on(event, listener as (...args: unknown[]) => void);
   }
 
   off<E extends keyof AgentEventMap>(
     event: E,
-    listener: (payload: AgentEventMap[E]) => void,
+    listener: AgentEventListener<E>,
   ): void {
     this.ee.off(event, listener as (...args: unknown[]) => void);
+  }
+
+  rawListeners<E extends keyof AgentEventMap>(
+    event: E,
+  ): Array<AgentEventListener<E>> {
+    return this.ee.rawListeners(event) as Array<AgentEventListener<E>>;
   }
 
   emit<E extends keyof AgentEventMap>(

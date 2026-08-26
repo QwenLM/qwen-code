@@ -38,6 +38,34 @@ import { dirname, join, basename, resolve } from 'node:path';
 import { writeStderrLineSafe } from '../../../utils/stdioHelpers.js';
 
 /**
+ * Slack for the run-epoch fence: absorbs the sub-millisecond skew between a
+ * file mtime (fractional) and `Date.now()` (integral) when a record is
+ * written moments after the plan. Real cross-run gaps are minutes to hours.
+ */
+export const RUN_EPOCH_SLACK_MS = 2000;
+
+/**
+ * The run's epoch: records older than this predate the run and are ignored.
+ *
+ * The Date.now()-stamped artifacts key on this — the deadline stamps and the
+ * session ledger — where the slack absorbs the sub-millisecond skew between a
+ * file mtime and a wall-clock stamp. The FILE-mtime-fenced artifacts (prompt
+ * records, transcripts) compare against the plan's strict mtime instead:
+ * their timestamps and the plan's come off the same clock, so they need no
+ * slack, and giving them one would re-admit a dead attempt's records written
+ * in the two seconds before a re-capture. An
+ * unstatable plan disables the fence (fail open, like every other malformed
+ * input these readers take).
+ */
+export function runEpochMs(planPath: string): number {
+  try {
+    return statSync(planPath).mtimeMs - RUN_EPOCH_SLACK_MS;
+  } catch {
+    return Number.NEGATIVE_INFINITY;
+  }
+}
+
+/**
  * Where the prompts this plan's agents were built from are recorded.
  *
  * Derived from the plan path, by both the writer and the reader, so that neither
@@ -60,6 +88,11 @@ export function promptRecordDir(planPath: string): string {
 const fileFor = (key: string) => `${encodeURIComponent(key)}.txt`;
 
 /** Where this agent's brief lives — the file it is told to read first. */
+/** Where `recordPrompt` puts a key's launch prompt — the always-present record. */
+export function recordedPromptPath(planPath: string, key: string): string {
+  return join(promptRecordDir(planPath), fileFor(key));
+}
+
 export function briefPath(planPath: string, key: string): string {
   return join(promptRecordDir(planPath), `${encodeURIComponent(key)}.brief.md`);
 }

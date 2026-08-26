@@ -6,6 +6,7 @@
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
+import { inspect } from 'node:util';
 import {
   ClientSideConnection,
   PROTOCOL_VERSION,
@@ -13,7 +14,12 @@ import {
 } from '@agentclientprotocol/sdk';
 import type {
   CancelNotification,
+  Client,
+  ContentBlock,
   PromptRequest,
+  PromptResponse,
+  SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
   SessionUpdate,
@@ -21,6 +27,7 @@ import type {
 import type {
   ApprovalMode,
   RebuiltSessionArtifactSnapshot,
+  TurnResultRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   DAEMON_TRACEPARENT_META_KEY,
@@ -29,15 +36,20 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  SESSION_PR_LIST_LIMIT,
+  SESSION_PR_URL_MAX_LENGTH,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  TURN_RESULT_CODE_TEXT_TRUNCATED,
+  TURN_RESULT_TEXT_MAX_CHARS,
   TrustGateError,
+  normalizeTurnResultError,
   normalizeSnapshotPayload,
   ShellExecutionService,
   type InvocationContextV1,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
-import type { AcpChannel } from './channel.js';
+import type { AcpChannel, AcpChannelTransportGuard } from './channel.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
@@ -45,11 +57,15 @@ import {
   type BridgeEvent,
 } from './eventBus.js';
 import {
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
   normalizeCompactedReplayMaxBytes,
+  normalizeJournalGrowthPoolBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
   TurnBoundaryCompactionEngine,
+  type JournalGrowthSessionLimit,
 } from './compactionEngine.js';
+import { createJournalGrowthPolicy } from './journalGrowthPolicy.js';
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
@@ -117,28 +133,43 @@ import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_STALE_INTERVALS,
+  CHANNEL_LIVENESS_META_KEY,
+  CHANNEL_LIVENESS_VERSION,
   clampActiveWorkIntervalMs,
   type ActiveWorkHeartbeatCapabilityV1,
   type ActiveWorkHoldCategory,
   type ActiveWorkSnapshotV1,
+  CHANNEL_PROMPT_META_KEY,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
-  MID_TURN_RECONCILIATION_RING_SIZE,
+  DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
+  LOAD_REPLAY_MAX_UPDATES,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
   REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   WORKTREE_MCP_DEFER_META_KEY,
   isValidTrustedModelPrompt,
+  sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
+import {
+  startChannelLivenessMonitor,
+  type ChannelLivenessMonitor,
+  type ChannelLivenessFailure,
+} from './channel-liveness.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
   BridgeSession,
@@ -147,6 +178,9 @@ import type {
   BridgeRestoredSession,
   BridgeSessionGoal,
   BridgeSessionSummary,
+  SessionPrInfo,
+  BridgeTurnStatus,
+  BridgeSessionCatalogVersion,
   BridgePendingInteraction,
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -167,9 +201,18 @@ import type {
   BridgeSessionTranscriptPageRequest,
   BridgeGenerationStreamEvent,
   BridgeWorkspaceGenerationStreamEvent,
+  BridgePromptContentBlock,
+  BridgePromptRequest,
+  ChildHeapReport,
   RuntimeMcpServerAddResult,
   RuntimeMcpServerRemoveResult,
 } from './bridgeTypes.js';
+import {
+  isSessionAttachmentReference,
+  SessionAttachmentReferenceError,
+  SessionAttachmentStore,
+  withAttachmentDegradationMarker,
+} from './sessionAttachments.js';
 import type {
   BridgeFreshSessionAdmissionContext,
   BridgeFreshSessionReservation,
@@ -179,7 +222,12 @@ import type {
   LiveScreenContextCaptureHandler,
   LiveSpeakToUserHandler,
   LiveTaskToolRequestHandler,
+  PromptLedgerSink,
 } from './bridgeOptions.js';
+import type {
+  PromptLedgerRecord,
+  PromptLedgerTerminalRecord,
+} from './prompt-ledger.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
@@ -243,10 +291,17 @@ const KNOWN_SESSION_UPDATE_TYPES = new Set([
   'session_info_update',
   'usage_update',
 ]);
-const MAX_BULK_REPLAY_UPDATES = 10_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function safeTransportFailureCode(error: unknown): string | undefined {
+  if (!isRecord(error)) return undefined;
+  const code = error['code'];
+  return typeof code === 'string' && /^[a-z0-9_.-]{1,64}$/iu.test(code)
+    ? code
+    : undefined;
 }
 
 function sessionSourceRequestMeta(
@@ -263,6 +318,21 @@ function sessionSourceRequestMeta(
     : {};
 }
 
+/**
+ * Only the daemon's authenticated channel-worker path can populate the
+ * user-facing display projection. Every other source echoes its prompt content
+ * verbatim. Single source of truth for the echo, pending-entry text, and child
+ * metadata so their `''`/undefined semantics cannot drift apart.
+ */
+function getChannelPromptDisplayText(
+  entry: Pick<SessionEntry, 'sourceType'>,
+  displayText: string | undefined,
+): string | undefined {
+  return entry.sourceType === 'channel' && typeof displayText === 'string'
+    ? displayText
+    : undefined;
+}
+
 function isDefinitiveAcpRequestError(error: unknown): boolean {
   if (error instanceof RequestError) return true;
   if (!isRecord(error)) return false;
@@ -271,6 +341,337 @@ function isDefinitiveAcpRequestError(error: unknown): boolean {
     Number.isInteger(error['code']) &&
     typeof error['message'] === 'string'
   );
+}
+
+class LogSafeAcpRequestError extends RequestError {
+  constructor(
+    code: number,
+    message: string,
+    data: unknown,
+    private readonly reservePreparedResponse?: (value: unknown) => void,
+  ) {
+    super(code, message, data);
+  }
+
+  override toResult<T>() {
+    const result = super.toResult<T>();
+    if ('error' in result) {
+      Object.defineProperty(result.error, inspect.custom, {
+        configurable: true,
+        value: () => ({ code: result.error.code, payloadOmitted: true }),
+      });
+      try {
+        this.reservePreparedResponse?.(result.error);
+      } catch {
+        // The guard already retired the transport. The ACP SDK does not await
+        // its message dispatcher, so throwing from toResult would be unhandled.
+      }
+    }
+    return result;
+  }
+}
+
+const MAX_LOG_SAFE_ACP_ERROR_DETAILS_CHARS = 1_024;
+const MAX_LOG_SAFE_ACP_ERROR_KIND_CHARS = 128;
+const MAX_LOG_SAFE_ACP_ERROR_HINT_CHARS = 512;
+
+function logSafeAcpErrorDetails(
+  error: unknown,
+): { details: string } | undefined {
+  const details =
+    error instanceof Error
+      ? error.message
+      : isRecord(error) && typeof error['message'] === 'string'
+        ? error['message']
+        : undefined;
+  if (!details) return undefined;
+  return {
+    details:
+      details.length <= MAX_LOG_SAFE_ACP_ERROR_DETAILS_CHARS
+        ? details
+        : `${details.slice(0, MAX_LOG_SAFE_ACP_ERROR_DETAILS_CHARS)}…`,
+  };
+}
+
+function boundedAcpErrorString(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : `${value.slice(0, maxChars)}…`;
+}
+
+function logSafeRequestErrorMessage(code: number): string {
+  switch (code) {
+    case -32700:
+      return 'Parse error';
+    case -32600:
+      return 'Invalid request';
+    case -32601:
+      return 'Method not found';
+    case -32602:
+      return 'Invalid params';
+    case -32603:
+      return 'Internal error';
+    case -32000:
+      return 'Authentication required';
+    case -32002:
+      return 'Resource not found';
+    default:
+      return 'ACP client request failed';
+  }
+}
+
+function logSafeRequestErrorData(data: unknown): unknown {
+  if (!isRecord(data) || typeof data['errorKind'] !== 'string') {
+    return undefined;
+  }
+  const status = data['status'];
+  const hint = data['hint'];
+  return {
+    errorKind: boundedAcpErrorString(
+      data['errorKind'],
+      MAX_LOG_SAFE_ACP_ERROR_KIND_CHARS,
+    ),
+    ...(typeof status === 'number' && Number.isFinite(status)
+      ? { status }
+      : {}),
+    ...(typeof hint === 'string'
+      ? {
+          hint: boundedAcpErrorString(hint, MAX_LOG_SAFE_ACP_ERROR_HINT_CHARS),
+        }
+      : {}),
+  };
+}
+
+class AcpInboundHandlerLimitError extends Error {
+  readonly code = 'acp_handler_limit_exceeded';
+
+  constructor(
+    readonly maxActiveHandlers: number,
+    readonly maxActiveHandlerBytes: number,
+    readonly requiredBytes: number,
+    readonly availableBytes: number,
+  ) {
+    super('ACP inbound handler capacity exceeded');
+    this.name = 'AcpInboundHandlerLimitError';
+  }
+}
+
+function estimateAcpHandlerBytes(value: unknown, limitBytes: number): number {
+  let bytes = 0;
+  const stack: unknown[] = [value];
+  const seen = new WeakSet<object>();
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === null) {
+      bytes += 4;
+    } else if (typeof current === 'string') {
+      bytes += Buffer.byteLength(current) + 2;
+    } else if (typeof current === 'number') {
+      bytes += 24;
+    } else if (typeof current === 'boolean') {
+      bytes += 5;
+    } else if (Array.isArray(current)) {
+      if (seen.has(current)) return limitBytes + 1;
+      seen.add(current);
+      bytes += 2 + Math.max(0, current.length - 1);
+      if (bytes + current.length > limitBytes) return limitBytes + 1;
+      for (let index = current.length - 1; index >= 0; index--) {
+        stack.push(current[index]);
+      }
+    } else if (isRecord(current)) {
+      if (seen.has(current)) return limitBytes + 1;
+      seen.add(current);
+      const entries = Object.entries(current);
+      bytes += 2 + Math.max(0, entries.length - 1);
+      for (const [key, entryValue] of entries) {
+        bytes += Buffer.byteLength(key) + 3;
+        stack.push(entryValue);
+      }
+    } else {
+      bytes += 4;
+    }
+    if (bytes > limitBytes) return limitBytes + 1;
+  }
+  return Math.max(1, bytes);
+}
+
+class AcpInboundHandlerAdmission {
+  private activeHandlers = 0;
+  private activeBytes = 0;
+
+  constructor(private readonly guard: AcpChannelTransportGuard) {}
+
+  async run<T>(params: unknown, operation: () => Promise<T>): Promise<T> {
+    const envelopeBytes = Math.min(2_048, this.guard.maxActiveHandlerBytes);
+    const requiredBytes =
+      envelopeBytes +
+      estimateAcpHandlerBytes(
+        params,
+        Math.max(0, this.guard.maxActiveHandlerBytes - envelopeBytes),
+      );
+    const availableBytes = Math.max(
+      0,
+      this.guard.maxActiveHandlerBytes - this.activeBytes,
+    );
+    if (
+      this.activeHandlers >= this.guard.maxActiveHandlers ||
+      requiredBytes > availableBytes
+    ) {
+      const error = new AcpInboundHandlerLimitError(
+        this.guard.maxActiveHandlers,
+        this.guard.maxActiveHandlerBytes,
+        requiredBytes,
+        availableBytes,
+      );
+      this.guard.fail(error);
+      throw error;
+    }
+    this.activeHandlers++;
+    this.activeBytes += requiredBytes;
+    try {
+      return await operation();
+    } finally {
+      this.activeHandlers--;
+      this.activeBytes -= requiredBytes;
+    }
+  }
+}
+
+async function withLogSafeAcpError<T>(
+  operation: () => Promise<T>,
+  reservePreparedResponse?: (value: unknown) => void,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof RequestError) {
+      const code = Number.isFinite(error.code) ? error.code : -32603;
+      throw new LogSafeAcpRequestError(
+        code,
+        logSafeRequestErrorMessage(code),
+        logSafeRequestErrorData(error.data),
+        reservePreparedResponse,
+      );
+    }
+    throw new LogSafeAcpRequestError(
+      -32603,
+      'Internal error',
+      logSafeAcpErrorDetails(error),
+      reservePreparedResponse,
+    );
+  }
+}
+
+function createLogSafeAcpClient(
+  client: Client,
+  transportGuard: AcpChannelTransportGuard,
+): Client {
+  const admission = new AcpInboundHandlerAdmission(transportGuard);
+  const runNotification = <T>(params: unknown, operation: () => Promise<T>) =>
+    withLogSafeAcpError(() => admission.run(params, operation));
+  const runRequest = <T>(params: unknown, operation: () => Promise<T>) =>
+    withLogSafeAcpError(
+      () =>
+        admission.run(params, async () => {
+          const result = await operation();
+          transportGuard.reservePreparedResponse(result ?? null);
+          return result;
+        }),
+      transportGuard.reservePreparedResponse,
+    );
+  return {
+    requestPermission: (params) =>
+      runRequest(params, () => client.requestPermission(params)),
+    sessionUpdate: (params) =>
+      runNotification(params, () => client.sessionUpdate(params)),
+    writeTextFile: client.writeTextFile
+      ? (params) => runRequest(params, () => client.writeTextFile!(params))
+      : undefined,
+    readTextFile: client.readTextFile
+      ? (params) => runRequest(params, () => client.readTextFile!(params))
+      : undefined,
+    createTerminal: client.createTerminal
+      ? (params) => runRequest(params, () => client.createTerminal!(params))
+      : undefined,
+    terminalOutput: client.terminalOutput
+      ? (params) => runRequest(params, () => client.terminalOutput!(params))
+      : undefined,
+    releaseTerminal: client.releaseTerminal
+      ? (params) =>
+          runRequest(
+            params,
+            async () => (await client.releaseTerminal!(params)) ?? {},
+          )
+      : undefined,
+    waitForTerminalExit: client.waitForTerminalExit
+      ? (params) =>
+          runRequest(params, () => client.waitForTerminalExit!(params))
+      : undefined,
+    killTerminal: client.killTerminal
+      ? (params) =>
+          runRequest(
+            params,
+            async () => (await client.killTerminal!(params)) ?? {},
+          )
+      : undefined,
+    extMethod: client.extMethod
+      ? (method, params) =>
+          runRequest(params, () => client.extMethod!(method, params))
+      : undefined,
+    extNotification: client.extNotification
+      ? (method, params) =>
+          runNotification(params, () => client.extNotification!(method, params))
+      : undefined,
+  };
+}
+
+const OUTBOUND_GUARDED_CONNECTION_METHODS = new Set<PropertyKey>([
+  'initialize',
+  'newSession',
+  'loadSession',
+  'unstable_forkSession',
+  'unstable_listSessions',
+  'unstable_resumeSession',
+  'setSessionMode',
+  'unstable_setSessionModel',
+  'setSessionConfigOption',
+  'authenticate',
+  'prompt',
+  'cancel',
+  'extMethod',
+  'extNotification',
+]);
+
+function createOutboundGuardedConnection(
+  connection: ClientSideConnection,
+  transportGuard: AcpChannelTransportGuard,
+): ClientSideConnection {
+  const wrappers = new Map<
+    PropertyKey,
+    (...args: unknown[]) => Promise<unknown>
+  >();
+  return new Proxy(connection, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (
+        typeof value !== 'function' ||
+        !OUTBOUND_GUARDED_CONNECTION_METHODS.has(property)
+      ) {
+        return value;
+      }
+      let wrapper = wrappers.get(property);
+      if (!wrapper) {
+        wrapper = async (...args: unknown[]) => {
+          const release = transportGuard.reserveOutboundOperation(args);
+          try {
+            return await Reflect.apply(value, target, args);
+          } finally {
+            release();
+          }
+        };
+        wrappers.set(property, wrapper);
+      }
+      return wrapper;
+    },
+  });
 }
 
 function getCanonicalModelId(response: unknown, fallback: string): string {
@@ -298,6 +699,7 @@ function describeLoadReplayValue(value: unknown): string {
 function extractLoadReplayResponse(state: BridgeSessionState): {
   state: BridgeSessionState;
   updates: SessionUpdate[];
+  anchorRecordId?: string;
   partial?: true;
   replayError?: string;
   hasMore?: boolean;
@@ -319,10 +721,10 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
         `(version=${LOAD_REPLAY_VERSION}, count=not-array)`,
     );
   }
-  if (rawUpdates.length > MAX_BULK_REPLAY_UPDATES) {
+  if (rawUpdates.length > LOAD_REPLAY_MAX_UPDATES) {
     throw new Error(
       `qwen.session.loadReplay updates exceed limit ` +
-        `(${rawUpdates.length} > ${MAX_BULK_REPLAY_UPDATES})`,
+        `(${rawUpdates.length} > ${LOAD_REPLAY_MAX_UPDATES})`,
     );
   }
   const partial = replay['partial'];
@@ -344,6 +746,13 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
     throw new Error(
       `Invalid qwen.session.loadReplay hasMore ` +
         `(version=${LOAD_REPLAY_VERSION}, hasMore=${describeLoadReplayValue(hasMore)})`,
+    );
+  }
+  const anchorRecordId = replay['anchorRecordId'];
+  if (anchorRecordId !== undefined && typeof anchorRecordId !== 'string') {
+    throw new Error(
+      `Invalid qwen.session.loadReplay anchorRecordId ` +
+        `(version=${LOAD_REPLAY_VERSION}, anchorRecordId=${describeLoadReplayValue(anchorRecordId)})`,
     );
   }
   const invalidUpdateIndex = rawUpdates.findIndex(
@@ -372,10 +781,29 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
   return {
     state: cleanState,
     updates: rawUpdates,
+    ...(typeof anchorRecordId === 'string' ? { anchorRecordId } : {}),
     ...(partial === true ? { partial: true as const } : {}),
     ...(typeof replayError === 'string' ? { replayError } : {}),
     ...(hasMore === true ? { hasMore: true } : {}),
   };
+}
+
+function takeRestoreAskUserQuestionHint(state: BridgeSessionState): {
+  hint: boolean;
+  state: BridgeSessionState;
+} {
+  const meta = isRecord(state._meta) ? state._meta : undefined;
+  const hint = meta?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true;
+  if (!hint || !meta) return { hint: false, state };
+  const nextMeta = { ...meta };
+  delete nextMeta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
+  const next: BridgeSessionState = { ...state };
+  if (Object.keys(nextMeta).length > 0) {
+    next._meta = nextMeta;
+  } else {
+    delete next._meta;
+  }
+  return { hint: true, state: next };
 }
 
 /**
@@ -472,6 +900,12 @@ interface ChannelInfo {
   restoreSettlementOverdue: boolean;
   /** Grace timers armed at restore abandonment, keyed by session id. */
   restoreSettlementTimers: Map<string, NodeJS.Timeout>;
+  /** Transport guard fired before the child process exited. */
+  transportFailed: boolean;
+  /** The transport guard, rather than an existing teardown, condemned it. */
+  transportFailureInitiatedTeardown: boolean;
+  /** Safe bounded code retained for telemetry; never the raw error message. */
+  transportFailureCode?: string;
   /**
    * Cached channel-close race for workspace-scoped status requests. Workspace
    * status can be polled frequently by dashboards, so keep one promise per
@@ -488,6 +922,13 @@ interface ChannelInfo {
   childCpuPercent?: number;
   childResourceAt?: number;
   /**
+   * The child's lifetime old-generation high-water marks, when it reports
+   * them. Absent — never zeroed — for a child that predates the fields or was
+   * spawned without the daemon marker, so a reader can tell "not measured"
+   * from a measured zero.
+   */
+  childHeap?: ChildHeapReport;
+  /**
    * MUST be set to `true` synchronously by any teardown path BEFORE
    * awaiting `channel.kill()`. `ensureChannel` treats a dying channel
    * as absent and spawns a fresh one — without this flag a concurrent
@@ -495,7 +936,7 @@ interface ChannelInfo {
    * 10s) would attach to a transport about to close, landing the
    * caller with a sessionId that 404s on every follow-up request.
    *
-   * **Set-sites (5)** — any new teardown path MUST call into one of
+   * **Set-sites (6)** — any new teardown path MUST call into one of
    * these or replicate the pattern:
    *
    *   1. `ensureChannel`: `initialize`-failure catch.
@@ -506,6 +947,7 @@ interface ChannelInfo {
    *   4. `killSession`: last session leaving (sessionIds.size === 0
    *      after the delete).
    *   5. `shutdown`: bulk-mark every entry in `aliveChannels`.
+   *   6. `ensureChannel`: a channel-level transport-failure signal.
    *
    * **BkUyD invariant (why we don't clear `channelInfo` here)**:
    * `killAllSync` must still find the channel during the SIGTERM
@@ -531,6 +973,7 @@ interface ChannelInfo {
     /** Highest snapshot sequence applied; guards against reordering only. */
     seq: number;
   };
+  channelLiveness?: ChannelLivenessMonitor;
   handshakeComplete: boolean;
 }
 
@@ -551,12 +994,16 @@ interface SessionEntry {
   worktree?: { slug: string; path: string; branch: string };
   /** Branch metadata, when created with branch param. */
   branch?: { name: string; baseBranch: string };
+  /** GitHub PRs bound via updateSessionMetadata, in binding order. */
+  prs?: SessionPrInfo[];
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
   events: EventBus;
   /** Per-session structured artifact registry. */
   artifacts: SessionArtifactStore;
+  /** Session-owned temporary attachment referenced by prompts and SSE events. */
+  attachments: SessionAttachmentStore;
   /** Sticky in-memory health state for the session's transcript recorder. */
   recordingDegraded: boolean;
   /** Set synchronously while agent-owned state and its writer lease close. */
@@ -574,6 +1021,11 @@ interface SessionEntry {
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
   pendingAgentNotificationCount: number;
+  /**
+   * Optional prompt terminal ledger sink (injected via BridgeOptions).
+   * Best-effort synchronous appends; absence keeps pre-existing behavior.
+   */
+  promptLedger?: PromptLedgerSink;
   /**
    * Last hold set the owning child reported for this Session, or `null` while
    * the channel has negotiated reporting but has not yet been heard from.
@@ -602,6 +1054,23 @@ interface SessionEntry {
    * tail of `sendPrompt`.
    */
   pendingPromptList: PendingPromptEntry[];
+  /** Recent formal terminals bridge-published before transcript visibility. */
+  terminalTurnStatuses: Map<string, BridgeTurnStatus>;
+  /**
+   * promptIds whose overlay terminal was enriched with the child's persisted
+   * `turn_result` by `getSessionTurnStatus`. Those entries fully answer a
+   * status poll, so they can be served without re-scanning the child
+   * transcript.
+   */
+  enrichedTerminalPromptIds: Set<string>;
+  /**
+   * Monotonic counter incremented when a successful rewind truncates this
+   * session's history. `getSessionTurnStatus` captures it before scanning
+   * the child transcript and discards the scanned outcome when the
+   * generation moved, so a result rolled back by a concurrent rewind is
+   * never cached or served.
+   */
+  rewindGeneration: number;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /**
@@ -622,11 +1091,10 @@ interface SessionEntry {
   /** Bounded ids promoted into the normal prompt FIFO. */
   promotedMidTurnMessageIds: string[];
   /**
-   * Per-session model-change FIFO. Prevents two concurrent
-   * `applyModelServiceId` calls (e.g. simultaneous attach-with-different-
-   * model requests) from racing into `unstable_setSessionModel` and
-   * leaving the agent in non-deterministic state. Always resolves —
-   * failures swallowed at the tail like `promptQueue`.
+   * Per-session model/configuration FIFO. Prevents model changes and
+   * model-dependent configuration changes from racing into the agent and
+   * leaving it in non-deterministic state. Always resolves — failures are
+   * swallowed at the tail like `promptQueue`.
    */
   modelChangeQueue: Promise<void>;
   /**
@@ -702,12 +1170,28 @@ interface SessionEntry {
    *  an originator clientId is known. Used by the session reaper to avoid
    *  killing sessions mid-prompt. */
   promptActive: boolean;
+  /**
+   * True while a child-driven Goal turn is running. Maintained by the
+   * `_qwencode/start_turn` / `_qwencode/end_turn` (source `goal`)
+   * notifications in `BridgeClient`; OR-ed into `hasActivePrompt`
+   * summaries because Goal turns never flip `promptActive`.
+   */
+  goalTurnActive?: boolean;
   /** Terminal error from the prior turn, cleared when the next turn starts. */
   turnError?: {
     message: string;
     code?: string;
     errorKind?: string;
   };
+  /**
+   * The journaled `turn_error` event behind `turnError`, when the failed
+   * turn published one. A bounded refresh replays it onto persisted
+   * history so the terminal survives a page refresh; any newer turn
+   * terminal — or newer turn content about to be folded by a queued
+   * terminal boundary — clears it so a stale error is never re-appended
+   * after newer content. Not part of the session summary.
+   */
+  turnErrorEvent?: BridgeEvent;
   retryAllowed: boolean;
   /** Prompt id whose `prompt_cancelled` event has already been broadcast. */
   cancelBroadcastPromptId?: string;
@@ -761,6 +1245,7 @@ interface SessionEntry {
   restoreReplayPartial?: true;
   restoreReplayError?: string;
   restoreHistoryHasMore?: true;
+  restoreHistoryAnchorRecordId?: string;
   /**
    * Most recent heartbeat across any client on this session (Date.now()
    * epoch ms). Set on every `recordHeartbeat` call regardless of whether
@@ -775,6 +1260,19 @@ interface SessionEntry {
    * own per-client eviction.
    */
   clientLastSeenAt: Map<string, number>;
+  /**
+   * Strictly monotonic activity watermark (Date.now() epoch ms), advanced
+   * once when a prompt that reached `running` publishes its first formal
+   * terminal. Projected as `BridgeSessionSummary.updatedAt` so clients can
+   * refresh session recency from the memory-only live-state route instead of
+   * rescanning the persisted catalog after each turn.
+   *
+   * Bridge-local and deliberately not a persistence acknowledgement: the
+   * recorder writes turn results through a serialized async queue, so a
+   * terminal only proves the daemon observed the running attempt settle.
+   * Undefined until the first running turn settles in this bridge.
+   */
+  lastTurnEndedAtMs?: number;
 }
 
 function isServeDebugLoggingEnabled(): boolean {
@@ -1004,9 +1502,10 @@ function pickUserInputEchoMeta(meta: unknown): Record<string, unknown> {
  */
 function echoPromptToSessionBus(
   entry: SessionEntry,
-  req: PromptRequest,
+  req: BridgePromptRequest,
   promptId: string,
   originatorClientId: string | undefined,
+  displayText: string | undefined,
 ): void {
   // `PromptRequest.prompt` is a non-optional `ContentBlock[]` per the
   // ACP type contract — read it directly so a future SDK bump that
@@ -1018,15 +1517,31 @@ function echoPromptToSessionBus(
   // contract — cheaper than a thrown `TypeError` mid-echo.
   const prompt = req.prompt;
   if (!Array.isArray(prompt) || prompt.length === 0) return;
+  let displayTextPublished = false;
   const serverTimestamp = Date.now();
-  const blockCount = Math.min(prompt.length, MAX_ECHO_CONTENT_BLOCKS);
+  const echoPrompt = prompt.slice(0, MAX_ECHO_CONTENT_BLOCKS);
+  if (
+    displayText &&
+    !echoPrompt.some((part) => isRecord(part) && part['type'] === 'text')
+  ) {
+    const textPart = prompt
+      .slice(MAX_ECHO_CONTENT_BLOCKS)
+      .find((part) => isRecord(part) && part['type'] === 'text');
+    if (textPart) echoPrompt[echoPrompt.length - 1] = textPart;
+  }
+  const blockCount = echoPrompt.length;
   for (let i = 0; i < blockCount; i += 1) {
-    const part = prompt[i];
+    const part = echoPrompt[i];
     if (!part || typeof part !== 'object' || Array.isArray(part)) continue;
-    // Every `ContentBlock` variant (text, image, audio, resource) is
-    // published to the bus verbatim. The SDK's `normalizeDaemonEvent`
-    // accepts any `content` shape; rich rendering of non-text blocks is
-    // the consumer's responsibility.
+    let displayPart = part;
+    if (displayText !== undefined && part.type === 'text') {
+      if (displayTextPublished) continue;
+      displayTextPublished = true;
+      if (!displayText) continue;
+      displayPart = { ...part, text: displayText };
+    }
+    // Non-text blocks are published verbatim. Channel text uses the display
+    // projection so hidden model context never reaches transcript consumers.
     try {
       entry.events.publish({
         type: 'session_update',
@@ -1035,7 +1550,7 @@ function echoPromptToSessionBus(
           sessionId: req.sessionId,
           update: {
             sessionUpdate: 'user_message_chunk',
-            content: part,
+            content: displayPart,
             // `_meta` lives inside the `update` object rather than at
             // envelope level. `_meta` is a standard JSON-RPC/MCP extension
             // field permitted alongside spec fields, the SDK normalizer
@@ -1135,18 +1650,46 @@ function broadcastTurnComplete(
   promptResult: { stopReason?: string; [k: string]: unknown },
   promptId: string | undefined,
   originatorClientId: string | undefined,
+  mutateTurnState: boolean,
 ): void {
   try {
-    entry.events.publish({
+    const meta =
+      promptResult['_meta'] && typeof promptResult['_meta'] === 'object'
+        ? (promptResult['_meta'] as Record<string, unknown>)
+        : undefined;
+    const rawBranchPoint =
+      meta?.['qwen.branchPoint'] && typeof meta['qwen.branchPoint'] === 'object'
+        ? (meta['qwen.branchPoint'] as Record<string, unknown>)
+        : undefined;
+    const branchPoint =
+      promptResult.stopReason === 'end_turn' &&
+      typeof rawBranchPoint?.['assistantRecordUuid'] === 'string' &&
+      CHAT_RECORD_UUID_RE.test(rawBranchPoint['assistantRecordUuid']) &&
+      typeof rawBranchPoint['checkpointUuid'] === 'string' &&
+      CHAT_RECORD_UUID_RE.test(rawBranchPoint['checkpointUuid'])
+        ? {
+            assistantRecordUuid: rawBranchPoint['assistantRecordUuid'],
+            checkpointUuid: rawBranchPoint['checkpointUuid'],
+          }
+        : undefined;
+    const published = entry.events.publish({
       type: 'turn_complete',
       ...(promptId ? { promptId } : {}),
       data: {
         sessionId,
         stopReason: promptResult.stopReason ?? 'end_turn',
         ...(promptId ? { promptId } : {}),
+        ...(branchPoint ? { branchPoint } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
+    // A newer turn terminal supersedes any pending refresh-append error —
+    // but only for a prompt that actually ran. A queued prompt's terminal
+    // (deadline expiry, queued removal) publishes the event alone without
+    // mutating turn state, so it must not erase the refresh-replay record
+    // of the active turn's failure either.
+    if (mutateTurnState && published !== undefined)
+      entry.turnErrorEvent = undefined;
   } catch {
     /* bus may be closed during session teardown */
   }
@@ -1188,6 +1731,17 @@ function extractJsonRpcErrorDetail(data: unknown): string | undefined {
   return undefined;
 }
 
+function extractJsonRpcErrorField(
+  err: unknown,
+  field: string,
+): string | undefined {
+  if (typeof err !== 'object' || err === null) return undefined;
+  const data = (err as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return undefined;
+  const value = (data as Record<string, unknown>)[field];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
 export function extractErrorCode(err: unknown): string | undefined {
   if (typeof err !== 'object' || err === null || !('code' in err))
     return undefined;
@@ -1195,6 +1749,111 @@ export function extractErrorCode(err: unknown): string | undefined {
   if (typeof raw === 'string') return raw;
   if (typeof raw === 'number') return String(raw);
   return undefined;
+}
+
+/**
+ * Event types that may be published after a turn terminal without adding
+ * turn content (prompt-queue bookkeeping, config changes, and other
+ * idle-reachable session bookkeeping). The bounded refresh-append guard
+ * skips these when deciding whether the in-memory `turn_error` is still
+ * the newest meaningful terminal; any other event type blocks the append.
+ * `pending_prompt_started` is deliberately absent: it is published before
+ * admission clears `turnErrorEvent`, so blocking the append in that window
+ * keeps a stale error from trailing a turn that is already starting.
+ *
+ * Audit the full `broadcastWorkspaceEvent` vocabulary (and any other
+ * idle-reachable session-bus publish) before adding a new event type to
+ * the bus: every idle non-turn event belongs here, or an otherwise-idle
+ * activity — a model switch, an extension refresh, an MCP server change,
+ * a user-shell command — defeats the append and the loop terminal
+ * disappears from the refreshed transcript. `session_update` events are
+ * turn content except the idle bookkeeping subtypes skipped via
+ * `isIdleBookkeepingSessionUpdate`: the user-shell output stream (its
+ * history goes to the model conversation, not the persisted transcript
+ * the refresh pages) and the latest-wins state snapshots
+ * (`available_commands_update`, `current_mode_update`) that settings and
+ * approval-mode refreshes fan out to idle sessions.
+ */
+const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
+  'pending_prompt_added',
+  'pending_prompt_completed',
+  'prompt_cancelled',
+  'model_switched',
+  'model_switch_failed',
+  'approval_mode_changed',
+  'language_changed',
+  'session_metadata_updated',
+  'session_cwd_changed',
+  'artifact_changed',
+  'settings_changed',
+  'extensions_changed',
+  'mcp_server_changed',
+  'mcp_server_added',
+  'mcp_server_removed',
+  'user_shell_command',
+  'user_shell_result',
+  // Workspace-level fan-out (workspace service, git watcher, memory /
+  // agent CRUD, device-flow registry) reaches every session bus via
+  // `publishWorkspaceEvent` while idle. The `auth_device_flow_*` members
+  // mirror the closed `DeviceFlowEventEmission` union — audit that union
+  // when it grows.
+  'tool_toggled',
+  'workspace_initialized',
+  'mcp_server_restarted',
+  'mcp_server_restart_refused',
+  'settings_reloaded',
+  'trust_change_requested',
+  'memory_changed',
+  'agent_changed',
+  'git_status_changed',
+  'git_branch_changed',
+  'github_setup_completed',
+  'auth_device_flow_started',
+  'auth_device_flow_throttled',
+  'auth_device_flow_authorized',
+  'auth_device_flow_failed',
+  'auth_device_flow_cancelled',
+]);
+
+/**
+ * `session_update` frames published while idle that carry no turn content
+ * for the persisted transcript, so they must not defeat the refresh-append
+ * of a pending terminal error the way a real turn's `session_update` does:
+ * the user-shell output stream (injected into the model conversation
+ * history instead of the transcript the refresh pages) and the
+ * latest-wins state snapshots (`available_commands_update` from a
+ * skills/settings refresh, the legacy dual-emit `current_mode_update`).
+ */
+function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
+  if (event.type !== 'session_update') return false;
+  const data = event.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  const update = (data as Record<string, unknown>)['update'];
+  if (!update || typeof update !== 'object' || Array.isArray(update))
+    return false;
+  const updateRecord = update as Record<string, unknown>;
+  const subtype = updateRecord['sessionUpdate'];
+  if (
+    subtype === 'available_commands_update' ||
+    subtype === 'current_mode_update'
+  ) {
+    return true;
+  }
+  const meta = updateRecord['_meta'];
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
+  return (meta as Record<string, unknown>)['source'] === 'user-shell';
+}
+
+/**
+ * Turn-content test behind the refresh-append guard: everything that is
+ * neither idle bookkeeping nor the synthetic journal-truncation marker
+ * (which `liveJournalSnapshot` unshifts without ever ingesting it as
+ * content) counts as newer turn content.
+ */
+function isRefreshAppendTurnContent(event: BridgeEvent): boolean {
+  if (event.type === 'history_truncated') return false;
+  if (REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES.has(event.type)) return false;
+  return !isIdleBookkeepingSessionUpdate(event);
 }
 
 export function classifyTurnErrorKind(
@@ -1214,8 +1873,13 @@ function broadcastTurnError(
   mutateTurnState: boolean,
 ): void {
   const message = extractErrorMessage(err);
-  const code = extractErrorCode(err);
-  const errorKind = classifyTurnErrorKind(message);
+  const structuredErrorKind = extractJsonRpcErrorField(err, 'errorKind');
+  const errorKind = structuredErrorKind ?? classifyTurnErrorKind(message);
+  const code =
+    structuredErrorKind !== undefined
+      ? (extractJsonRpcErrorField(err, 'code') ?? extractErrorCode(err))
+      : extractErrorCode(err);
+  const loopType = extractJsonRpcErrorField(err, 'loopType');
   if (errorKind) {
     writeServeDebugLine(
       `turn_error classified session=${JSON.stringify(sessionId)} ` +
@@ -1240,7 +1904,7 @@ function broadcastTurnError(
     };
   }
   try {
-    entry.events.publish({
+    const published = entry.events.publish({
       type: 'turn_error',
       ...(promptId ? { promptId } : {}),
       data: {
@@ -1248,10 +1912,21 @@ function broadcastTurnError(
         message,
         ...(code ? { code } : {}),
         ...(errorKind ? { errorKind } : {}),
+        ...(loopType ? { loopType } : {}),
         ...(promptId ? { promptId } : {}),
       },
       ...(originatorClientId ? { originatorClientId } : {}),
     });
+    if (mutateTurnState) {
+      // Undefined when the bus dropped the publish (closed mid-teardown);
+      // the refresh-append guard then simply has nothing to replay. A
+      // queued prompt's terminal (mutateTurnState=false) publishes the
+      // event alone and leaves the active turn's refresh-replay record
+      // untouched — the prompt never ran, so its terminal is not a newer
+      // turn boundary for the replay (but see `publishPromptTerminal`: a
+      // queued boundary that folds newer turn content supersedes it).
+      entry.turnErrorEvent = published;
+    }
   } catch {
     /* bus may be closed during session teardown */
   }
@@ -1267,6 +1942,180 @@ type PromptTerminal =
   | { kind: 'complete'; result: { stopReason?: string; [k: string]: unknown } }
   | { kind: 'cancelled' }
   | { kind: 'error'; err: unknown };
+
+const TERMINAL_TURN_STATUS_OVERLAY_LIMIT = 64;
+
+function truncateTurnText(text: string): {
+  text: string;
+  truncated: boolean;
+} {
+  const truncated = text.length > TURN_RESULT_TEXT_MAX_CHARS;
+  return {
+    text: truncated ? text.slice(0, TURN_RESULT_TEXT_MAX_CHARS) : text,
+    truncated,
+  };
+}
+
+function rememberTerminalTurnStatus(
+  entry: SessionEntry,
+  pending: PendingPromptEntry,
+  terminal: PromptTerminal,
+): void {
+  const promptText = truncateTurnText(pending.text);
+  const shared = {
+    sessionId: entry.sessionId,
+    promptId: pending.promptId,
+    promptText: promptText.text,
+    ...(promptText.truncated ? { promptTextTruncated: true } : {}),
+    queuedAt: pending.queuedAt,
+    ...(pending.startedAt !== undefined
+      ? { startedAt: pending.startedAt }
+      : {}),
+    endedAt: Date.now(),
+    ...(pending.originatorClientId !== undefined
+      ? { originatorClientId: pending.originatorClientId }
+      : {}),
+  };
+  const status: BridgeTurnStatus =
+    terminal.kind === 'complete'
+      ? {
+          ...shared,
+          state:
+            terminal.result.stopReason === 'cancelled'
+              ? 'cancelled'
+              : 'completed',
+          ...(terminal.result.stopReason !== undefined
+            ? { stopReason: terminal.result.stopReason }
+            : {}),
+        }
+      : terminal.kind === 'cancelled'
+        ? { ...shared, state: 'cancelled', stopReason: 'cancelled' }
+        : {
+            ...shared,
+            state: 'error',
+            error: normalizeTurnResultError(terminal.err),
+          };
+  entry.terminalTurnStatuses.set(pending.promptId, status);
+  // A fresh bridge-published terminal replaces any enriched answer for the
+  // same promptId.
+  entry.enrichedTerminalPromptIds.delete(pending.promptId);
+  while (entry.terminalTurnStatuses.size > TERMINAL_TURN_STATUS_OVERLAY_LIMIT) {
+    const oldest = entry.terminalTurnStatuses.keys().next().value;
+    if (oldest === undefined) break;
+    entry.terminalTurnStatuses.delete(oldest);
+    entry.enrichedTerminalPromptIds.delete(oldest);
+  }
+}
+
+/**
+ * Write a `getSessionTurnStatus` answer back into the overlay so later polls
+ * for the same settled promptId are served from memory instead of forcing a
+ * full child transcript scan each time. Shares the overlay's bounded
+ * eviction.
+ */
+function rememberEnrichedTerminalTurnStatus(
+  entry: SessionEntry,
+  promptId: string,
+  status: BridgeTurnStatus,
+): void {
+  entry.terminalTurnStatuses.set(promptId, status);
+  entry.enrichedTerminalPromptIds.add(promptId);
+  while (entry.terminalTurnStatuses.size > TERMINAL_TURN_STATUS_OVERLAY_LIMIT) {
+    const oldest = entry.terminalTurnStatuses.keys().next().value;
+    if (oldest === undefined) break;
+    entry.terminalTurnStatuses.delete(oldest);
+    entry.enrichedTerminalPromptIds.delete(oldest);
+  }
+}
+
+/**
+ * Advance a session's activity watermark past both wall time and its own
+ * previous value. The extra millisecond is a logical tie-breaker that keeps
+ * `updatedAt` strictly increasing when several terminals land inside one
+ * wall-clock millisecond or the clock moves backward; it is not a duration.
+ * A forward clock jump therefore stays until wall time catches up — correcting
+ * it downward would break the monotonicity clients order rows by.
+ *
+ * The first advance floors at `createdAt`: rows without a watermark are keyed
+ * by `createdAt`, and the live-only session cursor carries no emitted-identity
+ * list, so a first watermark behind `createdAt` (wall-clock rollback between
+ * creation and the first terminal) would move an already-emitted row's key
+ * backward mid-pass and let the strictly-older filter return it twice.
+ */
+function advanceTurnActivity(entry: SessionEntry): void {
+  const createdAtMs = Date.parse(entry.createdAt);
+  const previous =
+    entry.lastTurnEndedAtMs ??
+    (Number.isFinite(createdAtMs) ? createdAtMs : undefined);
+  entry.lastTurnEndedAtMs =
+    previous === undefined ? Date.now() : Math.max(Date.now(), previous + 1);
+}
+
+/**
+ * Best-effort ledger append: a failure must never block prompt execution
+ * or teardown, so it is logged and swallowed. Synchronous by design — the
+ * daemon-shutdown flush path requires the record to land before process
+ * exit.
+ */
+function appendPromptLedgerBestEffort(
+  entry: SessionEntry,
+  record: PromptLedgerRecord,
+): void {
+  const ledger = entry.promptLedger;
+  if (!ledger) return;
+  try {
+    ledger.appendSync(entry.sessionId, record);
+  } catch (error) {
+    writeStderrLine(
+      `qwen serve: prompt ledger append failed for session=${entry.sessionId} promptId=${record.promptId}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/**
+ * Project a PromptTerminal into the persisted ledger record. Mirrors the
+ * in-memory `rememberTerminalTurnStatus` mapping so the ledger and the SSE
+ * terminal agree, including the `stopReason: 'cancelled'` special case that
+ * the complete path reports as a cancellation.
+ */
+function promptLedgerTerminalRecord(
+  pendingEntry: PendingPromptEntry,
+  terminal: PromptTerminal,
+): PromptLedgerTerminalRecord {
+  const at = Date.now();
+  if (terminal.kind === 'complete') {
+    if (terminal.result.stopReason === 'cancelled') {
+      return {
+        v: 1,
+        promptId: pendingEntry.promptId,
+        terminal: 'cancelled',
+        at,
+      };
+    }
+    return {
+      v: 1,
+      promptId: pendingEntry.promptId,
+      terminal: 'completed',
+      ...(terminal.result.stopReason !== undefined
+        ? { stopReason: terminal.result.stopReason }
+        : {}),
+      at,
+    };
+  }
+  if (terminal.kind === 'cancelled') {
+    return { v: 1, promptId: pendingEntry.promptId, terminal: 'cancelled', at };
+  }
+  const normalized = normalizeTurnResultError(terminal.err);
+  return {
+    v: 1,
+    promptId: pendingEntry.promptId,
+    terminal: 'error',
+    ...(normalized.code !== undefined ? { code: normalized.code } : {}),
+    at,
+  };
+}
 
 /**
  * Publish the formal terminal event for an accepted prompt exactly once.
@@ -1293,7 +2142,39 @@ function publishPromptTerminal(
     return;
   }
   pendingEntry.terminalPublished = true;
+  appendPromptLedgerBestEffort(
+    entry,
+    promptLedgerTerminalRecord(pendingEntry, terminal),
+  );
+  rememberTerminalTurnStatus(entry, pendingEntry, terminal);
   const originatorClientId = pendingEntry.originatorClientId;
+  // Only a running prompt's terminal belongs to the active turn. The
+  // `state === 'running'` gate (not `activePromptId`) is deliberate: on
+  // the normal settle path `settleActivePromptState` runs in
+  // `promptPromise.finally` BEFORE the terminal is published, so
+  // `activePromptId` is already cleared when a genuine active terminal
+  // lands here. Queued terminals publish their event alone and must
+  // neither set nor clear session-scoped turn state.
+  const mutateTurnState = pendingEntry.state === 'running';
+  if (mutateTurnState) {
+    // Written before the terminal is published so a client that observed the
+    // terminal and then starts a live-state request cannot read a stale
+    // watermark. A queued-only terminal is not conversation activity and
+    // leaves the watermark alone.
+    advanceTurnActivity(entry);
+  }
+  if (!mutateTurnState && entry.turnErrorEvent) {
+    // A queued terminal is still a turn boundary on the bus: ingesting it
+    // folds and resets the live journal, erasing the guard's only evidence
+    // of newer turn content journaled since the pending error terminal.
+    // That content supersedes the stale error, so drop the refresh-replay
+    // record before the fold — otherwise the append would re-place the
+    // stale error AFTER the newer content.
+    const journal = entry.events.liveJournalSnapshot() ?? [];
+    if (journal.some(isRefreshAppendTurnContent)) {
+      entry.turnErrorEvent = undefined;
+    }
+  }
   if (terminal.kind === 'complete') {
     broadcastTurnComplete(
       entry,
@@ -1301,6 +2182,7 @@ function publishPromptTerminal(
       terminal.result,
       pendingEntry.promptId,
       originatorClientId,
+      mutateTurnState,
     );
   } else if (terminal.kind === 'cancelled') {
     broadcastTurnComplete(
@@ -1309,6 +2191,7 @@ function publishPromptTerminal(
       { stopReason: 'cancelled' },
       pendingEntry.promptId,
       originatorClientId,
+      mutateTurnState,
     );
   } else {
     broadcastTurnError(
@@ -1317,13 +2200,7 @@ function publishPromptTerminal(
       terminal.err,
       pendingEntry.promptId,
       originatorClientId,
-      // Only a running prompt's failure is the active turn's failure. The
-      // `state === 'running'` gate (not `activePromptId`) is deliberate:
-      // on the normal settle path `settleActivePromptState` runs in
-      // `promptPromise.finally` BEFORE the terminal is published, so
-      // `activePromptId` is already cleared when a genuine active failure
-      // lands here.
-      pendingEntry.state === 'running',
+      mutateTurnState,
     );
   }
 }
@@ -1376,23 +2253,192 @@ function hasControlCharacter(value: string): boolean {
  * placeholder for image-only prompts.
  */
 function extractPromptText(
-  prompt: ReadonlyArray<Record<string, unknown>>,
+  prompt: readonly BridgePromptContentBlock[],
 ): string {
   if (!Array.isArray(prompt)) return '';
   let hasImage = false;
   for (const block of prompt) {
-    if (block['type'] === 'image') {
+    const record = block as unknown as Record<string, unknown>;
+    if (record['type'] === 'image') {
       hasImage = true;
     }
     if (
-      block['type'] === 'text' &&
-      typeof block['text'] === 'string' &&
-      block['text'].length > 0
+      record['type'] === 'text' &&
+      typeof record['text'] === 'string' &&
+      record['text'].length > 0
     ) {
-      return block['text'];
+      return record['text'];
     }
   }
   return hasImage ? '[image]' : '';
+}
+
+function liveTurnStatus(
+  sessionId: string,
+  pending: PendingPromptEntry,
+): BridgeTurnStatus {
+  const promptText = truncateTurnText(pending.text);
+  return {
+    sessionId,
+    state: pending.state === 'running' ? 'running' : 'queued',
+    promptId: pending.promptId,
+    promptText: promptText.text,
+    ...(promptText.truncated ? { promptTextTruncated: true } : {}),
+    queuedAt: pending.queuedAt,
+    ...(pending.startedAt !== undefined
+      ? { startedAt: pending.startedAt }
+      : {}),
+    ...(pending.originatorClientId !== undefined
+      ? { originatorClientId: pending.originatorClientId }
+      : {}),
+  };
+}
+
+function findLiveTurnStatus(
+  entry: SessionEntry,
+  promptId?: string,
+): BridgeTurnStatus | undefined {
+  const live = entry.pendingPromptList.filter(
+    (pending) =>
+      !pending.terminalPublished &&
+      (!pending.removed || pending.state === 'running'),
+  );
+  if (promptId !== undefined) {
+    const match = live.find((pending) => pending.promptId === promptId);
+    return match ? liveTurnStatus(entry.sessionId, match) : undefined;
+  }
+  const running = live.find((pending) => pending.state === 'running');
+  if (running) return liveTurnStatus(entry.sessionId, running);
+  const queued = live.find((pending) => pending.state === 'queued');
+  return queued ? liveTurnStatus(entry.sessionId, queued) : undefined;
+}
+
+function settledTurnStatus(
+  sessionId: string,
+  record: TurnResultRecordPayload,
+): BridgeTurnStatus {
+  return {
+    sessionId,
+    state: record.state,
+    promptId: record.promptId,
+    ...(record.stopReason !== undefined
+      ? { stopReason: record.stopReason }
+      : {}),
+    ...(record.error !== undefined ? { error: record.error } : {}),
+    ...(record.startedAt !== undefined ? { startedAt: record.startedAt } : {}),
+    endedAt: record.endedAt,
+    ...(record.promptText !== undefined
+      ? { promptText: record.promptText }
+      : {}),
+    ...(record.promptTextTruncated !== undefined
+      ? { promptTextTruncated: record.promptTextTruncated }
+      : {}),
+    ...(record.resultText !== undefined
+      ? { resultText: record.resultText }
+      : {}),
+    ...(record.resultTruncated !== undefined
+      ? { resultTruncated: record.resultTruncated }
+      : {}),
+    ...(record.resultTruncated === true
+      ? { resultCode: record.resultCode ?? TURN_RESULT_CODE_TEXT_TRUNCATED }
+      : {}),
+    ...(record.originatorClientId !== undefined
+      ? { originatorClientId: record.originatorClientId }
+      : {}),
+  };
+}
+
+function enrichTerminalTurnStatus(
+  terminal: BridgeTurnStatus,
+  persisted: BridgeTurnStatus,
+): BridgeTurnStatus {
+  return {
+    ...terminal,
+    // The bridge's display projection is trusted; the child-recorded text
+    // only backfills when the terminal has none, so hidden channel context
+    // the child derived from raw blocks never replaces it.
+    ...(terminal.promptText === undefined && persisted.promptText !== undefined
+      ? { promptText: persisted.promptText }
+      : {}),
+    ...(terminal.promptTextTruncated === undefined &&
+    persisted.promptTextTruncated !== undefined
+      ? { promptTextTruncated: persisted.promptTextTruncated }
+      : {}),
+    ...(persisted.resultText !== undefined
+      ? { resultText: persisted.resultText }
+      : {}),
+    ...(persisted.resultTruncated !== undefined
+      ? { resultTruncated: persisted.resultTruncated }
+      : {}),
+    ...(persisted.resultCode !== undefined
+      ? { resultCode: persisted.resultCode }
+      : {}),
+    ...(terminal.originatorClientId === undefined &&
+    persisted.originatorClientId !== undefined
+      ? { originatorClientId: persisted.originatorClientId }
+      : {}),
+  };
+}
+
+/**
+ * Merge an overlay terminal with the child's persisted record for the same
+ * prompt. A bridge-synthesized error terminal (prompt deadline, teardown
+ * flush) is superseded on the poll surface once the child has settled and
+ * persisted a non-error outcome: the deadline releases the caller without
+ * killing the agent, so the persisted outcome is what actually happened.
+ * The trusted prompt display projection always stays the terminal's. Every
+ * other combination keeps the overlay outcome and enriches it with
+ * persisted text.
+ */
+function mergeTerminalWithPersisted(
+  terminal: BridgeTurnStatus,
+  persisted: BridgeTurnStatus,
+): BridgeTurnStatus {
+  if (terminal.state === 'error' && persisted.state !== 'error') {
+    return {
+      ...persisted,
+      ...(terminal.promptText !== undefined
+        ? { promptText: terminal.promptText }
+        : {}),
+      ...(terminal.promptTextTruncated !== undefined
+        ? { promptTextTruncated: terminal.promptTextTruncated }
+        : {}),
+    };
+  }
+  return enrichTerminalTurnStatus(terminal, persisted);
+}
+
+function latestTerminalTurnStatus(
+  entry: SessionEntry,
+): BridgeTurnStatus | undefined {
+  let latest: BridgeTurnStatus | undefined;
+  for (const status of entry.terminalTurnStatuses.values()) {
+    if ((status.endedAt ?? 0) >= (latest?.endedAt ?? 0)) latest = status;
+  }
+  return latest;
+}
+
+/**
+ * Extract attachment content blocks from a prompt for storage in the
+ * pending-prompt queue. References use the session attachment store; legacy
+ * audio blocks remain inline. This lets refreshed clients restore the payload.
+ */
+function extractMediaBlocks(
+  prompt: readonly BridgePromptContentBlock[],
+): BridgePromptContentBlock[] | undefined {
+  if (!Array.isArray(prompt)) return undefined;
+  const media: BridgePromptContentBlock[] = [];
+  for (const block of prompt) {
+    if (!block || typeof block !== 'object') continue;
+    if (
+      block.type === 'image' ||
+      block.type === 'audio' ||
+      (block.type === 'resource' && 'attachmentId' in block)
+    ) {
+      media.push(block);
+    }
+  }
+  return media.length > 0 ? media : undefined;
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
@@ -1436,9 +2482,30 @@ const MAX_SHELL_OUTPUT_FOR_HISTORY = 10_000;
 // a `BridgeOptions` knob the same way `maxPendingPromptsPerSession` (the
 // analogous bound `/prompt` enforces, default 5) is wired.
 const MAX_MID_TURN_QUEUE_DEPTH = 20;
+const MAX_QUEUED_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+
+function inlineAttachmentBlockBytes(
+  blocks: readonly BridgePromptContentBlock[],
+): number {
+  let total = 0;
+  for (const block of blocks) {
+    if (block.type === 'image' && 'data' in block) {
+      total += Buffer.byteLength(block.data);
+      continue;
+    }
+    if (block.type !== 'resource' || !('resource' in block)) continue;
+    const resource = block.resource;
+    if ('blob' in resource) total += Buffer.byteLength(resource.blob);
+    else if ('text' in resource) total += Buffer.byteLength(resource.text);
+  }
+  return total;
+}
+
 const DEFAULT_MAX_SESSIONS = 32;
 // Keep in sync with CLI serve/server.ts and SDK DaemonClient.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
+const CHAT_RECORD_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
  * typos before they OOM the daemon. At ~500 B per `BridgeEvent` an
@@ -1447,14 +2514,10 @@ const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
  * operator-controlled), just typo defense.
  */
 const MAX_EVENT_RING_SIZE = 1_000_000;
-// Bd1yh: per-permission-request wall clock. Without this, an agent
-// calling `requestPermission` while no SSE subscriber is connected
-// would hang the per-session FIFO promptQueue forever (the prompt
-// can't complete, every subsequent prompt is blocked behind it).
-// 5 minutes is generous for "human reads UI, decides, clicks
-// approve" while still bounded enough to recover from a wedged
-// state. Configurable via `BridgeOptions.permissionResponseTimeoutMs`.
-const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+// Human permissions wait indefinitely by default and still resolve through
+// voter cancellation, session cancellation, and shutdown. Operators can set
+// `BridgeOptions.permissionResponseTimeoutMs` when they need a wall-clock cap.
+const DEFAULT_PERMISSION_TIMEOUT_MS = 0;
 // Bd1z5: per-session cap on pending permissions in flight. A chatty
 // agent making rapid `requestPermission` calls would otherwise grow
 // `pendingPermissions` unboundedly — each entry is a UUID + closure
@@ -1557,7 +2620,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     }
   };
+  // In-memory session-catalog clock for the workspace live-state protocol.
+  // The generation changes only with this bridge instance; the revision
+  // advances on daemon-observed catalog membership and static-metadata
+  // changes. Getters return fresh value snapshots so a later mark never
+  // mutates a previously handed-out version.
+  const sessionCatalogGeneration = randomUUID();
+  let sessionCatalogRevision = 0;
+  const getSessionCatalogVersion = (): BridgeSessionCatalogVersion => ({
+    generation: sessionCatalogGeneration,
+    revision: sessionCatalogRevision,
+  });
+  const markSessionCatalogChanged = (): void => {
+    sessionCatalogRevision += 1;
+  };
   const emitSessionLifecycle = (event: BridgeSessionLifecycleEvent): void => {
+    // Membership marks advance through this single choke point — every
+    // bridge map insertion, deletion, and clear emits here after the
+    // mutation. Marking before the host callback keeps a throwing
+    // `sessionLifecycle` listener from suppressing the revision change.
+    markSessionCatalogChanged();
     try {
       opts.sessionLifecycle?.(event);
     } catch (err) {
@@ -1600,6 +2682,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   );
   const maxJournalEvents = normalizeMaxJournalEvents(opts.maxJournalEvents);
   const maxJournalBytes = normalizeMaxJournalBytes(opts.maxJournalBytes);
+  // Adaptive live-journal growth is opt-in via the pool: `runQwenServe`
+  // derives one from the daemon memory budget (and skips it when the
+  // operator pinned the journal flags). No pool → fixed-cap eviction,
+  // exactly the pre-growth behavior.
+  const journalGrowthPoolBytes = normalizeJournalGrowthPoolBytes(
+    opts.journalGrowthPoolBytes,
+  );
+  const journalGrowthPolicy =
+    journalGrowthPoolBytes !== undefined
+      ? createJournalGrowthPolicy({
+          baselineEvents: maxJournalEvents,
+          baselineBytes: maxJournalBytes,
+          poolBytes: journalGrowthPoolBytes,
+          hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+        })
+      : undefined;
+  // Daemon-wired shared-pool accounting (see BridgeOptions): the
+  // aggregator reports every sharing session's current cap, this
+  // bridge's included. Absent on standalone bridges.
+  const journalGrowthSessionLimits = opts.journalGrowthSessionLimits;
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   // Close over a per-handle env-override snapshot. Calls to
   // `channelFactory` at spawn time receive this as the 2nd arg, so
@@ -1850,6 +2952,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // can elapse inside a slow restore too.
     const owner = channelInfoForEntry(entry);
     if (owner?.pendingRestoreIds.has(entry.sessionId)) return false;
+    // A child that negotiated active-work but cannot report every category
+    // the daemon currently relies on must not authorize ordinary teardown.
+    // This differs from a legacy child that never negotiated at all: legacy
+    // cleanup keeps its historical behavior, while an incomplete negotiated
+    // answer is explicitly known not to cover the full retention predicate.
+    const capability = owner?.activeWork;
+    if (
+      capability &&
+      !owner.isQuarantined &&
+      !owner.restoreSettlementOverdue &&
+      ACTIVE_WORK_HOLD_CATEGORIES.some(
+        (category) => !capability.categories.includes(category),
+      )
+    ) {
+      return false;
+    }
     return !childReportsHeldWork(entry);
   }
 
@@ -1879,17 +2997,36 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     reason: string,
   ): Promise<void> {
-    if (!entryIsAutoCloseCandidate(entry)) return;
     // Note the asymmetry, preserved from the call sites this replaces: the
     // kill path keys off `attachCount`, the close path off `clientIds`. A
     // spawn owner that asked for a kill gets one once nothing is attached,
-    // even if some client id is still registered.
-    if (entry.spawnOwnerWantedKill && entry.attachCount === 0) {
+    // even if some client id is still registered. This is a deferred explicit
+    // kill, so incomplete child reporting must not turn it into ordinary
+    // cleanup or leave it pending forever.
+    //
+    // `activeWorkCloseInFlight` must stay excluded (the auto-close candidacy
+    // gate used to cover it): the reaper can be mid-probe on this same entry,
+    // holding the child's close gate for up to `ACTIVE_WORK_CLOSE_TIMEOUT_MS`.
+    // A kill fired in that window reaches `beginClose()` as 'Session close is
+    // already in progress', and `killSession` escalates any close error to a
+    // channel kill — taking down every sibling session with it. The in-flight
+    // probe resolves this entry one way or the other; if it retains, the
+    // tombstone completes on the next settle event.
+    if (
+      byId.get(entry.sessionId) === entry &&
+      !isClosingOrAuthorizingClose(entry) &&
+      entry.spawnOwnerWantedKill &&
+      entry.attachCount === 0
+    ) {
+      writeStderrLine(
+        `qwen serve: completing deferred kill of session ${JSON.stringify(entry.sessionId)} (${reason})`,
+      );
       await bridgeApi.killSession(entry.sessionId).catch(() => {
         /* best-effort; channel.exited will eventually reap anyway */
       });
       return;
     }
+    if (!entryIsAutoCloseCandidate(entry)) return;
     if (entry.clientIds.size > 0) return;
     await closeIfChildUnheld(entry, {
       trigger: reason,
@@ -1990,6 +3127,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
           sessionId: entry.sessionId,
           [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
+          drainTimeoutMs: sessionCloseDrainBudgetMs(
+            ACTIVE_WORK_CLOSE_TIMEOUT_MS,
+          ),
         }),
         ACTIVE_WORK_CLOSE_TIMEOUT_MS,
         SERVE_CONTROL_EXT_METHODS.sessionClose,
@@ -1998,10 +3138,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // The child is done with it; only local teardown remains.
         return true;
       }
-      // Refused: adopt the hold set it handed back so the cache reflects the
-      // reason we are backing off rather than the stale set that sent us here.
+      // Refused: adopt a bounded hold set so the cache reflects the reason we
+      // are backing off rather than the stale set that sent us here.
       const holds = response['holds'];
-      if (Array.isArray(holds)) {
+      if (
+        Array.isArray(holds) &&
+        holds.length <= ACTIVE_WORK_MAX_SESSION_HOLDS
+      ) {
         const adopted = new Map<string, ActiveWorkHoldCategory>();
         for (const hold of holds) {
           if (typeof hold !== 'object' || hold === null) continue;
@@ -2128,11 +3271,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   }
 
+  function channelUnavailableReject(
+    channel: AcpChannel,
+    context: string,
+  ): Promise<never> {
+    const unavailable = channel.transportFailed
+      ? Promise.race([channel.exited, channel.transportFailed])
+      : channel.exited;
+    const reject = () => {
+      throw new BridgeChannelClosedError(context);
+    };
+    return unavailable.then(reject, reject);
+  }
+
   async function killChannelWithLog(
     ci: ChannelInfo,
     context?: string,
   ): Promise<void> {
     ci.isDying = true;
+    ci.channelLiveness?.stop();
     await ci.channel.kill().catch((err) => {
       writeStderrLine(
         `qwen serve: channel kill failed${context ? ` (${context})` : ''}: ${String(err)}`,
@@ -2284,6 +3441,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (!channelShouldReapWhenIdle(ci) || !hasNoChannelWork(ci)) return;
     ci.emptyReapPending = false;
     ci.isDying = true;
+    ci.channelLiveness?.stop();
     await ci.channel.kill().catch(() => {
       /* best-effort — channel.exited handler still runs */
     });
@@ -2306,10 +3464,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   }
 
   function startSessionReaper(): void {
-    if (sessionReapIntervalMs <= 0 || sessionIdleTimeoutMs <= 0) {
-      writeStderrLine('qwen serve: session reaper disabled');
-      return;
-    }
+    if (sessionReapIntervalMs <= 0) return;
     writeStderrLine(
       `qwen serve: session reaper started ` +
         `(interval ${sessionReapIntervalMs}ms, ` +
@@ -2319,6 +3474,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (shuttingDown) return;
       const now = Date.now();
       for (const [id, entry] of byId) {
+        if (sessionIdleTimeoutMs <= 0) break;
         // Shared guards first (`pendingPromptCount` rather than `promptActive`,
         // so queued prompts and the FIFO hand-off gap between two prompts also
         // block the reap), then the reaper's own TTL policy on top.
@@ -2466,9 +3622,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     {
       connection: ClientSideConnection;
       promise: Promise<void>;
+      wait: Promise<void>;
+      rejectUnavailable: () => void;
       refreshBootstrap: boolean;
     }
   >();
+  const clearInFlightExtensionRefreshes = (
+    connection: ClientSideConnection,
+  ) => {
+    for (const [sessionId, refresh] of inFlightExtensionRefreshes) {
+      if (refresh.connection === connection) {
+        refresh.rejectUnavailable();
+        inFlightExtensionRefreshes.delete(sessionId);
+      }
+    }
+  };
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
     let isWaitingForUserQuestion = false;
@@ -2483,6 +3651,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       sessionId: entry.sessionId,
       workspaceCwd: entry.workspaceCwd,
       createdAt: entry.createdAt,
+      ...(entry.lastTurnEndedAtMs !== undefined
+        ? { updatedAt: new Date(entry.lastTurnEndedAtMs).toISOString() }
+        : {}),
       displayName: entry.displayName,
       ...(entry.parentSessionId
         ? { parentSessionId: entry.parentSessionId }
@@ -2490,7 +3661,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
       ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
       clientCount: entry.clientIds.size,
-      hasActivePrompt: entry.promptActive,
+      hasActivePrompt: entry.promptActive || entry.goalTurnActive === true,
       isWaitingForPermission,
       isWaitingForUserQuestion,
       pendingInteractionCount: entry.pendingInteractions.size,
@@ -2499,6 +3670,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingInteractions: [...entry.pendingInteractions.values()],
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
       ...(entry.branch ? { branch: entry.branch } : {}),
+      ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -2591,6 +3763,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     action: 'load' | 'resume';
     historyReplay: 'stream' | 'response';
     historyPageSize?: number;
+    liveReplayMode: 'full' | 'summary';
     hideInheritedHistory: boolean;
     publicPromise: Promise<BridgeRestoredSession>;
     settlementPromise: Promise<void>;
@@ -2616,6 +3789,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // the ACP request returns. Keep a temporary bus so those replay frames land in
   // the ring, then promote the same bus into the registered SessionEntry.
   const pendingRestoreEvents = new Map<string, EventBus>();
+
+  // Current journal byte caps of this bridge's live sessions, including
+  // in-flight restores whose buses are not registered in byId yet, each
+  // with this bridge's baseline cap. Shared with sibling bridges through
+  // the daemon-wide aggregator so ONE pool covers every workspace;
+  // without it the advisor accounts this bridge's sessions only.
+  const journalSessionLimits = (): JournalGrowthSessionLimit[] => {
+    const limits = [...byId.values()].map((entry) => ({
+      limitBytes: entry.events.journalLimitBytes() ?? maxJournalBytes,
+      baselineBytes: maxJournalBytes,
+    }));
+    for (const [restoreId, bus] of pendingRestoreEvents) {
+      if (!byId.has(restoreId)) {
+        limits.push({
+          limitBytes: bus.journalLimitBytes() ?? maxJournalBytes,
+          baselineBytes: maxJournalBytes,
+        });
+      }
+    }
+    return limits;
+  };
+  const unregisterJournalGrowthSessionLimits =
+    journalGrowthPolicy !== undefined &&
+    opts.registerJournalGrowthSessionLimits !== undefined
+      ? opts.registerJournalGrowthSessionLimits(journalSessionLimits)
+      : undefined;
 
   const createClientId = (): string => `client_${randomUUID()}`;
 
@@ -2859,8 +4058,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             if (!currentInfo) return;
             applyActiveWorkSnapshot(currentInfo, snapshot);
           },
+          // Child-side automatic title updates change persisted catalog
+          // metadata the bridge never sees; forward the catalog-clock mark.
+          markSessionCatalogChanged,
+          // A Goal turn drains the mid-turn queue but owns no prompt slot, so
+          // nothing else would settle what its last drain missed.
+          settleMidTurnQueueAfterGoalTurn,
         );
-        connection = new ClientSideConnection(() => client, channel.stream);
+        const rawConnection = new ClientSideConnection(
+          () =>
+            channel.transportGuard
+              ? createLogSafeAcpClient(client, channel.transportGuard)
+              : client,
+          channel.stream,
+        );
+        connection = channel.transportGuard
+          ? createOutboundGuardedConnection(
+              rawConnection,
+              channel.transportGuard,
+            )
+          : rawConnection;
       } catch (error) {
         try {
           channel.killSync();
@@ -2910,11 +4127,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         unsettledAbandonedRestores: new Set(),
         restoreSettlementOverdue: false,
         restoreSettlementTimers: new Map(),
+        transportFailed: false,
+        transportFailureInitiatedTeardown: false,
         isDying: false,
         isQuarantined: false,
         handshakeComplete: false,
       };
       infoRef.current = info;
+      const markTransportFailed = (error: unknown) => {
+        if (!info.isDying) {
+          info.transportFailureInitiatedTeardown = true;
+        }
+        info.transportFailed = true;
+        info.transportFailureCode = safeTransportFailureCode(error);
+        info.isDying = true;
+        info.channelLiveness?.stop();
+        clearInFlightExtensionRefreshes(info.connection);
+      };
+      void channel.transportFailed?.then(
+        markTransportFailed,
+        markTransportFailed,
+      );
       aliveChannels.add(info);
       // Belt-and-suspenders leak detection. The set is intentionally
       // multi-entry to cover the `killSession`-then-`spawnOrAttach`
@@ -2954,6 +4187,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // the SIGTERM grace window — even if a concurrent `spawnOrAttach`
       // has already reassigned `channelInfo` to a fresh channel.
       void channel.exited.then((exitInfo) => {
+        info.channelLiveness?.stop();
+        clearInFlightExtensionRefreshes(info.connection);
         if (channelInfo === info) cancelIdleTimer();
         if (info.workspaceMcpDiscoveryTimer) {
           clearTimeout(info.workspaceMcpDiscoveryTimer);
@@ -2988,7 +4223,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // but daemon stays up) still logs — there's no upstream
         // context line in that flow, and the message confirms the
         // cleanup actually ran.
-        const channelExitExpected = shuttingDown || info.isDying;
+        const channelExitExpected =
+          shuttingDown ||
+          (info.isDying && !info.transportFailureInitiatedTeardown);
         if (info.handshakeComplete) {
           telemetry.metrics?.channelLifecycle('exit', channelExitExpected);
         }
@@ -2996,12 +4233,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           telemetry.event('channel.exited', {
             'qwen-code.daemon.channel.exit_code': exitInfo?.exitCode ?? -1,
             'qwen-code.daemon.channel.session_count': sessions.length,
+            'qwen-code.daemon.channel.transport_failed': info.transportFailed,
+            'qwen-code.daemon.channel.transport_failure_initiated_teardown':
+              info.transportFailureInitiatedTeardown,
+            ...(info.transportFailureCode
+              ? {
+                  'qwen-code.daemon.channel.transport_error_code':
+                    info.transportFailureCode,
+                }
+              : {}),
             ...(exitInfo?.signalCode
               ? { 'qwen-code.daemon.channel.signal': exitInfo.signalCode }
               : {}),
           });
           writeStderrLine(
-            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, ${sessions.length} session(s) torn down)`,
+            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.transportFailed ? (info.transportFailureCode ?? 'failed') : 'ok'}, ${sessions.length} session(s) torn down)`,
           );
         }
         for (const sid of sessions) {
@@ -3035,6 +4281,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             touchActivity();
           }
           byId.delete(sid);
+          void sessEntry.attachments.close().catch((error) => {
+            writeStderrLine(
+              `qwen serve: failed to close attachments for closed channel session ${JSON.stringify(sid)}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
           telemetry.metrics?.sessionLifecycle('die');
           emitSessionLifecycle({
             type: 'removed',
@@ -3056,6 +4307,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // registered, so failure paths (init throw, timeout, late
       // shutdown) only need to mark dying + kill — the handler does
       // the alive-set cleanup when the OS reaps the child.
+      let channelLivenessNegotiated = false;
       try {
         await telemetry.withSpan(
           'channel.initialize',
@@ -3065,26 +4317,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           },
           async () => {
             const response = await withTimeout(
-              connection.initialize({
-                protocolVersion: PROTOCOL_VERSION,
-                _meta: {
-                  [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
-                    v: ACTIVE_WORK_HEARTBEAT_VERSION,
-                    intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+              Promise.race([
+                connection.initialize({
+                  protocolVersion: PROTOCOL_VERSION,
+                  _meta: {
+                    [ACTIVE_WORK_HEARTBEAT_META_KEY]: {
+                      v: ACTIVE_WORK_HEARTBEAT_VERSION,
+                      intervalMs: ACTIVE_WORK_HEARTBEAT_INTERVAL_MS,
+                      categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
+                    },
+                    [CHANNEL_STARTUP_PROFILE_META_KEY]: {
+                      v: CHANNEL_STARTUP_PROFILE_VERSION,
+                    },
+                    [CHANNEL_LIVENESS_META_KEY]: {
+                      v: CHANNEL_LIVENESS_VERSION,
+                    },
+                    [PRIVATE_PARENT_CAPABILITY_META_KEY]:
+                      privateParentCapability,
                   },
-                  [CHANNEL_STARTUP_PROFILE_META_KEY]: {
-                    v: CHANNEL_STARTUP_PROFILE_VERSION,
+                  clientCapabilities: {
+                    fs: {
+                      readTextFile: delegateReadTextFileToClient,
+                      writeTextFile: true,
+                    },
                   },
-                  [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
-                },
-                clientCapabilities: {
-                  fs: {
-                    readTextFile: delegateReadTextFileToClient,
-                    writeTextFile: true,
-                  },
-                },
-                clientInfo: { name: 'qwen-serve-bridge', version: '0' },
-              }),
+                  clientInfo: { name: 'qwen-serve-bridge', version: '0' },
+                }),
+                channelUnavailableReject(channel, 'during initialize'),
+              ]),
               initTimeoutMs,
               'initialize',
             );
@@ -3120,6 +4380,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 seq: 0,
               };
             }
+            const channelLivenessCapability = isRecord(response._meta)
+              ? response._meta[CHANNEL_LIVENESS_META_KEY]
+              : undefined;
+            channelLivenessNegotiated =
+              isRecord(channelLivenessCapability) &&
+              channelLivenessCapability['v'] === CHANNEL_LIVENESS_VERSION;
             try {
               const attributes = getChannelStartupProfileAttributes(
                 response,
@@ -3152,6 +4418,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
 
+      if (info.isDying) {
+        await channel.kill().catch(() => {});
+        throw new BridgeChannelClosedError('during initialize');
+      }
+
       // Late-shutdown re-check: if shutdown flipped during the
       // handshake, tear this channel down rather than leak past
       // `process.exit(0)`. Same cleanup pattern as the init-failure
@@ -3169,6 +4440,38 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // caller.
       channelInfo = info;
       info.handshakeComplete = true;
+      if (channelLivenessNegotiated) {
+        const failChannelLiveness = (error: ChannelLivenessFailure) => {
+          if (info.isDying || !aliveChannels.has(info)) return;
+          markTransportFailed(error);
+          telemetry.event('channel.liveness_failed', {
+            'qwen-code.daemon.acp_channel.id': info.id,
+            'qwen-code.daemon.channel.session_count': info.sessionIds.size,
+            'qwen-code.daemon.channel.transport_error_code': error.code,
+          });
+          writeStderrLine(
+            `qwen serve: channel liveness failed (${error.code}); killing channel`,
+          );
+          if (info.channel.transportGuard) {
+            info.channel.transportGuard.fail(error);
+          } else {
+            void killChannelWithLog(info, 'channel liveness failure');
+          }
+        };
+        info.channelLiveness = startChannelLivenessMonitor({
+          probe: (nonce) =>
+            info.connection.extMethod(SERVE_STATUS_EXT_METHODS.channelPing, {
+              v: CHANNEL_LIVENESS_VERSION,
+              nonce,
+            }),
+          onFailure: failChannelLiveness,
+          isActive: () =>
+            channelInfo === info &&
+            aliveChannels.has(info) &&
+            !info.isDying &&
+            !shuttingDown,
+        });
+      }
       telemetry.metrics?.channelLifecycle('spawn');
       return info;
     })();
@@ -3224,6 +4527,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       },
       ensureChannel,
     );
+    if (ci.isDying) {
+      throw new BridgeChannelClosedError('before newSession');
+    }
     ci.sessionSpawnsInFlight++;
     if (requestedSessionId !== undefined) {
       // A caller-supplied id can legitimately reuse an id after an abandoned
@@ -3270,17 +4576,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 : {}),
             });
             const response = await withTimeout(
-              ci.connection.newSession(
-                worktree
-                  ? {
-                      ...request,
-                      _meta: {
-                        ...(isRecord(request._meta) ? request._meta : {}),
-                        [WORKTREE_MCP_DEFER_META_KEY]: true,
-                      },
-                    }
-                  : request,
-              ),
+              Promise.race([
+                ci.connection.newSession(
+                  worktree
+                    ? {
+                        ...request,
+                        _meta: {
+                          ...(isRecord(request._meta) ? request._meta : {}),
+                          [WORKTREE_MCP_DEFER_META_KEY]: true,
+                        },
+                      }
+                    : request,
+                ),
+                channelUnavailableReject(ci.channel, 'during newSession'),
+              ]),
               initTimeoutMs,
               'newSession',
             );
@@ -3304,6 +4613,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // stays set until OS reap so `killAllSync` mid-SIGTERM still
           // finds a target (BkUyD invariant).
           ci.isDying = true;
+          ci.channelLiveness?.stop();
           await ci.channel.kill().catch(() => {
             /* best-effort — channel.exited handler still runs */
           });
@@ -3311,6 +4621,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ci.emptyReapPending = true;
         }
         throw err;
+      }
+
+      // Let an already-settled transport failure publish its synchronous
+      // lifecycle marker before installing a session from a response that was
+      // admitted immediately ahead of the fatal frame.
+      await Promise.resolve();
+      if (ci.isDying) {
+        throw new BridgeChannelClosedError('after newSession');
       }
 
       // Late-shutdown re-check (BUy4U): shutdown() may have flipped
@@ -3791,12 +5109,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     entry: SessionEntry,
     mode: ApprovalMode,
     clientId: string,
-  ): Promise<void> {
+  ): Promise<ApprovalMode> {
     try {
-      await applyApprovalMode(entry, mode, false, clientId);
+      const result = await applyApprovalMode(entry, mode, false, clientId);
+      return result.previous;
     } catch (err) {
       await rollbackAttachRegistration(entry, clientId);
       throw err;
+    }
+  }
+
+  async function rollbackApprovalModeForRejectedAttach(
+    entry: SessionEntry,
+    previous: ApprovalMode,
+    clientId: string,
+  ): Promise<void> {
+    if (byId.get(entry.sessionId) !== entry) return;
+    try {
+      await applyApprovalMode(entry, previous, false, clientId);
+    } catch (err) {
+      writeStderrLine(
+        `attach: failed to restore approval mode for session ${entry.sessionId}: ${extractErrorMessage(err)}`,
+      );
     }
   }
 
@@ -3838,7 +5172,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   /**
    * Lazy-init the per-session `transportClosedReject` promise that
    * `sendPrompt` / `setSessionModel` / `applyModelServiceId` race their
-   * ACP calls against. ONE listener is attached to `channel.exited`
+   * ACP calls against. ONE unavailable race is attached to the channel
    * over the session's lifetime (the first caller "wins" and creates
    * the promise; subsequent callers reuse it) — a per-call attach
    * would grow Node's listener list linearly with prompt count on
@@ -3848,11 +5182,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    */
   const getTransportClosedReject = (entry: SessionEntry): Promise<never> => {
     if (!entry.transportClosedReject) {
-      entry.transportClosedReject = entry.channel.exited.then(() => {
-        throw new BridgeChannelClosedError(
-          `mid-request (session ${entry.sessionId})`,
-        );
-      });
+      entry.transportClosedReject = channelUnavailableReject(
+        entry.channel,
+        `mid-request (session ${entry.sessionId})`,
+      );
     }
     return entry.transportClosedReject;
   };
@@ -3893,6 +5226,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return undefined;
   };
 
+  const assertAttachableSessionEntry = (
+    sessionId: string,
+    entry: SessionEntry,
+  ): void => {
+    if (byId.get(sessionId) !== entry) {
+      throw new SessionNotFoundError(
+        sessionId,
+        'The session channel is unavailable; retry after teardown completes',
+      );
+    }
+    if (isClosingOrAuthorizingClose(entry)) {
+      throw new SessionNotFoundError(
+        sessionId,
+        'The session is closing; retry after close completes',
+        'session_closing',
+      );
+    }
+    const owner = channelInfoForEntry(entry);
+    if (!owner || owner.isDying) {
+      throw new SessionNotFoundError(
+        sessionId,
+        'The session channel is unavailable; retry after teardown completes',
+      );
+    }
+  };
+
   const assertLivePromptEntry = (
     sessionId: string,
     entry: SessionEntry,
@@ -3905,9 +5264,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
     if (!info.statusClosedReject) {
-      info.statusClosedReject = info.channel.exited.then(() => {
-        throw new BridgeChannelClosedError('mid-request (workspace status)');
-      });
+      info.statusClosedReject = channelUnavailableReject(
+        info.channel,
+        'mid-request (workspace status)',
+      );
     }
     return info.statusClosedReject;
   };
@@ -4104,6 +5464,76 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return response as unknown as T;
   };
 
+  /**
+   * Caps on the one variable-length field a child controls in its heap
+   * report. V8 exposes 11 spaces on Node 22 and 13 on Node 24, all named well
+   * under 64 characters, so a legitimate report never approaches either.
+   */
+  const MAX_CHILD_HEAP_UNCLASSIFIED_NAMES = 64;
+  const MAX_CHILD_HEAP_SPACE_NAME_LENGTH = 64;
+
+  /**
+   * Validate a child's self-reported heap block at the trust boundary.
+   *
+   * Returns `undefined` for anything malformed rather than a partially filled
+   * report: these figures exist to decide whether a child fits a heap ceiling,
+   * and a report with some fields defaulted would understate a peak while
+   * looking complete. Rejecting the whole block leaves the channel's last good
+   * report in place, which is the honest fallback.
+   *
+   * `Number.isFinite` and not just `typeof`, because `typeof NaN === 'number'`
+   * — the same reason the rss and cpu checks above are written this way.
+   */
+  const parseChildHeapReport = (
+    value: unknown,
+  ): ChildHeapReport | undefined => {
+    if (typeof value !== 'object' || value === null) return undefined;
+    const raw = value as Record<string, unknown>;
+    const counts: Array<keyof ChildHeapReport> = [
+      'peakOldGenerationBytes',
+      'peakLiveSetBytes',
+      'peakTotalHeapBytes',
+      'majorGcCount',
+      'majorGcMs',
+    ];
+    const parsed: Record<string, number> = {};
+    for (const key of counts) {
+      const n = raw[key];
+      // Negative bytes or pause times are not a degraded reading, they are a
+      // broken sender; treat them like any other malformed field.
+      if (typeof n !== 'number' || !Number.isFinite(n) || n < 0) {
+        return undefined;
+      }
+      parsed[key] = n;
+    }
+    // Bounded because the daemon caches this array on the channel for the
+    // child's lifetime, and the child chooses its contents. It is the one
+    // variable-length field in the report, and a workstream about bounding
+    // daemon memory should not add an unbounded retained container. Real
+    // values come from V8's heap-space list: around a dozen entries with
+    // short names, so these caps are far above anything legitimate.
+    const names = raw['unclassifiedSpaceNames'];
+    if (
+      !Array.isArray(names) ||
+      names.length > MAX_CHILD_HEAP_UNCLASSIFIED_NAMES ||
+      names.some(
+        (name) =>
+          typeof name !== 'string' ||
+          name.length > MAX_CHILD_HEAP_SPACE_NAME_LENGTH,
+      )
+    ) {
+      return undefined;
+    }
+    return {
+      peakOldGenerationBytes: parsed['peakOldGenerationBytes'],
+      peakLiveSetBytes: parsed['peakLiveSetBytes'],
+      peakTotalHeapBytes: parsed['peakTotalHeapBytes'],
+      majorGcCount: parsed['majorGcCount'],
+      majorGcMs: parsed['majorGcMs'],
+      unclassifiedSpaceNames: names as string[],
+    };
+  };
+
   // Daemon Status child-resource: poll the live child's `workspaceResource`
   // extMethod and cache rss/cpu on the channel. The daemon's metrics sampler
   // fires this fire-and-forget, then reads the cache synchronously — keeping the
@@ -4123,6 +5553,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const res = await requestWorkspaceStatus<{
         rssBytes?: unknown;
         cpuPercent?: unknown;
+        heap?: unknown;
       }>(SERVE_STATUS_EXT_METHODS.workspaceResource, () => ({}));
       // A channel swap during the await would otherwise stamp a dead channel;
       // only write if this is still the live one.
@@ -4141,6 +5572,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // only on the child's send side.
         info.childCpuPercent = Math.min(100, Math.max(0, res.cpuPercent));
       }
+      // Only overwrite on a well-formed report. A child that stops sending the
+      // block keeps its last good marks rather than having them cleared: these
+      // are lifetime high-water values, so dropping them would lose history the
+      // child cannot resend.
+      const heap = parseChildHeapReport(res.heap);
+      if (heap) info.childHeap = heap;
       info.childResourceAt = Date.now();
     } catch (err) {
       // Child unreachable / mid-swap — keep the last good cache (or nothing
@@ -4158,7 +5595,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
   const getChildResourceSnapshot = ():
-    | { rssBytes: number; cpuPercent: number; ageMs: number }
+    | {
+        rssBytes: number;
+        cpuPercent: number;
+        ageMs: number;
+        heap?: ChildHeapReport;
+      }
     | undefined => {
     const info = liveChannelInfo();
     if (!info || info.childResourceAt === undefined) return undefined;
@@ -4172,6 +5614,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return {
       rssBytes: info.childRssBytes ?? 0,
       cpuPercent: info.childCpuPercent ?? 0,
+      // Deliberately not defaulted. Unlike rss/cpu, where 0 is a plausible
+      // reading, a zeroed heap report would assert the child needed no old
+      // generation — the one conclusion that must never be manufactured.
+      heap: info.childHeap,
       // Bounded by the guard above, so a caller summing several children's
       // readings can say how far apart they were taken. Without it a sum of
       // readings up to `STALE_CHILD_RESOURCE_MS` apart looks instantaneous.
@@ -4227,7 +5673,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         SERVE_CONTROL_EXT_METHODS.sessionClose,
         {
           sessionId: entry.sessionId,
-          drainTimeoutMs: Math.max(1, Math.floor(initTimeoutMs * 0.8)),
+          drainTimeoutMs: sessionCloseDrainBudgetMs(
+            opts?.timeoutMs ?? initTimeoutMs,
+          ),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
         },
       );
@@ -4341,6 +5789,51 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             `replay window evicted ${JSON.stringify(eviction)}`,
           );
         },
+        // Adaptive growth: the engine asks before evicting past its caps.
+        // The policy accounts growth across this bridge's live sessions
+        // from every session's CURRENT journal cap (stateless — no ledger
+        // to reconcile when a session is reaped), so granted headroom dies
+        // with its session.
+        ...(journalGrowthPolicy
+          ? {
+              onJournalGrowth: (current: {
+                maxEvents: number;
+                maxBytes: number;
+              }) => {
+                // The daemon-wired aggregator already covers every
+                // sharing bridge's live sessions (this bridge's included);
+                // standalone bridges fall back to their own enumeration.
+                const allSessionLimits = journalGrowthSessionLimits
+                  ? [...journalGrowthSessionLimits()]
+                  : journalSessionLimits();
+                // A requester whose bus lives outside both maps (defensive
+                // — today it is either registered or mid-restore) must
+                // still be charged at its current cap.
+                if (
+                  !byId.has(sessionId) &&
+                  !pendingRestoreEvents.has(sessionId)
+                ) {
+                  allSessionLimits.push({
+                    limitBytes: current.maxBytes,
+                    baselineBytes: maxJournalBytes,
+                  });
+                }
+                const grant = journalGrowthPolicy.grant({
+                  currentMaxEvents: current.maxEvents,
+                  currentMaxBytes: current.maxBytes,
+                  allSessionLimits,
+                });
+                if (grant) {
+                  teeServeDebugLine(
+                    `live journal growth session=${JSON.stringify(sessionId)}: ` +
+                      `${current.maxBytes} -> ${grant.maxBytes} bytes, ` +
+                      `${current.maxEvents} -> ${grant.maxEvents} entries`,
+                  );
+                }
+                return grant;
+              },
+            }
+          : {}),
       }),
       {
         // Fired once, on the FIRST ingest/seed failure (the bus keeps the
@@ -4539,13 +6032,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         workspaceCwd,
         persistence: createSessionArtifactPersistence(ci.connection, sessionId),
       }),
+      attachments: new SessionAttachmentStore(
+        opts.sessionAttachmentsRoot,
+        sessionId,
+      ),
       recordingDegraded: false,
       closing: false,
       cwdChangeQueue: Promise.resolve(),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingAgentNotificationCount: 0,
+      ...(opts.promptLedger ? { promptLedger: opts.promptLedger } : {}),
       pendingPromptList: [],
+      terminalTurnStatuses: new Map(),
+      enrichedTerminalPromptIds: new Set(),
+      rewindGeneration: 0,
       midTurnMessageQueue: [],
       settledMidTurnMessageIds: [],
       promotedMidTurnMessageIds: [],
@@ -4773,9 +6274,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       | 'restoreReplayPartial'
       | 'restoreReplayError'
       | 'restoreHistoryHasMore'
+      | 'restoreHistoryAnchorRecordId'
       | 'activePromptId'
     >,
     action: 'load' | 'resume',
+    liveReplayMode: 'full' | 'summary' = 'full',
   ): Pick<
     BridgeRestoredSession,
     | 'compactedReplay'
@@ -4786,6 +6289,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     | 'partial'
     | 'replayError'
     | 'historyHasMore'
+    | 'historyAnchorRecordId'
   > => {
     const replayStatus =
       action === 'load' && entry.restoreReplayPartial === true
@@ -4800,12 +6304,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // token must travel with it so a daemon restart between this response
     // and the first subscribe is detected (stale cursor + dead epoch).
     const eventEpoch = entry.events.epoch;
-    const snapshot = entry.events.snapshotReplay();
+    const snapshot = entry.events.snapshotReplay(liveReplayMode);
     if (!snapshot) {
       return {
         lastEventId: entry.events.lastEventId,
         eventEpoch,
         ...replayStatus,
+        ...(action === 'load' &&
+        entry.restoreHistoryAnchorRecordId !== undefined
+          ? { historyAnchorRecordId: entry.restoreHistoryAnchorRecordId }
+          : {}),
       };
     }
     if (action === 'load') {
@@ -4830,6 +6338,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(snapshot.degraded ? { replayDegraded: true } : {}),
         ...(entry.restoreHistoryHasMore === true
           ? { historyHasMore: true }
+          : {}),
+        ...(entry.restoreHistoryAnchorRecordId !== undefined
+          ? { historyAnchorRecordId: entry.restoreHistoryAnchorRecordId }
           : {}),
       };
     }
@@ -4918,10 +6429,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   async function refreshedReplayFieldsFor(
     entry: SessionEntry,
     historyPageSize: number,
+    liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
+        const eventEpoch = entry.events.epoch;
         const seenCursors = new Set<string>();
         let emptyPageCount = 0;
         let cursor: string | undefined;
@@ -4959,12 +6472,35 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&
+          entry.events.epoch === eventEpoch &&
           entry.events.lastEventId === lastEventId
         ) {
+          let compactedReplay = page.events;
+          const turnErrorEvent = entry.turnErrorEvent;
+          if (turnErrorEvent) {
+            // Append only while no newer turn content was journaled after
+            // the in-memory terminal: automatic turns (cron/background
+            // notification) run without clearing entry.turnError, and
+            // re-appending the stale error after their newer content would
+            // misplace it in the refreshed transcript. Bookkeeping events
+            // carry no turn content and must not defeat the append; a
+            // newer turn terminal clears turnErrorEvent at broadcast. The
+            // journal holds exactly the events published since the last
+            // turn boundary (the terminal itself folds into the replay
+            // window), so no history scan is needed.
+            const journal = entry.events.liveJournalSnapshot() ?? [];
+            const hasNewerTurnContent = journal.some(
+              isRefreshAppendTurnContent,
+            );
+            if (!hasNewerTurnContent) {
+              compactedReplay = [...page.events, turnErrorEvent];
+            }
+          }
           return {
-            compactedReplay: page.events,
+            compactedReplay,
             liveJournal: [],
             lastEventId,
+            eventEpoch,
             ...(page.partial === true ? { partial: true as const } : {}),
             ...(page.replayError !== undefined
               ? { replayError: page.replayError }
@@ -4979,7 +6515,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         break;
       }
     }
-    return replayFieldsFor(entry, 'load');
+    return replayFieldsFor(entry, 'load', liveReplayMode);
   }
 
   /**
@@ -5072,10 +6608,72 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return undefined;
   }
 
+  const sendTrackedPrompt: {
+    fn: AcpSessionBridge['sendPrompt'] | undefined;
+  } = { fn: undefined };
+
+  // Fire-and-forget restore prompt for a session whose transcript ends on an
+  // unanswered ask_user_question. Returns true only when the prompt was
+  // admitted synchronously. Best-effort: admission failures (sendPrompt
+  // throws synchronously by contract) and async failures are logged, never
+  // propagated — a successful load/resume must not error over a side effect.
+  const maybeFireRestoreAskUserQuestionPrompt = (
+    entry: SessionEntry,
+    restoreAskUserQuestionHint: boolean,
+    requestedClientId: string | undefined,
+    registeredClientId: string,
+    options: { suppressRestorePrompt?: boolean },
+  ): boolean => {
+    if (
+      opts.restoreAskUserQuestion !== true ||
+      restoreAskUserQuestionHint !== true ||
+      // Nobody can answer the re-hung question without an attached client;
+      // internal restores (boot rehydrate, keepalive, sub-session resume)
+      // pass no clientId and must not fabricate an unbounded permission wait.
+      requestedClientId === undefined ||
+      options.suppressRestorePrompt === true ||
+      // Admission-time busy check: pendingPromptCount flips synchronously
+      // when a prompt is accepted, before the queue callback sets
+      // promptActive; Goal turns never set promptActive at all.
+      entry.promptActive ||
+      entry.pendingPromptCount > 0 ||
+      entry.goalTurnActive === true
+    ) {
+      return false;
+    }
+    let restorePrompt: Promise<PromptResponse> | undefined;
+    try {
+      restorePrompt = sendTrackedPrompt.fn?.(
+        entry.sessionId,
+        { sessionId: entry.sessionId, prompt: [] } as Parameters<
+          AcpSessionBridge['sendPrompt']
+        >[1],
+        undefined,
+        { clientId: registeredClientId, restoreAskUserQuestion: true },
+      );
+    } catch (err) {
+      teeServeDebugLine(
+        `restoreAskUserQuestion: restore prompt admission failed for ${entry.sessionId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+    restorePrompt?.catch((err) => {
+      teeServeDebugLine(
+        `restoreAskUserQuestion: restore prompt failed for ${entry.sessionId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+    return true;
+  };
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
-    options: { skipFreshSessionAdmission?: boolean } = {},
+    options: {
+      skipFreshSessionAdmission?: boolean;
+      suppressRestorePrompt?: boolean;
+    } = {},
   ): Promise<BridgeRestoredSession> {
     if (shuttingDown) {
       throw new Error('AcpSessionBridge is shutting down');
@@ -5095,6 +6693,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       action === 'load' && historyReplay === 'response'
         ? req.historyPageSize
         : undefined;
+    const requestedLiveReplayMode = req.liveReplayMode;
+    if (
+      requestedLiveReplayMode !== undefined &&
+      requestedLiveReplayMode !== 'full' &&
+      requestedLiveReplayMode !== 'summary'
+    ) {
+      throw new Error(
+        `Invalid liveReplayMode: ${JSON.stringify(requestedLiveReplayMode)}`,
+      );
+    }
+    const liveReplayMode =
+      action === 'load' ? (requestedLiveReplayMode ?? 'full') : 'full';
     if (
       historyPageSize !== undefined &&
       (!Number.isSafeInteger(historyPageSize) ||
@@ -5110,21 +6720,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     const existing = byId.get(req.sessionId);
     if (existing) {
-      // `isClosingOrAuthorizingClose`, not bare `closing`: this is an admission
-      // path like attach/prompt/rewind, so a conditional close being confirmed
-      // must refuse it too. Otherwise a client attaches inside the round trip
-      // and the teardown it raced destroys the Session under it.
-      if (isClosingOrAuthorizingClose(existing)) {
-        throw new SessionNotFoundError(
-          req.sessionId,
-          'The session is closing; retry after close completes',
-          'session_closing',
-        );
-      }
+      assertAttachableSessionEntry(req.sessionId, existing);
       const replayFields =
         historyPageSize !== undefined
-          ? await refreshedReplayFieldsFor(existing, historyPageSize)
-          : replayFieldsFor(existing, action);
+          ? await refreshedReplayFieldsFor(
+              existing,
+              historyPageSize,
+              liveReplayMode,
+            )
+          : replayFieldsFor(existing, action, liveReplayMode);
       // Backfill a pagination anchor when the snapshot's truncation
       // marker carries no recordId (live session, in-flight turn capped
       // the journal before any turn boundary). Best-effort; omitted on
@@ -5133,21 +6737,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load'
           ? await resolveHistoryAnchorRecordId(existing, replayFields)
           : undefined;
-      if (byId.get(req.sessionId) !== existing) {
-        throw new SessionNotFoundError(req.sessionId);
-      }
-      if (isClosingOrAuthorizingClose(existing)) {
-        throw new SessionNotFoundError(
-          req.sessionId,
-          'The session is closing; retry after close completes',
-          'session_closing',
-        );
-      }
+      assertAttachableSessionEntry(req.sessionId, existing);
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
       recordAttachRef(existing, clientId);
       if (req.approvalMode) {
-        await applyApprovalModeForAttach(existing, req.approvalMode, clientId);
+        const previousApprovalMode = await applyApprovalModeForAttach(
+          existing,
+          req.approvalMode,
+          clientId,
+        );
+        try {
+          assertAttachableSessionEntry(req.sessionId, existing);
+        } catch (error) {
+          await rollbackApprovalModeForRejectedAttach(
+            existing,
+            previousApprovalMode,
+            clientId,
+          );
+          await rollbackAttachRegistration(existing, clientId);
+          throw error;
+        }
       }
       return {
         sessionId: existing.sessionId,
@@ -5165,7 +6775,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
-        hasActivePrompt: existing.promptActive,
+        hasActivePrompt:
+          existing.promptActive || existing.goalTurnActive === true,
         ...replayFields,
         ...(historyAnchorRecordId !== undefined
           ? { historyAnchorRecordId }
@@ -5182,12 +6793,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Cold restores only coalesce when their effective request shapes
       // match. Sharing across actions, replay transports, response pages, or
       // inherited-history policies can return replay selected for another
-      // caller. Same-shape coalescing is unaffected.
+      // caller. Same-shape coalescing is unaffected. The one directional
+      // exception is liveReplayMode: a summary request safely shares an
+      // in-flight full restore because once the restore settles the daemon
+      // recomputes the waiter's replay fields for its own mode from the
+      // registered entry — the two journals can diverge under cap pressure
+      // (each evicts independently against the shared caps), so the owner's
+      // projected fields can never be reused or filtered down for a waiter
+      // of a different mode. Only the reverse — a full request joining a
+      // summary restore — stays fenced: that projection lacks the nested
+      // detail the full client expects.
       if (
         inFlight.lifecycle.phase === 'abandoned' ||
         action !== inFlight.action ||
         historyReplay !== inFlight.historyReplay ||
         historyPageSize !== inFlight.historyPageSize ||
+        (inFlight.liveReplayMode === 'summary' && liveReplayMode === 'full') ||
         hideInheritedHistory !== inFlight.hideInheritedHistory
       ) {
         // An abandoned restore is fenced until the real ACP request and its
@@ -5232,6 +6853,43 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'the agent child likely crashed during session restore — retry to restore the session',
         );
       }
+      try {
+        assertAttachableSessionEntry(restored.sessionId, entry);
+      } catch (error) {
+        inFlight.coalesceState.count--;
+        entry.attachCount = Math.max(0, entry.attachCount - 1);
+        throw error;
+      }
+      // The owner's result carries replay fields selected for the OWNER'S
+      // live replay mode. A waiter whose mode differs (a summary load that
+      // joined a full restore — the only asymmetric direction the fence
+      // admits) recomputes its own fields from the registered entry, exactly
+      // as the existing-entry attach path above does — before registering —
+      // instead of inheriting the owner's unprojected full journal — which
+      // would include nested frames the summary client discards and the full
+      // journal's `history_truncated` marker even when the summary journal
+      // never truncated.
+      const waiterReplayFields =
+        liveReplayMode !== inFlight.liveReplayMode
+          ? historyPageSize !== undefined
+            ? await refreshedReplayFieldsFor(
+                entry,
+                historyPageSize,
+                liveReplayMode,
+              )
+            : replayFieldsFor(entry, action, liveReplayMode)
+          : undefined;
+      // `refreshedReplayFieldsFor` swallows fetch failures into the
+      // in-memory fallback, so re-assert after the await above: a channel
+      // death mid-fetch would otherwise attach the waiter to a session the
+      // daemon already tore down.
+      try {
+        assertAttachableSessionEntry(restored.sessionId, entry);
+      } catch (error) {
+        inFlight.coalesceState.count--;
+        entry.attachCount = Math.max(0, entry.attachCount - 1);
+        throw error;
+      }
       // NOTE: do NOT bump entry.attachCount here — `createSessionEntry`
       // already initialized it from coalesceState.count synchronously
       // when the IIFE registered the entry. Spread `restored` so the
@@ -5242,14 +6900,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `coalesceState.count`, so only the ledger is updated here.
       recordAttachRef(entry, clientId);
       if (req.approvalMode) {
-        await applyApprovalModeForAttach(entry, req.approvalMode, clientId);
+        const previousApprovalMode = await applyApprovalModeForAttach(
+          entry,
+          req.approvalMode,
+          clientId,
+        );
+        try {
+          assertAttachableSessionEntry(restored.sessionId, entry);
+        } catch (error) {
+          await rollbackApprovalModeForRejectedAttach(
+            entry,
+            previousApprovalMode,
+            clientId,
+          );
+          await rollbackAttachRegistration(entry, clientId);
+          throw error;
+        }
       }
       return {
         ...restored,
         attached: true,
         clientId,
         createdAt: entry.createdAt,
-        hasActivePrompt: entry.promptActive,
+        hasActivePrompt: entry.promptActive || entry.goalTurnActive === true,
+        ...(waiterReplayFields ?? {}),
       };
     }
 
@@ -5355,7 +7029,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 SERVE_CONTROL_EXT_METHODS.sessionClose,
                 {
                   sessionId: req.sessionId,
-                  drainTimeoutMs: Math.max(1, Math.floor(initTimeoutMs * 0.8)),
+                  drainTimeoutMs: sessionCloseDrainBudgetMs(initTimeoutMs),
                 },
               ),
               initTimeoutMs,
@@ -5442,6 +7116,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const promise = (async (): Promise<BridgeRestoredSession> => {
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       const restoreChannel = await ensureChannel();
+      if (restoreChannel.isDying) {
+        throw new BridgeChannelClosedError(`before session/${action}`);
+      }
       ci = restoreChannel;
       restoreChannel.pendingRestoreIds.add(req.sessionId);
       // Mark this id as in-flight restore BEFORE the ACP
@@ -5453,18 +7130,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // them. Cleared in the matching `finally` below.
       restoreChannel.client.markRestoreInFlight(req.sessionId);
       // Restore is a low-frequency one-shot path, so we register a
-      // fresh `channel.exited` listener per call instead of going
+      // fresh channel-unavailable race per call instead of going
       // through `getTransportClosedReject` (which exists to keep
       // sendPrompt's per-session listener count at 1 over the
       // session's lifetime). The listener is bound to this restore's
       // race only — once the race settles, no new awaits attach to
       // it, so there's no listener leak across restores.
-      const transportClosed = restoreChannel.channel.exited.then(() => {
-        throw new BridgeChannelClosedError(`during session/${action}`);
-      });
+      const transportClosed = channelUnavailableReject(
+        restoreChannel.channel,
+        `during session/${action}`,
+      );
       // Suppress the dangling rejection if `withTimeout` wins the
       // race below: `transportClosed` then stays pending, and a
-      // later `channel.exited` settle fires the inner `throw` with
+      // later channel-unavailable settle fires the inner `throw` with
       // no observer attached. Node 22 logs `unhandledRejection`;
       // under `--unhandled-rejections=throw` (common in container
       // deployments) the daemon process crashes. The `Promise.race`
@@ -5477,6 +7155,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       let replayPartial: true | undefined;
       let replayError: string | undefined;
       let replayHasMore: true | undefined;
+      let replayAnchorRecordId: string | undefined;
+      let restoreAskUserQuestionHint = false;
       try {
         const rawRestore = telemetry.withSpan(
           'session.restore',
@@ -5501,6 +7181,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 mcpServers: [],
                 _meta: {
                   ...sessionSourceRequestMeta(req.sourceType, req.sourceId),
+                  // Decline decisions known before the child RPC: keep the
+                  // child's replay finalize-skip aligned with the re-hang.
+                  ...(opts.restoreAskUserQuestion === true &&
+                  (req.clientId === undefined ||
+                    options.suppressRestorePrompt === true)
+                    ? {
+                        [DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+                      }
+                    : {}),
                   ...(historyReplay === 'response'
                     ? {
                         [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
@@ -5522,7 +7211,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               sessionId: req.sessionId,
               cwd: workspaceKey,
               mcpServers: [],
-              _meta: sessionSourceRequestMeta(req.sourceType, req.sourceId),
+              _meta: {
+                ...sessionSourceRequestMeta(req.sourceType, req.sourceId),
+                ...(opts.restoreAskUserQuestion === true &&
+                (req.clientId === undefined ||
+                  options.suppressRestorePrompt === true)
+                  ? {
+                      [DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+                    }
+                  : {}),
+              },
             });
             return await restoreChannel.connection.unstable_resumeSession(
               request,
@@ -5601,7 +7299,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           replayPartial = extracted.partial;
           replayError = extracted.replayError;
           replayHasMore = extracted.hasMore === true ? true : undefined;
+          replayAnchorRecordId = extracted.anchorRecordId;
         }
+        const restoreHint = takeRestoreAskUserQuestionHint(state);
+        restoreAskUserQuestionHint = restoreHint.hint;
+        state = restoreHint.state;
       } catch (err) {
         if (err instanceof SessionRestoreTimeoutError) throw err;
         restoreEvents.close();
@@ -5630,17 +7332,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const racedEntry = byId.get(req.sessionId);
       if (racedEntry) {
         restoreEvents.close();
-        // Same admission rule as the two checks above. This branch had no
-        // closing guard at all, so it could also attach to a Session already
-        // tearing down — narrower than the conditional-close window this PR
-        // introduced, but the same defect, and the fix is the same predicate.
-        if (isClosingOrAuthorizingClose(racedEntry)) {
-          throw new SessionNotFoundError(
-            req.sessionId,
-            'The session is closing; retry after close completes',
-            'session_closing',
-          );
-        }
+        assertAttachableSessionEntry(req.sessionId, racedEntry);
         // Self + any coalescers we accumulated while the restore was
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
@@ -5648,13 +7340,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const clientId = registerClient(racedEntry, req.clientId);
         recordAttachRef(racedEntry, clientId);
         if (req.approvalMode) {
+          let previousApprovalMode: ApprovalMode;
           try {
-            await applyApprovalMode(
+            const result = await applyApprovalMode(
               racedEntry,
               req.approvalMode,
               false,
               clientId,
             );
+            previousApprovalMode = result.previous;
           } catch (err) {
             await rollbackAttachRegistration(
               racedEntry,
@@ -5663,7 +7357,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             );
             throw err;
           }
+          try {
+            assertAttachableSessionEntry(req.sessionId, racedEntry);
+          } catch (error) {
+            await rollbackApprovalModeForRejectedAttach(
+              racedEntry,
+              previousApprovalMode,
+              clientId,
+            );
+            await rollbackAttachRegistration(
+              racedEntry,
+              clientId,
+              1 + coalesceState.count,
+            );
+            throw error;
+          }
         }
+        const restorePromptAdmitted = maybeFireRestoreAskUserQuestionPrompt(
+          racedEntry,
+          restoreAskUserQuestionHint,
+          req.clientId,
+          clientId,
+          options,
+        );
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
@@ -5680,8 +7396,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ? { sourceId: racedEntry.sourceId }
             : {}),
           state: racedEntry.restoreState ?? {},
-          hasActivePrompt: racedEntry.promptActive,
-          ...replayFieldsFor(racedEntry, action),
+          hasActivePrompt:
+            restorePromptAdmitted ||
+            racedEntry.promptActive ||
+            racedEntry.goalTurnActive === true,
+          ...replayFieldsFor(racedEntry, action, liveReplayMode),
         };
       }
 
@@ -5715,6 +7434,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (replayHasMore === true) {
         entry.restoreHistoryHasMore = true;
       }
+      if (replayAnchorRecordId !== undefined) {
+        entry.restoreHistoryAnchorRecordId = replayAnchorRecordId;
+      }
       seedSnapshotCaches(entry, publicState);
       const artifactRestoreWarnings = await entry.artifacts.restore(
         restoredArtifactSnapshot,
@@ -5744,9 +7466,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         ci.client.drainEarlyEvents(entry.sessionId, entry);
       }
+      assertAttachableSessionEntry(req.sessionId, entry);
       const clientId = registerClient(entry, req.clientId);
       if (req.approvalMode) {
         await applyApprovalModeForAttach(entry, req.approvalMode, clientId);
+        assertAttachableSessionEntry(req.sessionId, entry);
       }
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must
@@ -5756,6 +7480,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // directly.
       entry.attachCount = coalesceState.count;
       registeredEntry = entry;
+      const restorePromptAdmitted = maybeFireRestoreAskUserQuestionPrompt(
+        entry,
+        restoreAskUserQuestionHint,
+        req.clientId,
+        clientId,
+        options,
+      );
       // Explicit `session/load` / `session/resume` is "give me THIS
       // id"; it must NOT become the implicit attach target for
       // subsequent omitted-id `POST /session` callers under `single`
@@ -5775,8 +7506,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
-        hasActivePrompt: entry.promptActive,
-        ...replayFieldsFor(entry, action),
+        hasActivePrompt:
+          restorePromptAdmitted ||
+          entry.promptActive ||
+          entry.goalTurnActive === true,
+        ...replayFieldsFor(entry, action, liveReplayMode),
       };
     })().finally(async () => {
       if (restoreLifecycle.phase === 'abandoned') return;
@@ -5793,6 +7527,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const restoreEntry = byId.get(req.sessionId);
         if (restoreEntry?.events === restoreEvents) {
           byId.delete(req.sessionId);
+          await restoreEntry.attachments.close().catch((error) => {
+            writeStderrLine(
+              `qwen serve: failed to close attachments after restoring session ${JSON.stringify(req.sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
           ci?.sessionIds.delete(req.sessionId);
           emitSessionLifecycle({
             type: 'removed',
@@ -5852,6 +7591,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       action,
       historyReplay,
       ...(historyPageSize !== undefined ? { historyPageSize } : {}),
+      liveReplayMode,
       hideInheritedHistory,
       publicPromise: promise,
       settlementPromise,
@@ -6006,6 +7746,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // `session_closed` is terminal. Close the bus before ACP cancel so any
     // late cancellation frames from the agent are intentionally dropped.
     entry.events.close();
+    await entry.attachments.close().catch((error) => {
+      writeStderrLine(
+        `qwen serve: failed to close attachments for session ${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
     if (!agentSessionClosed) {
       try {
         await telemetry.withSpan(
@@ -6043,31 +7788,134 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     messageId: string,
     text: string,
     originatorClientId?: string,
+    content?: readonly BridgePromptContentBlock[],
   ) => {
-    void bridgeApi
-      .sendPrompt(
+    // Drop references that are already gone BEFORE admission: the admission
+    // check throws on the first dead reference, and the fallback would then
+    // replace the ENTIRE prompt with the marker, discarding the siblings the
+    // store still holds.
+    const resolvableBlocks: BridgePromptContentBlock[] = [];
+    let degraded = 0;
+    for (const block of content ?? []) {
+      try {
+        entry.attachments.assertReference(block);
+        resolvableBlocks.push(block);
+      } catch (error) {
+        if (!(error instanceof SessionAttachmentReferenceError)) throw error;
+        degraded += 1;
+      }
+    }
+    let prompt: BridgePromptContentBlock[] = [
+      ...(text ? [{ type: 'text', text } as ContentBlock] : []),
+      ...resolvableBlocks,
+    ];
+    if (degraded > 0) {
+      prompt = withAttachmentDegradationMarker(prompt);
+    }
+    const context = {
+      promptId: messageId,
+      promotedMidTurn: { originatorClientId },
+      onPromptAdmitted: () => {
+        rememberMidTurnId(entry.promotedMidTurnMessageIds, messageId);
+      },
+    };
+    const sendFallback = () =>
+      bridgeApi.sendPrompt(
         entry.sessionId,
         {
           sessionId: entry.sessionId,
-          prompt: [{ type: 'text', text }],
+          prompt: withAttachmentDegradationMarker(
+            text ? [{ type: 'text', text } as ContentBlock] : [],
+          ),
         },
         undefined,
+        context,
+      );
+    let result: Promise<PromptResponse>;
+    try {
+      result = bridgeApi.sendPrompt(
+        entry.sessionId,
         {
-          promptId: messageId,
-          promotedMidTurn: { originatorClientId },
-          // Record the id only once sendPrompt owns its FIFO slot: an
-          // admission failure must not land the id in the reconciliation
-          // ring, or retries would be acked for a message that never runs.
-          onPromptAdmitted: () => {
-            rememberMidTurnId(entry.promotedMidTurnMessageIds, messageId);
-          },
+          sessionId: entry.sessionId,
+          prompt,
         },
-      )
-      .catch((error: unknown) => {
+        undefined,
+        context,
+      );
+    } catch (error) {
+      try {
+        if (!(error instanceof SessionAttachmentReferenceError)) throw error;
+        result = sendFallback();
+      } catch (fallbackError) {
         writeStderrLine(
-          `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to run promoted message ${JSON.stringify(messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+          `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to run promoted message ${JSON.stringify(messageId)}: ${JSON.stringify(fallbackError instanceof Error ? fallbackError.message : String(fallbackError))}`,
         );
-      });
+        return;
+      }
+    }
+    // SessionAttachmentReferenceError can no longer reject this result
+    // asynchronously: admission-time reference checks throw synchronously
+    // (handled above) and dispatch degrades in place.
+    void result.catch((error: unknown) => {
+      writeStderrLine(
+        `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to run promoted message ${JSON.stringify(messageId)}: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+      );
+    });
+  };
+
+  /**
+   * Hand back every mid-turn message the turn that just ended never drained:
+   * `queueOnly` callers drive their own follow-through, everything else starts
+   * through the normal prompt path.
+   */
+  const settleUndrainedMidTurnMessages = (
+    entry: SessionEntry,
+    messages: readonly MidTurnQueueEntry[],
+  ) => {
+    for (const message of messages) {
+      if (message.queueOnly) {
+        try {
+          message.onSettledWithoutDrain?.();
+        } catch (error) {
+          writeStderrLine(
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to hand undrained queue-only message ${JSON.stringify(message.messageId)} back to its caller: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
+          );
+        }
+        continue;
+      }
+      promoteMidTurnMessage(
+        entry,
+        message.messageId,
+        message.text,
+        message.originatorClientId,
+        message.content,
+      );
+    }
+  };
+
+  /**
+   * Close the Goal turn's drain window. A Goal turn drains the mid-turn queue
+   * from inside the child, so a message enqueued after its last drain would
+   * otherwise sit in the queue with nothing scheduled to consume it — the same
+   * race the prompt settle already closes. Promoting is the supported path
+   * while a Goal is still active: the child's `claimGoalTurn` makes the
+   * promoted prompt wait for the permit and run as the next Goal turn.
+   */
+  const settleMidTurnQueueAfterGoalTurn = (sessionId: string) => {
+    const entry = byId.get(sessionId);
+    if (!entry) return;
+    // A prompt owns the queue and settles it on its own terminal; a Goal turn
+    // that started again already re-armed the child's drain.
+    if (
+      entry.goalTurnActive === true ||
+      entry.pendingPromptCount > 0 ||
+      entry.closing
+    ) {
+      return;
+    }
+    const undrained = entry.midTurnMessageQueue.splice(0);
+    if (undrained.length === 0) return;
+    settleUndrainedMidTurnMessages(entry, undrained);
   };
 
   const bridgeApi: AcpSessionBridge = {
@@ -6092,6 +7940,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           compactedReplayMaxBytes,
           maxJournalEvents,
           maxJournalBytes,
+          journalGrowth:
+            journalGrowthPoolBytes !== undefined
+              ? {
+                  poolBytes: journalGrowthPoolBytes,
+                  hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+                }
+              : null,
           channelIdleTimeoutMs: resolvedChannelIdleTimeoutMs(),
           sessionIdleTimeoutMs,
         },
@@ -6099,28 +7954,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         pendingPermissionCount: permissionMediator.pendingCount,
         channelLive: !!liveChannelInfo(),
         permissionPolicy: permissionMediator.policy,
-        sessions: [...byId.values()].map((entry) => ({
-          sessionId: entry.sessionId,
-          workspaceCwd: entry.workspaceCwd,
-          createdAt: entry.createdAt,
-          ...(entry.displayName ? { displayName: entry.displayName } : {}),
-          clientCount: entry.clientIds.size,
-          subscriberCount: entry.events.subscriberCount,
-          attachCount: entry.attachCount,
-          pendingPromptCount: entry.pendingPromptCount,
-          pendingPermissionCount: entry.pendingPermissionIds.size,
-          hasActivePrompt: entry.promptActive,
-          lastEventId: entry.events.lastEventId,
-          ...(entry.sessionLastSeenAt !== undefined
-            ? { lastSeenAt: entry.sessionLastSeenAt }
-            : {}),
-          ...(entry.currentModelId
-            ? { currentModelId: entry.currentModelId }
-            : {}),
-          ...(entry.currentApprovalMode
-            ? { currentApprovalMode: entry.currentApprovalMode }
-            : {}),
-        })),
+        sessions: [...byId.values()].map((entry) => {
+          const journalLimits = entry.events.journalLimits();
+          return {
+            sessionId: entry.sessionId,
+            workspaceCwd: entry.workspaceCwd,
+            createdAt: entry.createdAt,
+            ...(entry.displayName ? { displayName: entry.displayName } : {}),
+            clientCount: entry.clientIds.size,
+            subscriberCount: entry.events.subscriberCount,
+            attachCount: entry.attachCount,
+            pendingPromptCount: entry.pendingPromptCount,
+            pendingPermissionCount: entry.pendingPermissionIds.size,
+            hasActivePrompt:
+              entry.promptActive || entry.goalTurnActive === true,
+            lastEventId: entry.events.lastEventId,
+            ...(entry.sessionLastSeenAt !== undefined
+              ? { lastSeenAt: entry.sessionLastSeenAt }
+              : {}),
+            ...(entry.currentModelId
+              ? { currentModelId: entry.currentModelId }
+              : {}),
+            ...(entry.currentApprovalMode
+              ? { currentApprovalMode: entry.currentApprovalMode }
+              : {}),
+            maxJournalEvents: journalLimits?.maxEvents ?? maxJournalEvents,
+            maxJournalBytes: journalLimits?.maxBytes ?? maxJournalBytes,
+          };
+        }),
       };
     },
 
@@ -6292,13 +8153,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (effectiveScope === 'single') {
         const existing = defaultEntry;
         if (existing) {
-          if (isClosingOrAuthorizingClose(existing)) {
-            throw new SessionNotFoundError(
-              existing.sessionId,
-              'The session is closing; retry after close completes',
-              'session_closing',
-            );
-          }
+          assertAttachableSessionEntry(existing.sessionId, existing);
           // BRSCi: bump attach counter BEFORE any await so the
           // spawn-owner's disconnect reaper (server.ts:
           // `requireZeroAttaches: true`) sees this attach even when
@@ -6342,12 +8197,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             ).catch(() => {});
           }
+          let previousApprovalMode: ApprovalMode | undefined;
           if (req.approvalMode) {
-            await applyApprovalModeForAttach(
+            previousApprovalMode = await applyApprovalModeForAttach(
               existing,
               req.approvalMode,
               clientId,
             );
+          }
+          try {
+            assertAttachableSessionEntry(existing.sessionId, existing);
+          } catch (error) {
+            if (previousApprovalMode !== undefined) {
+              await rollbackApprovalModeForRejectedAttach(
+                existing,
+                previousApprovalMode,
+                clientId,
+              );
+            }
+            await rollbackAttachRegistration(existing, clientId);
+            throw error;
           }
           return {
             sessionId: existing.sessionId,
@@ -6362,7 +8231,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(existing.sourceId !== undefined
               ? { sourceId: existing.sourceId }
               : {}),
-            hasActivePrompt: existing.promptActive,
+            hasActivePrompt:
+              existing.promptActive || existing.goalTurnActive === true,
           };
         }
         // Coalesce: if another caller is already mid-spawn for this same
@@ -6383,7 +8253,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // the first sync step after `await inFlight`. Doing the
           // model-switch await first re-opens the race.
           const attachedEntry = byId.get(session.sessionId);
-          if (attachedEntry) attachedEntry.attachCount++;
           // BX9_U: even with the BRSCi bump-before-await ordering,
           // there are still adversarial paths where the entry could
           // be torn down between `await inFlight` resolving and our
@@ -6399,6 +8268,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               'the agent child likely crashed during initialization — retry to spawn a new session',
             );
           }
+          assertAttachableSessionEntry(session.sessionId, attachedEntry);
+          attachedEntry.attachCount++;
           const clientId = registerClient(attachedEntry, req.clientId);
           recordAttachRef(attachedEntry, clientId);
           if (req.modelServiceId) {
@@ -6412,18 +8283,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               clientId,
             ).catch(() => {});
           }
+          let previousApprovalMode: ApprovalMode | undefined;
           if (req.approvalMode) {
-            await applyApprovalModeForAttach(
+            previousApprovalMode = await applyApprovalModeForAttach(
               attachedEntry,
               req.approvalMode,
               clientId,
             );
           }
+          try {
+            assertAttachableSessionEntry(session.sessionId, attachedEntry);
+          } catch (error) {
+            if (previousApprovalMode !== undefined) {
+              await rollbackApprovalModeForRejectedAttach(
+                attachedEntry,
+                previousApprovalMode,
+                clientId,
+              );
+            }
+            await rollbackAttachRegistration(attachedEntry, clientId);
+            throw error;
+          }
           return {
             ...session,
             attached: true,
             clientId,
-            hasActivePrompt: attachedEntry.promptActive,
+            hasActivePrompt:
+              attachedEntry.promptActive ||
+              attachedEntry.goalTurnActive === true,
           };
         }
       }
@@ -6568,11 +8455,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ),
         );
       }
+      if (!Array.isArray(req.prompt)) {
+        return Promise.reject(
+          RequestError.invalidParams(undefined, 'Prompt must be an array'),
+        );
+      }
       const promotedMidTurn = context?.promotedMidTurn;
       const isPromotedMidTurn = promotedMidTurn !== undefined;
       const originatorClientId = promotedMidTurn
         ? promotedMidTurn.originatorClientId
         : resolveTrustedClientId(entry, context?.clientId);
+      entry.attachments.assertReferences(req.prompt);
       const modelPrompt = context?.modelPrompt;
       if (
         modelPrompt !== undefined &&
@@ -6632,16 +8525,51 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
       }
+      const channelDisplayText = getChannelPromptDisplayText(
+        entry,
+        context?.promptDisplayText,
+      );
+      const pendingText =
+        channelDisplayText === undefined
+          ? extractPromptText(req.prompt)
+          : channelDisplayText ||
+            (req.prompt.some(
+              (block) => isRecord(block) && block['type'] === 'image',
+            )
+              ? '[image]'
+              : '');
       const pendingEntry: PendingPromptEntry = {
         promptId,
         queuedAt,
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
         ...(isPromotedMidTurn ? { promotedMidTurn: true } : {}),
-        text: extractPromptText(req.prompt),
+        text: pendingText,
+        content: extractMediaBlocks(req.prompt),
         abortController: pendingAbort,
         state: isQueued ? 'queued' : 'running',
       };
       entry.pendingPromptList.push(pendingEntry);
+      // Dispatch marker: capture the transcript tail uuid before the
+      // write-ahead `in_flight` lands so cold-load reconciliation can
+      // require visible writes beyond it (identity-based attribution,
+      // immune to clock skew). Best-effort: absence degrades reconcile
+      // to its marker-less evidence chain, never blocks admission.
+      let tailUuid: string | undefined;
+      try {
+        tailUuid = entry.promptLedger?.transcriptTailUuid?.(sessionId);
+      } catch (error) {
+        opts.onDiagnosticLine?.(
+          `qwen serve: prompt ledger dispatch marker failed for session=${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          'warn',
+        );
+      }
+      appendPromptLedgerBestEffort(entry, {
+        v: 1,
+        promptId,
+        state: 'in_flight',
+        ...(tailUuid !== undefined ? { tailUuid } : {}),
+        at: queuedAt,
+      });
       try {
         context?.onPromptAdmitted?.();
       } catch (error) {
@@ -6771,6 +8699,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             }
             throw new DOMException('Prompt aborted', 'AbortError');
           }
+          pendingEntry.startedAt = Date.now();
           // If this prompt was queued behind another, promote it to
           // 'running' and publish a started event now that it has reached the
           // head of the FIFO. A promoted mid-turn message that starts
@@ -6807,10 +8736,42 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   : {}),
               },
               async () => {
+                // Degrade in place, never by re-admission: a fallback
+                // re-admitted at the FIFO tail would double the terminal
+                // for this promptId, transpose the turn behind later
+                // prompts, and race the deferred close-on-prompt-complete
+                // on a detached session.
+                let dispatchBlocks = req.prompt;
+                let resolvedPrompt: ContentBlock[];
+                try {
+                  resolvedPrompt =
+                    await entry.attachments.resolveContent(dispatchBlocks);
+                } catch (error) {
+                  if (
+                    !isPromotedMidTurn ||
+                    !(error instanceof SessionAttachmentReferenceError)
+                  ) {
+                    throw error;
+                  }
+                  // Degrade per block: one dead reference drops itself and
+                  // keeps its resolvable siblings instead of replacing the
+                  // whole prompt with the marker.
+                  const perBlock =
+                    await entry.attachments.resolveContentDegrading(
+                      dispatchBlocks,
+                    );
+                  dispatchBlocks = perBlock.retainedBlocks;
+                  // The batch resolve threw on a dead reference, so the
+                  // marker always applies here.
+                  resolvedPrompt = withAttachmentDegradationMarker(
+                    perBlock.resolvedBlocks,
+                  );
+                }
                 const normalized: PromptRequest = telemetry.injectPromptContext(
                   {
                     ...req,
                     sessionId,
+                    prompt: resolvedPrompt,
                   },
                 );
                 assertLivePromptEntry(sessionId, entry);
@@ -6825,6 +8786,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // through this tracked admission path instead of an untracked
                 // internal agent prompt.
                 const isContinue = context?.continue === true;
+                const isRestoreAskUserQuestion =
+                  context?.restoreAskUserQuestion === true;
                 const promptRequest = (() => {
                   const copy = {
                     ...normalized,
@@ -6835,6 +8798,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
+                  const promptDisplayText = channelDisplayText;
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];
                   delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
@@ -6842,20 +8806,45 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // only `continueSession` (via the trusted `isContinue` flag
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
+                  delete meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+                  delete meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
                   delete meta[DAEMON_MODEL_PROMPT_META_KEY];
+                  delete meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY];
+                  // Channel classification is authenticated channel-worker
+                  // metadata; the daemon prompt route validates the worker
+                  // authorization and re-arms it through the trusted
+                  // `channelPrompt` context flag below.
+                  delete meta[CHANNEL_PROMPT_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
                   if (isContinue) {
                     meta[DAEMON_CONTINUE_META_KEY] = true;
                   }
+                  if (isRestoreAskUserQuestion) {
+                    meta[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] = true;
+                  }
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
                   }
+                  if (promptDisplayText !== undefined) {
+                    meta[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY] =
+                      promptDisplayText;
+                  }
                   if (modelPrompt !== undefined) {
                     meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
+                  }
+                  const attachmentReferences = dispatchBlocks.filter(
+                    isSessionAttachmentReference,
+                  );
+                  if (attachmentReferences.length > 0) {
+                    meta[DAEMON_ATTACHMENT_REFERENCES_META_KEY] =
+                      attachmentReferences;
+                  }
+                  if (context?.channelPrompt === true) {
+                    meta[CHANNEL_PROMPT_META_KEY] = true;
                   }
                   meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {
@@ -6866,9 +8855,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   return copy;
                 })();
                 entry.promptActive = true;
+                // The child serializes Goal turns against RPC prompts, so a
+                // still-set flag here means the goal end_turn signal was
+                // lost; self-heal rather than pin the session active.
+                entry.goalTurnActive = false;
                 entry.activePromptId = pendingEntry.promptId;
                 delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
+                delete entry.turnErrorEvent;
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
                 touchActivity();
@@ -6901,12 +8895,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // in the transcript from the first attempt.
                   // Continuations carry no user prompt to echo (empty `prompt`);
                   // the original user_message_chunk is already in the transcript.
-                  if (!isRetry && !isContinue) {
+                  if (!isRetry && !isContinue && !isRestoreAskUserQuestion) {
                     echoPromptToSessionBus(
                       entry,
-                      promptRequest,
+                      {
+                        ...promptRequest,
+                        prompt: dispatchBlocks,
+                      },
                       pendingEntry.promptId,
                       originatorClientId,
+                      channelDisplayText,
                     );
                   }
                 } catch (echoErr) {
@@ -6977,6 +8975,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         writeStderrLine(
                           `sendPrompt: queued prompt removed before agent forward for session ${sessionId}`,
                         );
+                        return;
+                      }
+                      if (extractJsonRpcErrorField(err, 'errorKind')) {
+                        // Structured turn error (e.g. loop_detected): the
+                        // forward succeeded and the daemon rejected the turn
+                        // after running it. The formal turn_error terminal
+                        // already ends the turn visibly; a phantom
+                        // forward-failure line and prompt_cancelled broadcast
+                        // would misreport it.
+                        cancelPendingForSession(sessionId);
                         return;
                       }
                       writeStderrLine(
@@ -7120,24 +9128,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // caller synchronously reserves the next FIFO slot, then ordinary
           // promotions follow it without exposing the fallback as queued.
           releasePromptSlot();
-          for (const message of undrainedMessages) {
-            if (message.queueOnly) {
-              try {
-                message.onSettledWithoutDrain?.();
-              } catch (error) {
-                writeStderrLine(
-                  `[mid-turn] session=${JSON.stringify(entry.sessionId)} failed to hand undrained queue-only message ${JSON.stringify(message.messageId)} back to its caller: ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
-                );
-              }
-              continue;
-            }
-            promoteMidTurnMessage(
-              entry,
-              message.messageId,
-              message.text,
-              message.originatorClientId,
-            );
-          }
+          settleUndrainedMidTurnMessages(entry, undrainedMessages);
           // DAEMON-005: deferred close-on-prompt-complete. Lives here (not
           // in `promptPromise.finally`) so the terminal broadcast — the
           // `result.then` registered above on this same promise — runs
@@ -7446,65 +9437,135 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (isClosingOrAuthorizingClose(entry)) {
+        throw new SessionNotFoundError(sessionId, 'The session is closing');
+      }
       const source = parseSessionSource(req.sourceType, req.sourceId);
       if ('error' in source) {
         throw new InvalidSessionMetadataError('sourceType', source.error);
       }
       const isSideTask = source.sourceType === 'side_task';
+      const restoreBranch = isSideTask || req.atRecordId === undefined;
 
-      let originatorClientId: string | undefined;
       if (context?.clientId !== undefined) {
-        originatorClientId = resolveTrustedClientId(entry, context.clientId);
+        resolveTrustedClientId(entry, context.clientId);
       }
 
       const concurrentSideTask = isSideTask && entry.promptActive;
+      // Admission-time check: pendingPromptCount changes synchronously when a
+      // prompt is accepted, before its queue callback sets promptActive. A
+      // check inside the branch callback would observe post-prompt state and
+      // silently wait instead of rejecting.
+      if (!isSideTask && (entry.pendingPromptCount > 0 || entry.promptActive)) {
+        throw new BranchWhilePromptActiveError(sessionId);
+      }
       const branchResult = (
         concurrentSideTask ? Promise.resolve() : entry.promptQueue
       ).then(async () => {
-        if (entry.promptActive && !isSideTask) {
-          throw new BranchWhilePromptActiveError(sessionId);
+        if (
+          isClosingOrAuthorizingClose(entry) ||
+          byId.get(sessionId) !== entry
+        ) {
+          throw new SessionNotFoundError(sessionId, 'The session is closing');
         }
 
         assertFreshSessionsAvailable();
-        if (
-          byId.size + inFlightSpawns.size + inFlightRestores.size >=
-          maxSessions
-        ) {
-          throw new SessionLimitExceededError(maxSessions);
+        let admission: ReturnType<typeof reserveFreshSession> | undefined;
+        if (restoreBranch) {
+          if (
+            byId.size + inFlightSpawns.size + inFlightRestores.size >=
+            maxSessions
+          ) {
+            throw new SessionLimitExceededError(maxSessions);
+          }
+          admission = reserveFreshSession({
+            operation: 'branch',
+            workspaceCwd: boundWorkspace,
+            sourceSessionId: sessionId,
+          });
         }
-
-        const admission = reserveFreshSession({
-          operation: 'branch',
-          workspaceCwd: boundWorkspace,
-          sourceSessionId: sessionId,
-        });
         let admissionReleased = false;
         const releaseAdmissionOnce = () => {
-          if (admissionReleased) return;
+          if (admissionReleased || !admission) return;
           admissionReleased = true;
           releaseFreshSessionReservation(admission);
         };
         try {
-          const ci = await ensureChannel();
-          const result = (await withTimeout(
-            ci.connection.extMethod(
-              isSideTask
-                ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
-                : SERVE_CONTROL_EXT_METHODS.sessionBranch,
-              {
-                sessionId,
-                cwd: boundWorkspace,
-                name: req.name,
-              },
-            ),
-            initTimeoutMs,
-            isSideTask ? 'createSideTaskSession' : 'branchSession',
-          )) as { newSessionId: string; title?: string; displayName?: string };
+          // HAZARD: dispatch the source-session mutation on the entry's
+          // OWN connection, not `ci.connection` (the current attach
+          // target). During the channel-overlap window (A dying, B
+          // freshly spawned as `channelInfo`) the source session still
+          // lives on A; routing through B reports session-not-found or
+          // operates on the wrong runtime state. The NEW session's
+          // restore below stays on the intended channel.
+          const mutation = entry.connection.extMethod(
+            isSideTask
+              ? SERVE_CONTROL_EXT_METHODS.sessionSideTask
+              : SERVE_CONTROL_EXT_METHODS.sessionBranch,
+            {
+              sessionId,
+              cwd: boundWorkspace,
+              name: req.name,
+              ...(req.atRecordId !== undefined
+                ? { atRecordId: req.atRecordId }
+                : {}),
+            },
+          );
+          // ACP cannot cancel a branch after dispatch. Keep the queue and
+          // reservation until its real outcome is known so a caller never sees
+          // a timeout followed by an unobserved committed session. The
+          // transport-closed race rejects only when the channel exits — a
+          // branch whose channel died cannot be observed or delivered anyway —
+          // so a slow-but-alive fork still waits for its real outcome.
+          let result: {
+            newSessionId: string;
+            title?: string;
+            displayName?: string;
+          };
+          try {
+            result = (await Promise.race([
+              mutation,
+              getTransportClosedReject(entry),
+            ])) as typeof result;
+          } catch (err) {
+            const data = (err as { data?: unknown })?.data;
+            if (
+              !isSideTask &&
+              data &&
+              typeof data === 'object' &&
+              (data as { errorKind?: unknown }).errorKind === 'session_busy'
+            ) {
+              const msg =
+                (err as { message?: string })?.message ?? 'Branch failed';
+              throw new SessionBusyError(sessionId, msg);
+            }
+            throw err;
+          }
 
           if (!result || typeof result.newSessionId !== 'string') {
             throw new Error(
               `branchSession: agent returned invalid response: ${JSON.stringify(result)}`,
             );
+          }
+          // The fork is durably committed at this point, including the
+          // persisted-only path that never becomes a live session. Mark
+          // before any restore attempt so a committed branch is visible to
+          // catalog-version watchers even when the restore later fails.
+          markSessionCatalogChanged();
+          if (opts.sessionAttachmentsRoot) {
+            const branchAttachments = new SessionAttachmentStore(
+              opts.sessionAttachmentsRoot,
+              result.newSessionId,
+            );
+            try {
+              await branchAttachments.copyFrom(entry.attachments);
+            } catch (error) {
+              writeStderrLine(
+                `qwen serve: failed to copy attachments for branched session ${result.newSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            } finally {
+              await branchAttachments.close();
+            }
           }
           const rawBranchName = result.displayName ?? result.title;
           const branchDisplayName =
@@ -7512,6 +9573,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               ? rawBranchName
               : result.newSessionId.slice(0, 8);
 
+          if (!restoreBranch) {
+            return {
+              sessionId: result.newSessionId,
+              displayName: branchDisplayName,
+              forkedFrom: {
+                sessionId,
+                displayName: entry.displayName ?? sessionId.slice(0, 8),
+              },
+            };
+          }
+
+          const ci = await ensureChannel();
           let restored;
           try {
             const hideInheritedHistory = req.replayInheritedHistory === false;
@@ -7531,27 +9604,57 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               },
               {
                 skipFreshSessionAdmission: true,
+                // A fork inherits the parent's dangling ask_user_question
+                // tail, but forks cannot run that tool — never fire a
+                // restore prompt into a brand-new branch.
+                suppressRestorePrompt: true,
               },
             );
             releaseAdmissionOnce();
           } catch (restoreErr) {
             writeStderrLine(
-              `qwen serve: branchSession load failed for ${result.newSessionId}, attempting cleanup...`,
+              `qwen serve: branchSession load failed for ${result.newSessionId}; closing partial live state while preserving the committed session...`,
             );
             try {
-              await ci.connection.extMethod(
-                SERVE_CONTROL_EXT_METHODS.sessionClose,
-                { sessionId: result.newSessionId, cwd: boundWorkspace },
-              );
+              if (!ci.isDying) {
+                await withTimeout(
+                  Promise.race([
+                    ci.connection.extMethod(
+                      SERVE_CONTROL_EXT_METHODS.sessionClose,
+                      {
+                        sessionId: result.newSessionId,
+                        cwd: boundWorkspace,
+                        drainTimeoutMs:
+                          sessionCloseDrainBudgetMs(initTimeoutMs),
+                      },
+                    ),
+                    channelUnavailableReject(
+                      ci.channel,
+                      'during branchSession cleanup',
+                    ),
+                  ]),
+                  initTimeoutMs,
+                  'branchSession cleanup',
+                );
+              }
             } catch (cleanupErr) {
               writeStderrLine(
-                `qwen serve: branchSession cleanup of ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
+                `qwen serve: branchSession live-state close for ${result.newSessionId} failed: ${cleanupErr instanceof Error ? cleanupErr.message : cleanupErr}`,
               );
             }
             throw restoreErr;
           }
 
           const newEntry = byId.get(result.newSessionId);
+          if (newEntry && !opts.sessionAttachmentsRoot) {
+            try {
+              await newEntry.attachments.copyFrom(entry.attachments);
+            } catch (error) {
+              writeStderrLine(
+                `qwen serve: failed to copy attachments for branched session ${result.newSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          }
           if (newEntry) newEntry.displayName = branchDisplayName;
           let sourcePersisted: boolean | undefined;
           if (newEntry?.sourceType) {
@@ -7581,21 +9684,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 }`,
               );
             }
-          }
-
-          if (!isSideTask) {
-            const eventData = {
-              sourceSessionId: sessionId,
-              newSessionId: result.newSessionId,
-              displayName: branchDisplayName,
-            };
-            const branchEnvelope = {
-              type: 'session_branched' as const,
-              data: eventData,
-              ...(originatorClientId ? { originatorClientId } : {}),
-            };
-            // The branch announcement belongs to the new session only.
-            newEntry?.events.publish(branchEnvelope);
           }
 
           return {
@@ -7631,7 +9719,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
         context,
       );
-      const { forkedFrom: _forkedFrom, ...sideTask } = result;
+      const restoredResult = result as typeof result & BridgeRestoredSession;
+      const { forkedFrom: _forkedFrom, ...sideTask } = restoredResult;
       return {
         ...sideTask,
         parentSessionId: sessionId,
@@ -7661,18 +9750,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           throw new CdWhilePromptActiveError(sessionId);
         }
 
-        const ci = await ensureChannel();
-        const raw = await ci.connection.extMethod(
-          SERVE_CONTROL_EXT_METHODS.sessionCd,
-          {
+        assertLivePromptEntry(sessionId, entry);
+        const raw = await Promise.race([
+          entry.connection.extMethod(SERVE_CONTROL_EXT_METHODS.sessionCd, {
             sessionId,
             path: req.path,
             ...(req.allowedRoots ? { allowedRoots: req.allowedRoots } : {}),
             ...(req.managedRelocation
               ? { managedRelocation: req.managedRelocation }
               : {}),
-          },
-        );
+          }),
+          getTransportClosedReject(entry),
+        ]);
         const extResult = raw as {
           previousCwd: string;
           newCwd: string;
@@ -7739,6 +9828,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (entry) {
         entry.worktree = worktree;
+        markSessionCatalogChanged();
       }
     },
 
@@ -7759,6 +9849,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId !== undefined
           ? resolveTrustedClientId(entry, context.clientId)
           : undefined;
+      // Validate everything before mutating anything: a combined
+      // displayName+pr request must not partially apply when the pr is
+      // invalid.
+      if (metadata.pr !== undefined) {
+        const pr = metadata.pr as unknown;
+        if (
+          pr === null ||
+          typeof pr !== 'object' ||
+          typeof (pr as SessionPrInfo).number !== 'number' ||
+          !Number.isInteger((pr as SessionPrInfo).number) ||
+          (pr as SessionPrInfo).number <= 0 ||
+          typeof (pr as SessionPrInfo).url !== 'string' ||
+          (pr as SessionPrInfo).url.length > SESSION_PR_URL_MAX_LENGTH ||
+          !/^https?:\/\//i.test((pr as SessionPrInfo).url) ||
+          // The url is interpolated into the stderr audit line — control
+          // characters would let a client forge log lines (the displayName
+          // branch rejects them for the same reason).
+          hasControlCharacter((pr as SessionPrInfo).url)
+        ) {
+          throw new InvalidSessionMetadataError(
+            'pr',
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+          );
+        }
+      }
       if (metadata.displayName !== undefined) {
         if (
           typeof metadata.displayName !== 'string' ||
@@ -7778,6 +9893,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const nextDisplayName = metadata.displayName || undefined;
         if (entry.displayName !== nextDisplayName) {
           entry.displayName = nextDisplayName;
+          // The catalog exposes display names; an actual rename is a
+          // static-metadata change. Mark before the SSE publish so the
+          // revision never trails the client-visible event.
+          markSessionCatalogChanged();
           writeStderrLine(
             `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +
               `displayName=${entry.displayName === undefined ? 'cleared' : 'set'}` +
@@ -7821,7 +9940,60 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
         }
       }
-      return { displayName: entry.displayName };
+      if (metadata.pr !== undefined) {
+        // Already validated above, before any mutation.
+        const bound = metadata.pr;
+        const existing = entry.prs ?? [];
+        const latest = existing[existing.length - 1];
+        if (latest?.number === bound.number && latest.url === bound.url) {
+          // Same binding repeated — no change, no event.
+        } else {
+          // Re-binding a number refreshes it and moves it to latest.
+          entry.prs = [
+            ...existing.filter((p) => p.number !== bound.number),
+            { number: bound.number, url: bound.url },
+          ].slice(-SESSION_PR_LIST_LIMIT);
+          markSessionCatalogChanged();
+          writeStderrLine(
+            `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +
+              `pr=${bound.number} bound (${bound.url})` +
+              (context?.clientId
+                ? ` by client ${JSON.stringify(context.clientId)}`
+                : ''),
+          );
+          try {
+            entry.events.publish({
+              type: 'session_metadata_updated',
+              // Echo the current name: SDK folds treat an absent displayName
+              // as "cleared", so a pr-only event must not blank the title.
+              data: {
+                sessionId,
+                ...(entry.displayName !== undefined
+                  ? { displayName: entry.displayName }
+                  : {}),
+                prs: entry.prs,
+              },
+              ...(metadataOriginatorClientId
+                ? { originatorClientId: metadataOriginatorClientId }
+                : {}),
+            });
+          } catch {
+            /* bus already closed */
+          }
+        }
+      }
+      return {
+        displayName: entry.displayName,
+        ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
+      };
+    },
+
+    seedSessionPrs(sessionId, prs) {
+      const entry = byId.get(sessionId);
+      if (!entry || (entry.prs && entry.prs.length > 0)) return;
+      entry.prs = prs
+        .map(({ number, url }) => ({ number, url }))
+        .slice(-SESSION_PR_LIST_LIMIT);
     },
 
     async getSessionArtifacts(sessionId, context) {
@@ -7871,6 +10043,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       return out;
     },
+
+    getSessionCatalogVersion,
+
+    markSessionCatalogChanged,
 
     getSessionSummary(sessionId) {
       const entry = byId.get(sessionId);
@@ -8287,6 +10463,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async controlSessionGoal(sessionId, request, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return requestSessionStatus(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+        { request },
+      );
+    },
+
     async clearSessionGoal(sessionId) {
       return requestSessionStatus<{ cleared: boolean; condition?: string }>(
         sessionId,
@@ -8412,6 +10601,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         refreshBootstrap: boolean,
       ) => {
         let inFlight = inFlightExtensionRefreshes.get(entry.sessionId);
+        let created = false;
         if (
           !inFlight ||
           inFlight.connection !== entry.connection ||
@@ -8426,27 +10616,37 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               },
             );
           })();
+          let rejectUnavailable!: () => void;
+          const unavailable = new Promise<never>((_resolve, reject) => {
+            rejectUnavailable = () =>
+              reject(
+                new BridgeChannelClosedError('refreshExtensionsForAllSessions'),
+              );
+          });
           inFlight = {
             connection: entry.connection,
             promise,
+            wait: Promise.race([
+              withTimeout(
+                promise,
+                30_000,
+                SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+              ),
+              unavailable,
+            ]),
+            rejectUnavailable,
             refreshBootstrap,
           };
           inFlightExtensionRefreshes.set(entry.sessionId, inFlight);
-          const clear = () => {
-            if (inFlightExtensionRefreshes.get(entry.sessionId) === inFlight) {
-              inFlightExtensionRefreshes.delete(entry.sessionId);
-            }
-          };
-          void promise.then(clear, clear);
+          created = true;
         }
-        await Promise.race([
-          withTimeout(
-            inFlight.promise,
-            30_000,
-            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
-          ),
-          getTransportClosedReject(entry),
-        ]);
+        const clear = () => {
+          if (inFlightExtensionRefreshes.get(entry.sessionId) === inFlight) {
+            inFlightExtensionRefreshes.delete(entry.sessionId);
+          }
+        };
+        if (created) void inFlight.promise.then(clear, clear);
+        await inFlight.wait;
       };
 
       const results = await Promise.all(
@@ -8640,6 +10840,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         throw err;
       }
       return response;
+    },
+
+    async setSessionConfigOption(sessionId, req) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const normalized: SetSessionConfigOptionRequest = { ...req, sessionId };
+      const transportClosed = getTransportClosedReject(entry);
+      const work = entry.modelChangeQueue.then(() =>
+        Promise.race([
+          withTimeout(
+            entry.connection.setSessionConfigOption(normalized),
+            initTimeoutMs,
+            'setSessionConfigOption',
+          ),
+          transportClosed,
+        ]),
+      );
+      entry.modelChangeQueue = work.then(
+        () => undefined,
+        () => undefined,
+      );
+      return (await work) as SetSessionConfigOptionResponse;
     },
 
     async setSessionLanguage(sessionId, params, context) {
@@ -8870,16 +11094,134 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Authorize the caller against this session — mirrors /prompt.
       resolveTrustedClientId(entry, context?.clientId);
       return entry.pendingPromptList
-        .filter((p) => !p.removed)
+        .filter((p) => !p.removed && !p.terminalPublished)
         .map((p) => ({
           promptId: p.promptId,
           text: p.text,
+          ...(p.content ? { content: p.content } : {}),
           queuedAt: p.queuedAt,
           state: p.state,
           ...(p.originatorClientId !== undefined
             ? { originatorClientId: p.originatorClientId }
             : {}),
         }));
+    },
+
+    async getSessionTurnStatus(sessionId, context, promptId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+
+      const liveBeforeRead = findLiveTurnStatus(entry, promptId);
+      if (liveBeforeRead) return liveBeforeRead;
+
+      // An overlay terminal a previous poll already enriched with the
+      // child's persisted record fully answers the query; serving it here
+      // spares settled prompts a full child transcript scan on every poll.
+      if (
+        promptId !== undefined &&
+        entry.enrichedTerminalPromptIds.has(promptId)
+      ) {
+        const enrichedTerminal = entry.terminalTurnStatuses.get(promptId);
+        if (enrichedTerminal) return enrichedTerminal;
+      }
+
+      const rewindGenerationBeforeRead = entry.rewindGeneration;
+      let result: {
+        v: number;
+        sessionId: string;
+        turnResult: TurnResultRecordPayload | null;
+      };
+      try {
+        result = await requestSessionStatus(
+          sessionId,
+          SERVE_CONTROL_EXT_METHODS.sessionTurnStatus,
+          { ...(promptId !== undefined ? { promptId } : {}) },
+          // Transcript scans of large histories exceed the 10s init default;
+          // give the read the same budget as other transcript reads.
+          SESSION_TRANSCRIPT_TIMEOUT_MS,
+        );
+      } catch (error) {
+        const liveAfterFailure = findLiveTurnStatus(entry, promptId);
+        if (liveAfterFailure) return liveAfterFailure;
+        const terminalAfterFailure =
+          promptId !== undefined
+            ? entry.terminalTurnStatuses.get(promptId)
+            : latestTerminalTurnStatus(entry);
+        if (terminalAfterFailure) return terminalAfterFailure;
+        throw error;
+      }
+      const liveAfterRead = findLiveTurnStatus(entry, promptId);
+      if (liveAfterRead) return liveAfterRead;
+      const terminal =
+        promptId !== undefined
+          ? entry.terminalTurnStatuses.get(promptId)
+          : latestTerminalTurnStatus(entry);
+      // A rewind that completed while the scan was in flight may have
+      // rolled back the scanned outcome; drop it so neither the write-back
+      // nor the return below resurrects a rewound-away result. Rewind also
+      // cleared the overlay this read falls back to, so the failure path
+      // needs no equivalent guard.
+      const persisted =
+        result.turnResult &&
+        entry.rewindGeneration === rewindGenerationBeforeRead
+          ? settledTurnStatus(sessionId, result.turnResult)
+          : undefined;
+      if (promptId !== undefined) {
+        if (terminal && persisted) {
+          const merged = mergeTerminalWithPersisted(terminal, persisted);
+          rememberEnrichedTerminalTurnStatus(entry, promptId, merged);
+          return merged;
+        }
+        if (terminal) return terminal;
+        if (persisted) {
+          rememberEnrichedTerminalTurnStatus(entry, promptId, persisted);
+          return persisted;
+        }
+      } else {
+        if (terminal && persisted && terminal.promptId === persisted.promptId) {
+          return mergeTerminalWithPersisted(terminal, persisted);
+        }
+        if (terminal && persisted) {
+          return (terminal.endedAt ?? 0) >= (persisted.endedAt ?? 0)
+            ? terminal
+            : persisted;
+        }
+        if (terminal) return terminal;
+        if (persisted) return persisted;
+      }
+      if (promptId !== undefined) {
+        return undefined;
+      }
+      return { sessionId, state: 'idle' as const };
+    },
+
+    async storeSessionAttachment(sessionId, data, mimeType, context, name) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await entry.attachments.putAttachment(data, mimeType, name);
+    },
+
+    async readSessionAttachment(sessionId, attachmentId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await entry.attachments.read(attachmentId);
+    },
+
+    async removeSessionAttachment(sessionId, attachmentId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await entry.attachments.remove(attachmentId);
+    },
+
+    async deleteSessionAttachments(sessionId, options) {
+      const store =
+        byId.get(sessionId)?.attachments ??
+        new SessionAttachmentStore(opts.sessionAttachmentsRoot, sessionId);
+      await store.delete(options);
     },
 
     removePendingPrompt(sessionId, promptId, context) {
@@ -8965,7 +11307,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId,
       );
       const trimmed = message.trim();
-      if (trimmed.length === 0) {
+      // Attachment blocks travel with the message through drain and promotion;
+      // text blocks are dropped so the drain never duplicates the message text.
+      const mediaBlocks = (options?.content ?? []).filter(
+        (block): block is BridgePromptContentBlock =>
+          block.type === 'image' || block.type === 'resource',
+      );
+      if (trimmed.length === 0 && mediaBlocks.length === 0) {
         writeStderrLine(
           `[mid-turn] session=${entry.sessionId} rejected: empty`,
         );
@@ -8976,11 +11324,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           (queued) => queued.messageId === requestedMessageId,
         );
         if (existing) {
-          if (existing.text === trimmed) {
+          // A retry under the same id is only idempotent when the WHOLE
+          // payload matches — accepting different media under an existing id
+          // would silently keep the original attachments.
+          const sameMedia =
+            JSON.stringify(existing.content ?? []) ===
+            JSON.stringify(mediaBlocks);
+          if (existing.text === trimmed && sameMedia) {
             return { accepted: true, messageId: requestedMessageId };
           }
           writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(requestedMessageId)}: text mismatch`,
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(requestedMessageId)}: text or content mismatch`,
           );
           return { accepted: false };
         }
@@ -8988,11 +11342,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           (pending) => pending.promptId === requestedMessageId,
         );
         if (promoted) {
-          if (promoted.text === trimmed) {
+          const promotedMedia = (promoted.content ?? []).filter(
+            (block) => block.type === 'image' || block.type === 'resource',
+          );
+          const sameMedia =
+            JSON.stringify(promotedMedia) === JSON.stringify(mediaBlocks);
+          const promotedText =
+            promoted.text === '[image]' && trimmed.length === 0
+              ? ''
+              : promoted.text;
+          if (promotedText === trimmed && sameMedia) {
             return { accepted: true, messageId: requestedMessageId };
           }
           writeStderrLine(
-            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected promoted id ${JSON.stringify(requestedMessageId)}: text mismatch`,
+            `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected promoted id ${JSON.stringify(requestedMessageId)}: text or content mismatch`,
           );
           return { accepted: false };
         }
@@ -9012,20 +11375,55 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         );
         return { accepted: false };
       }
+      // Validate only genuinely new admissions, AFTER the retry-ack rings:
+      // a same-id retry whose media was already removed (delete racing an
+      // in-flight POST, or a refresh re-enqueueing from the snapshot) must
+      // settle idempotently instead of failing with session_attachment_gone.
+      entry.attachments.assertReferences(mediaBlocks);
+      const inlineBytes = inlineAttachmentBlockBytes(mediaBlocks);
+      if (inlineBytes > 0) {
+        const queuedInlineBytes = entry.midTurnMessageQueue.reduce(
+          (total, queued) =>
+            total + inlineAttachmentBlockBytes(queued.content ?? []),
+          0,
+        );
+        if (
+          queuedInlineBytes + inlineBytes >
+          MAX_QUEUED_INLINE_ATTACHMENT_BYTES
+        ) {
+          writeStderrLine(
+            `[mid-turn] session=${entry.sessionId} rejected: queued inline attachments exceed the ${MAX_QUEUED_INLINE_ATTACHMENT_BYTES}-byte session budget`,
+          );
+          return { accepted: false };
+        }
+      }
       const messageId = requestedMessageId ?? randomUUID();
       // If the turn settled while the POST was in flight, start it through the
       // normal prompt path. A client-supplied id keeps retries idempotent.
-      if (entry.pendingPromptCount === 0) {
-        // `queueOnly` callers (live steering) drive the next turn themselves:
-        // a promoted message would run as a bare prompt with no collector
-        // forwarding its response to them or arming a deadline.
-        if (options?.queueOnly) {
+      // A child-driven Goal turn never crosses the `session/prompt` RPC
+      // boundary, so `pendingPromptCount` stays 0 for its whole duration —
+      // but the child drains THIS queue between tool batches from inside that
+      // turn, so the session is genuinely busy and the message belongs in the
+      // queue. Without `goalTurnActive` here every mid-turn insert during a
+      // Goal turn is rejected as idle even though the client enables the
+      // affordance (Goal turns are non-idle in `hasActivePrompt` summaries).
+      if (entry.pendingPromptCount === 0 && entry.goalTurnActive !== true) {
+        // Both modes refuse new ownership once idle. `queueOnly` callers (live
+        // steering) additionally drive the next turn themselves: a promoted
+        // message would have no collector forwarding its response or deadline.
+        if (options?.queueOnly || options?.rejectIfIdle) {
           writeStderrLine(
             `[mid-turn] session=${JSON.stringify(entry.sessionId)} rejected id ${JSON.stringify(messageId)}: session idle`,
           );
           return { accepted: false };
         }
-        promoteMidTurnMessage(entry, messageId, trimmed, originatorClientId);
+        promoteMidTurnMessage(
+          entry,
+          messageId,
+          trimmed,
+          originatorClientId,
+          mediaBlocks.length > 0 ? mediaBlocks : undefined,
+        );
         return { accepted: true, messageId };
       }
       // Bound the drain queue. Rejected requests remain unowned.
@@ -9038,6 +11436,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const queuedMessage: MidTurnQueueEntry = {
         messageId,
         text: trimmed,
+        ...(mediaBlocks.length > 0 ? { content: mediaBlocks } : {}),
         originatorClientId,
         ...(options?.queueOnly
           ? {
@@ -9166,6 +11565,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           .map((message) => ({
             messageId: message.messageId,
             text: message.text,
+            // Carry the media blocks so a refreshed client can rebuild the
+            // queued row with its attachments (the snapshot is the only
+            // recovery source once the client's in-memory copy is gone).
+            ...(message.content ? { content: message.content } : {}),
           })),
         settledMessageIds: [...entry.settledMidTurnMessageIds],
         promotedMessageIds: [...entry.promotedMidTurnMessageIds],
@@ -9420,9 +11823,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : output;
 
         try {
-          await entry.connection.extMethod(
-            SERVE_CONTROL_EXT_METHODS.sessionShellHistory,
-            { sessionId, command, output: historyOutput, exitCode },
+          await withTimeout(
+            Promise.race([
+              entry.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.sessionShellHistory,
+                { sessionId, command, output: historyOutput, exitCode },
+              ),
+              getTransportClosedReject(entry),
+            ]),
+            initTimeoutMs,
+            'sessionShellHistory',
           );
         } catch (err) {
           writeServeDebugLine(
@@ -9474,10 +11884,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId,
       );
 
-      let response: Record<string, unknown>;
-      try {
-        response = (await Promise.race([
-          withTimeout(
+      // Admission-time check: a rewind queued behind an active prompt runs
+      // after the prompt's `finally` clears the busy flags, and client-side
+      // timeouts cannot cancel queued work — the rewind would truncate
+      // history after the caller was told it failed. The agent-side
+      // `isTurnIdle()` guard never fires because the queue guarantees the turn
+      // is over before the rewind reaches the agent. Reject synchronously,
+      // matching branchSession and launchSessionForkAgent.
+      if (entry.pendingPromptCount > 0 || entry.promptActive) {
+        throw new SessionBusyError(
+          sessionId,
+          'Cannot rewind while a prompt is running',
+        );
+      }
+
+      const rewindResult = entry.promptQueue.then(async () => {
+        if (entry.closing) {
+          throw new SessionNotFoundError(sessionId, 'The session is closing');
+        }
+        let response: Record<string, unknown>;
+        try {
+          // ACP cannot cancel a rewind after dispatch. Keep the queue until
+          // its real outcome is known so a caller never sees a timeout
+          // followed by an unobserved history truncation + file restores —
+          // same hazard the branch path documents.
+          response = (await Promise.race([
             entry.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.sessionRewind,
               {
@@ -9486,107 +11917,117 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 rewindFiles: req.rewindFiles !== false,
               },
             ),
-            initTimeoutMs,
-            SERVE_CONTROL_EXT_METHODS.sessionRewind,
-          ),
-          getTransportClosedReject(entry),
-        ])) as Record<string, unknown>;
-      } catch (err) {
-        const data = (err as { data?: unknown })?.data;
-        if (data && typeof data === 'object' && 'errorKind' in data) {
-          const kind = (data as { errorKind: string }).errorKind;
-          const msg = (err as { message?: string })?.message ?? 'Rewind failed';
-          if (kind === 'session_busy') {
-            throw new SessionBusyError(sessionId, msg);
+            getTransportClosedReject(entry),
+          ])) as Record<string, unknown>;
+        } catch (err) {
+          const data = (err as { data?: unknown })?.data;
+          if (data && typeof data === 'object' && 'errorKind' in data) {
+            const kind = (data as { errorKind: string }).errorKind;
+            const msg =
+              (err as { message?: string })?.message ?? 'Rewind failed';
+            if (kind === 'session_busy') {
+              throw new SessionBusyError(sessionId, msg);
+            }
+            if (kind === 'invalid_rewind_target') {
+              throw new InvalidRewindTargetError(sessionId, msg);
+            }
           }
-          if (kind === 'invalid_rewind_target') {
-            throw new InvalidRewindTargetError(sessionId, msg);
-          }
+          throw err;
         }
-        throw err;
-      }
 
-      const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
-      const filesChanged = (response['filesChanged'] as string[]) ?? [];
-      const filesFailed = (response['filesFailed'] as string[]) ?? [];
-      const artifactSnapshot = restoredArtifactSnapshotFromState(
-        response as BridgeSessionState,
-      );
-      const artifactSnapshotUnavailable = artifactSnapshotUnavailableReason(
-        response as BridgeSessionState,
-      );
-      const beforeArtifacts = (await entry.artifacts.list()).artifacts;
-      const shouldRestoreArtifactSnapshot =
-        artifactSnapshot !== undefined &&
-        artifactSnapshotUnavailable === undefined;
-      const artifactRestoreWarnings =
-        artifactSnapshotUnavailable !== undefined
-          ? [
-              `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
-            ]
-          : shouldRestoreArtifactSnapshot
-            ? await entry.artifacts.restore(artifactSnapshot, {
-                preserveLiveEphemeral: true,
-              })
-            : [];
-      const artifactRestoreFailed = artifactRestoreWarnings.some(
-        isArtifactRestoreFailureWarning,
-      );
-      const shouldRecordArtifactSnapshot =
-        shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
-      const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
-        ? await entry.artifacts.recordSnapshot()
-        : [];
-      const artifactWarnings = [
-        ...artifactRestoreWarnings,
-        ...artifactSnapshotWarnings,
-      ];
-      for (const warning of artifactRestoreWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
-            warning,
-          )}`,
-        );
-      }
-      for (const warning of artifactSnapshotWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=rewind_snapshot_warning warning=${JSON.stringify(
-            warning,
-          )}`,
-        );
-      }
-      const afterArtifacts = (await entry.artifacts.list()).artifacts;
-      publishArtifactChanges(
-        entry,
-        artifactReseedChanges(beforeArtifacts, afterArtifacts),
-        originatorClientId,
-      );
-      try {
-        entry.events.publish({
-          type: 'session_rewound',
-          data: {
-            sessionId,
-            promptId: req.promptId,
-            targetTurnIndex,
-            filesChanged,
-            filesFailed,
-            ...(artifactWarnings.length > 0
-              ? { warnings: artifactWarnings }
-              : {}),
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
-      } catch {
-        /* bus closed */
-      }
+        entry.terminalTurnStatuses.clear();
+        entry.enrichedTerminalPromptIds.clear();
+        entry.rewindGeneration += 1;
 
-      return {
-        rewound: filesFailed.length === 0,
-        targetTurnIndex,
-        filesChanged,
-        filesFailed,
-        ...(artifactWarnings.length > 0 ? { warnings: artifactWarnings } : {}),
-      };
+        const targetTurnIndex = (response['targetTurnIndex'] as number) ?? 0;
+        const filesChanged = (response['filesChanged'] as string[]) ?? [];
+        const filesFailed = (response['filesFailed'] as string[]) ?? [];
+        const artifactSnapshot = restoredArtifactSnapshotFromState(
+          response as BridgeSessionState,
+        );
+        const artifactSnapshotUnavailable = artifactSnapshotUnavailableReason(
+          response as BridgeSessionState,
+        );
+        const beforeArtifacts = (await entry.artifacts.list()).artifacts;
+        const shouldRestoreArtifactSnapshot =
+          artifactSnapshot !== undefined &&
+          artifactSnapshotUnavailable === undefined;
+        const artifactRestoreWarnings =
+          artifactSnapshotUnavailable !== undefined
+            ? [
+                `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
+              ]
+            : shouldRestoreArtifactSnapshot
+              ? await entry.artifacts.restore(artifactSnapshot, {
+                  preserveLiveEphemeral: true,
+                })
+              : [];
+        const artifactRestoreFailed = artifactRestoreWarnings.some(
+          isArtifactRestoreFailureWarning,
+        );
+        const shouldRecordArtifactSnapshot =
+          shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
+        const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
+          ? await entry.artifacts.recordSnapshot()
+          : [];
+        const artifactWarnings = [
+          ...artifactRestoreWarnings,
+          ...artifactSnapshotWarnings,
+        ];
+        for (const warning of artifactRestoreWarnings) {
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
+              warning,
+            )}`,
+          );
+        }
+        for (const warning of artifactSnapshotWarnings) {
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=rewind_snapshot_warning warning=${JSON.stringify(
+              warning,
+            )}`,
+          );
+        }
+        const afterArtifacts = (await entry.artifacts.list()).artifacts;
+        publishArtifactChanges(
+          entry,
+          artifactReseedChanges(beforeArtifacts, afterArtifacts),
+          originatorClientId,
+        );
+        try {
+          entry.events.publish({
+            type: 'session_rewound',
+            data: {
+              sessionId,
+              promptId: req.promptId,
+              targetTurnIndex,
+              filesChanged,
+              filesFailed,
+              ...(artifactWarnings.length > 0
+                ? { warnings: artifactWarnings }
+                : {}),
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        } catch {
+          /* bus closed */
+        }
+
+        return {
+          rewound: filesFailed.length === 0,
+          targetTurnIndex,
+          filesChanged,
+          filesFailed,
+          ...(artifactWarnings.length > 0
+            ? { warnings: artifactWarnings }
+            : {}),
+        };
+      });
+      entry.promptQueue = rewindResult.then(
+        () => undefined,
+        () => undefined,
+      );
+      return rewindResult;
     },
 
     async manageMcpServer(serverName, action, originatorClientId) {
@@ -9990,6 +12431,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           closingChannel,
           `force kill closing session ${JSON.stringify(sessionId)}`,
         );
+        await entry.attachments.close().catch((releaseError) => {
+          writeStderrLine(
+            `qwen serve: failed to close attachments for killed session ${JSON.stringify(sessionId)}: ${releaseError instanceof Error ? releaseError.message : String(releaseError)}`,
+          );
+        });
         return true;
       }
       entry.closing = true;
@@ -10011,6 +12457,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           timeoutMs: initTimeoutMs,
         });
       } catch (error) {
+        // A definitive refusal means the child is alive and kept the session:
+        // it already holds its own close gate (a cd or restore in progress —
+        // child-side state the daemon cannot see). Escalating that to a
+        // channel kill would take every sibling session down for a close
+        // that is already proceeding. Leave the kill pending instead; the
+        // deferred tombstone completes it on the next settle event.
+        if (isDefinitiveAcpRequestError(error)) {
+          entry.closing = false;
+          return false;
+        }
         if (ci) {
           await killChannelWithLog(
             ci,
@@ -10078,6 +12534,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         /* bus already closed */
       }
       entry.events.close();
+      await entry.attachments.close().catch((error) => {
+        writeStderrLine(
+          `qwen serve: failed to close attachments for killed session ${JSON.stringify(sessionId)}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
       // Only kill the channel when no other sessions remain AND no
       // restore is in flight.
       // `pendingRestoreIds` covers in-flight `session/load` and
@@ -10159,6 +12620,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
       }
       for (const info of channels) {
+        info.channelLiveness?.stop();
         try {
           info.channel.killSync();
         } catch {
@@ -10182,6 +12644,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // entered the bridge.shutdown() phase fails fast instead of
         // spawning a child this teardown won't see.
         shuttingDown = true;
+        unregisterJournalGrowthSessionLimits?.();
         cancelIdleTimer();
         stopSessionReaper();
         const entries = Array.from(byId.values());
@@ -10198,7 +12661,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // `ensureChannel` past the gate would still see the dying
         // state and not attach).
         const channels = Array.from(aliveChannels);
-        for (const ci of channels) ci.isDying = true;
+        for (const ci of channels) {
+          ci.isDying = true;
+          ci.channelLiveness?.stop();
+        }
         // Drain mediator pending state before clearing byId so awaiting
         // `requestPermission` callers unwind. Each `forgetSession`
         // settles all matching pending as session_closed; the bridge's
@@ -10273,6 +12739,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           : Promise.resolve();
         const teardownResults = await Promise.allSettled([
           ...channels.map((ci) => ci.channel.kill()),
+          ...[...byId.values()].map((entry) => entry.attachments.close()),
           ...inFlightSessionAwaits,
           ...inFlightRestoreAwaits,
           inFlightChannelAwait,
@@ -10306,6 +12773,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
   };
+
+  sendTrackedPrompt.fn = bridgeApi.sendPrompt.bind(bridgeApi);
 
   return bridgeApi;
 }

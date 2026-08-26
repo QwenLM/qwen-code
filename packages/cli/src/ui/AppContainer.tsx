@@ -78,6 +78,7 @@ import {
   buildResumedHistoryItems,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
+import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
@@ -119,6 +120,7 @@ const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
 import { useWakeRepaint } from './hooks/use-wake-repaint.js';
+import type { MicrophonePermission } from './hooks/use-voice-input.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -156,8 +158,9 @@ import * as fs from 'node:fs';
 import { basename } from 'node:path';
 import {
   formatSessionWindowTitle,
+  titleStatusPrefix,
   writeTerminalTitle,
-} from '../utils/windowTitle.js';
+} from './utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
@@ -167,12 +170,18 @@ import {
 } from './hooks/useGeminiStream.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
-import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
+import {
+  CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
+  consumesContextAnnouncementLatch,
+  isBtwCommand,
+  isContextFilesAnnouncement,
+  isSlashCommand,
+} from './utils/commandUtils.js';
 import {
   detectWorkflowKeyword,
   buildWorkflowSteeringNotice,
 } from './utils/workflow-keyword.js';
-import { parseSlashCommand } from '../utils/commands.js';
+import { parseSlashCommand } from './commands/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { ExtensionRefreshState } from '../config/extension-refresh-state.js';
@@ -192,7 +201,7 @@ import { useCommandMigration } from './hooks/useCommandMigration.js';
 import { migrateTomlCommands } from '../services/command-migration-tool.js';
 import { sendNotification } from '../services/notificationService.js';
 import { type UpdateObject } from './utils/updateCheck.js';
-import { setUpdateHandler } from '../utils/handleAutoUpdate.js';
+import { setUpdateHandler } from './handleAutoUpdate.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import {
   useMessageQueue,
@@ -224,8 +233,8 @@ import {
 } from './contexts/BackgroundTaskViewContext.js';
 import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
-import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../utils/chat-recording-failure.js';
-import { buildPermissionSuggestions } from '../utils/permission-suggestions.js';
+import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../nonInteractive/chat-recording-failure.js';
+import { buildPermissionSuggestions } from '../nonInteractive/permission-suggestions.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
@@ -843,6 +852,39 @@ export const AppContainer = (props: AppContainerProps) => {
    * parent checkout. (PR #4174 review #3259975249.)
    */
   const pendingWorktreeNoticeRef = useRef<string | null>(null);
+  // One-shot announcement of the context files (QWEN.md / context.fileName)
+  // attached to the system prompt, shown alongside the first real prompt so
+  // users can verify discovery (e.g., catch typos in context.fileName)
+  // without digging into debug logs (#5267).
+  const contextFilesAnnouncedRef = useRef(false);
+  // /clear and other same-process session switches wipe the emitted INFO
+  // item without remounting this component while context files stay
+  // attached, so re-arm the latch for the new session's first prompt.
+  useEffect(() => {
+    contextFilesAnnouncedRef.current = false;
+  }, [sessionStats.sessionId]);
+  // Wrap loadHistory to reconcile the announcement latch after any history
+  // replacement (rewind, /restore, /resume of the current session). If the
+  // restored history contains a context-files announcement the latch is
+  // consumed (prevents duplicates); otherwise it's armed (allows
+  // re-announcement). This covers /restore and same-id /resume, which the
+  // sessionId effect does not catch because the id is unchanged.
+  // Destructure loadHistory so the useCallback can depend on the function
+  // (stable, empty-deps) instead of the whole historyManager object, whose
+  // identity changes on every history mutation — passing the wrapper into
+  // useSlashCommandProcessor would otherwise put `history` back into the
+  // commandContext useMemo deps (the historyRef pattern exists to avoid
+  // exactly that).
+  const { loadHistory: rawLoadHistory } = historyManager;
+  const loadHistoryWithLatchReconciliation = useCallback(
+    (newHistory: HistoryItem[]) => {
+      rawLoadHistory(newHistory);
+      contextFilesAnnouncedRef.current = newHistory.some(
+        isContextFilesAnnouncement,
+      );
+    },
+    [rawLoadHistory],
+  );
   const activeWorktree = useMemo(
     () =>
       worktreeSession
@@ -860,6 +902,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
+  // Dedup for the voice mic-permission notice. Held here rather than in
+  // Composer because dialogs (tool approvals, auth, settings) swap Composer
+  // out of the layout; a ref held there would reset on each swap and the
+  // notice would repeat on the next recording.
+  const voiceMicWarnedStatusRef = useRef<MicrophonePermission | null>(null);
   const lastTitleRef = useRef<string | null>(null);
   const [startupWarnings, setStartupWarnings] = useState(
     () => props.startupWarnings || [],
@@ -944,7 +991,7 @@ export const AppContainer = (props: AppContainerProps) => {
           collapseOnResume,
           collapsePreviewCount,
         );
-        historyManager.loadHistory(historyItems);
+        loadHistoryWithLatchReconciliation(historyItems);
 
         // Seed the prompt counter from the resumed conversation so new
         // promptIds don't collide with restored file history snapshots.
@@ -1428,6 +1475,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setThemeError,
     historyManager.addItem,
     initializationResult.themeError,
+    config,
   );
 
   const {
@@ -1487,7 +1535,12 @@ export const AppContainer = (props: AppContainerProps) => {
     openEditorDialog,
     handleEditorSelect,
     exitEditorDialog,
-  } = useEditorSettings(settings, setEditorError, historyManager.addItem);
+  } = useEditorSettings(
+    settings,
+    setEditorError,
+    historyManager.addItem,
+    config,
+  );
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
@@ -1582,6 +1635,10 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     settings,
     historyManager,
+    // Route the interactive /resume through the latch-reconciling wrapper
+    // so same-id resume (no sessionId change → no effect re-arm) still
+    // re-arms the latch when the rebuilt history has no announcement.
+    loadHistory: loadHistoryWithLatchReconciliation,
     startNewSession,
     clearPendingState: clearPendingStateFromRef,
     setSessionName,
@@ -1865,7 +1922,7 @@ export const AppContainer = (props: AppContainerProps) => {
     historyManager.history,
     historyManager.addItem,
     historyManager.clearItems,
-    historyManager.loadHistory,
+    loadHistoryWithLatchReconciliation,
     refreshStatic,
     toggleVimEnabled,
     isProcessing,
@@ -2008,6 +2065,7 @@ export const AppContainer = (props: AppContainerProps) => {
     if (config.isSafeMode()) {
       config.setUserMemory('');
       config.setGeminiMdFileCount(0);
+      config.setContextFilePaths([]);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry([], config.getWorkingDir()),
       );
@@ -2030,27 +2088,33 @@ export const AppContainer = (props: AppContainerProps) => {
       Date.now(),
     );
     try {
-      const { memoryContent, fileCount, conditionalRules, projectRoot } =
-        await loadHierarchicalGeminiMemory(
-          process.cwd(),
-          settings.merged.context?.loadFromIncludeDirectories
-            ? config.getWorkspaceContext().getDirectories()
-            : [],
-          config.getFileService(),
-          config.getExtensionContextFilePaths(),
-          config.isTrustedFolder(),
-          settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
-          config.getContextRuleExcludes(),
-          {
-            loadReason: 'refresh',
-            onInstructionsLoaded: createInstructionsLoadedCallback(() =>
-              config.getHookSystem(),
-            ),
-          },
-        );
+      const {
+        memoryContent,
+        fileCount,
+        contextFilePaths,
+        conditionalRules,
+        projectRoot,
+      } = await loadHierarchicalGeminiMemory(
+        config.getWorkingDir(),
+        settings.merged.context?.loadFromIncludeDirectories
+          ? config.getWorkspaceContext().getDirectories()
+          : [],
+        config.getFileService(),
+        config.getExtensionContextFilePaths(),
+        config.isTrustedFolder(),
+        settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
+        config.getContextRuleExcludes(),
+        {
+          loadReason: 'refresh',
+          onInstructionsLoaded: createInstructionsLoadedCallback(() =>
+            config.getHookSystem(),
+          ),
+        },
+      );
 
       config.setUserMemory(memoryContent);
       config.setGeminiMdFileCount(fileCount);
+      config.setContextFilePaths(contextFilePaths);
       config.setConditionalRulesRegistry(
         new ConditionalRulesRegistry(conditionalRules, projectRoot),
       );
@@ -2530,6 +2594,44 @@ export const AppContainer = (props: AppContainerProps) => {
         void handleSlashCommand('/quit');
         return;
       }
+      // Heuristically mirror the downstream input classification (see
+      // consumesContextAnnouncementLatch) so the latch is consumed by the
+      // submission most likely to start the first main model turn. This is a
+      // prediction, not an admission guarantee: rare post-admission aborts
+      // (ESC, expansion errors) and built-in submit_prompt commands without
+      // the modelInvocable flag are not re-armed here; consuming at the true
+      // admission choke point is a deeper refactor deferred for this feature.
+      // Known gap: /cd, /directory add, and performMemoryRefresh swap the
+      // attached context-file set within the same session but do not re-arm
+      // the latch, so the new file set is never announced after the first
+      // prompt consumes it. A self-healing latch that watches the
+      // context-file set would cover these centrally; deferred as a
+      // follow-up. (/restore and same-id /resume are handled by the
+      // loadHistory wrapper above.)
+      const trimmedPrompt = userPromptText.trim();
+      if (
+        !contextFilesAnnouncedRef.current &&
+        consumesContextAnnouncementLatch(trimmedPrompt, {
+          shellModeActive,
+          slashCommands,
+        })
+      ) {
+        const contextFilePaths = config.getContextFilePaths();
+        if (contextFilePaths.length > 0) {
+          // Consume the latch only when something was actually announced;
+          // files attached before the first prompt still get their one-shot
+          // notice. Files attached after (e.g. /directory add,
+          // performMemoryRefresh) are a known gap — see above.
+          contextFilesAnnouncedRef.current = true;
+          historyManager.addItem(
+            {
+              type: MessageType.INFO,
+              text: `${CONTEXT_FILES_ANNOUNCEMENT_PREFIX} ${contextFilePaths.join(', ')}`,
+            },
+            Date.now(),
+          );
+        }
+      }
       const recoveredAgentsNotice =
         !isSlashCommand(userPromptText) && !isBtwCommand(userPromptText)
           ? config.consumePendingRecoveredAgentsNotice()
@@ -2593,12 +2695,12 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void Promise.resolve(
-          submitQuery(
-            submittedValue,
-            SendMessageType.UserQuery,
-            undefined,
-            submittedPrompt === undefined ? undefined : { submittedPrompt },
-          ),
+          submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
+            ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            onAdmissionFailed: () => {
+              addMessage(submittedValue, true, submittedPrompt);
+            },
+          }),
         ).catch((error) => {
           debugLogger.warn('Failed to admit /btw submission', error);
         });
@@ -2752,6 +2854,7 @@ export const AppContainer = (props: AppContainerProps) => {
       historyManager,
       settings.merged.ui?.disableWorkflowKeywordTrigger,
       setBufferText,
+      shellModeActive,
       vimEnabled,
     ],
   );
@@ -3011,6 +3114,9 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleClearScreen = useCallback(() => {
     clearPendingStateRef.current();
+    // Ctrl-L wipes the emitted INFO item without a session switch, so re-arm
+    // the latch or the remaining attached files go unannounced afterwards.
+    contextFilesAnnouncedRef.current = false;
     historyManager.clearItems();
     clearScreen();
     remountStaticHistory();
@@ -3146,7 +3252,13 @@ export const AppContainer = (props: AppContainerProps) => {
       // causes transient heap peaks that trigger OOM (#4624).
       const conversationHistory = geminiClient.getHistoryTail(40, true);
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
+        // On by default: the schema declares `default: true`, but
+        // `mergeSettings` doesn't apply schema defaults, so an unset value is
+        // `undefined` and a `=== true` gate left the cache-aware fork as dead
+        // code unless the flag was explicitly set (#9230). Same treatment as
+        // `enableFollowupSuggestions` above — only an explicit `false` opts
+        // out.
+        enableCacheSharing: settings.merged.ui?.enableCacheSharing !== false,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -3655,11 +3767,13 @@ export const AppContainer = (props: AppContainerProps) => {
 
           // Strip suppressOnRestore flags and filter out collapse-summary items
           // so rewound items remain visible without stale summary text
-          const truncatedUi = expandCollapsedHistory(
-            originalHistory.filter((h) => h.id < userItem.id),
+          const truncatedUi = recoalesceFindingsHistoryItems(
+            expandCollapsedHistory(
+              originalHistory.filter((h) => h.id < userItem.id),
+            ),
           );
           clearPendingStateRef.current();
-          historyManager.loadHistory(truncatedUi);
+          loadHistoryWithLatchReconciliation(truncatedUi);
 
           refreshStatic();
 
@@ -3730,7 +3844,13 @@ export const AppContainer = (props: AppContainerProps) => {
         setIsRewindSelectorOpen(false);
       }
     },
-    [config, historyManager, refreshStatic, buffer],
+    [
+      config,
+      historyManager,
+      loadHistoryWithLatchReconciliation,
+      refreshStatic,
+      buffer,
+    ],
   );
 
   const handleDoubleEscRewind = useDoublePress(openRewindSelector, (pending) =>
@@ -4305,7 +4425,11 @@ export const AppContainer = (props: AppContainerProps) => {
     }
 
     const folderName = basename(config.getTargetDir());
-    const title = formatSessionWindowTitle(sessionName, folderName);
+    const title = formatSessionWindowTitle(
+      sessionName,
+      folderName,
+      titleStatusPrefix(streamingState),
+    );
 
     // Only update the title if it's different from the last value we set
     if (lastTitleRef.current !== title) {
@@ -4318,6 +4442,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // Exit cleanup is handled by setWindowTitle() in gemini.tsx → process.on('exit')
   }, [
     sessionName,
+    streamingState,
     settings.merged.ui?.hideWindowTitle,
     settings.merged.ui?.showStatusInTitle,
     config,
@@ -4443,6 +4568,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalWidth,
       terminalHeight,
       mainControlsRef,
+      voiceMicWarnedStatusRef,
       currentIDE,
       startupIdeConnectionStatus,
       updateInfo,
@@ -4587,6 +4713,7 @@ export const AppContainer = (props: AppContainerProps) => {
       terminalWidth,
       terminalHeight,
       mainControlsRef,
+      voiceMicWarnedStatusRef,
       currentIDE,
       startupIdeConnectionStatus,
       updateInfo,

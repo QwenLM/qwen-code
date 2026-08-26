@@ -26,6 +26,12 @@ The extension supports two explicit read adapters:
 - Generic HTTP Search V1 for an existing knowledge base, RAG service, or
   enterprise search endpoint.
 
+Provider teams that want to own and distribute their integration independently
+use the portable MCP contract in
+[External Context Provider Extensions](./external-context-provider-extensions.md).
+That profile reuses Qwen Extensions rather than adding dynamic adapters to this
+private process.
+
 The default extension manifest remains search-only. Generic knowledge-base
 writes, personal memory, and managed replacement of Qwen's native memory remain
 out of scope. On-demand and auto-recall are mutually exclusive retrieval

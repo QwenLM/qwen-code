@@ -6,6 +6,14 @@
 
 import type { Stream } from '@agentclientprotocol/sdk';
 
+export interface AcpChannelTransportGuard {
+  maxActiveHandlers: number;
+  maxActiveHandlerBytes: number;
+  reserveOutboundOperation(value: unknown): () => void;
+  reservePreparedResponse(value: unknown): void;
+  fail(error: unknown): void;
+}
+
 /**
  * One ACP NDJSON channel to a single agent. Tests inject a fake by
  * replacing the channel factory; production uses
@@ -19,6 +27,15 @@ import type { Stream } from '@agentclientprotocol/sdk';
  */
 export interface AcpChannel {
   stream: Stream;
+  /**
+   * Resolves once when the transport becomes permanently unusable before the
+   * underlying process has exited. The bridge uses this to stop admitting work
+   * to a child that is still inside its termination grace period. Providers
+   * that expose this signal are also responsible for starting teardown.
+   */
+  transportFailed?: Promise<unknown>;
+  /** Present only on daemon-owned bounded transports. */
+  transportGuard?: AcpChannelTransportGuard;
   /** Best-effort terminate; resolves when teardown is complete. */
   kill(): Promise<void>;
   /**

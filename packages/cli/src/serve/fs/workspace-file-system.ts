@@ -38,7 +38,12 @@ import {
   type AuditPublisher,
   createAuditPublisher,
 } from './audit.js';
-import { FsError, wrapAsFsError, type FsErrorKind } from './errors.js';
+import {
+  FsError,
+  isFsError,
+  wrapAsFsError,
+  type FsErrorKind,
+} from './errors.js';
 import {
   assertCursorMatchesFile,
   decodeTextCursor,
@@ -55,6 +60,7 @@ import {
   BINARY_PROBE_BYTES,
   MAX_READ_BYTES,
   MAX_TEXT_SCAN_BYTES,
+  MAX_UPLOAD_BYTES,
   assertTrustedForIntent,
   enforceReadSize,
   enforceWriteSize,
@@ -194,6 +200,47 @@ export type WriteMode = 'create' | 'replace' | 'overwrite';
  */
 export type AtomicWriteMode = Exclude<WriteMode, 'overwrite'>;
 
+/**
+ * Mode policy for NEW files created by text writes
+ * (`writeTextAtomic` / `writeTextOverwrite` / `edit` / `editAtomic`
+ * and the same-host built-in-tool write route).
+ *
+ *   - `'owner'` (default) — owner-only `0o600`, independent of the
+ *     daemon's umask. This is the long-standing fail-closed posture:
+ *     a fresh agent-created file is never world/group readable by
+ *     accident, regardless of how permissive the process umask is.
+ *   - `'system'` — the standard POSIX `0o666 & ~umask` handling, so
+ *     agent-created files follow the daemon process's umask like any
+ *     other process on the machine (e.g. `0664` under `umask 0002`).
+ *     Operators running the daemon under a supervisor that sets
+ *     `UMask=` (systemd drop-ins, containers) can opt in via
+ *     `QWEN_SERVE_NEW_FILE_MODE=system`.
+ *
+ * Existing-file mode preservation is unaffected by either policy —
+ * editing a `0600` secret keeps it `0600`, an executable keeps `+x`.
+ * Binary uploads (`writeBytesAtomic`) always create at `0o600`
+ * regardless of this policy.
+ */
+export type NewFileModePolicy = 'owner' | 'system';
+
+/** Owner-only mode bits applied to new files under the default policy. */
+export const OWNER_ONLY_NEW_FILE_MODE = 0o600;
+
+/**
+ * Resolve the mode bits for a NEW file under the given policy.
+ * `umask` is read lazily only when the `system` policy consumes it; the
+ * default `owner` policy never touches the process umask. Tests pass an
+ * explicit value to stay deterministic without mutating process state.
+ */
+export function resolveNewFileModeBits(
+  policy: NewFileModePolicy,
+  umask?: number,
+): number {
+  return policy === 'system'
+    ? 0o666 & ~(umask ?? process.umask())
+    : OWNER_ONLY_NEW_FILE_MODE;
+}
+
 export interface WriteTextAtomicOptions extends WriteTextFileOptions {
   mode: AtomicWriteMode;
   expectedHash?: ContentHash;
@@ -256,10 +303,12 @@ export interface WorkspaceFileSystem {
   /**
    * Unconditional create-or-overwrite (no `expectedHash` gate). Atomic
    * temp+rename with target-mode preservation: a `0o600` secret survives
-   * the edit at `0o600`; a new file is created at `0o600` (NOT umask
-   * default). Used by protocols whose wire format carries no client-side
-   * hash — e.g. ACP `WriteTextFileRequest` is just `{path, content,
-   * sessionId}` so the CAS-gated `writeTextAtomic` doesn't fit.
+   * the edit at `0o600`. New files are created under the factory's
+   * `NewFileModePolicy` — `0o600` by default, or the umask-derived
+   * `0o666 & ~umask` under `'system'`. Used by protocols whose wire
+   * format carries no client-side hash — e.g. ACP `WriteTextFileRequest`
+   * is just `{path, content, sessionId}` so the CAS-gated
+   * `writeTextAtomic` doesn't fit.
    *
    * Symlinks at the target are rejected (`symlink_escape`) consistent
    * with `writeTextAtomic` and HTTP `POST /file`.
@@ -286,6 +335,34 @@ export interface WorkspaceFileSystem {
     newText: string,
     opts: { expectedHash: ContentHash },
   ): Promise<WriteOutcome>;
+  /**
+   * Single-purpose no-clobber binary create. Writes `data` atomically
+   * (temp + publish) at `p`; it cannot modify or replace existing file
+   * content. An existing target (including a final-component symlink)
+   * throws `file_already_exists` (`symlink_escape` for a symlink). The
+   * caller is responsible for choosing a free name; the upload route owns
+   * the numbered-candidate policy; the collision is expected control flow
+   * there and emits no `fs.denied` audit event. `data` is size-checked
+   * against `MAX_UPLOAD_BYTES` here — the binary-ingress policy, NOT the
+   * `MAX_WRITE_BYTES` text default. Trust and generation guards are enforced
+   * at entry, inside the path lock, and at the final publish checkpoint.
+   * New files are created at `0o600`.
+   */
+  writeBytesAtomic(
+    p: ResolvedPath,
+    data: Buffer,
+  ): Promise<{ sizeBytes: number; hash: ContentHash }>;
+  /**
+   * Create a directory at `p` (already resolved within the workspace).
+   * `recursive: true` also creates missing intermediate components; every
+   * created component is re-checked with `lstat` right after `mkdir` and
+   * each parent is re-checked before the next `mkdir`, so a symlink
+   * swapped in mid-creation is rejected (`symlink_escape`) rather than
+   * followed. An existing directory is left untouched; an existing
+   * non-directory or symlink at `p` is rejected. Directories are created
+   * at `0o755` (modulo the process umask).
+   */
+  mkdir(p: ResolvedPath, opts?: { recursive?: boolean }): Promise<void>;
 }
 
 /**
@@ -323,6 +400,14 @@ export interface CreateWorkspaceFileSystemFactoryDeps {
   pathLocks?: PathMutexRegistry;
   /** Runtime-generation guard checked at mutation commit points. */
   generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /**
+   * Mode policy for NEW files created by text writes. Defaults to
+   * `'owner'` (`0o600`, umask-independent). `'system'` follows the
+   * daemon process's umask (`0o666 & ~umask`). Production wiring
+   * derives this from `QWEN_SERVE_NEW_FILE_MODE`; see
+   * `NewFileModePolicy`.
+   */
+  newFileMode?: NewFileModePolicy;
 }
 
 /**
@@ -368,6 +453,7 @@ export function createWorkspaceFileSystemFactory(
   });
   const lowFs = new StandardFileSystemService();
   const pathLocks = deps.pathLocks ?? new PathMutexRegistry();
+  const newFileMode: NewFileModePolicy = deps.newFileMode ?? 'owner';
 
   const forRequest = (ctx: RequestContext): WorkspaceFileSystem =>
     new WorkspaceFileSystemImpl({
@@ -379,6 +465,7 @@ export function createWorkspaceFileSystemFactory(
       lowFs,
       pathLocks,
       generationGuard: deps.generationGuard,
+      newFileMode,
     });
 
   return {
@@ -416,6 +503,7 @@ export function createWorkspaceFileSystemFactory(
             ctx,
             pathLocks,
             generationGuard: deps.generationGuard,
+            newFileMode,
           });
           return;
         } catch (outsideErr) {
@@ -447,6 +535,8 @@ interface SameHostToolTextWriteDeps {
   ctx: RequestContext;
   pathLocks: PathMutexRegistry;
   generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /** New-file mode policy for the external host-writer route. */
+  newFileMode: NewFileModePolicy;
 }
 
 async function writeSameHostToolTextOutsideWorkspace(
@@ -469,6 +559,7 @@ async function writeSameHostToolTextOutsideWorkspace(
       content,
       mode: 'overwrite',
       meta,
+      newFileModeBits: resolveNewFileModeBits(deps.newFileMode),
       assertGenerationOpen: () => deps.generationGuard?.assertOpen(),
     });
     deps.audit.recordAccess(deps.ctx, {
@@ -575,6 +666,8 @@ interface ImplDeps {
   lowFs: StandardFileSystemService;
   pathLocks: PathMutexRegistry;
   generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
+  /** Mode policy for NEW files created by text writes. */
+  newFileMode: NewFileModePolicy;
 }
 
 function assertNoNestedWorkspaces(workspaces: readonly string[]): void {
@@ -1148,6 +1241,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             mode: opts.mode,
             expectedHash: opts.expectedHash,
             meta,
+            newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
             assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
@@ -1251,6 +1345,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             content,
             mode: 'overwrite',
             meta,
+            newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
             assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
@@ -1388,6 +1483,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             mode: 'replace',
             expectedHash: opts.expectedHash,
             meta,
+            newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
             assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
@@ -1459,6 +1555,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           content: next,
           mode: 'overwrite',
           meta: mergeWriteMeta(snapshot.meta, {}),
+          newFileModeBits: resolveNewFileModeBits(this.deps.newFileMode),
           assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
         });
         const verdict = this.ignoreVerdict(p, 'file');
@@ -1476,6 +1573,79 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     }
   }
 
+  async writeBytesAtomic(
+    p: ResolvedPath,
+    data: Buffer,
+  ): Promise<{ sizeBytes: number; hash: ContentHash }> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      enforceWriteSize(data.length, MAX_UPLOAD_BYTES);
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          await assertCreateTargetAbsent(p as string);
+          this.deps.generationGuard?.assertOpen();
+          const result = await atomicPublishResolvedFile({
+            target: p,
+            buf: data,
+            mode: 'create',
+            assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
+          });
+          const verdict = this.ignoreVerdict(p, 'file');
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'write',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: result.sizeBytes,
+            matchedIgnore: verdict.ignored ? verdict.category : undefined,
+          });
+          return { sizeBytes: result.sizeBytes, hash: result.hash };
+        },
+      );
+      return out;
+    } catch (err) {
+      // A no-clobber collision is the upload route's expected candidate-loop
+      // outcome (it numbers on), not a boundary policy denial; auditing it
+      // would emit one `fs.denied` per skipped occupied name.
+      throw this.recordAndWrap(err, 'write', p as string, {
+        audit: !(isFsError(err) && err.kind === 'file_already_exists'),
+      });
+    }
+  }
+
+  async mkdir(p: ResolvedPath, opts?: { recursive?: boolean }): Promise<void> {
+    const start = performance.now();
+    try {
+      this.deps.generationGuard?.assertOpen();
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          await ensureResolvedDirectory(p as string, {
+            recursive: opts?.recursive ?? false,
+            assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
+          });
+          this.deps.generationGuard?.assertOpen();
+          const verdict = this.ignoreVerdict(p, 'directory');
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'write',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: 0,
+            operation: 'mkdir',
+            matchedIgnore: verdict.ignored ? verdict.category : undefined,
+          });
+          return undefined;
+        },
+      );
+      return out;
+    } catch (err) {
+      throw this.recordAndWrap(err, 'write', p as string);
+    }
+  }
+
   /**
    * Coerce an arbitrary thrown value into an `FsError`, emit the
    * matching `fs.denied` audit event, and return the typed error
@@ -1489,7 +1659,12 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
    *   - routes can still rely on `instanceof FsError`
    *     for their `sendFsError` serializer.
    */
-  private recordAndWrap(err: unknown, intent: Intent, input: string): Error {
+  private recordAndWrap(
+    err: unknown,
+    intent: Intent,
+    input: string,
+    opts?: { audit?: boolean },
+  ): Error {
     if (
       err instanceof Error &&
       'code' in err &&
@@ -1498,6 +1673,9 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       return err;
     }
     const fs = wrapAsFsError(err);
+    if (opts?.audit === false) {
+      return fs;
+    }
     this.deps.audit.recordDenied(this.deps.ctx, {
       intent,
       input,
@@ -1532,6 +1710,13 @@ interface AtomicWriteTextInput {
   mode: WriteMode;
   expectedHash?: ContentHash;
   meta: ReadMeta;
+  /**
+   * Mode bits for a NEW target (existing targets always preserve their
+   * on-disk mode). Undefined falls back to the owner-only `0o600`
+   * default; callers wired with a `NewFileModePolicy` pass
+   * `resolveNewFileModeBits(policy)` here.
+   */
+  newFileModeBits?: number;
   assertGenerationOpen?: () => void;
 }
 
@@ -2177,7 +2362,137 @@ function mergeWriteMeta(
 async function atomicWriteTextResolvedFile(
   input: AtomicWriteTextInput,
 ): Promise<AtomicWriteTextOutcome> {
-  const target = input.target as string;
+  const buf = await encodeTextFileContentAsync(
+    input.target,
+    input.content,
+    buildWriteMeta(input.meta),
+  );
+  // Text writes keep the `MAX_WRITE_BYTES` policy. The byte upload path
+  // validates its own buffer against `MAX_UPLOAD_BYTES` before calling the
+  // shared publisher, so the two policies stay distinct.
+  enforceWriteSize(buf.length);
+  return atomicPublishResolvedFile({
+    target: input.target,
+    buf,
+    mode: input.mode,
+    expectedHash: input.expectedHash,
+    newFileModeBits: input.newFileModeBits,
+    assertGenerationOpen: input.assertGenerationOpen,
+  });
+}
+
+/**
+ * Ensure `target` exists as a real directory (never a symlink). With
+ * `recursive`, walk up to the deepest existing ancestor and create each
+ * missing component one at a time, verifying with `lstat` immediately after
+ * each `mkdir` — and checking each component's parent before the next
+ * `mkdir` — so a symlink swapped in mid-creation is rejected instead of
+ * followed. `target` must already be resolved within the workspace; the
+ * caller holds the path lock.
+ */
+async function ensureResolvedDirectory(
+  target: string,
+  opts: {
+    recursive: boolean;
+    assertGenerationOpen: () => void;
+  },
+): Promise<void> {
+  const assertRealDirectory = async (p: string): Promise<void> => {
+    const st = await fsp.lstat(p);
+    if (st.isSymbolicLink()) {
+      throw new FsError('symlink_escape', `directory path is a symlink: ${p}`, {
+        hint: 're-resolve the target after detecting symlink swaps',
+      });
+    }
+    if (!st.isDirectory()) {
+      throw new FsError(
+        'parse_error',
+        `path exists and is not a directory: ${p}`,
+      );
+    }
+  };
+  // `lstat` does not follow the FINAL component, so the per-component
+  // re-check above cannot see a symlink swapped into an intermediate
+  // ancestor mid-creation; reject one before the next `mkdir` would
+  // create through it.
+  const assertParentNotSymlink = async (p: string): Promise<void> => {
+    const parent = path.dirname(p);
+    const st = await fsp.lstat(parent);
+    if (st.isSymbolicLink()) {
+      throw new FsError(
+        'symlink_escape',
+        `directory parent is a symlink: ${parent}`,
+        { hint: 're-resolve the target after detecting symlink swaps' },
+      );
+    }
+  };
+  try {
+    await assertRealDirectory(target);
+    return;
+  } catch (err) {
+    if (isFsError(err)) throw err;
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+  if (!opts.recursive) {
+    opts.assertGenerationOpen();
+    await assertParentNotSymlink(target);
+    try {
+      await fsp.mkdir(target, { mode: 0o755 });
+    } catch (err) {
+      // Lost a create race; the winner may be a directory we can reuse.
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    await assertRealDirectory(target);
+    return;
+  }
+  const missing: string[] = [];
+  let current = target;
+  while (true) {
+    try {
+      await assertRealDirectory(current);
+      break;
+    } catch (err) {
+      if (isFsError(err)) throw err;
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      missing.push(current);
+      const parent = path.dirname(current);
+      if (parent === current) throw err;
+      current = parent;
+    }
+  }
+  for (const entry of missing.reverse()) {
+    opts.assertGenerationOpen();
+    await assertParentNotSymlink(entry);
+    try {
+      await fsp.mkdir(entry, { mode: 0o755 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    await assertRealDirectory(entry);
+  }
+}
+
+/**
+ * Shared atomic temp+publish core. `buf` MUST already be size-validated by
+ * the caller against its own policy (`MAX_WRITE_BYTES` for text,
+ * `MAX_UPLOAD_BYTES` for binary uploads). This function does not re-check
+ * size; it only handles the filesystem mechanics: parent validation, temp
+ * reservation, precondition checks, generation gating, and publication.
+ */
+async function atomicPublishResolvedFile(input: {
+  target: string;
+  buf: Buffer;
+  mode: WriteMode;
+  expectedHash?: ContentHash;
+  /**
+   * Mode bits for a NEW target. Existing targets preserve their on-disk
+   * mode regardless. Undefined falls back to the owner-only `0o600`
+   * default (`OWNER_ONLY_NEW_FILE_MODE`).
+   */
+  newFileModeBits?: number;
+  assertGenerationOpen?: () => void;
+}): Promise<AtomicWriteTextOutcome> {
+  const target = input.target;
   const parent = path.dirname(target);
   const parentStat = await fsp.lstat(parent);
   // Defense-in-depth against a parent-symlink swap. A full fix requires
@@ -2195,30 +2510,46 @@ async function atomicWriteTextResolvedFile(
       `parent path is not a directory: ${parent}`,
     );
   }
-  const tmpPath = path.join(
-    parent,
-    `.${path.basename(target)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`,
-  );
+  const tmpSuffix = `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  // The temp name is `.<basename><suffix>`. When the target basename is itself
+  // near the filesystem NAME_MAX (255 bytes) — a 255-byte upload, say — the
+  // untruncated temp name would exceed it and `open()` would fail ENAMETOOLONG
+  // before the atomic publish could run. Cap the basename portion (UTF-8-safe).
+  const tmpNameMaxBytes = 255;
+  const tmpBaseMaxBytes =
+    tmpNameMaxBytes - 1 - Buffer.byteLength(tmpSuffix, 'utf-8');
+  let tmpBase = path.basename(target);
+  if (Buffer.byteLength(tmpBase, 'utf-8') > tmpBaseMaxBytes) {
+    tmpBase = safeUtf8Truncate(
+      Buffer.from(tmpBase, 'utf-8'),
+      tmpBaseMaxBytes,
+    ).toString('utf-8');
+  }
+  const tmpPath = path.join(parent, `.${tmpBase}${tmpSuffix}`);
   let tempLive = false;
   let tempHandle: Awaited<ReturnType<typeof fsp.open>> | undefined;
   let tempStat: Awaited<ReturnType<typeof fsp.lstat>> | undefined;
   try {
     tempHandle = await reserveTempFile(tmpPath);
     tempLive = true;
-    const encoded = await writeEncodedTextTemp({
-      targetPath: target,
+    const written = await writeBufferToTemp({
       tmpPath,
-      content: input.content,
-      meta: input.meta,
+      buf: input.buf,
       handle: tempHandle,
     });
-    tempStat = encoded.stat;
+    tempStat = written.stat;
     const targetState = await assertAtomicTargetPrecondition({
       target,
       mode: input.mode,
       expectedHash: input.expectedHash,
     });
-    await chmodHandleBestEffort(tempHandle, targetState.mode ?? 0o600);
+    // Existing targets preserve their on-disk mode; NEW targets get the
+    // caller's policy bits (umask-following `0o666 & ~umask` under the
+    // `system` policy) or the owner-only `0o600` default.
+    await chmodHandleBestEffort(
+      tempHandle,
+      targetState.mode ?? input.newFileModeBits ?? OWNER_ONLY_NEW_FILE_MODE,
+    );
     await assertTempPathMatchesStat(tmpPath, tempStat);
     await tempHandle.close();
     tempHandle = undefined;
@@ -2231,7 +2562,7 @@ async function atomicWriteTextResolvedFile(
     }
     tempLive = false;
     await fsyncParentDirBestEffort(parent);
-    return encoded;
+    return written;
   } catch (err) {
     await tempHandle?.close().catch(() => undefined);
     if (tempLive) {
@@ -2251,20 +2582,17 @@ async function reserveTempFile(
   return fsp.open(tmpPath, 'wx', 0o600);
 }
 
-async function writeEncodedTextTemp(input: {
-  targetPath: string;
+/**
+ * Write an already-validated buffer to the reserved temp handle and verify
+ * the handle still names the same regular file. Shared by the text and
+ * binary publishers; size policy is enforced by the caller, not here.
+ */
+async function writeBufferToTemp(input: {
   tmpPath: string;
-  content: string;
-  meta: ReadMeta;
+  buf: Buffer;
   handle: Awaited<ReturnType<typeof fsp.open>>;
 }): Promise<AtomicWriteTextOutcome> {
-  const buf = await encodeTextFileContentAsync(
-    input.targetPath,
-    input.content,
-    buildWriteMeta(input.meta),
-  );
-  enforceWriteSize(buf.length);
-  await input.handle.writeFile(buf);
+  await input.handle.writeFile(input.buf);
   await syncHandleBestEffort(input.handle);
   const st = await fsp.lstat(input.tmpPath);
   const opened = await input.handle.stat();
@@ -2282,7 +2610,7 @@ async function writeEncodedTextTemp(input: {
       `temporary path is not a regular file: ${input.tmpPath}`,
     );
   }
-  return { sizeBytes: buf.length, hash: hashBuffer(buf), stat: st };
+  return { sizeBytes: input.buf.length, hash: hashBuffer(input.buf), stat: st };
 }
 
 async function assertCreateTargetAbsent(target: string): Promise<void> {

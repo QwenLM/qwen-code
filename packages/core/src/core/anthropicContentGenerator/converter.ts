@@ -943,6 +943,11 @@ export class AnthropicContentConverter {
       tool_use: FinishReason.STOP,
       max_tokens: FinishReason.MAX_TOKENS,
       content_filter: FinishReason.SAFETY,
+      // Anthropic's refusal stop_reason is a provider safety decision; it
+      // must land in the content-filter family so downstream gates (e.g.
+      // the quiet post-tool-result acceptance in geminiChat, #9026) keep
+      // it fatal instead of masking it with an "(empty content)" turn.
+      refusal: FinishReason.SAFETY,
     };
     return mapping[reason] || FinishReason.FINISH_REASON_UNSPECIFIED;
   }

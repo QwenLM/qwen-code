@@ -15,6 +15,41 @@ export const GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON =
   'The current Goal revision exceeded the bounded evidence catalog. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
 export const GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON =
   'The current Goal revision exceeded the checkpoint verifier request limit. Automatic retries cannot recover. Edit or replace the Goal before resuming it.';
+/**
+ * How many consecutive stalled checkpoints a Goal may run before it stops.
+ * Three matches the thrash bounds elsewhere in this family of runtimes: one
+ * stalled checkpoint is a busy turn, two is a pattern, three is the loop.
+ */
+export const GOAL_CHECKPOINT_STALL_LIMIT = 3;
+export const GOAL_CHECKPOINT_STALLED_REASON =
+  'The current Goal revision ran three consecutive evidence checkpoints without relief: the evidence window overflowed every time, and each check either came back with a full claim list or a result that could not be folded into claims at all, so every turn paid a checkpoint call and lost uncatalogued evidence. Automatic retries cannot recover. Edit or replace the Goal with a narrower objective before resuming it.';
+
+/**
+ * Which bound a `usage_limited` Goal ran into.
+ *
+ * Only the evidence bounds are enumerated: they are the ones a caller has to
+ * branch on, because they are the ones a plain resume cannot clear. Every other
+ * route to `usage_limited` is an operational failure that carries prose in
+ * `lastReason` and nothing to key off.
+ */
+export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
+
+export function isGoalLimitKind(value: unknown): value is GoalLimitKind {
+  return value === 'evidence_catalog' || value === 'checkpoint_request';
+}
+
+/** The limit a `usage_limited` reason denotes, for reasons that denote one. */
+export function goalLimitKindForReason(
+  reason: string,
+): GoalLimitKind | undefined {
+  if (reason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON) {
+    return 'evidence_catalog';
+  }
+  if (reason === GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON) {
+    return 'checkpoint_request';
+  }
+  return undefined;
+}
 
 export const PAUSED_GOAL_SYSTEM_REMINDER =
   '<system-reminder>\nThe Goal is paused. Do not continue its objective unless the user resumes it. Treat this message as ordinary conversation.\n</system-reminder>';
@@ -77,16 +112,61 @@ export interface GoalRecord {
   evidenceCursor: TranscriptCursor;
   turnCount: number;
   activeTimeMs: number;
+  /**
+   * Model tokens billed to this Goal so far, summed across its turn windows.
+   *
+   * Measured from the same session token source as `/stats`. Verification and
+   * checkpoint side queries run between turn windows and are not included.
+   * Zero on Goals recovered from a transcript written before the field existed.
+   */
+  tokensUsed: number;
   createdAt: number;
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;
+  /**
+   * Consecutive checkpoint checks that failed to relieve an overflowing
+   * evidence window: the checkpoint came back full (see
+   * `isGoalCheckpointStalled`) or the verifier result could not be folded
+   * into claims at all. Persisted on the record rather than held in memory
+   * so a daemon restart or session resume cannot launder the count; absent
+   * means zero. Reset by any checkpoint check that finds room, and by every
+   * control action that starts a different evidence window: edit, replace,
+   * and the resume of an evidence-limited Goal.
+   */
+  checkpointStalls?: number;
   lastReason?: string;
+  /**
+   * Set alongside `lastReason` whenever the runtime stops a Goal at one of the
+   * enumerated bounds. `lastReason` stays the human-readable half; this is the
+   * half state transitions are allowed to read.
+   */
+  limitKind?: GoalLimitKind;
 }
 
 export interface GoalSnapshotV2 {
   v: typeof GOAL_STATE_VERSION;
   goal: GoalRecord | null;
   activity: GoalActivity;
+  clearedGoal?: GoalOrder;
+}
+
+export interface GoalOrder {
+  goalId: string;
+  revision: number;
+  updatedAt: number;
+}
+
+/**
+ * What a session with no reachable Goal runtime looks like.
+ *
+ * `getGoalRuntimeReady()` rejects when goal persistence is unavailable —
+ * permanently, once a malformed transcript record has set a sticky recovery
+ * error. For anything that only reads or reduces goal state, the honest
+ * answer is "no goal", not a failed request: the caller asked what the goal
+ * is, and the answer is nothing.
+ */
+export function emptyGoalSnapshot(): GoalSnapshotV2 {
+  return { v: GOAL_STATE_VERSION, goal: null, activity: 'idle' };
 }
 
 /** True while any new model send must carry the runtime's exact turn permit. */

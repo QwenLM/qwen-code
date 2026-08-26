@@ -35,6 +35,8 @@ import {
   EVENT_FILE_OPERATION,
   EVENT_RIPGREP_FALLBACK,
   EVENT_RIPGREP_RUNTIME_RECOVERY,
+  EVENT_SESSION_END,
+  EVENT_SESSION_START,
   EVENT_SKILL_LAUNCH,
   EVENT_EXTENSION_ENABLE,
   EVENT_EXTENSION_DISABLE,
@@ -48,6 +50,7 @@ import {
   logApiRequest,
   logApiResponse,
   logStartSession,
+  logSessionEnd,
   logUserPrompt,
   logToolCall,
   logLoopDetected,
@@ -117,6 +120,7 @@ import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppress
 describe('loggers', () => {
   const mockLogger = {
     emit: vi.fn(),
+    enabled: vi.fn().mockReturnValue(true),
   };
   const mockUiEvent = {
     addEvent: vi.fn(),
@@ -348,6 +352,75 @@ describe('loggers', () => {
           output_format: 'json',
           skills: undefined,
           subagents: undefined,
+        },
+      });
+    });
+  });
+
+  describe('session lifecycle wiring', () => {
+    // Distinct session ids per case: emitSessionStart is idempotent per id,
+    // and the module-level guard persists across tests in this file.
+    it('logStartSession emits the standard session.start record with lineage', () => {
+      const mockConfig = makeFakeConfig({
+        sessionId: 'lifecycle-start-session',
+      });
+
+      logStartSession(
+        mockConfig,
+        new StartSessionEvent(mockConfig),
+        'previous-session-id',
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Session started.',
+        attributes: {
+          'event.name': EVENT_SESSION_START,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          'session.id': 'lifecycle-start-session',
+          'session.previous_id': 'previous-session-id',
+        },
+      });
+    });
+
+    it('logSessionEnd emits the standard session.end record', () => {
+      const mockConfig = makeFakeConfig({
+        sessionId: 'lifecycle-end-session',
+      });
+
+      logSessionEnd(mockConfig);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Session ended.',
+        attributes: {
+          'event.name': EVENT_SESSION_END,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          'session.id': 'lifecycle-end-session',
+        },
+      });
+    });
+
+    it('does not emit or consume the session.start idempotency token while the SDK is uninitialized', () => {
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(false);
+      const mockConfig = makeFakeConfig({
+        sessionId: 'suppressed-session',
+      });
+
+      logStartSession(mockConfig, new StartSessionEvent(mockConfig));
+      logSessionEnd(mockConfig);
+
+      expect(mockLogger.emit).not.toHaveBeenCalled();
+
+      // The suppressed start must not consume the one-shot token: once the
+      // SDK settles, the settle-time catch-up still emits the record.
+      vi.spyOn(sdk, 'isTelemetrySdkInitialized').mockReturnValue(true);
+      logStartSession(mockConfig, new StartSessionEvent(mockConfig));
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Session started.',
+        attributes: {
+          'event.name': EVENT_SESSION_START,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          'session.id': 'suppressed-session',
         },
       });
     });
@@ -671,6 +744,25 @@ describe('loggers', () => {
       ).toHaveBeenCalledWith(mockConfig, event);
     });
 
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'test-model',
+        100,
+        'prompt-id',
+      );
+
+      logApiResponse(mockConfig, event, 'request-session-id');
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
+    });
+
     it.each([
       'prompt_suggestion',
       'forked_query',
@@ -771,6 +863,29 @@ describe('loggers', () => {
       logApiResponse(configWithRecording, event);
 
       expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'user_query',
+        errorMessage: 'test error',
+      });
+
+      logApiError(
+        makeFakeConfig({ sessionId: 'current-session-id' }),
+        event,
+        'request-session-id',
+      );
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
     });
 
     it('suppresses chatRecordingService writes inside hidden runs', () => {
@@ -918,6 +1033,20 @@ describe('loggers', () => {
           prompt_id: 'prompt-id-6',
         },
       });
+    });
+
+    it('uses the request session snapshot when provided', () => {
+      const event = new ApiRequestEvent('test-model', 'prompt-id');
+
+      logApiRequest(mockConfig, event, 'request-session-id');
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            'session.id': 'request-session-id',
+          }),
+        }),
+      );
     });
   });
 

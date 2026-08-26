@@ -10,7 +10,7 @@ import type { Config } from '../config/config.js';
 import {
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
-} from '../utils/environmentContext.js';
+} from '../core/environmentContext.js';
 import { generateSessionRecap } from './sessionRecap.js';
 
 const reminder = (body: string) =>

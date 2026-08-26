@@ -155,6 +155,7 @@ describe('compressFastCommand', () => {
           originalTokenCount: 200,
           newTokenCount: 100,
           compressionStatus: CompressionStatus.COMPRESSED,
+          compressionKind: 'fast',
         },
       },
       expect.any(Number),
@@ -178,6 +179,67 @@ describe('compressFastCommand', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  // Issue #9309: the fast-compression banner mixes an API-reported baseline
+  // with a locally adjusted count, so the UI item must carry per-side
+  // provenance for the renderer to mark estimated numbers.
+  it('should pass token-count provenance to the compression item (interactive)', async () => {
+    mockTryCompressChatFast.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    await compressFastCommand.action!(context, '');
+
+    expect(context.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.COMPRESSION,
+        compression: {
+          isPending: false,
+          originalTokenCount: 200,
+          newTokenCount: 100,
+          compressionStatus: CompressionStatus.COMPRESSED,
+          compressionKind: 'fast',
+          originalTokenCountIsEstimated: false,
+          newTokenCountIsEstimated: true,
+        },
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('should mark estimated counts in the non-interactive message', async () => {
+    mockTryCompressChatFast.mockResolvedValue({
+      originalTokenCount: 200,
+      newTokenCount: 100,
+      originalTokenCountIsEstimated: false,
+      newTokenCountIsEstimated: true,
+      compressionStatus: CompressionStatus.COMPRESSED,
+    } satisfies ChatCompressionInfo);
+
+    const ctx = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {
+          getGeminiClient: () =>
+            ({
+              tryCompressChatFast: mockTryCompressChatFast,
+            }) as unknown as GeminiClient,
+        },
+      },
+    });
+
+    const result = await compressFastCommand.action!(ctx, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Context compressed (200 -> ~100).',
+    });
   });
 
   it('should handle errors gracefully', async () => {

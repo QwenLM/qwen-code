@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { format } from 'node:util';
 import {
   ClientSideConnection,
   type AnyMessage,
@@ -436,17 +437,83 @@ describe('ndJsonStream', () => {
     await stream.readable.cancel();
   });
 
+  it('bounds requests retained by the ACP SDK while responses are blocked', async () => {
+    const cancel = vi.fn();
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    let nextRequestId = 1;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+        timer = setInterval(() => {
+          if (nextRequestId > 3) {
+            clearInterval(timer);
+            return;
+          }
+          const request = {
+            jsonrpc: '2.0',
+            id: nextRequestId++,
+            method: 'terminal/create',
+            params: { command: 'true', sessionId: 'session' },
+          };
+          inputController.enqueue(
+            encoder.encode(`${JSON.stringify(request)}\n`),
+          );
+        }, 0);
+      },
+      cancel,
+    });
+    let releaseFirstWrite!: () => void;
+    const firstWriteBlocked = new Promise<void>((resolve) => {
+      releaseFirstWrite = resolve;
+    });
+    let writeCount = 0;
+    const outputWrite = vi.fn(() => {
+      writeCount++;
+      return writeCount === 1 ? firstWriteBlocked : Promise.resolve();
+    });
+    const onTransportError = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>({ write: outputWrite }),
+      input,
+      { onTransportError },
+      limits({
+        maxFrameBytes: 1024,
+        maxQueuedMessages: 2,
+        maxQueuedBytes: 4096,
+      }),
+    );
+    const connection = new ClientSideConnection(() => ({}) as never, stream);
+
+    await vi.waitFor(() =>
+      expect(onTransportError).toHaveBeenCalledWith(
+        expect.any(NdJsonQueueLimitError),
+      ),
+    );
+    clearInterval(timer);
+    expect(nextRequestId).toBe(4);
+    expect(outputWrite).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    await expect(connection.closed).resolves.toBeUndefined();
+    releaseFirstWrite();
+  });
+
   it('keeps bounded parse-error logs free of input and parser text', async () => {
     const payload = '{"secret":"do-not-echo"';
     const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onTransportError = vi.fn();
     const stream = ndJsonStream(
       new WritableStream<Uint8Array>(),
       byteStream([encoder.encode(`${payload}\n`)]),
-      undefined,
+      { onTransportError },
       limits(),
     );
 
     await expect(readAll(stream.readable)).resolves.toEqual([]);
+    expect(onTransportError).toHaveBeenCalledOnce();
+    expect(onTransportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'ndjson_parse_error' }),
+    );
     expect(stderr).toHaveBeenCalledWith('Failed to parse JSON message:', {
       errorKind: 'ndjson_parse_error',
       bytes: encoder.encode(payload).byteLength,
@@ -454,6 +521,295 @@ describe('ndJsonStream', () => {
       payloadOmitted: true,
     });
     expect(JSON.stringify(stderr.mock.calls)).not.toContain('do-not-echo');
+    stderr.mockRestore();
+  });
+
+  it('rejects malformed JSON-RPC envelopes without logging their payloads', async () => {
+    const invalidLines = [
+      JSON.stringify({ jsonrpc: '2.0', secret: 'object-secret' }),
+      JSON.stringify(['array-secret']),
+      JSON.stringify('scalar-secret'),
+      JSON.stringify({
+        jsonrpc: '1.0',
+        method: 'bad',
+        secret: 'version-secret',
+      }),
+      JSON.stringify({ jsonrpc: '2.0', id: 1, secret: 'response-secret' }),
+      JSON.stringify({ jsonrpc: '2.0', id: 99, result: 'unknown-response' }),
+    ];
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onMessageReceived = vi.fn();
+    for (const line of invalidLines) {
+      const onTransportError = vi.fn();
+      const stream = ndJsonStream(
+        new WritableStream<Uint8Array>(),
+        byteStream([encoder.encode(`${line}\n`)]),
+        { onMessageReceived, onTransportError },
+        limits({ maxQueuedMessages: 8, maxQueuedBytes: 8192 }),
+      );
+      await expect(readAll(stream.readable)).resolves.toEqual([]);
+      expect(onTransportError).toHaveBeenCalledOnce();
+      expect(onTransportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'ndjson_invalid_message' }),
+      );
+    }
+    expect(onMessageReceived).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledTimes(invalidLines.length);
+    for (const call of stderr.mock.calls) {
+      expect(call).toEqual([
+        'Failed to parse JSON message:',
+        {
+          errorKind: 'ndjson_invalid_message',
+          bytes: expect.any(Number),
+          sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          payloadOmitted: true,
+        },
+      ]);
+    }
+    expect(JSON.stringify(stderr.mock.calls)).not.toMatch(/-secret/u);
+    stderr.mockRestore();
+  });
+
+  it('accepts bounded JSON-RPC string ids', async () => {
+    const request = {
+      jsonrpc: '2.0',
+      id: 'request-1',
+      method: 'client/request',
+      params: { ok: true },
+    } satisfies AnyMessage;
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([encoder.encode(`${JSON.stringify(request)}\n`)]),
+      undefined,
+      limits(),
+    );
+
+    await expect(readAll(stream.readable)).resolves.toEqual([request]);
+  });
+
+  it('accepts a string response id only when an outbound request owns it', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      undefined,
+      limits(),
+    );
+    const writer = stream.writable.getWriter();
+    await writer.write({
+      jsonrpc: '2.0',
+      id: 'owned-request',
+      method: 'agent/request',
+      params: {},
+    });
+    const response = {
+      jsonrpc: '2.0',
+      id: 'owned-request',
+      result: { ok: true },
+    } satisfies AnyMessage;
+    inputController.enqueue(encoder.encode(`${JSON.stringify(response)}\n`));
+    inputController.close();
+
+    await expect(readAll(stream.readable)).resolves.toEqual([response]);
+    writer.releaseLock();
+  });
+
+  it('allows an owned bulk response beyond inbound structure limits', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      undefined,
+      limits({ maxFrameBytes: 128_000, maxQueuedBytes: 128_000 }),
+    );
+    const writer = stream.writable.getWriter();
+    await writer.write({
+      jsonrpc: '2.0',
+      id: 41,
+      method: 'session/load',
+      params: {},
+    });
+    const response = {
+      jsonrpc: '2.0',
+      id: 41,
+      result: { updates: Array.from({ length: 4_097 }, () => null) },
+    } satisfies AnyMessage;
+    inputController.enqueue(encoder.encode(`${JSON.stringify(response)}\n`));
+    inputController.close();
+
+    await expect(readAll(stream.readable)).resolves.toEqual([response]);
+    writer.releaseLock();
+  });
+
+  it('rejects oversized request structures without materializing values', async () => {
+    const params = Object.fromEntries(
+      Array.from({ length: 10_001 }, (_, index) => [`k${index}`, index]),
+    );
+    const request = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'client/request',
+      params,
+    } satisfies AnyMessage;
+    const line = `${JSON.stringify(request)}\n`;
+    const onTransportError = vi.fn();
+    const valuesSpy = vi.spyOn(Object, 'values');
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([encoder.encode(line)]),
+      { onTransportError },
+      limits({ maxFrameBytes: 256_000, maxQueuedBytes: 256_000 }),
+    );
+
+    await expect(readAll(stream.readable)).resolves.toEqual([]);
+    expect(onTransportError).toHaveBeenCalledOnce();
+    expect(onTransportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'ndjson_invalid_message' }),
+    );
+    expect(valuesSpy).not.toHaveBeenCalled();
+    valuesSpy.mockRestore();
+  });
+
+  it('accepts a matching response before local write completion', async () => {
+    let inputController!: ReadableStreamDefaultController<Uint8Array>;
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        inputController = controller;
+      },
+    });
+    let finishWrite!: () => void;
+    const writeFinished = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    const response = {
+      jsonrpc: '2.0',
+      id: 7,
+      result: { ok: true },
+    } satisfies AnyMessage;
+    const onTransportError = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>({
+        write() {
+          inputController.enqueue(
+            encoder.encode(`${JSON.stringify(response)}\n`),
+          );
+          inputController.close();
+          return writeFinished;
+        },
+      }),
+      input,
+      { onTransportError },
+      limits(),
+    );
+    const writer = stream.writable.getWriter();
+    const write = writer.write({
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'agent/request',
+      params: {},
+    });
+
+    await expect(readAll(stream.readable)).resolves.toEqual([response]);
+    expect(onTransportError).not.toHaveBeenCalled();
+    finishWrite();
+    await write;
+    writer.releaseLock();
+  });
+
+  it('bounds outbound requests that never receive a response', async () => {
+    const input = new ReadableStream<Uint8Array>();
+    const onTransportError = vi.fn();
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      input,
+      { onTransportError },
+      limits({ maxQueuedMessages: 2, maxQueuedBytes: 4096 }),
+    );
+    const writer = stream.writable.getWriter();
+    await writer.write({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'agent/request',
+      params: {},
+    });
+    await writer.write({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'agent/request',
+      params: {},
+    });
+
+    await expect(
+      writer.write({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'agent/request',
+        params: {},
+      }),
+    ).rejects.toBeInstanceOf(NdJsonQueueLimitError);
+    expect(onTransportError).toHaveBeenCalledOnce();
+    writer.releaseLock();
+    await stream.readable.cancel();
+  });
+
+  it('rejects log-amplifying protocol scalars before ACP SDK dispatch', async () => {
+    const renderedErrors: string[] = [];
+    const stderr = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      renderedErrors.push(format(...args));
+    });
+    const invalidLines = [
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: `unknown/${'SECRET_METHOD'.repeat(100)}`,
+        params: {},
+      }),
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'SECRET_ID',
+        result: {},
+      }),
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        error: {
+          code: -32603,
+          message: 'SECRET_ERROR'.repeat(100),
+        },
+      }),
+    ];
+    const onMessageReceived = vi.fn();
+    for (const line of invalidLines) {
+      const onTransportError = vi.fn();
+      const stream = ndJsonStream(
+        new WritableStream<Uint8Array>(),
+        byteStream([encoder.encode(`${line}\n`)]),
+        { onMessageReceived, onTransportError },
+        limits({ maxFrameBytes: 4096, maxQueuedBytes: 16_384 }),
+      );
+      const connection = new ClientSideConnection(() => ({}) as never, stream);
+      await expect(connection.closed).resolves.toBeUndefined();
+      expect(onTransportError).toHaveBeenCalledOnce();
+      expect(onTransportError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'ndjson_invalid_message' }),
+      );
+    }
+    expect(onMessageReceived).not.toHaveBeenCalled();
+    expect(renderedErrors).toHaveLength(invalidLines.length);
+    expect(renderedErrors.join('\n')).toContain('ndjson_invalid_message');
+    expect(renderedErrors.join('\n')).not.toMatch(
+      /SECRET_METHOD|SECRET_ID|SECRET_ERROR/u,
+    );
     stderr.mockRestore();
   });
 
@@ -487,6 +843,34 @@ describe('ndJsonStream', () => {
       observedBytes: payloadBytes + 1,
     });
     expect(onTransportError).toHaveBeenCalledOnce();
+  });
+
+  it('reports bounded outbound serialization failures exactly once', async () => {
+    const cyclic: Record<string, unknown> = {
+      jsonrpc: '2.0',
+      method: 'cyclic',
+    };
+    cyclic['self'] = cyclic;
+    const invalidMessages = [
+      cyclic,
+      { jsonrpc: '2.0', method: 'bigint', params: { value: 1n } },
+    ];
+
+    for (const invalid of invalidMessages) {
+      const onTransportError = vi.fn();
+      const stream = ndJsonStream(
+        new WritableStream<Uint8Array>(),
+        byteStream([]),
+        { onTransportError },
+        limits(),
+      );
+
+      await expect(
+        writeOne(stream.writable, invalid as unknown as AnyMessage),
+      ).rejects.toBeInstanceOf(TypeError);
+      expect(onTransportError).toHaveBeenCalledOnce();
+      expect(onTransportError).toHaveBeenCalledWith(expect.any(TypeError));
+    }
   });
 
   it('cancels and unlocks bounded input during frame assembly', async () => {
@@ -526,5 +910,85 @@ describe('ndJsonStream', () => {
     expect(onTransportError).toHaveBeenCalledWith(
       expect.objectContaining({ code: 'ndjson_frame_too_large' }),
     );
+  });
+
+  it('delivers complete admitted frames before a later inbound fatal', async () => {
+    const notifications = vi.fn();
+    const onTransportError = vi.fn();
+    const first = message('prefix-one', { n: 1 });
+    const second = message('prefix-two', { n: 2 });
+    const maxFrameBytes = 128;
+    const input = encoder.encode(
+      `${JSON.stringify(first)}\n${JSON.stringify(second)}\n${'x'.repeat(maxFrameBytes + 1)}`,
+    );
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([input]),
+      { onTransportError },
+      limits({
+        maxFrameBytes,
+        maxQueuedMessages: 4,
+        maxQueuedBytes: maxFrameBytes * 4,
+      }),
+    );
+    const connection = new ClientSideConnection(
+      () =>
+        ({
+          extNotification: async (method: string, params: unknown) => {
+            notifications(method, params);
+          },
+        }) as never,
+      stream,
+    );
+
+    await expect(connection.closed).resolves.toBeUndefined();
+    expect(notifications.mock.calls).toEqual([
+      ['prefix-one', { n: 1 }],
+      ['prefix-two', { n: 2 }],
+    ]);
+    expect(onTransportError).toHaveBeenCalledOnce();
+    expect(onTransportError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'ndjson_frame_too_large' }),
+    );
+  });
+
+  it('redacts bounded valid messages when the ACP SDK logs handler errors', async () => {
+    const renderedErrors: string[] = [];
+    const stderr = vi.spyOn(console, 'error').mockImplementation((...args) => {
+      renderedErrors.push(format(...args));
+    });
+    const input = [
+      {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'unknown/request',
+        params: { secret: 'unknown-secret' },
+      },
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'session/request_permission',
+        params: { secret: 'params-secret' },
+      },
+    ];
+    const stream = ndJsonStream(
+      new WritableStream<Uint8Array>(),
+      byteStream([
+        encoder.encode(
+          `${input.map((value) => JSON.stringify(value)).join('\n')}\n`,
+        ),
+      ]),
+      undefined,
+      limits({ maxQueuedMessages: 4, maxQueuedBytes: 4096 }),
+    );
+    const connection = new ClientSideConnection(() => ({}) as never, stream);
+
+    await expect(connection.closed).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(renderedErrors).toHaveLength(2));
+    expect(renderedErrors.join('\n')).toContain('payloadOmitted: true');
+    expect(renderedErrors.join('\n')).not.toMatch(
+      /unknown-secret|params-secret/u,
+    );
+    stderr.mockRestore();
   });
 });

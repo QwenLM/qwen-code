@@ -10,6 +10,11 @@ import {
 } from '../customization';
 import type { Message } from '../adapters/types';
 
+vi.mock('../WebShellContexts', async () => {
+  const { createContext } = await import('react');
+  return { CompactModeContext: createContext(false) };
+});
+
 // Stub the message body components so MessageItem's own wiring — not the bodies
 // — is under test. UserMessage/AssistantMessage throw on a sentinel so we can
 // drive the message-level ErrorBoundary (the real one, imported below); the
@@ -18,8 +23,18 @@ import type { Message } from '../adapters/types';
 vi.mock('./MessageTimestamp', async () => {
   const React = await import('react');
   return {
-    MessageTimestamp: ({ children }: { children: React.ReactNode }) =>
-      React.createElement('div', null, children),
+    MessageTimestamp: ({
+      children,
+      toolGroupSpacing,
+    }: {
+      children: React.ReactNode;
+      toolGroupSpacing?: boolean;
+    }) =>
+      React.createElement(
+        'div',
+        { 'data-tool-group-spacing': String(toolGroupSpacing === true) },
+        children,
+      ),
     formatTimestamp: () => '',
   };
 });
@@ -39,9 +54,11 @@ vi.mock('./messages/AssistantMessage', async () => {
     AssistantMessage: ({
       content,
       customFooterInfo,
+      onBranchSession,
     }: {
       content: string;
       customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+      onBranchSession?: () => void | Promise<void>;
     }) => {
       if (content.includes('__BOOM__')) throw new Error('assistant boom');
       const { renderAssistantTurnFooter } = useWebShellCustomization();
@@ -53,6 +70,16 @@ vi.mock('./messages/AssistantMessage', async () => {
         { 'data-testid': 'assistant-ok' },
         content,
         customFooter,
+        onBranchSession
+          ? React.createElement(
+              'button',
+              {
+                'data-testid': 'assistant-branch',
+                onClick: () => void onBranchSession(),
+              },
+              'branch',
+            )
+          : null,
       );
     },
     ThinkingMessage: ({ generateContent }: { generateContent?: unknown }) =>
@@ -63,7 +90,16 @@ vi.mock('./messages/AssistantMessage', async () => {
   };
 });
 vi.mock('./messages/SystemMessage', () => ({ SystemMessage: () => null }));
-vi.mock('./messages/ToolGroup', () => ({ ToolGroup: () => null }));
+vi.mock('./messages/ToolGroup', async () => {
+  const React = await import('react');
+  return {
+    ToolGroup: ({ compactSummary }: { compactSummary?: boolean }) =>
+      React.createElement('div', {
+        'data-testid': 'tool-group',
+        'data-compact-summary': String(compactSummary === true),
+      }),
+  };
+});
 vi.mock('./messages/PlanMessage', () => ({ PlanMessage: () => null }));
 vi.mock('./messages/BtwMessage', () => ({ BtwMessage: () => null }));
 vi.mock('./messages/UserShellMessage', () => ({
@@ -73,6 +109,7 @@ vi.mock('./InsightProgress', () => ({ InsightProgress: () => null }));
 vi.mock('./InsightReady', () => ({ InsightReady: () => null }));
 
 const { MessageItem } = await import('./MessageItem');
+const { CompactModeContext } = await import('../WebShellContexts');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -112,6 +149,12 @@ const assistantMsg = (id: string, content: string): Message =>
   ({ id, role: 'assistant', content, timestamp: 0 }) as Message;
 const thinkingMsg = (id: string, content: string): Message =>
   ({ id, role: 'thinking', content, timestamp: 0 }) as Message;
+const toolMsg = (id: string): Message => ({
+  id,
+  role: 'tool_group',
+  tools: [],
+  timestamp: 0,
+});
 
 function item(message: Message) {
   return <MessageItem message={message} />;
@@ -192,6 +235,78 @@ describe('MessageItem selectable wrapper', () => {
     // The message body renders inside the wrapper, so the CSS descendant
     // selector `[data-user-selectable] *` still re-enables selection.
     expect(wrapper.querySelector('[data-testid="user-ok"]')).not.toBeNull();
+  });
+});
+
+describe('MessageItem tool group spacing', () => {
+  it('marks only synthetic groups as compact summaries', () => {
+    const synthetic = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(toolMsg('summary-agent-1'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    const regular = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(toolMsg('agent-1'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+
+    expect(
+      synthetic
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-compact-summary'),
+    ).toBe('true');
+    expect(
+      regular
+        .querySelector('[data-testid="tool-group"]')
+        ?.getAttribute('data-compact-summary'),
+    ).toBe('false');
+  });
+
+  it('uses larger row spacing only in compact mode', () => {
+    const compact = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(toolMsg('compact'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    const regular = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={false}>
+          {item(toolMsg('regular'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    const compactAssistant = render(
+      <I18nProvider language="en">
+        <CompactModeContext.Provider value={true}>
+          {item(assistantMsg('assistant', 'answer'))}
+        </CompactModeContext.Provider>
+      </I18nProvider>,
+    );
+    const defaultTool = render(
+      <I18nProvider language="en">{item(toolMsg('default'))}</I18nProvider>,
+    );
+
+    expect(
+      compact.firstElementChild?.getAttribute('data-tool-group-spacing'),
+    ).toBe('true');
+    expect(
+      regular.firstElementChild?.getAttribute('data-tool-group-spacing'),
+    ).toBe('false');
+    expect(
+      compactAssistant.firstElementChild?.getAttribute(
+        'data-tool-group-spacing',
+      ),
+    ).toBe('false');
+    expect(
+      defaultTool.firstElementChild?.getAttribute('data-tool-group-spacing'),
+    ).toBe('false');
   });
 });
 

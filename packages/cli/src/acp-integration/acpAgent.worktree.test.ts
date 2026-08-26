@@ -49,7 +49,8 @@ const { mockConnectionState } = vi.hoisted(() => {
   return { mockConnectionState: state };
 });
 
-vi.mock('@agentclientprotocol/sdk', () => ({
+vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@agentclientprotocol/sdk')>()),
   AgentSideConnection: vi.fn().mockImplementation(() => ({
     get closed() {
       return mockConnectionState.promise;
@@ -151,6 +152,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     YOLO: 'yolo',
     PLAN: 'plan',
   },
+  OutputFormat: {
+    TEXT: 'text',
+    JSON: 'json',
+    STREAM_JSON: 'stream-json',
+  },
   Kind: {
     Read: 'read',
     Edit: 'edit',
@@ -172,6 +178,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  SessionIdCaseConflictError: class SessionIdCaseConflictError extends Error {
+    override readonly name = 'SessionIdCaseConflictError';
+  },
   Storage: {
     getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
   },
@@ -272,7 +281,10 @@ vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
 }));
-vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
+vi.mock('./session/Session.js', () => ({
+  Session: vi.fn(),
+  registerCreateSubSessionTool: vi.fn().mockResolvedValue(undefined),
+}));
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
@@ -324,6 +336,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
   function makeInnerConfig() {
     const mockSessionService = {
       sessionExists: vi.fn().mockResolvedValue(true),
+      findSessionIdIgnoringCase: vi.fn().mockResolvedValue(SESSION_ID),
       getWorktreeSessionPath: vi.fn().mockReturnValue(SIDECAR_PATH),
     };
     vi.mocked(SessionService).mockImplementation(
@@ -444,6 +457,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
     vi.mocked(Session).mockImplementation(() => {
       const mock = {
         getId: vi.fn().mockReturnValue(SESSION_ID),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),

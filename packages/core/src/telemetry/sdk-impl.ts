@@ -22,6 +22,7 @@
 
 import { diag } from '@opentelemetry/api';
 import type { Context, TextMapPropagator } from '@opentelemetry/api';
+import { W3CTraceContextPropagator } from '@opentelemetry/core';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { SemanticResourceAttributes } from '@opentelemetry/semantic-conventions';
 import { resourceFromAttributes } from '@opentelemetry/resources';
@@ -41,6 +42,7 @@ import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
 import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import { SERVICE_NAME } from './constants.js';
+import { setDaemonFallbackPropagator } from './daemon-tracing.js';
 import {
   FileLogExporter,
   FileMetricExporter,
@@ -48,8 +50,12 @@ import {
 } from './file-exporters.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { LogToSpanProcessor } from './log-to-span-processor.js';
-import { getCurrentSessionId } from './session-context.js';
+import {
+  getCurrentSessionId,
+  getSessionIdFromContext,
+} from './session-context.js';
 import { resolveHttpOtlpUrl } from './otlp-urls.js';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 
 /**
  * `TextMapPropagator` that emits nothing. Installed when
@@ -124,10 +130,13 @@ function validateUrl(url: string | undefined): string | undefined {
 }
 
 class SessionIdSpanProcessor implements SpanProcessor {
-  onStart(span: SdkSpan): void {
+  onStart(span: SdkSpan, parentContext: Context): void {
     try {
-      if ((span as unknown as ReadableSpan).attributes?.['session.id']) return;
-      const sessionId = getCurrentSessionId();
+      const existingSessionId = span.attributes['session.id'];
+      if (typeof existingSessionId === 'string' && existingSessionId) return;
+      const sessionId =
+        getSessionIdFromContext(parentContext) ??
+        (sessionIdContext.getStore() || getCurrentSessionId());
       if (sessionId) {
         span.setAttribute('session.id', sessionId);
       }
@@ -415,22 +424,14 @@ export async function startTelemetrySdk(
       ? [new SessionIdSpanProcessor(), new BatchSpanProcessor(spanExporter)]
       : [],
     logRecordProcessors: logExporter
-      ? [new BatchLogRecordProcessor(logExporter)]
+      ? [new BatchLogRecordProcessor({ exporter: logExporter })]
       : logToSpanProcessor
         ? [logToSpanProcessor]
         : [],
-    // Metrics uses the singular `metricReader` field because
-    // `@opentelemetry/sdk-node@0.203.0` only accepts one reader; there is no
-    // `metricReaders: []` opt-out. The SDK's `start()` calls
-    // `configureMetricProviderFromEnv()` unconditionally, so env-based readers
-    // are only suppressed when an explicit reader is provided. This is
-    // intentionally asymmetric with `spanProcessors`/`logRecordProcessors`,
-    // where an empty array disables env fallback for those signals. Those two
-    // must stay unconditional arrays: omitting them re-enables sdk-node's
-    // env-based fallback, and the logs fallback runs in the NodeSDK
-    // constructor — outside the env-var scrub window around `start()` in
-    // sdk.ts (`startSdkWithExplicitExporters`).
-    ...(metricReader && { metricReader }),
+    // In 0.221, omitting both metrics fields enables constructor-time env
+    // fallback. An explicit empty array keeps metrics disabled when qwen-code
+    // has no configured reader, before the start() env scrub can take effect.
+    metricReaders: metricReader ? [metricReader] : [],
     instrumentations: [
       new HttpInstrumentation({
         // OTLP HTTP exporter uses node:http (patched here, not by undici).
@@ -502,6 +503,16 @@ export async function startTelemetrySdk(
       }),
     ],
   });
+
+  // Construct the daemon fallback W3C propagator here rather than in
+  // daemon-tracing.ts to keep @opentelemetry/core out of the static startup
+  // graph: this module is only loaded via dynamic import when telemetry is
+  // enabled, and its closure already contains @opentelemetry/core (via
+  // sdk-node/resources), so the fallback adds no bytes to the CLI launch
+  // path. The setter is a no-op-safe seam — until it runs, inbound
+  // traceparent extraction yields no parent context, matching the
+  // telemetry-off state.
+  setDaemonFallbackPropagator(new W3CTraceContextPropagator());
 
   return { sdk, metricReader };
 }

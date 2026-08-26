@@ -10,6 +10,7 @@ import {
   assistantTextEvent,
   createWebShellDaemonScenario,
   permissionRequestEvent,
+  toolCallEvent,
   turnCompleteEvent,
   userTextEvent,
 } from '../utils/mockDaemon';
@@ -71,22 +72,13 @@ for (const theme of THEMES) {
         id: number,
         toolCallId: string,
         description: string,
-      ): DaemonEvent => ({
-        id,
-        v: 1,
-        type: 'session_update',
-        data: {
-          update: {
-            sessionUpdate: 'tool_call',
-            toolCallId,
-            toolName: 'Agent',
-            title: 'Agent',
-            kind: 'other',
-            status: 'completed',
-            rawInput: { description, run_in_background: true },
-          },
-        },
-      });
+      ): DaemonEvent =>
+        toolCallEvent(
+          toolCallId,
+          'Agent',
+          { description, run_in_background: true },
+          { id },
+        );
       const scenario = createWebShellDaemonScenario({
         events: [
           userTextEvent('Split the migration across parallel agents.', {
@@ -261,6 +253,51 @@ for (const theme of THEMES) {
                 required: true,
                 envResolvable: true,
               },
+              {
+                key: 'senderPolicy',
+                label: 'Sender Policy',
+                kind: 'enum',
+                required: true,
+                default: 'allowlist',
+                options: [
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'allowedUsers',
+                label: 'Allowed Users',
+                kind: 'string-list',
+              },
+              {
+                key: 'groupPolicy',
+                label: 'Group Policy',
+                kind: 'enum',
+                required: true,
+                default: 'disabled',
+                options: [
+                  { value: 'disabled', label: 'Disabled' },
+                  { value: 'pairing', label: 'Pairing' },
+                  { value: 'allowlist', label: 'Allowlist' },
+                  { value: 'open', label: 'Open' },
+                ],
+              },
+              {
+                key: 'sessionScope',
+                label: 'Session Scope',
+                kind: 'enum',
+                required: true,
+                default: 'user',
+                options: [
+                  { value: 'user', label: 'Per user and chat' },
+                  {
+                    value: 'chat_thread',
+                    label: 'Per chat and thread',
+                  },
+                  { value: 'single', label: 'One shared session' },
+                ],
+              },
             ],
           },
           {
@@ -324,6 +361,8 @@ for (const theme of THEMES) {
                 type: 'dingtalk',
                 clientId: 'ding-visual-app',
                 senderPolicy: 'pairing',
+                groupPolicy: 'disabled',
+                sessionScope: 'user',
               },
               secrets: {
                 clientSecret: { present: true, source: 'literal' },
@@ -933,6 +972,8 @@ for (const theme of THEMES) {
             shortSummary: 'timeout treated as success',
             failureScenario:
               'When `review run` times out, the CLI still prints a verdict as if the review completed.',
+            witness:
+              'Probe: forced a 1ms timeout — BASE prints "Verdict: Approve", PR exits 1 with "review incomplete" — flipped.',
             suggestedFix:
               'Fail closed when timedOut is true instead of reporting the verdict.',
             category: 'correctness',
@@ -989,26 +1030,12 @@ for (const theme of THEMES) {
         },
         events: [
           userTextEvent('Review my changes and save the report.', { id: 1 }),
-          {
-            id: 2,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: 'call-record-review',
-                toolName: 'record_artifact',
-                title: 'record_artifact',
-                kind: 'other',
-                status: 'completed',
-                rawInput: {
-                  title: 'Code review result',
-                  workspacePath: reviewPath,
-                },
-                rawOutput: { recorded: true },
-              },
-            },
-          },
+          toolCallEvent(
+            'call-record-review',
+            'record_artifact',
+            { title: 'Code review result', workspacePath: reviewPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
           assistantTextEvent('Review saved to the workspace.', { id: 3 }),
           turnCompleteEvent('prompt-review', { id: 4 }),
         ],
@@ -1057,6 +1084,10 @@ for (const theme of THEMES) {
           'Review verdict is reported even when the child process times out',
         ),
       ).toBeVisible();
+      // The witness row — the executed evidence the witness rule delivers to
+      // the author; gating the shot on it keeps this scenario a coverage
+      // witness for the field, not just for the card.
+      await expect(page.getByText('forced a 1ms timeout')).toBeVisible();
       await captureScreenshot(page, `code-review-artifact-${theme}`);
 
       // Fullscreen is only reachable once the panel is open; without
@@ -1108,26 +1139,12 @@ for (const theme of THEMES) {
         },
         events: [
           userTextEvent('Open the saved report.', { id: 1 }),
-          {
-            id: 2,
-            v: 1,
-            type: 'session_update',
-            data: {
-              update: {
-                sessionUpdate: 'tool_call',
-                toolCallId: 'call-record-report',
-                toolName: 'record_artifact',
-                title: 'record_artifact',
-                kind: 'other',
-                status: 'completed',
-                rawInput: {
-                  title: 'Summary report',
-                  workspacePath: reportPath,
-                },
-                rawOutput: { recorded: true },
-              },
-            },
-          },
+          toolCallEvent(
+            'call-record-report',
+            'record_artifact',
+            { title: 'Summary report', workspacePath: reportPath },
+            { id: 2, rawOutput: { recorded: true } },
+          ),
           assistantTextEvent('Report saved to the workspace.', { id: 3 }),
           turnCompleteEvent('prompt-drawer', { id: 4 }),
         ],

@@ -116,6 +116,22 @@ describe('SessionService - rename and custom title', () => {
       expect(writtenRecord.sessionId).toBe(sessionIdA);
     });
 
+    it('should rename a session in the archive store', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.renameSession(
+        sessionIdA,
+        'archived session',
+        'manual',
+        'archived',
+      );
+
+      expect(result).toBe(true);
+      expect(vi.mocked(jsonl.writeLineSync).mock.calls[0][0]).toContain(
+        `/archive/${sessionIdA}.jsonl`,
+      );
+    });
+
     it('should return false when session does not exist', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([]);
 

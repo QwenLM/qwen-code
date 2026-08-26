@@ -11,7 +11,10 @@ import type {
   MarkdownChartLabelOverrides,
 } from '@datafe-open/markdown-chart';
 import type { MarkdownChartReactErrorHandler } from '@datafe-open/markdown-chart-react';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonInputAnnotation,
+  GoalSnapshotV2,
+} from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
@@ -168,7 +171,25 @@ export type ChatHeaderRenderer = (info: ChatHeaderRenderInfo) => ReactNode;
 export interface UserMessageContentRenderInfo {
   content: string;
   images?: readonly { data: string; mimeType: string }[];
+  files?: readonly {
+    name: string;
+    mimeType: string;
+    data?: Blob;
+    text?: string;
+    attachmentId?: string;
+  }[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellPreparedSubmit {
+  prompt: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellSubmitSnapshot {
+  sessionId?: string;
+  prompt: string;
+  inputAnnotations: readonly DaemonInputAnnotation[];
 }
 
 export type UserMessageContentRenderer = (
@@ -263,6 +284,12 @@ export type WebShellComposerTagPlacement = 'top' | 'inline';
 
 export interface WebShellComposerTagOptions {
   placement?: WebShellComposerTagPlacement;
+  /**
+   * Inline placement only: insert at the caret (default, synchronous user
+   * gestures) or append after the document end (asynchronous producers,
+   * which must not interrupt typing or steal focus).
+   */
+  position?: 'caret' | 'end';
 }
 
 export interface WebShellComposerTextOptions {
@@ -444,6 +471,9 @@ export interface WebShellFooterRenderInfo {
   model: string;
   streamingState: DaemonStreamingState;
   contextUsageRatio: number;
+  /** Canonical daemon-owned Goal state for the active session. */
+  goalSnapshot: GoalSnapshotV2 | null;
+  /** @deprecated Prefer goalSnapshot. */
   activeGoal: { condition: string; setAt: number } | null;
   tasks: readonly WebShellTaskInfo[];
   availableModes: readonly string[];
@@ -475,6 +505,12 @@ export interface WebShellCustomization {
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  /**
+   * Built-in / host @ mention providers. Split-view panes share this context
+   * so they match the main composer without ChatPane prop drilling.
+   */
+  builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
+  atProviders?: readonly WebShellAtProvider[];
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
@@ -496,6 +532,25 @@ export interface WebShellCustomization {
   markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
+  /**
+   * Controls whether the composer's file-upload entry points (drag-and-drop
+   * and the @ panel upload item) are enabled. Works alongside the daemon's
+   * `workspace_file_upload` capability, not instead of it: setting `false`
+   * force-disables upload even when the daemon advertises the capability,
+   * while `true`/omitted still requires the capability (and the workspace
+   * trust / qualified-route safety checks) to be satisfied.
+   */
+  fileUploadEnabled?: boolean;
+  /**
+   * Directory that drag-and-dropped files upload into, **relative to the
+   * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
+   * `'uploads'`, `'uploads/images'`, or omit it to upload into the
+   * workspace root (the default). A leading-slash path like `'/uploads'`
+   * is rejected by the daemon as outside the workspace. The directory
+   * (including intermediate components) is created automatically on upload
+   * when it does not exist.
+   */
+  fileUploadDirectory?: string;
 }
 
 const WebShellCustomizationContext = createContext<WebShellCustomization>({});

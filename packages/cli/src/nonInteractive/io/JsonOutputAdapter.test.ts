@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Buffer } from 'node:buffer';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type {
   Config,
@@ -12,6 +13,10 @@ import type {
 import { GeminiEventType, OutputFormat } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { JsonOutputAdapter } from './JsonOutputAdapter.js';
+import {
+  HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
+  HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER,
+} from './headless-tool-result-text-projection.js';
 
 function createMockConfig(): Config {
   return {
@@ -774,6 +779,97 @@ describe('JsonOutputAdapter', () => {
         is_error?: boolean;
       };
       expect(block.is_error).toBe(true);
+    });
+
+    it('serializes a bounded tool result in JSON output', () => {
+      const display = 'HEAD-' + 'x'.repeat(100_000) + '-TAIL';
+      adapter.emitToolResult(
+        {
+          callId: 'tool-large',
+          name: 'test_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+        {
+          callId: 'tool-large',
+          responseParts: [],
+          resultDisplay: display,
+          error: undefined,
+          errorType: undefined,
+        },
+      );
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      const user = parsed.find(
+        (message: { type?: string }) => message.type === 'user',
+      );
+      const content = user.message.content[0].content as string;
+
+      expect(
+        Buffer.byteLength(JSON.stringify(content), 'utf8'),
+      ).toBeLessThanOrEqual(HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET);
+      expect(content).toContain(HEADLESS_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
+      expect(content).not.toBe(display);
+    });
+
+    it('retains only the bounded preview while text output stays unchanged', () => {
+      mockConfig = {
+        ...createMockConfig(),
+        getOutputFormat: vi.fn().mockReturnValue(OutputFormat.TEXT),
+      } as unknown as Config;
+      adapter = new JsonOutputAdapter(mockConfig);
+      const display = 'HEAD-' + 'x'.repeat(100_000) + '-TAIL';
+      adapter.emitToolResult(
+        {
+          callId: 'tool-large',
+          name: 'test_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+        {
+          callId: 'tool-large',
+          responseParts: [],
+          resultDisplay: display,
+          error: undefined,
+          errorType: undefined,
+        },
+      );
+      adapter.startAssistantMessage();
+      adapter.processEvent({ type: GeminiEventType.Content, value: 'done' });
+      adapter.finalizeAssistantMessage();
+
+      const storedMessages = (
+        adapter as unknown as {
+          messages: Array<{
+            type: string;
+            message?: { content?: Array<{ content?: string }> };
+          }>;
+        }
+      ).messages;
+      const user = storedMessages.find((message) => message.type === 'user');
+      const content = user?.message?.content?.[0]?.content;
+
+      expect(typeof content).toBe('string');
+      expect(
+        Buffer.byteLength(JSON.stringify(content), 'utf8'),
+      ).toBeLessThanOrEqual(HEADLESS_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET);
+      expect(content).not.toBe(display);
+
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      expect(stdoutWriteSpy).toHaveBeenCalledWith('done\n');
     });
   });
 

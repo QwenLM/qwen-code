@@ -9,10 +9,10 @@ import {
   GOAL_CHECKPOINT_CLAIM_MAX_BYTES,
   GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS,
   GOAL_CHECKPOINT_SOURCE_REFERENCE_LIMIT,
-  GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
-  GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
+  goalLimitKindForReason,
   isGoalEvidenceProofKind,
+  isGoalLimitKind,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
   type GoalRecord,
@@ -35,6 +35,8 @@ export interface GoalControlTransition {
 export interface GoalTurnFinishedTransition {
   now: number;
   lastReason?: string;
+  /** Tokens billed to the turn that just finished. */
+  tokensUsed?: number;
 }
 
 export class GoalConflictError extends Error {
@@ -105,7 +107,9 @@ export function reduceGoalControl(
       objective: normalizeObjective(request.objective, snapshotOf(current)),
       evidenceCursor: copyCursor(transition.cursor),
       evidenceCheckpoint: undefined,
+      checkpointStalls: undefined,
       lastReason: undefined,
+      limitKind: undefined,
     });
   }
 
@@ -131,18 +135,32 @@ export function reduceGoalControl(
       snapshotOf(current),
     );
   }
-  if (
-    current.status === 'usage_limited' &&
-    (current.lastReason === GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON ||
-      current.lastReason === GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON)
-  ) {
-    throw new GoalInvalidTransitionError(
-      'An evidence-limited Goal cannot be resumed; edit or replace the Goal first',
-      snapshotOf(current),
-    );
-  }
   if (request.action !== 'resume') {
     return assertNever(request, snapshotOf(current));
+  }
+  // A Goal stopped by an evidence bound resumes from a fresh evidence window
+  // rather than refusing to resume at all. The bound was reached because the
+  // catalog could no longer hold everything since the cursor; carrying that
+  // same cursor and checkpoint back into an active Goal would reach it again
+  // on the next turn. Repointing the cursor to the resume boundary and
+  // dropping the checkpoint is the same reset `/goal edit` already performs,
+  // without discarding the objective or minting a new revision.
+  //
+  // The cost is explicit and belongs to the user who asked to resume:
+  // evidence recorded before this point is no longer citable, so a terminal
+  // proposal must prove itself from what the resumed run produces.
+  if (current.status === 'usage_limited' && isEvidenceLimited(current)) {
+    return transitionGoal(current, transition.now, {
+      status: 'active',
+      evidenceCursor: copyCursor(transition.cursor),
+      evidenceCheckpoint: undefined,
+      // The streak counts checkpoints against one window; this resume starts
+      // a different one, so carrying it over would spend the new window's
+      // allowance on the old window's failures.
+      checkpointStalls: undefined,
+      lastReason: undefined,
+      limitKind: undefined,
+    });
   }
   return transitionGoal(current, transition.now, {
     status: 'active',
@@ -161,6 +179,7 @@ export function reduceGoalTurnFinished(
   }
   return transitionGoal(current, transition.now, {
     turnCount: current.turnCount + 1,
+    tokensUsed: current.tokensUsed + Math.max(0, transition.tokensUsed ?? 0),
     ...(transition.lastReason === undefined
       ? {}
       : { lastReason: transition.lastReason }),
@@ -271,23 +290,46 @@ export function parseGoalSnapshotV2(
 ): GoalSnapshotV2 | undefined {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['v', 'goal', 'activity']) ||
+    !hasOnlyKeys(value, ['v', 'goal', 'activity', 'clearedGoal']) ||
     value['v'] !== GOAL_STATE_VERSION ||
     !isGoalActivity(value['activity'])
   ) {
     return undefined;
   }
   if (value['goal'] === null) {
+    const clearedGoal = parseGoalOrder(value['clearedGoal']);
+    if (value['clearedGoal'] !== undefined && !clearedGoal) return undefined;
     return {
       v: GOAL_STATE_VERSION,
       goal: null,
       activity: value['activity'],
+      ...(clearedGoal ? { clearedGoal } : {}),
     };
   }
+  if (value['clearedGoal'] !== undefined) return undefined;
   const goal = parseGoalRecord(value['goal']);
   return goal
     ? { v: GOAL_STATE_VERSION, goal, activity: value['activity'] }
     : undefined;
+}
+
+function parseGoalOrder(value: unknown): GoalSnapshotV2['clearedGoal'] {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['goalId', 'revision', 'updatedAt']) ||
+    typeof value['goalId'] !== 'string' ||
+    !value['goalId'] ||
+    !isNonNegativeInteger(value['revision']) ||
+    value['revision'] === 0 ||
+    !isFiniteNumber(value['updatedAt'])
+  ) {
+    return undefined;
+  }
+  return {
+    goalId: value['goalId'],
+    revision: value['revision'],
+    updatedAt: value['updatedAt'],
+  };
 }
 
 export function parseGoalStateCause(
@@ -310,6 +352,7 @@ function createGoal(
     evidenceCursor: copyCursor(cursor),
     turnCount: 0,
     activeTimeMs: 0,
+    tokensUsed: 0,
     createdAt: now,
     updatedAt: now,
   };
@@ -341,6 +384,21 @@ function normalizeObjective(
     );
   }
   return normalized;
+}
+
+/**
+ * Whether a stopped Goal was stopped by one of the evidence bounds.
+ *
+ * `limitKind` is the field of record. The `lastReason` comparison behind it
+ * reads Goals persisted before `limitKind` existed, where the sentinel prose
+ * was the only marker a transition could key off.
+ */
+function isEvidenceLimited(goal: GoalRecord): boolean {
+  return (
+    goal.limitKind !== undefined ||
+    (goal.lastReason !== undefined &&
+      goalLimitKindForReason(goal.lastReason) !== undefined)
+  );
 }
 
 function transitionGoal(
@@ -395,10 +453,13 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'evidenceCursor',
       'turnCount',
       'activeTimeMs',
+      'tokensUsed',
       'createdAt',
       'updatedAt',
       'evidenceCheckpoint',
+      'checkpointStalls',
       'lastReason',
+      'limitKind',
     ]) ||
     typeof value['goalId'] !== 'string' ||
     !value['goalId'] ||
@@ -410,11 +471,18 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isTranscriptCursor(value['evidenceCursor']) ||
     !isNonNegativeInteger(value['turnCount']) ||
     !isNonNegativeNumber(value['activeTimeMs']) ||
+    (value['tokensUsed'] !== undefined &&
+      !isNonNegativeNumber(value['tokensUsed'])) ||
     !isFiniteNumber(value['createdAt']) ||
     !isFiniteNumber(value['updatedAt']) ||
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
+    (value['checkpointStalls'] !== undefined &&
+      !isNonNegativeInteger(value['checkpointStalls'])) ||
     (value['lastReason'] !== undefined &&
-      typeof value['lastReason'] !== 'string')
+      typeof value['lastReason'] !== 'string') ||
+    (value['limitKind'] !== undefined &&
+      (!isGoalLimitKind(value['limitKind']) ||
+        value['status'] !== 'usage_limited'))
   ) {
     return undefined;
   }
@@ -433,6 +501,8 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     evidenceCursor: copyCursor(value['evidenceCursor']),
     turnCount: value['turnCount'],
     activeTimeMs: value['activeTimeMs'],
+    // Goals persisted before `tokensUsed` existed carry no spend to restore.
+    tokensUsed: value['tokensUsed'] ?? 0,
     createdAt: value['createdAt'],
     updatedAt: value['updatedAt'],
     ...(value['evidenceCheckpoint'] === undefined
@@ -440,9 +510,16 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       : {
           evidenceCheckpoint: structuredClone(value['evidenceCheckpoint']),
         }),
+    // Zero is spelled as no field; a persisted 0 restores the same way.
+    ...(value['checkpointStalls']
+      ? { checkpointStalls: value['checkpointStalls'] }
+      : {}),
     ...(value['lastReason'] === undefined
       ? {}
       : { lastReason: value['lastReason'] }),
+    ...(value['limitKind'] === undefined
+      ? {}
+      : { limitKind: value['limitKind'] }),
   };
 }
 
