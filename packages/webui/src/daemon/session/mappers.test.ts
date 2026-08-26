@@ -386,6 +386,151 @@ describe('mapWorkspaceSkills', () => {
 });
 
 describe('updateConnectionFromDaemonEvent', () => {
+  it('applies config-option updates only to live reasoning state', () => {
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      currentModel: 'qwen3.8-max',
+      reasoning: {
+        enabled: true,
+        effort: 'xhigh',
+        efforts: [{ value: 'xhigh', name: 'Extra High' }],
+      },
+      models: [
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          reasoningPreview: {
+            enabled: true,
+            effort: 'xhigh',
+            efforts: [{ value: 'xhigh', name: 'Extra High' }],
+          },
+        },
+      ],
+    };
+    const next = applyEvent(current, {
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'config_option_update',
+          configOptions: [
+            {
+              id: 'reasoning_effort',
+              currentValue: 'medium',
+              options: [
+                { value: 'none', name: 'Thinking off' },
+                { value: 'medium', name: 'Medium' },
+                { value: 'xhigh', name: 'Extra High' },
+              ],
+            },
+          ],
+        },
+      },
+    } as DaemonEvent);
+
+    expect(next.reasoning).toMatchObject({ enabled: true, effort: 'medium' });
+    expect(next.models).toBe(current.models);
+    expect(next.models?.[0]?.reasoningPreview?.effort).toBe('xhigh');
+  });
+
+  it('updates every retained provider preview without changing live session state', () => {
+    const configOptions = [
+      {
+        id: 'reasoning_effort',
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none', name: 'Thinking off' },
+          { value: 'xhigh', name: 'Extra High' },
+        ],
+      },
+    ];
+    const providers = workspaceProvidersWithConfigOptions(configOptions);
+    providers.providers[0]?.models.push({
+      modelId: 'second-model',
+      baseModelId: 'second-model',
+      name: 'Second model',
+      isCurrent: false,
+      isRuntime: false,
+      configOptions: structuredClone(configOptions),
+    });
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      sessionId: 'live-session',
+      currentModel: 'qwen3.8-max',
+      providers,
+      reasoning: {
+        enabled: true,
+        effort: 'xhigh',
+        efforts: [{ value: 'xhigh', name: 'Extra High' }],
+      },
+      models: [
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          reasoningPreview: {
+            enabled: true,
+            effort: 'xhigh',
+            efforts: [{ value: 'xhigh', name: 'Extra High' }],
+          },
+        },
+      ],
+    };
+    const opaque = applyEvent(current, {
+      id: 2,
+      v: 1,
+      type: 'settings_changed',
+      data: {
+        key: 'model.reasoningEffort',
+        value: 'Vendor.Ultra',
+        scope: 'user',
+      },
+    } as DaemonEvent);
+
+    expect(opaque.reasoning).toBe(current.reasoning);
+    expect(opaque.models).toBe(current.models);
+    expect(
+      mapProviderStatus(opaque.providers).models.map(
+        (model) => model.reasoningPreview,
+      ),
+    ).toEqual([
+      {
+        enabled: true,
+        effort: 'Vendor.Ultra',
+        efforts: [
+          { value: 'xhigh', name: 'Extra High' },
+          { value: 'Vendor.Ultra', name: 'Vendor.Ultra' },
+        ],
+      },
+      {
+        enabled: true,
+        effort: 'Vendor.Ultra',
+        efforts: [
+          { value: 'xhigh', name: 'Extra High' },
+          { value: 'Vendor.Ultra', name: 'Vendor.Ultra' },
+        ],
+      },
+    ]);
+
+    const disabled = applyEvent(opaque, {
+      id: 3,
+      v: 1,
+      type: 'settings_changed',
+      data: {
+        key: 'model.reasoningEffort',
+        value: 'none',
+        scope: 'user',
+      },
+    } as DaemonEvent);
+    expect(disabled.reasoning).toBe(current.reasoning);
+    expect(disabled.models).toBe(current.models);
+    expect(
+      mapProviderStatus(disabled.providers).models.map(
+        (model) => model.reasoningPreview?.enabled,
+      ),
+    ).toEqual([false, false]);
+  });
+
   it('updates and clears the authoritative Goal snapshot', () => {
     const goal = {
       goalId: 'goal-1',

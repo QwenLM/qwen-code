@@ -53,6 +53,8 @@ import {
   getSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
 import { persistStableClientId } from './clientLifecycle.js';
+import { mapProviderStatus } from './mappers.js';
+import { getWorkspaceModelsAfterSessionClear } from './actions.js';
 
 interface MockSession {
   sessionId: string;
@@ -745,6 +747,187 @@ describe('DaemonSessionProvider', () => {
         { value: 'medium', name: 'medium' },
         { value: 'xhigh', name: 'xhigh' },
       ],
+    });
+  });
+
+  it('refreshes the authoritative default after a persisted effort is cleared', async () => {
+    sdkMocks.workspaceProviders
+      .mockResolvedValueOnce(workspaceProvidersWithReasoningPreview('medium'))
+      .mockResolvedValue(workspaceProvidersWithReasoningPreview('xhigh'));
+    sdkMocks.qualifiedWorkspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview('xhigh'),
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'clear-reasoning-session',
+        context: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'clear-reasoning-session',
+          workspaceCwd: '/mock-workspace',
+          state: {
+            configOptions: reasoningConfigOptions('medium'),
+            models: {
+              currentModelId: 'qwen3.8-max',
+              availableModels: [
+                {
+                  modelId: 'qwen3.8-max',
+                  baseModelId: 'qwen3.8-max',
+                  name: 'Qwen 3.8 Max',
+                },
+              ],
+            },
+          },
+        })),
+        events: async function* clearedReasoningEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'settings_changed',
+            data: {
+              key: 'model.reasoningEffort',
+              value: null,
+              scope: 'user',
+            },
+          } satisfies DaemonEvent;
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'clear-reasoning-session',
+    });
+    await vi.waitFor(() =>
+      expect(sdkMocks.qualifiedWorkspaceProviders).toHaveBeenCalled(),
+    );
+    await vi.waitFor(() =>
+      expect(
+        mapProviderStatus(connection?.providers).models[0]?.reasoningPreview
+          ?.effort,
+      ).toBe('xhigh'),
+    );
+    expect(connection?.sessionId).toBe('clear-reasoning-session');
+    expect(
+      getWorkspaceModelsAfterSessionClear(connection!)?.[0]?.reasoningPreview
+        ?.effort,
+    ).toBe('xhigh');
+
+    await act(async () => {
+      await actions?.clearSession();
+      await flushPromises();
+    });
+
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview?.effort).toBe('xhigh');
+  });
+
+  it('drops a reasoning provider refresh after switching workspaces', async () => {
+    const staleRefresh =
+      createDeferred<
+        ReturnType<typeof workspaceProvidersWithReasoningPreview>
+      >();
+    sdkMocks.workspaceProviders
+      .mockResolvedValueOnce(
+        workspaceProvidersWithReasoningPreview('medium', '/work/a'),
+      )
+      .mockResolvedValue(
+        workspaceProvidersWithReasoningPreview('xhigh', '/work/b'),
+      );
+    sdkMocks.qualifiedWorkspaceProviders.mockReturnValue(staleRefresh.promise);
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-a',
+        workspaceCwd: '/work/a',
+        events: async function* workspaceASettingsEvent(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'settings_changed',
+            data: {
+              key: 'model.reasoningEffort',
+              value: null,
+              scope: 'user',
+            },
+          } satisfies DaemonEvent;
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      }),
+      createMockSession({ sessionId: 'session-b', workspaceCwd: '/work/b' }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+      workspaceCwd: '/work/a',
+    });
+    await vi.waitFor(() =>
+      expect(sdkMocks.qualifiedWorkspaceProviders).toHaveBeenCalled(),
+    );
+
+    let switched: Promise<void> | undefined;
+    act(() => {
+      switched = requireActions(actions).loadSession('session-b', {
+        workspaceCwd: '/work/b',
+      });
+    });
+    await act(async () => {
+      await switched;
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+      providers: { workspaceCwd: '/work/b' },
+    });
+
+    staleRefresh.resolve(
+      workspaceProvidersWithReasoningPreview('medium', '/work/a'),
+    );
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+      providers: { workspaceCwd: '/work/b' },
     });
   });
 

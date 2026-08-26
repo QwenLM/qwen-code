@@ -560,6 +560,7 @@ export interface DaemonWorkspaceEventSignals {
   agentsVersion: number;
   toolsVersion: number;
   settingsVersion: number;
+  reasoningSettingsVersion: number;
   skillsVersion: number;
   lastSkillMutation?: DaemonSkillToggleMutation;
   skillMutationsByCwd?: Record<string, DaemonSkillToggleMutation[]>;

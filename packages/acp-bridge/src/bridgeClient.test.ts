@@ -75,6 +75,7 @@ import type {
 } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+import type { BridgeEvent } from './eventBus.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
 import {
   SESSION_ATTACHMENT_MAX_ITEM_BYTES,
@@ -106,6 +107,11 @@ function makeClient(
       import('./bridgeOptions.js').BridgeOptions['onCreateCurrentSessionScheduledTask']
     >;
   },
+  settingsChanged?: {
+    resolveEntry: (sessionId?: string) => unknown;
+    ownsSession?: (sessionId: string) => boolean;
+    handler: (event: Omit<BridgeEvent, 'id' | 'v'>) => void;
+  },
 ): BridgeClient {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run in fs-path tests');
@@ -119,6 +125,7 @@ function makeClient(
   return new BridgeClient(
     (managedGuard?.resolveEntry ??
       currentSessionTask?.resolveEntry ??
+      settingsChanged?.resolveEntry ??
       noPermissionFlow) as never, // resolveEntry
     noPermissionFlow as never, // resolvePendingRestoreEvents
     throwerMediator, // mediator (F3 Commit 3)
@@ -130,6 +137,7 @@ function makeClient(
     undefined,
     managedGuard?.ownsSession ??
       currentSessionTask?.ownsSession ??
+      settingsChanged?.ownsSession ??
       (() => true),
     undefined,
     undefined,
@@ -145,6 +153,7 @@ function makeClient(
     undefined,
     undefined,
     currentSessionTask?.handler,
+    settingsChanged?.handler,
   );
 }
 
@@ -759,6 +768,45 @@ describe('BridgeClient — recording degradation ownership', () => {
 
     expect(freshEntry.recordingDegraded).toBe(false);
     expect(publish).not.toHaveBeenCalled();
+  });
+});
+
+describe('BridgeClient — settings notification ownership', () => {
+  it('accepts only v1 notifications from the channel that owns the session', async () => {
+    const sessionId = 'session-owned-by-current-channel';
+    const handler = vi.fn();
+    let ownsSession = false;
+    const client = makeClient(undefined, undefined, undefined, {
+      resolveEntry: (id) =>
+        id === sessionId
+          ? { sessionId, events: { publish: vi.fn() } }
+          : undefined,
+      ownsSession: () => ownsSession,
+      handler,
+    });
+    const notification = {
+      sessionId,
+      key: 'model.reasoningEffort',
+      value: 'high',
+      scope: 'user',
+    };
+
+    await client.extNotification('qwen/notify/session/settings-changed', {
+      v: 1,
+      ...notification,
+    });
+    ownsSession = true;
+    await client.extNotification('qwen/notify/session/settings-changed', {
+      v: 2,
+      ...notification,
+    });
+    expect(handler).not.toHaveBeenCalled();
+
+    await client.extNotification('qwen/notify/session/settings-changed', {
+      v: 1,
+      ...notification,
+    });
+    expect(handler).toHaveBeenCalledOnce();
   });
 });
 

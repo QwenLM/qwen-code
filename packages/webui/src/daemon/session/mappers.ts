@@ -182,6 +182,69 @@ export function mapSessionContextReasoning(
   return mapReasoningControls(status?.state?.configOptions, fallbackEffort);
 }
 
+function patchReasoningControls(
+  controls: DaemonReasoningControls,
+  value: string,
+): DaemonReasoningControls {
+  if (value === 'none') return { ...controls, enabled: false };
+  const efforts = controls.efforts.some((effort) => effort.value === value)
+    ? controls.efforts
+    : [...controls.efforts, { value, name: value }];
+  return { enabled: true, effort: value, efforts };
+}
+
+function patchReasoningConfigOptions(
+  configOptions: unknown,
+  value: string,
+): unknown {
+  if (!Array.isArray(configOptions)) return configOptions;
+  let changed = false;
+  const next = configOptions.map((candidate) => {
+    const option = getRecord(candidate);
+    if (
+      getString(option, 'id') !== 'reasoning_effort' ||
+      !Array.isArray(option?.['options'])
+    ) {
+      return candidate;
+    }
+    const options = option['options'] as unknown[];
+    const nextOptions =
+      value === 'none' ||
+      options.some((item) => getString(getRecord(item), 'value') === value)
+        ? options
+        : [...options, { value, name: value }];
+    changed = true;
+    return { ...option, currentValue: value, options: nextOptions };
+  });
+  return changed ? next : configOptions;
+}
+
+function patchProviderReasoningPreviews(
+  status: DaemonWorkspaceProvidersStatus | undefined,
+  value: string,
+): DaemonWorkspaceProvidersStatus | undefined {
+  if (!status) return undefined;
+  let changed = false;
+  const providers = status.providers.map((provider) => {
+    let providerChanged = false;
+    const models = provider.models.map((model) => {
+      const configOptions = patchReasoningConfigOptions(
+        model.configOptions,
+        value,
+      );
+      if (configOptions === model.configOptions) return model;
+      changed = true;
+      providerChanged = true;
+      return {
+        ...model,
+        configOptions: configOptions as typeof model.configOptions,
+      };
+    });
+    return providerChanged ? { ...provider, models } : provider;
+  });
+  return changed ? { ...status, providers } : status;
+}
+
 export function mapSupportedCommands(
   status: DaemonSessionSupportedCommandsStatus | undefined,
 ): {
@@ -312,6 +375,29 @@ export function updateConnectionFromDaemonEvent(
         skills,
       }));
     }
+    if (getString(update, 'sessionUpdate') === 'config_option_update') {
+      const configOptions = update?.['configOptions'];
+      if (!Array.isArray(configOptions)) return;
+      setConnection((current) => {
+        const reasoning = mapReasoningControls(
+          configOptions,
+          current.reasoning?.effort,
+        );
+        return {
+          ...current,
+          reasoning,
+          context: current.context
+            ? {
+                ...current.context,
+                state: {
+                  ...current.context.state,
+                  configOptions,
+                },
+              }
+            : current.context,
+        };
+      });
+    }
     return;
   }
 
@@ -367,6 +453,48 @@ export function updateConnectionFromDaemonEvent(
       const mode = getString(data, 'next') ?? getString(data, 'mode');
       if (mode) {
         setConnection((current) => ({ ...current, currentMode: mode }));
+      }
+      break;
+    }
+    case 'settings_changed': {
+      const data = getRecord(event.data);
+      const value = data?.['value'];
+      if (
+        data?.['key'] === 'model.reasoningEffort' &&
+        typeof value === 'string'
+      ) {
+        setConnection((current) => {
+          const providers = patchProviderReasoningPreviews(
+            current.providers,
+            value,
+          );
+          if (providers && providers !== current.providers) {
+            if (current.sessionId) return { ...current, providers };
+            const projected = mapProviderStatus(providers);
+            return {
+              ...current,
+              providers,
+              models: projected.models,
+              currentModel: projected.currentModel ?? current.currentModel,
+              contextWindow: projected.contextWindow ?? current.contextWindow,
+            };
+          }
+          if (current.sessionId || !current.models) return current;
+          return {
+            ...current,
+            models: current.models.map((model) =>
+              model.reasoningPreview
+                ? {
+                    ...model,
+                    reasoningPreview: patchReasoningControls(
+                      model.reasoningPreview,
+                      value,
+                    ),
+                  }
+                : model,
+            ),
+          };
+        });
       }
       break;
     }

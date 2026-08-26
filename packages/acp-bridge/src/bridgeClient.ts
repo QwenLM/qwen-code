@@ -900,6 +900,9 @@ export class BridgeClient implements Client {
      */
     private readonly onGoalTurnEnded?: (sessionId: string) => void,
     private readonly onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler,
+    private readonly onSettingsChanged?: (
+      event: Omit<BridgeEvent, 'id' | 'v'>,
+    ) => void,
   ) {}
 
   async requestPermission(
@@ -2152,6 +2155,7 @@ export class BridgeClient implements Client {
    * Handle child->bridge ACP `extNotification` calls. Recognized methods are
    * `qwen/notify/session/model-update`,
    * `qwen/notify/session/mode-update`,
+   * `qwen/notify/session/settings-changed`,
    * `qwen/notify/session/title-update` (auto/in-process session titles),
    * `qwen/notify/session/recording-degraded`,
    * `qwen/notify/session/prompt-suggestion` (followup assist),
@@ -2364,6 +2368,10 @@ export class BridgeClient implements Client {
     }
     if (method === 'qwen/notify/session/model-update') {
       this.handleInSessionModelUpdate(params);
+      return;
+    }
+    if (method === 'qwen/notify/session/settings-changed') {
+      this.handleInSessionSettingsChanged(params);
       return;
     }
     if (method === 'qwen/notify/session/mode-update') {
@@ -2737,6 +2745,39 @@ export class BridgeClient implements Client {
     writeStderrLine(
       `[demux] session=${sessionId} type=current_model_update action=promoted model=${currentModelId}`,
     );
+  }
+
+  private handleInSessionSettingsChanged(
+    params: Record<string, unknown>,
+  ): void {
+    const sessionId = params['sessionId'];
+    const key = params['key'];
+    const value = params['value'];
+    const scope = params['scope'];
+    if (
+      params['v'] !== 1 ||
+      typeof sessionId !== 'string' ||
+      key !== 'model.reasoningEffort' ||
+      typeof value !== 'string' ||
+      (scope !== 'user' && scope !== 'workspace')
+    ) {
+      return;
+    }
+    if (!this.ownsSession(sessionId)) return;
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return;
+    const event = {
+      type: 'settings_changed',
+      data: { key, value, scope },
+      ...(entry.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
+    } as const;
+    if (this.onSettingsChanged) {
+      this.onSettingsChanged(event);
+    } else {
+      entry.events.publish(event);
+    }
   }
 
   /**

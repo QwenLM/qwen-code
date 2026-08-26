@@ -8,6 +8,7 @@ import express from 'express';
 import type { Application } from 'express';
 import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   hashDaemonWorkspace,
   readCronTasks,
@@ -597,6 +598,7 @@ export interface ServeAppDeps {
    * generations no longer exposed by the workspace registry.
    */
   getSessionBridges?: () => readonly AcpSessionBridge[];
+  publishGlobalWorkspaceEvent?: (event: Omit<BridgeEvent, 'id' | 'v'>) => void;
   workspaceTrustHotReloadAvailable?: boolean;
   getWorkspaceTrustPolicySnapshot?: () =>
     | DaemonTrustPolicySnapshot
@@ -2420,11 +2422,16 @@ export function createServeApp(
     clientId: string | undefined,
   ) => {
     invalidateServeFeaturesCache();
-    primaryBridge.publishWorkspaceEvent({
+    const event = {
       type: 'settings_changed',
       data: { key, value, scope },
       ...(clientId ? { originatorClientId: clientId } : {}),
-    });
+    } as const;
+    if (scope === 'user' && deps.publishGlobalWorkspaceEvent) {
+      deps.publishGlobalWorkspaceEvent(event);
+    } else {
+      primaryBridge.publishWorkspaceEvent(event);
+    }
   };
 
   if (deps.persistSetting) {

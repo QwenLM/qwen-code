@@ -4122,6 +4122,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // nothing else would settle what its last drain missed.
           settleMidTurnQueueAfterGoalTurn,
           opts.onCreateCurrentSessionScheduledTask,
+          publishSettingsChangedEvent,
         );
         const rawConnection = new ClientSideConnection(
           () =>
@@ -5842,6 +5843,26 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       writeStderrLine(
         `qwen serve: broadcastWorkspaceEvent type=${envelope.type} dropped on ALL ${failureCount} session bus(es); SSE subscribers will miss this event (GET fallback still authoritative)`,
       );
+    }
+  };
+
+  const publishSettingsChangedEvent = (
+    event: Omit<BridgeEvent, 'id' | 'v'>,
+  ): void => {
+    const scope =
+      event.data && typeof event.data === 'object'
+        ? (event.data as Record<string, unknown>)['scope']
+        : undefined;
+    if (scope === 'user' && opts.publishGlobalWorkspaceEvent !== undefined) {
+      try {
+        opts.publishGlobalWorkspaceEvent(event);
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: global settings_changed broadcast failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } else {
+      broadcastWorkspaceEvent(event);
     }
   };
 
@@ -11316,20 +11337,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     scope,
                   },
                 } as const;
-                if (
-                  scope === 'user' &&
-                  opts.publishGlobalWorkspaceEvent !== undefined
-                ) {
-                  try {
-                    opts.publishGlobalWorkspaceEvent(event);
-                  } catch (err) {
-                    writeStderrLine(
-                      `qwen serve: global settings_changed broadcast failed: ${err instanceof Error ? err.message : String(err)}`,
-                    );
-                  }
-                } else {
-                  broadcastWorkspaceEvent(event);
-                }
+                publishSettingsChangedEvent(event);
               }
             }
             return response;

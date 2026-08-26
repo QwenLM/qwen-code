@@ -79,7 +79,10 @@ export function resolveReasoningPreviewState(
   const reasoning = preference === undefined ? modelDefault : preference;
   if (reasoning === false) return { enabled: false };
   const effort = typeof reasoning === 'string' ? reasoning : reasoning?.effort;
-  return effort?.trim() ? { enabled: true, effort } : undefined;
+  if (typeof effort !== 'string' || !effort.trim()) return undefined;
+  return effort === REASONING_EFFORT_NONE
+    ? { enabled: false }
+    : { enabled: true, effort };
 }
 
 export function buildModelReasoningConfigOption(
@@ -91,6 +94,7 @@ export function buildModelReasoningConfigOption(
 
   const configuredEffort =
     !reasoning.toggleOnly &&
+    typeof state.effort === 'string' &&
     state.effort?.trim() &&
     state.effort !== REASONING_EFFORT_NONE &&
     state.effort !== REASONING_EFFORT_DEFAULT

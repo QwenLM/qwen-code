@@ -677,6 +677,7 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
   agentsVersion: 0,
   toolsVersion: 0,
   settingsVersion: 0,
+  reasoningSettingsVersion: 0,
   skillsVersion: 0,
   mcpVersion: 0,
   extensionsVersion: 0,
@@ -1071,6 +1072,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
+  const reasoningProvidersRefreshRef = useRef(0);
   const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
   const mountedRef = useRef(false);
 
@@ -1083,6 +1085,82 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       tryLiveJournalRepairRef.current = undefined;
     };
   }, []);
+
+  useEffect(() => {
+    if (workspaceEventSignals.reasoningSettingsVersion === 0) return;
+    const client =
+      workspaceClientRef.current ??
+      (resolvedBaseUrl
+        ? new DaemonClient({ baseUrl: resolvedBaseUrl, token: resolvedToken })
+        : undefined);
+    if (!client) return;
+    const refreshId = ++reasoningProvidersRefreshRef.current;
+    const targetWorkspace =
+      sessionRef.current?.workspaceCwd ??
+      activeWorkspaceCwdRef.current ??
+      connectionRef.current.workspaceCwd ??
+      resolvedWorkspaceCwdRef.current;
+    const targetWorkspaceKey = normalizeWorkspaceIdentity(targetWorkspace);
+    const load = targetWorkspace
+      ? client.workspaceByCwd(targetWorkspace).workspaceProviders()
+      : client.workspaceProviders();
+    void load
+      .then((providers) => {
+        if (
+          !mountedRef.current ||
+          refreshId !== reasoningProvidersRefreshRef.current
+        ) {
+          return;
+        }
+        const responseWorkspaceKey = normalizeWorkspaceIdentity(
+          providers.workspaceCwd,
+        );
+        if (
+          targetWorkspaceKey &&
+          responseWorkspaceKey &&
+          responseWorkspaceKey !== targetWorkspaceKey
+        ) {
+          return;
+        }
+        const projected = mapProviderStatus(providers);
+        setConnectionSynchronous((current) => {
+          const currentWorkspaceKey = normalizeWorkspaceIdentity(
+            sessionRef.current?.workspaceCwd ??
+              activeWorkspaceCwdRef.current ??
+              current.workspaceCwd ??
+              resolvedWorkspaceCwdRef.current,
+          );
+          if (
+            targetWorkspaceKey &&
+            currentWorkspaceKey !== targetWorkspaceKey
+          ) {
+            return current;
+          }
+          const activeSession = sessionRef.current;
+          if (activeSession && current.sessionId === activeSession.sessionId) {
+            return { ...current, providers };
+          }
+          return {
+            ...current,
+            providers,
+            models: projected.models,
+            currentModel: projected.currentModel ?? current.currentModel,
+            contextWindow: projected.contextWindow ?? current.contextWindow,
+          };
+        });
+      })
+      .catch((error: unknown) => {
+        console.warn(
+          '[DaemonSessionProvider] failed to refresh providers after reasoning setting change:',
+          error,
+        );
+      });
+  }, [
+    resolvedBaseUrl,
+    resolvedToken,
+    setConnectionSynchronous,
+    workspaceEventSignals.reasoningSettingsVersion,
+  ]);
 
   const sessionEffectWorkspaceCwd = restoreWorkspaceCwd ?? workspaceCwd;
 
@@ -4512,6 +4590,7 @@ function bumpWorkspaceEventSignals(
   let agents = 0;
   let tools = 0;
   let settings = 0;
+  let reasoningSettings = 0;
   const skillMutations: Array<
     NonNullable<DaemonWorkspaceEventSignals['lastSkillMutation']>
   > = [];
@@ -4544,6 +4623,9 @@ function bumpWorkspaceEventSignals(
           }
         } else {
           settings += 1;
+          if (event.key === 'model.reasoningEffort') {
+            reasoningSettings += 1;
+          }
         }
         break;
       case 'workspace.mcp.budget_warning':
@@ -4624,6 +4706,8 @@ function bumpWorkspaceEventSignals(
       agentsVersion: current.agentsVersion + agents,
       toolsVersion: current.toolsVersion + tools,
       settingsVersion: current.settingsVersion + settings,
+      reasoningSettingsVersion:
+        current.reasoningSettingsVersion + reasoningSettings,
       skillsVersion: current.skillsVersion + newSkillMutations.length,
       mcpVersion: current.mcpVersion + mcp,
       extensionsVersion: current.extensionsVersion + extensions,

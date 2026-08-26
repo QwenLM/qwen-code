@@ -395,6 +395,8 @@ async function registerModelInvocableCommands(
 export interface NonInteractiveSlashCommandSessionHooks {
   /** @see CommandContext['session']['startNewSession'] */
   startNewSession?: (sessionId: string) => void;
+  /** @see CommandContext['session']['notifySettingsChanged'] */
+  notifySettingsChanged?: CommandContext['session']['notifySettingsChanged'];
 }
 
 export const handleSlashCommand = async (
@@ -648,6 +650,9 @@ export const handleSlashCommand = async (
       sessionShellAllowlist: new Set(),
       ...(sessionHooks?.startNewSession
         ? { startNewSession: sessionHooks.startNewSession }
+        : {}),
+      ...(sessionHooks?.notifySettingsChanged
+        ? { notifySettingsChanged: sessionHooks.notifySettingsChanged }
         : {}),
     },
     invocation: {

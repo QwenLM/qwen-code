@@ -26,6 +26,7 @@ import {
 } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
+import { effortCommand } from './ui/commands/effort-command.js';
 
 const recordAutoSkillUsageMock = vi.hoisted(() => vi.fn());
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
@@ -160,6 +161,50 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result.type).toBe('no_command');
+  });
+
+  it('forwards a real built-in effort persistence event through the session hook', async () => {
+    const setValue = vi.fn();
+    const notifySettingsChanged = vi.fn();
+    Object.assign(mockConfig, {
+      getReasoningEffort: vi.fn().mockReturnValue('high'),
+      getReasoningPreference: vi.fn().mockReturnValue(undefined),
+      getReasoningEffortOverride: vi.fn().mockReturnValue(undefined),
+      setReasoningEffort: vi.fn(),
+    });
+    mockSettings = {
+      ...mockSettings,
+      isTrusted: true,
+      user: { path: '', settings: {} },
+      workspace: { path: '', settings: {} },
+      setValue,
+    } as unknown as LoadedSettings;
+    mockGetCommands.mockReturnValue([effortCommand]);
+
+    const result = await handleSlashCommand(
+      '/effort high',
+      abortController,
+      mockConfig,
+      mockSettings,
+      { notifySettingsChanged },
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      resolvedCommand: { name: 'effort', kind: CommandKind.BUILT_IN },
+    });
+    expect(setValue).toHaveBeenCalledWith(
+      expect.anything(),
+      'model.reasoningEffort',
+      'high',
+      undefined,
+      { throwOnWriteFailure: true },
+    );
+    expect(notifySettingsChanged).toHaveBeenCalledWith({
+      key: 'model.reasoningEffort',
+      value: 'high',
+      scope: 'user',
+    });
   });
 
   it('should return unsupported for built-in commands without non-interactive supportedModes', async () => {

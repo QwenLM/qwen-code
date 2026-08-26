@@ -13,6 +13,7 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { SettingScope } from '../../config/settings.js';
 import {
   applyReasoningEffort,
   normalizeReasoningEffort,
@@ -108,11 +109,19 @@ export const effortCommand: SlashCommand = {
     // Provider adapters clamp the tier to what the active model supports.
     applyReasoningEffort(config, tier);
     if (context.executionPolicy?.persistModelSelection !== false) {
+      const persistScope = getPersistScopeForModelSelection(settings);
       settings.setValue(
-        getPersistScopeForModelSelection(settings),
+        persistScope,
         'model.reasoningEffort',
         tier,
+        undefined,
+        { throwOnWriteFailure: true },
       );
+      context.session.notifySettingsChanged?.({
+        key: 'model.reasoningEffort',
+        value: tier,
+        scope: persistScope === SettingScope.Workspace ? 'workspace' : 'user',
+      });
     }
 
     return {

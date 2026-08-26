@@ -23028,6 +23028,118 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('promotes child-side user reasoning persistence to daemon-wide fan-out', async () => {
+      const publishGlobalWorkspaceEvent = vi.fn();
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        publishGlobalWorkspaceEvent,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/settings-changed',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          key: 'model.reasoningEffort',
+          value: 'high',
+          scope: 'user',
+        },
+      );
+
+      expect(publishGlobalWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          key: 'model.reasoningEffort',
+          value: 'high',
+          scope: 'user',
+        },
+      });
+      expect(
+        bridge
+          .getSessionReplaySnapshot(session.sessionId)
+          ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+      ).toEqual([]);
+      await bridge.shutdown();
+    });
+
+    it('keeps child-side workspace reasoning persistence on its bridge', async () => {
+      const publishGlobalWorkspaceEvent = vi.fn();
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        publishGlobalWorkspaceEvent,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/settings-changed',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          key: 'model.reasoningEffort',
+          value: 'medium',
+          scope: 'workspace',
+        },
+      );
+
+      expect(publishGlobalWorkspaceEvent).not.toHaveBeenCalled();
+      expect(
+        bridge
+          .getSessionReplaySnapshot(session.sessionId)
+          ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+      ).toContainEqual(
+        expect.objectContaining({
+          data: {
+            key: 'model.reasoningEffort',
+            value: 'medium',
+            scope: 'workspace',
+          },
+        }),
+      );
+      await bridge.shutdown();
+    });
+
+    it('drops malformed child-side reasoning setting notifications', async () => {
+      const publishGlobalWorkspaceEvent = vi.fn();
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        publishGlobalWorkspaceEvent,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/settings-changed',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          key: 'model.reasoningEffort',
+          value: 3,
+          scope: 'user',
+        },
+      );
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/settings-changed',
+        {
+          v: 1,
+          sessionId: 'unknown-session',
+          key: 'model.reasoningEffort',
+          value: 'high',
+          scope: 'user',
+        },
+      );
+
+      expect(publishGlobalWorkspaceEvent).not.toHaveBeenCalled();
+      expect(
+        bridge
+          .getSessionReplaySnapshot(session.sessionId)
+          ?.liveJournal.filter((event) => event.type === 'settings_changed'),
+      ).toEqual([]);
+      await bridge.shutdown();
+    });
+
     it('broadcasts a cleared persisted reasoning value as null', async () => {
       const publishGlobalWorkspaceEvent = vi.fn();
       const handle = makeChannel({

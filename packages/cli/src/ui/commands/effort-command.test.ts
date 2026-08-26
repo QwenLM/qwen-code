@@ -20,6 +20,7 @@ describe('effortCommand', () => {
   let getReasoningEffort: ReturnType<typeof vi.fn>;
   let getReasoningPreference: ReturnType<typeof vi.fn>;
   let setValue: ReturnType<typeof vi.fn>;
+  let notifySettingsChanged: ReturnType<typeof vi.fn>;
   let context: CommandContext;
 
   beforeEach(() => {
@@ -32,6 +33,7 @@ describe('effortCommand', () => {
     getReasoningEffort = vi.fn(() => currentEffort);
     getReasoningPreference = vi.fn();
     setValue = vi.fn();
+    notifySettingsChanged = vi.fn();
     context = createMockCommandContext({
       services: {
         config: {
@@ -47,6 +49,7 @@ describe('effortCommand', () => {
           workspace: { settings: {} },
         } as never,
       },
+      session: { notifySettingsChanged },
     });
   });
 
@@ -91,7 +94,14 @@ describe('effortCommand', () => {
       expect.anything(),
       'model.reasoningEffort',
       'high',
+      undefined,
+      { throwOnWriteFailure: true },
     );
+    expect(notifySettingsChanged).toHaveBeenCalledWith({
+      key: 'model.reasoningEffort',
+      value: 'high',
+      scope: 'user',
+    });
     expect(res).toMatchObject({ messageType: 'info' });
   });
 
@@ -111,7 +121,31 @@ describe('effortCommand', () => {
 
     expect(setReasoningEffort).toHaveBeenCalledWith('high');
     expect(setValue).not.toHaveBeenCalled();
+    expect(notifySettingsChanged).not.toHaveBeenCalled();
     expect(res).toMatchObject({ messageType: 'info' });
+  });
+
+  it('reports the workspace scope selected for persistence', async () => {
+    context.services.settings.workspace.settings = { modelProviders: {} };
+
+    await effortCommand.action!(context, 'medium');
+
+    expect(notifySettingsChanged).toHaveBeenCalledWith({
+      key: 'model.reasoningEffort',
+      value: 'medium',
+      scope: 'workspace',
+    });
+  });
+
+  it('does not notify when the settings write fails', async () => {
+    setValue.mockImplementationOnce(() => {
+      throw new Error('disk full');
+    });
+
+    await expect(effortCommand.action!(context, 'medium')).rejects.toThrow(
+      'disk full',
+    );
+    expect(notifySettingsChanged).not.toHaveBeenCalled();
   });
 
   it('reports thinking is disabled when setReasoningEffort is a no-op', async () => {
@@ -127,6 +161,8 @@ describe('effortCommand', () => {
       expect.anything(),
       'model.reasoningEffort',
       'high',
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect(res).toMatchObject({ messageType: 'info' });
     expect((res as { content: string }).content).toContain(
@@ -171,6 +207,8 @@ describe('effortCommand', () => {
       expect.anything(),
       'model.reasoningEffort',
       'max',
+      undefined,
+      { throwOnWriteFailure: true },
     );
     expect(res).toMatchObject({ messageType: 'info' });
     expect((res as { content: string }).content).toContain('higher priority');

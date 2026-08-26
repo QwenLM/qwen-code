@@ -12761,6 +12761,7 @@ class QwenAgent implements Agent {
       settings,
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
+      (activeConfig) => this.buildConfigOptions(activeConfig),
     );
     const replaySessionHistory = async () => {
       if (

@@ -2371,6 +2371,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('passes the live config-option builder into created sessions', async () => {
+    await setupSessionMocks('config-option-builder-session');
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({ clientCapabilities: {} });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(vi.mocked(Session).mock.calls.at(-1)?.[6]).toBeTypeOf('function');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('closes managed writers before resource shutdown on connection EOF', async () => {
     const innerConfig = await setupSessionMocks('managed-session');
     const order: string[] = [];

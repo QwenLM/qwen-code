@@ -4156,6 +4156,7 @@ describe('runQwenServe telemetry validation', () => {
                   },
                 }
               : {},
+          setValue: vi.fn(),
         } as unknown as ReturnType<typeof settingsRuntime.loadSettings>;
       },
     );
@@ -4169,6 +4170,7 @@ describe('runQwenServe telemetry validation', () => {
         hostname: '127.0.0.1',
         mode: 'http-bridge',
         workspace: [primary, secondary],
+        token: 'fanout-token',
         maxSessions: 1,
         eventRingSize: 1234,
         compactedReplayMaxBytes: 1024,
@@ -4228,6 +4230,61 @@ describe('runQwenServe telemetry validation', () => {
       expect(secondaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith(
         settingsChangedEvent,
       );
+
+      vi.mocked(primaryBridge.publishWorkspaceEvent).mockClear();
+      vi.mocked(secondaryBridge.publishWorkspaceEvent).mockClear();
+      const userSetting = await fetch(`${handle.url}/workspace/settings`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer fanout-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          scope: 'user',
+          key: 'model.reasoningEffort',
+          value: 'none',
+        }),
+      });
+      expect(userSetting.status).toBe(200);
+      const userSettingEvent = {
+        type: 'settings_changed' as const,
+        data: {
+          key: 'model.reasoningEffort',
+          value: 'none',
+          scope: 'user',
+        },
+      };
+      expect(primaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+        userSettingEvent,
+      );
+      expect(secondaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith(
+        userSettingEvent,
+      );
+
+      vi.mocked(primaryBridge.publishWorkspaceEvent).mockClear();
+      vi.mocked(secondaryBridge.publishWorkspaceEvent).mockClear();
+      const workspaceSetting = await fetch(`${handle.url}/workspace/settings`, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer fanout-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          scope: 'workspace',
+          key: 'model.reasoningEffort',
+          value: 'medium',
+        }),
+      });
+      expect(workspaceSetting.status).toBe(200);
+      expect(primaryBridge.publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'settings_changed',
+        data: {
+          key: 'model.reasoningEffort',
+          value: 'medium',
+          scope: 'workspace',
+        },
+      });
+      expect(secondaryBridge.publishWorkspaceEvent).not.toHaveBeenCalled();
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );

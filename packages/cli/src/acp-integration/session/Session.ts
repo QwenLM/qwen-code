@@ -268,6 +268,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SessionConfigOption,
   SessionUpdate,
   SetSessionModeRequest,
   SetSessionModeResponse,
@@ -2076,6 +2077,9 @@ export class Session implements SessionContext {
      * a full snapshot; the Session itself keeps no reporting state.
      */
     private readonly onActiveWorkChanged?: () => void,
+    private readonly buildConfigOptions?: (
+      config: Config,
+    ) => SessionConfigOption[],
   ) {
     this.sessionId = id;
     this.requiresManagedConversationBinding =
@@ -5034,6 +5038,36 @@ export class Session implements SessionContext {
                   // long-lived Session; without this the goal-state
                   // subscription stays on the disposed instance.
                   startNewSession: () => this.rebindGoalRuntimeForNewSession(),
+                  notifySettingsChanged: ({ key, value, scope }) => {
+                    const configOptions = this.buildConfigOptions?.(
+                      this.config,
+                    );
+                    if (configOptions) {
+                      void this.sendUpdate({
+                        sessionUpdate: 'config_option_update',
+                        configOptions,
+                      }).catch((error) => {
+                        debugLogger.debug(
+                          'config_option_update notification failed',
+                          error,
+                        );
+                      });
+                    }
+                    void this.client
+                      .extNotification('qwen/notify/session/settings-changed', {
+                        v: 1,
+                        sessionId: this.sessionId,
+                        key,
+                        value,
+                        scope,
+                      })
+                      .catch((error) => {
+                        debugLogger.debug(
+                          'settings-changed extNotification failed',
+                          error,
+                        );
+                      });
+                  },
                 },
                 this.slashCommandPolicy,
               );

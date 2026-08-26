@@ -5085,6 +5085,78 @@ describe('Session', () => {
     });
   });
 
+  it('forwards persisted slash-command setting changes to the bridge', async () => {
+    session.dispose();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+      undefined,
+      undefined,
+      () => [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'high',
+          options: [{ value: 'high', name: 'High' }],
+        },
+      ],
+    );
+    vi.mocked(
+      nonInteractiveCliCommands.handleSlashCommand,
+    ).mockImplementationOnce(
+      async (_query, _abort, _config, _settings, hooks) => {
+        hooks?.notifySettingsChanged?.({
+          key: 'model.reasoningEffort',
+          value: 'high',
+          scope: 'user',
+        });
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: 'Reasoning effort: high',
+          resolvedCommand: {
+            name: 'effort',
+            kind: CommandKind.BUILT_IN,
+          },
+        };
+      },
+    );
+
+    await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: '/effort high' }],
+    });
+
+    expect(mockClient.extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/settings-changed',
+      {
+        v: 1,
+        sessionId: 'test-session-id',
+        key: 'model.reasoningEffort',
+        value: 'high',
+        scope: 'user',
+      },
+    );
+    expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+      sessionId: 'test-session-id',
+      update: {
+        sessionUpdate: 'config_option_update',
+        configOptions: [
+          {
+            id: 'reasoning_effort',
+            name: 'Reasoning effort',
+            type: 'select',
+            currentValue: 'high',
+            options: [{ value: 'high', name: 'High' }],
+          },
+        ],
+      },
+    });
+  });
+
   describe('sendAvailableCommandsUpdate', () => {
     it('sends available_commands_update from getAvailableCommands()', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([

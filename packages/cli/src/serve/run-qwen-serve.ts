@@ -6991,6 +6991,7 @@ async function runQwenServeImpl(
       liveDiscoveryStableBaseDir,
       workspaceRegistry,
       getSessionBridges: () => runtimeBridges,
+      publishGlobalWorkspaceEvent,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       ...(workspaceTrustHotReloadAvailable
         ? {

@@ -125,6 +125,11 @@ export interface CommandContext {
     sessionShellAllowlist: Set<string>;
     /** Reset session metrics and prompt counters for a fresh session. */
     startNewSession?: (sessionId: string) => void;
+    notifySettingsChanged?: (change: {
+      key: string;
+      value: unknown;
+      scope: 'user' | 'workspace';
+    }) => void;
   };
   // Flag to indicate if an overwrite has been confirmed
   overwriteConfirmed?: boolean;

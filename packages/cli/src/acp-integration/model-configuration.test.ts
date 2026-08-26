@@ -9,6 +9,7 @@ import {
   buildModelReasoningConfigOption,
   buildModelReasoningConfigPreview,
   getModelConfiguration,
+  resolveReasoningPreviewState,
 } from './model-configuration.js';
 
 describe('model configuration manifest', () => {
@@ -79,6 +80,40 @@ describe('model configuration manifest', () => {
     ).toMatchObject([{ currentValue: 'none' }]);
   });
 
+  it('projects a model-default none effort as disabled reasoning', () => {
+    const state = resolveReasoningPreviewState(undefined, { effort: 'none' });
+
+    expect(state).toEqual({ enabled: false });
+    expect(
+      buildModelReasoningConfigPreview('qwen3.8-max', state),
+    ).toMatchObject([{ currentValue: 'none' }]);
+  });
+
+  it('ignores a malformed non-string model-default effort', () => {
+    expect(
+      resolveReasoningPreviewState(undefined, { effort: 3 as never }),
+    ).toBeUndefined();
+  });
+
+  it.each(['None', ' none '])(
+    'keeps the model-default effort %j opaque',
+    (effort) => {
+      expect(resolveReasoningPreviewState(undefined, { effort })).toEqual({
+        enabled: true,
+        effort,
+      });
+    },
+  );
+
+  it('ignores a malformed non-string live effort', () => {
+    expect(() =>
+      buildModelReasoningConfigOption('qwen3.8-max', {
+        enabled: true,
+        effort: 0 as never,
+      }),
+    ).not.toThrow();
+  });
+
   it('keeps an opaque configured effort visible in workspace preview', () => {
     expect(
       buildModelReasoningConfigPreview('qwen3.8-max', {
@@ -107,8 +142,7 @@ describe('model configuration manifest', () => {
     expect(option?.currentValue).toBe('default');
     expect(
       option?.options.filter(
-        (candidate) =>
-          'value' in candidate && candidate.value === 'default',
+        (candidate) => 'value' in candidate && candidate.value === 'default',
       ),
     ).toHaveLength(1);
   });
