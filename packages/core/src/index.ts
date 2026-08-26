@@ -297,6 +297,7 @@ export {
   computeThresholds,
   type CompactionThresholds,
 } from './services/chatCompressionService.js';
+export { estimateContextTextTokens } from './services/tokenEstimation.js';
 export {
   resolveSlimmingConfig,
   type ResolvedSlimmingConfig,

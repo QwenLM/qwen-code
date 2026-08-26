@@ -1655,7 +1655,9 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(child.getCwd()).toBe('/tmp/derived');
-      expect(parent.getCwd()).toBe(baseParams.targetDir);
+      // The constructor resolves targetDir, so on win32 the POSIX fixture
+      // spelling comes back drive-qualified — compare the resolved form.
+      expect(parent.getCwd()).toBe(path.resolve(baseParams.targetDir));
       expect(Object.getPrototypeOf(child)).toBe(parent);
     });
 
@@ -2495,6 +2497,28 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('clears loaded Skill state at the session boundary', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      const clearLoadedSkills = vi.fn();
+      vi.spyOn(config.getToolRegistry(), 'getTool').mockImplementation(
+        (name: string) =>
+          name === ToolNames.SKILL
+            ? ({ clearLoadedSkills } as never)
+            : undefined,
+      );
+
+      config.startNewSession('replacement-session');
+
+      expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    });
+
     it('records no lifecycle transition when resuming the current session id', async () => {
       const sessionId = 'same-session-id';
       const config = new Config({ ...baseParams, sessionId });
@@ -2507,12 +2531,20 @@ describe('Server Config (config.ts)', () => {
       });
       vi.mocked(logSessionEnd).mockClear();
       vi.mocked(logStartSession).mockClear();
+      const clearLoadedSkills = vi.fn();
+      vi.spyOn(config.getToolRegistry(), 'getTool').mockImplementation(
+        (name: string) =>
+          name === ToolNames.SKILL
+            ? ({ clearLoadedSkills } as never)
+            : undefined,
+      );
 
       config.startNewSession(sessionId, {
         conversation: { messages: [] },
       } as unknown as ResumedSessionData);
 
       expect(logSessionEnd).not.toHaveBeenCalled();
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
       expect(logStartSession).toHaveBeenCalledWith(
         config,
         expect.anything(),
