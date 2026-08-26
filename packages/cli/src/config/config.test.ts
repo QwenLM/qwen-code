@@ -5049,6 +5049,92 @@ describe('loadCliConfig safe mode', () => {
   });
 });
 
+describe('loadCliConfig registry allowlist wiring (#9827)', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    vi.spyOn(process, 'cwd').mockReturnValue(
+      path.resolve(path.sep, 'home', 'user', 'project'),
+    );
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('passes settings.permissions.allow as the registry allowlist', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      permissions: {
+        allow: ['ReadFile', 'Shell'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getRegistryAllowList()).toEqual(['ReadFile', 'Shell']);
+  });
+
+  it('does not treat --allowed-tools as a registry allowlist', async () => {
+    process.argv = ['node', 'script.js', '--allowed-tools', 'ReadFile'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    // Auto-approval grant only — the full toolset stays registered
+    expect(config.getPermissionsAllow()).toContain('ReadFile');
+    expect(config.getRegistryAllowList()).toEqual([]);
+  });
+
+  it('does not treat the legacy tools.allowed key as a registry allowlist', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: ['ShellTool'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getPermissionsAllow()).toContain('ShellTool');
+    expect(config.getRegistryAllowList()).toEqual([]);
+  });
+
+  it('strips the registry allowlist in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      permissions: {
+        allow: ['ReadFile'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getRegistryAllowList()).toEqual([]);
+  });
+
+  it('strips the registry allowlist in bare mode', async () => {
+    // Mirror of the safe-mode test: bare mode drops settings
+    // `permissions.allow` from the merged allow rules, so an allowlist
+    // activated from the same settings would run with zero in-force
+    // membership rules and strip the bare registry's minimal toolset.
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      permissions: {
+        allow: ['ReadFile'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getRegistryAllowList()).toEqual([]);
+  });
+});
+
 describe('loadCliConfig chatCompression', () => {
   const originalArgv = process.argv;
 
