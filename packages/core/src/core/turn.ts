@@ -124,6 +124,12 @@ export interface LlmFinishedEventValue {
   usageMetadata: GenerateContentResponseUsageMetadata | undefined;
 }
 
+/** @deprecated Use `LlmErrorEventValue`; retained for one release. */
+export type GeminiErrorEventValue = LlmErrorEventValue;
+
+/** @deprecated Use `LlmFinishedEventValue`; retained for one release. */
+export type GeminiFinishedEventValue = LlmFinishedEventValue;
+
 export interface ToolCallRequestInfo {
   callId: string;
   /**

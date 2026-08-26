@@ -13,9 +13,11 @@ import {
   getAllMemoryFilenames,
 } from '../utils/memory-constants.js';
 import {
+  getAllGeminiMdFilenames as getToolAllGeminiMdFilenames,
   setMemoryFilename as setToolMemoryFilename,
   getCurrentMemoryFilename as getToolCurrentMemoryFilename,
   getAllMemoryFilenames as getToolAllMemoryFilenames,
+  setGeminiMdFilename as setToolGeminiMdFilename,
 } from '../tools/memory-config.js';
 
 // Mock dependencies
@@ -65,5 +67,11 @@ describe('setMemoryFilename', () => {
     setToolMemoryFilename('LEGACY_CONTEXT.md');
     expect(getCurrentMemoryFilename()).toBe('LEGACY_CONTEXT.md');
     expect(getAllMemoryFilenames()).toEqual(['LEGACY_CONTEXT.md']);
+  });
+
+  it('keeps the legacy public names wired to the renamed state', () => {
+    setToolGeminiMdFilename('LEGACY_NAME.md');
+    expect(getCurrentMemoryFilename()).toBe('LEGACY_NAME.md');
+    expect(getToolAllGeminiMdFilenames()).toEqual(['LEGACY_NAME.md']);
   });
 });

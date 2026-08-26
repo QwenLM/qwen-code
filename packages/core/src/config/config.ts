@@ -1082,6 +1082,8 @@ export interface ConfigParameters {
   lspClient?: LspClient;
   userMemory?: string;
   memoryFileCount?: number;
+  /** @deprecated Use `memoryFileCount`; retained for one release. */
+  geminiMdFileCount?: number;
   approvalMode?: ApprovalMode;
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
@@ -2335,7 +2337,8 @@ export class Config {
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
-    this.memoryFileCount = params.memoryFileCount ?? 0;
+    this.memoryFileCount =
+      params.memoryFileCount ?? params.geminiMdFileCount ?? 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.AUTO;
     this.accessibility = params.accessibility ?? {};
@@ -6374,6 +6377,16 @@ export class Config {
 
   setMemoryFileCount(count: number): void {
     this.memoryFileCount = count;
+  }
+
+  /** @deprecated Use `getMemoryFileCount`; retained for one release. */
+  getGeminiMdFileCount(): number {
+    return this.getMemoryFileCount();
+  }
+
+  /** @deprecated Use `setMemoryFileCount`; retained for one release. */
+  setGeminiMdFileCount(count: number): void {
+    this.setMemoryFileCount(count);
   }
 
   /** Display paths of the currently loaded context (memory) files. */

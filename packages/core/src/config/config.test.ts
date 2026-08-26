@@ -607,6 +607,28 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('memory file count compatibility', () => {
+    it('keeps the legacy parameter and accessors working for one release', () => {
+      const config = new Config({ ...baseParams, geminiMdFileCount: 2 });
+
+      expect(config.getMemoryFileCount()).toBe(2);
+      expect(config.getGeminiMdFileCount()).toBe(2);
+
+      config.setGeminiMdFileCount(3);
+      expect(config.getMemoryFileCount()).toBe(3);
+    });
+
+    it('prefers the renamed parameter when both names are present', () => {
+      const config = new Config({
+        ...baseParams,
+        geminiMdFileCount: 2,
+        memoryFileCount: 4,
+      });
+
+      expect(config.getMemoryFileCount()).toBe(4);
+    });
+  });
+
   describe('getMemoryAgentTimeoutMinutes', () => {
     it('returns undefined when unset', () => {
       expect(

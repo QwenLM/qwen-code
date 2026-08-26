@@ -42,6 +42,11 @@ gemini-converter.ts` converts _upstream Gemini CLI extension_ configs
    (mostly `cli/src/acp-integration`). These belong to `#4063` item 1
    (de-Google the type system), not this rename.
 
+`@qwen-code/qwen-code-core` is also published as a standalone package. Names
+already exported from its root barrel, `Config`, or supported deep-import paths
+remain as deprecated aliases for one release; repository consumers use only
+the new names.
+
 ## Symbol map
 
 Local type/class/enum names (PascalCase, → `Llm*`):
@@ -93,6 +98,8 @@ Non-test files; `gemini-converter.ts` is intentionally NOT renamed (see above).
 | `packages/core/src/core/geminiContentGenerator/index.ts`                  | `packages/core/src/core/llm-content-generator/index.ts`                 |
 | `packages/core/src/core/geminiRequest.ts`                                 | `packages/core/src/core/llm-request.ts`                                 |
 
+The old `geminiRequest.ts` path remains as a one-release re-export shim.
+
 ## Phasing
 
 Two pull requests. The core LLM symbols are strongly coupled (`GeminiClient`
@@ -110,6 +117,9 @@ move as one atomic PR.
 - Leaf types: `GeminiCodeRequest`, `GeminiChatSendOptions`,
   `GeminiErrorEventValue`, `GeminiFinishedEventValue`, and `geminiRequest.ts` →
   `llm-request.ts`.
+- One-release deprecated aliases for the public core exports, `Config` memory
+  count input/accessors, memory filename helpers, and the old request module
+  path.
 
 **PR 2 — core LLM layer (atomic)**:
 
@@ -130,6 +140,9 @@ move as one atomic PR.
 - **Cross-package barrel**: `GeminiClient` and `GeminiEventType` are exported via
   the `@qwen-code/qwen-code-core` barrel. `sdk-typescript` and `acp-bridge`
   import them; PR 2 must update those packages.
+- **Published package compatibility**: renamed public symbols remain as
+  deprecated aliases for one release. Remove those aliases only after a stable
+  release has shipped the replacement names.
 - **Two `GeminiEventType` enums**: `core/src/core/turn.ts` and
   `cli/src/ui/types.ts` define the same name. Rename both and verify their
   relationship (distinct enums vs re-export) before PR 2.
@@ -143,4 +156,6 @@ move as one atomic PR.
 - `cd packages/core && npx tsc --noEmit`
 - `cd packages/cli && npx tsc --noEmit`
 - Targeted unit tests per renamed module
+- Legacy-name grep results are confined to the documented compatibility aliases
+  and `geminiRequest.ts` shim; active repository consumers use the new names.
 - `npm run lint` (kebab-case filenames are enforced)

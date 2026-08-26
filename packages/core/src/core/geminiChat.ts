@@ -450,6 +450,9 @@ export interface LlmChatSendOptions {
   disableModelFallbacks?: boolean;
 }
 
+/** @deprecated Use `LlmChatSendOptions`; retained for one release. */
+export type GeminiChatSendOptions = LlmChatSendOptions;
+
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
   trigger?: CompactTrigger;
@@ -1942,7 +1945,8 @@ export class GeminiChat {
    */
   private pendingPartialAssistantTurnIndex: number | null = null;
   private pendingPartialAssistantRecord:
-    Parameters<ChatRecordingService['recordAssistantTurn']>[0] | null = null;
+    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+    | null = null;
 
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
