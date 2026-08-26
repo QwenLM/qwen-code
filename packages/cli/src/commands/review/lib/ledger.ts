@@ -83,6 +83,17 @@ export interface Ledger {
    * anchors must not disagree about what a clean round is. The findings
    * still ride; only the anchor is withheld.
    *
+   * Withheld is not lost when the graft's guards allow the recovery: a
+   * fail-closed round's marker carries no `sha`, but recovery (`pr-context`)
+   * grafts the anchor forward from the most recent EARLIER own marker that
+   * carries one — the withhold is about the fail-closed round's own range,
+   * while an earlier round's "clean up to sha" stays true, and scoping the
+   * next round `sha..HEAD` re-covers the gap. The graft fires only when the
+   * winning work list is complete, the source is a STRICTLY earlier own
+   * round, and the walk has a known identity; refused, the withhold stands
+   * and later rounds stay full-range until a round re-establishes the chain
+   * (issue #9902).
+   *
    * It also never crosses accounts: `pr-context` strips it from a marker
    * another account posted, so a foreign body can never decide which lines
    * this pipeline stops looking at.
@@ -225,6 +236,34 @@ export interface Ledger {
    * plants neither the streak nor the finding.
    */
   churnRounds?: number;
+  /**
+   * How many consecutive rounds — this one included — the first-time-finding
+   * rate did not fall; the streak the severity floor's early trigger reads
+   * (#9903). A round whose rate fell resets it to zero — there is no
+   * carry-on-unmeasured here, unlike `churnRounds`: the churn streak arms a
+   * blocking Critical where late filing loses the mechanism, while this one
+   * engages a disclosed, non-capping deferral posture where a FALSE
+   * engagement silently defers real Suggestions, so the cheap error is a
+   * wiped streak (one delayed engagement), never a carried one.
+   *
+   * Once the streak reaches the bar it is PINNED, not re-measured: the
+   * floor it engages moves fresh Suggestions into the deferral channel, so
+   * the posted-set trend the signal reads goes quiet precisely because the
+   * floor is working — and re-measuring against a pre-trigger floor
+   * assumption would flap engagement at period two through the trend's own
+   * `floorChanged` guard. The pin is the latch: later rounds engage on the
+   * recorded streak alone until the round-6 rule takes over anyway.
+   *
+   * Same trust shape as `churnRounds`, whose group it rides in: clamped to
+   * the marker's own round at every read, stripped from foreign winners at
+   * the `pr-context` seam, and kept out of the volume tier that sheds first
+   * — the pull request whose rate never falls is exactly the one whose
+   * marker sits at the byte cap. Worst case for a planted streak:
+   * Suggestions move into a DISCLOSED deferral list — nothing is withheld,
+   * no verdict is capped, and an explicit `--severity-floor suggestion`
+   * disengages.
+   */
+  flatRounds?: number;
 }
 
 /**
@@ -495,6 +534,11 @@ export function serializeLedger(ledger: Ledger): string {
     // spends no bytes on it at all.
     const streak = streakOf(ledger.churnRounds);
     if (streak !== undefined && streak > 0) payload.churnRounds = streak;
+    // Same rung, same bound, same zero-omission for the floor trigger's
+    // streak — the pull request whose rate never falls is exactly the one
+    // whose marker sits at the byte cap.
+    const flat = streakOf(ledger.flatRounds);
+    if (flat !== undefined && flat > 0) payload.flatRounds = flat;
     if (dropped > 0) payload.dropped = dropped;
     // A truncated list must not certify a range: the dropped entries reference
     // code at or before the anchored head, and a next round scoped to
@@ -761,6 +805,16 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // pull request ever ran. Same invariant the finding-id filter enforces
     // above: a claim about rounds that did not exist is not read.
     const churnRounds = Math.min(streakOf(raw.churnRounds) ?? 0, raw.round);
+    // Same read for the floor trigger's streak — with the honest-maximum
+    // clamp `prevLedgerFacts` applies on the other route into the trigger:
+    // the signal that advances the streak gates on round >= 3, so at round
+    // N no honest marker carries more than N - 2, and a planted one
+    // claiming more would engage the floor off rounds the signal could
+    // never have measured.
+    const flatRounds = Math.min(
+      streakOf(raw.flatRounds) ?? 0,
+      Math.max(raw.round - 2, 0),
+    );
     // The floor qualifies `posted`, so it survives only beside it: a floor
     // alone would let a later round compare postures across rounds whose
     // volumes it does not have, which is not a comparison anyone can act on.
@@ -787,6 +841,7 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),
       ...(churnRounds === 0 ? {} : { churnRounds }),
+      ...(flatRounds === 0 ? {} : { flatRounds }),
       ...(floor === undefined ? {} : { floor }),
       ...(fresh === undefined ? {} : { fresh }),
     };

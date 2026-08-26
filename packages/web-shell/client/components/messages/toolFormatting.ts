@@ -59,6 +59,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   workflow: 'Workflow',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
+  report_findings: 'ReportFindings',
   web_search: 'WebSearch',
   image_gen: 'ImageGen',
   display_image: 'DisplayImage',
