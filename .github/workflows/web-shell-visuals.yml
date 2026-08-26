@@ -154,14 +154,20 @@ jobs:
           if command -v apt-get > /dev/null 2>&1; then
             npx playwright install --with-deps chromium
           else
+            # One definition, two call sites: the gate judges the rescan, so
+            # both scans must keep the exact same find/ldd shape — pasted
+            # copies could drift.
+            scan_chromium_libs() {
+              missing=''
+              while IFS= read -r bin; do
+                unresolved="$(ldd "${bin}" 2>/dev/null | grep 'not found' || true)"
+                if [ -n "${unresolved}" ]; then
+                  missing="${missing}${unresolved}"$'\n'
+                fi
+              done < <(find "${HOME}/.cache/ms-playwright" -type f \( -name 'headless_shell' -o -name 'chrome' \) 2>/dev/null)
+            }
             npx playwright install chromium
-            missing=''
-            while IFS= read -r bin; do
-              unresolved="$(ldd "${bin}" 2>/dev/null | grep 'not found' || true)"
-              if [ -n "${unresolved}" ]; then
-                missing="${missing}${unresolved}"$'\n'
-              fi
-            done < <(find "${HOME}/.cache/ms-playwright" -type f \( -name 'headless_shell' -o -name 'chrome' \) 2>/dev/null)
+            scan_chromium_libs
             if [ -n "${missing}" ]; then
               # First scan found unresolved libraries: provision the known
               # Chromium runtime set, then rescan and let the gate below judge
@@ -172,13 +178,7 @@ jobs:
               sudo -n dnf install -y --skip-broken ${chromium_sys_deps} > /dev/null 2>&1 ||
                 sudo -n yum install -y --skip-broken ${chromium_sys_deps} > /dev/null 2>&1 ||
                 echo "::warning::could not install Chromium system dependencies; the library gate lists what still fails to resolve."
-              missing=''
-              while IFS= read -r bin; do
-                unresolved="$(ldd "${bin}" 2>/dev/null | grep 'not found' || true)"
-                if [ -n "${unresolved}" ]; then
-                  missing="${missing}${unresolved}"$'\n'
-                fi
-              done < <(find "${HOME}/.cache/ms-playwright" -type f \( -name 'headless_shell' -o -name 'chrome' \) 2>/dev/null)
+              scan_chromium_libs
             fi
             if [ -n "${missing}" ]; then
               printf '%s' "${missing}" | sort -u

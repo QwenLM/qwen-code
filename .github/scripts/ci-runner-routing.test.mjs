@@ -15,7 +15,17 @@
 // persistent pool.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -129,6 +139,125 @@ function runPickRunner({ ecsDisabled, sameRepo, assoc, eventName, dispatch }) {
     .find((l) => l.startsWith('Selected Linux runner: '));
   assert.ok(line, `no selection in pick_runner output: ${result.stdout}`);
   return line.slice('Selected Linux runner: '.length);
+}
+
+// Resolves a host executable by walking PATH. The exec tests below give the
+// step a stub-only PATH, and spawnSync resolves the spawned command against
+// that CHILD path, so the real bash and scan tools must be pinned by
+// absolute path.
+function hostToolPath(name) {
+  for (const dir of (process.env.PATH ?? '').split(':')) {
+    if (!dir) {
+      continue;
+    }
+    const candidate = join(dir, name);
+    const stats = statSync(candidate, { throwIfNoEntry: false });
+    if (stats && (stats.mode & 0o111) !== 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function writeStub(dir, name, lines) {
+  const file = join(dir, name);
+  writeFileSync(file, `${lines.join('\n')}\n`);
+  chmodSync(file, 0o755);
+}
+
+// Executes the REAL 'Install Playwright Chromium' step under GitHub's
+// default bash wrapper with apt-get absent from PATH, so the non-apt lane
+// runs. Its external world is stubbed: npx/sudo/dnf/yum/ldd are scripts in
+// a stub dir, the browser tree is a real tmp ${HOME}, and machine state is
+// a file the dnf/yum stubs write — the same side effect a real provision
+// has. machine: 'provisioned' — every library resolves before the first
+// scan; 'provisionable' — the first scan finds missing libraries and dnf
+// fixes them; 'unprovisionable' — nothing resolves and dnf/yum both fail.
+function runInstallStep(machine) {
+  const install = visualsCaptureJob.steps.find(
+    (s) => s.name === 'Install Playwright Chromium',
+  );
+  assert.ok(install, 'the Playwright install step must exist');
+  const bashPath = hostToolPath('bash');
+  assert.ok(bashPath, 'bash must be resolvable to execute the step');
+  const root = mkdtempSync(join(tmpdir(), 'visuals-install-'));
+  try {
+    const stubDir = join(root, 'stubs');
+    const binDir = join(root, 'bin');
+    const stubState = join(root, 'stub-state');
+    for (const dir of [stubDir, binDir, stubState]) {
+      mkdirSync(dir);
+    }
+    for (const tool of ['grep', 'sort', 'find']) {
+      const toolPath = hostToolPath(tool);
+      assert.ok(toolPath, `${tool} must be resolvable for the scan pipeline`);
+      symlinkSync(toolPath, join(binDir, tool));
+    }
+    writeStub(stubDir, 'npx', [
+      '#!/bin/sh',
+      'printf \'npx %s\\n\' "$*" >> "$STUB_DIR/calls.log"',
+    ]);
+    writeStub(stubDir, 'sudo', [
+      '#!/bin/sh',
+      'printf \'sudo %s\\n\' "$*" >> "$STUB_DIR/calls.log"',
+      'while [ $# -gt 0 ]; do case "$1" in -*) shift ;; *) break ;; esac; done',
+      'exec "$@"',
+    ]);
+    for (const tool of ['dnf', 'yum']) {
+      writeStub(stubDir, tool, [
+        '#!/bin/sh',
+        `printf '${tool} %s\\n' "$*" >> "$STUB_DIR/calls.log"`,
+        '[ "$STUB_PROVISION" = ok ] || exit 1',
+        'printf \'provisioned\\n\' > "$STUB_DIR/state"',
+      ]);
+    }
+    writeStub(stubDir, 'ldd', [
+      '#!/bin/sh',
+      "state=''",
+      '[ -f "$STUB_DIR/state" ] && read -r state < "$STUB_DIR/state"',
+      '[ "$state" = provisioned ] && exit 0',
+      'case "$1" in *chrome*) printf \'\\tlibnss3.so => not found\\n\' ;; esac',
+    ]);
+    const fakeHome = join(root, 'home');
+    const browserDir = join(
+      fakeHome,
+      '.cache',
+      'ms-playwright',
+      'chromium-1187',
+    );
+    mkdirSync(browserDir, { recursive: true });
+    for (const bin of ['headless_shell', 'chrome']) {
+      const file = join(browserDir, bin);
+      writeFileSync(file, '#!/bin/sh\n');
+      chmodSync(file, 0o755);
+    }
+    if (machine === 'provisioned') {
+      writeFileSync(join(stubState, 'state'), 'provisioned\n');
+    }
+    const result = spawnSync(
+      bashPath,
+      ['--noprofile', '--norc', '-eo', 'pipefail', '-c', install.run],
+      {
+        env: {
+          PATH: `${stubDir}:${binDir}`,
+          HOME: fakeHome,
+          STUB_DIR: stubState,
+          STUB_PROVISION: machine === 'provisionable' ? 'ok' : 'fail',
+        },
+        encoding: 'utf8',
+      },
+    );
+    const callsFile = join(stubState, 'calls.log');
+    const calls = existsSync(callsFile) ? readFileSync(callsFile, 'utf8') : '';
+    return {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      calls,
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 const ASSOCIATIONS = [
@@ -599,19 +728,39 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     assert.equal(preflight.if, "${{ runner.environment == 'self-hosted' }}");
   });
 
-  it('gates the pool render on Chromium libraries actually resolving', () => {
-    // --with-deps drives apt-get, which the RHEL-family pool machines do
-    // not have (first pool run failed there, 2026-08-26). The non-apt
-    // branch must download the browser AND hard-verify its shared
-    // libraries with ldd, failing with the missing list instead of
-    // crashing mid-render. Pin the WIRING of the gate, not keywords
-    // somewhere in the script: an inverted guard or a find that matches
-    // nothing must fail here.
-    const install = visualsCaptureJob.steps.find(
+  it('keeps the install step wired into the job', () => {
+    // The exec tests below run the step's non-apt lane in isolation; these
+    // are the job-level facts no isolated run can see: the lane resolves
+    // Playwright from the repo lockfile (a registry download would pair a
+    // different browser revision with the lockfile's), runs before the
+    // capture it serves, and its failure fails the job.
+    const steps = visualsCaptureJob.steps;
+    const install = steps.findIndex(
       (s) => s.name === 'Install Playwright Chromium',
     );
-    assert.ok(install, 'the Playwright install step must exist');
-    const lines = install.run.split('\n');
+    const npmCi = steps.findIndex((s) => s.name === 'Install dependencies');
+    const afterCapture = steps.findIndex((s) => s.id === 'after_capture');
+    assert.ok(install !== -1, 'the Playwright install step must exist');
+    assert.ok(
+      npmCi !== -1 && npmCi < install,
+      'npx must resolve the lockfile Playwright, not a registry release with a different browser revision',
+    );
+    assert.ok(
+      install < afterCapture,
+      'the browser must be installed before the capture that drives it',
+    );
+    assert.ok(
+      !('continue-on-error' in steps[install]),
+      'a failed install or gate must fail the job, not publish an empty preview',
+    );
+    assert.ok(
+      !('continue-on-error' in visualsCaptureJob),
+      'a job-level continue-on-error would mask the gate too',
+    );
+    // The hosted apt lane is not exec-tested here (apt-get may not exist on
+    // the machine running the suite); pin its one line. The non-apt lane is
+    // exec-tested by the tests below.
+    const lines = steps[install].run.split('\n');
     const ifIndex = lines.findIndex((l) =>
       l.trim().startsWith('if command -v apt-get'),
     );
@@ -620,73 +769,97 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       ifIndex !== -1 && elseIndex > ifIndex,
       'the apt probe must branch into a non-apt lane',
     );
-    const aptBranch = lines.slice(ifIndex + 1, elseIndex).join('\n');
-    const noAptBranch = lines.slice(elseIndex + 1).join('\n');
-    assert.match(aptBranch, /npx playwright install --with-deps chromium/);
-    // Swapped branch bodies would drive apt-get on the lane that has none
-    // and skip the library gate on the lane that needs it.
-    assert.match(noAptBranch, /npx playwright install chromium/);
-    assert.ok(
-      !noAptBranch.includes('--with-deps'),
-      'the non-apt lane must not take the apt-only --with-deps path',
+    assert.equal(
+      lines[ifIndex + 1].trim(),
+      'npx playwright install --with-deps chromium',
+      'the hosted lane must keep apt-driven dependency installation',
     );
-    // The ldd loop is only meaningful if find actually matches the browser
-    // binaries; a pattern that matches nothing never feeds ldd and the gate
-    // passes on any machine.
-    assert.match(
-      noAptBranch,
-      /find "\$\{HOME\}\/\.cache\/ms-playwright" -type f \\\( -name 'headless_shell' -o -name 'chrome' \\\) 2>\/dev\/null/,
-    );
-    assert.match(
-      noAptBranch,
-      /ldd "\$\{bin\}" 2>\/dev\/null \| grep 'not found'/,
-    );
-    // Each accumulation terminates its own line, and only when there IS one:
-    // a fused list defeats sort -u, and an unconditional separator would trip
-    // the non-empty gate on a fully-provisioned machine.
-    assert.match(
-      noAptBranch,
-      /if \[ -n "\$\{unresolved\}" \]; then\n\s*missing="\$\{missing\}\$\{unresolved\}"\$'\\n'\n\s*fi/,
-    );
-    // The hard failure sits BEHIND the non-empty guard — an inverted test
-    // would let an unresolved-library machine through to crash mid-render.
-    assert.match(noAptBranch, /if \[ -n "\$\{missing\}" \]; then[\s\S]*exit 1/);
+    // An env override at any of these levels moves the ground under the
+    // pinned steps: HOME relocates the library scan, RUNNER_TEMP the stale
+    // clear, GITHUB_WORKSPACE the heal, PATH/BASH_ENV re-resolve (or
+    // pre-load) every command.
+    for (const envMap of [
+      steps[install].env,
+      visualsCaptureJob.env,
+      visualsDoc.env,
+    ]) {
+      for (const key of [
+        'BASH_ENV',
+        'PATH',
+        'HOME',
+        'RUNNER_TEMP',
+        'GITHUB_WORKSPACE',
+      ]) {
+        assert.ok(
+          !envMap || envMap[key] === undefined,
+          `${key} must not be overridden around the capture steps`,
+        );
+      }
+    }
   });
 
-  it('provisions missing Chromium libraries before the gate judges', () => {
-    // The pool's RHEL-family images do not ship Chromium's runtime libraries
-    // and carry no apt-get for the installer to drive, so the lane installs
-    // the known set with dnf/yum when the first scan finds something missing,
-    // then rescans, and the hard gate judges the RESCAN. Pin the wiring —
-    // first scan, provision attempt, rescan, gate — because a lane that
-    // installs but gates on the first scan (or never rescans) keeps a
-    // provisionable machine red.
-    const install = visualsCaptureJob.steps.find(
-      (s) => s.name === 'Install Playwright Chromium',
-    );
-    const lines = install.run.split('\n');
-    const elseIndex = lines.findIndex((l) => l.trim() === 'else');
-    const noAptBranch = lines.slice(elseIndex + 1).join('\n');
-    const findNeedle = 'find "${HOME}/.cache/ms-playwright"';
-    const firstScan = noAptBranch.indexOf(findNeedle);
-    const dnf = noAptBranch.indexOf('sudo -n dnf install -y');
-    const yum = noAptBranch.indexOf('sudo -n yum install -y');
-    const rescan = noAptBranch.indexOf(findNeedle, firstScan + 1);
-    const gate = noAptBranch.indexOf('exit 1');
-    assert.ok(firstScan !== -1, 'the first library scan must exist');
-    assert.ok(dnf > firstScan, 'the dnf attempt must follow the first scan');
-    assert.ok(yum > dnf, 'a yum fallback must follow the dnf attempt');
-    assert.ok(rescan > dnf, 'a rescan must follow the provision attempt');
-    assert.ok(gate > rescan, 'the gate must judge the rescan, not the first scan');
-    const depsList = noAptBranch.indexOf("chromium_sys_deps='");
-    assert.ok(
-      depsList !== -1 && depsList < dnf,
-      'the package list must be defined before the install attempt',
+  it('passes a fully provisioned machine without provisioning anything', () => {
+    const { status, stdout, stderr, calls } = runInstallStep('provisioned');
+    assert.equal(
+      status,
+      0,
+      `a provisioned machine must pass the gate: ${stdout}${stderr}`,
     );
     assert.match(
-      noAptBranch,
-      /chromium_sys_deps='[^']*\bnss\b/,
-      'the provision list must name Chromium runtime packages',
+      stdout,
+      /Chromium shared libraries all resolve on this runner\./,
     );
+    assert.match(
+      calls,
+      /^npx playwright install chromium$/m,
+      'the lane must download the browser',
+    );
+    assert.ok(
+      !calls.includes('--with-deps'),
+      'the non-apt lane must not take the apt-only flag — swapped branch bodies would',
+    );
+    assert.ok(
+      !/^(sudo|dnf|yum) /m.test(calls),
+      'nothing may be provisioned when the first scan resolves',
+    );
+  });
+
+  it('provisions a fixable machine and judges the rescan', () => {
+    const { status, stdout, stderr, calls } = runInstallStep('provisionable');
+    assert.equal(
+      status,
+      0,
+      `a machine dnf can fix must pass the gate: ${stdout}${stderr}`,
+    );
+    assert.match(
+      stdout,
+      /Chromium shared libraries all resolve on this runner\./,
+    );
+    assert.match(
+      calls,
+      /^sudo -n dnf install -y --skip-broken .*mesa-libgbm/m,
+      'the lane must provision the known Chromium runtime set non-interactively',
+    );
+    assert.ok(!/yum/m.test(calls), 'yum is only a fallback after dnf fails');
+  });
+
+  it('fails an unfixable machine with the concrete missing list', () => {
+    const { status, stdout, stderr, calls } = runInstallStep('unprovisionable');
+    assert.equal(
+      status,
+      1,
+      `an unprovisionable machine must fail the gate: ${stdout}${stderr}`,
+    );
+    assert.match(
+      stdout,
+      /libnss3\.so => not found/,
+      'the concrete missing list must surface',
+    );
+    assert.match(
+      stdout,
+      /::error::/,
+      'the failure must carry the actionable annotation',
+    );
+    assert.match(calls, /^sudo -n yum /m, 'yum must be tried once dnf fails');
   });
 });
