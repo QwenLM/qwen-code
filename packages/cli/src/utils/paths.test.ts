@@ -46,6 +46,25 @@ describe('safeTarget — the length cap', () => {
     expect(a.startsWith(b)).toBe(false);
     expect(b.startsWith(a)).toBe(false);
   });
+
+  it('keeps capped stems prefix-free against UNCAPPED stems too', () => {
+    // R17-6 entrance 2: with `-` as the cap joiner, every exactly-55-char
+    // uncapped stem was a strict sweep-prefix of every capped stem sharing
+    // its head — `qwen-review-<head55>-` matched the capped twin's whole
+    // family and cleanup deleted its live artifacts mid-round. The joiner is
+    // `~`, which sits OUTSIDE the token alphabet (the flatten maps a literal
+    // `~` in the input to `_`), so no uncapped stem can spell a capped
+    // stem's head-plus-joiner.
+    const head = 'h'.repeat(55);
+    const capped = safeTarget(`${head}${'x'.repeat(300)}`);
+    expect(capped.length).toBe(64);
+    expect(capped.charAt(55)).toBe('~');
+    const uncapped = safeTarget(head);
+    expect(uncapped).toBe(head);
+    expect(capped.startsWith(`${uncapped}-`)).toBe(false);
+    // A literal `~` in the INPUT cannot forge the joiner.
+    expect(safeTarget(`${head}~deadbeef`)).toBe(`${head}_deadbeef`);
+  });
 });
 
 describe('safeTarget', () => {

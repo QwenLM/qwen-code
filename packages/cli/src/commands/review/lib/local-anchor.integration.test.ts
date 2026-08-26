@@ -10,7 +10,14 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -18,6 +25,7 @@ import {
   hashWorktreeFiles,
   revisionIdentities,
   UNHASHABLE,
+  invisibleTrackedPaths,
 } from './local-anchor.js';
 import { isolateHostGitConfig } from './test-utils.js';
 
@@ -369,5 +377,67 @@ describe('hashWorktreeFiles — a state name spelled as a value is uncertifiable
     // foldable, or the anchor would re-review the entire tree every round.
     expect(ids['plain.ts']).toContain('diff=unspecified');
     expect(ids['plain.ts']).not.toBe(UNHASHABLE);
+  });
+});
+
+describe('invisibleTrackedPaths — sparse-checkout owns its S bits', () => {
+  it('exempts out-of-cone S paths, keeps manual bits and non-sparse absences', () => {
+    // R17-5: every out-of-cone tracked path in a sparse checkout is
+    // S-tagged by design and absent from the worktree — counting them made
+    // the oracle non-empty on every sample, withholding the candidate and
+    // all three decided stops on a completely clean materialized tree, for
+    // ever. An absent path holds no file to hide an edit in, so under
+    // sparse-checkout an absent S path is exempt; an in-cone manually
+    // skip-worktree'd file still flags, and outside sparse-checkout an
+    // absent S path stays flagged — there the bit is a user's hand and the
+    // absence is a deletion it hides.
+    writeFileSync(join(repo, 'in.ts'), 'export const a = 1;\n');
+    git('add', 'in.ts');
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    writeFileSync(join(repo, 'sub/out.ts'), 'export const b = 1;\n');
+    git('add', 'sub/out.ts');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+
+    git('sparse-checkout', 'set', '--cone', '.');
+    // Cone mode with only the root: sub/ leaves the worktree, S-tagged.
+    expect(existsSync(join(repo, 'sub/out.ts'))).toBe(false);
+    expect(invisibleTrackedPaths(repo)).toEqual([]);
+
+    // The assume-unchanged family is never exempted, sparse or not: git
+    // does not manage those bits for any feature, so a lowercase tag is
+    // always a user's hand. (A manual skip-worktree on an in-cone file is
+    // unconstructible here — cone-mode git silently re-clears it, measured
+    // on git 2.47.)
+    git('update-index', '--assume-unchanged', 'in.ts');
+    expect(invisibleTrackedPaths(repo)).toEqual(['in.ts']);
+    git('update-index', '--no-assume-unchanged', 'in.ts');
+
+    // Outside sparse-checkout, an absent S path is a hidden deletion and
+    // stays flagged.
+    git('sparse-checkout', 'disable');
+    git('update-index', '--skip-worktree', 'sub/out.ts');
+    rmSync(join(repo, 'sub/out.ts'));
+    expect(invisibleTrackedPaths(repo)).toEqual(['sub/out.ts']);
+  });
+});
+
+describe('hashWorktreeFiles — a configured `unspecified` driver is uncertifiable', () => {
+  it('takes UNHASHABLE under diff.unspecified.binary, folds nothing without it', () => {
+    // R17-3: `check-attr` answers `diff=unspecified` byte-identically for
+    // the no-rule state and an explicit `diff=unspecified` value, and the
+    // two render differently exactly when `diff.unspecified.binary` is
+    // configured — the fold cannot split what the stream spells alike, so
+    // the config's presence makes the dimension ambiguous for every path
+    // that answered it. Without the config nothing changes.
+    writeFileSync(join(repo, 'data.dat'), 'plain bytes\n');
+    git('add', 'data.dat');
+
+    const before = hashWorktreeFiles(repo, ['data.dat'])['data.dat'];
+    expect(before).not.toBe(UNHASHABLE);
+    expect(before).toContain('diff=unspecified');
+
+    git('config', 'diff.unspecified.binary', 'true');
+    const after = hashWorktreeFiles(repo, ['data.dat'])['data.dat'];
+    expect(after).toBe(UNHASHABLE);
   });
 });

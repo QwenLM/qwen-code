@@ -408,6 +408,22 @@ function renderingAttributes(
       `diff.${driver}.binary`,
     );
     if (binary === null) continue;
+    if (driver === 'unspecified') {
+      // `check-attr` answers `diff=unspecified` byte-identically for the
+      // no-rule state AND an explicit `diff=unspecified` value, and the two
+      // render differently exactly when THIS config key exists (the driver
+      // named `unspecified` goes binary; the no-rule state stays readable —
+      // probed, git 2.47.3). The fold cannot split what the stream spells
+      // alike, so with the config present the whole dimension is ambiguous
+      // for every path that answered it: UNHASHABLE, the module's standard
+      // for a rendering it cannot certify. Without the config — every
+      // ordinary repo — nothing changes and `unspecified` stays foldable,
+      // for the reason the state-vs-value gate above records.
+      for (const path of Object.keys(out)) {
+        if (diffDriverByPath[path] === driver) out[path] = UNHASHABLE;
+      }
+      continue;
+    }
     for (const [path, attrs] of Object.entries(out)) {
       if (diffDriverByPath[path] === driver) {
         out[path] = `${attrs},${driver}.binary=${binary}`;
@@ -528,11 +544,34 @@ export function invisibleTrackedPaths(repoRoot: string): string[] | null {
     // Unmeasured is uncertifiable, exactly like a listed bit.
     return null;
   }
+  // Sparse-checkout manages `S` bits itself: every out-of-cone tracked path
+  // is S-tagged BY DESIGN and absent from the worktree, so counting them
+  // made the oracle non-empty on every sample in every sparse repo — the
+  // candidate withheld and all three decided stops failed their visibility
+  // conjuncts on a completely clean materialized tree, for ever. An absent
+  // path holds no file to hide an edit in, so under sparse-checkout an
+  // S-tagged path counts only while it EXISTS on disk (a manually
+  // skip-worktree'd in-cone file keeps flagging). Outside sparse-checkout
+  // nothing is exempted — there `S` is always a user's hand, and an absent
+  // S path is a deletion the bit hides. The same reasoning never applies to
+  // the assume-unchanged family: git does not manage those bits for any
+  // feature, so an absent lowercase path IS a hidden deletion.
+  const sparse =
+    gitOpt('-C', repoRoot, 'config', '--get', 'core.sparseCheckout') === 'true';
   const out: string[] = [];
   for (const rec of raw.toString('utf8').split('\0')) {
     // `<tag> <path>` records: lowercase tags are the assume-unchanged
     // family, `S` is skip-worktree; every other tag leaves the path visible.
-    if (/^[a-zS]/.test(rec)) out.push(rec.slice(2));
+    if (!/^[a-zS]/.test(rec)) continue;
+    const path = rec.slice(2);
+    if (sparse && rec.startsWith('S')) {
+      try {
+        lstatSync(join(repoRoot, path));
+      } catch {
+        continue;
+      }
+    }
+    out.push(path);
   }
   return out;
 }

@@ -53,11 +53,17 @@ export function safeTarget(target: string): string {
   //
   // On the prefix sweep this was deferred for (`cleanup` filters
   // `startsWith(tmpPrefix(target))`, review-round finding R8-7): capped stems
-  // are mutually prefix-free by construction — every one is exactly
-  // `SAFE_TARGET_MAX` long, so none can be a strict prefix of another. The
-  // short-stem hazard the sweep already had (`abc` prefixing `abc-def`) is
-  // untouched in both directions.
-  return `${stem.slice(0, SAFE_TARGET_MAX - 9)}-${createHash('sha256')
+  // are prefix-free against EVERY stem, not just each other. Among
+  // themselves they are all exactly `SAFE_TARGET_MAX` long, so none extends
+  // another; against uncapped stems the `~` joiner decides — it sits outside
+  // the token alphabet (the flatten above maps it to `_`), so no uncapped
+  // stem can spell a capped stem's head-plus-joiner. With `-` here, every
+  // exactly-55-character uncapped stem WAS a strict sweep-prefix of every
+  // capped stem sharing its head, and a finishing review deleted the capped
+  // twin's live artifacts mid-round (R17-6 entrance 2). The short-stem
+  // hazard the sweep already had (`abc` prefixing `abc-def`, R17-6
+  // entrance 1) predates the cap and is tracked separately.
+  return `${stem.slice(0, SAFE_TARGET_MAX - 9)}~${createHash('sha256')
     .update(stem)
     .digest('hex')
     .slice(0, 8)}`;

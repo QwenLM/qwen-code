@@ -164,6 +164,13 @@ describe('capture-local — incremental local rounds', () => {
     seedDirtyTree();
     const plan = capture();
     expect(plan.incremental).toBeUndefined();
+    // R17-4: the plan carries the written candidate's own stateId so Step 8
+    // can tell this round's candidate from a concurrent run's overwrite —
+    // the path alone cannot (stable per target, no lease).
+    const published = JSON.parse(
+      readFileSync(plan.cacheCandidatePath, 'utf8'),
+    ) as { stateId: string };
+    expect(plan['cacheCandidateStateId']).toBe(published.stateId);
     const candidate = JSON.parse(
       readFileSync(plan.cacheCandidatePath, 'utf8'),
     ) as { files: Record<string, string>; headSha: string | null };
@@ -608,6 +615,41 @@ describe('capture-local — the decided stops are machine-readable', () => {
     expect(plan.chunks.length).toBe(0);
     expect(plan['incremental']).toBeDefined();
     expect(plan['nothingToReview']).toEqual({ reason: 'scope-emptied' });
+    // R17-2: the split key rides the plan. A discarded change leaves the
+    // file PRESENT with the cited bytes gone, so presence cannot route the
+    // SUPERSEDED split — the capture names the paths itself.
+    const scope = (
+      plan['incremental'] as { scope: { supersededPaths?: string[] } }
+    ).scope;
+    expect(scope.supersededPaths).toEqual(
+      expect.arrayContaining([CHANGED, CALLER, BYSTANDER]),
+    );
+  });
+
+  it('names a DELETED untracked cached path in supersededPaths the same way', () => {
+    // The other half of the removed set: an UNTRACKED file the cached round
+    // reviewed, deleted since. (A deleted TRACKED file is different on
+    // purpose: its deletion is a live diff against HEAD, so it stays in the
+    // slice as a change — only content that leaves every diff lands here.)
+    // Same field, same split — the finding citing it is superseded whether
+    // the file left the tree or only the change did.
+    seedDirtyTree();
+    write('src/untracked.ts', 'export const u = 1;\n');
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    git('checkout', '--', '.');
+    rmSync(join(repo, 'src/untracked.ts'));
+
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan['nothingToReview']).toEqual({ reason: 'scope-emptied' });
+    const scope = (
+      plan['incremental'] as { scope: { supersededPaths?: string[] } }
+    ).scope;
+    expect(scope.supersededPaths).toEqual(
+      expect.arrayContaining(['src/untracked.ts', CHANGED]),
+    );
   });
 
   it('publishes the stop at a name the PARENT can predict', () => {
