@@ -127,52 +127,63 @@ resolve_and_reply_threads() {
   RESOLUTION_SELECTED_N=0
   CONFIRMED_RESOLVED_N=0
   RESOLVED_BY_OTHERS_N=0
+  ALREADY_RESOLVED_N=0
   if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
     # One spelling of the id grammar (optional rc: prefix, optional
     # trailing CR, digits only, deduplicated), shared by the counter
     # and the resolve loop below.
     RESOLVED_IDS="$(sed 's/\r$//; s/^rc://' "${WORKDIR}/resolved-comments.txt" | grep -E '^[0-9]+$' | sort -u || true)"
     RESOLUTION_SELECTED_N="$(grep -c . <<< "${RESOLVED_IDS}" || true)"
-    LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
-    if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
-      RESOLUTION_GUARD='salvage merge'
-      echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
-    elif [[ -z "${VERIFIED_HEAD}" ]]; then
-      RESOLUTION_GUARD='missing verified_head'
-      echo "::warning::skipping review-thread resolution because this round recorded no deterministically verified commit"
-    elif [[ "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
-      RESOLUTION_GUARD='verified_head mismatch'
-      echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
-    else
-      # The PR read model is eventually consistent: a headRefOid read
-      # seconds after this round's OWN push routinely still returns the
-      # previous head — on #9729 every pushed round tripped this guard
-      # that way, silently, for days (#10106). Give propagation a
-      # bounded window before declaring drift; the per-mutation guards
-      # below stay single-shot, because once the head was observed
-      # equal a later mismatch means it actually moved.
-      # The delay knob exists for tests; anything but a single digit
-      # (e.g. a GITHUB_ENV plant stalling this PAT-bearing step) falls
-      # back to the default.
-      [[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5
-      LIVE_HEAD_EVER_READ='false'
-      for live_head_attempt in 1 2 3 4 5; do
-        LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" || LIVE_PR_HEAD=''
-        if [[ -n "${LIVE_PR_HEAD}" ]]; then
-          LIVE_HEAD_EVER_READ='true'
-          if [[ "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
-            CAN_RESOLVE_THREADS='true'
-            break
+    # Nothing selected resolves nothing, so the head guards below have
+    # no resolution to gate — a malformed file (zero valid ids) must
+    # not spend this PAT-bearing step's reads on a proof nothing needs.
+    if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then
+      LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
+      if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
+        RESOLUTION_GUARD='salvage merge'
+        echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
+      elif [[ -z "${VERIFIED_HEAD}" ]]; then
+        RESOLUTION_GUARD='missing verified_head'
+        echo "::warning::skipping review-thread resolution because this round recorded no deterministically verified commit"
+      elif [[ "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+        RESOLUTION_GUARD='verified_head mismatch'
+        echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
+      else
+        # The PR read model is eventually consistent: a headRefOid read
+        # seconds after this round's OWN push routinely still returns the
+        # previous head — on #9729 every pushed round tripped this guard
+        # that way, silently, for days (#10106). Give propagation a
+        # bounded window before declaring drift; the per-mutation guards
+        # below stay single-shot, because once the head was observed
+        # equal a later mismatch means it actually moved. A round that
+        # pushed nothing has no push to propagate — a mismatched head
+        # there moves only further away, never back — so one read
+        # decides.
+        # The delay knob exists for tests; anything but a single digit
+        # (e.g. a GITHUB_ENV plant stalling this PAT-bearing step) falls
+        # back to the default.
+        [[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5
+        LIVE_HEAD_ATTEMPTS=5
+        [[ "${ROUND_PUSHED:-}" == 'true' ]] || LIVE_HEAD_ATTEMPTS=1
+        LIVE_HEAD_EVER_READ='false'
+        for (( live_head_attempt = 1; live_head_attempt <= LIVE_HEAD_ATTEMPTS; live_head_attempt++ )); do
+          LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" || LIVE_PR_HEAD=''
+          if [[ -n "${LIVE_PR_HEAD}" ]]; then
+            LIVE_HEAD_EVER_READ='true'
+            if [[ "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
+              CAN_RESOLVE_THREADS='true'
+              break
+            fi
           fi
+          [[ "${live_head_attempt}" == "${LIVE_HEAD_ATTEMPTS}" ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"
+        done
+        if [[ "${CAN_RESOLVE_THREADS}" != 'true' ]]; then
+          # drift: a head was read but never matched; unreadable: no read
+          # returned any head (auth/API health, not a contributor push).
+          RESOLUTION_GUARD='live-head drift'
+          [[ "${LIVE_HEAD_EVER_READ}" == 'true' ]] || RESOLUTION_GUARD='live-head unreadable'
+          echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
         fi
-        [[ "${live_head_attempt}" == 5 ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"
-      done
-      if [[ "${CAN_RESOLVE_THREADS}" != 'true' ]]; then
-        # drift: a head was read but never matched; unreadable: no read
-        # returned any head (auth/API health, not a contributor push).
-        RESOLUTION_GUARD='live-head drift'
-        [[ "${LIVE_HEAD_EVER_READ}" == 'true' ]] || RESOLUTION_GUARD='live-head unreadable'
-        echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
       fi
     fi
   fi
@@ -222,6 +233,13 @@ resolve_and_reply_threads() {
           node(id:$threadId){... on PullRequestReviewThread{isResolved}}
         }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
     }
+    # A thread can carry more than one selected id — the feedback
+    # renderer lists a reply under a Critical root as its own finding —
+    # so the loop tracks the threads it already handled and counts
+    # THREADS, not ids: a second id of a handled thread must not
+    # re-resolve it nor read the loop's own resolution as "another
+    # actor".
+    SEEN_THREAD_IDS=''
     while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
       # A file with no valid ids normalizes to an empty list; the
       # here-string still yields one empty iteration.
@@ -230,8 +248,28 @@ resolve_and_reply_threads() {
         'map(select(.isResolved | not)
            | select(any(.comments.nodes[]; .databaseId == $id)))
          | .[0].id // ""' <<< "${THREADS_JSON}")"
+      thread_open='true'
       if [[ -z "${thread_id}" ]]; then
-        echo "::warning::comment ${rc_id} matched no open review thread"
+        thread_open='false'
+        # The open-thread filter above hides an id whose thread was
+        # resolved BEFORE the fetch; find it anyway, or it stays in
+        # the residual count every round — the SKILL has the agent
+        # re-list a still-holding fix, so the count never converges.
+        thread_id="$(jq -r --argjson id "${rc_id}" \
+          'map(select(any(.comments.nodes[]; .databaseId == $id)))
+           | .[0].id // ""' <<< "${THREADS_JSON}")"
+        if [[ -z "${thread_id}" ]]; then
+          echo "::warning::comment ${rc_id} matched no open review thread"
+          continue
+        fi
+      fi
+      if grep -qxF "${thread_id}" <<< "${SEEN_THREAD_IDS}"; then
+        RESOLUTION_SELECTED_N=$(( RESOLUTION_SELECTED_N - 1 ))
+        continue
+      fi
+      SEEN_THREAD_IDS="${SEEN_THREAD_IDS}${thread_id}"$'\n'
+      if [[ "${thread_open}" == 'false' ]]; then
+        ALREADY_RESOLVED_N=$(( ALREADY_RESOLVED_N + 1 ))
         continue
       fi
       if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
@@ -279,7 +317,7 @@ resolve_and_reply_threads() {
   # host strings plus counts — nothing agent-controlled.
   RESOLUTION_NOTE=''
   if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then
-    RESOLUTION_LEFT_N=$(( RESOLUTION_SELECTED_N - CONFIRMED_RESOLVED_N - RESOLVED_BY_OTHERS_N ))
+    RESOLUTION_LEFT_N=$(( RESOLUTION_SELECTED_N - CONFIRMED_RESOLVED_N - RESOLVED_BY_OTHERS_N - ALREADY_RESOLVED_N ))
     if [[ -n "${RESOLUTION_GUARD}" ]]; then
       RESOLUTION_PHASE='skipped'
       RESOLUTION_PHASE_ZH='被跳过'
@@ -522,6 +560,7 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
       PUSH_RACE_MERGED='true'
     fi
   done
+  ROUND_PUSHED='true'
   resolve_and_reply_threads
   # Best-effort: verified out-of-footprint findings persist into
   # the per-PR tracking issue (script content from expression
@@ -585,6 +624,7 @@ else
   # No push happened, so the verified head is the unchanged
   # origin head; resolution's own live-head guards still apply.
   PUSH_RACE_MERGED='false'
+  ROUND_PUSHED='false'
   resolve_and_reply_threads
   # Best-effort: verified out-of-footprint findings persist into
   # the per-PR tracking issue (script content from expression

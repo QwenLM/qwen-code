@@ -17497,8 +17497,9 @@ exit 1
       ].join('\n'),
     );
     chmodSync(join(bin, 'gh'), 0o755);
-    // 111 was implemented; 333's thread is already resolved; 999 matches
-    // nothing. 222 was DECLINED, so it is deliberately absent and must stay open.
+    // 111 was implemented (112 is a reply in the SAME thread); 333's thread
+    // is already resolved; 999 matches nothing. 222 was DECLINED, so it is
+    // deliberately absent and must stay open.
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
     const localHead = execFileSync('git', ['rev-parse', 'HEAD'], {
       encoding: 'utf8',
@@ -17512,7 +17513,10 @@ exit 1
         id: 'T_open_1',
         isResolved: false,
         comments: {
-          nodes: [{ databaseId: 111 }],
+          // 112 is a reply in this same thread: the feedback renderer lists
+          // a Critical root and its reply as two findings with their own
+          // rc: handles, so one thread can carry two selected ids (R2-1).
+          nodes: [{ databaseId: 111 }, { databaseId: 112 }],
           pageInfo: { hasNextPage: false },
         },
       },
@@ -17562,6 +17566,7 @@ exit 1
           VERIFIED_HEAD: localHead,
           LIVE_HEAD: localHead,
           PUSH_RACE_MERGED: 'false',
+          ROUND_PUSHED: 'true',
           LIVE_HEAD_RETRY_DELAY: '0',
           ...env,
         },
@@ -17634,13 +17639,36 @@ exit 1
     expect(lagThenConverge.out).not.toContain(
       'skipping review-thread resolution',
     );
-    // …and a head that never converges still skips, after exhausting the
-    // whole window rather than a single read.
+    // …and a PUSHED round whose head never converges still skips, after
+    // exhausting the whole window rather than a single read…
     const neverConverges = runResolve({ LIVE_HEAD: 'stale-pre-push-head' });
     expect(neverConverges.status).toBe(0);
     expect(neverConverges.resolved).toEqual([]);
     expect(neverConverges.out).toContain('skipping review-thread resolution');
     expect(readFileSync(headReadCount, 'utf8')).toBe('5');
+    // …but the window waits out THIS round's OWN push, so a round that
+    // pushed nothing decides on ONE read — a head moved by a contributor
+    // only ever moves further from VERIFIED_HEAD, never back to it.
+    const noopNeverConverges = runResolve({
+      LIVE_HEAD: 'stale-pre-push-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(noopNeverConverges.status).toBe(0);
+    expect(noopNeverConverges.resolved).toEqual([]);
+    expect(noopNeverConverges.out).toContain(
+      'skipping review-thread resolution',
+    );
+    expect(readFileSync(headReadCount, 'utf8')).toBe('1');
+    // And an empty selection needs no head proof at all: zero reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    const zeroIdsDrift = runResolve({
+      LIVE_HEAD: 'stale-pre-push-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(zeroIdsDrift.status).toBe(0);
+    expect(zeroIdsDrift.resolved).toEqual([]);
+    expect(readFileSync(headReadCount, 'utf8')).toBe('0');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
     // The retry delay is a test knob on a PAT-bearing step: anything but
     // a single digit (a GITHUB_ENV plant stalling the step to the job
     // timeout) must fall back to the default.
@@ -17651,8 +17679,15 @@ exit 1
     // reads fire inside the propagation window, every one returns the
     // stale head, and resolution silently skips every pushed round.
     expect(block).toContain(
-      '[[ "${live_head_attempt}" == 5 ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"',
+      '[[ "${live_head_attempt}" == "${LIVE_HEAD_ATTEMPTS}" ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"',
     );
+    // The window's premise is THIS round's OWN push propagating: five
+    // attempts only after a push, one read otherwise, and no head proof
+    // at all on an empty selection.
+    expect(block).toContain(
+      '[[ "${ROUND_PUSHED:-}" == \'true\' ]] || LIVE_HEAD_ATTEMPTS=1',
+    );
+    expect(block).toContain('if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then');
 
     const movedBeforeMutation = runResolve({
       LIVE_HEAD_SEQUENCE: `${localHead},new-contributor-head`,
@@ -17754,6 +17789,21 @@ exit 1
     expect(resolvedByOtherActor.status).toBe(0);
     expect(resolvedByOtherActor.resolved).toEqual([]);
     expect(resolvedByOtherActor.out).toContain('was resolved by another actor');
+
+    // R2-1: a Critical root and its reply carry two rc: handles for ONE
+    // thread. The loop resolves the thread on the first id; the second
+    // maps to the same thread and must read as same-thread dedupe — not
+    // as "another actor" resolving it between the fetch and the guard,
+    // which counted one thread as two in the note.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    const oneThreadTwoIds = runResolve();
+    expect(oneThreadTwoIds.status).toBe(0);
+    expect(oneThreadTwoIds.resolved).toEqual(['resolve:T_open_1']);
+    expect(oneThreadTwoIds.out).not.toContain('resolved by another actor');
+    expect(oneThreadTwoIds.out).toContain(
+      'confirmed 1 selected review thread(s) resolved',
+    );
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
 
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
     const unknownThreadState = runResolve({
@@ -17963,6 +18013,15 @@ exit 1
     expect(
       pushAndReportScript.match(/echo "\$\{RESOLUTION_NOTE\}"/g) ?? [],
     ).toHaveLength(2);
+    // R2-3 wiring: each arm tells the shared function whether THIS round
+    // pushed — the pushed arm retries out its own push's propagation lag,
+    // the no-op arm decides on one read.
+    expect(
+      pushAndReportScript.match(/ROUND_PUSHED='true'/g) ?? [],
+    ).toHaveLength(1);
+    expect(
+      pushAndReportScript.match(/ROUND_PUSHED='false'/g) ?? [],
+    ).toHaveLength(1);
     const noteEnd = lines.findIndex((l) =>
       l.includes('The mirror of the resolve above'),
     );
@@ -17992,6 +18051,7 @@ exit 1
             VERIFIED_HEAD: localHead,
             LIVE_HEAD: localHead,
             PUSH_RACE_MERGED: 'false',
+            ROUND_PUSHED: 'true',
             LIVE_HEAD_RETRY_DELAY: '0',
             ...env,
           },
@@ -18017,6 +18077,25 @@ exit 1
         'resolved 0 of 3 selected thread(s), 3 left for a later round',
       );
     }
+    // R2-3: a round that pushed nothing decides on ONE read — the note
+    // stays byte-identical while the head reads drop from five to one…
+    const noopDriftNote = runNote({
+      LIVE_HEAD: 'new-contributor-head',
+      ROUND_PUSHED: 'false',
+    });
+    expect(noopDriftNote).toContain('Review-thread resolution skipped');
+    expect(noopDriftNote).toContain('guard: `live-head drift`');
+    expect(noopDriftNote).toContain(
+      'resolved 0 of 3 selected thread(s), 3 left for a later round',
+    );
+    expect(readFileSync(headReadCount, 'utf8')).toBe('1');
+    // …and an empty selection skips the head proof entirely: zero reads.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
+    expect(
+      runNote({ LIVE_HEAD: 'new-contributor-head', ROUND_PUSHED: 'false' }),
+    ).toBe('');
+    expect(readFileSync(headReadCount, 'utf8')).toBe('0');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
     // A mid-list abort names its guard too, and carries the partial count.
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
     const stoppedNote = runNote({
@@ -18044,14 +18123,25 @@ exit 1
     // Per-thread misses without a stopping guard still show up as a count,
     // and an incomplete thread fetch is called out as the likely cause.
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    // R2-2: 333's thread was already resolved BEFORE the fetch — it is
+    // not work left behind, so the residual counts 999 alone; without
+    // the already-resolved probe a re-listed still-valid fix kept the
+    // residual above zero forever.
     const partialNote = runNote();
     expect(partialNote).toContain(
-      'Resolved 1 of 3 selected review thread(s); 2 not resolved by this round',
+      'Resolved 1 of 3 selected review thread(s); 1 not resolved by this round',
     );
     expect(partialNote).toContain('details in the run log');
     expect(partialNote).not.toContain('guard:');
     const fetchNote = runNote({ THREADS_FETCH_EXIT: '1' });
     expect(fetchNote).toContain('thread fetch incomplete');
+    // A round that re-lists ONLY already-resolved ids converges to "all
+    // resolved" instead of reporting a phantom residual forever.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '333\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
+    // R2-1: two ids of ONE thread count one thread in the note.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:112\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
     // A thread another actor resolved between the fetch and the per-thread
     // guard is not work left for a later round: before it had its own
     // counter the note said "3 left" while only 2 threads were open.
