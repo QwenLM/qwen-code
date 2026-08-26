@@ -27,9 +27,6 @@ const MIN_KEYTERM_ECHO_TOKENS = 8;
 const MIN_ABSOLUTE_KEYTERM_ECHO_TOKENS = 10;
 const MIN_KEYTERM_SET_ECHO_RATIO = 0.3;
 const debugLogger = createDebugLogger('VOICE_TRANSCRIBER');
-// The address classification in this file is mirrored in
-// packages/desktop/packages/server-core/src/voice/net-guard.ts. The bun
-// workspace boundary prevents sharing a module; keep the two in sync.
 const BLOCKED_TRANSITION_IPV6_ADDRESSES = new BlockList();
 for (const [address, prefix] of [
   ['64:ff9b:1::', 48],

@@ -74,9 +74,7 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
     createContentGenerator: vi.fn().mockResolvedValue({
       generateContent: vi.fn(),
       generateContentStream: vi.fn(),
-      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
       embedContent: vi.fn(),
-      useSummarizedThinking: vi.fn().mockReturnValue(false),
     }),
     createContentGeneratorConfig: vi.fn().mockReturnValue({
       model: DEFAULT_QWEN_MODEL,

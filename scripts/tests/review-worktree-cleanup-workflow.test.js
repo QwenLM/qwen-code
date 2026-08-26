@@ -11,6 +11,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -128,6 +129,33 @@ function expectCleanupRecipe(run) {
   expect(code.indexOf('worktree prune', remove)).toBeGreaterThan(remove);
   expect(code.indexOf(`refs/heads/${branchFamily}*`)).toBeGreaterThan(remove);
   expectPipedLoopsIsolated(code, 2);
+}
+
+// Deleting the tree is not always possible: a containerised job on this
+// shared pool can leave residue owned by another uid, and on a pool member
+// without passwordless sudo nothing unprivileged can unlink it. Leaving it
+// in place poisons the checkout of every LATER job scheduled here, so the
+// sweep must move it out of the workspace instead of warning and continuing
+// — renaming needs write permission only on the two parents, and the
+// workspace root is always the runner's own.
+function expectQuarantineFallback(run) {
+  const code = stripComments(run);
+  expect(code).toContain('_qwen-quarantine');
+  // The move must be the fallback of the removal chain, not an
+  // unconditional relocation: a workspace that deletes cleanly keeps its
+  // caches.
+  expect(code).toMatch(
+    /rm -rf "\$GITHUB_WORKSPACE\/\.qwen"[\s\S]*?sudo -n rm -rf[\s\S]*?mv -- "\$GITHUB_WORKSPACE\/\.qwen"/,
+  );
+  // Same filesystem by construction — a cross-device `mv` degrades to
+  // copy-then-unlink, which fails on exactly the residue this exists for.
+  expect(code).toContain(
+    '"$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"',
+  );
+  // The quarantined tree still needs a human: the warning must name where
+  // it went, and the terminal warning must survive for the case where even
+  // the rename fails.
+  expect(code).toContain('leaked .qwen; runner needs manual cleanup');
 }
 
 function expectHardenedGit(run) {
@@ -256,6 +284,7 @@ describe('review worktree cleanup steps', () => {
       expect(cleanIdx, id).toBeLessThan(checkoutIdx);
       expectCleanupRecipe(run);
       expectHardenedGit(run);
+      expectQuarantineFallback(run);
     }
     // The copies are deliberate: a pre-checkout step cannot trust leftover
     // workspace scripts, so the recipe stays inline per job. Pin them
@@ -454,6 +483,93 @@ describe('review worktree cleanup steps', () => {
       });
       expect(out.status).toBe(0);
       expect(out.stdout.trim()).toBe(review);
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'the pre-checkout sweep moves residue it cannot delete out of the workspace',
+    () => {
+      // The incident this exists for: residue whose containing directory
+      // denies the unlink, so `rm -rf` fails and actions/checkout dies
+      // wiping the workspace (measured, run 32621267802 — two unrelated PRs
+      // failed at Checkout on the same runner). Reproduced here with a
+      // write-denied parent rather than a foreign uid, which needs root:
+      // the failing syscall and the recovery are the same, and the sweep's
+      // own chmod is stepped over so it cannot repair the fixture away.
+      const root = mkdtempSync(join(tmpdir(), 'ci-quarantine-'));
+      const workspace = join(root, 'repo', 'repo');
+      const poison = join(
+        workspace,
+        `${toPosix(REVIEW_TMP_DIR)}/review-pr-9748-scratch-verify--round-1--x`,
+      );
+      const locked = join(poison, 'probe-ws/.qwen/tmp');
+      try {
+        mkdirSync(join(locked, 'review-pr-666'), { recursive: true });
+        chmodSync(locked, 0o500);
+        const out = spawnSync(
+          'bash',
+          [
+            '-c',
+            // Neutralise the sweep's own chmod and any sudo: this models the
+            // pool member that cannot repair the residue at all.
+            `set -euo pipefail\nchmod() { return 1; }\nsudo() { return 1; }\n${ciCleanSteps[0].run}`,
+            'clean-stale-qwen',
+          ],
+          {
+            cwd: workspace,
+            env: { ...process.env, GITHUB_WORKSPACE: workspace },
+            encoding: 'utf8',
+          },
+        );
+        expect(out.status).toBe(0);
+        // The workspace is clear, so the checkout that follows has nothing
+        // to trip on …
+        expect(existsSync(join(workspace, '.qwen'))).toBe(false);
+        // … and the residue was moved, not deleted: it still needs a human,
+        // and the warning says where it went.
+        const quarantine = join(root, 'repo', '_qwen-quarantine');
+        expect(existsSync(quarantine)).toBe(true);
+        expect(readdirSync(quarantine)).toHaveLength(1);
+        const warnings = out.stdout
+          .split('\n')
+          .filter((line) => line.startsWith('::warning::'));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain('_qwen-quarantine');
+      } finally {
+        // The locked directory has usually MOVED by now (that is the point),
+        // so repair the whole fixture by path rather than the original one.
+        spawnSync('bash', [
+          '-c',
+          `chmod -R u+rwX "${root}" 2>/dev/null || true`,
+        ]);
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'the pre-checkout sweep still deletes residue it can remove',
+    () => {
+      // The fallback must stay a fallback: a workspace that deletes cleanly
+      // keeps its caches instead of accumulating quarantined copies.
+      const root = mkdtempSync(join(tmpdir(), 'ci-quarantine-'));
+      const workspace = join(root, 'repo', 'repo');
+      try {
+        mkdirSync(join(workspace, `${toPosix(REVIEW_TMP_DIR)}/review-pr-77`), {
+          recursive: true,
+        });
+        const out = spawnSync('bash', ['-c', ciCleanSteps[0].run], {
+          cwd: workspace,
+          env: { ...process.env, GITHUB_WORKSPACE: workspace },
+          encoding: 'utf8',
+        });
+        expect(out.status).toBe(0);
+        expect(existsSync(join(workspace, '.qwen'))).toBe(false);
+        expect(existsSync(join(root, 'repo', '_qwen-quarantine'))).toBe(false);
+        expect(out.stdout).not.toContain('::warning::');
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     },
   );
 

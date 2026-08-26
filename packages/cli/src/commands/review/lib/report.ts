@@ -89,6 +89,14 @@ export interface PlanReport {
   testDiffLines: number;
   docsDiffLines: number;
   generatedDiffLines: number;
+  /**
+   * Whether the diff signals a wrapping type — the Agent 1e roster gate reads
+   * this (see `hasWrapperTypes` in roster.ts). Always written by the capture
+   * commands this CLI ships; a plan with NO field was written by an older CLI,
+   * and the gate treats absent exactly like true — the check must not vanish
+   * from a review over version skew.
+   */
+  wrapperSignal: boolean;
   /** Contiguous, non-overlapping line ranges tiling the whole diff file. */
   chunks: DiffChunk[];
   files: FileMetric[];
@@ -175,6 +183,7 @@ export function buildPlanReport(
     testDiffLines: plan.testDiffLines,
     docsDiffLines: plan.docsDiffLines,
     generatedDiffLines: plan.generatedDiffLines,
+    wrapperSignal: plan.wrapperSignal,
     chunks: plan.chunks,
     files,
     budget: reviewBudget(

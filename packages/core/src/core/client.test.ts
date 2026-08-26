@@ -425,26 +425,6 @@ vi.mock(
 );
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
-// Mock RequestTokenizer to use simple character-based estimation
-vi.mock('../utils/request-tokenizer/requestTokenizer.js', () => ({
-  RequestTokenizer: class {
-    async calculateTokens(request: { contents: unknown }) {
-      // Simple estimation: count characters in JSON and divide by 4
-      const totalChars = JSON.stringify(request.contents).length;
-      return {
-        totalTokens: Math.floor(totalChars / 4),
-        breakdown: {
-          textTokens: Math.floor(totalChars / 4),
-          imageTokens: 0,
-          audioTokens: 0,
-          otherTokens: 0,
-        },
-        processingTime: 0,
-      };
-    }
-  },
-}));
-
 /**
  * Array.fromAsync ponyfill, which will be available in es 2024.
  *
@@ -563,7 +543,6 @@ describe('Gemini Client (client.ts)', () => {
       generateContent: mockGenerateContentFn,
       generateContentStream: vi.fn(),
       batchEmbedContents: vi.fn(),
-      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
     } as unknown as ContentGenerator;
 
     // Because the GeminiClient constructor kicks off an async process (startChat)

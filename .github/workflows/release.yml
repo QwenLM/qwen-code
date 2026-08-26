@@ -607,7 +607,7 @@ jobs:
         run: |-
           # Explicit allowlist: new channel workspaces require release approval.
           PUBLISH_MARKER="$(mktemp)"
-          for channel in dingtalk feishu github qqbot telegram wecom weixin; do
+          for channel in dingtalk dws feishu github qqbot telegram wecom weixin; do
             echo "::group::Publishing @qwen-code/channel-${channel}"
             (
               cd "${channel}"

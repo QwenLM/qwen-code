@@ -7,8 +7,6 @@
 import {
   GenerateContentResponse,
   type Content,
-  type CountTokensParameters,
-  type CountTokensResponse,
   type EmbedContentParameters,
   type EmbedContentResponse,
   type GenerateContentParameters,
@@ -1245,18 +1243,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     return areSensitiveSpanAttributesEnabled(this.config);
   }
 
-  async countTokens(req: CountTokensParameters): Promise<CountTokensResponse> {
-    return this.wrapped.countTokens(req);
-  }
-
   async embedContent(
     req: EmbedContentParameters,
   ): Promise<EmbedContentResponse> {
     return this.wrapped.embedContent(req);
-  }
-
-  useSummarizedThinking(): boolean {
-    return this.wrapped.useSummarizedThinking();
   }
 
   private toContents(contents: ContentListUnion): Content[] {

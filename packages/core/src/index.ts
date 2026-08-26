@@ -234,6 +234,24 @@ export {
   isRecordableDerivedChild,
 } from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
+export {
+  ReportFindingsTool,
+  FINDING_SEVERITIES,
+  FINDING_CONFIDENCES,
+  FINDING_OUTCOMES,
+  FINDING_SOURCES,
+  REPORT_FINDINGS_LEVELS,
+  compressFindingSummary,
+} from './tools/report-findings.js';
+export type {
+  ReportFindingsParams,
+  ReportFindingsFindingParams,
+  FindingSeverity,
+  FindingConfidence,
+  FindingOutcome,
+  FindingSource,
+  ReportFindingsLevel,
+} from './tools/report-findings.js';
 export { CreateSubSessionTool } from './tools/create-sub-session.js';
 export type {
   ArtifactPublisher,
@@ -569,6 +587,7 @@ export * from './core/environmentContext.js';
 export * from './utils/env.js';
 export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
+export * from './utils/file-identity.js';
 export * from './utils/fileUtils.js';
 export * from './utils/filesearch/fileSearch.js';
 export * as crawlCache from './utils/filesearch/crawlCache.js';

@@ -1635,14 +1635,15 @@ export function buildRoleBrief(
     }
   }
 
-  // Cross-repo lightweight mode: there is no tree, only the diff. Two briefs assume
-  // one, and the degradation used to be a sentence the orchestrator was told to add
-  // by hand — which is not a thing that survives, and is now not a thing it can do:
-  // it does not write these any more. So the builder degrades them, from the same
-  // plan the roster reads.
+  // Cross-repo lightweight mode: there is no tree, only the diff. Several briefs
+  // assume one, and the degradation used to be a sentence the orchestrator was told
+  // to add by hand — which is not a thing that survives, and is now not a thing it
+  // can do: it does not write these any more. So the builder degrades them, from
+  // the same plan the roster reads.
   //
-  // 1b's is a *precision* rule, not a convenience: an agent that cannot grep for a
-  // re-establishment and asserts one is missing files a false Critical, and a false
+  // The clause below is a *precision* rule, not a convenience: an agent that
+  // cannot grep for a re-establishment (1b), a caller (1c), or a wrapper's call
+  // sites (1e) and asserts one is missing files a false Critical, and a false
   // Critical blocks a merge.
   if (reviewMode(report as RosterPlan) === 'diff-only' && brief.reviewsCode) {
     parts.push(
@@ -1651,12 +1652,16 @@ export function buildRoleBrief(
         'local checkout to read enclosing functions from, and nothing to `grep_search`. ' +
         'Work from the diff alone.',
     );
-    if (role === '1b' || role === '1c') {
+    // 1e's forwarding-completeness walk greps the wrapper's call sites, and a
+    // caller lives outside the diff exactly like 1b's replacement or 1c's
+    // consumers — the same precision rule applies.
+    if (role === '1b' || role === '1c' || role === '1e') {
       parts.push(
         '',
         'Which changes what you may conclude. When the evidence you would need sits **outside ' +
           'the diff** — the replacement for a deleted export, the call sites of a changed ' +
-          'signature, the read sites of a new field — you cannot check it, and you must not ' +
+          'signature, the read sites of a new field, the callers a wrapper does not forward — ' +
+          'you cannot check it, and you must not ' +
           'assert it is missing. Report the candidate at `Confidence: low` and say plainly that ' +
           'the check could not be made. A false Critical blocks a merge.',
       );

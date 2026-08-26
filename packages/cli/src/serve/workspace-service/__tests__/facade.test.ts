@@ -58,6 +58,11 @@ vi.mock('@qwen-code/qwen-code-core', () => {
       AUTO_EDIT: 'autoEdit',
       YOLO: 'yolo',
     },
+    OutputFormat: {
+      TEXT: 'text',
+      JSON: 'json',
+      STREAM_JSON: 'stream-json',
+    },
     DEFAULT_STOP_HOOK_BLOCK_CAP: 5,
     DEFAULT_MAX_AUDIO_BRIDGE_BYTES: 10 * 1024 * 1024,
     DEFAULT_MAX_SUBAGENT_DEPTH: 5,
