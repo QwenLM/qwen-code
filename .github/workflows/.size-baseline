@@ -51,7 +51,7 @@
 1079 scorecard-monthly.yml
 10691 sdk-java.yml
 3886 sdk-python.yml
-7318 security-checks.yml
+16822 security-checks.yml
 6777 serve-ab-publish.yml
 17013 serve-ab.yml
 2641 stale.yml

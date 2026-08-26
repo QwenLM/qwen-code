@@ -62,7 +62,10 @@ function simulateRunsOn({ ecsDisabled, sameRepo, assoc, mergeGroup }) {
 // label, unwrapped here to the array it names. Any term the substitutions
 // do not recognise fails loud, so an edited expression is re-read here
 // instead of silently outgrowing the matrix.
-function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
+function evalRunsOn(
+  expression,
+  { ecsDisabled, eventName, sameRepo, assoc, repository = 'QwenLM/qwen-code' },
+) {
   const substitutions = [
     [/vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/, String(!ecsDisabled)],
     [
@@ -74,7 +77,10 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
     ],
-    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
+    [
+      /github\.repository == 'QwenLM\/qwen-code'/,
+      String(repository === 'QwenLM/qwen-code'),
+    ],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
       String(sameRepo),
@@ -437,6 +443,20 @@ describe('security-checks.yml runner routing', () => {
   const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
   const HOSTED_LABELS = ['ubuntu-latest'];
   const JOBS = ['dependency-cve', 'secret-scan'];
+  const SELF_HOSTED_IF = "${{ runner.environment == 'self-hosted' }}";
+  // The pool-lane steps are verbatim copies of ci.yml's Test job. They run
+  // before checkout on shared runners, where a composite action cannot be
+  // loaded yet, so the copy is pinned byte-identical here instead: a fix
+  // that lands on one copy and misses the other fails this suite.
+  const ciStep = (name) => {
+    const step = ciDoc.jobs.test.steps.find((s) => s.name === name);
+    assert.ok(step, `ci.yml test job must still carry '${name}'`);
+    return step;
+  };
+  // Only the gate may differ between the copies; a `shell:` or `env:`
+  // override on one side is drift too, so compare the whole step sans `if`.
+  const sansIf = (step) =>
+    Object.fromEntries(Object.entries(step).filter(([key]) => key !== 'if'));
 
   it('keeps the two routing expressions byte-identical', () => {
     assert.equal(
@@ -495,6 +515,26 @@ describe('security-checks.yml runner routing', () => {
       );
     });
 
+    it(`${jobName} never routes a fork's own repository to the pool`, () => {
+      // The repository gate keeps the workflow inert in forks: without it,
+      // a fork's push to main satisfies `github.event_name == 'push'` and
+      // queues forever on labels no fork runner carries.
+      for (const lane of [
+        { eventName: 'push', sameRepo: false, assoc: '' },
+        { eventName: 'pull_request', sameRepo: true, assoc: 'OWNER' },
+      ]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ...lane,
+            ecsDisabled: false,
+            repository: 'someone/qwen-code',
+          }),
+          HOSTED_LABELS,
+          `${jobName} must stay hosted in a fork on ${lane.eventName}`,
+        );
+      }
+    });
+
     it(`${jobName} obeys the kill-switch on every event`, () => {
       for (const eventName of ['push', 'pull_request']) {
         assert.deepEqual(
@@ -510,25 +550,39 @@ describe('security-checks.yml runner routing', () => {
       }
     });
 
-    it(`${jobName} heals workspace ownership before its checkout`, () => {
+    it(`${jobName} heals the shared workspace before its checkout`, () => {
       // The pool reuses workspaces; a prior containerised job can leave
-      // root-owned files that make checkout's clean die on EACCES.
+      // root-owned files that make checkout's clean die on EACCES. When
+      // the runner has no passwordless sudo the chown cannot fix a leaked
+      // .qwen/, so the sweep's rename-aside must follow the heal.
       const steps = securityDoc.jobs[jobName].steps;
       const heal = steps.findIndex(
         (s) => s.name === 'Restore workspace ownership',
+      );
+      const clean = steps.findIndex(
+        (s) => s.name === 'Clean stale .qwen before checkout',
       );
       const checkout = steps.findIndex((s) =>
         String(s.uses || '').startsWith('actions/checkout'),
       );
       assert.ok(heal !== -1, `${jobName} must carry the ownership heal`);
-      assert.equal(
-        steps[heal].if,
-        "${{ runner.environment == 'self-hosted' }}",
+      assert.ok(clean !== -1, `${jobName} must carry the stale-.qwen sweep`);
+      assert.ok(checkout !== -1, `${jobName} must check out the repository`);
+      assert.equal(steps[heal].if, SELF_HOSTED_IF);
+      assert.equal(steps[clean].if, SELF_HOSTED_IF);
+      assert.ok(
+        heal < clean && clean < checkout,
+        `${jobName} must heal, then sweep, then check out`,
       );
       assert.match(steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
-      assert.ok(
-        heal < checkout,
-        `${jobName} must heal ownership before checking out`,
+      assert.match(steps[clean].run, /mv -- "\$GITHUB_WORKSPACE\/\.qwen"/);
+      assert.deepEqual(
+        sansIf(steps[heal]),
+        sansIf(ciStep('Restore workspace ownership')),
+      );
+      assert.deepEqual(
+        sansIf(steps[clean]),
+        sansIf(ciStep('Clean stale .qwen before checkout')),
       );
     });
   }
@@ -549,6 +603,25 @@ describe('security-checks.yml runner routing', () => {
       (s) => s.uses === './.github/actions/self-hosted-node',
     );
     assert.ok(preflight, 'the pool lane must use the pre-installed Node');
-    assert.equal(preflight.if, "${{ runner.environment == 'self-hosted' }}");
+    assert.equal(preflight.if, SELF_HOSTED_IF);
+  });
+
+  it('dependency-cve feeds npm ci from the persistent pool cache', () => {
+    // $GITHUB_ENV writes reach later steps only, so the cache step must
+    // precede the install; losing it sends npm ci through the pool's slow
+    // egress for the whole dependency tree on every run.
+    const steps = securityDoc.jobs['dependency-cve'].steps;
+    const cache = steps.findIndex(
+      (s) => s.name === 'Configure persistent npm cache (self-hosted)',
+    );
+    const install = steps.findIndex((s) => s.name === 'Install dependencies');
+    assert.ok(cache !== -1, 'the pool lane must configure its npm cache');
+    assert.ok(install !== -1, 'the install step must exist');
+    assert.equal(steps[cache].if, SELF_HOSTED_IF);
+    assert.ok(cache < install, 'the cache must be configured before npm ci');
+    assert.deepEqual(
+      sansIf(steps[cache]),
+      sansIf(ciStep('Configure persistent npm cache (self-hosted)')),
+    );
   });
 });
