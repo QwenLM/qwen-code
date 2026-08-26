@@ -678,21 +678,13 @@ jobs:
       # branch) fires `synchronize` like any push, but adds nothing on the
       # PR side — and a full automatic round costs hours (#10111: two base
       # refreshes on PR #9729 spent one full round plus one cancelled one).
-      # Certify that shape deterministically and skip the round: every
-      # first-parent commit since the head the last completed automatic
-      # round reviewed must be a two-parent merge of the base branch, and
-      # the PR's own three-dot diff must be unchanged — patch-id equality,
-      # which ignores hunk offsets but hashes content and context, so an
-      # upstream edit inside the PR's own hunks (context lines included)
-      # fails the equality and the round runs. Everything here fails OPEN:
-      # any probe error or unmatched shape proceeds with the full round,
-      # which is why the script never exits non-zero (a step failure would
-      # be misreported as a pipeline failure by the fallback comment) and
-      # continue-on-error is the belt for an unexpected crash. The reviewed
-      # head comes from the newest ledger-marked review posted by THIS
-      # account — resolved live via `gh api user`, same norm as the fallback
-      # dedup, so a participant posting the marker text can never certify a
-      # head this gate would skip.
+      # The script certifies that shape deterministically (pure base-merge
+      # chain since the last ledger-marked reviewed head, PR-side diff
+      # unchanged by patch-id) and posts one marker-deduped note when it
+      # skips; its full contract lives in its header. Everything fails OPEN
+      # into the full round — the script never exits non-zero (a step
+      # failure would be misreported as a pipeline failure by the fallback
+      # comment) and continue-on-error is the belt for an unexpected crash.
       - name: 'Skip base-refresh-only synchronize'
         id: 'base_refresh'
         if: |-
@@ -708,101 +700,7 @@ jobs:
           BASE_REF: '${{ github.event.pull_request.base.ref }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
-          # Deliberately no `set -e`: every refusal below is fail-open by
-          # construction, and the trailing exit 0 makes the tolerance total.
-          set -uo pipefail
-          SKIP=false
-          REVIEWED_SHA=''
-          REASON=''
-
-          decide() {
-            REASON='pr head fetch failed'
-            git fetch --no-tags --quiet origin "refs/pull/${PR_NUMBER}/head" || return
-            REASON='event head not reachable from the PR head ref'
-            git cat-file -e "${EVENT_HEAD_SHA}^{commit}" 2>/dev/null || return
-            REASON='base branch ref unavailable'
-            if ! git rev-parse -q --verify "origin/${BASE_REF}^{commit}" >/dev/null; then
-              git fetch --no-tags --quiet origin "${BASE_REF}" || return
-              git rev-parse -q --verify "origin/${BASE_REF}^{commit}" >/dev/null || return
-            fi
-
-            REASON='reviewed-head lookup failed'
-            local bot_login reviews
-            bot_login="$(gh api user --jq '.login')" && [ -n "$bot_login" ] || return
-            reviews="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --method GET --paginate -F per_page=100)" || return
-            REVIEWED_SHA="$(printf '%s' "$reviews" | jq -sr --arg login "$bot_login" '[.[][] | select(.user.login == $login) | select(.body | contains("<!-- qwen-review-ledger"))] | last | .commit_id // empty')" || return
-            REASON='no completed automatic round on this PR'
-            [ -n "$REVIEWED_SHA" ] || return
-            REASON='reviewed head not in the fetched history'
-            git cat-file -e "${REVIEWED_SHA}^{commit}" 2>/dev/null || return
-            REASON='reviewed head is not an ancestor of the pushed head'
-            git merge-base --is-ancestor "$REVIEWED_SHA" "$EVENT_HEAD_SHA" 2>/dev/null || return
-
-            # Bounded walk: a stale reviewed head must not buy an unbounded
-            # ancestry scan, and past ten first-parent steps this is not the
-            # cheap shape the gate exists for anyway.
-            local count c p2
-            REASON='commit walk failed'
-            count="$(git rev-list --first-parent --count "${REVIEWED_SHA}..${EVENT_HEAD_SHA}" 2>/dev/null)" || return
-            REASON='no new commits since the reviewed head'
-            [ "$count" -ge 1 ] 2>/dev/null || return
-            REASON="too many commits since the reviewed head (${count})"
-            [ "$count" -le 10 ] 2>/dev/null || return
-            for c in $(git rev-list --first-parent "${REVIEWED_SHA}..${EVENT_HEAD_SHA}" 2>/dev/null); do
-              REASON="non-merge commit since the reviewed head: ${c}"
-              p2="$(git rev-parse -q --verify "${c}^2" 2>/dev/null)" || return
-              REASON="octopus merge since the reviewed head: ${c}"
-              if git rev-parse -q --verify "${c}^3" >/dev/null 2>&1; then return; fi
-              REASON="merge of a non-base branch since the reviewed head: ${c}"
-              git merge-base --is-ancestor "$p2" "origin/${BASE_REF}" 2>/dev/null || return
-            done
-
-            local mb_r mb_h pid_r pid_h
-            REASON='merge-base resolution failed'
-            mb_r="$(git merge-base "origin/${BASE_REF}" "$REVIEWED_SHA" 2>/dev/null)" || return
-            mb_h="$(git merge-base "origin/${BASE_REF}" "$EVENT_HEAD_SHA" 2>/dev/null)" || return
-            REASON='patch-id computation failed'
-            pid_r="$(git diff "$mb_r" "$REVIEWED_SHA" 2>/dev/null | git patch-id --stable | cut -d' ' -f1)" || return
-            pid_h="$(git diff "$mb_h" "$EVENT_HEAD_SHA" 2>/dev/null | git patch-id --stable | cut -d' ' -f1)" || return
-            REASON='empty PR-side diff'
-            { [ -n "$pid_r" ] && [ -n "$pid_h" ]; } || return
-            REASON='the PR-side diff changed'
-            [ "$pid_r" = "$pid_h" ] || return
-
-            REASON=''
-            SKIP=true
-          }
-          decide
-
-          {
-            echo "skip=$SKIP"
-            echo "reviewed_sha=$REVIEWED_SHA"
-            echo "reason=$REASON"
-          } >> "$GITHUB_OUTPUT"
-          if [ "$SKIP" != 'true' ]; then
-            echo "Base-refresh gate: full round proceeds (${REASON})." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          echo "Base-refresh gate: head ${EVENT_HEAD_SHA} only merges ${BASE_REF} into reviewed head ${REVIEWED_SHA}; skipping the automatic round." >> "$GITHUB_STEP_SUMMARY"
-
-          # One marker-deduped note per PR, updated in place. Blank line
-          # after the marker, or none of the prose renders — same HTML-block
-          # quirk as the ack comment. Note failures only warn: the skip
-          # decision is already recorded above.
-          NOTE_BODY="$(printf '<!-- qwen-review-base-refresh -->\n\n🔁 **Base refresh detected** — head `%s` only merges `%s` into the last reviewed head `%s`; the PR-side diff is unchanged, so that review still applies and no new automatic round was spent ([this run](%s)). Comment `@qwen-code /review` for a fresh full review.\n\n<details>\n<summary>中文说明</summary>\n\n🔁 **检测到 base 刷新** —— head `%s` 仅把 `%s` 合入上次已评审的 head `%s`,PR 侧 diff 未变,原有评审结论仍然适用,本次未消耗新的自动评审轮次([本次运行](%s))。如需全新完整评审,请评论 `@qwen-code /review`。\n\n</details>' "$EVENT_HEAD_SHA" "$BASE_REF" "$REVIEWED_SHA" "$RUN_URL" "$EVENT_HEAD_SHA" "$BASE_REF" "$REVIEWED_SHA" "$RUN_URL")"
-          note_login="$(gh api user --jq '.login')" || note_login=''
-          existing_id=''
-          if [ -n "$note_login" ]; then
-            existing_id="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --method GET --paginate -F per_page=100 | jq -sr --arg login "$note_login" '[.[][] | select(.user.login == $login) | select(.body | contains("<!-- qwen-review-base-refresh -->"))] | last | .id // empty')" || existing_id=''
-          fi
-          if [ -n "$existing_id" ]; then
-            gh api --method PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" -f body="$NOTE_BODY" > /dev/null \
-              || echo "::warning::could not update the base-refresh note"
-          else
-            gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body "$NOTE_BODY" \
-              || echo "::warning::could not post the base-refresh note"
-          fi
-          exit 0
+          .github/scripts/review-base-refresh-gate.sh
 
       - name: 'Setup Node.js for hosted review'
         if: "steps.context.outputs.should_run == 'true' && steps.base_refresh.outputs.skip != 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true')"

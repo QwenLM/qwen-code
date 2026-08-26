@@ -3876,6 +3876,14 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
     parse(workflow).jobs['review-pr'].steps.find(
       (s) => s.name === 'Skip base-refresh-only synchronize',
     );
+  // The step body lives in .github/scripts/ (the workflow size ratchet), so
+  // the executed cases below run the script file itself — the exact bash CI
+  // runs — and the fail-open pins read the same file.
+  const gateScriptPath = join(
+    process.cwd(),
+    '.github/scripts/review-base-refresh-gate.sh',
+  );
+  const gateScript = readFileSync(gateScriptPath, 'utf8');
 
   it('gates only the automatic synchronize path, and never fails the job', () => {
     const step = gateStep();
@@ -3884,9 +3892,11 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
     const cond = step.if.replace(/\s+/g, ' ').trim();
     expect(cond).toContain("steps.context.outputs.auto_review == 'true'");
     expect(cond).toContain("github.event.action == 'synchronize'");
-    // Fail-open contract: the script itself never exits non-zero.
-    expect(step.run).toContain('exit 0');
-    expect(step.run).not.toContain('exit 1');
+    // The step runs the checked-in script, whose fail-open contract is that
+    // it never exits non-zero.
+    expect(step.run).toContain('.github/scripts/review-base-refresh-gate.sh');
+    expect(gateScript).toContain('exit 0');
+    expect(gateScript).not.toContain('exit 1');
   });
 
   it('wires the skip output into every review-spending step', () => {
@@ -4008,7 +4018,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
           '    else',
           "      echo '[]'",
           '    fi ;;',
-          "  'pr comment 9 --repo QwenLM/qwen-code --body '*)",
+          "  'api repos/QwenLM/qwen-code/issues/9/comments -f body='*)",
           '    printf \'POSTED %s\\n\' "$args" >> "$GH_POSTED" ;;',
           "  'api --method PATCH '*)",
           '    printf \'PATCHED %s\\n\' "$args" >> "$GH_POSTED" ;;',
@@ -4022,7 +4032,7 @@ describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
       const summary = join(dir, 'gss');
       writeFileSync(output, '');
       writeFileSync(summary, '');
-      const res = spawnSync('bash', ['-c', gateStep().run], {
+      const res = spawnSync('bash', [gateScriptPath], {
         cwd: join(dir, 'workspace'),
         encoding: 'utf8',
         env: {
