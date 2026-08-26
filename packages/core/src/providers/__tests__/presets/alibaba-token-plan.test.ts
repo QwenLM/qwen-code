@@ -34,6 +34,8 @@ describe('token plan provider', () => {
       modelIds: getDefaultModelIds(tokenPlanProvider),
     });
 
+    expect(tokenPlanProvider.supportsModelDiscovery).toBe(true);
+
     expect(template.map((model) => model.id)).toEqual([
       'qwen3.7-plus',
       'qwen3.6-plus',

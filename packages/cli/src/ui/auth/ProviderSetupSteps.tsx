@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import { DescriptiveRadioButtonSelect } from '../components/shared/DescriptiveRadioButtonSelect.js';
@@ -14,7 +14,11 @@ import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
-import { AuthType, resolveProviderModels } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  resolveProviderModels,
+  discoverProviderModels,
+} from '@qwen-code/qwen-code-core';
 import type {
   ProviderConfig,
   BaseUrlOption,
@@ -194,6 +198,8 @@ interface ModelOption {
   label: string;
 }
 
+type ModelRecommendationSource = 'provider' | 'fallback';
+
 function formatModelOptionLabel(model: ModelSpec): string {
   const details: string[] = [];
   if (model.contextWindowSize) {
@@ -231,41 +237,57 @@ function mergeModelIds(
   customModelIdsText: string,
   selectedRecommendationKeys: string[],
 ): string[] {
+  // Checked recommendations lead: models[0] becomes the active model on
+  // first-time setup, and checked ids are catalog-served while free-form ids
+  // can include defaults the account's catalog does not serve.
   return uniqueModelIds([
-    ...normalizeModelIds(customModelIdsText),
     ...selectedRecommendationKeys,
+    ...normalizeModelIds(customModelIdsText),
   ]);
 }
 
 function getRecommendedSelections(
   selectedModelIds: string[],
   modelOptions: ModelOption[],
+  builtInModelIds: Set<string>,
 ): string[] {
   const selectedSet = new Set(selectedModelIds);
   return modelOptions
-    .filter((item) => selectedSet.has(item.key))
+    .filter(
+      (item) => selectedSet.has(item.key) && builtInModelIds.has(item.key),
+    )
     .map((item) => item.key);
 }
 
 function getCustomModelIdsText(
   selectedModelIds: string[],
-  recommendedModelIds: Set<string>,
+  selectedRecommendationKeys: string[],
 ): string {
+  const recommendedSelections = new Set(selectedRecommendationKeys);
   return selectedModelIds
-    .filter((id) => !recommendedModelIds.has(id))
+    .filter((id) => !recommendedSelections.has(id))
     .join(', ');
 }
 
 function ModelIdsStep({
   config,
   flow,
+  models,
+  recommendationSource,
+  syncChangesToFlow = true,
 }: {
   config: ProviderConfig;
   flow: ProviderSetupFlow;
+  models?: ModelSpec[];
+  recommendationSource?: ModelRecommendationSource;
+  syncChangesToFlow?: boolean;
 }): React.JSX.Element {
+  // Discovered models (passed by DiscoveringModelIdsStep) win; otherwise
+  // resolve the models for the selected endpoint so providers with a
+  // per-baseUrl model list only offer the models served by that endpoint.
   const providerModels = useMemo(
-    () => resolveProviderModels(config, flow.state.baseUrl),
-    [config, flow.state.baseUrl],
+    () => models ?? resolveProviderModels(config, flow.state.baseUrl),
+    [models, config, flow.state.baseUrl],
   );
   const defaultIds = providerModels?.map((m) => m.id).join(', ') ?? '';
   const hasSelectableModels = (providerModels?.length ?? 0) > 0;
@@ -282,18 +304,19 @@ function ModelIdsStep({
       })) ?? [],
     [providerModels],
   );
-  const recommendedModelIds = useMemo(
-    () => new Set(modelOptions.map((item) => item.key)),
-    [modelOptions],
+  const builtInModelIds = useMemo(
+    () => new Set(config.models?.map((model) => model.id) ?? []),
+    [config.models],
   );
   const [focusedModelIndex, setFocusedModelIndex] = useState(
     MODEL_CUSTOM_INPUT_FOCUS_INDEX,
   );
-  const [customModelIdsText, setCustomModelIdsText] = useState(() =>
-    getCustomModelIdsText(selectedModelIds, recommendedModelIds),
-  );
   const [selectedRecommendationKeys, setSelectedRecommendationKeys] = useState(
-    () => getRecommendedSelections(selectedModelIds, modelOptions),
+    () =>
+      getRecommendedSelections(selectedModelIds, modelOptions, builtInModelIds),
+  );
+  const [customModelIdsText, setCustomModelIdsText] = useState(() =>
+    getCustomModelIdsText(selectedModelIds, selectedRecommendationKeys),
   );
   const [modelSearchQuery, setModelSearchQuery] = useState('');
   const filteredModelOptions = useMemo(() => {
@@ -305,6 +328,13 @@ function ModelIdsStep({
       modelOptionSearchText(item).includes(normalizedQuery),
     );
   }, [modelOptions, modelSearchQuery]);
+  // Only the built-in specs are endorsed as recommendations; other served ids
+  // are listed under a separate heading below.
+  const firstOtherModelIndex = useMemo(
+    () =>
+      filteredModelOptions.findIndex((item) => !builtInModelIds.has(item.key)),
+    [filteredModelOptions, builtInModelIds],
+  );
   const recommendedScrollOffset =
     focusedModelIndex < 0
       ? 0
@@ -322,11 +352,17 @@ function ModelIdsStep({
 
   const syncModelIds = useCallback(
     (customText: string, recommendationKeys: string[]) => {
-      flow.changeModelIds(
-        mergeModelIds(customText, recommendationKeys).join(', '),
-      );
+      if (syncChangesToFlow) {
+        flow.changeModelIds(
+          mergeModelIds(customText, recommendationKeys).join(', '),
+        );
+      } else {
+        // Edits commit only on Enter here, but a stale submit error must
+        // still clear on edit, as changeModelIds does on the synced path.
+        flow.clearModelIdsError();
+      }
     },
-    [flow],
+    [flow, syncChangesToFlow],
   );
 
   const handleSubmitModelIds = useCallback(() => {
@@ -443,9 +479,16 @@ function ModelIdsStep({
             )}
           </Text>
         </Box>
-        <Box marginTop={1}>
-          <Text color={theme.text.secondary}>{t('Recommended models')}</Text>
-        </Box>
+        {firstOtherModelIndex !== 0 && (
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>
+              {t('Recommended models')}
+              {recommendationSource === 'provider' && t(' · from the provider')}
+              {recommendationSource === 'fallback' &&
+                t(' · provider list unavailable, showing built-ins')}
+            </Text>
+          </Box>
+        )}
         <Box marginTop={0} flexDirection="column">
           <Text color={theme.text.secondary}>{t('Search')}</Text>
           <TextInput
@@ -479,17 +522,30 @@ function ModelIdsStep({
                 : isSelected
                   ? theme.text.accent
                   : theme.text.primary;
+              const showOtherModelsHeading =
+                firstOtherModelIndex !== -1 &&
+                modelIndex >= firstOtherModelIndex &&
+                (visibleIndex === 0 || modelIndex === firstOtherModelIndex);
               return (
-                <Box key={item.key} alignItems="flex-start">
-                  <Box minWidth={4} flexShrink={0}>
-                    <Text color={textColor}>
-                      {isSelected ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY}
-                    </Text>
+                <Fragment key={item.key}>
+                  {showOtherModelsHeading && (
+                    <Box marginTop={1}>
+                      <Text color={theme.text.secondary}>
+                        {t('Other models from the provider')}
+                      </Text>
+                    </Box>
+                  )}
+                  <Box alignItems="flex-start">
+                    <Box minWidth={4} flexShrink={0}>
+                      <Text color={textColor}>
+                        {isSelected ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY}
+                      </Text>
+                    </Box>
+                    <Box flexGrow={1}>
+                      <Text color={textColor}>{item.label}</Text>
+                    </Box>
                   </Box>
-                  <Box flexGrow={1}>
-                    <Text color={textColor}>{item.label}</Text>
-                  </Box>
-                </Box>
+                </Fragment>
               );
             })
           ) : (
@@ -541,6 +597,69 @@ function ModelIdsStep({
       )}
       <NAV_HINT_INPUT />
     </Box>
+  );
+}
+
+function DiscoveringModelIdsStep({
+  config,
+  flow,
+}: {
+  config: ProviderConfig;
+  flow: ProviderSetupFlow;
+}): React.JSX.Element {
+  const [snapshot, setSnapshot] = useState<{
+    models: ModelSpec[];
+    source: ModelRecommendationSource;
+  } | null>(null);
+  const baseUrl = flow.state.baseUrl;
+  const apiKey = flow.state.apiKey;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    const builtInModels = config.models ?? [];
+
+    void discoverProviderModels({
+      baseUrl,
+      apiKey,
+      staticModels: builtInModels,
+      signal: controller.signal,
+    }).then((models) => {
+      if (active) {
+        setSnapshot({
+          models: models ?? builtInModels,
+          source: models ? 'provider' : 'fallback',
+        });
+      }
+    });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [apiKey, baseUrl, config.models]);
+
+  if (!snapshot) {
+    return (
+      <Box marginTop={1} flexDirection="column">
+        <Text color={theme.text.secondary}>
+          {t('Loading models from provider…')}
+        </Text>
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>{t('Esc to go back')}</Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  return (
+    <ModelIdsStep
+      config={config}
+      flow={flow}
+      models={snapshot.models}
+      recommendationSource={snapshot.source}
+      syncChangesToFlow={false}
+    />
   );
 }
 
@@ -804,6 +923,9 @@ export function ProviderSetupSteps({
       return <ApiKeyStep config={provider} flow={flow} />;
 
     case 'models':
+      if (provider.supportsModelDiscovery) {
+        return <DiscoveringModelIdsStep config={provider} flow={flow} />;
+      }
       return <ModelIdsStep config={provider} flow={flow} />;
 
     case 'advancedConfig':
