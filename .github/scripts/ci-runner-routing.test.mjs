@@ -652,4 +652,41 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     // would let an unresolved-library machine through to crash mid-render.
     assert.match(noAptBranch, /if \[ -n "\$\{missing\}" \]; then[\s\S]*exit 1/);
   });
+
+  it('provisions missing Chromium libraries before the gate judges', () => {
+    // The pool's RHEL-family images do not ship Chromium's runtime libraries
+    // and carry no apt-get for the installer to drive, so the lane installs
+    // the known set with dnf/yum when the first scan finds something missing,
+    // then rescans, and the hard gate judges the RESCAN. Pin the wiring —
+    // first scan, provision attempt, rescan, gate — because a lane that
+    // installs but gates on the first scan (or never rescans) keeps a
+    // provisionable machine red.
+    const install = visualsCaptureJob.steps.find(
+      (s) => s.name === 'Install Playwright Chromium',
+    );
+    const lines = install.run.split('\n');
+    const elseIndex = lines.findIndex((l) => l.trim() === 'else');
+    const noAptBranch = lines.slice(elseIndex + 1).join('\n');
+    const findNeedle = 'find "${HOME}/.cache/ms-playwright"';
+    const firstScan = noAptBranch.indexOf(findNeedle);
+    const dnf = noAptBranch.indexOf('sudo -n dnf install -y');
+    const yum = noAptBranch.indexOf('sudo -n yum install -y');
+    const rescan = noAptBranch.indexOf(findNeedle, firstScan + 1);
+    const gate = noAptBranch.indexOf('exit 1');
+    assert.ok(firstScan !== -1, 'the first library scan must exist');
+    assert.ok(dnf > firstScan, 'the dnf attempt must follow the first scan');
+    assert.ok(yum > dnf, 'a yum fallback must follow the dnf attempt');
+    assert.ok(rescan > dnf, 'a rescan must follow the provision attempt');
+    assert.ok(gate > rescan, 'the gate must judge the rescan, not the first scan');
+    const depsList = noAptBranch.indexOf("chromium_sys_deps='");
+    assert.ok(
+      depsList !== -1 && depsList < dnf,
+      'the package list must be defined before the install attempt',
+    );
+    assert.match(
+      noAptBranch,
+      /chromium_sys_deps='[^']*\bnss\b/,
+      'the provision list must name Chromium runtime packages',
+    );
+  });
 });

@@ -142,9 +142,12 @@ jobs:
 
       # --with-deps drives apt-get; the pool machines are not Debian-family
       # ("apt-get: command not found" on the first pool run, 2026-08-26), so
-      # there the browser download has to suffice. Verify the shared
-      # libraries actually resolve and fail with the concrete missing list —
-      # a clear provisioning signal — instead of a mid-render crash.
+      # there the browser download has to suffice, and the runtime libraries
+      # the RHEL-family pool images do not ship are provisioned with dnf/yum
+      # when the first ldd scan finds them missing (the same shape as the
+      # 'Install ffmpeg' step). The post-rescan gate is unchanged: fail with
+      # the concrete missing list — a clear provisioning signal — instead of
+      # a mid-render crash.
       - name: 'Install Playwright Chromium'
         run: |-
           set -uo pipefail
@@ -159,6 +162,24 @@ jobs:
                 missing="${missing}${unresolved}"$'\n'
               fi
             done < <(find "${HOME}/.cache/ms-playwright" -type f \( -name 'headless_shell' -o -name 'chrome' \) 2>/dev/null)
+            if [ -n "${missing}" ]; then
+              # First scan found unresolved libraries: provision the known
+              # Chromium runtime set, then rescan and let the gate below judge
+              # what actually resolves. Best-effort like the ffmpeg step — a
+              # machine that cannot be provisioned still fails the gate with
+              # the concrete list.
+              chromium_sys_deps='nss nspr atk at-spi2-atk at-spi2-core cups-libs dbus-libs expat glib2 libX11 libXcomposite libXdamage libXext libXfixes libXrandr libdrm libxcb libxkbcommon mesa-libgbm alsa-lib pango cairo'
+              sudo -n dnf install -y --skip-broken ${chromium_sys_deps} > /dev/null 2>&1 ||
+                sudo -n yum install -y --skip-broken ${chromium_sys_deps} > /dev/null 2>&1 ||
+                echo "::warning::could not install Chromium system dependencies; the library gate lists what still fails to resolve."
+              missing=''
+              while IFS= read -r bin; do
+                unresolved="$(ldd "${bin}" 2>/dev/null | grep 'not found' || true)"
+                if [ -n "${unresolved}" ]; then
+                  missing="${missing}${unresolved}"$'\n'
+                fi
+              done < <(find "${HOME}/.cache/ms-playwright" -type f \( -name 'headless_shell' -o -name 'chrome' \) 2>/dev/null)
+            fi
             if [ -n "${missing}" ]; then
               printf '%s' "${missing}" | sort -u
               echo "::error::Chromium's shared libraries do not resolve on this runner (missing list above). Provision them in the pool image, or set MAINTAINER_ECS_RUNNER_DISABLED to route the render back to hosted."
