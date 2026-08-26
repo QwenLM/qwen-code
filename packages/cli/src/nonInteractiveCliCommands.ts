@@ -424,9 +424,12 @@ export const handleSlashCommand = async (
     new McpPromptLoader(config),
     new BuiltinCommandLoader(config),
     new BundledSkillLoader(config),
-    new SkillCommandLoader(config),
     new SavedWorkflowLoader(config),
     new FileCommandLoader(config),
+    // Skills load last: a file command claiming a qualified skill name
+    // must arrive before the skill so the numeric-suffix branch in
+    // CommandService fires instead of a silent override.
+    new SkillCommandLoader(config),
   ];
 
   // Build the disabled-command set (case-insensitive).
@@ -744,9 +747,12 @@ export const getAvailableCommands = async (
       new McpPromptLoader(config),
       new BuiltinCommandLoader(config),
       new BundledSkillLoader(config),
-      new SkillCommandLoader(config),
       new SavedWorkflowLoader(config),
       new FileCommandLoader(config),
+      // Skills load last: a file command claiming a qualified skill name
+      // must arrive before the skill so the numeric-suffix branch in
+      // CommandService fires instead of a silent override.
+      new SkillCommandLoader(config),
     ];
 
     const disabledSlashCommands = config.getDisabledSlashCommands();

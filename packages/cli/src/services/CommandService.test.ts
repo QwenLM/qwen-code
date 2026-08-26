@@ -349,6 +349,42 @@ describe('CommandService', () => {
     expect(cleanResult?.extensionName).toBe('other');
   });
 
+  it('numeric-suffixes a colliding skill under the production loader order', async () => {
+    // Production call sites hand file commands to CommandService before
+    // skills: SkillCommandLoader runs after FileCommandLoader, so the
+    // colliding skill arrives last and must take the numeric suffix.
+    const userCommand = createMockCommand('demo:chat', CommandKind.FILE);
+    const collidingSkill = {
+      ...createMockCommand('demo:chat', CommandKind.SKILL),
+      extensionName: 'demo',
+      modelInvocable: true,
+    };
+
+    const service = await CommandService.create(
+      [
+        new MockCommandLoader([userCommand]),
+        new MockCommandLoader([collidingSkill]),
+      ],
+      new AbortController().signal,
+    );
+
+    const commands = service.getCommands();
+    expect(commands).toHaveLength(2);
+
+    // The earlier file command keeps the contested name.
+    const userOwner = commands.find((cmd) => cmd.name === 'demo:chat');
+    expect(userOwner?.kind).toBe(CommandKind.FILE);
+    expect(userOwner?.extensionName).toBeUndefined();
+
+    // The skill survives on the suffixed key instead of being dropped.
+    const renamedSkill = commands.find((cmd) => cmd.extensionName === 'demo');
+    expect(renamedSkill?.name).toBe('demo:chat1');
+    expect(renamedSkill?.kind).toBe(CommandKind.SKILL);
+    expect(service.getModelInvocableCommands().map((c) => c.name)).toEqual([
+      'demo:chat1',
+    ]);
+  });
+
   it('should handle secondary conflicts when renaming extension commands', async () => {
     // User has both /deploy and /gcp.deploy commands
     const userCommand1 = createMockCommand('deploy', CommandKind.FILE);

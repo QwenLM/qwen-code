@@ -41,7 +41,10 @@ export class CommandService {
    * Conflict resolution:
    * - Extension skills arrive pre-namespaced as `<extension>:<name>` from the
    *   SkillManager. Collisions on that full name get numeric suffixes
-   *   (`<extension>:<name>1`)
+   *   (`<extension>:<name>1`). The suffix branch only sees collisions that
+   *   arrive earlier, so SkillCommandLoader must come after FileCommandLoader;
+   *   otherwise a file command claiming a qualified skill name silently
+   *   overwrites the skill.
    * - Other extension commands that conflict with existing commands are renamed
    *   to `extensionName.commandName`
    * - Non-extension commands (built-in, user, project) override earlier commands
