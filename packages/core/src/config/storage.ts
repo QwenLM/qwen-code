@@ -1469,6 +1469,22 @@ export class Storage {
   }
 
   /**
+   * Generated-workflow scripts directory: `<projectDir>/workflows/generated`.
+   * A trusted root for `Workflow({scriptPath})` / `workflow({scriptPath})`
+   * that is NOT a saved-workflow scope: scripts here are never listed as
+   * `/<name>` slash commands and cannot be reached by `workflow('<name>')`.
+   * It exists for tooling that emits a script for one run (a CLI subcommand
+   * generating a fan-out for the model to dispatch) — such a script has no
+   * business in the user's command namespace, and the runtime dir keeps it
+   * out of the project tree. Layout below the root is the writer's; the
+   * loader trusts the whole subtree. A subprocess reaches it as
+   * `$QWEN_CODE_PROJECT_DIR/workflows/generated`.
+   */
+  getGeneratedWorkflowsDir(): string {
+    return path.join(this.getWorkflowRunsDir(), 'generated');
+  }
+
+  /**
    * Path to the persisted snapshot of a completed workflow run.
    */
   getWorkflowRunSnapshotPath(runId: string): string {
