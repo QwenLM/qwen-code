@@ -994,6 +994,65 @@ Body`);
       });
     });
 
+    it('prefixes collisions with the extension name, not its display name', async () => {
+      const userQwenSkillsDir = path.join(TEST_HOME, '.qwen', 'skills');
+      mockParseYaml.mockImplementation((yamlString: string) =>
+        yaml.parse(yamlString),
+      );
+      vi.mocked(fs.readdir).mockReset();
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        if (String(dirPath) === userQwenSkillsDir) {
+          return Promise.resolve([
+            {
+              name: 'pdf',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+      vi.mocked(fs.readFile).mockImplementation(() =>
+        Promise.resolve('---\nname: pdf\ndescription: User pdf\n---\nBody'),
+      );
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'rust-analyzer',
+          name: 'rust-analyzer',
+          displayName: 'Rust Analyzer',
+          version: '1.97.1',
+          isActive: true,
+          path: '/extensions/rust-analyzer',
+          config: { name: 'rust-analyzer', version: '1.97.1' },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'pdf',
+              description: 'Rust pdf skill',
+              body: 'Body',
+              filePath: '/extensions/rust-analyzer/skills/pdf/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+
+      const skills = await manager.listSkills({ force: true });
+
+      // The prefix comes from the validated extension name so the command
+      // stays typeable; the display name never enters the namespace.
+      const extensionCopy = skills.find((s) => s.level === 'extension');
+      expect(extensionCopy?.name).toBe('rust-analyzer:pdf');
+      expect(extensionCopy?.extensionName).toBe('rust-analyzer');
+      await expect(manager.loadSkill('Rust Analyzer:pdf')).resolves.toBeNull();
+      await expect(
+        manager.loadSkill('rust-analyzer:pdf'),
+      ).resolves.toMatchObject({ level: 'extension' });
+    });
+
     it('qualifies a cross-level collision only after a full refresh', async () => {
       const userQwenSkillsDir = path.join(TEST_HOME, '.qwen', 'skills');
       mockParseYaml.mockImplementation((yamlString: string) =>

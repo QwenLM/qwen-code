@@ -1037,13 +1037,14 @@ export class SkillManager {
               `Extension "${extension.name}" skill "${skill.name}" has invalid priority (${typeof skill.priority}: ${String(skill.priority)}); treating as 0.`,
             );
           }
-          const owner = extension.displayName ?? extension.name;
           skills.push({
             ...skill,
             // Left unqualified here: collision resolution needs every
-            // level loaded, so refreshCache does it in one pass (#9408).
-            // Mirrors gemini-cli#23566.
-            extensionName: owner,
+            // level loaded, so refreshCache does it in one pass
+            // (#9408, mirroring gemini-cli#23566). The prefix stays the
+            // validated extension name; displayName is free-form and can
+            // carry characters command names cannot.
+            extensionName: extension.name,
             // Normalize so downstream consumers reading `skill.priority`
             // (e.g. the `/skills` display sort) observe the same value
             // reflected by the warning above.
