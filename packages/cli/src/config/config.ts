@@ -1767,6 +1767,22 @@ export async function loadCliConfig(
       '⚠ Safe mode: --core-tools flag is ignored (settings-sourced core tools are also disabled).\n',
     );
   }
+  // An explicit `tools.core: []` in settings disables every tool for the
+  // session (the empty-allowlist semantic of #10065). Give the user one
+  // visible startup notice instead of failing every tool call silently;
+  // the argv flag wins over settings when valued, so only the settings
+  // path can resolve to the empty allowlist here.
+  if (
+    !bareMode &&
+    !safeMode &&
+    !(argv.coreTools && argv.coreTools.length > 0) &&
+    Array.isArray(settings.tools?.core) &&
+    settings.tools.core.length === 0
+  ) {
+    writeStderrLine(
+      '⚠ tools.core is an empty allowlist: all tools are disabled for this session. Add tool names to tools.core or remove the key to re-enable tools (#10065).\n',
+    );
+  }
   const resolvedCoreTools: string[] = [
     ...(bareMode || safeMode ? [] : (argv.coreTools ?? [])),
     ...(bareMode || safeMode ? [] : (settings.tools?.core ?? [])),

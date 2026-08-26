@@ -3091,6 +3091,36 @@ describe('Approval mode tool exclusion logic', () => {
     expect(config.getCoreTools()).toEqual(['web_fetch']);
   });
 
+  it('should warn at startup when tools.core is an explicitly empty allowlist', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const emptySettings: Settings = {
+      tools: {
+        core: [],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    const config = await loadCliConfig(emptySettings, argv, undefined, []);
+    expect(config.getCoreTools()).toEqual([]);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+
+    // A non-empty allowlist must not trigger the notice.
+    const valuedSettings: Settings = {
+      tools: {
+        core: ['read_file'],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    await loadCliConfig(valuedSettings, argv, undefined, []);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+  });
+
   it('should exclude only shell tools in non-interactive mode with auto-edit approval mode', async () => {
     process.argv = [
       'node',
