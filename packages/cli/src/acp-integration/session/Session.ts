@@ -1664,12 +1664,12 @@ function collectMcpServerMentionRefs(
  * methods — declaring the tool there would only advertise an action whose
  * every call fails with JSON-RPC -32601.
  *
- * Applies the same `PermissionManager.isToolEnabled()` check that gate does, so
- * an operator's `tools.core` allowlist or a whole-tool deny rule keeps the tool
- * out of the model's action space instead of only failing at execution. Being
- * session-scoped, the tool is absent from the workspace tools inventory the
- * daemon serves from its bootstrap registry — that panel lists workspace tools,
- * and a daemon-only tool that exists per session is deliberately not one.
+ * Applies the same registration-status check as that gate. Disabled tools stay
+ * out of the registry; permission-deferred tools stay behind ToolSearch instead
+ * of being revealed by this late registration path. Being session-scoped, the
+ * tool is absent from the workspace tools inventory the daemon serves from its
+ * bootstrap registry — that panel lists workspace tools, and a daemon-only tool
+ * that exists per session is deliberately not one.
  */
 export async function registerCreateSubSessionTool(
   config: Config,
@@ -1678,13 +1678,23 @@ export async function registerCreateSubSessionTool(
     return;
   }
   const permissionManager = config.getPermissionManager();
-  if (
-    permissionManager &&
-    !(await permissionManager.isToolEnabled(ToolNames.CREATE_SUB_SESSION))
-  ) {
+  const registrationStatus = permissionManager
+    ? await permissionManager.getToolRegistrationStatus(
+        ToolNames.CREATE_SUB_SESSION,
+      )
+    : 'registered';
+  if (registrationStatus === 'disabled') {
     return;
   }
   const toolRegistry = config.getToolRegistry();
+  if (registrationStatus === 'deferred') {
+    toolRegistry.registerPermissionDeferredFactory(
+      ToolNames.CREATE_SUB_SESSION,
+      async () => new CreateSubSessionTool(config),
+    );
+    await config.getGeminiClient().setTools();
+    return;
+  }
   toolRegistry.registerTool(new CreateSubSessionTool(config));
   // The registration lands after `config.initialize()` → `startChat()` already
   // snapshotted the chat's tool declarations, and the tool is deferred — so it
