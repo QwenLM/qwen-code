@@ -918,7 +918,9 @@ export async function parseArguments(): Promise<CliArgs> {
           string: true,
           description: 'Core tool paths',
           coerce: (tools: string[]) =>
-            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
+            tools
+              .flatMap((tool) => tool.split(',').map((t) => t.trim()))
+              .filter((t) => t !== ''),
         })
         .option('exclude-tools', {
           type: 'array',
@@ -2180,7 +2182,9 @@ export async function loadCliConfig(
         ? undefined
         : argv.coreTools?.length
           ? argv.coreTools
-          : settings.tools?.core,
+          : Array.isArray(settings.tools?.core)
+            ? settings.tools.core
+            : undefined,
     allowedTools:
       bareMode || safeMode
         ? argv.allowedTools || undefined

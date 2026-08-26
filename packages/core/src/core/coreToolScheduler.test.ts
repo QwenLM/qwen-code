@@ -3821,6 +3821,7 @@ describe('CoreToolScheduler', () => {
       const message = completedCall.response.error?.message ?? '';
       expect(message).toContain('tools.core');
       expect(message).toContain('"edit"');
+      expect(message).toContain('restart');
       expect(message).not.toContain('permissions.allow');
       expect(message).not.toContain('permission was declined');
     }

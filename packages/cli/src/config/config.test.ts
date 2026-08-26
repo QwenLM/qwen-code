@@ -3121,6 +3121,106 @@ describe('Approval mode tool exclusion logic', () => {
     );
   });
 
+  it('should normalize --core-tools "" to absent instead of yielding an empty-string allowlist (#10065)', async () => {
+    // Quoted empty expansion: `--core-tools ""` or `--core-tools ","`
+    // must not produce a `[""]` allowlist that silently disables every
+    // core tool while `isCoreToolsAllowListEmpty()` returns false (#10065).
+    process.argv = ['node', 'script.js', '--core-tools', '', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toBeUndefined();
+  });
+
+  it('should normalize --core-tools "," to absent instead of yielding an empty-string allowlist (#10065)', async () => {
+    process.argv = ['node', 'script.js', '--core-tools', ',', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toBeUndefined();
+  });
+
+  it('should treat a non-array settings tools.core as absent instead of flowing it raw into Config (#10065)', async () => {
+    // A hand-edited settings file with `"tools": { "core": "" }` must
+    // not crash `isLsToolEnabled()` with a TypeError when
+    // `createToolRegistry()` calls `.some()` on the string (#10065).
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: {
+        core: '' as unknown as string[],
+      },
+    } as unknown as Settings;
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toBeUndefined();
+    // Must not throw when calling isLsToolEnabled on the result.
+    expect(() => config.isLsToolEnabled()).not.toThrow();
+  });
+
+  it('should suppress the empty-allowlist notice when --core-tools has a value (#10065)', async () => {
+    // A valued `--core-tools` flag resolves to a non-empty allowlist,
+    // so the "all tools are disabled" notice would be factually wrong
+    // even when settings.tools.core is `[]` (#10065).
+    process.argv = [
+      'node',
+      'script.js',
+      '--core-tools',
+      'web_fetch',
+      '-p',
+      'test',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    await loadCliConfig(settings, argv, undefined, []);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+  });
+
+  it('should suppress the empty-allowlist notice in safe mode (#10065)', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    await loadCliConfig(settings, argv, undefined, []);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+  });
+
+  it('should suppress the empty-allowlist notice in bare mode (#10065)', async () => {
+    process.argv = ['node', 'script.js', '--bare', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [],
+      },
+    };
+
+    mockWriteStderrLine.mockClear();
+    await loadCliConfig(settings, argv, undefined, []);
+    expect(mockWriteStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('tools.core is an empty allowlist'),
+    );
+  });
+
   it('should exclude only shell tools in non-interactive mode with auto-edit approval mode', async () => {
     process.argv = [
       'node',
