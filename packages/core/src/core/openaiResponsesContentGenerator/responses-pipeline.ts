@@ -119,6 +119,47 @@ export class StreamConnectTimeoutError extends Error {
 }
 
 /**
+ * Thrown when reading a non-2xx response body exceeds the configured request
+ * timeout. The connect timer stops the moment response headers arrive, so a
+ * proxy that commits its status line and then stalls the body would otherwise
+ * hold the turn open forever -- the SSE guards never run on this path, because
+ * an error response never becomes a stream. `code: 'ETIMEDOUT'` makes
+ * `classifyRetryError` treat it as a retryable transport error, matching the
+ * other transport bounds on this wire.
+ */
+export class ErrorBodyTimeoutError extends Error {
+  readonly code = 'ETIMEDOUT' as const;
+
+  constructor(
+    readonly bodyTimeoutMs: number,
+    readonly status: number,
+  ) {
+    super(
+      `Responses API error response body (HTTP ${status}) did not complete ` +
+        `within ${bodyTimeoutMs}ms. Increase the model request timeout ` +
+        `(or set it to 0 to disable this bound).`,
+    );
+    this.name = 'ErrorBodyTimeoutError';
+  }
+}
+
+function newAbortError(): Error {
+  const abortErr = new Error('Aborted');
+  abortErr.name = 'AbortError';
+  return abortErr;
+}
+
+// responses-reasoning-rejection.ts refuses to classify any error body longer
+// than 64,000 characters, so a COMPLETE body up to that size has to survive
+// the read intact or replay recovery stops working.
+const CLASSIFIABLE_ERROR_BODY_CHARS = 64_000;
+// Read exactly one character past that ceiling. A body that reaches this cap
+// is necessarily truncated, and its length alone then makes the classifier
+// fail closed -- so a partial body can never be mistaken for the whole
+// evidence, without the read having to signal truncation out of band.
+const MAX_ERROR_BODY_CHARS = CLASSIFIABLE_ERROR_BODY_CHARS + 1;
+
+/**
  * Resolve a stream-guard timeout (ms). Precedence, for both guards: explicit
  * `ContentGeneratorConfig` field (programmatic, wins -- including `0` to
  * disable) > the env deployment knob > the built-in default. A value above the
@@ -601,7 +642,16 @@ export class ResponsesPipeline {
     }
 
     if (!response.ok) {
-      const errBody = await response.text().catch(() => '');
+      // Bounded: the connect timer has already been cleared, and an error
+      // response never reaches the SSE guards, so this read is the last place
+      // a stalled endpoint can hold the turn open. A caller cancellation and
+      // the ETIMEDOUT bound both propagate rather than being swallowed into
+      // an ordinary status error.
+      const errBody = await this.readErrorResponseBody(
+        response,
+        signal,
+        connectController,
+      );
       const err = new Error(
         `Responses API error ${response.status}: ${errBody.substring(0, 500)}`,
       );
@@ -615,18 +665,122 @@ export class ResponsesPipeline {
     }
 
     const contentType = response.headers.get('content-type') ?? '';
-    if (
-      contentType &&
-      !/text\/event-stream|application\/x-ndjson|application\/stream\+json/.test(
-        contentType,
-      )
-    ) {
+    // Only real SSE: this reader parses `event:`/`data:` frames and nothing
+    // else, so accepting a line-delimited-JSON media type it cannot frame
+    // yielded an empty, silently successful turn. Matched case-insensitively
+    // and with the usual parameters (`; charset=utf-8`) allowed.
+    if (contentType && !/^\s*text\/event-stream\s*(?:;|$)/i.test(contentType)) {
       throw new Error(
         `Responses API returned non-SSE content-type: ${contentType}`,
       );
     }
 
     return response.body.getReader();
+  }
+
+  /**
+   * Read a non-2xx response body under three bounds: the configured request
+   * timeout, the caller's AbortSignal, and a character cap.
+   *
+   * The whole body is kept when it fits inside the cap, because
+   * responses-reasoning-rejection.ts classifies from the complete envelope; a
+   * body that hits the cap is returned one character over the classifier's
+   * own ceiling, so recovery fails closed on it rather than acting on a
+   * prefix. The excerpt the surfaced message quotes is capped separately by
+   * the caller, and nothing here logs the body.
+   *
+   * On either bound the body is cancelled and the request aborted, so the
+   * socket is freed instead of draining a body nobody will read.
+   */
+  private async readErrorResponseBody(
+    response: Response,
+    signal: AbortSignal | undefined,
+    requestController: AbortController,
+  ): Promise<string> {
+    const timeoutMs = this.connectTimeoutMs;
+    const bounded = timeoutMs > 0 && timeoutMs < DISABLED_REQUEST_TIMEOUT_MS;
+
+    let rejectTermination!: (error: Error) => void;
+    const termination = new Promise<never>((_resolve, reject) => {
+      rejectTermination = reject;
+    });
+    // Raced below, but rejected from timers/listeners that can fire before or
+    // after any race: keep a permanent handler so it is never an unhandled
+    // rejection.
+    termination.catch(() => {});
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    if (signal?.aborted) {
+      rejectTermination(newAbortError());
+    } else if (signal) {
+      onAbort = () => rejectTermination(newAbortError());
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    if (bounded) {
+      timer = setTimeout(() => {
+        // A user cancellation wins over the bound's ETIMEDOUT.
+        rejectTermination(
+          signal?.aborted
+            ? newAbortError()
+            : new ErrorBodyTimeoutError(timeoutMs, response.status),
+        );
+      }, timeoutMs);
+      timer.unref?.();
+    }
+
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      if (onAbort && signal) signal.removeEventListener('abort', onAbort);
+    };
+
+    const body = response.body;
+    if (!body) {
+      // No stream to drain (a 204/304, or a transport that only exposes
+      // text()). Still raced, so a mock or shim that never settles cannot
+      // outlive the bound.
+      try {
+        const text = await Promise.race([
+          Promise.resolve(response.text()).catch(() => ''),
+          termination,
+        ]);
+        return text.slice(0, MAX_ERROR_BODY_CHARS);
+      } finally {
+        cleanup();
+      }
+    }
+
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    let completed = false;
+    try {
+      while (text.length < MAX_ERROR_BODY_CHARS) {
+        const readPromise = reader.read();
+        let result: ReadableStreamReadResult<Uint8Array>;
+        try {
+          result = await Promise.race([readPromise, termination]);
+        } catch (error) {
+          // The orphaned read settles once the body is cancelled below;
+          // swallow it so it is not an unhandled rejection.
+          void Promise.resolve(readPromise).catch(() => {});
+          throw error;
+        }
+        if (result.done) {
+          completed = true;
+          break;
+        }
+        text += decoder.decode(result.value, { stream: true });
+      }
+      if (completed) text += decoder.decode();
+      return text.slice(0, MAX_ERROR_BODY_CHARS);
+    } finally {
+      cleanup();
+      void reader.cancel().catch(() => {});
+      // Truncated at the cap or terminated by a bound: the request is still
+      // in flight and nothing else will end it.
+      if (!completed) requestController.abort();
+    }
   }
 
   /**

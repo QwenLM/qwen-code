@@ -21,6 +21,7 @@ import {
   StreamInactivityTimeoutError,
   StreamLifetimeExceededError,
   StreamConnectTimeoutError,
+  ErrorBodyTimeoutError,
 } from './responses-pipeline.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
@@ -2084,6 +2085,331 @@ describe('ResponsesPipeline', () => {
       expect((err as { status?: number }).status).toBe(status);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(parsedCall(0).input).toEqual(ORIGINAL_INPUT);
+    });
+  });
+
+  describe('non-2xx error body bounds', () => {
+    // Resolves with the sentinel when `pending` has not settled inside
+    // `ms` of REAL time, so an unbounded wait fails as an assertion instead
+    // of hanging the file until the runner's own timeout.
+    const UNBOUNDED = 'UNBOUNDED';
+    function withRealDeadline<T>(
+      pending: Promise<T>,
+      ms = 2000,
+    ): Promise<T | typeof UNBOUNDED> {
+      return Promise.race([
+        pending,
+        new Promise<typeof UNBOUNDED>((resolve) => {
+          const t = setTimeout(() => resolve(UNBOUNDED), ms);
+          t.unref?.();
+        }),
+      ]);
+    }
+
+    /**
+     * An error body that flushes one chunk and then never produces another --
+     * a proxy that has committed its status line and stalled. Pending reads
+     * reject with AbortError once the request's signal fires, matching what
+     * undici does to an in-flight body when the request is aborted.
+     */
+    function stalledErrorBody(signal: AbortSignal | undefined, head: string) {
+      let cancelled = false;
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(head));
+          signal?.addEventListener(
+            'abort',
+            () => {
+              const abortErr = new Error('The operation was aborted');
+              abortErr.name = 'AbortError';
+              try {
+                controller.error(abortErr);
+              } catch {
+                // Already closed or errored.
+              }
+            },
+            { once: true },
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      return { stream, wasCancelled: () => cancelled };
+    }
+
+    it('bounds a stalled non-2xx error body with a retryable ETIMEDOUT', async () => {
+      // The connect timer is cleared once headers arrive, so a proxy that
+      // flushes `503` and then stalls its body left the old
+      // `await response.text()` waiting with no bound at all.
+      let fetchSignal: AbortSignal | undefined;
+      let body!: ReturnType<typeof stalledErrorBody>;
+      fetchMock.mockImplementation((_url: string, init: RequestInit) => {
+        fetchSignal = init.signal ?? undefined;
+        body = stalledErrorBody(fetchSignal, '{"error":{"message":"');
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          headers: { get: () => 'application/json' },
+          body: body.stream,
+          // A real stalled body stalls `text()` too.
+          text: () => new Promise<string>(() => {}),
+        });
+      });
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig({ timeout: 100 }),
+        makeCliConfig(),
+      );
+
+      const outcome = await withRealDeadline(
+        pipeline
+          .connectStream(textRequest('hi'), 'p1')
+          .then(() => undefined as unknown)
+          .catch((e: unknown) => e),
+      );
+
+      expect(outcome).not.toBe(UNBOUNDED);
+      expect(outcome).toBeInstanceOf(ErrorBodyTimeoutError);
+      // Retry-classifiable, like every other transport bound on this wire.
+      expect(outcome).toMatchObject({ code: 'ETIMEDOUT' });
+      expect((outcome as Error).message).toMatch(/error response body/i);
+      expect((outcome as Error).message).toContain('503');
+      // The abandoned body and the underlying request are both released.
+      expect(body.wasCancelled()).toBe(true);
+      expect(fetchSignal?.aborted).toBe(true);
+    }, 15000);
+
+    it('preserves caller AbortError semantics while a non-2xx body is read', async () => {
+      // `.catch(() => "")` around the body read swallowed the caller's
+      // cancellation and reported an ordinary status-503 failure instead.
+      const caller = new AbortController();
+      fetchMock.mockImplementation((_url: string, init: RequestInit) => {
+        const body = stalledErrorBody(
+          init.signal ?? undefined,
+          '{"error":{"message":"',
+        );
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          headers: { get: () => 'application/json' },
+          body: body.stream,
+          text: () =>
+            new Promise<string>((_resolve, reject) => {
+              init.signal?.addEventListener(
+                'abort',
+                () => {
+                  const abortErr = new Error('The operation was aborted');
+                  abortErr.name = 'AbortError';
+                  reject(abortErr);
+                },
+                { once: true },
+              );
+            }),
+        });
+      });
+      const pipeline = new ResponsesPipeline(
+        // Long enough that only the caller's abort can end this.
+        makeGeneratorConfig({ timeout: 30_000 }),
+        makeCliConfig(),
+      );
+
+      const pending = pipeline
+        .connectStream(textRequest('hi'), 'p1', caller.signal)
+        .then(() => undefined as unknown)
+        .catch((e: unknown) => e);
+      const abortTimer = setTimeout(() => caller.abort(), 20);
+      abortTimer.unref?.();
+
+      const outcome = await withRealDeadline(pending);
+
+      expect(outcome).not.toBe(UNBOUNDED);
+      expect((outcome as Error).name).toBe('AbortError');
+      // Not transformed into an HTTP status failure.
+      expect((outcome as { status?: number }).status).toBeUndefined();
+      expect((outcome as Error).message).not.toContain('503');
+    }, 15000);
+
+    it('control: a complete streamed error body still classifies for replay recovery', async () => {
+      // Bounding the read must not cost the classifier the bytes it needs:
+      // the whole body, delivered in chunks, has to arrive intact.
+      const rejection = JSON.stringify({
+        error: {
+          message:
+            "Invalid 'input[1].id': string too long. Expected a string " +
+            'with maximum length 64, but got a string with length 83 instead.',
+          type: 'invalid_request_error',
+          param: 'input[1].id',
+          code: 'string_above_max_length',
+        },
+      });
+      const encoder = new TextEncoder();
+      const bytes = encoder.encode(rejection);
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        headers: { get: () => 'application/json' },
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (let i = 0; i < bytes.length; i += 7) {
+              controller.enqueue(bytes.slice(i, i + 7));
+            }
+            controller.close();
+          },
+        }),
+        text: async () => rejection,
+      });
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body: sseStream(
+          sseEvent('response.completed', {
+            response: { id: 'r1', status: 'completed' },
+          }),
+        ),
+        text: async () => '',
+      });
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      const request: GenerateContentParameters = {
+        model: 'gpt-5',
+        contents: [
+          { role: 'user', parts: [{ text: 'hello' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                thought: true,
+                text: 'a thought',
+                thoughtSignature: JSON.stringify({
+                  id: `rs_${'a'.repeat(80)}`,
+                  encrypted_content: 'enc',
+                }),
+              },
+            ],
+          },
+          { role: 'user', parts: [{ text: 'continue' }] },
+        ],
+      };
+      for await (const _ of pipeline.executeStream(request, 'p1')) {
+        // drain
+      }
+
+      // The rejection was read in full and acted on: one retry went out.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('control: an oversized error body fails closed instead of being classified from a prefix', async () => {
+      // A body whose first 64,000 characters happen to be a complete,
+      // classifiable object must NOT license a replay recovery -- acting on a
+      // truncated body is acting on evidence we do not have.
+      const rejection = JSON.stringify({
+        error: {
+          message:
+            "Invalid 'input[1].id': string too long. Expected a string " +
+            'with maximum length 64, but got a string with length 83 instead.',
+          type: 'invalid_request_error',
+          param: 'input[1].id',
+          code: 'string_above_max_length',
+        },
+      });
+      const oversized = `${rejection}${' '.repeat(70_000)}`;
+      fetchMock.mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        headers: { get: () => 'application/json' },
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(oversized));
+            controller.close();
+          },
+        }),
+        text: async () => oversized,
+      });
+      fetchMock.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        headers: { get: () => 'text/event-stream' },
+        body: sseStream([]),
+        text: async () => '',
+      });
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+
+      const err = await pipeline
+        .connectStream(textRequest('hi'), 'p1')
+        .then(() => undefined as unknown)
+        .catch((e: unknown) => e);
+
+      expect((err as { status?: number }).status).toBe(400);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      // The surfaced excerpt stays short whatever the body's size.
+      expect((err as Error).message.length).toBeLessThan(700);
+    });
+  });
+
+  describe('SSE content-type guard', () => {
+    function respondWith(contentType: string, lines: string[]) {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: { get: () => contentType },
+        body: sseStream(lines),
+        text: async () => '',
+      });
+    }
+
+    async function collect() {
+      const pipeline = new ResponsesPipeline(
+        makeGeneratorConfig(),
+        makeCliConfig(),
+      );
+      const chunks = [];
+      for await (const chunk of pipeline.executeStream(
+        textRequest('hi'),
+        'p1',
+      )) {
+        chunks.push(chunk);
+      }
+      return chunks;
+    }
+
+    // Valid NDJSON: bare JSON objects, one per line, with no SSE framing --
+    // exactly what these media types promise and what the reader, which only
+    // understands `event:`/`data:` lines, silently turns into zero candidates.
+    const NDJSON_LINES = [
+      JSON.stringify({ type: 'response.output_text.delta', delta: 'hi' }),
+      JSON.stringify({
+        type: 'response.completed',
+        response: { id: 'r1', status: 'completed' },
+      }),
+    ];
+
+    it.each(['application/x-ndjson', 'application/stream+json'])(
+      'rejects %s, which the SSE reader cannot parse',
+      async (contentType) => {
+        respondWith(contentType, NDJSON_LINES);
+        await expect(collect()).rejects.toThrow(/non-SSE content-type/);
+      },
+    );
+
+    it('control: accepts text/event-stream case-insensitively and with parameters', async () => {
+      respondWith('Text/Event-Stream; charset=utf-8', [
+        ...sseEvent('response.output_text.delta', { delta: 'hi' }),
+        ...sseEvent('response.completed', {
+          response: { id: 'r1', status: 'completed' },
+        }),
+      ]);
+      const chunks = await collect();
+      expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'hi' },
+      ]);
     });
   });
 });
