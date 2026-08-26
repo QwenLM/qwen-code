@@ -31,6 +31,9 @@ const ciDoc = parse(readFileSync(join(workflowsDir, 'ci.yml'), 'utf8'));
 const serveAbDoc = parse(
   readFileSync(join(workflowsDir, 'serve-ab.yml'), 'utf8'),
 );
+const visualsDoc = parse(
+  readFileSync(join(workflowsDir, 'web-shell-visuals.yml'), 'utf8'),
+);
 
 const TRUSTED = ['OWNER', 'MEMBER', 'COLLABORATOR'];
 const ECS = '["self-hosted", "linux", "x64", "ecs-qwen"]';
@@ -43,6 +46,12 @@ const windowsRunsOn = String(ciDoc.jobs.test_windows['runs-on']);
 const pickRunner = ciDoc.jobs.classify_pr.steps.find(
   (s) => s.id === 'pick_runner',
 );
+// The visuals parse and job dereference sit at module load, not inside a
+// describe callback: on Node 22 a throw there reports zero failures and
+// exits 0, silently darkening every guard below; here the same throw fails
+// module load and exits 1.
+const visualsCaptureJob = visualsDoc.jobs.capture;
+const visualsCaptureRunsOn = String(visualsCaptureJob['runs-on']);
 
 // GitHub expression semantics for the classify runs-on, restricted to the
 // routing-relevant inputs: contains(list, '') is false, a missing
@@ -428,18 +437,13 @@ describe('web-shell-visuals.yml capture runner routing', () => {
   // trust split exactly as serve-ab does: same-repo PRs and write-access
   // fork authors reach the persistent pool, every other fork PR keeps the
   // ephemeral hosted runner, and the kill-switch forces everything hosted.
-  const visualsDoc = parse(
-    readFileSync(join(workflowsDir, 'web-shell-visuals.yml'), 'utf8'),
-  );
   // evalRunsOn unwraps the winning fromJSON label to the array it names.
   const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
   const HOSTED_LABELS = ['ubuntu-latest'];
-  const job = visualsDoc.jobs.capture;
-  const runsOn = String(job['runs-on']);
 
   it('routes pull requests by fork trust', () => {
     assert.deepEqual(
-      evalRunsOn(runsOn, {
+      evalRunsOn(visualsCaptureRunsOn, {
         ecsDisabled: false,
         eventName: 'pull_request',
         sameRepo: true,
@@ -449,7 +453,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
       'same-repo PRs must render on the pool',
     );
     assert.deepEqual(
-      evalRunsOn(runsOn, {
+      evalRunsOn(visualsCaptureRunsOn, {
         ecsDisabled: false,
         eventName: 'pull_request',
         sameRepo: false,
@@ -460,7 +464,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     );
     for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE', '']) {
       assert.deepEqual(
-        evalRunsOn(runsOn, {
+        evalRunsOn(visualsCaptureRunsOn, {
           ecsDisabled: false,
           eventName: 'pull_request',
           sameRepo: false,
@@ -474,7 +478,7 @@ describe('web-shell-visuals.yml capture runner routing', () => {
 
   it('obeys the kill-switch', () => {
     assert.deepEqual(
-      evalRunsOn(runsOn, {
+      evalRunsOn(visualsCaptureRunsOn, {
         ecsDisabled: true,
         eventName: 'pull_request',
         sameRepo: true,
@@ -488,11 +492,47 @@ describe('web-shell-visuals.yml capture runner routing', () => {
   it('matches serve-ab routing byte for byte', () => {
     // One trust split, one edit site: a clause change on either side must
     // touch both or fail here.
-    assert.equal(runsOn, String(serveAbDoc.jobs.ab['runs-on']));
+    assert.equal(visualsCaptureRunsOn, String(serveAbDoc.jobs.ab['runs-on']));
+  });
+
+  it('clears stale capture dirs before any capture', () => {
+    // On the persistent pool ${RUNNER_TEMP} outlives a run (see serve-ab.yml's
+    // step of the same name): a leftover capture set from an earlier run would
+    // be composited and uploaded as this run's preview, or silently become its
+    // diff baseline. Unconditional — hosted runners get a fresh temp, so it is
+    // a no-op there.
+    const steps = visualsCaptureJob.steps;
+    const clear = steps.findIndex((s) => s.name === 'Clear stale capture dirs');
+    assert.ok(clear !== -1, 'the stale-capture clear must exist');
+    assert.ok(
+      !('if' in steps[clear]),
+      'the clear must run on BOTH lanes, not only the pool',
+    );
+    assert.ok(
+      !('continue-on-error' in steps[clear]),
+      'a failed clear must fail the job, not publish a leaked preview',
+    );
+    assert.match(
+      steps[clear].run,
+      /rm -rf "\$\{RUNNER_TEMP\}\/web-shell-visuals" "\$\{RUNNER_TEMP\}\/web-shell-before"/,
+      'the clear must remove BOTH the after and the before capture trees',
+    );
+    const afterCapture = steps.findIndex((s) => s.id === 'after_capture');
+    const beforeCapture = steps.findIndex(
+      (s) => s.name === 'Capture before (base) screenshots',
+    );
+    assert.ok(
+      afterCapture !== -1 && beforeCapture !== -1,
+      'both capture steps must exist',
+    );
+    assert.ok(
+      clear < afterCapture && clear < beforeCapture,
+      'the clear must precede every capture that writes those trees',
+    );
   });
 
   it('heals workspace ownership before the first checkout', () => {
-    const steps = job.steps;
+    const steps = visualsCaptureJob.steps;
     const heal = steps.findIndex(
       (s) => s.name === 'Restore workspace ownership',
     );
@@ -508,17 +548,35 @@ describe('web-shell-visuals.yml capture runner routing', () => {
   it('keeps the capture job free of ambient secrets', () => {
     // The security-model header promises the render job holds no secrets of
     // its own; the merge-base resolve step's read-only GITHUB_TOKEN is the
-    // one permitted exception.
-    for (const step of job.steps) {
-      for (const value of Object.values(step.env ?? {})) {
-        const refs = String(value).match(/secrets\.[A-Za-z_]+/g) ?? [];
-        for (const ref of refs) {
-          assert.equal(
-            ref,
-            'secrets.GITHUB_TOKEN',
-            `capture step '${step.name}' references ${ref}; the render side must stay secret-free`,
-          );
-        }
+    // one permitted exception. Every expression-interpolating surface is
+    // scanned — step env, with inputs, run text, and job- and workflow-level
+    // env — a step-env-only scan lets a secret passed through any other
+    // surface slip past.
+    const surfaces = visualsCaptureJob.steps.flatMap((step) =>
+      [
+        ...Object.values(step.env ?? {}),
+        ...Object.values(step.with ?? {}),
+        step.run,
+      ].map((value) => [`step '${step.name}'`, value]),
+    );
+    surfaces.push(
+      ...Object.values(visualsCaptureJob.env ?? {}).map((value) => [
+        'job-level env',
+        value,
+      ]),
+      ...Object.values(visualsDoc.env ?? {}).map((value) => [
+        'workflow-level env',
+        value,
+      ]),
+    );
+    for (const [where, value] of surfaces) {
+      const refs = String(value ?? '').match(/secrets\.[A-Za-z_]+/g) ?? [];
+      for (const ref of refs) {
+        assert.equal(
+          ref,
+          'secrets.GITHUB_TOKEN',
+          `capture ${where} references ${ref}; the render side must stay secret-free`,
+        );
       }
     }
   });
@@ -529,12 +587,12 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     // security-checks' first pool run (2026-08-26). Hosted keeps the
     // action; the pool reuses the machine's Node and its persistent npm
     // cache, exactly as ci.yml does.
-    const setup = job.steps.find((s) =>
+    const setup = visualsCaptureJob.steps.find((s) =>
       String(s.uses || '').startsWith('actions/setup-node'),
     );
     assert.ok(setup, 'the hosted setup-node step must exist');
     assert.equal(setup.if, "${{ runner.environment == 'github-hosted' }}");
-    const preflight = job.steps.find(
+    const preflight = visualsCaptureJob.steps.find(
       (s) => s.uses === './.github/actions/self-hosted-node',
     );
     assert.ok(preflight, 'the pool lane must use the pre-installed Node');
@@ -546,15 +604,52 @@ describe('web-shell-visuals.yml capture runner routing', () => {
     // not have (first pool run failed there, 2026-08-26). The non-apt
     // branch must download the browser AND hard-verify its shared
     // libraries with ldd, failing with the missing list instead of
-    // crashing mid-render.
-    const install = job.steps.find(
+    // crashing mid-render. Pin the WIRING of the gate, not keywords
+    // somewhere in the script: an inverted guard or a find that matches
+    // nothing must fail here.
+    const install = visualsCaptureJob.steps.find(
       (s) => s.name === 'Install Playwright Chromium',
     );
     assert.ok(install, 'the Playwright install step must exist');
-    assert.match(install.run, /command -v apt-get/);
-    assert.match(install.run, /playwright install --with-deps chromium/);
-    assert.match(install.run, /ldd/);
-    assert.match(install.run, /not found/);
-    assert.match(install.run, /exit 1/);
+    const lines = install.run.split('\n');
+    const ifIndex = lines.findIndex((l) =>
+      l.trim().startsWith('if command -v apt-get'),
+    );
+    const elseIndex = lines.findIndex((l) => l.trim() === 'else');
+    assert.ok(
+      ifIndex !== -1 && elseIndex > ifIndex,
+      'the apt probe must branch into a non-apt lane',
+    );
+    const aptBranch = lines.slice(ifIndex + 1, elseIndex).join('\n');
+    const noAptBranch = lines.slice(elseIndex + 1).join('\n');
+    assert.match(aptBranch, /npx playwright install --with-deps chromium/);
+    // Swapped branch bodies would drive apt-get on the lane that has none
+    // and skip the library gate on the lane that needs it.
+    assert.match(noAptBranch, /npx playwright install chromium/);
+    assert.ok(
+      !noAptBranch.includes('--with-deps'),
+      'the non-apt lane must not take the apt-only --with-deps path',
+    );
+    // The ldd loop is only meaningful if find actually matches the browser
+    // binaries; a pattern that matches nothing never feeds ldd and the gate
+    // passes on any machine.
+    assert.match(
+      noAptBranch,
+      /find "\$\{HOME\}\/\.cache\/ms-playwright" -type f \\\( -name 'headless_shell' -o -name 'chrome' \\\) 2>\/dev\/null/,
+    );
+    assert.match(
+      noAptBranch,
+      /ldd "\$\{bin\}" 2>\/dev\/null \| grep 'not found'/,
+    );
+    // Each accumulation terminates its own line, and only when there IS one:
+    // a fused list defeats sort -u, and an unconditional separator would trip
+    // the non-empty gate on a fully-provisioned machine.
+    assert.match(
+      noAptBranch,
+      /if \[ -n "\$\{unresolved\}" \]; then\n\s*missing="\$\{missing\}\$\{unresolved\}"\$'\\n'\n\s*fi/,
+    );
+    // The hard failure sits BEHIND the non-empty guard — an inverted test
+    // would let an unresolved-library machine through to crash mid-render.
+    assert.match(noAptBranch, /if \[ -n "\$\{missing\}" \]; then[\s\S]*exit 1/);
   });
 });

@@ -71,6 +71,16 @@ jobs:
     # ~2x the original: the job now also builds + renders the merge-base arm.
     timeout-minutes: 30
     steps:
+      # Unconditional, and before any capture: on the persistent pool
+      # ${RUNNER_TEMP} outlives a run (see serve-ab.yml's 'Clear stale capture
+      # dirs'). A leftover capture set from an earlier run would be composited
+      # and uploaded as this run's preview — or silently become its diff
+      # baseline. No-op on ephemeral hosted runners.
+      - name: 'Clear stale capture dirs'
+        run: |-
+          set -euo pipefail
+          rm -rf "${RUNNER_TEMP}/web-shell-visuals" "${RUNNER_TEMP}/web-shell-before"
+
       # Pre-checkout heal, mirroring ci.yml: a previous containerised job on
       # this persistent runner may leave root-owned or read-only files in the
       # shared workspace, and checkout's clean would die on EACCES. Hosted
@@ -144,10 +154,13 @@ jobs:
             npx playwright install chromium
             missing=''
             while IFS= read -r bin; do
-              missing="${missing}$(ldd "${bin}" 2>/dev/null | grep 'not found' || true)"
+              unresolved="$(ldd "${bin}" 2>/dev/null | grep 'not found' || true)"
+              if [ -n "${unresolved}" ]; then
+                missing="${missing}${unresolved}"$'\n'
+              fi
             done < <(find "${HOME}/.cache/ms-playwright" -type f \( -name 'headless_shell' -o -name 'chrome' \) 2>/dev/null)
             if [ -n "${missing}" ]; then
-              printf '%s\n' "${missing}" | sort -u
+              printf '%s' "${missing}" | sort -u
               echo "::error::Chromium's shared libraries do not resolve on this runner (missing list above). Provision them in the pool image, or set MAINTAINER_ECS_RUNNER_DISABLED to route the render back to hosted."
               exit 1
             fi
