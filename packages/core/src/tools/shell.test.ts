@@ -512,9 +512,18 @@ describe('ShellTool', () => {
         aborted: false,
       });
 
+      // The inline record is an OVERLAY of the full process env: the gh
+      // legs receive it as the child's ENTIRE environment, so a bare
+      // partial record would drop PATH/HOME and fail every leg before it
+      // authenticates — and the repo-identity leg needs the token too.
+      const overlayEnv = { ...process.env, GH_TOKEN: 't0ken' };
       expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
         '/test/dir',
-        { GH_TOKEN: 't0ken' },
+        overlayEnv,
+      );
+      expect(fetchAttributionRepoKeysMock).toHaveBeenCalledWith(
+        '/test/dir',
+        overlayEnv,
       );
     });
 

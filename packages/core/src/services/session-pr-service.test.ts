@@ -788,6 +788,55 @@ describe('ghPrCreateInlineEnv', () => {
     expect(ghPrCreateInlineEnv('git push')).toBeUndefined();
   });
 
+  it('skips non-GH assignments instead of stopping at them', () => {
+    expect(
+      ghPrCreateInlineEnv('FOO=bar GH_TOKEN=x gh pr create --fill'),
+    ).toEqual({ GH_TOKEN: 'x' });
+  });
+
+  it('lets a later gate-matching segment supply the credentials', () => {
+    // A non-creating gate-matching segment before the real create must not
+    // shadow the later segment's token.
+    expect(
+      ghPrCreateInlineEnv(
+        'gh pr create --web; GH_TOKEN=t2 gh pr create --fill',
+      ),
+    ).toEqual({ GH_TOKEN: 't2' });
+  });
+
+  it('collects exported GH_* assignments from earlier segments', () => {
+    expect(
+      ghPrCreateInlineEnv('export GH_TOKEN=ghp_x; gh pr create --fill'),
+    ).toEqual({ GH_TOKEN: 'ghp_x' });
+    expect(
+      ghPrCreateInlineEnv('export GH_TOKEN=ghp_x && gh pr create --fill'),
+    ).toEqual({ GH_TOKEN: 'ghp_x' });
+    expect(
+      ghPrCreateInlineEnv('export GH_TOKEN=ghp_x\ngit push'),
+    ).toBeUndefined();
+    expect(
+      ghPrCreateInlineEnv('export FOO=bar GH_TOKEN=x; gh pr create --fill'),
+    ).toEqual({ GH_TOKEN: 'x' });
+  });
+
+  it('expands quoted and $VAR values the way the child shell would', () => {
+    process.env['QWEN_TEST_GH_SECRET'] = 's3cret';
+    try {
+      expect(
+        ghPrCreateInlineEnv('GH_TOKEN="$QWEN_TEST_GH_SECRET" gh pr create'),
+      ).toEqual({ GH_TOKEN: 's3cret' });
+      expect(
+        ghPrCreateInlineEnv('GH_TOKEN=${QWEN_TEST_GH_SECRET} gh pr create'),
+      ).toEqual({ GH_TOKEN: 's3cret' });
+      // Single quotes suppress expansion in the shell too.
+      expect(
+        ghPrCreateInlineEnv("GH_TOKEN='${QWEN_TEST_GH_SECRET}' gh pr create"),
+      ).toEqual({ GH_TOKEN: '${QWEN_TEST_GH_SECRET}' });
+    } finally {
+      delete process.env['QWEN_TEST_GH_SECRET'];
+    }
+  });
+
   it('ignores assignments after the binary (gh arguments)', () => {
     expect(
       ghPrCreateInlineEnv('gh pr create --title GH_TOKEN=x'),

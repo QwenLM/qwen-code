@@ -405,6 +405,9 @@ export async function backfillWorkspaceSessionPrs(
         numbers,
         {
           numberToUrl,
+          existingNumbers: new Set(
+            (existing ?? []).map((entry) => entry.number),
+          ),
           // The page maps hold foreign entries whenever gh resolved another
           // repo (divergent default, fork parent); only a RELATED page —
           // the workspace's own repo or a confirmed fork parent — may feed
@@ -435,6 +438,8 @@ async function bindCandidateNumbers(
   numbers: readonly number[],
   sources: {
     numberToUrl: ReadonlyMap<number, string>;
+    /** Numbers already persisted in this session's sidecar (pre-read). */
+    existingNumbers: ReadonlySet<number>;
     pageUrlByNumber: ReadonlyMap<number, string>;
     pageStateByNumber: ReadonlyMap<number, 'open' | 'merged' | 'closed'>;
     remote: string | undefined;
@@ -442,9 +447,25 @@ async function bindCandidateNumbers(
   },
   result: SessionPrBackfillWorkspaceResult,
 ): Promise<void> {
+  // Re-resolve the session's CURRENT archive state immediately before the
+  // locked mutation: an archive/restore transition landing during the scan
+  // and gh window above must not strand the new bindings in the wrong
+  // state's chats dir — the sibling shell binder re-resolves for this same
+  // race. A location that cannot be determined keeps the enumerated state.
+  let archiveState = candidate.archiveState;
+  try {
+    const location = await sessionService.getSessionLocation(
+      candidate.sessionId,
+    );
+    if (location === 'active' || location === 'archived') {
+      archiveState = location;
+    }
+  } catch {
+    // Best-effort backfill: keep the enumerated state.
+  }
   const prPath = sessionService.getPrSessionPathForArchiveState(
     candidate.sessionId,
-    candidate.archiveState,
+    archiveState,
   );
   // `/review <url>` forms name their PR's URL explicitly — bind the named
   // URL itself instead of re-resolving the bare number, which could land
@@ -471,6 +492,7 @@ async function bindCandidateNumbers(
     if (url === undefined) {
       url = formUrlByNumber.get(number);
     }
+    let urlFromRemoteFallback = false;
     if (url === undefined) {
       // Fork layout: gh's own attribution names the parent repo's PR
       // authoritatively — a RELATED page (same repo or confirmed fork
@@ -481,9 +503,30 @@ async function bindCandidateNumbers(
       url = sources.pageUrlByNumber.get(number);
       if (url === undefined && sources.remote !== undefined) {
         url = `${sources.remote}/pull/${number}`;
+        urlFromRemoteFallback = true;
       }
     }
-    const state = sources.pageStateByNumber.get(number);
+    // The synthesized remote URL is not authoritative for a number the
+    // sidecar already holds: in a fork layout it points at the fork (a
+    // guaranteed 404), and every gh-unavailable re-run would replace the
+    // persisted parent URL with it and back again — oscillating the
+    // entry's createdAt and state. Re-offer the number WITHOUT a url so
+    // the locked mutation counts it already bound and leaves it untouched.
+    if (urlFromRemoteFallback && sources.existingNumbers.has(number)) {
+      bindings.push({
+        number,
+        source: number === candidate.conventionNumber ? 'worktree' : 'review',
+      });
+      continue;
+    }
+    // The page's state belongs to the page's OWN url for the number: a
+    // `/review <url>` form that resolved another repo's URL (the fork
+    // layout) must not pair with the page repo's same-numbered PR — a
+    // DIFFERENT PR whose terminal state would poison this binding.
+    const state =
+      url !== undefined && sources.pageUrlByNumber.get(number) === url
+        ? sources.pageStateByNumber.get(number)
+        : undefined;
     bindings.push({
       number,
       url,

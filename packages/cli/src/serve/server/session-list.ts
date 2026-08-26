@@ -538,17 +538,18 @@ function mergeLiveSessionSummary(
     const persistedNumbers = new Set(persistedPrs.map((p) => p.number));
     const ordered = persistedPrs.map((p) => {
       const liveEntry = liveByNumber.get(p.number);
-      // The same number in another repository is another PR: a persisted
-      // state resolved for the old URL must never be stamped onto a
-      // live entry already re-bound elsewhere.
-      return liveEntry
-        ? {
-            ...liveEntry,
-            ...(p.state !== undefined && p.url === liveEntry.url
-              ? { state: p.state }
-              : {}),
-          }
-        : p;
+      if (!liveEntry) return p;
+      // The sidecar is the append-only binding-time record: when a
+      // sidecar-only writer (the shell hook, backfill) re-binds a number
+      // to ANOTHER repo, the persisted url wins over the stale live one —
+      // the same number in another repository is another PR. State follows
+      // the url it was resolved for: the persisted state belongs to the
+      // persisted url; a live state survives only when it was stamped for
+      // that same url.
+      const mergedEntry = { ...liveEntry, url: p.url };
+      if (p.state !== undefined) mergedEntry.state = p.state;
+      else if (p.url !== liveEntry.url) delete mergedEntry.state;
+      return mergedEntry;
     });
     // A binding present only in the live entry was either bound this
     // daemon lifetime and has not landed in the sidecar yet (the newest
@@ -559,9 +560,13 @@ function mergeLiveSessionSummary(
     // newest; at the cap it is an evicted oldest binding and must not be
     // re-appended as the session's latest.
     for (const liveEntry of livePrs) {
+      // Gate on the PERSISTED size: eviction only happens at the cap, so
+      // below it a live-only entry is genuinely the newest binding and
+      // must not be dropped once the running total fills up — the final
+      // slice keeps the newest and evicts the oldest persisted instead.
       if (
         !persistedNumbers.has(liveEntry.number) &&
-        ordered.length < SESSION_PR_LIST_LIMIT
+        persistedPrs.length < SESSION_PR_LIST_LIMIT
       ) {
         ordered.push(liveEntry);
       }
