@@ -213,6 +213,7 @@ import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-key
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
   type ActiveWorkHoldV1,
+  type BridgeConversationDirectoryExpectation,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
@@ -222,6 +223,7 @@ import {
   isValidTrustedModelPrompt,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -274,6 +276,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { insertAfterFunctionResponses } from '../../nonInteractive/nonInteractiveHelpers.js';
+import { isSameConversationPath } from '../../utils/conversation-directory-identity.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
@@ -289,7 +292,10 @@ import {
   collectGoalStatusItemsFromRecords,
   findGoalToRestore,
 } from '../../ui/utils/restoreGoal.js';
-import { CommandKind } from '../../ui/commands/types.js';
+import {
+  CommandKind,
+  type NonInteractiveSlashCommandPolicy,
+} from '../../ui/commands/types.js';
 import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
 import {
   ACP_ROUTE_ID_PREFIX,
@@ -337,6 +343,7 @@ import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
+  type PermissionPersistencePolicy,
   requestPermissionWithAbort,
   resolvePermissionOutcome,
   toPermissionOptions,
@@ -661,6 +668,45 @@ export const LOOP_DETECTED_TURN_ERROR_MESSAGE =
 const TOOL_EXECUTION_CANCELLED_MESSAGE = 'Tool execution was cancelled.';
 const TOOL_POST_EXECUTION_CANCELLED_MESSAGE =
   'The tool had already completed; its output was discarded.';
+
+type ManagedConversationBinding = {
+  expectation: BridgeConversationDirectoryExpectation;
+  assertIdentity: () => Promise<void>;
+  state: 'pending' | 'committed' | 'released';
+};
+
+type ManagedConversationActivation = {
+  run: () => Promise<void>;
+  onRelease?: () => void;
+  releaseScheduled: boolean;
+  state: 'pending' | 'activating' | 'ready' | 'poisoned';
+  promise?: Promise<void>;
+  error?: unknown;
+};
+
+function sameManagedConversationExpectation(
+  left: BridgeConversationDirectoryExpectation,
+  right: BridgeConversationDirectoryExpectation,
+): boolean {
+  return (
+    left.canonicalSessionId === right.canonicalSessionId &&
+    left.root.canonicalPath === right.root.canonicalPath &&
+    left.root.device === right.root.device &&
+    left.root.inode === right.root.inode &&
+    left.child.name === right.child.name &&
+    left.child.canonicalPath === right.child.canonicalPath &&
+    left.child.device === right.child.device &&
+    left.child.inode === right.child.inode
+  );
+}
+
+function managedConversationBindingError(): RequestError {
+  return new RequestError(
+    -32004,
+    'The standalone working directory is missing.',
+    { errorKind: 'working_directory_missing' },
+  );
+}
 
 function createDaemonToolLoopState(
   repeatedToolFailureMode: RepeatedToolFailureGuardMode,
@@ -1668,16 +1714,45 @@ export interface AvailableCommandsSnapshot {
   }>;
 }
 
+const STANDALONE_SLASH_COMMAND_POLICY: NonInteractiveSlashCommandPolicy =
+  Object.freeze({
+    allowSessionReset: false,
+    allowWorkspaceSettingsWrite: false,
+    persistModelSelection: false,
+    blockedBuiltinCommandNames: Object.freeze([
+      'cd',
+      'clear',
+      'directory',
+      'diff',
+      'dream',
+      'export',
+      'learn',
+      'curator',
+      'workflows',
+    ]),
+  });
+
+const STANDALONE_PERMISSION_PERSISTENCE_POLICY: PermissionPersistencePolicy =
+  Object.freeze({
+    allowProjectPersistence: false,
+    allowUserPersistence: true,
+  });
+
+const STANDALONE_WORKTREE_ACTION_ERROR =
+  'Standalone sessions cannot change or override their working directory.';
+
 export async function buildAvailableCommandsSnapshot(
   config: Config,
   abortSignal: AbortSignal = AbortSignal.timeout(10_000),
   settings?: LoadedSettings,
+  executionPolicy?: NonInteractiveSlashCommandPolicy,
 ): Promise<AvailableCommandsSnapshot> {
   const slashCommands = await getAvailableCommands(
     config,
     abortSignal,
     'acp',
     settings,
+    executionPolicy,
   );
   const disabledSkillNames = config.getDisabledSkillNames();
   const inactiveSkillRefs = inactiveExtensionSkillRefs(config);
@@ -1930,6 +2005,11 @@ export class Session implements SessionContext {
   private liveSpeakToUserTool?: SpeakToUserTool;
   private liveConversationActive: boolean | undefined;
   private liveEndInstructionPending = false;
+  private readonly requiresManagedConversationBinding: boolean;
+  private readonly requiresManagedConversationActivation: boolean;
+  private readonly slashCommandPolicy?: NonInteractiveSlashCommandPolicy;
+  private managedConversationBinding?: ManagedConversationBinding;
+  private managedConversationActivation?: ManagedConversationActivation;
 
   // Message rewrite middleware (optional, installed after history replay)
   messageRewriter?: MessageRewriteMiddleware;
@@ -1982,6 +2062,16 @@ export class Session implements SessionContext {
     private readonly onActiveWorkChanged?: () => void,
   ) {
     this.sessionId = id;
+    this.requiresManagedConversationBinding =
+      isReservedStandaloneSessionSourceType(
+        this.config.getSessionSourceType?.(),
+      );
+    this.requiresManagedConversationActivation =
+      this.requiresManagedConversationBinding &&
+      this.config.isProvisionalWorkspace?.() === true;
+    this.slashCommandPolicy = this.requiresManagedConversationBinding
+      ? STANDALONE_SLASH_COMMAND_POLICY
+      : undefined;
     this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
@@ -2242,6 +2332,7 @@ export class Session implements SessionContext {
   }
 
   async #drainGoalQueue(): Promise<void> {
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.goalQueue.length === 0) return;
     await this.runExclusiveAutomaticHistoryMutation(() =>
       this.#drainGoalQueueExclusive(),
@@ -2258,7 +2349,8 @@ export class Session implements SessionContext {
       this.cronProcessing ||
       this.cronAbortController ||
       this.notificationProcessing ||
-      this.notificationAbortController
+      this.notificationAbortController ||
+      this.#isAutomaticWorkHeld()
     ) {
       return;
     }
@@ -3227,6 +3319,7 @@ export class Session implements SessionContext {
    * mount.
    */
   startCronScheduler(): void {
+    if (this.#isAutomaticWorkHeld()) return;
     // Best-effort: a cron startup failure must not break session creation.
     this.#startCronSchedulerInRuntime().catch((error) => {
       debugLogger.warn(
@@ -3237,6 +3330,162 @@ export class Session implements SessionContext {
 
   getConfig(): Config {
     return this.config;
+  }
+
+  installPendingManagedConversationBinding(
+    expectation: BridgeConversationDirectoryExpectation,
+    assertIdentity: () => Promise<void>,
+  ): void {
+    if (
+      !this.requiresManagedConversationBinding ||
+      expectation.canonicalSessionId !== this.sessionId
+    ) {
+      throw managedConversationBindingError();
+    }
+    if (
+      this.managedConversationBinding &&
+      this.managedConversationBinding.state !== 'released' &&
+      !sameManagedConversationExpectation(
+        this.managedConversationBinding.expectation,
+        expectation,
+      )
+    ) {
+      throw managedConversationBindingError();
+    }
+    this.managedConversationBinding = {
+      expectation,
+      assertIdentity,
+      state: 'pending',
+    };
+  }
+
+  installManagedConversationActivation(
+    run: () => Promise<void>,
+    onRelease?: () => void,
+  ): void {
+    if (
+      !this.requiresManagedConversationActivation ||
+      this.managedConversationActivation
+    ) {
+      throw managedConversationBindingError();
+    }
+    this.managedConversationActivation = {
+      run,
+      ...(onRelease ? { onRelease } : {}),
+      releaseScheduled: false,
+      state: 'pending',
+    };
+  }
+
+  private async activateManagedConversation(): Promise<void> {
+    if (!this.requiresManagedConversationActivation) return;
+    const activation = this.managedConversationActivation;
+    if (!activation) throw managedConversationBindingError();
+    if (activation.state === 'ready') return;
+    if (activation.state === 'poisoned') throw activation.error;
+    if (activation.promise) return activation.promise;
+    activation.state = 'activating';
+    const promise = activation
+      .run()
+      .then(() => {
+        activation.state = 'ready';
+      })
+      .catch((error: unknown) => {
+        activation.state = 'poisoned';
+        activation.error = error;
+        throw error;
+      });
+    activation.promise = promise;
+    return promise;
+  }
+
+  async commitManagedConversationBinding(
+    expectation: BridgeConversationDirectoryExpectation,
+  ): Promise<void> {
+    const binding = this.managedConversationBinding;
+    if (
+      !this.requiresManagedConversationBinding ||
+      !binding ||
+      !sameManagedConversationExpectation(binding.expectation, expectation)
+    ) {
+      throw managedConversationBindingError();
+    }
+    if (binding.state === 'committed' || binding.state === 'released') return;
+    if (
+      !isSameConversationPath(
+        this.config.getTargetDir(),
+        binding.expectation.child.canonicalPath,
+      )
+    ) {
+      throw managedConversationBindingError();
+    }
+    await binding.assertIdentity();
+    await this.activateManagedConversation();
+    await binding.assertIdentity();
+    binding.state = 'committed';
+  }
+
+  async releaseManagedConversationBinding(
+    expectation: BridgeConversationDirectoryExpectation,
+  ): Promise<void> {
+    const binding = this.managedConversationBinding;
+    if (
+      !this.requiresManagedConversationBinding ||
+      !binding ||
+      binding.state === 'pending' ||
+      !sameManagedConversationExpectation(binding.expectation, expectation)
+    ) {
+      throw managedConversationBindingError();
+    }
+    if (binding.state === 'released') return;
+    if (
+      !isSameConversationPath(
+        this.config.getTargetDir(),
+        binding.expectation.child.canonicalPath,
+      )
+    ) {
+      throw managedConversationBindingError();
+    }
+    await binding.assertIdentity();
+    binding.state = 'released';
+    const activation = this.managedConversationActivation;
+    if (activation && !activation.releaseScheduled) {
+      activation.releaseScheduled = true;
+      try {
+        activation.onRelease?.();
+      } catch (error) {
+        debugLogger.warn(
+          `Managed conversation release callback failed [session ${this.sessionId}]: ${error}`,
+        );
+      }
+    }
+    this.startCronScheduler();
+    void this.sendAvailableCommandsUpdate();
+    void this.#drainGoalQueue();
+    void this.#drainCronQueue();
+    void this.#drainNotificationQueue();
+  }
+
+  private async assertManagedConversationBindingReady(): Promise<void> {
+    if (!this.requiresManagedConversationBinding) return;
+    const binding = this.managedConversationBinding;
+    if (
+      binding?.state !== 'released' ||
+      !isSameConversationPath(
+        this.config.getTargetDir(),
+        binding.expectation.child.canonicalPath,
+      )
+    ) {
+      throw managedConversationBindingError();
+    }
+    await binding.assertIdentity();
+  }
+
+  #isAutomaticWorkHeld(): boolean {
+    return (
+      this.requiresManagedConversationBinding &&
+      this.managedConversationBinding?.state !== 'released'
+    );
   }
 
   shouldHintAskUserQuestionRestore(): boolean {
@@ -3259,6 +3508,9 @@ export class Session implements SessionContext {
         'Session history mutation is in progress',
       );
     }
+    if (this.requiresManagedConversationBinding) {
+      await this.assertManagedConversationBindingReady();
+    }
     try {
       await this.config.assertCanStartTurn();
     } catch (error) {
@@ -3268,6 +3520,9 @@ export class Session implements SessionContext {
         });
       }
       throw error;
+    }
+    if (this.requiresManagedConversationBinding) {
+      await this.assertManagedConversationBindingReady();
     }
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
@@ -3337,6 +3592,16 @@ export class Session implements SessionContext {
       holds.push({ category: 'shell', id: 'background-shells' });
     }
     return holds;
+  }
+
+  hasStandaloneRelocationBlockers(): boolean {
+    return (
+      this.collectActiveWorkHolds().length > 0 ||
+      this.config
+        .getMonitorRegistry()
+        .getAll()
+        .some((monitor) => monitor.status === 'running')
+    );
   }
 
   #activeWorkChanged(): void {
@@ -4753,6 +5018,7 @@ export class Session implements SessionContext {
                   // subscription stays on the disposed instance.
                   startNewSession: () => this.rebindGoalRuntimeForNewSession(),
                 },
+                this.slashCommandPolicy,
               );
 
               if (
@@ -7582,6 +7848,7 @@ export class Session implements SessionContext {
    */
   async #startCronSchedulerIfNeeded(): Promise<void> {
     if (this.disposed) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (!this.config.isCronEnabled()) return;
     if (this.cronDisabledByTokenLimit) return;
     const scheduler = this.config.getCronScheduler();
@@ -7593,13 +7860,15 @@ export class Session implements SessionContext {
     // are delivered as late fires through the start() callback below.
     // Durable tasks live under ~/.qwen (user-owned, not in the working
     // tree), so no folder-trust gate is needed here.
-    try {
-      await scheduler.enableDurable(this.sessionId);
-    } catch (err) {
-      // Durable support is best-effort; session-only jobs still run.
-      debugLogger.warn(
-        `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
-      );
+    if (!this.requiresManagedConversationBinding) {
+      try {
+        await scheduler.enableDurable(this.sessionId);
+      } catch (err) {
+        // Durable support is best-effort; session-only jobs still run.
+        debugLogger.warn(
+          `Durable cron init failed — persistent tasks will not fire in this session: ${err}`,
+        );
+      }
     }
 
     // dispose() may have run while the durable load was in flight; its
@@ -7694,6 +7963,7 @@ export class Session implements SessionContext {
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
@@ -7709,6 +7979,7 @@ export class Session implements SessionContext {
 
   async #drainCronQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.cronProcessing) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.notificationProcessing) return;
     if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.#nextCronQueueIndex() < 0) return;
@@ -8509,6 +8780,7 @@ export class Session implements SessionContext {
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
     if (this.closing) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.notificationProcessing) return;
     if (
       this.pendingPrompt ||
@@ -8529,6 +8801,7 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueueExclusive(): Promise<void> {
     if (this.disposed || this.closing || this.notificationProcessing) return;
+    if (this.#isAutomaticWorkHeld()) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }
@@ -9041,13 +9314,19 @@ export class Session implements SessionContext {
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 
+  buildAvailableCommandsSnapshot(): Promise<AvailableCommandsSnapshot> {
+    return buildAvailableCommandsSnapshot(
+      this.config,
+      undefined,
+      this.settings,
+      this.slashCommandPolicy,
+    );
+  }
+
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    if (this.#isAutomaticWorkHeld()) return;
     const { availableCommands, availableSkills, availableSkillDetails } =
-      await buildAvailableCommandsSnapshot(
-        this.config,
-        undefined,
-        this.settings,
-      );
+      await this.buildAvailableCommandsSnapshot();
     const update: SessionUpdate = {
       sessionUpdate: 'available_commands_update',
       availableCommands,
@@ -9265,7 +9544,10 @@ export class Session implements SessionContext {
         debugLogger.debug('model-update extNotification failed', error);
       });
 
-    if (options.persistDefault ?? true) {
+    const persistDefault =
+      !this.requiresManagedConversationBinding &&
+      (options.persistDefault ?? true);
+    if (persistDefault) {
       const persistScope = getPersistScopeForModelSelection(this.settings);
       this.settings.setValue(
         persistScope,
@@ -10388,6 +10670,27 @@ export class Session implements SessionContext {
         const isAgentTool = tool.name === ToolNames.AGENT;
         const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
         const isEnterPlanModeTool = tool.name === ToolNames.ENTER_PLAN_MODE;
+        const requestsAgentWorkingDirectory =
+          isAgentTool &&
+          (args['isolation'] === 'worktree' ||
+            (typeof args['working_dir'] === 'string' &&
+              args['working_dir'].trim().length > 0));
+        if (
+          this.requiresManagedConversationBinding &&
+          (requestsAgentWorkingDirectory ||
+            tool.name === ToolNames.ENTER_WORKTREE ||
+            tool.name === ToolNames.EXIT_WORKTREE)
+        ) {
+          return earlyErrorResponse(
+            new Error(STANDALONE_WORKTREE_ACTION_ERROR),
+            toolName,
+            {
+              status: 'error',
+              errorType: ToolErrorType.EXECUTION_DENIED,
+              executionStatus: 'not_started',
+            },
+          );
+        }
         if (isAgentTool) {
           agentToolAbortController = new AbortController();
           activeToolAbortSignal = agentToolAbortController.signal;
@@ -10450,6 +10753,9 @@ export class Session implements SessionContext {
                 onStopAfterPermissionCancel?.();
               },
               (params, signal) => this.#requestPermissionQueued(params, signal),
+              this.requiresManagedConversationBinding
+                ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
+                : undefined,
             );
 
             // Set up sub-agent tool tracking
@@ -11024,6 +11330,9 @@ export class Session implements SessionContext {
               const permissionOptions = toPermissionOptions(
                 confirmationDetails,
                 pmForcedAsk,
+                this.requiresManagedConversationBinding
+                  ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
+                  : undefined,
               );
               const offeredPermissionOptions = permissionOptions.map(
                 (option) => ({ ...option }),
@@ -11219,7 +11528,6 @@ export class Session implements SessionContext {
               // requestPermission (user saw dialog and made a choice).
               // AUTO_EDIT auto-approved tools never reach here.
               if (
-                outcome === ToolConfirmationOutcome.ProceedAlways ||
                 outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
                 outcome === ToolConfirmationOutcome.ProceedAlwaysUser
               ) {
@@ -12190,6 +12498,13 @@ export class Session implements SessionContext {
       }
 
       case 'unsupported': {
+        if (result.originalType === 'unsupported_action') {
+          throw new RequestError(
+            -32004,
+            'This action is not supported in this standalone session.',
+            { errorKind: 'unsupported_action' },
+          );
+        }
         // Command returned an unsupported result type
         const unsupportedError = `Slash command not supported in ACP integration: ${result.reason}`;
         throw new Error(unsupportedError);
