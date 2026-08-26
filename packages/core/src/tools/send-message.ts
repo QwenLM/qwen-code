@@ -450,7 +450,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send a message to a teammate or to another Qwen Code session on this machine (use "to"), or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
+      'Send to a teammate or another Qwen Code session (use "to"), or a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
         'Set "to" to a bare teammate name (no @), to "*" to broadcast within an active Agent Team only, or to a session name from list_agents — append its " [ref]" only when list_agents shows two sessions with that name. ' +
         "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied, blocked from, or cannot do itself. " +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
