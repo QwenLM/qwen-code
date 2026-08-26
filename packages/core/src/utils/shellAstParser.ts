@@ -1130,11 +1130,14 @@ function localGitConfigMakesCommandUnsafe(
     const subcommand = stripOuterQuotes(
       getArgumentNodes(command)[0]?.text ?? '',
     ).toLowerCase();
-    if (!['diff', 'log', 'show', 'status'].includes(subcommand)) continue;
+    if (!['blame', 'diff', 'log', 'show', 'status'].includes(subcommand))
+      continue;
     if (changedDirectory) return true;
     usesDiff ||= subcommand === 'diff';
     usesStatus ||= subcommand === 'status';
-    usesTextconvConsumer ||= ['diff', 'log', 'show'].includes(subcommand);
+    usesTextconvConsumer ||= ['blame', 'diff', 'log', 'show'].includes(
+      subcommand,
+    );
   }
 
   if (!usesDiff && !usesStatus && !usesTextconvConsumer) return false;

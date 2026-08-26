@@ -27,6 +27,23 @@ const PROBE_FAILED: LocalGitConfigRisk = {
   fsmonitor: true,
 };
 
+const DIFF_DRIVER_COMMAND_KEY_PATTERN = String.raw`^diff\..*\.command$`;
+const DIFF_DRIVER_TEXTCONV_KEY_PATTERN = String.raw`^diff\..*\.textconv$`;
+const LOCAL_GIT_CONFIG_RISK_KEY_PATTERN = [
+  String.raw`^diff\.external$`,
+  String.raw`^core\.fsmonitor$`,
+  DIFF_DRIVER_COMMAND_KEY_PATTERN,
+  DIFF_DRIVER_TEXTCONV_KEY_PATTERN,
+].join('|');
+const DIFF_DRIVER_COMMAND_KEY = new RegExp(
+  DIFF_DRIVER_COMMAND_KEY_PATTERN,
+  'i',
+);
+const DIFF_DRIVER_TEXTCONV_KEY = new RegExp(
+  DIFF_DRIVER_TEXTCONV_KEY_PATTERN,
+  'i',
+);
+
 export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
   try {
     if (!statSync(cwd).isDirectory()) return NO_RISK;
@@ -44,7 +61,7 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       '--show-scope',
       '--null',
       '--get-regexp',
-      '^diff\\.external$|^core\\.fsmonitor$|^diff\\..*\\.command$|^diff\\..*\\.textconv$',
+      LOCAL_GIT_CONFIG_RISK_KEY_PATTERN,
     ],
     {
       encoding: 'utf8',
@@ -78,11 +95,8 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
       : undefined;
   };
   const hasLocalValueMatching = (pattern: RegExp): boolean =>
-    [...effective.entries()].some(
-      ([key, entry]) =>
-        pattern.test(key) &&
-        (entry.scope === 'local' || entry.scope === 'worktree') &&
-        entry.value.trim() !== '',
+    [...effective.keys()].some(
+      (key) => pattern.test(key) && (localValue(key) ?? '') !== '',
     );
 
   const diffExternal = localValue('diff.external');
@@ -90,8 +104,8 @@ export function getLocalGitConfigRisk(cwd: string): LocalGitConfigRisk {
 
   return {
     diffExternal: diffExternal !== undefined && diffExternal !== '',
-    diffDriverCommand: hasLocalValueMatching(/^diff\..+\.command$/i),
-    diffDriverTextconv: hasLocalValueMatching(/^diff\..+\.textconv$/i),
+    diffDriverCommand: hasLocalValueMatching(DIFF_DRIVER_COMMAND_KEY),
+    diffDriverTextconv: hasLocalValueMatching(DIFF_DRIVER_TEXTCONV_KEY),
     fsmonitor:
       fsmonitor !== undefined &&
       fsmonitor !== '' &&
