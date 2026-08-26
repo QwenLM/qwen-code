@@ -5,6 +5,7 @@
  */
 
 import type { HistoryItemCompression } from '../types.js';
+import { isCompressionFailureStatus } from '@qwen-code/qwen-code-core';
 import { MessageType } from '../types.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
@@ -99,7 +100,10 @@ export const compressCommand: SlashCommand = {
             content: 'Compressing context...',
           };
           const compressed = await doCompress();
-          if (!compressed) {
+          if (
+            !compressed ||
+            isCompressionFailureStatus(compressed.compressionStatus)
+          ) {
             yield {
               messageType: 'error' as const,
               content: t('Failed to compress chat history.'),
@@ -142,7 +146,11 @@ export const compressCommand: SlashCommand = {
         return;
       }
 
-      if (!compressed) {
+      if (
+        !compressed ||
+        (executionMode !== 'interactive' &&
+          isCompressionFailureStatus(compressed.compressionStatus))
+      ) {
         if (executionMode === 'interactive') {
           ui.addItem(
             {

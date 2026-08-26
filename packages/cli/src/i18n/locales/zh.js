@@ -1543,6 +1543,8 @@ export default {
     '聊天历史压缩未能减小大小。这可能表明压缩提示存在问题。',
   'Could not compress chat history due to a token counting error.':
     '由于 token 计数错误，无法压缩聊天历史。',
+  'Could not compress chat history due to an API error.':
+    '由于 API 错误，无法压缩聊天历史。',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

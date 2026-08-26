@@ -55,6 +55,7 @@ import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
+  isCompressionFailureStatus,
   detectLoopSentinel,
   detectAutonomousSentinel,
   LoopTickResolver,
@@ -374,16 +375,6 @@ function isTodoStopGuardPromptText(text: unknown): text is string {
   return (
     remainder === body ||
     remainder === body + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX
-  );
-}
-
-function isCompressionFailureStatus(status: CompressionStatus): boolean {
-  return (
-    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
-    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
-    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
-    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
   );
 }
 

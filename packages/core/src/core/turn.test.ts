@@ -12,6 +12,7 @@ import type {
 } from './turn.js';
 import {
   CompressionStatus,
+  isCompressionFailureStatus,
   Turn,
   GeminiEventType,
   createDuplicateProviderToolCallResponse,
@@ -53,6 +54,49 @@ vi.mock('@google/genai', async (importOriginal) => {
 vi.mock('../utils/errorReporting', () => ({
   reportError: vi.fn(),
 }));
+
+describe('isCompressionFailureStatus', () => {
+  it('treats each compression failure status as failed', () => {
+    expect(
+      isCompressionFailureStatus(
+        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+      ),
+    ).toBe(true);
+    expect(
+      isCompressionFailureStatus(
+        CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+      ),
+    ).toBe(true);
+    expect(
+      isCompressionFailureStatus(
+        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+      ),
+    ).toBe(true);
+    expect(
+      isCompressionFailureStatus(
+        CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      ),
+    ).toBe(true);
+    expect(
+      isCompressionFailureStatus(
+        CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps API errors distinct from other compression failure statuses', () => {
+    expect(CompressionStatus.COMPRESSION_FAILED_API_ERROR).not.toBe(
+      CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+    );
+    expect(CompressionStatus.COMPRESSION_FAILED_API_ERROR).not.toBe(
+      CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+    );
+    expect(isCompressionFailureStatus(CompressionStatus.COMPRESSED)).toBe(
+      false,
+    );
+    expect(isCompressionFailureStatus(CompressionStatus.NOOP)).toBe(false);
+  });
+});
 
 describe('findRepeatedDuplicateProviderToolCall', () => {
   const getProviderCallId = (item: { providerCallId?: string }) =>

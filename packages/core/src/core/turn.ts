@@ -368,6 +368,18 @@ export enum CompressionStatus {
   COMPRESSION_FAILED_API_ERROR,
 }
 
+export function isCompressionFailureStatus(
+  status: CompressionStatus | null | undefined,
+): boolean {
+  return (
+    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
+    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
+    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
+  );
+}
+
 /**
  * Why an auto-compaction fired. Drives the user-facing notice so a
  * screenshot-overflow trigger isn't mislabeled as "approached the token

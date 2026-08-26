@@ -1186,6 +1186,8 @@ export default {
     "La compression de l'historique du chat n'a pas réduit la taille. Cela peut indiquer des problèmes avec l'invite de compression.",
   'Could not compress chat history due to a token counting error.':
     "Impossible de compresser l'historique du chat en raison d'une erreur de comptage de tokens.",
+  'Could not compress chat history due to an API error.':
+    "Impossible de compresser l'historique du chat en raison d'une erreur d'API.",
   // ============================================================================
   // Commandes - Répertoire
   // ============================================================================
