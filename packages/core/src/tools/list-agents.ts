@@ -10,6 +10,7 @@ import {
   listMessageablePeers,
 } from '../ipc/peer-directory.js';
 import { getOwnPeerIdentity } from '../ipc/peer-send.js';
+import { sanitizeName } from '../agents/team/teamHelpers.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
   BaseDeclarativeTool,
@@ -66,10 +67,23 @@ class ListAgentsInvocation extends BaseToolInvocation<
         )
       : [];
 
+    // send_message routes a name to an in-process teammate first, and
+    // that lookup sanitizes (lowercases, folds punctuation). A peer whose
+    // name sanitizes to a teammate's is unreachable by its bare name, so
+    // it is printed with its ref — which no teammate name sanitizes to.
+    const teammateNames = new Set(
+      (this.config.getTeamManager()?.getTeamFile().members ?? []).map(
+        (member) => member.name,
+      ),
+    );
     const sessions = peers.map((peer) => ({
       // The name IS the address. The ref is only appended when it has to
       // be, so the common case stays a bare, typeable name.
-      to: formatPeerAddress(peer, peers),
+      to:
+        teammateNames.has(sanitizeName(peer.name)) &&
+        !formatPeerAddress(peer, peers).endsWith(']')
+          ? `${peer.name} [${peer.ref}]`
+          : formatPeerAddress(peer, peers),
       name: peer.name,
       ref: peer.ref,
       cwd: peer.cwd,
@@ -84,7 +98,8 @@ class ListAgentsInvocation extends BaseToolInvocation<
           : '. ') +
         'Named Agent Team teammates are not listed here; their results are ' +
         'delivered automatically through team messaging, so do not use ' +
-        'list_agents to wait for a teammate.';
+        'list_agents to wait for a teammate.' +
+        (self ? ` This session is named "${self.name}".` : '');
       return { llmContent: message, returnDisplay: message };
     }
 

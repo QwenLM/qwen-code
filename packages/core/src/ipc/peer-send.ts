@@ -14,11 +14,14 @@
 import type { ApprovalMode } from '../config/approval-mode.js';
 import { readOwnSessionRecord } from '../services/session-registry.js';
 import { receiverReviewsActions } from './inbound-gate.js';
-import { buildUserFrame, canonicalizeMsgId } from './peer-frames.js';
+import {
+  buildUserFrame,
+  canonicalizeMsgId,
+  type PeerDeliveryStatus,
+} from './peer-frames.js';
 import {
   formatPeerAddress,
   listMessageablePeers,
-  peerRef,
   resolvePeerTarget,
   suggestPeerNames,
   toPeerSessionInfo,
@@ -44,12 +47,15 @@ export interface OwnPeerIdentity {
 
 export async function getOwnPeerIdentity(): Promise<OwnPeerIdentity | null> {
   const record = await readOwnSessionRecord();
-  if (!record?.ipcPath) return null;
+  // The same projection peers see, so the name this session reports for
+  // itself is the flattened one they would type.
+  const self = record === null ? null : toPeerSessionInfo(record);
+  if (!self) return null;
   return {
-    ipcPath: record.ipcPath,
-    name: record.name,
-    sessionId: record.sessionId,
-    ref: peerRef(record.sessionId),
+    ipcPath: self.ipcPath,
+    name: self.name,
+    sessionId: self.sessionId,
+    ref: self.ref,
   };
 }
 
@@ -72,6 +78,15 @@ export interface SentPeerMessage {
   address: string;
   peerName: string;
   sentAt: number;
+  /** Last receipt applied, or 'pending' before any. */
+  state: PeerDeliveryStatus | 'pending';
+}
+
+/** A receipt that moved a sent message to a new state. */
+export interface SettledPeerReceipt {
+  address: string;
+  peerName: string;
+  previous: PeerDeliveryStatus | 'pending';
 }
 
 /**
@@ -94,6 +109,48 @@ function trackSent(msgId: string, info: SentPeerMessage): void {
     if (oldest === undefined) break;
     sentMessages.delete(oldest);
   }
+}
+
+/**
+ * The receipt transitions a sent message can make. A receiver's gate
+ * re-sends `held` on a retry and on a failed release, and corrects
+ * `delivered` to `expired` when the session exits with the message still
+ * queued; everything else is a repeat, and a repeat must not become
+ * another line in the user's transcript.
+ */
+const RECEIPT_TRANSITIONS: Record<
+  PeerDeliveryStatus | 'pending',
+  ReadonlySet<PeerDeliveryStatus>
+> = {
+  pending: new Set(['held', 'delivered', 'denied', 'expired', 'misaddressed']),
+  held: new Set(['delivered', 'denied', 'expired', 'misaddressed']),
+  delivered: new Set(['expired']),
+  denied: new Set(),
+  expired: new Set(),
+  misaddressed: new Set(),
+};
+
+/**
+ * Apply a receipt to the send it answers.
+ *
+ * A receipt names a message id, and any process that can reach this
+ * session's socket can write one for any id, any number of times. Only
+ * ids this session actually sent are answered for, and only a receipt
+ * that moves the message to a new state is reported — so a stranger's
+ * receipts, and a peer repeating one, are noise the inbox drops rather
+ * than notices the user reads. Returns undefined for both.
+ */
+export function settleSentPeerMessage(
+  msgId: string,
+  status: PeerDeliveryStatus,
+): SettledPeerReceipt | undefined {
+  const entry = sentMessages.get(canonicalizeMsgId(msgId));
+  if (!entry || !RECEIPT_TRANSITIONS[entry.state].has(status)) {
+    return undefined;
+  }
+  const previous = entry.state;
+  entry.state = status;
+  return { address: entry.address, peerName: entry.peerName, previous };
 }
 
 /**
@@ -186,15 +243,29 @@ export async function sendToPeer(
       : {}),
   });
 
+  // Tracked before the write, not after: a receiver whose loop is stalled
+  // accepts the connection and lets the bytes sit in the kernel buffer,
+  // so a send can time out here and still be read — and receipted — once
+  // it resumes. Only a failure that proves the frame never arrived
+  // forgets it again.
+  trackSent(frame.msgId, {
+    address,
+    peerName: peer.name,
+    sentAt: Date.now(),
+    state: 'pending',
+  });
   try {
     await sendPeerFrame(peer.ipcPath, frame);
-    trackSent(frame.msgId, {
-      address,
-      peerName: peer.name,
-      sentAt: Date.now(),
-    });
     return { kind: 'sent', peer, address };
   } catch (error) {
+    if (
+      error instanceof PeerSendError &&
+      (error.code === 'ENOENT' ||
+        error.code === 'ECONNREFUSED' ||
+        error.code === 'EMSGSIZE')
+    ) {
+      sentMessages.delete(canonicalizeMsgId(frame.msgId));
+    }
     return {
       kind: 'failed',
       peer,
@@ -221,7 +292,7 @@ export function describeSendFailure(error: unknown): string {
       case 'EBUSY':
         return 'the session is alive but momentarily busy. Retry the same name shortly.';
       case 'ETIMEDOUT':
-        return 'the session accepted the connection but never read the message.';
+        return 'the session accepted the connection but had not read the message after 5 seconds. It may still read it once it is free, so do not assume it was lost; retry once, and if it repeats, that session is stuck and its user should be told.';
       default:
         return error.message;
     }

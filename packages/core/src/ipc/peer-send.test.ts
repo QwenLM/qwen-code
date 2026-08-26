@@ -42,6 +42,7 @@ const {
   resetSentPeerMessagesForTest,
   senderModeClass,
   sendToPeer,
+  settleSentPeerMessage,
 } = await import('./peer-send.js');
 const { peerRef } = await import('./peer-directory.js');
 
@@ -89,6 +90,14 @@ describe('getOwnPeerIdentity', () => {
   it('is null when this session has no inbox — the send-side gate', async () => {
     readOwnSessionRecord.mockResolvedValue({ ...SELF, ipcPath: undefined });
     expect(await getOwnPeerIdentity()).toBeNull();
+  });
+
+  it('reports the flattened name peers see, not the raw record', async () => {
+    readOwnSessionRecord.mockResolvedValue({
+      ...SELF,
+      name: 'self\u001b[31m-00',
+    });
+    expect((await getOwnPeerIdentity())?.name).toBe('self [31m-00');
   });
 
   it('returns the reply address, name, and the ref peers see', async () => {
@@ -293,10 +302,10 @@ describe('describeSendFailure', () => {
     );
   });
 
-  it('explains a timeout as the peer not reading', () => {
-    expect(describeSendFailure(new PeerSendError('x', 'ETIMEDOUT'))).toContain(
-      'never read',
-    );
+  it('explains a timeout as possibly still readable, with a next step', () => {
+    const text = describeSendFailure(new PeerSendError('x', 'ETIMEDOUT'));
+    expect(text).toContain('may still read it');
+    expect(text).toContain('retry once');
   });
 
   it('falls back to the message for anything else', () => {
@@ -326,9 +335,25 @@ describe('lookupSentPeerMessage', () => {
     expect(lookupSentPeerMessage(frame.msgId.toUpperCase())).toBeDefined();
   });
 
-  it('does not remember a send that failed', async () => {
+  it('forgets a send that provably never arrived', async () => {
     listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
-    sendPeerFrame.mockRejectedValue(new PeerSendError('gone', 'ENOENT'));
+    for (const code of ['ENOENT', 'ECONNREFUSED', 'EMSGSIZE']) {
+      sendPeerFrame.mockClear();
+      sendPeerFrame.mockRejectedValue(new PeerSendError('gone', code));
+      await sendToPeer({
+        target: 'app-ab',
+        message: 'hi',
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      expect(
+        lookupSentPeerMessage(sendPeerFrame.mock.calls[0][1].msgId),
+      ).toBeUndefined();
+    }
+  });
+
+  it('keeps a send that timed out, since the peer may still read it', async () => {
+    listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
+    sendPeerFrame.mockRejectedValue(new PeerSendError('slow', 'ETIMEDOUT'));
     await sendToPeer({
       target: 'app-ab',
       message: 'hi',
@@ -336,7 +361,7 @@ describe('lookupSentPeerMessage', () => {
     });
     expect(
       lookupSentPeerMessage(sendPeerFrame.mock.calls[0][1].msgId),
-    ).toBeUndefined();
+    ).toMatchObject({ address: 'app-ab', state: 'pending' });
   });
 
   it('answers only for ids this session sent', () => {
@@ -356,5 +381,75 @@ describe('lookupSentPeerMessage', () => {
     const last = sendPeerFrame.mock.calls.at(-1)![1].msgId;
     expect(lookupSentPeerMessage(first)).toBeUndefined();
     expect(lookupSentPeerMessage(last)).toBeDefined();
+  });
+});
+
+describe('settleSentPeerMessage', () => {
+  async function sendOne(): Promise<string> {
+    listMessageablePeers.mockResolvedValue([peer('s1', 'app-ab')]);
+    await sendToPeer({
+      target: 'app-ab',
+      message: 'hi',
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+    return sendPeerFrame.mock.calls.at(-1)![1].msgId as string;
+  }
+
+  it('reports the first receipt and the state it moved from', async () => {
+    const id = await sendOne();
+    expect(settleSentPeerMessage(id, 'held')).toEqual({
+      address: 'app-ab',
+      peerName: 'app-ab',
+      previous: 'pending',
+    });
+    expect(settleSentPeerMessage(id, 'delivered')).toEqual({
+      address: 'app-ab',
+      peerName: 'app-ab',
+      previous: 'held',
+    });
+  });
+
+  it('drops a repeated receipt', async () => {
+    const id = await sendOne();
+    expect(settleSentPeerMessage(id, 'held')).toBeDefined();
+    expect(settleSentPeerMessage(id, 'held')).toBeUndefined();
+    expect(settleSentPeerMessage(id, 'denied')).toBeDefined();
+    expect(settleSentPeerMessage(id, 'denied')).toBeUndefined();
+    expect(settleSentPeerMessage(id, 'held')).toBeUndefined();
+  });
+
+  it('lets a delivery be corrected to expired exactly once', async () => {
+    const id = await sendOne();
+    expect(settleSentPeerMessage(id, 'delivered')).toBeDefined();
+    expect(settleSentPeerMessage(id, 'expired')).toMatchObject({
+      previous: 'delivered',
+    });
+    expect(settleSentPeerMessage(id, 'expired')).toBeUndefined();
+    expect(settleSentPeerMessage(id, 'delivered')).toBeUndefined();
+  });
+
+  it('treats a terminal state as final', async () => {
+    for (const terminal of ['denied', 'expired', 'misaddressed'] as const) {
+      const id = await sendOne();
+      expect(settleSentPeerMessage(id, terminal)).toBeDefined();
+      for (const next of [
+        'held',
+        'delivered',
+        'denied',
+        'expired',
+        'misaddressed',
+      ] as const) {
+        expect(settleSentPeerMessage(id, next)).toBeUndefined();
+      }
+    }
+  });
+
+  it('answers only for ids this session sent', () => {
+    expect(settleSentPeerMessage('never-sent', 'held')).toBeUndefined();
+  });
+
+  it('matches ids the way the receiving gate does', async () => {
+    const id = await sendOne();
+    expect(settleSentPeerMessage(id.toUpperCase(), 'held')).toBeDefined();
   });
 });

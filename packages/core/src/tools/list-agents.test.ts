@@ -51,6 +51,7 @@ describe('ListAgentsTool', () => {
     registry = new BackgroundTaskRegistry();
     tool = new ListAgentsTool({
       getBackgroundTaskRegistry: () => registry,
+      getTeamManager: () => null,
     } as unknown as Config);
   });
 
@@ -147,9 +148,21 @@ describe('ListAgentsTool — peer sessions', () => {
     ref: 'se1f00',
   };
 
-  function toolWith(registry = new BackgroundTaskRegistry()) {
+  function toolWith(
+    registry = new BackgroundTaskRegistry(),
+    teammates: string[] = [],
+  ) {
     return new ListAgentsTool({
       getBackgroundTaskRegistry: () => registry,
+      getTeamManager: () =>
+        teammates.length === 0
+          ? null
+          : {
+              getTeamFile: () => ({
+                leadAgentId: 'lead-1',
+                members: teammates.map((name) => ({ name })),
+              }),
+            },
     } as unknown as Config);
   }
 
@@ -175,6 +188,25 @@ describe('ListAgentsTool — peer sessions', () => {
     const result = await run();
     expect(result.llmContent).toContain('no other Qwen Code session');
     expect(result.llmContent).toContain('Named Agent Team teammates');
+    // The description promises the session's own name; the empty case
+    // must keep that promise too.
+    expect(result.llmContent).toContain('This session is named "self-00"');
+  });
+
+  it('appends the ref when a teammate shadows the bare name', async () => {
+    // send_message tries teammates first with a sanitized lookup, so a
+    // peer whose name sanitizes to a teammate's is unreachable bare.
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ sessionId: 's1', name: 'Docs-CD', ref: 'aaa111' }),
+      peerRow({ sessionId: 's2', name: 'other-ef', ref: 'bbb222' }),
+    ]);
+    const parsed = JSON.parse(
+      String((await run(toolWith(undefined, ['docs-cd']))).llmContent),
+    );
+    expect(parsed.sessions.map((s: { to: string }) => s.to)).toEqual([
+      'Docs-CD [aaa111]',
+      'other-ef',
+    ]);
   });
 
   it('lists a peer with a bare name as its address, and names itself', async () => {
@@ -215,6 +247,27 @@ describe('ListAgentsTool — peer sessions', () => {
     const parsed = JSON.parse(String((await run()).llmContent));
     expect(parsed.sessions).toHaveLength(1);
     expect(parsed.sessions[0].name).toBe('docs-cd');
+  });
+
+  it("keeps a peer that merely shares this session's name", async () => {
+    listMessageablePeers.mockResolvedValue([
+      peerRow({ name: 'self-00', ipcPath: '/tmp/self.sock' }),
+      peerRow({
+        sessionId: 's2',
+        ref: 'bbb222',
+        name: 'self-00',
+        cwd: '/w/twin',
+        ipcPath: '/tmp/s2.sock',
+      }),
+    ]);
+    const parsed = JSON.parse(String((await run()).llmContent));
+    expect(parsed.sessions).toEqual([
+      expect.objectContaining({
+        name: 'self-00',
+        ref: 'bbb222',
+        cwd: '/w/twin',
+      }),
+    ]);
   });
 
   it('counts both kinds in the display line', async () => {

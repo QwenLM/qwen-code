@@ -43,7 +43,17 @@ export const MAX_FRAME_BYTES = 1024 * 1024;
 export type PeerMessagePriority = 'now' | 'next';
 
 /** Terminal states a sent message can reach on the receiving side. */
-export type PeerDeliveryStatus = 'held' | 'denied' | 'expired' | 'delivered';
+export type PeerDeliveryStatus =
+  | 'held'
+  | 'denied'
+  | 'expired'
+  | 'delivered'
+  /**
+   * The frame named a session id the receiver does not hold: the sender's
+   * directory was stale (the address changed hands, or the peer ran
+   * /clear). Distinct from `denied` — nobody decided anything.
+   */
+  | 'misaddressed';
 
 export interface PeerUserFrame {
   msgV: number;
@@ -178,7 +188,8 @@ export function parsePeerFrame(line: string): PeerFrame | null {
       status !== 'held' &&
       status !== 'denied' &&
       status !== 'expired' &&
-      status !== 'delivered'
+      status !== 'delivered' &&
+      status !== 'misaddressed'
     ) {
       return null;
     }
@@ -245,6 +256,8 @@ export function describeDeliveryStatus(status: PeerDeliveryStatus): string {
       return 'Your held message expired without a decision and was not delivered.';
     case 'delivered':
       return 'Your message was released to the recipient session.';
+    case 'misaddressed':
+      return 'That address now belongs to a different session than the one you addressed; it was not delivered. List the agents again before re-sending.';
     default: {
       const exhaustive: never = status;
       return exhaustive;

@@ -186,6 +186,20 @@ describe('parsePeerFrame — control frames', () => {
     origMsgId: 'abc',
   };
 
+  it('parses every delivery status, including misaddressed', () => {
+    for (const status of [
+      'held',
+      'denied',
+      'expired',
+      'delivered',
+      'misaddressed',
+    ]) {
+      expect(parsePeerFrame(line({ ...validControl, status }))).toMatchObject({
+        status,
+      });
+    }
+  });
+
   it('parses a delivery status', () => {
     expect(parsePeerFrame(line(validControl))).toMatchObject({
       type: 'control',
@@ -252,6 +266,10 @@ describe('delivery status frames', () => {
     expect(describeDeliveryStatus('denied')).toContain('declined');
     expect(describeDeliveryStatus('expired')).toContain('expired');
     expect(describeDeliveryStatus('delivered')).toContain('released');
+    expect(describeDeliveryStatus('misaddressed')).toContain(
+      'different session',
+    );
+    expect(describeDeliveryStatus('misaddressed')).not.toContain('declined');
   });
 
   it('carries the reason on the frame so the sender need not map it', () => {

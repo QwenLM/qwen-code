@@ -212,6 +212,14 @@ describe('resolvePeerTarget', () => {
     });
   });
 
+  it('refuses to guess between two sessions whose refs collide', () => {
+    const x = peer({ sessionId: 's1', name: 'app-ab', ref: 'abc123' });
+    const y = peer({ sessionId: 's2', name: 'docs-cd', ref: 'abc123' });
+    const result = resolvePeerTarget([x, y], 'abc123');
+    expect(result.kind).toBe('ambiguous');
+    if (result.kind === 'ambiguous') expect(result.matches).toEqual([x, y]);
+  });
+
   it('rejects a ref that does not belong to the named session', () => {
     expect(resolvePeerTarget([a, c], `docs-cd [${a.ref}]`)).toEqual({
       kind: 'none',

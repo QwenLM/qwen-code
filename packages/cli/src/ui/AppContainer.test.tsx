@@ -70,6 +70,7 @@ import {
   SendMessageType,
   type GeminiClient,
   type GoalTurnHost,
+  describeDeliveryStatus,
   type HeldMessage,
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
@@ -7233,7 +7234,7 @@ describe('AppContainer State Management', () => {
       const notices = () =>
         addItem.mock.calls
           .map((call) => String((call[0] as { text?: string })?.text ?? ''))
-          .filter((text) => text.startsWith('Your message to '));
+          .filter((text) => text.startsWith('Message to '));
 
       // The common case: delivered straight away. Nothing to say.
       act(() => {
@@ -7241,6 +7242,7 @@ describe('AppContainer State Management', () => {
           status: 'delivered',
           address: 'docs-cd',
           origMsgId: 'm1',
+          previous: 'pending',
         });
       });
       expect(notices()).toEqual([]);
@@ -7250,10 +7252,13 @@ describe('AppContainer State Management', () => {
           status: 'held',
           address: 'docs-cd',
           origMsgId: 'm2',
+          previous: 'pending',
         });
       });
       expect(notices()).toHaveLength(1);
-      expect(notices()[0]).toContain('docs-cd was held');
+      expect(notices()[0]).toBe(
+        `Message to docs-cd: ${describeDeliveryStatus('held')}`,
+      );
 
       // The user over there released it: that ends a hold they saw.
       act(() => {
@@ -7261,20 +7266,37 @@ describe('AppContainer State Management', () => {
           status: 'delivered',
           address: 'docs-cd',
           origMsgId: 'm2',
+          previous: 'held',
         });
       });
       expect(notices()).toHaveLength(2);
-      expect(notices()[1]).toContain('was delivered');
+      expect(notices()[1]).toContain(describeDeliveryStatus('delivered'));
 
       act(() => {
         peer.emitReceipt({
           status: 'denied',
           address: 'app-ab [ab12cd]',
           origMsgId: 'm3',
+          previous: 'pending',
         });
       });
       expect(notices()).toHaveLength(3);
-      expect(notices()[2]).toContain('app-ab [ab12cd] was denied');
+      expect(notices()[2]).toBe(
+        `Message to app-ab [ab12cd]: ${describeDeliveryStatus('denied')}`,
+      );
+
+      // A stale address is named as such, never as a human's decision.
+      act(() => {
+        peer.emitReceipt({
+          status: 'misaddressed',
+          address: 'docs-cd',
+          origMsgId: 'm4',
+          previous: 'pending',
+        });
+      });
+      expect(notices()).toHaveLength(4);
+      expect(notices()[3]).toContain('different session');
+      expect(notices()[3]).not.toContain('declined');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

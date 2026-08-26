@@ -91,6 +91,7 @@ Commands for managing AI tools and models.
 | `/curator`            | Inspect, pin, archive, or restore inactive project auto-skills                        | `/curator`, `/curator run --dry-run`, `/curator pin <directory>`, `/curator restore <directory>`          |
 | `/plan`               | Switch to plan mode or exit plan mode                                                 | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
 | `/approval-mode`      | Change the tool-approval mode (current session only)                                  | `/approval-mode`, `/approval-mode auto-edit`                                                              |
+| `/peers`              | Review messages held from other Qwen Code sessions on this machine                    | `/peers`, `/peers accept <id>`, `/peers deny all`                                                         |
 | → `plan`              | Analysis only, no execution (secure review)                                           | `/approval-mode plan`                                                                                     |
 | → `default`           | Require approval for edits (daily use)                                                | `/approval-mode default`                                                                                  |
 | → `auto-edit`         | Auto-approve edits (trusted environment)                                              | `/approval-mode auto-edit`                                                                                |
@@ -808,18 +809,27 @@ in `settings.json` and restart:
 Once on, the model in one session can discover the others with
 `list_agents` — each appears under `sessions` with the same `name` that
 `qwen sessions ps` prints — and address one with `send_message` using
-that name as `to`. When two sessions share a name, `list_agents` appends
-a short `[ref]` and the full `name [ref]` is required; a bare name that
-could mean either is refused rather than guessed. `list_agents` also
-reports the session's own name under `self`, and `to: "*"` still means
-"my Agent Team teammates" and never reaches other sessions.
+that name as `to`. When two sessions share a name, `list_agents` shows
+each with a short `[ref]` and the send must include it (`name [ref]`); a
+bare name that could mean either is refused rather than guessed.
+`list_agents` also reports the session's own name under `self`, and
+`to: "*"` still means "my Agent Team teammates" and never reaches other
+sessions.
 
 A message arrives in the other session marked as coming from another
 session, not from its user, and carries none of your authority there:
 the receiving session acts on it only within its own permission settings.
 Its user can choose what happens to incoming messages with
-`agents.crossSessionInbound` (`accept`, `hold`, or `refuse`); when unset,
-a message is delivered as long as the receiving session still reviews
-each action, and held for review otherwise. Held messages are listed and
-released with `/peers` in the receiving session. The sender's `send_message`
-call reports whether the message was delivered, held, or refused.
+`agents.crossSessionInbound` (`accept`, `hold`, or `refuse`). When unset,
+a message is delivered if the receiving session still reviews each
+action (default or plan mode), or if both sessions are in a mode that
+applies actions without per-action review; otherwise it is held for
+review. Held messages are listed and released with `/peers` in the
+receiving session.
+
+The `send_message` call only confirms the message was handed to the other
+session. What became of it arrives later as a receipt: if it was held,
+declined, or expired — or released after a hold — a notice appears in the
+sending session's transcript (`Message to <name>: …`). The model that
+sent it is not told; if the other session replies, the reply arrives as a
+cross-session message.

@@ -56,7 +56,7 @@ describe('SendMessageTool — team mode', () => {
   it('describes text invisibility as peer-only for teammates', () => {
     const tool = new SendMessageTool(makeTeamConfig());
     expect(tool.description).toContain(
-      'Your text output is NOT visible to peer teammates',
+      'Your text output is NOT visible to teammates or to other sessions',
     );
     expect(tool.description).not.toContain('NOT visible to other agents');
   });
@@ -580,6 +580,21 @@ describe('SendMessageTool — peer mode', () => {
     expect(sendToPeer).not.toHaveBeenCalled();
   });
 
+  it('recognises a teammate by its sanitized name, not the raw string', async () => {
+    // TeamManager.sendMessage resolves through findMemberByName, which
+    // sanitizes; the precedence check must use the same rule or "Alice"
+    // would go looking for a session.
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({ teamManager: { sendMessage, broadcast: vi.fn() } }),
+    );
+    await tool
+      .build({ to: 'Alice', message: 'hello' })
+      .execute(new AbortController().signal);
+    expect(sendMessage).toHaveBeenCalled();
+    expect(sendToPeer).not.toHaveBeenCalled();
+  });
+
   it('reaches a peer even while a team is active, when no teammate has that name', async () => {
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     sendToPeer.mockResolvedValue({
@@ -687,6 +702,114 @@ describe('SendMessageTool — peer mode', () => {
       .execute(new AbortController().signal);
 
     expect(result.llmContent).toContain('No active team');
+  });
+
+  it("never routes a teammate's report to the leader through the peer directory", async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    // A session named "leaderboard-3c" is reachable: the peer route would
+    // suggest it for "leader" and swallow the report.
+    sendToPeer.mockResolvedValue({
+      kind: 'not-found',
+      suggestions: ['leaderboard-3c'],
+    });
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+          getTeamFile: () => ({
+            leadAgentId: 'lead-1',
+            members: [{ name: 'alice' }],
+          }),
+        },
+      }),
+    );
+
+    for (const to of ['leader', 'Leader', 'lead-1']) {
+      sendMessage.mockClear();
+      const result = await runWithTeammateIdentity(
+        {
+          agentName: 'alice',
+          teamName: 'team',
+          agentId: 'alice@team',
+          isTeamLead: false,
+        },
+        () =>
+          tool
+            .build({ to, message: 'report' })
+            .execute(new AbortController().signal),
+      );
+      expect(result.error).toBeUndefined();
+      expect(sendMessage).toHaveBeenCalledWith(
+        to,
+        'report',
+        'alice',
+        undefined,
+      );
+    }
+    expect(sendToPeer).not.toHaveBeenCalled();
+  });
+
+  it('says a teammate was searched too when a name resolves nowhere', async () => {
+    sendToPeer.mockResolvedValue({
+      kind: 'not-found',
+      suggestions: ['docs-cd'],
+    });
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: { sendMessage: vi.fn(), broadcast: vi.fn() },
+      }),
+    );
+    const result = await tool
+      .build({ to: 'docs', message: 'hi' })
+      .execute(new AbortController().signal);
+    expect(result.llmContent).toContain('and no teammate');
+    expect(result.llmContent).toContain('docs-cd');
+  });
+
+  it("appends the session search to the team's not-found error", async () => {
+    sendToPeer.mockResolvedValue({ kind: 'not-found', suggestions: [] });
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        teamManager: {
+          sendMessage: vi
+            .fn()
+            .mockRejectedValue(new Error('Teammate "zed" not found.')),
+          broadcast: vi.fn(),
+        },
+      }),
+    );
+    const result = await tool
+      .build({ to: 'zed', message: 'hi' })
+      .execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('Teammate "zed" not found.');
+    expect(result.llmContent).toContain(
+      'No reachable session has that name either',
+    );
+  });
+
+  it('says messaging is off, rather than that a lookup found nothing', async () => {
+    sendToPeer.mockResolvedValue({ kind: 'disabled' });
+    const result = await toolWithoutTeam()
+      .build({ to: 'docs-cd', message: 'hi' })
+      .execute(new AbortController().signal);
+    expect(result.llmContent).toContain('No active team');
+    expect(result.llmContent).toContain('agents.crossSessionMessaging');
+    expect(result.llmContent).not.toContain('no reachable session');
+  });
+
+  it('tells the model it will not learn the outcome and must not re-send', async () => {
+    sendToPeer.mockResolvedValue({
+      kind: 'sent',
+      address: 'docs-cd',
+      peer: { cwd: '/w/docs' },
+    });
+    const result = await toolWithoutTeam()
+      .build({ to: 'docs-cd', message: 'hi' })
+      .execute(new AbortController().signal);
+    expect(result.llmContent).toContain('do not re-send');
+    expect(result.llmContent).toContain('<cross_session_message>');
   });
 
   it('warns the model off permission laundering in the tool description', () => {

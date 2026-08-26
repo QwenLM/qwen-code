@@ -2559,24 +2559,18 @@ export const AppContainer = (props: AppContainerProps) => {
   // sitting on — or threw away — a message the model was told was sent;
   // without it the sender reads silence as delivery. 'delivered' is the
   // expected outcome and is only worth a line when it ends a hold the
-  // user already saw announced. Receipts for ids this session never sent
-  // are dropped before they reach here, so a stranger cannot fill the
-  // history with them.
-  const announcedReceiptHoldsRef = useRef<Set<string>>(new Set());
+  // user already saw announced. Receipts for ids this session never sent,
+  // and receipts that repeat a state, are dropped before they reach here
+  // — so neither a stranger nor a chatty peer can fill the history with
+  // them, and nothing here needs to remember what was announced.
   useEffect(() => {
     if (!peerMessaging) return;
-    return peerMessaging.onReceipt(({ status, address, origMsgId }) => {
-      const holds = announcedReceiptHoldsRef.current;
-      if (status === 'held') {
-        holds.add(origMsgId);
-      } else {
-        const wasHeld = holds.delete(origMsgId);
-        if (status === 'delivered' && !wasHeld) return;
-      }
+    return peerMessaging.onReceipt(({ status, address, previous }) => {
+      if (status === 'delivered' && previous !== 'held') return;
       historyManager.addItem(
         {
           type: MessageType.INFO,
-          text: `Your message to ${address} was ${status}: ${describeDeliveryStatus(status)}`,
+          text: `Message to ${address}: ${describeDeliveryStatus(status)}`,
         },
         Date.now(),
       );

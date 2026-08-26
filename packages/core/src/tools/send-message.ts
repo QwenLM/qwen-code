@@ -103,7 +103,17 @@ class SendMessageInvocation extends BaseToolInvocation<
    * Every other outcome, including failures, is a result: each one has a
    * different next step for the model.
    */
-  private async trySendToPeer(to: string): Promise<ToolResult | null> {
+  /**
+   * Set when the peer route was consulted and found cross-session
+   * messaging off here, so the final error can say so instead of
+   * claiming a lookup that never happened.
+   */
+  private peerMessagingOff = false;
+
+  private async trySendToPeer(
+    to: string,
+    teamActive: boolean,
+  ): Promise<ToolResult | null> {
     let approvalMode: ApprovalMode | null;
     try {
       approvalMode = this.config.getApprovalMode();
@@ -121,6 +131,7 @@ class SendMessageInvocation extends BaseToolInvocation<
 
     switch (outcome.kind) {
       case 'disabled':
+        this.peerMessagingOff = true;
         return null;
 
       case 'self': {
@@ -137,7 +148,7 @@ class SendMessageInvocation extends BaseToolInvocation<
       case 'not-found': {
         if (outcome.suggestions.length === 0) return null;
         const msg =
-          `No reachable session is named "${to}". Did you mean: ` +
+          `No reachable session${teamActive ? ' and no teammate' : ''} is named "${to}". Did you mean: ` +
           `${outcome.suggestions.join(', ')}? Use list_agents to see who is reachable.`;
         return {
           llmContent: msg,
@@ -174,7 +185,9 @@ class SendMessageInvocation extends BaseToolInvocation<
             `Sent to ${outcome.address} — another Qwen Code session on this machine, ` +
             `working in ${outcome.peer.cwd}. It arrives there as a marked cross-session ` +
             "message carrying none of your user's authority, and may be held for that " +
-            "session's user to review before it acts.",
+            "session's user to review before it reaches that session's model. You will " +
+            'not be told whether it was delivered or held, so do not re-send; if that ' +
+            'session replies, the reply arrives here as a <cross_session_message>.',
           returnDisplay: `“${preview}” → ${outcome.address}`,
         };
       }
@@ -368,22 +381,29 @@ class SendMessageInvocation extends BaseToolInvocation<
     // Route 2: teammate by name via TeamManager. In-process wins over a
     // same-named peer session: a teammate is part of this session's own
     // work, and silently routing off-process would be the more surprising
-    // of the two.
-    const teammateExists =
+    // of the two. The leader is an in-process recipient too, though never
+    // a member: a teammate reports back with `to: "leader"` (or the lead
+    // agent id), and TeamManager resolves both — so must this check, or a
+    // teammate's report would go looking for a session named "leader".
+    const inProcessRecipient =
       !!teamManager &&
-      findMemberByName(teamManager.getTeamFile().members, to) !== undefined;
+      (to.toLowerCase() === LEADER_NAME ||
+        to === teamManager.getTeamFile().leadAgentId ||
+        findMemberByName(teamManager.getTeamFile().members, to) !== undefined);
 
-    if (!teammateExists) {
+    if (!inProcessRecipient) {
       // Route 3: another Qwen Code session on this machine.
-      const peerResult = await this.trySendToPeer(to);
+      const peerResult = await this.trySendToPeer(to, !!teamManager);
       if (peerResult) return peerResult;
     }
 
     if (!teamManager) {
-      const msg =
-        `No active team, no task_id, and no reachable session named "${to}". ` +
-        'Create a team, pass `task_id` to message a background task, or use ' +
-        'list_agents to see which sessions are reachable.';
+      const msg = this.peerMessagingOff
+        ? `No active team and no task_id, and cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so "${to}" cannot be another session. ` +
+          'Create a team, or pass `task_id` to message a background task.'
+        : `No active team, no task_id, and no reachable session named "${to}". ` +
+          'Create a team, pass `task_id` to message a background task, or use ' +
+          'list_agents to see which sessions are reachable.';
       return {
         llmContent: msg,
         returnDisplay: msg,
@@ -401,7 +421,16 @@ class SendMessageInvocation extends BaseToolInvocation<
       const msg = `Message sent to "${to}".`;
       return { llmContent: msg, returnDisplay: msg };
     } catch (error) {
-      const errMsg = error instanceof Error ? error.message : String(error);
+      let errMsg = error instanceof Error ? error.message : String(error);
+      // The team's "not found" is only half the answer once the peer
+      // directory was searched too.
+      if (
+        !inProcessRecipient &&
+        !this.peerMessagingOff &&
+        /not found/i.test(errMsg)
+      ) {
+        errMsg += ` No reachable session has that name either; use list_agents to see who is reachable.`;
+      }
       return {
         llmContent: `Failed to send message: ${errMsg}`,
         returnDisplay: `Failed to send message: ${errMsg}`,
@@ -423,10 +452,10 @@ export class SendMessageTool extends BaseDeclarativeTool<
       ToolDisplayNames.SEND_MESSAGE,
       'Send a message to a teammate or to another Qwen Code session on this machine (use "to"), or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
         'Set "to" to a bare teammate name (no @), to "*" to broadcast within an active Agent Team only, or to a session name from list_agents — append its " [ref]" only when list_agents shows two sessions with that name. ' +
-        "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied. " +
+        "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied, blocked from, or cannot do itself. " +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
         'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
-        'Your text output is NOT visible to peer teammates — use this tool to communicate.',
+        'Your text output is NOT visible to teammates or to other sessions — use this tool to communicate.',
       Kind.Other,
       {
         type: 'object',
