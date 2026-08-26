@@ -124,17 +124,6 @@ export function useResumeCommand(
       // Close dialog immediately to prevent input capture during async operations.
       closeResumeDialog();
 
-      if (await isManagedAgentViewResumeBlocked(sessionId)) {
-        addItem(
-          {
-            type: MessageType.ERROR,
-            text: MANAGED_AGENT_VIEW_RESUME_MESSAGE,
-          } as HistoryItemWithoutId,
-          Date.now(),
-        );
-        return;
-      }
-
       // Open the telemetry swap transaction BEFORE touching the outgoing
       // session. Opening takes the session-switch latch and captures the
       // outgoing session for the undo snapshot; see the lifetime contract
@@ -170,6 +159,18 @@ export function useResumeCommand(
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
+        if (await isManagedAgentViewResumeBlocked(sessionId)) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: MANAGED_AGENT_VIEW_RESUME_MESSAGE,
+            } as HistoryItemWithoutId,
+            Date.now(),
+          );
+          config.getGeminiClient()?.commitTelemetrySwap?.();
+          return;
+        }
+
         const cwd = config.getTargetDir();
         const sessionService = new SessionService(cwd);
         const sessionData = await sessionService.loadSession(sessionId);

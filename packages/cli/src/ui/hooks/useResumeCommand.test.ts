@@ -801,7 +801,20 @@ describe('useResumeCommand', () => {
   });
 
   it('blocks picker resume for a managed Agent View session', async () => {
-    mockIsManagedAgentViewResumeBlocked.mockResolvedValueOnce(true);
+    const calls: string[] = [];
+    mockIsManagedAgentViewResumeBlocked.mockImplementationOnce(async () => {
+      calls.push('guard');
+      return true;
+    });
+    const geminiClient = {
+      beginTelemetrySwap: vi.fn(() => {
+        calls.push('begin');
+        return true;
+      }),
+      commitTelemetrySwap: vi.fn(() => {
+        calls.push('commit');
+      }),
+    };
     const historyManager = {
       addItem: vi.fn(),
       clearItems: vi.fn(),
@@ -813,6 +826,8 @@ describe('useResumeCommand', () => {
       getBackgroundShellRegistry: () => ({ hasRunningEntries: () => false }),
       getMonitorRegistry: () => ({ getRunning: () => [] }),
       getWorkflowRunRegistry: () => ({ hasRunningEntries: () => false }),
+      getGeminiClient: () => geminiClient,
+      getSessionId: () => 'current-session',
       getTargetDir: () => '/tmp',
     } as unknown as import('@qwen-code/qwen-code-core').Config;
     const { result } = renderHook(() =>
@@ -833,6 +848,9 @@ describe('useResumeCommand', () => {
       { type: 'error', text: 'managed session message' },
       expect.any(Number),
     );
+    expect(calls).toEqual(['begin', 'guard', 'commit']);
+    expect(geminiClient.beginTelemetrySwap).toHaveBeenCalledTimes(1);
+    expect(geminiClient.commitTelemetrySwap).toHaveBeenCalledTimes(1);
   });
 
   it('blocks resume when the current session still has a running monitor', async () => {
