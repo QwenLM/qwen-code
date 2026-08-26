@@ -224,7 +224,7 @@ export function createForkedChat(
       ? params.history.slice(-maxHistoryEntries)
       : params.history;
 
-  return new GeminiChat(
+  const forkedChat = new GeminiChat(
     config,
     {
       ...params.generationConfig,
@@ -236,6 +236,10 @@ export function createForkedChat(
     undefined, // no chatRecordingService
     undefined, // no telemetryService
   );
+  // The fork shares the parent's ToolRegistry; its history rewrites must
+  // not touch the parent's loaded-skill tracking.
+  forkedChat.isForkedChat = true;
+  return forkedChat;
 }
 
 interface ForkedModelRuntime {

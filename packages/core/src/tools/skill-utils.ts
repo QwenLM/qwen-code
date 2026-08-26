@@ -8,7 +8,12 @@ import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
+import type { ToolRegistry } from './tool-registry.js';
+import { ToolNames } from './tool-names.js';
 import { escapeXml } from '../utils/xml.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL');
 
 /**
  * Builds the LLM-facing content string when a skill body is injected.
@@ -289,5 +294,31 @@ export function applySkillAllowedTools(
   }
   for (const rule of allowedTools) {
     permissionManager.addSessionAllowRule(rule);
+  }
+}
+
+/**
+ * Conservatively drop ALL loaded-skill tracking after a destructive
+ * history rewrite (compaction, truncation, orphan stripping). The rewrite
+ * may have removed a skill body; the dedup guard must not leave that
+ * skill permanently unreloadable behind "already loaded in context".
+ * Over-clearing is the safe direction: a still-resident body costs at
+ * most one duplicate injection on the next invoke, while a stale entry
+ * makes the body unrecoverable until session restart.
+ *
+ * Duck-typed (mirroring `clearCommand`'s existing `clearLoadedSkills`
+ * call) so history-rewrite sites don't need a runtime import of the
+ * SkillTool class.
+ */
+export function clearLoadedSkillTracking(
+  toolRegistry: ToolRegistry | undefined,
+  logTag: string,
+): void {
+  const tool = toolRegistry?.getTool(ToolNames.SKILL);
+  if (tool && 'clearLoadedSkills' in tool) {
+    (tool as { clearLoadedSkills(): void }).clearLoadedSkills();
+    debugLogger.debug(
+      `[SKILL_TRACKING] conservatively cleared loaded-skill tracking after ${logTag}`,
+    );
   }
 }
