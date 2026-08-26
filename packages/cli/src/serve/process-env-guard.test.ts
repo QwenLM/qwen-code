@@ -45,6 +45,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/acp-bridge/src/process-registry.ts',
+    {
+      reason:
+        'Windows process-tree cleanup resolves the trusted System32 taskkill path from the process-scoped OS root.',
+      accesses: { 'key:SystemRoot': 1 },
+    },
+  ],
+  [
     'packages/acp-bridge/src/spawnChannel.ts',
     {
       reason:
