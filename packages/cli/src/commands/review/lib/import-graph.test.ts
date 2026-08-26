@@ -423,16 +423,28 @@ describe('seamLines', () => {
     const leading = [
       "import { $store } from './changed.js';", // 1
       '$store.dispatch();', // 2
-      'const restore = 1;', // 3 — `store` inside another word, must NOT mark
+      '$$store.dispatch();', // 3 — preceded by `$`: a different identifier
+      'const restore = 1;', // 4 — `store` inside another word, must NOT mark
     ].join('\n');
     expect(seamLines('src/imp.ts', leading, changed)).toEqual([1, 2]);
   });
 
+  it('bounds the clause at the keyword, not inside a binding that contains one', () => {
+    // A binding named `exporter`/`importData`/`reimport` used to displace
+    // the clause bound inside its own name: the substring search for the
+    // statement keyword landed in the binding, the clause parsed zero
+    // bindings, and every usage line dropped from the seam.
+    for (const name of ['exporter', 'importData', 'reimport']) {
+      const source = [
+        `import { ${name} } from './changed.js';`, // 1
+        `${name}(x);`, // 2
+      ].join('\n');
+      expect(seamLines('src/imp.ts', source, changed)).toEqual([1, 2]);
+    }
+  });
+
   it('marks nothing for a file whose imports all resolve elsewhere', () => {
-    const source = [
-      "import { a } from './stable.js';",
-      'a();',
-    ].join('\n');
+    const source = ["import { a } from './stable.js';", 'a();'].join('\n');
     expect(seamLines('src/imp.ts', source, changed)).toEqual([]);
   });
 });

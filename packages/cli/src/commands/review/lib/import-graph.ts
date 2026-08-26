@@ -267,7 +267,6 @@ export function discoverWorkspacePackages(
     .map(([dir, name]) => ({ name, dir }));
 }
 
-
 /** An identifier a seam binding can be — nothing flag- or operator-shaped. */
 const IDENT_RE = /^[A-Za-z_$][\w$]*$/;
 
@@ -349,14 +348,19 @@ export function seamLines(
     if (resolveSpecifier(fromFile, m[2], changed, packages) === null) continue;
     marked.add(lineOf(m.index ?? 0));
     // The clause sits between the statement keyword and this `from`. The
-    // nearest preceding keyword bounds it; a clause the scan cannot bound
-    // contributes the statement line alone — fail toward fewer lines, which
-    // the always-in-scope brief backstops.
+    // nearest preceding keyword bounds it — word-bounded, because a binding
+    // that merely CONTAINS the keyword (`exporter`, `reimport`) used to
+    // displace the bound inside its own name and parse the clause to zero
+    // bindings; a clause the scan cannot bound contributes the statement
+    // line alone — fail toward fewer lines, which the always-in-scope
+    // brief backstops.
     const at = m.index ?? 0;
-    const start = Math.max(
-      source.lastIndexOf('import', at),
-      source.lastIndexOf('export', at),
-    );
+    let start = -1;
+    for (const km of source
+      .slice(0, at)
+      .matchAll(/(^|[^\w$])(?:import|export)(?![\w$])/g)) {
+      start = (km.index ?? 0) + (km[1]?.length ?? 0);
+    }
     if (start >= 0 && at - start <= 2000) {
       for (const name of clauseBindings(source.slice(start, at))) {
         bindings.add(name);
@@ -375,14 +379,18 @@ export function seamLines(
     // bindings sit BEFORE the call, on its own line.
     const lineStart = source.lastIndexOf('\n', at - 1) + 1;
     const before = source.slice(lineStart, at);
-    const decl = /(?:const|let|var)\s+(?:\{([^}]*)\}|([A-Za-z_$][\w$]*))\s*=\s*$/.exec(
-      before,
-    );
+    const decl =
+      /(?:const|let|var)\s+(?:\{([^}]*)\}|([A-Za-z_$][\w$]*))\s*=\s*$/.exec(
+        before,
+      );
     if (decl) {
       if (decl[2]) bindings.add(decl[2]);
       if (decl[1]) {
         for (const entry of decl[1].split(',')) {
-          const words = entry.trim().split(/[:\s]+/).filter(Boolean);
+          const words = entry
+            .trim()
+            .split(/[:\s]+/)
+            .filter(Boolean);
           const name = words[words.length - 1];
           if (name && IDENT_RE.test(name)) bindings.add(name);
         }
@@ -396,9 +404,7 @@ export function seamLines(
     // names are escaped and the boundary is spelled explicitly: not
     // preceded/followed by an identifier character, `$` included.
     const escaped = [...bindings].map((b) => b.replace(/\$/g, '\\$'));
-    const usage = new RegExp(
-      `(?<![\\w$])(?:${escaped.join('|')})(?![\\w$])`,
-    );
+    const usage = new RegExp(`(?<![\\w$])(?:${escaped.join('|')})(?![\\w$])`);
     const lines = source.split('\n');
     for (let i = 0; i < lines.length; i++) {
       if (usage.test(lines[i])) marked.add(i + 1);

@@ -48,7 +48,7 @@ import {
   roundCapStopDisclosure,
   readBudgetStop,
 } from './lib/deadline.js';
-import { LARGE_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
+import { isFixAuditRound, LARGE_REVERSE_AUDIT_ROUNDS } from './lib/budget.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   HOSTNAME_RE,
@@ -87,10 +87,7 @@ import {
   type LedgerFinding,
 } from './lib/ledger.js';
 import { mdField } from './lib/md-field.js';
-import {
-  CRITICAL_FLOOR_ROUND,
-  FLAT_STREAK_TO_ENGAGE,
-} from './lib/posture.js';
+import { CRITICAL_FLOOR_ROUND, FLAT_STREAK_TO_ENGAGE } from './lib/posture.js';
 import {
   convergenceAdvisory,
   convergenceAssessment,
@@ -549,7 +546,11 @@ function floorResolvesCritical(
   // critical".
   const thisRound = prevRound + 1;
   if (floor === 'critical') return 'explicit';
-  if (floor === 'auto' && !contextUnavailable && thisRound >= CRITICAL_FLOOR_ROUND) {
+  if (
+    floor === 'auto' &&
+    !contextUnavailable &&
+    thisRound >= CRITICAL_FLOOR_ROUND
+  ) {
     return 'auto-resolved';
   }
   // The signal-driven early trigger (#9903): the convergence diagnosis's
@@ -1810,9 +1811,7 @@ export const CHURN_STREAK_TO_FILE = 2;
 
 // The flat-trend bar lives in `lib/posture.ts` beside the round schedule:
 // the capture command's plan-time posture prediction (#10104) reads the same
-// two constants this resolution does, so the two cannot drift. Re-exported
-// here because this module is where every earlier reader imported it from.
-export { FLAT_STREAK_TO_ENGAGE } from './lib/posture.js';
+// two constants this resolution does, so the two cannot drift.
 
 /**
  * This round's census, or null when it cannot be read as one.
@@ -2586,30 +2585,17 @@ function fixAuditShapeFacts(planPath: string | undefined): {
     const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
       incremental?: unknown;
     };
-    const inc = plan?.incremental;
-    if (typeof inc !== 'object' || inc === null) return null;
-    const rec = inc as {
-      posture?: unknown;
+    // The SAME admission `isFixAuditRound` applies — one bar, called,
+    // not restated: this reader gates the floor arm and the body's
+    // disclosure, that one the roster and the tier, and a weaker bar here
+    // let a garbled scope run the FULL shape while the floor deferred and
+    // the body described a fix-audit round nobody ran.
+    if (!isFixAuditRound(plan)) return null;
+    const rec = plan.incremental as {
       postureCause?: unknown;
-      effective?: unknown;
       scope?: unknown;
     };
-    if (rec.posture !== 'critical' || rec.effective !== true) return null;
-    // The SAME admission `isFixAuditRound` (budget.ts) applies: the two
-    // readers gate different consumers — this one the floor arm and the
-    // body's disclosure, that one the roster and the tier — and a weaker
-    // bar here let a garbled scope run the FULL shape while the floor
-    // deferred and the body described a fix-audit round nobody ran.
     const scope = rec.scope;
-    if (typeof scope !== 'object' || scope === null) return null;
-    const shaped = scope as { anchor?: unknown; deltaFiles?: unknown };
-    if (
-      typeof shaped.anchor !== 'string' ||
-      shaped.anchor === '' ||
-      !Array.isArray(shaped.deltaFiles)
-    ) {
-      return null;
-    }
     const interaction = (scope as { interaction?: unknown }).interaction;
     let seamFiles = 0;
     let seamKept = 0;
@@ -4837,21 +4823,36 @@ function composeReviewBody(
         : fixAudit?.cause === 'round'
           ? '轮次日程'
           : 'critical 发布下限';
-  // The deferral claim states what THIS round's floor actually resolved to,
-  // not what the capture predicted. With the fix-audit arm in the
-  // resolution the two agree by construction on the auto path; the residual
-  // divergence is an explicit `suggestion` floor this round beside a stale
-  // plan posture — and there the body must say the floor was open rather
-  // than claim a deferral beside its own inline Suggestions.
-  const fixAuditFloorEngaged = convergence?.criticalFloorKind !== undefined;
+  // The deferral claim states what THIS round's floor actually ENFORCED —
+  // the strict reading `floorEnforcedReroute` acted on — not the reporting
+  // reading: the two diverge on a floor the state omitted, which the
+  // report folds to `auto` (the plan arm resolves it) while enforcement
+  // fails open, and keying the claim off the reporting reading posted
+  // "recorded and deferred" beside the very Suggestions posting inline in
+  // the same body.
+  const fixAuditFloorEngaged = convergence?.floorEnforcementEngaged === true;
+  // The open-floor sentence names its true cause: an explicit `suggestion`
+  // floor the operator set, or a floor the state omitted and the strict
+  // reading cannot act on.
+  const fixAuditOpenCauseEn =
+    convergence?.criticalFloorKind === undefined
+      ? '(the operator turned the posture off)'
+      : '(the floor record was absent, and the enforcement reading fails open)';
+  const fixAuditOpenCauseZh =
+    convergence?.criticalFloorKind === undefined
+      ? '（操作者关闭了该姿态）'
+      : '（下限记录缺失，强制读取按开放放行）';
   const fixAuditFloorEn = fixAuditFloorEngaged
     ? 'Findings below Critical were recorded and deferred, never posted.'
     : 'The posting floor itself resolved OPEN at compose time this round ' +
-      '(the operator turned the posture off), so no finding was withheld ' +
-      'by a floor — only the narrowed shape above applied.';
+      fixAuditOpenCauseEn +
+      ', so no finding was withheld by a floor — only the narrowed shape ' +
+      'above applied.';
   const fixAuditFloorZh = fixAuditFloorEngaged
     ? '低于 Critical 的发现只记录延后，不发布。'
-    : '但本轮发布下限在 compose 期实际解析为开放（操作者关闭了该姿态），没有任何发现被下限扣留——只有上述收窄形态生效。';
+    : '但本轮发布下限在 compose 期实际解析为开放' +
+      fixAuditOpenCauseZh +
+      '，没有任何发现被下限扣留——只有上述收窄形态生效。';
   const fixAuditSeamEn =
     fixAudit && fixAudit.seamFiles > 0
       ? ` (interaction files seam-bounded: ${fixAudit.seamKept} of ${fixAudit.seamTotal} hunk(s) republished)`

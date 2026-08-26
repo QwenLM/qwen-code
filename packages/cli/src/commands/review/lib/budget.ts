@@ -258,12 +258,11 @@ export interface DiffSize {
  * "not a fix-audit round", which is the ordinary full shape — the safe
  * direction.
  *
- * It lives here beside `isTerritoryFanOut` because that predicate is its one
- * structural consumer and this module must stay import-free.
+ * It lives here beside `isTerritoryFanOut` because this module must stay
+ * import-free; the topology gate reads it here, and the roster's Agent-0
+ * exclusion plus the brief builder's posture frame read it back directly.
  */
-export function isFixAuditRound(plan: {
-  incremental?: unknown;
-}): boolean {
+export function isFixAuditRound(plan: { incremental?: unknown }): boolean {
   const inc = plan?.incremental;
   if (typeof inc !== 'object' || inc === null) return false;
   const rec = inc as {
@@ -272,10 +271,14 @@ export function isFixAuditRound(plan: {
     scope?: unknown;
   };
   if (rec.posture !== 'critical' || rec.effective !== true) return false;
-  // The scope must be at least the shape the brief builder validates —
-  // anchor and delta list — or a posture beside a garbled scope would
-  // shrink the roster while `incrementalScopeOf` degrades the briefs to
-  // full-scope, two readers disagreeing about one plan.
+  // The scope must pass the bar the brief builder applies — a non-empty
+  // anchor and a delta list that IS one (present, all non-empty strings) —
+  // or a posture beside a scope `incrementalScopeOf` rejects would shrink
+  // the roster while the briefs degrade to full-scope, two readers
+  // disagreeing about one plan. The bar is stricter than the builder's only
+  // where the builder would still render an incremental frame (an
+  // interaction-only scope): that then reads as the ordinary full shape —
+  // the safe direction, as always here.
   const scope = rec.scope as
     | { anchor?: unknown; deltaFiles?: unknown }
     | null
@@ -285,7 +288,9 @@ export function isFixAuditRound(plan: {
     scope !== null &&
     typeof scope.anchor === 'string' &&
     scope.anchor !== '' &&
-    Array.isArray(scope.deltaFiles)
+    Array.isArray(scope.deltaFiles) &&
+    scope.deltaFiles.length > 0 &&
+    scope.deltaFiles.every((p) => typeof p === 'string' && p !== '')
   );
 }
 
@@ -303,7 +308,7 @@ export function isFixAuditRound(plan: {
 export function isTerritoryFanOut(plan: DiffSize): boolean {
   // A fix-audit round keeps the territory shape whatever its size: the
   // narrowed delta is usually 3A-sized, but the round's whole point is one
-  // accountable auditor per territory of the fix commits, not thirteen
+  // accountable auditor per territory of the fix commits, not fourteen
   // dimension lenses re-walking a delta the posture defers all but Critical
   // findings on. Ruling it HERE keeps the one-predicate contract — the
   // roster, the round-cap tier, and the topology-mismatch note all read this

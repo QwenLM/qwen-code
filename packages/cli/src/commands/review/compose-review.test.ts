@@ -2201,7 +2201,52 @@ describe('composeReview — the fix-audit round-shape disclosure (#10104)', () =
     );
   });
 
-  it("an explicit `suggestion` floor beats a stale plan posture, and the body says the floor was open", () => {
+  it('an ABSENT floor beside the plan record claims no deferral beside its inline Suggestion (#10104)', () => {
+    // The default config writes no `severityFloor` ("omit what does not
+    // apply"). The REPORTING reading folds absence to `auto` and the plan
+    // arm resolves critical, but the ENFORCEMENT reading stays strict and
+    // moves nothing — so the body must not claim a deferral beside the very
+    // Suggestion it posts inline.
+    const input = rcInput(POSTURE);
+    input.criticalsInline = 0;
+    input.suggestionsInline = 1;
+    input.draftedComments = [
+      { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+    ];
+    const r = composeReview(input);
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).not.toContain('recorded and deferred, never posted');
+    expect(r.body).toContain('resolved OPEN at compose time');
+  });
+
+  it('a scope the brief builder rejects engages neither the floor arm nor the disclosure (#10104)', () => {
+    // `incrementalScopeOf` degrades to full scope on a both-empty scope and
+    // on a delta list carrying a non-string element; the shape readers must
+    // read the same plan as no fix-audit round, or the floor defers and the
+    // body discloses a shape the full roster never ran.
+    for (const scope of [
+      { anchor: 'a'.repeat(40), deltaFiles: [], interaction: [] },
+      {
+        anchor: 'a'.repeat(40),
+        deltaFiles: ['src/a.ts', 42],
+        interaction: [],
+      },
+    ]) {
+      const input = rcInput({ ...POSTURE, scope });
+      input.criticalsInline = 0;
+      input.suggestionsInline = 1;
+      input.contextUnavailable = true;
+      input.severityFloor = 'auto';
+      input.draftedComments = [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** untested guard' },
+      ];
+      const r = composeReview(input);
+      expect(r.floorEnforced).toEqual([]);
+      expect(r.body).not.toContain('fix-audit round');
+    }
+  });
+
+  it('an explicit `suggestion` floor beats a stale plan posture, and the body says the floor was open', () => {
     const input = rcInput(POSTURE);
     input.criticalsInline = 0;
     input.suggestionsInline = 1;

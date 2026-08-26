@@ -1245,6 +1245,43 @@ describe('isFixAuditRound and the topology override (#10104)', () => {
     ).toBe(false);
   });
 
+  it('refuses the scopes the brief builder refuses — one bar across readers', () => {
+    // `incrementalScopeOf` degrades to full scope when the delta list is
+    // empty beside an empty interaction list, and when it carries a
+    // non-string element; the shape readers must refuse the same plans, or
+    // the roster drops Agent 0 while every brief runs full-scope.
+    const scope = POSTURE.incremental.scope;
+    const divergent = [
+      { ...scope, deltaFiles: [], interaction: [] },
+      { ...scope, deltaFiles: ['x.ts', 42] },
+      { ...scope, deltaFiles: [''] },
+    ];
+    for (const s of divergent) {
+      expect(
+        isFixAuditRound({
+          incremental: { ...POSTURE.incremental, scope: s },
+        }),
+      ).toBe(false);
+    }
+    // …and neither shape flips the topology or the round-cap tier.
+    const small = { srcDiffLines: 120, diffLines: 400 };
+    expect(
+      isTerritoryFanOut({
+        ...small,
+        incremental: { ...POSTURE.incremental, scope: divergent[0] },
+      }),
+    ).toBe(false);
+    expect(
+      reverseAuditRoundTier(
+        {
+          ...small,
+          incremental: { ...POSTURE.incremental, scope: divergent[1] },
+        },
+        false,
+      ),
+    ).toBe(10);
+  });
+
   it('flips a small plan into the territory fan-out', () => {
     const small = { srcDiffLines: 120, diffLines: 400 };
     expect(isTerritoryFanOut(small)).toBe(false);
