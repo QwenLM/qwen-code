@@ -2314,6 +2314,14 @@ describe.skipIf(!loaderOracleAvailable)('describeWorkerTlsTrustGaps', () => {
     return `${blocks!.at(-1)}\n`;
   };
 
+  /** The renewed-root bundle minus its long-lived twin. */
+  const leafPlusShortTwinOnlyPem = (): string => {
+    const blocks = TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT.match(
+      /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
+    );
+    return `${blocks![0]}\n${blocks![1]}\n`;
+  };
+
   it('reports nothing for a self-signed cert covering the dialled host', () => {
     expect(
       describeWorkerTlsTrustGaps({
@@ -2494,33 +2502,46 @@ describe.skipIf(!loaderOracleAvailable)('describeWorkerTlsTrustGaps', () => {
 
   // One-clock witnesses: the walk's issuer preference and the per-member
   // validity flags must judge the SAME instant the report samples. The
-  // straddle test feeds the anchor walk an instant inside the short-lived
-  // twin's window and everything else an instant past it — two clocks would
-  // anchor through the short root AND tell the operator to renew it, the
-  // false CERT_HAS_EXPIRED this PR removes. The boundary tests freeze the
-  // clock on each edge of that window, where the expired/not-yet-valid flags
-  // flip, so a one-sided edit to either predicate fails instead of passing
-  // silently years away from any boundary.
+  // straddle test hands that one sample an instant inside the short-lived
+  // twin's window and poisons any second sample with an instant past it —
+  // two clocks would anchor through the short root AND tell the operator
+  // to renew it, the false CERT_HAS_EXPIRED this PR removes. Sample order
+  // routes the clocks, not a stack-name match on the module-private walk,
+  // so a rename cannot silently no-op the guard. The boundary tests freeze
+  // the clock on each edge of that window, where the expired/not-yet-valid
+  // flags flip, so a one-sided edit to either predicate fails instead of
+  // passing silently years away from any boundary.
   it('judges the walk and the report at one sampled instant', () => {
     const insideWindow = new Date('2026-08-20T00:00:00Z').getTime();
     const pastWindow = new Date('2026-08-25T00:00:00Z').getTime();
-    const clock = vi
-      .spyOn(Date, 'now')
-      .mockImplementation(() =>
-        new Error().stack?.includes('walkWorkerAnchorPath') === true
-          ? insideWindow
-          : pastWindow,
-      );
+    // Production passes the serving file as certSourcePath; mirror that.
+    // The temp-file fallback spends a Date.now sample of its own
+    // (graceful-fs retry timing), which would shift the poison below.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-one-clock-'));
+    const certSourcePath = path.join(dir, 'fullchain.pem');
+    fs.writeFileSync(certSourcePath, TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT, {
+      mode: 0o600,
+    });
+    let samples = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => {
+      samples += 1;
+      return samples === 1 ? insideWindow : pastWindow;
+    });
     try {
       expect(
         describeWorkerTlsTrustGaps({
           cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
           certPath: '/certs/fullchain.pem',
+          certSourcePath,
           daemonUrl,
         }),
       ).toEqual([]);
+      // A second sample IS the regression: the walk and the report judging
+      // different instants. Fail on it even when the gap happens not to.
+      expect(samples).toBe(1);
     } finally {
       clock.mockRestore();
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -2531,6 +2552,26 @@ describe.skipIf(!loaderOracleAvailable)('describeWorkerTlsTrustGaps', () => {
       expect(
         describeWorkerTlsTrustGaps({
           cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The notAfter edge is pinned only when the expiring twin is the walk's
+  // ONLY issuer: with the long-lived twin in the bundle, a strict `>` in
+  // certValidAt re-anchors through it and still reports no gaps one
+  // instant early — the same false CERT_HAS_EXPIRED class this PR removes.
+  it('still anchors at the exact notAfter when the short twin is the only issuer', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-22T12:12:20Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(leafPlusShortTwinOnlyPem()),
           certPath: '/certs/fullchain.pem',
           daemonUrl,
         }),
