@@ -45,6 +45,8 @@
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@opentelemetry/api": "^1.9.0",
+    "@opentui/core": "0.5.8",
+    "@opentui/react": "0.5.8",
     "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/audio-capture": "file:../audio-capture",
     "@qwen-code/channel-base": "file:../channels/base",
