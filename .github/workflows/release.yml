@@ -474,10 +474,9 @@ jobs:
 
   publish:
     name: 'Publish Release'
-    # Route to the ECS self-hosted pool like the review/CI lanes; the
-    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
-    # ubuntu-latest fallback without a code change.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Publishing carries release credentials, so keep it off the shared pool
+    # that also executes pull-request code.
+    runs-on: 'ubuntu-latest'
     needs:
       - 'prepare'
       - 'quality'

@@ -528,7 +528,6 @@ describe('release lane runner routing', () => {
       'quality',
       'integration_none',
       'integration_docker',
-      'publish',
     ];
     for (const name of conditionalJobs) {
       const job = releaseYaml.jobs[name];
@@ -543,7 +542,10 @@ describe('release lane runner routing', () => {
     }
   });
 
-  it('keeps the failure notifier on an ephemeral hosted runner', () => {
+  it('keeps publishing and failure notification on hosted runners', () => {
+    expect(releaseYaml.jobs.publish['runs-on']).toBe('ubuntu-latest');
+    expect(releaseYaml.jobs.publish['runs-on']).not.toContain('ecs-qwen');
+
     // notify_failure exists to report failures OF the ECS pool; in
     // post-claim pool failures (runner crash, pool-wide loss) its `if:`
     // gate opens while the pool is wedged, so routing it back onto the
