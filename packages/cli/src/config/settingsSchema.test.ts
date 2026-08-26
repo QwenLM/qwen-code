@@ -272,6 +272,33 @@ describe('SettingsSchema', () => {
       expect(exploreModel.showInDialog).toBe(false);
     });
 
+    it('should keep cross-session messaging off by default', () => {
+      // The default is the entire security posture of the feature: shipping
+      // it flipped on would open every session on the box to peer messages.
+      const crossSessionMessaging =
+        getSettingsSchema().agents.properties.crossSessionMessaging;
+
+      expect(crossSessionMessaging.type).toBe('boolean');
+      expect(crossSessionMessaging.default).toBe(false);
+      expect(crossSessionMessaging.requiresRestart).toBe(true);
+      expect(crossSessionMessaging.showInDialog).toBe(false);
+    });
+
+    it('should define the inbound cross-session policy as accept/hold/refuse', () => {
+      const crossSessionInbound =
+        getSettingsSchema().agents.properties.crossSessionInbound;
+
+      expect(crossSessionInbound.type).toBe('enum');
+      // Unset is not a fourth policy: it means approval-mode parity, which
+      // the gate derives. A concrete default here would silence that.
+      expect(crossSessionInbound.default).toBeUndefined();
+      expect(crossSessionInbound.options).toEqual([
+        { value: 'accept', label: 'Accept' },
+        { value: 'hold', label: 'Hold for review' },
+        { value: 'refuse', label: 'Refuse' },
+      ]);
+    });
+
     it('should define model grade settings', () => {
       const agents = getSettingsSchema().agents.properties;
 

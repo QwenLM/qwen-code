@@ -17,6 +17,7 @@ import { type PartListUnion } from '@google/genai';
 import process from 'node:process';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { ArenaDialogType } from './useArenaCommand.js';
+import { usePeerMessaging } from '../../peerMessaging/PeerMessagingContext.js';
 import {
   type Logger,
   type Config,
@@ -242,6 +243,10 @@ export const useSlashCommandProcessor = (
   }
   const activeExtensionRefreshState =
     extensionRefreshState ?? fallbackExtensionRefreshStateRef.current;
+
+  // Null unless cross-session messaging is enabled and bound; `/peers`
+  // reads that as "the feature is off" rather than as an error.
+  const peerMessaging = usePeerMessaging();
 
   // Ref avoids adding `history` to the commandContext useMemo deps,
   // which would cause a full context rebuild on every history append.
@@ -523,6 +528,7 @@ export const useSlashCommandProcessor = (
         settings,
         logger,
         extensionRefreshState: activeExtensionRefreshState,
+        peerMessaging,
       },
       ui: {
         get history() {
@@ -590,6 +596,7 @@ export const useSlashCommandProcessor = (
       isIdleRef,
       agentViewIdleGateStateRef,
       activeExtensionRefreshState,
+      peerMessaging,
     ],
   );
 

@@ -1684,6 +1684,8 @@ export async function loadCliConfig(
    */
   hostPolicy?: {
     toolInvocationGuard?: ToolInvocationGuard;
+    /** Host-managed session whose exact private cwd is bound after bootstrap. */
+    provisionalWorkspace?: true;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
@@ -1691,6 +1693,7 @@ export async function loadCliConfig(
     };
   },
 ): Promise<Config> {
+  const provisionalWorkspace = hostPolicy?.provisionalWorkspace === true;
   const debugMode = isDebugMode(argv);
   if (debugMode && process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
     setInvocationScopedEnv('QWEN_DEBUG_LOG_FILE', '1');
@@ -1764,26 +1767,29 @@ export async function loadCliConfig(
 
   let outputLanguageFilePath: string | undefined;
   if (!bareMode && !safeMode) {
-    if (fs.existsSync(projectOutputLanguagePath)) {
+    if (!provisionalWorkspace && fs.existsSync(projectOutputLanguagePath)) {
       outputLanguageFilePath = projectOutputLanguagePath;
     } else if (fs.existsSync(globalOutputLanguagePath)) {
       outputLanguageFilePath = globalOutputLanguagePath;
     }
   }
 
-  const fileService = new FileDiscoveryService(
-    cwd,
-    settings.context?.fileFiltering?.customIgnoreFiles,
-  );
+  const fileService = provisionalWorkspace
+    ? undefined
+    : new FileDiscoveryService(
+        cwd,
+        settings.context?.fileFiltering?.customIgnoreFiles,
+      );
 
-  const includeDirectories = (
-    bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? [])
-  )
-    .map(resolvePath)
-    .concat((argv.includeDirectories || []).map(resolvePath));
+  const includeDirectories = provisionalWorkspace
+    ? []
+    : (bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? []))
+        .map(resolvePath)
+        .concat((argv.includeDirectories || []).map(resolvePath));
 
   // LSP configuration: enabled only via --experimental-lsp flag
-  const lspEnabled = !bareMode && argv.experimentalLsp === true;
+  const lspEnabled =
+    !provisionalWorkspace && !bareMode && argv.experimentalLsp === true;
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -2271,9 +2277,11 @@ export async function loadCliConfig(
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,
+    provisionalWorkspace,
     includeDirectories,
-    loadMemoryFromIncludeDirectories:
-      bareMode || safeMode
+    loadMemoryFromIncludeDirectories: provisionalWorkspace
+      ? false
+      : bareMode || safeMode
         ? includeDirectories.length > 0
         : (settings.context?.loadFromIncludeDirectories ?? false),
     importFormat: settings.context?.importFormat || 'tree',
@@ -2605,7 +2613,7 @@ export async function loadCliConfig(
         config,
         config.getWorkspaceContext(),
         appEvents,
-        fileService,
+        fileService!,
         ideContextStore,
         {
           requireTrustedWorkspace: folderTrust,

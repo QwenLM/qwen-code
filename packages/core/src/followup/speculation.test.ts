@@ -78,6 +78,58 @@ describe('startSpeculation', () => {
     expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
   });
 
+  it('stops before executing a permission-deferred tool', async () => {
+    const ensureTool = vi.fn();
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn().mockReturnValue(true),
+      ensureTool,
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      if (forkedAgentMocks.sendMessageStream.mock.calls.length === 1) {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call-permission-deferred',
+                        name: 'read_file',
+                        args: { path: '.env' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        };
+      }
+    });
+
+    const state = await startSpeculation(config, 'read .env');
+    await vi.waitFor(() => expect(state.status).toBe('boundary'));
+
+    expect(toolRegistry.isPermissionDeferred).toHaveBeenCalledWith('read_file');
+    expect(ensureTool).not.toHaveBeenCalled();
+
+    await abortSpeculation(state);
+  });
+
   it('stops at a boundary when the host guard denies a speculative invocation', async () => {
     const execute = vi.fn();
     const guard = vi.fn().mockResolvedValue({

@@ -10,6 +10,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../../config/config.js';
 import { Storage } from '../../config/storage.js';
+import { getShellContextEnvVars } from '../../services/shellContextEnv.js';
+import {
+  registerSessionProjectDir,
+  sessionIdContext,
+  unregisterSessionProjectDir,
+} from '../../utils/sessionIdContext.js';
 import {
   listSavedWorkflows,
   resolveSavedWorkflowScript,
@@ -180,7 +186,145 @@ describe('workflow-saved', () => {
           { scriptPath: outside },
           fakeConfig(projectDir),
         ),
-      ).rejects.toThrow(/outside the saved-workflow directories/);
+      ).rejects.toThrow(/outside the workflow script roots/);
+    });
+  });
+
+  describe('resolveSavedWorkflowScript — generated-scripts root', () => {
+    let generatedDir: string;
+
+    beforeEach(() => {
+      generatedDir = new Storage(projectDir).getGeneratedWorkflowsDir();
+    });
+
+    it('reads a {scriptPath} under the generated root', async () => {
+      await fs.mkdir(generatedDir, { recursive: true });
+      const p = path.join(generatedDir, 'qwen-review-1a2b3c.js');
+      await fs.writeFile(p, `return 'generated';`, 'utf8');
+      const resolved = await resolveSavedWorkflowScript(
+        { scriptPath: p },
+        fakeConfig(projectDir),
+      );
+      expect(resolved.script).toBe(`return 'generated';`);
+      expect(resolved.name).toBe('qwen-review-1a2b3c');
+    });
+
+    it('trusts the whole subtree, so a writer may nest per session', async () => {
+      const nested = path.join(generatedDir, 's-abc', 'fanout.js');
+      await fs.mkdir(path.dirname(nested), { recursive: true });
+      await fs.writeFile(nested, `return 'nested';`, 'utf8');
+      const resolved = await resolveSavedWorkflowScript(
+        { scriptPath: nested },
+        fakeConfig(projectDir),
+      );
+      expect(resolved.script).toBe(`return 'nested';`);
+    });
+
+    it('is neither listed as a slash command nor resolvable by name', async () => {
+      await fs.mkdir(generatedDir, { recursive: true });
+      await fs.writeFile(
+        path.join(generatedDir, 'emitted.js'),
+        `return 'generated';`,
+        'utf8',
+      );
+      expect(await listSavedWorkflows(fakeConfig(projectDir))).toEqual([]);
+      await expect(
+        resolveSavedWorkflowScript('emitted', fakeConfig(projectDir)),
+      ).rejects.toThrow(/no workflow with that name.*\(none\)/);
+    });
+
+    it('refuses a sibling of the generated root (no prefix match)', async () => {
+      // `<runs>/generated-evil/x.js` shares the string prefix `generated`
+      // with the root but is not inside it.
+      const sibling = path.join(`${generatedDir}-evil`, 'x.js');
+      await fs.mkdir(path.dirname(sibling), { recursive: true });
+      await fs.writeFile(sibling, `return 'pwned';`, 'utf8');
+      const attempt = resolveSavedWorkflowScript(
+        { scriptPath: sibling },
+        fakeConfig(projectDir),
+      );
+      await expect(attempt).rejects.toThrow(
+        /outside the workflow script roots \(checked: /,
+      );
+      // The refusal names every root it checked — the generated one lives in
+      // the runtime dir, which no debugger would guess from the path alone.
+      await expect(attempt).rejects.toThrow(generatedDir);
+    });
+
+    it('refuses a file that symlinks out of the generated root', async () => {
+      const outside = path.join(projectDir, 'secret.js');
+      await fs.writeFile(outside, `return 'EXFILTRATED';`, 'utf8');
+      await fs.mkdir(generatedDir, { recursive: true });
+      const link = path.join(generatedDir, 'link.js');
+      await fs.symlink(outside, link, 'file');
+      await expect(
+        resolveSavedWorkflowScript(
+          { scriptPath: link },
+          fakeConfig(projectDir),
+        ),
+      ).rejects.toThrow(/outside the workflow script roots/);
+    });
+
+    it('refuses a symlinked generated root', async () => {
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-gen-evil-'));
+      try {
+        await fs.writeFile(
+          path.join(external, 'leak.js'),
+          `return 'EXFILTRATED';`,
+          'utf8',
+        );
+        await fs.mkdir(path.dirname(generatedDir), { recursive: true });
+        await fs.symlink(external, generatedDir, 'dir');
+        const attempt = resolveSavedWorkflowScript(
+          { scriptPath: path.join(generatedDir, 'leak.js') },
+          fakeConfig(projectDir),
+        );
+        await expect(attempt).rejects.toThrow(
+          /outside the workflow script roots/,
+        );
+        // The refused root stays visible in the message: a checked-list it
+        // is silently absent from reads as if the loader never considered it.
+        await expect(attempt).rejects.toThrow(
+          `(checked: ${new Storage(projectDir).getProjectWorkflowsDir()}, ${Storage.getUserWorkflowsDir()}; refused symlinked root: ${generatedDir})`,
+        );
+      } finally {
+        await fs.rm(external, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('resolveSavedWorkflowScript — subprocess reachability contract', () => {
+    it('loads a script at $QWEN_CODE_PROJECT_DIR/workflows/generated', async () => {
+      const sessionId = 'wf-contract';
+      // Mirror Config at session start: publish the storage project dir
+      // under the session id, then read back what a subprocess is handed.
+      registerSessionProjectDir(
+        sessionId,
+        new Storage(projectDir).getProjectDir(),
+      );
+      try {
+        const env = sessionIdContext.run(sessionId, () =>
+          getShellContextEnvVars(),
+        );
+        expect(env['QWEN_CODE_PROJECT_DIR']).toBeDefined();
+        // Literal path segments on purpose: this test must fail if EITHER
+        // half of the contract moves — the env export or the loader root.
+        const p = path.join(
+          env['QWEN_CODE_PROJECT_DIR'],
+          'workflows',
+          'generated',
+          'x.js',
+        );
+        await fs.mkdir(path.dirname(p), { recursive: true });
+        await fs.writeFile(p, `return 'composed';`, 'utf8');
+        const resolved = await resolveSavedWorkflowScript(
+          { scriptPath: p },
+          fakeConfig(projectDir),
+        );
+        expect(resolved.script).toBe(`return 'composed';`);
+      } finally {
+        unregisterSessionProjectDir(sessionId);
+      }
     });
   });
 
@@ -376,9 +520,16 @@ describe('workflow-saved', () => {
 
     it('{scriptPath} into a symlinked root is refused', async () => {
       const p = path.join(projectWorkflowsDir, 'leak.js');
-      await expect(
-        resolveSavedWorkflowScript({ scriptPath: p }, fakeConfig(projectDir)),
-      ).rejects.toThrow(/outside the saved-workflow directories/);
+      const attempt = resolveSavedWorkflowScript(
+        { scriptPath: p },
+        fakeConfig(projectDir),
+      );
+      await expect(attempt).rejects.toThrow(
+        /outside the workflow script roots/,
+      );
+      await expect(attempt).rejects.toThrow(
+        `refused symlinked root: ${projectWorkflowsDir}`,
+      );
     });
 
     it('save into a symlinked root is refused (no write-through)', async () => {

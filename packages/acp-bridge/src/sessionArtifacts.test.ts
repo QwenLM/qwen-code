@@ -4833,6 +4833,80 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('restores workspace artifact metadata without filesystem access', async () => {
+    const sessionId = 's11-restore-workspace-metadata-only';
+    const workspacePath = 'missing/metadata-only.txt';
+    const id = stableSessionArtifactId(sessionId, `workspace:${workspacePath}`);
+    const realpath = vi.spyOn(fs, 'realpath');
+    const stat = vi.spyOn(fs, 'stat');
+    const lstat = vi.spyOn(fs, 'lstat');
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (snapshot) => {
+          snapshots.push(snapshot);
+        },
+      },
+    });
+
+    try {
+      await expect(
+        store.restore(
+          {
+            v: 2,
+            sessionId,
+            sequence: 1,
+            artifacts: [
+              {
+                id,
+                kind: 'file',
+                storage: 'workspace',
+                source: 'tool',
+                status: 'available',
+                title: 'Metadata-only workspace file',
+                workspacePath,
+                sizeBytes: 17,
+                retention: 'restorable',
+                clientRetained: false,
+                createdAt: '2026-07-04T00:00:00.000Z',
+                updatedAt: '2026-07-04T00:00:00.000Z',
+                persistedAt: '2026-07-04T00:00:00.000Z',
+              },
+            ],
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
+          },
+          { workspaceAccess: 'metadata-only' },
+        ),
+      ).resolves.toEqual([]);
+
+      expect(realpath).not.toHaveBeenCalled();
+      expect(stat).not.toHaveBeenCalled();
+      expect(lstat).not.toHaveBeenCalled();
+      await expect(store.recordSnapshot()).resolves.toEqual([]);
+      expect(snapshots).toMatchObject([
+        {
+          artifacts: [
+            {
+              id,
+              status: 'available',
+              sizeBytes: 17,
+              workspacePath,
+            },
+          ],
+        },
+      ]);
+    } finally {
+      realpath.mockRestore();
+      stat.mockRestore();
+      lstat.mockRestore();
+    }
+  });
+
   it('keeps live artifacts when a non-empty restore snapshot fully fails', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's11-restore-fail-closed',
