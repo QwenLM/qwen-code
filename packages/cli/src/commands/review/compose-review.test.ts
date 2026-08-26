@@ -12938,6 +12938,145 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(anchored.body).not.toContain('re-reads the whole diff');
   });
 
+  it('discloses a grafted anchor the running model cannot use', () => {
+    // Issue #9902's recovery grafts a fail-closed winner onto the most
+    // recent anchored own marker, and the side file persists the graft.
+    // When the graft's certifier mismatches the identity this round runs
+    // under, Step 1's same-model gate refuses it and the round re-reads
+    // the full diff — the chain is STILL broken, so persisting the graft
+    // must not silence the disclosure that names the loop.
+    const input = {
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    };
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      sha: 'deadbeef00112233',
+      model: 'model-a@aaaaaaaa',
+      anchorFromRound: 2,
+      findings: [],
+    });
+    const mismatched = composeReview(
+      input,
+      'unknown',
+      true,
+      'model-b@bbbbbbbb',
+    );
+    expect(mismatched.body).toContain('re-reads the whole diff');
+    // …and it names WHY — the split clause, never the false "the round it
+    // recovered had none either": this side file visibly holds the grafted
+    // sha, and the operator reading it must be pointed at the identity
+    // mismatch, not away from it.
+    expect(mismatched.body).toContain(
+      'one certified by an identity other than',
+    );
+    expect(mismatched.body).not.toContain('had none either');
+    // …and the same graft under a MATCHING identity is usable — the graft
+    // breaks the loop, so the disclosure stays silent.
+    const matched = composeReview(input, 'unknown', true, 'model-a@aaaaaaaa');
+    expect(matched.body).not.toContain('re-reads the whole diff');
+    // A graft with NO certifier (an attribution-off source round) is a
+    // mismatch by construction — the fallback is the full review, and the
+    // disclosure fires.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      sha: 'deadbeef00112233',
+      anchorFromRound: 2,
+      findings: [],
+    });
+    const uncertified = composeReview(
+      input,
+      'unknown',
+      true,
+      'model-a@aaaaaaaa',
+    );
+    expect(uncertified.body).toContain('re-reads the whole diff');
+  });
+
+  it('discloses a grafted anchor this round could not use even under a matching certifier', () => {
+    // The same-model gate is only one of Step 1's refusal reasons. A
+    // fail-closed winner never posts a sha, so the graft re-derives
+    // identically every later round: when this round's fetch REFUSED the
+    // re-run it licensed (a deterministic history refusal) or resolved it
+    // to the head (upToDate), the round re-read the full diff and every
+    // later round re-derives the same unusable anchor — the chain is still
+    // broken, and reading the certifier match alone would silence the
+    // disclosure for the whole streak.
+    const input = {
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    };
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      sha: 'deadbeef00112233',
+      model: 'model-a@aaaaaaaa',
+      anchorFromRound: 2,
+      findings: [],
+    });
+    // History-refused: the plan records the re-run's refusal.
+    writeFileSync(
+      input.planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        incremental: {
+          since: 'deadbeef00112233',
+          effective: false,
+          reason: 'not-an-ancestor',
+        },
+      }),
+    );
+    const refused = composeReview(input, 'unknown', true, 'model-a@aaaaaaaa');
+    expect(refused.body).toContain('re-reads the whole diff');
+    // upToDate: the graft resolved to the head — the fence routes the round
+    // onto the full-range plan, which the disclosure must still name.
+    writeFileSync(
+      input.planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        incremental: {
+          since: 'deadbeef00112233',
+          effective: true,
+          upToDate: true,
+        },
+      }),
+    );
+    const upToDate = composeReview(input, 'unknown', true, 'model-a@aaaaaaaa');
+    expect(upToDate.body).toContain('re-reads the whole diff');
+    // A re-run that NARROWED is a usable graft — the loop is broken and the
+    // disclosure stays silent.
+    writeFileSync(
+      input.planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        incremental: { since: 'deadbeef00112233', effective: true },
+      }),
+    );
+    const narrowed = composeReview(input, 'unknown', true, 'model-a@aaaaaaaa');
+    expect(narrowed.body).not.toContain('re-reads the whole diff');
+    // And a plan with NO recorded incremental outcome keeps the same-model
+    // gate as the only witness — nothing says the graft was unusable.
+    writeFileSync(input.planPath, JSON.stringify({ prNumber: 8255 }));
+    const unrecorded = composeReview(
+      input,
+      'unknown',
+      true,
+      'model-a@aaaaaaaa',
+    );
+    expect(unrecorded.body).not.toContain('re-reads the whole diff');
+  });
+
   it('agrees with the ledger about an out-of-bounds claimed id', () => {
     // `idFor` refuses to carry an id the serializer would reject and mints a
     // fresh one. Read as a re-post here, the marker's own work list would
