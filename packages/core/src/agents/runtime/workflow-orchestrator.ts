@@ -7,12 +7,6 @@
 import { randomBytes } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import * as os from 'node:os';
-import {
-  E_TIMEOUT,
-  Mutex,
-  withTimeout,
-  type MutexInterface,
-} from 'async-mutex';
 import type { Config } from '../../config/config.js';
 import {
   createWorkflowSandbox,
@@ -963,7 +957,7 @@ async function runOverridePath(
     );
   }
   if (opts.isolation === 'worktree') {
-    worktreeIsolation = await provisionWorkflowWorktree(config, signal);
+    worktreeIsolation = await provisionWorkflowWorktree(config);
     effectiveContext = createDirScopedConfigOverride(
       config,
       worktreeIsolation.path,
@@ -1268,159 +1262,6 @@ interface WorkflowWorktreeIsolation {
 }
 
 /**
- * Per-acquire deadline for the provisioning lock below. A wedged
- * `git worktree add` inside the critical section (an unresponsive network
- * filesystem, a blocking post-checkout hook — the same hazard
- * GitWorktreeService's fetch-PR timeout names) would otherwise hold this
- * process-global lock forever: every subsequent worktree dispatch in the
- * process queues behind it with no way out, each burning its run's wall-clock
- * budget and dying with a misleading "exceeded N ms of active time" error.
- * With the deadline a waiter instead fails fast with an error that names
- * serialized provisioning. Sized well clear of a legitimate full window's
- * serialised provisioning (each provision runs well under a second) yet far
- * below the run's wall-clock cap, so a wedged holder reads as a provisioning
- * stall, not a wall-clock timeout.
- */
-const WORKTREE_PROVISION_LOCK_TIMEOUT_MS = 120_000;
-
-let worktreeProvisionLockTimeoutMs = WORKTREE_PROVISION_LOCK_TIMEOUT_MS;
-
-/**
- * Serialises worktree provisioning across a run's dispatch window. Sixteen
- * concurrent `git worktree add` calls contend on `.git/worktrees` and the
- * index lock; the losers fail and become `null` slots in the fan-out, which
- * reads as "agent returned nothing" rather than "git lost a race". Creating
- * a worktree takes well under a second, so queueing them costs far less than
- * the retries it prevents. Module-level on purpose: the contention is on the
- * repository, not on any one run.
- */
-let worktreeProvisionLock: MutexInterface = withTimeout(
-  new Mutex(),
-  WORKTREE_PROVISION_LOCK_TIMEOUT_MS,
-);
-
-/** Dispatches currently parked on the lock's acquire wait (test seam). */
-let worktreeProvisionLockWaiters = 0;
-
-/**
- * Test seam: rebuild the provisioning lock so a holder wedged by one test
- * cannot queue the next test's dispatches, optionally shortening the acquire
- * deadline so a wait timeout is observable without a production-length wait.
- */
-export function resetWorktreeProvisionLockForTesting(timeoutMs?: number): void {
-  worktreeProvisionLockTimeoutMs =
-    timeoutMs ?? WORKTREE_PROVISION_LOCK_TIMEOUT_MS;
-  worktreeProvisionLock = withTimeout(
-    new Mutex(),
-    worktreeProvisionLockTimeoutMs,
-  );
-}
-
-const ABORTED_WHILE_WAITING_MESSAGE =
-  `agent({isolation:'worktree'}): run aborted while waiting to ` +
-  `provision the worktree.`;
-
-/**
- * Test seam: how many dispatches are currently parked on the provisioning
- * lock's acquire wait. Lets a test reach the exact parked state the abort
- * race exists for, without wall-clock pauses.
- */
-export function worktreeProvisionLockWaiterCountForTesting(): number {
-  return worktreeProvisionLockWaiters;
-}
-
-/**
- * Acquires the provisioning lock, racing the wait against the dispatch's
- * signal: an abort while parked rejects at once instead of draining the
- * acquire deadline and misreporting the cancellation as a provisioning
- * stall. If the acquire only resolves after the race rejected, the lock is
- * released immediately so the abandoned wait cannot wedge it.
- */
-async function acquireProvisionLockOrAbort(
-  signal?: AbortSignal,
-): Promise<() => void> {
-  worktreeProvisionLockWaiters += 1;
-  try {
-    if (!signal) {
-      return await worktreeProvisionLock.acquire();
-    }
-    return await new Promise<() => void>((resolve, reject) => {
-      const onAbort = () => reject(new Error(ABORTED_WHILE_WAITING_MESSAGE));
-      signal.addEventListener('abort', onAbort, { once: true });
-      worktreeProvisionLock.acquire().then(
-        (release) => {
-          signal.removeEventListener('abort', onAbort);
-          if (signal.aborted) {
-            // The race already rejected; drop the lock no one will use.
-            release();
-            return;
-          }
-          resolve(release);
-        },
-        (error) => {
-          signal.removeEventListener('abort', onAbort);
-          reject(error);
-        },
-      );
-    });
-  } finally {
-    worktreeProvisionLockWaiters -= 1;
-  }
-}
-
-/**
- * Serialised, abort-aware provisioning entry point: waits on the lock
- * (bounded by the acquire deadline), racing the wait against the dispatch's
- * signal so an abort while parked rejects at once instead of draining the
- * deadline and misreporting the cancellation as a stall. Delegates to the
- * exclusive provision once the lock is held.
- */
-async function provisionWorkflowWorktree(
-  config: Config,
-  signal?: AbortSignal,
-): Promise<WorkflowWorktreeIsolation> {
-  if (signal?.aborted) {
-    throw new Error(
-      `agent({isolation:'worktree'}): run aborted before the worktree ` +
-        `could be provisioned.`,
-    );
-  }
-  let release: () => void;
-  try {
-    release = await acquireProvisionLockOrAbort(signal);
-  } catch (err) {
-    if (err === E_TIMEOUT) {
-      // An abort that races the deadline still reads as a cancellation,
-      // not a stall.
-      if (signal?.aborted) {
-        throw new Error(ABORTED_WHILE_WAITING_MESSAGE);
-      }
-      throw new Error(
-        `agent({isolation:'worktree'}): worktree provisioning is ` +
-          `serialised and this dispatch did not acquire the provisioning ` +
-          `lock within ${worktreeProvisionLockTimeoutMs}ms — another ` +
-          `provision is likely stalled (a hung git process or a blocked ` +
-          `filesystem). Retrying now would wait out the same deadline: ` +
-          `kill the wedged git process, or restart the session, then ` +
-          `dispatch again.`,
-      );
-    }
-    throw err;
-  }
-  try {
-    // Re-check once the lock is held: a run cancelled while this dispatch
-    // queued must not provision — then tear down — a worktree it will
-    // never use.
-    if (signal?.aborted) {
-      throw new Error(ABORTED_WHILE_WAITING_MESSAGE);
-    }
-    return await provisionWorkflowWorktreeExclusively(config);
-  } finally {
-    release();
-  }
-}
-
-/**
  * Provision an isolation worktree for one `agent({isolation:'worktree'})`
  * call. Mirrors the AgentTool provision path (agent.ts:1849-1963) with
  * the same fail-closed dirty-parent refuse: if the parent working tree
@@ -1430,7 +1271,7 @@ async function provisionWorkflowWorktree(
  * UX so model authors can rely on consistent behavior across both call
  * sites.
  */
-async function provisionWorkflowWorktreeExclusively(
+async function provisionWorkflowWorktree(
   config: Config,
 ): Promise<WorkflowWorktreeIsolation> {
   const cwd = config.getTargetDir();
@@ -1456,12 +1297,6 @@ async function provisionWorkflowWorktreeExclusively(
   const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
   const wtService =
     projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
-
-  // Repair the auto-generated `.qwen/.gitignore` BEFORE the dirty gate:
-  // an untracked pre-fix body is exactly what makes the gate report dirty,
-  // and `createUserWorktree`'s internal repair sits behind the very gate
-  // it exists to clear.
-  await wtService.ensureWorktreesGitignored();
 
   let parentDirty = false;
   try {

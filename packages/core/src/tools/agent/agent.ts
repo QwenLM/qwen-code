@@ -2888,12 +2888,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const wtService =
           projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
 
-        // Repair the auto-generated `.qwen/.gitignore` BEFORE the dirty
-        // gate: an untracked pre-fix body is exactly what makes the gate
-        // report dirty, and `createUserWorktree`'s internal repair sits
-        // behind the very gate it exists to clear.
-        await wtService.ensureWorktreesGitignored();
-
         // Refuse isolation when the parent has uncommitted changes.
         // `git worktree add -b <branch> <path> <base>` checks out the
         // base branch's tip — uncommitted edits in the parent's

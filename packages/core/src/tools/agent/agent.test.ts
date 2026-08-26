@@ -2508,21 +2508,6 @@ describe('AgentTool', () => {
 
     it('passes custom ignore files into worktree isolation file service', async () => {
       vi.useRealTimers();
-      const { GitWorktreeService } = await import(
-        '../../services/gitWorktreeService.js'
-      );
-      // The pre-gate repair must run BEFORE the dirty check: an untracked
-      // legacy `.qwen/.gitignore` is what makes the gate report dirty, so
-      // a repair queued behind the gate would never run. Spies run the real
-      // implementations; only the call order is asserted.
-      const repairSpy = vi.spyOn(
-        GitWorktreeService.prototype,
-        'ensureWorktreesGitignored',
-      );
-      const gateSpy = vi.spyOn(
-        GitWorktreeService.prototype,
-        'hasWorktreeChanges',
-      );
       const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wt-'));
       try {
         execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
@@ -2575,14 +2560,7 @@ describe('AgentTool', () => {
             .getFileService()
             .getQwenIgnoreFileDisplayForPath('secret.txt'),
         ).toBe('.cursorignore');
-        expect(repairSpy).toHaveBeenCalled();
-        expect(gateSpy).toHaveBeenCalled();
-        expect(repairSpy.mock.invocationCallOrder[0]).toBeLessThan(
-          gateSpy.mock.invocationCallOrder[0],
-        );
       } finally {
-        repairSpy.mockRestore();
-        gateSpy.mockRestore();
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();
       }
