@@ -273,6 +273,15 @@ export function extractHunkPatch(
  * file back while the report claims a content revert. The pipeline's own
  * captures always use default prefixes; a non-standard one arrives only
  * through arbitrary `--diff`, and refusing it is safe where mutating is not.
+ *
+ * This is a SYNTACTIC first-filter — it catches prefixes that do not even look
+ * like `a/`/`b/` (`--src-prefix=old/`, crossed prefixes, bare `--no-prefix`
+ * tokens) cheaply, before any apply. It CANNOT catch a `--no-prefix` /
+ * `--src-prefix=a/…` capture whose literal paths merely begin `a/`/`b/`: those
+ * are indistinguishable from default prefixes by token shape alone. The
+ * correctness backstop for that class is grounded in the TREE, not the token —
+ * `runRevertHunk` reclassifies a `--check` failure as a harness fact (exit 2)
+ * whenever git's own `-p1` target does not exist in the tree.
  */
 export function sectionUnsafeToRevert(
   diffText: string,
@@ -539,6 +548,30 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
     };
   }
   const patch = extractHunkPatch(diffText, file, sel.n);
+  // The file `git apply -R -p1` will actually TOUCH — its own path resolution,
+  // not a guess about the prefix. `-p1` strips exactly one leading path
+  // component from each side (assuming git's default `a/` `b/`); the reverse
+  // apply modifies the non-`/dev/null` side. Grounding the prefix assumption in
+  // this resolved path (does it exist in the tree?) is what the syntactic
+  // `sectionUnsafeToRevert` gate cannot do: a `--no-prefix` or `--src-prefix`
+  // capture whose tokens merely LOOK like `a/` `b/` resolves, after the strip,
+  // to a path that is simply not in the tree.
+  const p1strip = (raw: string): string => {
+    const t = raw.startsWith('"') ? raw.slice(1, -1) : raw;
+    if (t === '/dev/null') return t;
+    const slash = t.indexOf('/');
+    return slash >= 0 ? t.slice(slash + 1) : t;
+  };
+  const patchLines = patch.split('\n');
+  const p1Minus = p1strip(
+    patchLines.find((l) => l.startsWith('--- '))?.slice(4) ?? '',
+  );
+  const p1Plus = p1strip(
+    patchLines.find((l) => l.startsWith('+++ '))?.slice(4) ?? '',
+  );
+  // -R modifies the side that is NOT /dev/null: the `+++` (new) side for an
+  // edit or creation, the `---` (old) side for a deletion (un-delete).
+  const p1Target = p1Plus !== '/dev/null' ? p1Plus : p1Minus;
 
   const tree = resolve(args.tree);
   // git apply needs no repository, so a --tree that is a plain (non-repo)
@@ -612,6 +645,23 @@ export function runRevertHunk(args: RevertHunkArgs): RevertHunkReport {
       };
     }
     if (check.status !== 0) {
+      // Structural prefix check, grounded in the tree rather than token shape:
+      // if git's own `-p1` target does not EXIST here, the refusal is not a
+      // coupling fact about the hunk — git could not find the file to revert.
+      // That is either a non-default-prefix capture (git strips one component
+      // assuming a/ b/, so `--no-prefix`/`--src-prefix` tokens resolve to a path
+      // that is not there) or a wrong --tree. Classify it as a harness fact
+      // (exit 2), not the exit-1 coupling class a verifier records against the
+      // diff. Only the "target genuinely present but content no longer matches"
+      // case — a real overlap/coupling — stays exit 1.
+      if (p1Target !== '/dev/null' && !existsSync(join(tree, p1Target))) {
+        return {
+          applied: false,
+          hunk: entry,
+          harnessFailure: true,
+          note: `hunk ${args.hunk}: git apply -R -p1 resolves the target to ${JSON.stringify(p1Target)}, which does not exist in ${tree} — so this is a harness fact, not a coupling refusal about the hunk. The capture likely uses non-default diff prefixes (git strips one leading component, assuming a/ b/), or --tree points at the wrong tree. Recapture with git's default prefixes (drop --no-prefix/--src-prefix/--dst-prefix); nothing was changed.`,
+        };
+      }
       return {
         applied: false,
         hunk: entry,

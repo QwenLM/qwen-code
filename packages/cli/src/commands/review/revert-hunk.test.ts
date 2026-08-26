@@ -335,6 +335,76 @@ describe('runRevertHunk', () => {
     expect(readFileSync(join(dir, 'caf\u00e9.txt'), 'utf8')).toBe(before);
   });
 
+  it('grounds the prefix in the tree: a --no-prefix capture under a literal b/ dir is a harness fact, not a coupling refusal', () => {
+    // The syntactic gate CANNOT catch this: a real file under a top-level dir
+    // named `b`, captured with --no-prefix, has tokens (`+++ b/new`) that are
+    // indistinguishable from a default `b/` prefix, so it passes the gate. But
+    // git apply -R -p1 strips the `b/` and targets `new`, which is not in the
+    // tree — so the refusal is a prefix/tree fact (exit 2), not the exit-1
+    // coupling fact git's "No such file" would otherwise be recorded as.
+    const dir = tempDir('rh-noprefix-a-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    git(dir, 'commit', '-qm', 'empty', '--allow-empty');
+    mkdirSync(join(dir, 'b'), { recursive: true });
+    writeFileSync(join(dir, 'b', 'new'), 'line1\nline2\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'create b/new');
+    const diffText = git(dir, 'diff', '--no-prefix', 'HEAD~1', 'HEAD');
+    const diffPath = join(dir, 'np.diff');
+    writeFileSync(diffPath, diffText);
+    // Sanity: the token really looks like a default b/ prefix.
+    expect(diffText).toContain('+++ b/new');
+    const id = listHunks(diffText)[0].id;
+    const before = readFileSync(join(dir, 'b', 'new'), 'utf8');
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: id });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.conflict).toBeUndefined(); // NOT the exit-1 coupling class
+    expect(r.note).toContain('non-default diff prefixes');
+    // The real file under b/ is untouched.
+    expect(readFileSync(join(dir, 'b', 'new'), 'utf8')).toBe(before);
+  });
+
+  it('grounds the prefix in the tree: a --no-prefix rename under literal a/ b/ dirs never rewinds the wrong file', () => {
+    // Entrance (b): a rename a/x → b/y under literal top-level dirs, captured
+    // with --no-prefix and rename metadata, passes the syntactic gate AND the
+    // move/copy rewrite. But git apply -R -p1 resolves the target to `y`, which
+    // is not in the tree (the real file is b/y) — caught by the tree check
+    // before any mutation, so the wrong file is never rewound.
+    const dir = tempDir('rh-noprefix-b-');
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    mkdirSync(join(dir, 'a'), { recursive: true });
+    writeFileSync(join(dir, 'a', 'x'), 'line1\nline2\nline3\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'base');
+    mkdirSync(join(dir, 'b'), { recursive: true });
+    writeFileSync(join(dir, 'b', 'y'), 'line1\nLINE2\nline3\n'); // renamed + edited
+    rmSync(join(dir, 'a', 'x'));
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-qm', 'rename a/x -> b/y with edit');
+    const diffText = git(dir, 'diff', '-M', '--no-prefix', 'HEAD~1', 'HEAD');
+    const diffPath = join(dir, 'np-rename.diff');
+    writeFileSync(diffPath, diffText);
+    // Sanity: it really is a --no-prefix rename whose tokens look default.
+    expect(diffText).toContain('rename to b/y');
+    const id = listHunks(diffText).find((h) => h.path === 'b/y')?.id ?? 'b/y:1';
+    const beforeY = readFileSync(join(dir, 'b', 'y'), 'utf8');
+    const r = runRevertHunk({ diff: diffPath, tree: dir, hunk: id });
+    expect(r.applied).toBe(false);
+    expect(r.harnessFailure).toBe(true);
+    expect(r.conflict).toBeUndefined();
+    // The real renamed file is untouched — no wrong-file rewind.
+    expect(readFileSync(join(dir, 'b', 'y'), 'utf8')).toBe(beforeY);
+    // And no stray root file `y` was created.
+    expect(existsSync(join(dir, 'y'))).toBe(false);
+  });
+
   it('refuses a hand-crafted section whose paths differ without rename metadata', () => {
     // git never emits `--- a/old` / `+++ b/new` without a rename/copy header;
     // a hand-assembled --diff can, and reverse-applying it would MOVE the
