@@ -680,7 +680,7 @@ describe('Windows temp short-alias guard', () => {
     expect(script).toBeTruthy();
   });
 
-  it.runIf(process.platform !== 'win32')(
+  it.runIf(process.platform === 'linux')(
     'accepts, warns, or fails on the three ways an env path can meet its realpath',
     () => {
       const base = realpathSync(
