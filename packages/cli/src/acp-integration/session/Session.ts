@@ -7398,17 +7398,27 @@ export class Session implements SessionContext {
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
       try {
-        rawParts =
-          message.kind === 'text'
-            ? [{ text: message.message }]
-            : await withTimeoutSignal(
-                abortSignal,
-                MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                (signal) =>
-                  this.#resolvePrompt(message.content, signal, {
-                    onFullTurnModel: options.onFullTurnModel,
-                  }),
-              );
+        if (message.kind === 'text') {
+          rawParts = [{ text: message.message }];
+        } else {
+          rawParts = await withTimeoutSignal(
+            abortSignal,
+            MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+            (signal) =>
+              this.#resolvePrompt(message.content, signal, {
+                deferBridgeConversions: true,
+              }),
+          );
+          // Keep local resolution bounded, then let media bridges own their
+          // longer timeouts while remaining cancellable by the real turn.
+          rawParts = await this.#applyBridgeConversionsIfNeeded(
+            rawParts,
+            abortSignal,
+            options.onFullTurnModel,
+          );
+          // Bridges report cancellation as skipped instead of throwing.
+          abortSignal.throwIfAborted();
+        }
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
           return parts;
@@ -12115,6 +12125,7 @@ export class Session implements SessionContext {
     options: {
       promptLast?: boolean;
       onFullTurnModel?: (model: string) => boolean;
+      deferBridgeConversions?: boolean;
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
@@ -12126,6 +12137,14 @@ export class Session implements SessionContext {
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
+    const finish = (parts: Part[]) =>
+      options.deferBridgeConversions
+        ? parts
+        : this.#applyBridgeConversionsIfNeeded(
+            parts,
+            abortSignal,
+            options.onFullTurnModel,
+          );
 
     const parts = message.map((part) => {
       switch (part.type) {
@@ -12270,19 +12289,11 @@ export class Session implements SessionContext {
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
-      return this.#applyBridgeConversionsIfNeeded(
-        partsToSend,
-        abortSignal,
-        options.onFullTurnModel,
-      );
+      return finish(partsToSend);
     }
 
     if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
-      return this.#applyBridgeConversionsIfNeeded(
-        [...partsToSend, ...extensionParts, ...mcpServerParts],
-        abortSignal,
-        options.onFullTurnModel,
-      );
+      return finish([...partsToSend, ...extensionParts, ...mcpServerParts]);
     }
 
     // Construct the initial part of the query for the LLM
@@ -12389,11 +12400,7 @@ export class Session implements SessionContext {
       ? [...referenceParts, promptPart]
       : [promptPart, ...referenceParts];
 
-    return this.#applyBridgeConversionsIfNeeded(
-      processedQueryParts,
-      abortSignal,
-      options.onFullTurnModel,
-    );
+    return finish(processedQueryParts);
   }
 
   async #applyBridgeConversionsIfNeeded(
