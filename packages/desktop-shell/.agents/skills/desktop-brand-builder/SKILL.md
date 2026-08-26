@@ -123,7 +123,10 @@ source of truth for patching config and generating resources.
 What the script does:
 
 1. Patches `src-tauri/tauri.conf.json`: `productName`, `identifier`,
-   `bundle.shortDescription`, and `plugins.updater.endpoints`.
+   `bundle.shortDescription`, and `plugins.updater.endpoints`. When
+   `updaterEndpoints` is empty it also clears `bundle.createUpdaterArtifacts`
+   and removes the official `plugins.updater.pubkey`; a brand supplying its
+   own feed must supply its own pubkey.
 2. Regenerates the full icon set from the logo via
    `npx --yes @tauri-apps/cli icon <logo>` (falls back to a warning if the
    CLI cannot run; in that case copy the logo over `src-tauri/icons/icon.png`

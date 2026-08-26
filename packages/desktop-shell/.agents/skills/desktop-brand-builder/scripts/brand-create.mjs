@@ -88,6 +88,11 @@ function loadConfig(path) {
   if (!logo || !existsSync(logo) || !statSync(logo).isFile()) {
     fail(`logo must be an existing file path, got: ${input.logo}`);
   }
+  const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.svg', '.ico', '.webp']);
+  const logoExt = extname(logo).toLowerCase();
+  if (!IMAGE_EXTS.has(logoExt)) {
+    fail(`logo must be an image file (.png/.jpg/.jpeg/.svg/.ico/.webp), got: ${input.logo}`);
+  }
 
   const words = titleWords(brandId);
   return {
@@ -133,9 +138,13 @@ function patchTauriConfig(shellRoot, brand) {
 }
 
 function generateIcons(shellRoot, brand) {
+  // shell:true is required on Windows so npx.cmd resolves (CVE-2024-27980
+  // blocks shell-less .cmd spawns). Quote the logo path to prevent spaces
+  // or other characters from being re-interpreted by the shell.
+  const safeLogo = `"${brand.logo.replace(/"/g, '\\"')}"`;
   const result = spawnSync(
     'npx',
-    ['--yes', '@tauri-apps/cli', 'icon', brand.logo],
+    ['--yes', '@tauri-apps/cli', 'icon', safeLogo],
     { cwd: shellRoot, stdio: 'inherit', shell: true },
   );
   if (result.status === 0) {
@@ -166,9 +175,11 @@ function patchBootstrap(shellRoot, brand) {
     if (!existsSync(filePath)) continue;
     let text = readFileSync(filePath, 'utf8');
     const before = text;
-    text = text.replaceAll('Qwen Code', brand.appName);
+    // Use function replacers to avoid `$` pattern interpretation
+    // (e.g. `$&` in the replacement string would expand to the matched text).
+    text = text.replaceAll('Qwen Code', () => brand.appName);
     if (file === 'index.html') {
-      text = text.replaceAll('qwen-code-logo.svg', brandLogoName);
+      text = text.replaceAll('qwen-code-logo.svg', () => brandLogoName);
     }
     if (text !== before) {
       writeFileSync(filePath, text);
