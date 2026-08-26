@@ -2219,6 +2219,46 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('leaves the stream open when attach setup fails', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(),
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const originalPatch = supervisorStore.patchAgentViewSessionState;
+    const patchSpy = vi
+      .spyOn(supervisorStore, 'patchAgentViewSessionState')
+      .mockImplementation(async (sessionId, patch, options) => {
+        if (patch.attachState === 'attached') {
+          throw new Error('attach write failed');
+        }
+        return originalPatch(sessionId, patch, options);
+      });
+    const socket = new FakeAttachSocket();
+
+    try {
+      await expect(
+        handler.attachStream?.(
+          { sessionId: result.sessionId },
+          socket as unknown as Socket,
+          'request-1',
+        ),
+      ).rejects.toThrow('attach write failed');
+      expect(socket.writableEnded).toBe(false);
+    } finally {
+      socket.destroy();
+      patchSpy.mockRestore();
+      await fs.rm(globalDir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects send and answer while a live attach is open', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -3162,6 +3202,90 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('fails closed when worker liveness data is unreadable', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const seedHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(999_999_002, 999_999_001),
+    });
+    const result = (await seedHandler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    const paths = getAgentViewSessionPaths(result.sessionId, { globalDir });
+    await fs.writeFile(paths.workerPath, '{ invalid json', 'utf8');
+    const recoveredHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(999_999_003, 999_999_004),
+    });
+
+    await expect(
+      recoveredHandler.stop?.({ sessionId: result.sessionId }),
+    ).rejects.toThrow('temporarily unreadable');
+    await expect(
+      readAgentViewSessionState(result.sessionId, { globalDir }),
+    ).resolves.toMatchObject({
+      sessionState: 'starting',
+      processState: 'starting',
+    });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
+  it('clears stale worker pids with the terminal heal', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const seedHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(999_999_002, 999_999_001),
+    });
+    const result = (await seedHandler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    await patchSessionStateForTest(result.sessionId, globalDir, {
+      sessionState: 'working',
+      processState: 'alive',
+    });
+    const recoveredHandler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => fakePtyHost(999_999_003, 999_999_004),
+    });
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+      const error = new Error('not running') as NodeJS.ErrnoException;
+      error.code = 'ESRCH';
+      throw error;
+    });
+
+    try {
+      await recoveredHandler.list();
+      const worker = JSON.parse(
+        await fs.readFile(
+          getAgentViewSessionPaths(result.sessionId, { globalDir }).workerPath,
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      expect(worker).not.toHaveProperty('hostPid');
+      expect(worker).not.toHaveProperty('workerPid');
+      await expect(
+        readAgentViewSessionState(result.sessionId, { globalDir }),
+      ).resolves.toMatchObject({
+        sessionState: 'failed',
+        processState: 'exited',
+      });
+    } finally {
+      killSpy.mockRestore();
+      await fs.rm(globalDir, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed instead of signaling unauthenticated stored pids', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),
@@ -3316,16 +3440,24 @@ describe('Agent View supervisor process helpers', () => {
         return snapshots;
       });
     const list = handler.list();
-    await read;
-    await Promise.resolve();
-    snapshotSpy.mockRestore();
-    releaseRetire();
+    let listError: unknown;
+    try {
+      await read;
+      await expect(list).resolves.toHaveLength(1);
+    } catch (error) {
+      listError = error;
+    } finally {
+      snapshotSpy.mockRestore();
+      releaseRetire();
+    }
 
     await expect(respawn).resolves.toEqual({
       sessionId: result.sessionId,
       respawned: true,
     });
-    await list;
+    if (listError) {
+      throw listError;
+    }
     const token = await readWorkerTokenForTest(result.sessionId, globalDir);
     await expect(
       handler.workerControl?.({ sessionId: result.sessionId, token }),

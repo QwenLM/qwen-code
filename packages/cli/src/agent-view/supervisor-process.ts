@@ -23,6 +23,7 @@ import type {
   AgentViewSessionStateFile,
   AgentViewWorkerControlEvent,
   AgentViewWorkerEvent,
+  AgentViewWorkerFile,
 } from './protocol.js';
 import type {
   AgentViewPtyHostExit,
@@ -515,7 +516,10 @@ class AgentViewSupervisorProcessHandler
         const connected =
           this.workers.has(adoption.sessionId) ||
           (await this.workers.reconnectSessionHostLocked(adoption.sessionId));
-        const worker = await readAgentViewWorker(adoption.sessionId, store);
+        const worker = await readAgentViewWorkerForLiveness(
+          adoption.sessionId,
+          store,
+        );
         const pidAlive =
           isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid);
         if (connected || pidAlive || worker?.hostEndpoint) {
@@ -1653,6 +1657,7 @@ class AgentViewSupervisorProcessHandler
     }, DEFAULT_ATTACH_LEASE_HEARTBEAT_MS);
     heartbeat.unref?.();
     let bridged = false;
+    let propagatingError = false;
     try {
       if (
         controller.signal.aborted ||
@@ -1678,6 +1683,9 @@ class AgentViewSupervisorProcessHandler
         pty: host,
         detachSignal: controller.signal,
       });
+    } catch (error) {
+      propagatingError = !bridged;
+      throw error;
     } finally {
       clearInterval(heartbeat);
       const wasCurrent = this.attachSockets.get(sessionId) === socket;
@@ -1695,7 +1703,9 @@ class AgentViewSupervisorProcessHandler
           // Best-effort: a store error during detach must not mask
           // the original error from the try block.
         }
-        socket.end();
+        if (bridged || !propagatingError) {
+          socket.end();
+        }
       }
       // Pre-bridge failure: leave the socket open so the RPC layer can
       // deliver the structured error envelope instead of a bare EOF.
@@ -2069,7 +2079,10 @@ class WorkerRegistry {
       await markStoppedSession(sessionId, this.store, 'alive');
       return;
     }
-    const storedWorker = await readAgentViewWorker(sessionId, this.store);
+    const storedWorker = await readAgentViewWorkerForLiveness(
+      sessionId,
+      this.store,
+    );
     if (
       [storedWorker?.hostPid, storedWorker?.workerPid].some(
         (pid) => pid !== undefined && isPidRunning(pid),
@@ -2644,7 +2657,7 @@ class WorkerRegistry {
   }
 
   private async assertNoStoredWorkerProcess(sessionId: string): Promise<void> {
-    const worker = await readAgentViewWorker(sessionId, this.store);
+    const worker = await readAgentViewWorkerForLiveness(sessionId, this.store);
     for (const pid of [worker?.hostPid, worker?.workerPid]) {
       if (!pid) continue;
       if (isPidRunning(pid)) {
@@ -2907,6 +2920,9 @@ class WorkerRegistry {
       state.sessionState === 'stopped' &&
       state.processState === 'alive'
     ) {
+      if (this.hostSetupQueues.has(state.sessionId)) {
+        return state;
+      }
       return this.withHostSetupLock(state.sessionId, async () => {
         const latest = await readAgentViewSessionState(
           state.sessionId,
@@ -2933,7 +2949,10 @@ class WorkerRegistry {
         }
         return state;
       }
-      const worker = await readAgentViewWorker(state.sessionId, this.store);
+      const worker = await readAgentViewWorkerForLiveness(
+        state.sessionId,
+        this.store,
+      );
       if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
         return state;
       }
@@ -2949,7 +2968,10 @@ class WorkerRegistry {
       const connected =
         this.ptyHosts.has(state.sessionId) || (await reconnectHost());
       if (!connected) {
-        const worker = await readAgentViewWorker(state.sessionId, this.store);
+        const worker = await readAgentViewWorkerForLiveness(
+          state.sessionId,
+          this.store,
+        );
         if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
           return state;
         }
@@ -3023,7 +3045,10 @@ class WorkerRegistry {
           : ((await readAgentViewSessionState(state.sessionId, this.store)) ??
               state);
       }
-      const worker = await readAgentViewWorker(state.sessionId, this.store);
+      const worker = await readAgentViewWorkerForLiveness(
+        state.sessionId,
+        this.store,
+      );
       if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
         return state;
       }
@@ -3072,7 +3097,10 @@ class WorkerRegistry {
       return state;
     }
 
-    const worker = await readAgentViewWorker(state.sessionId, this.store);
+    const worker = await readAgentViewWorkerForLiveness(
+      state.sessionId,
+      this.store,
+    );
     if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
       return state;
     }
@@ -3115,6 +3143,9 @@ class WorkerRegistry {
       },
       this.store,
     );
+    if (appliedPatch) {
+      await clearAgentViewWorkerPids(state.sessionId, this.store);
+    }
     return appliedPatch ? { ...state, ...appliedPatch } : state;
   }
 }
@@ -3676,6 +3707,51 @@ async function readOrThrowIfAbsent<T>(
   throw new Error(
     `Agent View record at ${filePath} is temporarily unreadable. Retry the operation.`,
   );
+}
+
+async function readAgentViewWorkerForLiveness(
+  sessionId: string,
+  options: { globalDir?: string },
+): Promise<AgentViewWorkerFile | undefined> {
+  const workerPath = getAgentViewSessionPaths(sessionId, options).workerPath;
+  const filePresent = async () => {
+    try {
+      await fs.promises.access(workerPath);
+      return true;
+    } catch (error) {
+      if (isEnoent(error)) {
+        return false;
+      }
+      throw new Error(
+        `Agent View worker record at ${workerPath} is temporarily unreadable. Retry the operation.`,
+        { cause: error },
+      );
+    }
+  };
+  let worker = await readAgentViewWorker(sessionId, options);
+  if (worker) {
+    return worker;
+  }
+  if (!(await filePresent())) {
+    return undefined;
+  }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 50 * attempt));
+    worker = await readAgentViewWorker(sessionId, options);
+    if (worker) {
+      return worker;
+    }
+    if (!(await filePresent())) {
+      return undefined;
+    }
+  }
+  throw new Error(
+    `Agent View worker record at ${workerPath} is temporarily unreadable. Retry the operation.`,
+  );
+}
+
+function isEnoent(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
 async function applyWorkerEvent(
