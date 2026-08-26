@@ -2805,6 +2805,83 @@ describe('LoopDetectionService', () => {
       expect(fired).toBe(false);
     });
 
+    it('does not accumulate an oscillating board toward the global-duplicate halt (heuristics on)', () => {
+      // A board flipping between two byte-identical states returns a result
+      // different from its predecessor on EVERY poll — changed-state
+      // progress — even though each (call, result) pair recurs across the
+      // turn. Turn-wide pair totals would reach the threshold here; the
+      // consecutive identical-result count must not.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('oscillating-global');
+      let detected = false;
+      for (let i = 0; i < 4 * GLOBAL_DUPLICATE_THRESHOLD && !detected; i++) {
+        detected = heuristicService.addAndCheck(taskListEvent(`call-${i}`));
+        if (detected) break;
+        detected = heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(i % 2 === 0 ? 'board A' : 'board B'),
+        );
+      }
+      expect(detected).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('keeps an oscillating board alive past the adaptive cap (skipLoopDetection default)', () => {
+      // CLI default (skipLoopDetection=true): the pair totals previously
+      // fed capMaxKeyRepeat, so an oscillating board past the 100-call soft
+      // cap was halted by the always-on adaptive cap. Every poll changing
+      // the result must keep the stuck signal at bay instead.
+      const defaultCapService = new LoopDetectionService(makeConfig());
+      defaultCapService.reset('oscillating-cap');
+      let fired = false;
+      for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN + 20; i++) {
+        fired = defaultCapService.checkAlwaysOnSafeties(
+          taskListEvent(`call-${i}`),
+        );
+        if (fired) break;
+        fired = defaultCapService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(i % 2 === 0 ? 'board A' : 'board B'),
+        );
+        if (fired) break;
+      }
+      expect(fired).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('still halts an interleaved frozen board via the adaptive cap', () => {
+      // The other direction under the CLI default: a genuinely frozen board
+      // (same result on every poll) interleaved with other calls must still
+      // build the stuck signal and trip the adaptive cap past the soft cap.
+      const svc = new LoopDetectionService(makeConfig());
+      svc.reset('frozen-cap');
+      let fired = false;
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD && !fired; i++) {
+        fired = svc.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('filler', { i }),
+        );
+        if (fired) break;
+        fired = svc.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+        if (fired) break;
+        fired = svc.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        );
+      }
+      expect(fired).toBe(false);
+      // Diverse filler calls push the turn past the soft cap; the frozen
+      // result streak (>= threshold) is the stuck signal that halts it.
+      for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN + 20 && !fired; i++) {
+        fired = svc.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('filler', { j: i }),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(svc.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
     it('restarts the streak when a result changed, then halts on a fresh unchanged streak', () => {
       const args = TASK_LIST_ARGS;
       // R1..R4: the board changes once mid-streak (v2), so R5 must NOT halt.

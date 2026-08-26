@@ -261,6 +261,8 @@ export class LoopDetectionService {
   // skipLoopDetection. capMaxKeyRepeat is the running max count of any single
   // (tool,args) key this turn — the stuck-repetition signal that decides
   // whether exceeding the soft cap halts (stuck) or is allowed (productive).
+  // Stateful read tools feed their consecutive identical-result count instead
+  // (recordToolResult), so changed-state polling never builds the signal.
   private capKeyCounts = new Map<string, number>();
   private capMaxKeyRepeat = 0;
 
@@ -279,12 +281,20 @@ export class LoopDetectionService {
     }
   >();
 
-  // Turn-wide counts of (repeat key, result fingerprint) pairs for stateful
-  // read tools, recorded post-execution. Replaces the request-time
+  // Consecutive identical-result counts per repeat key for stateful read
+  // tools, recorded post-execution. Replaces the request-time
   // global-duplicate counting and the cap's stuck-repetition counting for
   // these tools: the same call returning changed state is productive and
-  // must not accumulate toward either halt.
-  private statefulPairCounts = new Map<string, number>();
+  // must not accumulate toward either halt. The count restarts at 1
+  // whenever the result differs from the key's predecessor, so a board
+  // oscillating between two byte-identical states is changed-state progress
+  // on every poll and never accumulates — even though the same
+  // (call, result) pair recurs across the turn — while a frozen board keeps
+  // accumulating even when other calls are interleaved.
+  private statefulConsecutiveResults = new Map<
+    string,
+    { fingerprint: string; count: number }
+  >();
 
   // callId → request pairing so results can be matched to their calls when
   // the runtime only has the response (populated on ToolCallRequest events,
@@ -391,21 +401,28 @@ export class LoopDetectionService {
       this.sameNameStreak = 1;
     }
 
-    // Turn-wide (repeat key, fingerprint) counting: replaces the
-    // request-time global-duplicate and cap stuck-repetition counting for
-    // stateful tools.
-    const pairKey = `${key}|${fingerprint}`;
-    const pairCount = (this.statefulPairCounts.get(pairKey) ?? 0) + 1;
-    this.statefulPairCounts.set(pairKey, pairCount);
-    if (pairCount > this.capMaxKeyRepeat) {
-      this.capMaxKeyRepeat = pairCount;
+    // Consecutive identical-result counting: replaces the request-time
+    // global-duplicate and cap stuck-repetition counting for stateful
+    // tools. The count restarts at 1 whenever the result differs from the
+    // key's predecessor, so an oscillating board (changed state on every
+    // poll) never accumulates toward either halt while a frozen board —
+    // same result on every poll, even interleaved with other calls — does.
+    const prior = this.statefulConsecutiveResults.get(key);
+    const consecutiveCount =
+      prior && prior.fingerprint === fingerprint ? prior.count + 1 : 1;
+    this.statefulConsecutiveResults.set(key, {
+      fingerprint,
+      count: consecutiveCount,
+    });
+    if (consecutiveCount > this.capMaxKeyRepeat) {
+      this.capMaxKeyRepeat = consecutiveCount;
     }
 
     // The global-duplicate detector is gated (skipLoopDetection) exactly as
     // its request-time counterpart in addAndCheckHeuristicLoops.
     if (
       !this.config.getSkipLoopDetection() &&
-      pairCount >= GLOBAL_DUPLICATE_THRESHOLD
+      consecutiveCount >= GLOBAL_DUPLICATE_THRESHOLD
     ) {
       this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
       logLoopDetected(
@@ -503,7 +520,7 @@ export class LoopDetectionService {
         this.trackToolCall(event.value);
         const toolCallKey = this.getToolCallKey(event.value);
         // Stateful read tools are counted post-execution in
-        // recordToolResult, keyed on (call, result fingerprint) instead of
+        // recordToolResult, on consecutive identical results instead of
         // args alone (issue #9450).
         const globalDup = this.isStatefulReadTool(event.value.name)
           ? false
@@ -626,9 +643,9 @@ export class LoopDetectionService {
       this.capMaxKeyRepeat = 0;
       // A retry replays the failed attempt's tool calls; drop the stateful
       // result evidence too so the replayed attempt is judged on its own
-      // results (pair counts re-accumulate as results land, consistent with
-      // the capKeyCounts/globalToolCallCounts clears).
-      this.statefulPairCounts.clear();
+      // results (consecutive counts re-accumulate as results land, consistent
+      // with the capKeyCounts/globalToolCallCounts clears).
+      this.statefulConsecutiveResults.clear();
       for (const state of this.statefulRepeatState.values()) {
         state.resultsObserved = 0;
         state.unchangedStreak = 0;
@@ -1570,7 +1587,7 @@ export class LoopDetectionService {
     this.capKeyCounts.clear();
     this.capMaxKeyRepeat = 0;
     this.statefulRepeatState.clear();
-    this.statefulPairCounts.clear();
+    this.statefulConsecutiveResults.clear();
     this.requestByCallId.clear();
   }
 
