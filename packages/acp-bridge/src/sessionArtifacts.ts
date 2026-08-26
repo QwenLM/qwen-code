@@ -187,6 +187,7 @@ export interface SessionArtifactWarningDetail {
 
 export interface SessionArtifactRestoreOptions {
   preserveLiveEphemeral?: boolean;
+  workspaceAccess?: 'metadata-only';
 }
 
 export interface SessionArtifactPersistence {
@@ -280,6 +281,10 @@ export class SessionArtifactStore {
 
   inputBatchLimit(): number {
     return this.maxArtifacts * 2;
+  }
+
+  resetWorkspaceResolutionCache(): void {
+    this.realWorkspaceCwdPromise = undefined;
   }
 
   async list(): Promise<SessionArtifactsEnvelope> {
@@ -715,6 +720,7 @@ export class SessionArtifactStore {
           const markerArtifact = await this.normalizeRestoredMarkerArtifact(
             artifact,
             warnings,
+            options.workspaceAccess === 'metadata-only',
           );
           if (markerArtifact)
             this.markerArtifacts.set(artifact.id, markerArtifact);
@@ -738,6 +744,12 @@ export class SessionArtifactStore {
               metadataBudget: 'persisted',
               workspaceExpected: workspaceExpectedFromArtifact(artifact),
               hashWorkspaceContent: false,
+              ...(options.workspaceAccess === 'metadata-only'
+                ? {
+                    workspaceAccess: 'metadata-only' as const,
+                    workspaceStatus: artifact.status,
+                  }
+                : {}),
             },
           );
           if (
@@ -864,6 +876,7 @@ export class SessionArtifactStore {
   private async normalizeRestoredMarkerArtifact(
     artifact: PersistedSessionArtifact,
     warnings: string[],
+    metadataOnly = false,
   ): Promise<PersistedSessionArtifact | undefined> {
     try {
       const input = persistedArtifactToInput(artifact);
@@ -881,6 +894,12 @@ export class SessionArtifactStore {
           metadataBudget: 'persisted',
           workspaceExpected: workspaceExpectedFromArtifact(artifact),
           hashWorkspaceContent: false,
+          ...(metadataOnly
+            ? {
+                workspaceAccess: 'metadata-only' as const,
+                workspaceStatus: artifact.status,
+              }
+            : {}),
         },
       );
       if (normalized.id !== artifact.id) {
@@ -1484,6 +1503,8 @@ export class SessionArtifactStore {
       metadataBudget?: 'user' | 'persisted';
       workspaceExpected?: WorkspaceStatusExpected;
       hashWorkspaceContent?: boolean;
+      workspaceAccess?: 'metadata-only';
+      workspaceStatus?: DaemonSessionArtifactStatus;
     } = {},
   ): Promise<NormalizedArtifact> {
     if (!input || typeof input !== 'object') {
@@ -1508,7 +1529,9 @@ export class SessionArtifactStore {
     const workspacePath = input.workspacePath
       ? normalizeWorkspacePath(
           input.workspacePath,
-          await this.getRealWorkspaceCwdForValidation(),
+          options.workspaceAccess === 'metadata-only'
+            ? this.workspaceCwd
+            : await this.getRealWorkspaceCwdForValidation(),
         )
       : undefined;
     const managedId = normalizeManagedId(input.managedId);
@@ -1534,11 +1557,18 @@ export class SessionArtifactStore {
       persistenceAvailable: this.persistence !== undefined,
     });
     const workspaceStatus = workspacePath
-      ? await this.getInitialWorkspaceStatus(
-          workspacePath,
-          options.workspaceExpected,
-          { hashContent: options.hashWorkspaceContent !== false },
-        )
+      ? options.workspaceAccess === 'metadata-only'
+        ? {
+            status: options.workspaceStatus ?? 'missing',
+            ...(options.workspaceExpected?.sizeBytes !== undefined
+              ? { sizeBytes: options.workspaceExpected.sizeBytes }
+              : {}),
+          }
+        : await this.getInitialWorkspaceStatus(
+            workspacePath,
+            options.workspaceExpected,
+            { hashContent: options.hashWorkspaceContent !== false },
+          )
       : undefined;
     if (workspaceStatus?.escaped) {
       throw new SessionArtifactValidationError(
@@ -1575,7 +1605,9 @@ export class SessionArtifactStore {
       storage,
       source,
       status: workspaceStatus?.status ?? 'available',
-      ...(workspacePath ? { lastStatAt: Date.now() } : {}),
+      ...(workspacePath && options.workspaceAccess !== 'metadata-only'
+        ? { lastStatAt: Date.now() }
+        : {}),
       title,
       description,
       workspacePath,

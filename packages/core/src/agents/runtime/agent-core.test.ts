@@ -23,7 +23,10 @@ import {
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
-import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import {
+  subagentIdentityContext,
+  subagentNameContext,
+} from '../../utils/subagentNameContext.js';
 import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
@@ -114,7 +117,12 @@ describe('AgentCore.runInAgentFrames', () => {
   // The reasoning loop uses the same wrap, so anything that breaks here
   // also breaks the synchronous path. These tests pin the contract.
 
-  function makeCore(name: string, runtimeView?: RuntimeContentGeneratorView) {
+  function makeCore(
+    name: string,
+    runtimeView?: RuntimeContentGeneratorView,
+    taskName?: string,
+    subagentId?: string,
+  ) {
     const promptConfig: PromptConfig = { systemPrompt: '' };
     const modelConfig: ModelConfig = { model: 'test-model' };
     const runConfig: RunConfig = { max_turns: 1 };
@@ -128,8 +136,35 @@ describe('AgentCore.runInAgentFrames', () => {
       undefined,
       undefined,
       runtimeView,
+      taskName,
+      subagentId,
     );
   }
+
+  it('keeps the stable telemetry name and exposes task identity locally', async () => {
+    const core = makeCore(
+      'general-purpose',
+      undefined,
+      'fix token panel bug',
+      'general-purpose-stable',
+    );
+
+    let observedName: string | undefined;
+    let observedIdentity:
+      | { type: string; id: string; taskName?: string }
+      | undefined;
+    await core.runInAgentFrames(async () => {
+      observedName = subagentNameContext.getStore();
+      observedIdentity = subagentIdentityContext.getStore();
+    });
+
+    expect(observedName).toBe('general-purpose');
+    expect(observedIdentity).toMatchObject({
+      type: 'general-purpose',
+      taskName: 'fix token panel bug',
+    });
+    expect(observedIdentity?.id).toBe('general-purpose-stable');
+  });
 
   it('publishes both the runtime view and the agent name when invoked from outside any frame', async () => {
     const view: RuntimeContentGeneratorView = {
