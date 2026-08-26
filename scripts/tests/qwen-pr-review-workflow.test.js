@@ -1357,7 +1357,9 @@ describe('capture-tools step wiring', () => {
     const step = doc.jobs['review-pr'].steps.find(
       (s) => s.name === 'Install capture tools (tmux + freeze)',
     );
-    expect(step.if).toBe("steps.context.outputs.should_run == 'true'");
+    expect(step.if).toBe(
+      "steps.context.outputs.should_run == 'true' && steps.base_refresh.outputs.skip != 'true'",
+    );
   });
 
   it('cleans stale per-run tool dirs before the next run creates one', () => {
@@ -3853,5 +3855,321 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.status).toBe(0);
     expect(r.posted).toBe('');
     expect(r.summary).toContain('deferring to the fallback-comment job');
+  });
+});
+
+describe('base-refresh-only synchronize gate (real git, stubbed gh)', () => {
+  // The gate's ledger lookup and note dedup run the step's own jq filters, so
+  // these executed cases need jq on PATH; the repo shapes need real git run
+  // from bash. Windows runners get the static pins below and skip the rest.
+  const hasJq = (() => {
+    try {
+      execFileSync('jq', ['--version'], { stdio: 'ignore' });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  const skipExecuted = process.platform === 'win32' || !hasJq;
+
+  const gateStep = () =>
+    parse(workflow).jobs['review-pr'].steps.find(
+      (s) => s.name === 'Skip base-refresh-only synchronize',
+    );
+
+  it('gates only the automatic synchronize path, and never fails the job', () => {
+    const step = gateStep();
+    expect(step.id).toBe('base_refresh');
+    expect(step['continue-on-error']).toBe(true);
+    const cond = step.if.replace(/\s+/g, ' ').trim();
+    expect(cond).toContain("steps.context.outputs.auto_review == 'true'");
+    expect(cond).toContain("github.event.action == 'synchronize'");
+    // Fail-open contract: the script itself never exits non-zero.
+    expect(step.run).toContain('exit 0');
+    expect(step.run).not.toContain('exit 1');
+  });
+
+  it('wires the skip output into every review-spending step', () => {
+    const doc = parse(workflow);
+    for (const name of [
+      'Setup Node.js for hosted review',
+      'Install Qwen CLI if missing',
+      'Install capture tools (tmux + freeze)',
+      'Run review',
+    ]) {
+      const step = doc.jobs['review-pr'].steps.find((s) => s.name === name);
+      expect(step.if, name).toContain(
+        "steps.base_refresh.outputs.skip != 'true'",
+      );
+    }
+  });
+
+  const LEDGER_BODY =
+    'No issues found. LGTM! ✅\n\n<!-- qwen-review-ledger {"v":1,"round":3,"findings":[]} -->';
+  const reviewsFixture = (login, sha, body = LEDGER_BODY) =>
+    JSON.stringify([{ user: { login }, commit_id: sha, body }]);
+
+  // Build an origin repo in the requested shape (R = last reviewed head,
+  // pr tip = pushed head), publish refs/pull/9/head, clone the workspace the
+  // step runs in. No sed: file contents are written line by line so the
+  // shapes run identically on BSD and GNU userlands.
+  const SETUP = `
+    set -euo pipefail
+    write_f() { : > f.txt; n=1; while [ "$n" -le 20 ]; do if [ "$n" -eq "$2" ]; then echo "$1"; else echo "$n"; fi; n=$((n+1)); done >> f.txt; }
+    git init -q -b main origin
+    cd origin
+    git config user.email t@t
+    git config user.name t
+    write_f 0 0
+    echo x > other.txt
+    git add .
+    git commit -qm base
+    git checkout -qb pr
+    write_f TEN 10
+    git commit -qam pr-change
+    git rev-parse HEAD > ../R
+    case "$SHAPE" in
+      update_branch_only)
+        git checkout -q main; echo y > other.txt; git commit -qam advance
+        git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
+      two_refreshes)
+        git checkout -q main; echo y > other.txt; git commit -qam adv1
+        git checkout -q pr; git merge -q --no-edit main >/dev/null
+        git checkout -q main; echo z > other.txt; git commit -qam adv2
+        git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
+      real_push_after_refresh)
+        git checkout -q main; echo y > other.txt; git commit -qam advance
+        git checkout -q pr; git merge -q --no-edit main >/dev/null
+        echo extra > extra.txt; git add extra.txt; git commit -qm real-push ;;
+      context_touch)
+        git checkout -q main; write_f TWELVE 12; git commit -qam context-touch
+        git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
+      far_touch)
+        git checkout -q main; write_f NINETEEN 19; git commit -qam far-touch
+        git checkout -q pr; git merge -q --no-edit main >/dev/null ;;
+      non_base_merge)
+        git checkout -qb side "$(git rev-parse pr~1)"
+        echo s > side.txt; git add side.txt; git commit -qm side
+        git checkout -q pr; git merge -q --no-edit side >/dev/null ;;
+      force_push)
+        git checkout -q main
+        git branch -f pr main
+        git checkout -q pr; write_f REWRITTEN 10; git commit -qam rewritten ;;
+      *) echo "unknown shape: $SHAPE" >&2; exit 1 ;;
+    esac
+    git rev-parse pr > ../H
+    git update-ref refs/pull/9/head "$(git rev-parse pr)"
+    cd ..
+    git clone -q origin workspace
+  `;
+
+  function runGate(
+    shape,
+    {
+      reviewsFor,
+      userFail = false,
+      reviewsFail = false,
+      existingNoteId = '',
+    } = {},
+  ) {
+    const dir = mkdtempSync(join(tmpdir(), 'base-refresh-'));
+    try {
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      execFileSync('bash', ['-c', SETUP], {
+        cwd: dir,
+        env: { ...process.env, SHAPE: shape },
+      });
+      const R = readFileSync(join(dir, 'R'), 'utf8').trim();
+      const H = readFileSync(join(dir, 'H'), 'utf8').trim();
+      const reviewsFile = join(dir, 'reviews.json');
+      writeFileSync(
+        reviewsFile,
+        reviewsFor ? reviewsFor(R, H) : reviewsFixture('qwen-code-ci-bot', R),
+      );
+      const posted = join(dir, 'posted');
+      writeFileSync(posted, '');
+      const gh = join(bin, 'gh');
+      writeFileSync(
+        gh,
+        [
+          '#!/bin/bash',
+          'args="$*"',
+          'case "$args" in',
+          "  'api user --jq .login')",
+          '    if [ -n "${GH_USER_FAIL:-}" ]; then exit 1; fi',
+          '    echo "$GH_LOGIN" ;;',
+          "  *'/pulls/9/reviews'*)",
+          '    if [ -n "${GH_REVIEWS_FAIL:-}" ]; then exit 1; fi',
+          '    cat "$GH_REVIEWS_FILE" ;;',
+          "  *'/issues/9/comments --method GET'*)",
+          '    if [ -n "${GH_EXISTING_NOTE_ID:-}" ]; then',
+          '      printf \'[{"id": %s, "user": {"login": "%s"}, "body": "<!-- qwen-review-base-refresh -->"}]\\n\' "$GH_EXISTING_NOTE_ID" "$GH_LOGIN"',
+          '    else',
+          "      echo '[]'",
+          '    fi ;;',
+          "  'pr comment 9 --repo QwenLM/qwen-code --body '*)",
+          '    printf \'POSTED %s\\n\' "$args" >> "$GH_POSTED" ;;',
+          "  'api --method PATCH '*)",
+          '    printf \'PATCHED %s\\n\' "$args" >> "$GH_POSTED" ;;',
+          '  *)',
+          '    echo "unexpected gh: $args" >&2; exit 1 ;;',
+          'esac',
+        ].join('\n') + '\n',
+      );
+      chmodSync(gh, 0o755);
+      const output = join(dir, 'gho');
+      const summary = join(dir, 'gss');
+      writeFileSync(output, '');
+      writeFileSync(summary, '');
+      const res = spawnSync('bash', ['-c', gateStep().run], {
+        cwd: join(dir, 'workspace'),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          GITHUB_OUTPUT: output,
+          GITHUB_STEP_SUMMARY: summary,
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          PR_NUMBER: '9',
+          EVENT_HEAD_SHA: H,
+          BASE_REF: 'main',
+          RUN_URL: 'https://example.test/run/1',
+          GH_LOGIN: 'qwen-code-ci-bot',
+          GH_USER_FAIL: userFail ? '1' : '',
+          GH_REVIEWS_FAIL: reviewsFail ? '1' : '',
+          GH_REVIEWS_FILE: reviewsFile,
+          GH_POSTED: posted,
+          GH_EXISTING_NOTE_ID: existingNoteId,
+        },
+      });
+      const out = Object.fromEntries(
+        readFileSync(output, 'utf8')
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => [
+            l.slice(0, l.indexOf('=')),
+            l.slice(l.indexOf('=') + 1),
+          ]),
+      );
+      return {
+        status: res.status,
+        stderr: res.stderr ?? '',
+        out,
+        R,
+        H,
+        posted: readFileSync(posted, 'utf8'),
+        summary: readFileSync(summary, 'utf8'),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it.skipIf(skipExecuted)(
+    'skips an update-branch-only refresh and posts the deduped note',
+    () => {
+      const r = runGate('update_branch_only');
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('true');
+      expect(r.out.reviewed_sha).toBe(r.R);
+      expect(r.summary).toContain('skipping the automatic round');
+      expect(r.posted).toContain('POSTED ');
+      expect(r.posted).toContain('<!-- qwen-review-base-refresh -->');
+      expect(r.posted).toContain(r.R);
+      expect(r.posted).toContain(r.H);
+    },
+  );
+
+  it.skipIf(skipExecuted)('skips across two consecutive refreshes', () => {
+    const r = runGate('two_refreshes');
+    expect(r.status).toBe(0);
+    expect(r.out.skip).toBe('true');
+  });
+
+  it.skipIf(skipExecuted)(
+    'skips when upstream touched the same file far from the PR hunks — offsets are ignored',
+    () => {
+      const r = runGate('far_touch');
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('true');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'updates the existing note in place instead of posting a second one',
+    () => {
+      const r = runGate('update_branch_only', { existingNoteId: '777' });
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('true');
+      expect(r.posted).toContain('PATCHED ');
+      expect(r.posted).toContain('issues/comments/777');
+      expect(r.posted).not.toContain('POSTED ');
+    },
+  );
+
+  it.skipIf(skipExecuted)('reviews when a real commit rode the refresh', () => {
+    const r = runGate('real_push_after_refresh');
+    expect(r.status).toBe(0);
+    expect(r.out.skip).toBe('false');
+    expect(r.out.reason).toMatch(/non-merge commit/);
+    expect(r.posted).toBe('');
+  });
+
+  it.skipIf(skipExecuted)(
+    'reviews when the merge changed the PR-side diff (context overlap)',
+    () => {
+      const r = runGate('context_touch');
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe('the PR-side diff changed');
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'reviews when the merged branch is not the base',
+    () => {
+      const r = runGate('non_base_merge');
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toMatch(/non-base branch/);
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'reviews after a force-push retires the reviewed head',
+    () => {
+      const r = runGate('force_push');
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toMatch(
+        /not in the fetched history|not an ancestor/,
+      );
+    },
+  );
+
+  it.skipIf(skipExecuted)(
+    'never certifies a head from another account or an unmarked review',
+    () => {
+      for (const reviewsFor of [
+        (R) => reviewsFixture('some-participant', R),
+        (R) => reviewsFixture('qwen-code-ci-bot', R, 'LGTM, no marker here.'),
+      ]) {
+        const r = runGate('update_branch_only', { reviewsFor });
+        expect(r.status).toBe(0);
+        expect(r.out.skip).toBe('false');
+        expect(r.out.reason).toBe('no completed automatic round on this PR');
+      }
+    },
+  );
+
+  it.skipIf(skipExecuted)('fails open, exit 0, when the gh lookups die', () => {
+    for (const opts of [{ userFail: true }, { reviewsFail: true }]) {
+      const r = runGate('update_branch_only', opts);
+      expect(r.status).toBe(0);
+      expect(r.out.skip).toBe('false');
+      expect(r.out.reason).toBe('reviewed-head lookup failed');
+      expect(r.posted).toBe('');
+    }
   });
 });
