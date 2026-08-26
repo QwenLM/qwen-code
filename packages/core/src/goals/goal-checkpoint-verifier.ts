@@ -7,11 +7,12 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
-import type {
-  GoalCheckpointVerificationResult,
-  GoalCheckpointVerifier,
-  GoalCheckpointVerifierClaim,
-  GoalCheckpointVerifierInput,
+import {
+  InvalidGoalCheckpointError,
+  type GoalCheckpointVerificationResult,
+  type GoalCheckpointVerifier,
+  type GoalCheckpointVerifierClaim,
+  type GoalCheckpointVerifierInput,
 } from './goal-checkpoint.js';
 import {
   GOAL_CHECKPOINT_CLAIM_LIMIT,
@@ -116,7 +117,9 @@ export function parseGoalCheckpointVerifierText(
   try {
     value = JSON.parse(text);
   } catch {
-    throw new Error('Goal checkpoint verifier returned invalid JSON');
+    throw new InvalidGoalCheckpointError(
+      'Goal checkpoint verifier returned invalid JSON',
+    );
   }
   if (
     !isRecord(value) ||
@@ -125,25 +128,14 @@ export function parseGoalCheckpointVerifierText(
     value['claims'].length === 0 ||
     value['claims'].length > GOAL_CHECKPOINT_CLAIM_LIMIT
   ) {
-    throw new Error('Goal checkpoint verifier returned invalid claims');
+    throw new InvalidGoalCheckpointError(
+      'Goal checkpoint verifier returned invalid claims',
+    );
   }
   const claims = value['claims'].map((claim, index) =>
     parseClaim(claim, index),
   );
   return { claims };
-}
-
-export function validateGoalCheckpointVerifierText(
-  text: string,
-): string | null {
-  try {
-    parseGoalCheckpointVerifierText(text);
-    return null;
-  } catch (error) {
-    return error instanceof Error
-      ? error.message
-      : 'Goal checkpoint verifier returned invalid output';
-  }
 }
 
 export function createGoalCheckpointVerifier(
@@ -177,7 +169,10 @@ export function createGoalCheckpointVerifier(
           responseJsonSchema: GOAL_CHECKPOINT_VERIFIER_SCHEMA,
           thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
         },
-        validate: validateGoalCheckpointVerifierText,
+        // Parsing stays out of a validate hook: runSideQuery re-wraps hook
+        // failures into plain Errors, dropping the InvalidGoalCheckpointError
+        // class the runtime's checkpoint stall breaker counts unusable
+        // results by.
       });
       return parseGoalCheckpointVerifierText(result.text);
     } finally {
@@ -203,13 +198,17 @@ function parseClaim(
     ) ||
     new Set(value['sourceRefs']).size !== value['sourceRefs'].length
   ) {
-    throw new Error(`Goal checkpoint verifier claim ${index + 1} is invalid`);
+    throw new InvalidGoalCheckpointError(
+      `Goal checkpoint verifier claim ${index + 1} is invalid`,
+    );
   }
   // Trim before measuring, and count code points, so this validator agrees
   // with materializeGoalEvidenceCheckpoint on the shared protocol limit.
   const claim = value['claim'].trim();
   if (!claim || [...claim].length > GOAL_CHECKPOINT_CLAIM_MAX_CHARACTERS) {
-    throw new Error(`Goal checkpoint verifier claim ${index + 1} is invalid`);
+    throw new InvalidGoalCheckpointError(
+      `Goal checkpoint verifier claim ${index + 1} is invalid`,
+    );
   }
   return {
     proofKind: value['proofKind'],

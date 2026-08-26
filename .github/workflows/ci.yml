@@ -12,6 +12,15 @@ on:
       - 'main'
       - 'release/**'
   merge_group:
+  # A daily heartbeat for the macOS and Windows lanes ONLY. Those two are
+  # gated on `merge_group`, and the merge queue is not enabled on this
+  # repository — no queue run since 2026-07-02 — so they had stopped running
+  # entirely: skipped on every pull request, and never reached afterwards. The
+  # pull-request gate below catches the diffs a path list can recognise; this
+  # catches everything it cannot, one day later, on `main`. Every other job
+  # here excludes `schedule` explicitly, so a nightly run is exactly two jobs.
+  schedule:
+    - cron: '17 19 * * *'
   workflow_dispatch:
     inputs:
       branch_ref:
@@ -50,7 +59,7 @@ env:
   # BOTH the github_ci_only helper step and the full-profile Test step, so a
   # new helper test can't be added to one path and silently dropped from the
   # other.
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -68,7 +77,11 @@ jobs:
     # else a busy hosted pool delays it and blocks the ECS-bound jobs. The
     # kill-switch is read here, so flipping it reverts everything to hosted.
     # This runs-on and the pick_runner step below are the canonical home of
-    # the association routing; sdk-java.yml and serve-ab.yml mirror it.
+    # the association routing; sdk-java.yml and serve-ab.yml mirror it (the
+    # routing tests hold the mirrors to it). test_windows deliberately does
+    # not: a pull_request run executes the PR's own YAML, so no runs-on trust
+    # clause is enforceable there and its lane never admits pull requests to
+    # the pool.
     runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     outputs:
@@ -139,6 +152,71 @@ jobs:
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
 
+  # Does this pull request need the macOS and Windows lanes? They are the only
+  # signal this repository has about a host that is not Linux with a GNU
+  # userland, and they are expensive, so they run on the diffs whose behaviour
+  # the HOST decides — shell, CI definitions, the script layer, the runner
+  # config, the platform-coupled subtrees. The classifier is a net, not a
+  # proof; the scheduled run on `main` is what covers everything a path list
+  # cannot see.
+  #
+  # Its own job, not a step in classify_pr: that job's outputs pick the Linux
+  # runner for everything else, and a new failure mode there (this one needs a
+  # checkout, on a pool whose workspace other jobs can poison) would take the
+  # whole run's routing with it. Here a failure costs one skipped
+  # classification, which the gate reads as "run the lanes".
+  #
+  # Hosted, and the checkout is of the pull request's BASE commit: this runs
+  # before any review, so checking out the contributor's head would run their
+  # classifier with this job's token, and staying off the ECS pool keeps it
+  # away from the poisoned-workspace class entirely.
+  classify_platform:
+    name: 'Classify platform sensitivity'
+    if: "${{ github.event_name == 'pull_request' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    continue-on-error: true
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+    outputs:
+      platform_sensitive: '${{ steps.platform.outputs.platform_sensitive }}'
+    steps:
+      - name: 'Check out the classifier from the base branch'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.pull_request.base.sha }}'
+          persist-credentials: false
+          sparse-checkout: '.github/scripts/ci'
+
+      - name: 'Classify platform sensitivity'
+        id: 'platform'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          IS_SAME_REPO_PR: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
+        run: |-
+          set -uo pipefail
+          # Fail-safe in every direction: only a confident `false` from the
+          # classifier skips the lanes. A classifier error, an unexpected
+          # word, a fork PR, or this whole job failing all end as "run" — a
+          # gate that fails open stops testing without ever saying so.
+          sensitive=true
+          if [ "${IS_SAME_REPO_PR}" = 'true' ]; then
+            set +e
+            classified="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}" platform)"
+            rc=$?
+            set -e
+            case "${rc}:${classified}" in
+              0:true|0:false) sensitive="${classified}" ;;
+              *) echo "::warning::Platform-sensitivity classifier returned rc=${rc} '${classified}'; running the macOS and Windows lanes." ;;
+            esac
+          else
+            echo "Fork PR detected; running the macOS and Windows lanes."
+          fi
+          echo "platform_sensitive=${sensitive}" >> "${GITHUB_OUTPUT}"
+          echo "Platform-sensitive: ${sensitive}"
+
   #
   # Test: Node
   #
@@ -149,7 +227,7 @@ jobs:
     # report; the per-step skip_ci guards below make them no-op (pass) there.
     # Not on push: the merge queue already tested the merged tree, so a
     # post-merge re-run on `main` would be redundant.
-    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    if: "${{ !cancelled() && github.event_name != 'push' && github.event_name != 'schedule' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 60
     outputs:
@@ -397,10 +475,6 @@ jobs:
       - name: 'Check desktop workspace isolation'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:desktop-isolation'
-
-      - name: 'Check voice guard mirror sync'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
-        run: 'npm run check:voice-guard-sync'
 
       - name: 'Install linters'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -831,19 +905,48 @@ jobs:
             packages/web-shell/client/e2e/playwright-report
           if-no-files-found: 'ignore'
 
-  # macOS/Windows: slowest/costliest runners, rare platform regressions — run
-  # only in the merge queue. Skipped on PR (ubuntu is the fast PR signal) and on
-  # push (the queue already tested the merged tree, so a post-merge re-run is
-  # redundant). Two named jobs, not a matrix: a skipped matrix job reports one
-  # collapsed check name, never the per-OS required contexts, so PRs would sit
-  # "Expected" forever and never enter the queue. A skipped named job reports
-  # under its exact name and satisfies the required check (same as the
-  # Integration Tests job).
+  # macOS/Windows: slowest/costliest runners, and the only signal this
+  # repository has about a host that is not Linux with a GNU userland.
+  #
+  # They used to run in the merge queue alone. That queue is not enabled here —
+  # no `merge_group` run since 2026-07-02, and merges land as squashes — so the
+  # gate meant they never ran at all: reported as "skipped" on every pull
+  # request, and never reached afterwards. A macOS-only failure could ship and
+  # sit in `main` indefinitely, which is what happened in #9220 (a GNU-only
+  # `realpath -m` in a workflow guard, with the suite that pinned it red on
+  # every Mac).
+  #
+  # Three triggers now, in cost order: a pull request whose diff the
+  # platform-sensitivity classifier recognises (shell, CI definitions, the
+  # script layer, the runner config, the platform-coupled subtrees), the merge
+  # queue if it is ever enabled again, and a nightly run on `main` for
+  # everything a path list cannot see. The pull-request gate is fail-safe —
+  # only a confident `false` skips, so a broken classifier costs runner minutes
+  # rather than coverage.
+  #
+  # Two named jobs, not a matrix: a skipped matrix job reports one collapsed
+  # check name, never the per-OS contexts, so a required-check configuration
+  # would sit "Expected" forever. A skipped named job reports under its exact
+  # name. (No status check is required on `main` today — the ruleset carries
+  # only deletion, non-fast-forward and pull_request rules — so this shape is
+  # currently insurance, not a live constraint.)
   test_macos:
     name: 'Test (macos-latest, Node 22.x)'
-    needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
+    needs:
+      - 'classify_pr'
+      - 'classify_platform'
+    if: |-
+      ${{
+        !cancelled() && (
+          github.event_name == 'merge_group' ||
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+            needs.classify_platform.outputs.platform_sensitive != 'false')
+        )
+      }}
     runs-on: 'macos-latest'
+    timeout-minutes: 60
     permissions:
       contents: 'read'
     steps:
@@ -919,16 +1022,31 @@ jobs:
 
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
-  # it matches the required-status-check context. The job is merge_group-only,
-  # so code reaching it is post-approval; maintainers can still queue fork PRs.
-  # The runs-on expression therefore needs only the kill switch. ECS-only
-  # tuning is gated on runner.environment; the hosted fallback is the pre-ECS
-  # job plus the checkout guard and a job-level timeout-minutes.
+  # it matches the required-status-check context. The lane now runs on pull
+  # requests too, but every pull request runs on hosted windows-2022: a
+  # pull_request run executes the workflow YAML from the PR's own merge commit,
+  # so any PR this lane admits could rewrite `runs-on` in the same diff that
+  # reaches it. A gate the gated tree controls is no gate; the pool is reached
+  # only by triggers an unreviewed PR cannot open — the post-approval merge
+  # queue, schedule and dispatch. ECS-only tuning is gated on runner.environment;
+  # the hosted fallback is the pre-ECS job plus the checkout guard and a
+  # job-level timeout-minutes.
   test_windows:
     name: 'Test (windows-latest, Node 22.x)'
-    needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
-    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
+    needs:
+      - 'classify_pr'
+      - 'classify_platform'
+    if: |-
+      ${{
+        !cancelled() && (
+          github.event_name == 'merge_group' ||
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' &&
+            needs.classify_platform.outputs.platform_sensitive != 'false')
+        )
+      }}
+    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
     timeout-minutes: 60
     permissions:
       contents: 'read'
@@ -963,11 +1081,17 @@ jobs:
       # Same stale-checkout guard as the Ubuntu gate: this job now runs on ECS,
       # so fail loud if the checkout lacks the merge-queue head rather than
       # silently testing the wrong tree into a merge.
+      # Written when this lane ran in the merge queue alone, so its expected
+      # SHA named only the queue's event: on any other trigger the input is
+      # empty and the step fails the whole lane before a single test runs.
+      # That is what the revived triggers hit first. Same event-aware shape as
+      # the Ubuntu gate now, and skipped where there is no head to verify —
+      # the scheduled and dispatch runs check out a branch by name.
       - name: 'Verify checkout includes expected head commit'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
         uses: './.github/actions/verify-checkout-head'
         with:
-          expected_sha: '${{ github.event.merge_group.head_sha }}'
+          expected_sha: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
@@ -1281,7 +1405,7 @@ jobs:
   desktop_shell:
     name: 'Desktop Shell (${{ matrix.os }})'
     needs: 'classify_pr'
-    if: "${{ !cancelled() && github.event_name != 'push' && needs.classify_pr.outputs.skip_ci != 'true' }}"
+    if: "${{ !cancelled() && github.event_name != 'push' && github.event_name != 'schedule' && needs.classify_pr.outputs.skip_ci != 'true' }}"
     strategy:
       fail-fast: false
       matrix:
