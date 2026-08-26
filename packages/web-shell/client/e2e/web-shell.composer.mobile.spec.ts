@@ -159,6 +159,8 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
 
   await page.setViewportSize({ width: 1000, height: 915 });
   await expect(sidebar).toBeVisible();
+  // Width stays at the mobile-mount clamp: resize re-clamping only shrinks
+  // within a session, and the drawer never expands toward the persisted 512.
   await expect
     .poll(() =>
       sidebar.evaluate((element) => element.getBoundingClientRect().width),

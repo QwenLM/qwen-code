@@ -369,6 +369,9 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       'button[aria-label="Collapse"]',
     );
     expect(close).not.toBeNull();
+    expect(
+      container.querySelectorAll(`.${sidebarStyles.footer} button`),
+    ).toHaveLength(1);
     click(close!);
 
     expect(onMobileClose).toHaveBeenCalledOnce();
