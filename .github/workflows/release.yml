@@ -902,10 +902,19 @@ jobs:
 
   notify_failure:
     name: 'Notify Release Failure'
-    # Route to the ECS self-hosted pool like the review/CI lanes; the
-    # MAINTAINER_ECS_RUNNER_DISABLED repo variable restores the hosted
-    # ubuntu-latest fallback without a code change.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # Pinned to an ephemeral hosted runner instead of the ECS pool the other
+    # release jobs route to: this job exists to report failures OF that pool.
+    # In post-claim failure modes (a runner crash or host loss mid-job,
+    # pool-wide network/tooling loss) the upstream jobs are marked failed and
+    # the `if:` gate below opens while the pool is exactly what is broken —
+    # routing the notifier back onto it means a failed release produces no
+    # failure issue, no autofix dispatch, no alert. The job is gh/jq-only
+    # (both preinstalled on hosted images), so hosted capacity costs nothing
+    # here. The sibling failure notifiers stay hosted for the same reason
+    # (release-vscode-companion.yml, release-sdk.yml, release-sdk-python.yml;
+    # qwen-code-pr-review.yml's fallback comment: it "runs on an ephemeral
+    # hosted runner, so it survives whatever killed the review job").
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     needs:
       - 'prepare'
