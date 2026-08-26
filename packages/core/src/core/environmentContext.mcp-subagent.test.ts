@@ -17,10 +17,10 @@ import {
 
 // Why this exists.
 //
-// `getInitialChatHistory` gates three of its four reminder parts and leaves
+// `getInitialChatHistory` gates two of its three reminder parts and leaves
 // `buildMcpServerInstructionsReminder` ungated, which reads as an oversight:
-// the skills and deferred-tools reminders are both suppressed for subagents
-// precisely because announcing something the agent cannot use wastes a turn.
+// the skills reminder is suppressed for subagents precisely because announcing
+// something the agent cannot use wastes a turn.
 //
 // The MCP part needs no gate, and this pins the reason so the asymmetry is not
 // "fixed" into a behaviour change. Server instructions live on the

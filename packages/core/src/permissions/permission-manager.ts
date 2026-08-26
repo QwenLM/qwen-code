@@ -770,7 +770,7 @@ export class PermissionManager {
     //   either (non-core tools bypassed it) (#9827).
     // - `tool_search`: the deferred-tool discovery surface itself. When
     //   ToolSearch is absent from the registry, client.ts
-    //   (`resolveDeferredToolsForReminder`) eagerly force-reveals EVERY
+    //   (`resolveDeferredToolsForCatalog`) eagerly force-reveals EVERY
     //   registered deferred tool — all `mcp__*` tools and the deferred
     //   `computer_use__*` family — into the eager model request, and
     //   `preloadDeferredToolsWithinBudget` early-returns without it, so

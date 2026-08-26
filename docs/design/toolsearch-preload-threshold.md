@@ -21,8 +21,8 @@ the equivalent gate.
 
 New setting `tools.toolSearch.threshold` (number, percent, default `10`).
 
-At session start (`GeminiClient.startChat`, before the deferred-tools reminder
-is resolved), when ToolSearch is registered and the threshold is > 0:
+At session start (`GeminiClient.startChat`, before the initial declarations are
+built), when ToolSearch is registered and the threshold is > 0:
 
 - Estimate the combined token footprint of every deferred tool schema —
   bundled built-ins and MCP alike
@@ -37,18 +37,16 @@ is resolved), when ToolSearch is registered and the threshold is > 0:
   restores the old behavior unconditionally.
 
 Preloaded tools therefore land in the initial declaration list, are filtered
-out of the startup deferred-tools reminder, and the declaration list stays
-stable for the whole session.
+out of the `tool_search` catalog (they are already directly callable), and the
+declaration list stays stable for the whole session.
 
 ## Decisions
 
-- **Session start only, never `setTools()`.** Revealing a tool the startup
-  reminder already announced would make `queueAddedMcpToolsReminder` flag it
-  as "removed", and a mid-session declaration change busts the very cache the
-  preload exists to protect. Tools from servers that connect later stay
-  deferred (announced via the added-tools reminder, reachable through
-  ToolSearch) until the next session start. `/clear` clears the revealed set
-  and re-runs the decision.
+- **Session start only, never `setTools()`.** A mid-session reveal changes the
+  declaration list and busts the very cache the preload exists to protect.
+  Tools from servers that connect later stay deferred (advertised in the
+  `tool_search` catalog, reachable through ToolSearch) until the next session
+  start. `/clear` clears the revealed set and re-runs the decision.
 - **One budget over the whole deferred set, bundled included.** Claude Code's
   auto threshold covers MCP/SDK tools only (its built-ins are managed
   separately), but it can afford that split: deferred tools are stripped from
@@ -72,4 +70,4 @@ stable for the whole session.
   starts (compression also passes through `startChat`) cannot ratchet the
   revealed set past the budget as servers come and go.
 - **No preload when ToolSearch is unavailable** — the existing eager-reveal
-  branch in `resolveDeferredToolsForReminder` already exposes everything.
+  branch in `resolveDeferredToolsForCatalog` already exposes everything.

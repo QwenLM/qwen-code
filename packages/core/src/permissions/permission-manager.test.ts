@@ -2967,7 +2967,7 @@ describe('PermissionManager', () => {
 
     it('tool_search is exempt from the allowlist (#9827)', async () => {
       // When ToolSearch is missing from the registry, client.ts
-      // (`resolveDeferredToolsForReminder`) eagerly force-reveals every
+      // (`resolveDeferredToolsForCatalog`) eagerly force-reveals every
       // registered deferred tool (all mcp__* and the deferred
       // computer_use__* family) into the eager model request, and
       // `preloadDeferredToolsWithinBudget` early-returns without it. Under

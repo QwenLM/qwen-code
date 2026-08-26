@@ -15,8 +15,8 @@ resume, rebuild its executable surface from the current parent session:
 - use the current parent's rendered system instruction;
 - take the current parent's advertised tool names and resolve their schemas
   through the resumed agent's current registry;
-- include current MCP, deferred-tool, and Skill reminders on the continuation
-  turn, while declaring earlier capability listings obsolete;
+- include current MCP and Skill reminders on the continuation turn, while
+  declaring earlier capability listings obsolete;
 - leave the task paused when the current parent prompt or tool surface cannot
   be reconstructed.
 

@@ -3497,8 +3497,9 @@ export class Config {
       .discoverAllMcpToolsIncremental(this)
       .then(async () => {
         // After background discovery completes, push the newly-registered
-        // MCP tools into the active GeminiChat so the next model request
-        // sees both the updated declarations and added-tool reminder deltas.
+        // MCP tools into the active GeminiChat so the next model request sees
+        // the updated declarations, including the refreshed tool_search
+        // catalog that advertises the new deferred tools.
         // Interactive mode also calls setTools() via AppContainer's
         // batch-flush effect — this trailing call is idempotent there, but
         // it's the ONLY path that updates `chat.tools` for non-interactive

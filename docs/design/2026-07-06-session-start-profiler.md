@@ -12,7 +12,7 @@ The profiler is enabled only when `QWEN_CODE_PROFILE_SESSION_START=1`.
 
 When enabled, core writes JSONL records under `Storage.getRuntimeBaseDir()/session-start-perf/`. Daily JSONL filenames use the UTC date from the record timestamp. Each record includes a timestamp, `SessionStartSource`, success flag, total duration, bounded stage durations, and small aggregate counts such as history length and rendered snapshot count. The #4748 daemon profiling follow-up adds an optional opaque Session ID when the caller supplies one so this detail record can be joined to the cross-process trace.
 
-The measured stages follow the existing `startChat()` sequence: tool registry warm, resumed deferred-tool reveal scan, deferred reminder setup, initial chat history build, skill reminder dedup seeding, agent reminder dedup seeding, system instruction build, `GeminiChat` construction, orphan tool-use repair, SessionStart hook, optional SessionStart context apply, and `setTools()`.
+The measured stages follow the existing `startChat()` sequence: tool registry warm, resumed deferred-tool reveal scan, deferred-tool preload decision, deferred-tool catalog setup, initial chat history build, skill reminder dedup seeding, agent reminder dedup seeding, system instruction build, `GeminiChat` construction, orphan tool-use repair, SessionStart hook, optional SessionStart context apply, and `setTools()`.
 
 ## Safety Boundaries
 

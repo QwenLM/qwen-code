@@ -492,9 +492,9 @@ function isModelFunctionCallEntry(content: Content | undefined): boolean {
  * True when `content` is a *pure* system-reminder entry: it has parts and
  * EVERY part is a text part wrapped in `<system-reminder>…</system-reminder>`.
  *
- * These are structural history entries — the startup-context prelude,
- * mid-history MCP added-tool reminders, and resume-restored deferred schemas
- * — NOT real user turns.
+ * These are structural history entries — the startup-context prelude
+ * (history[0]), plus any reminder-only entry that a resumed session's history
+ * still carries from an earlier release — NOT real user turns.
  *
  * The "every part" requirement is load-bearing. Per-turn reminders (plan
  * mode, subagent list, recalled memory) are prepended as an extra part to the

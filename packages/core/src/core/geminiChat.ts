@@ -4982,9 +4982,9 @@ export class GeminiChat {
       this.history[this.history.length - 1]!.role === 'user'
     ) {
       // Never pop a *pure* system-reminder user entry. These are structural,
-      // not orphaned turns: the startup-context prelude (history[0]),
-      // mid-history MCP added-tool reminders, and resume-restored deferred
-      // schema context. Popping one would remove model-visible state that the
+      // not orphaned turns: the startup-context prelude (history[0]), plus any
+      // reminder-only entry a resumed session's history still carries from an
+      // earlier release. Popping one would remove model-visible state that the
       // runtime may still rely on.
       //
       // Must check EVERY part, not just parts[0]: a failed user turn in plan

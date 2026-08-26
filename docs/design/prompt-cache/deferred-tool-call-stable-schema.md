@@ -5,9 +5,9 @@
 Deferred tools were advertised through startup and lifecycle
 `<system-reminder>` messages. That makes the catalog ordinary conversation
 history: it can be diluted by a long context, removed by compression, or require
-special restoration during resume and compaction. The restoration path also
-coupled tool execution to bookkeeping about whether a schema was still present
-in the active history.
+special restoration during resume and compaction. Keeping the deferred set
+reachable therefore meant re-injecting catalog text into history whenever a
+lifecycle event evicted it.
 
 ## Design
 
@@ -51,6 +51,18 @@ MCP connection changes update the registry. The next declaration read therefore
 contains the new catalog without appending synthetic user-history entries or
 rewriting the system instruction.
 
+The presentation ledger, unlike the catalog, does follow the active model
+context. A delivery surface commits a mark only after the carrying `tool_search`
+result enters active history, and rolls that commit back if the send fails
+before the push. Surfaces that execute a batch sequentially gate the whole batch
+against a snapshot taken before it starts, so a `tool_search` earlier in the
+same batch cannot self-authorize a sibling `tool_call`. Every history mutation
+that can evict a tool result — compression, `/clear`, resume reload,
+rewind/truncation, and stripping an orphaned turn that carried a tool result —
+clears the ledger, so an affected tool must be searched again before it can be
+routed. Revealed (directly declared) tools are unaffected: their schemas stay in
+the function-declaration list regardless of history.
+
 ## Execution and safety
 
 `tool_call` is a transport bridge, not a separate executor. Before scheduling,
@@ -68,10 +80,15 @@ confirmation, hooks, cancellation, result truncation, telemetry, and UI
 identity. The provider-facing response keeps the original `tool_call` name and
 call ID so request/response pairing remains valid.
 
-The old schema-presentation ledger is removed, and execution does not depend on
-schema text surviving in history. This removes the need to restore schema
-reminders after compression or resume. It does not grant access to arbitrary
-tools: only live, hidden, proxy-eligible deferred tools may be targeted.
+Reaching the catalog no longer depends on reminder text surviving in history, so
+nothing is re-injected after compression or resume. Execution still requires
+that the target schema was actually presented to the model: the registry keeps a
+session-scoped presentation ledger mapping each proxied tool to the schema
+fingerprint `tool_search` delivered, and `tool_call` rejects a target whose mark
+is missing or whose fingerprint no longer matches the live schema — issue
+#6721's fail-closed gate against routing guessed or stale arguments. This does
+not grant access to arbitrary tools: only live, hidden, proxy-eligible deferred
+tools with a current presented schema may be targeted.
 
 Subagents and teammates keep their existing direct declaration surface and do
 not receive `tool_call`, preserving their tool restrictions. If `tool_search`
@@ -93,7 +110,9 @@ Tests cover:
 - deterministic catalog rendering and live registry updates;
 - absence of deferred catalog reminders from startup and lifecycle paths;
 - repeated search after a prior schema result;
-- `tool_call` normalization without history-presentation state;
+- `tool_call` normalization, including the presentation-ledger gate, its
+  batch snapshot, delivery rollback, and ledger clearing across history
+  mutations;
 - rejection of malformed, missing, replaced, or ineligible targets;
 - preservation of real-target permissions, hooks, validation, telemetry, and
   provider response identity; and
