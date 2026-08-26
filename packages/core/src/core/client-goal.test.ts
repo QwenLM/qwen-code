@@ -1032,7 +1032,6 @@ describe('GeminiClient Goal admission', () => {
             goalPermit: current,
             goalTurnKey: `goal-runtime:${current.turnId}`,
           },
-          0,
         ),
       );
     }
@@ -1040,5 +1039,39 @@ describe('GeminiClient Goal admission', () => {
     expect(started).toHaveLength(turns + 1);
     expect(turnMocks.run).toHaveBeenCalledTimes(turns);
     expect(client['sessionTurnCount']).toBe(0);
+  });
+
+  it('holds a runtime Goal turn to the caller recursion budget like any other send', async () => {
+    // Each Goal continuation is a fresh top-level send that starts from
+    // MAX_TURNS on its own, so a Goal has no reason to outlive one turn's
+    // recursion allowance. A caller that hands over an exhausted budget gets
+    // the same refusal every other message type gets -- and, because the
+    // turn was admitted, the interrupted-exit path pauses the Goal instead
+    // of leaving it running with a permit nobody will finish.
+    const { client, runtime } = setupGoalClient();
+    turnMocks.run.mockImplementation(async function* () {});
+
+    const events = await collect(
+      client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'goal-exhausted',
+        {
+          type: SendMessageType.Goal,
+          goalPermit: permit,
+          goalTurnKey: `goal-runtime:${permit.turnId}`,
+        },
+        0,
+      ),
+    );
+
+    expect(turnMocks.run).not.toHaveBeenCalled();
+    expect(runtime.dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'pause' }),
+    );
+    expect(runtime.finishTurn).toHaveBeenCalledOnce();
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: GeminiEventType.MaxSessionTurns }),
+    );
   });
 });
