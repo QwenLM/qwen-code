@@ -6,6 +6,9 @@
 
 export const CONTEXT_USAGE_ATTRIBUTE = 'qwen-code.context.usage';
 const MAX_CONTEXT_USAGE_ATTRIBUTE_LENGTH = 1024;
+// Longest JSON spelling of a non-negative finite number (24 characters).
+const MAX_SERIALIZED_NON_NEGATIVE_NUMBER = 0.0000010000000000000002;
+let contextUsageAttributeLengthLimit = MAX_CONTEXT_USAGE_ATTRIBUTE_LENGTH;
 
 const FIXED_CATEGORY_KEYS = [
   'system_prompt_tokens',
@@ -32,6 +35,19 @@ export interface ContextUsageV1 {
   compaction_reserve_tokens: number;
   available_before_compaction_tokens?: number;
   estimated: true;
+}
+
+export function configureContextUsageAttributeLengthLimit(
+  otelSpanAttributeValueLengthLimit: number | undefined,
+): void {
+  contextUsageAttributeLengthLimit =
+    otelSpanAttributeValueLengthLimit !== undefined &&
+    otelSpanAttributeValueLengthLimit > 0
+      ? Math.min(
+          MAX_CONTEXT_USAGE_ATTRIBUTE_LENGTH,
+          otelSpanAttributeValueLengthLimit,
+        )
+      : MAX_CONTEXT_USAGE_ATTRIBUTE_LENGTH;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -178,11 +194,36 @@ export function serializeContextUsage(
   try {
     const canonical = cloneContextUsage(contextUsage);
     if (!canonical) return undefined;
-    const serialized = JSON.stringify(canonical);
-    return serialized.length <= MAX_CONTEXT_USAGE_ATTRIBUTE_LENGTH
-      ? serialized
-      : undefined;
+    return serializeCanonicalContextUsage(canonical);
   } catch {
     return undefined;
   }
+}
+
+export function serializeContextUsageForSpanStart(
+  contextUsage: unknown,
+): string | undefined {
+  const canonical = cloneContextUsage(contextUsage);
+  if (!canonical) return undefined;
+  const serialized = serializeCanonicalContextUsage(canonical);
+  if (!serialized) return undefined;
+
+  const maximumFinalizedSize = serializeCanonicalContextUsage({
+    ...canonical,
+    breakdown: {
+      ...canonical.breakdown,
+      messages_tokens: Number.MAX_SAFE_INTEGER,
+    },
+    available_before_compaction_tokens: MAX_SERIALIZED_NON_NEGATIVE_NUMBER,
+  });
+  return maximumFinalizedSize ? serialized : undefined;
+}
+
+function serializeCanonicalContextUsage(
+  contextUsage: ContextUsageV1,
+): string | undefined {
+  const serialized = JSON.stringify(contextUsage);
+  return serialized.length <= contextUsageAttributeLengthLimit
+    ? serialized
+    : undefined;
 }

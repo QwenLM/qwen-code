@@ -241,6 +241,7 @@ import {
   setSessionIdOnContext,
 } from './session-context.js';
 import {
+  configureContextUsageAttributeLengthLimit,
   CONTEXT_USAGE_ATTRIBUTE,
   type ContextUsageV1,
 } from './context-usage.js';
@@ -276,6 +277,7 @@ describe('session-tracing', () => {
   });
 
   afterEach(() => {
+    configureContextUsageAttributeLengthLimit(undefined);
     vi.restoreAllMocks();
   });
 
@@ -727,6 +729,33 @@ describe('session-tracing', () => {
         messages_tokens: 0,
       });
       expect(normalized.available_before_compaction_tokens).toBe(77);
+    });
+
+    it('omits a request-start snapshot above the effective OTel limit', () => {
+      configureContextUsageAttributeLengthLimit(1);
+
+      const { span } = startLLMRequestSpanWithContext('m', 'p', {
+        contextUsage,
+      });
+      const record = mockSpans[0]!;
+      endLLMRequestSpan(span, { success: true, inputTokens: 3 });
+
+      expect(record.attributes).not.toHaveProperty(CONTEXT_USAGE_ATTRIBUTE);
+    });
+
+    it('omits the start value when a normalized value could exceed the limit', () => {
+      const initialValue = JSON.stringify(contextUsage);
+      configureContextUsageAttributeLengthLimit(initialValue.length);
+
+      const { span } = startLLMRequestSpanWithContext('m', 'p', {
+        contextUsage,
+      });
+      const record = mockSpans[0]!;
+      expect(record.attributes).not.toHaveProperty(CONTEXT_USAGE_ATTRIBUTE);
+
+      endLLMRequestSpan(span, { success: true, inputTokens: 3 });
+
+      expect(record.attributes).not.toHaveProperty(CONTEXT_USAGE_ATTRIBUTE);
     });
 
     it('owns the request-start snapshot across caller mutations', () => {

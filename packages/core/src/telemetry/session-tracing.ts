@@ -47,6 +47,7 @@ import {
   CONTEXT_USAGE_ATTRIBUTE,
   normalizeContextUsage,
   serializeContextUsage,
+  serializeContextUsageForSpanStart,
   type ContextUsageV1,
 } from './context-usage.js';
 
@@ -779,7 +780,8 @@ export function startLLMRequestSpanWithContext(
   const sessionId = resolveSessionId(parentCtx, options?.sessionId, ctx);
   const userId = resolveGenAiUserId(parentCtx, promptId, options?.userId);
   const contextUsage = cloneContextUsage(options?.contextUsage);
-  const serializedContextUsage = serializeContextUsage(contextUsage);
+  const serializedContextUsage =
+    serializeContextUsageForSpanStart(contextUsage);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
     ...(sessionId ? { 'gen_ai.conversation.id': sessionId } : {}),

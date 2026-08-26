@@ -4,13 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
+  configureContextUsageAttributeLengthLimit,
   isValidContextUsage,
   normalizeContextUsage,
   serializeContextUsage,
+  serializeContextUsageForSpanStart,
   type ContextUsageV1,
 } from './context-usage.js';
+
+afterEach(() => {
+  configureContextUsageAttributeLengthLimit(undefined);
+});
 
 describe('normalizeContextUsage', () => {
   function snapshot(breakdown: ContextUsageV1['breakdown']): ContextUsageV1 {
@@ -231,5 +237,58 @@ describe('serializeContextUsage', () => {
     expect(breakdownReads).toBe(1);
     expect(serialized).toContain('"window_size_tokens":100');
     expect(serialized).not.toContain('secret');
+  });
+
+  it('omits JSON that the effective OTel span limit would truncate', () => {
+    const value: ContextUsageV1 = {
+      version: 1,
+      window_size_tokens: Number.MAX_SAFE_INTEGER,
+      breakdown: {
+        system_prompt_tokens: Number.MAX_SAFE_INTEGER,
+        builtin_tools_tokens: Number.MAX_SAFE_INTEGER,
+        mcp_tools_tokens: Number.MAX_SAFE_INTEGER,
+        memory_files_tokens: Number.MAX_SAFE_INTEGER,
+        skills_tokens: Number.MAX_SAFE_INTEGER,
+        messages_tokens: Number.MAX_SAFE_INTEGER,
+      },
+      compaction_reserve_tokens: Number.MAX_SAFE_INTEGER,
+      available_before_compaction_tokens: Number.MAX_SAFE_INTEGER,
+      estimated: true,
+    };
+
+    configureContextUsageAttributeLengthLimit(256);
+    expect(serializeContextUsage(value)).toBeUndefined();
+
+    configureContextUsageAttributeLengthLimit(0);
+    expect(serializeContextUsage(value)).toBeDefined();
+  });
+
+  it('preflights the longest finite available-token spelling', () => {
+    const value: ContextUsageV1 = {
+      version: 1,
+      window_size_tokens: 100,
+      breakdown: {
+        system_prompt_tokens: 1,
+        builtin_tools_tokens: 1,
+        mcp_tools_tokens: 1,
+        memory_files_tokens: 1,
+        skills_tokens: 1,
+        messages_tokens: 0,
+      },
+      compaction_reserve_tokens: 10,
+      estimated: true,
+    };
+    const shorterWorstCase = JSON.stringify({
+      ...value,
+      breakdown: {
+        ...value.breakdown,
+        messages_tokens: Number.MAX_SAFE_INTEGER,
+      },
+      available_before_compaction_tokens: Number.MAX_VALUE,
+    });
+
+    configureContextUsageAttributeLengthLimit(shorterWorstCase.length);
+
+    expect(serializeContextUsageForSpanStart(value)).toBeUndefined();
   });
 });

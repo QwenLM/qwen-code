@@ -317,8 +317,15 @@ remains the control plane for whether spans are recorded or exported.
 - Snapshot construction performs a bounded number of linear passes over the
   logical request. It must not add a nested scan per tool, skill, or message.
 - The schema has a fixed key set and a bounded serialized size. JSON is compact
-  and is never truncated into invalid JSON. Serialization omits the complete
-  attribute if it exceeds a fixed 1024-character safety limit.
+  and is never truncated into invalid JSON. At SDK initialization, Qwen Code
+  resolves the standard OTel span-specific/general attribute-value limit with
+  the same precedence used by `NodeSDK` and passes it explicitly to the SDK.
+  Serialization omits the complete attribute if it exceeds the smaller of that
+  positive effective limit and the fixed 1024-character safety limit. Without
+  a positive effective limit, only the fixed limit applies. Span start also
+  preflights a conservative maximum finalized size for the same snapshot; if a
+  provider-total-normalized value could exceed the limit, the attribute is
+  omitted from the start so an unnormalized value cannot survive finalization.
 - The size bound limits per-span payload, not fleet-wide ingestion or value
   cardinality. Total volume scales with physical attempts, including retries
   and subagents, and the aggregate JSON values are expected to be nearly
@@ -364,18 +371,19 @@ pre-allocate scalar aliases.
    Leave the existing `estimateContentTokens` compaction estimator unchanged,
    and keep CLI detail parsing, localization, and rendering in the CLI package.
 2. Add a pure `telemetry/context-usage.ts` module defining the V1 type,
-   provider-total normalization, validation, the 1024-character limit, and
-   compact serialization. It must not import `Config`, tool implementations,
-   or `LoggingContentGenerator`, so `session-tracing` cannot create a
-   telemetry-to-tools dependency cycle.
+   provider-total normalization, validation, effective OTel/fixed character
+   limits, and compact serialization. It must not import `Config`, tool
+   implementations, or `LoggingContentGenerator`, so `session-tracing` cannot
+   create a telemetry-to-tools dependency cycle.
 3. Keep request-source collection at the request wrapper boundary. Retain the
    owning generator-configuration reference in `LoggingContentGenerator`, read
    its effective context-window size at snapshot time, classify the request
    using `Config` and the tool registry there, and pass only the resulting plain
    numeric snapshot to both streaming and non-streaming span starts.
 4. Extend `StartLLMRequestSpanOptions` and the internal `SpanContext` with the
-   structured snapshot. Serialize at start and overwrite after valid input
-   usage is available in `endLLMRequestSpan`.
+   structured snapshot. Preflight and serialize at start, retain the snapshot
+   only when the attribute is emitted, and overwrite it after valid input usage
+   is available in `endLLMRequestSpan`.
 5. Do not change the span name, span kind, existing standard usage fields,
    sensitive-content controls, events, metrics, or exporters.
 
@@ -384,7 +392,8 @@ pre-allocate scalar aliases.
 Unit tests for the context-usage module cover:
 
 - the exact version-1 JSON shape and compact serialization;
-- whole-attribute omission above the 1024-character safety limit;
+- whole-attribute omission above either the effective positive OTel span limit
+  or the 1024-character safety limit;
 - CJK and ASCII estimation parity with `/context`;
 - structured messages with inline media, without base64-size inflation;
 - system-prompt versus memory attribution;
