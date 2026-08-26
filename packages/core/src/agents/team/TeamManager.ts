@@ -88,6 +88,14 @@ const debug = createDebugLogger('AGENTS_TEAM_MANAGER');
 // imported it from this module keep compiling.
 export type { TeamAgentHandle };
 
+/** Delivery outcome of a {@link TeamManager.broadcast} call. */
+export interface BroadcastResult {
+  /** Number of recipients the broadcast attempted (sender excluded). */
+  total: number;
+  /** Names of recipients whose delivery was rejected. */
+  failedRecipients: string[];
+}
+
 /** Configuration for spawning a teammate. */
 export interface TeammateSpawnConfig {
   /** Human-readable name (will be sanitized). */
@@ -670,31 +678,38 @@ export class TeamManager {
   /**
    * Broadcast a message to all teammates and the leader
    * (except the sender).
+   *
+   * Returns the delivery outcome so the caller can distinguish complete
+   * success from partial/total failure instead of assuming every
+   * delivery landed.
    */
-  async broadcast(message: string, fromName: string): Promise<void> {
-    const promises = this.teamFile.members
+  async broadcast(message: string, fromName: string): Promise<BroadcastResult> {
+    const recipients = this.teamFile.members
       .filter((m) => m.name.toLowerCase() !== fromName.toLowerCase())
-      .map((m) => this.sendMessage(m.name, message, fromName));
+      .map((m) => m.name);
 
     // Also deliver to leader inbox if sender is not the leader.
     if (fromName.toLowerCase() !== LEADER_NAME) {
-      promises.push(this.sendMessage(LEADER_NAME, message, fromName));
+      recipients.push(LEADER_NAME);
     }
 
     // allSettled, not all: a single recipient that terminated between
     // the member snapshot and the send throws (its queue is gone), and
     // Promise.all would reject the whole broadcast — making the leader
     // think every recipient failed when the rest were delivered fine.
-    const results = await Promise.allSettled(promises);
-    const failures = results.filter(
-      (r): r is PromiseRejectedResult => r.status === 'rejected',
+    const results = await Promise.allSettled(
+      recipients.map((name) => this.sendMessage(name, message, fromName)),
     );
-    if (failures.length > 0) {
+    const failedRecipients = recipients.filter(
+      (_, i) => results[i]?.status === 'rejected',
+    );
+    if (failedRecipients.length > 0) {
       debug.warn(
-        `Broadcast: ${failures.length}/${results.length} send(s) failed ` +
+        `Broadcast: ${failedRecipients.length}/${results.length} send(s) failed ` +
           `(recipient likely terminated).`,
       );
     }
+    return { total: recipients.length, failedRecipients };
   }
 
   /**
