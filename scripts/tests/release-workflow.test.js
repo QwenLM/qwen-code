@@ -6,10 +6,13 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -287,6 +290,136 @@ describe('release workflow', () => {
       );
     } finally {
       rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('executes the workspace wipe against guard branches', () => {
+    const wipeEnd = canonicalWipe.indexOf('rm -f -- "${HOME:?}/.npmrc"');
+    expect(wipeEnd).toBeGreaterThan(0);
+    const wipeScript = canonicalWipe.slice(0, wipeEnd);
+
+    const runWipe = (envOverrides, { preCreateWorkspace } = {}) => {
+      const base = mkdtempSync(join(tmpdir(), 'release-wipe-behavioral-'));
+      const workspace = join(base, 'workspace');
+      mkdirSync(workspace);
+      if (preCreateWorkspace) preCreateWorkspace(base, workspace);
+      const env = {
+        ...process.env,
+        GITHUB_WORKSPACE: workspace,
+        RUNNER_WORKSPACE: base,
+        HOME: join(base, 'home'),
+        XDG_CONFIG_HOME: join(base, 'home', '.config'),
+        ...envOverrides,
+      };
+      mkdirSync(env.HOME);
+      return {
+        result: spawnSync('bash', ['-e', '-o', 'pipefail', '-c', wipeScript], {
+          encoding: 'utf8',
+          env,
+        }),
+        base,
+        workspace,
+      };
+    };
+
+    // Happy path: a normal workspace inside the runner workspace is wiped.
+    {
+      const { result, base, workspace } = runWipe(
+        {},
+        {
+          preCreateWorkspace: (_base, ws) => {
+            writeFileSync(join(ws, 'leftover.txt'), 'stale');
+          },
+        },
+      );
+      try {
+        expect(result.status).toBe(0);
+        const entries = readdirSync(workspace);
+        expect(entries).toHaveLength(0);
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Symlink heal: a workspace replaced with a symlink inside the runner
+    // workspace is removed and recreated, then wiped.
+    {
+      const { result, base, workspace } = runWipe(
+        {},
+        {
+          preCreateWorkspace: (b, ws) => {
+            rmSync(ws, { recursive: true, force: true });
+            symlinkSync(join(b, 'decoy'), ws);
+          },
+        },
+      );
+      try {
+        expect(result.status).toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'healing workspace',
+        );
+        const stat = lstatSync(workspace);
+        expect(stat.isDirectory()).toBe(true);
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Workspace outside runner workspace: refused.
+    {
+      const outside = mkdtempSync(join(tmpdir(), 'release-wipe-outside-'));
+      const base = mkdtempSync(join(tmpdir(), 'release-wipe-runner-'));
+      try {
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: outside,
+          RUNNER_WORKSPACE: base,
+          HOME: join(base, 'home'),
+          XDG_CONFIG_HOME: join(base, 'home', '.config'),
+        };
+        mkdirSync(env.HOME);
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
+        );
+        expect(result.status).not.toBe(0);
+        expect(`${result.stdout}${result.stderr}`).toContain(
+          'refusing to wipe workspace outside the runner workspace',
+        );
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+        rmSync(base, { recursive: true, force: true });
+      }
+    }
+
+    // Path with '..' that realpath resolves inside the runner workspace:
+    // canonicalization succeeds, containment passes, wipe proceeds.
+    {
+      const base = mkdtempSync(join(tmpdir(), 'release-wipe-dots-'));
+      const workspace = join(base, 'workspace');
+      mkdirSync(workspace);
+      writeFileSync(join(workspace, 'leftover.txt'), 'stale');
+      try {
+        const env = {
+          ...process.env,
+          GITHUB_WORKSPACE: join(base, 'sub', '..', 'workspace'),
+          RUNNER_WORKSPACE: base,
+          HOME: join(base, 'home'),
+          XDG_CONFIG_HOME: join(base, 'home', '.config'),
+        };
+        mkdirSync(env.HOME);
+        const result = spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', wipeScript],
+          { encoding: 'utf8', env },
+        );
+        expect(result.status).toBe(0);
+        const entries = readdirSync(workspace);
+        expect(entries).toHaveLength(0);
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
     }
   });
 
