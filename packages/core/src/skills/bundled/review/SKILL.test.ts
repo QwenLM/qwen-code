@@ -816,6 +816,48 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('pins the fix-constraint field in all three of its halves', () => {
+    // The premise half of #10153, beside the fix-witness claim half above.
+    // The same three clauses have to survive together:
+    //   1. the finding format has to ASK for the fact (Step 6, and the Step 4
+    //      aggregate slot Step 6 points at),
+    //   2. the comment has to CARRY it — a constraint recorded and never
+    //      posted reaches no fixer, and the human fixer reading the comment
+    //      is the loop this field exists for, and
+    //   3. the two properties that make it different from its sibling must
+    //      hold at both sites: omitted rather than `N/A` (comment volume,
+    //      #9177), and witness-grade evidence — a quoted constant or a
+    //      file:line — rather than a caution the fixer would follow.
+    const body = skillBody();
+    expect(body).toContain(
+      '**Fix constraint** — an existing fact the fix must not violate, with its source',
+    );
+    expect(body).toContain(
+      'Omit it when none was observed — never `N/A` — and never without a source',
+    );
+    expect(body).toContain(
+      '- **Fix constraint:** <the existing fact the general fix must not violate',
+    );
+    expect(body).toContain(
+      'Suggested fix, Fix witness, Fix constraint, Severity',
+    );
+    // The artifact field list: a fourth optional field the command carries
+    // but the skill does not name is one the orchestrator strips when it
+    // re-emits the artifact by hand.
+    expect(body).toContain(
+      '`fixConstraint` is the existing fact the fix must not violate, with its source',
+    );
+    expect(body).toContain(
+      'And a comment whose fix rests on an existing fact carries that fact',
+    );
+    expect(body).toContain(
+      'a constraint that names no constant and no `file:line` is not posted',
+    );
+    expect(body).toContain(
+      'A finding with no `fixConstraint` adds nothing — no `N/A`, no "no constraints observed"',
+    );
+  });
+
   it('pins the fix-induced disposition and both of its operands', () => {
     // Attribution needs the DISPOSITION and the two-operand test together.
     // With only the disposition, a round folds any adjacent defect into an
