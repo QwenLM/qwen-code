@@ -41,6 +41,7 @@ import {
   IdeClient,
   ideContextStore,
   createDebugLogger,
+  describeDeliveryStatus,
   describeHoldCause,
   getErrorMessage,
   getAllGeminiMdFilenames,
@@ -2547,6 +2548,35 @@ export const AppContainer = (props: AppContainerProps) => {
           text:
             `Held a message from another session (${describeHoldCause(newest.cause)}). ` +
             `${held.length} waiting — /peers to review.`,
+        },
+        Date.now(),
+      );
+    });
+  }, [historyManager, peerMessaging]);
+
+  // Surface what became of messages this session sent. A 'held' or
+  // 'denied' receipt is the only way to learn that a peer's user is
+  // sitting on — or threw away — a message the model was told was sent;
+  // without it the sender reads silence as delivery. 'delivered' is the
+  // expected outcome and is only worth a line when it ends a hold the
+  // user already saw announced. Receipts for ids this session never sent
+  // are dropped before they reach here, so a stranger cannot fill the
+  // history with them.
+  const announcedReceiptHoldsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!peerMessaging) return;
+    return peerMessaging.onReceipt(({ status, address, origMsgId }) => {
+      const holds = announcedReceiptHoldsRef.current;
+      if (status === 'held') {
+        holds.add(origMsgId);
+      } else {
+        const wasHeld = holds.delete(origMsgId);
+        if (status === 'delivered' && !wasHeld) return;
+      }
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text: `Your message to ${address} was ${status}: ${describeDeliveryStatus(status)}`,
         },
         Date.now(),
       );

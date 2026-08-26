@@ -73,7 +73,10 @@ import {
   type HeldMessage,
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
-import type { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import type {
+  PeerMessaging,
+  PeerReceipt,
+} from '../peerMessaging/peer-messaging.js';
 import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -7091,6 +7094,7 @@ describe('AppContainer State Management', () => {
       value: PeerMessaging;
       submit: (modelText: string, displayText: string) => void;
       emitHeld: (held: readonly HeldMessage[]) => void;
+      emitReceipt: (receipt: PeerReceipt) => void;
     }
 
     const heldMessage = (msgId: string): HeldMessage =>
@@ -7110,6 +7114,7 @@ describe('AppContainer State Management', () => {
       let submitFn: ((modelText: string, displayText: string) => void) | null =
         null;
       let heldListener: ((held: readonly HeldMessage[]) => void) | null = null;
+      let receiptListener: ((receipt: PeerReceipt) => void) | null = null;
       const value = {
         setSubmitFn: (fn: (modelText: string, displayText: string) => void) => {
           submitFn = fn;
@@ -7117,6 +7122,10 @@ describe('AppContainer State Management', () => {
         setQueuedPeerCount: vi.fn(),
         onHeldChange: (fn: (held: readonly HeldMessage[]) => void) => {
           heldListener = fn;
+          return () => {};
+        },
+        onReceipt: (fn: (receipt: PeerReceipt) => void) => {
+          receiptListener = fn;
           return () => {};
         },
         getHeld: () => [],
@@ -7129,6 +7138,10 @@ describe('AppContainer State Management', () => {
         emitHeld: (held) => {
           if (!heldListener) throw new Error('no held-change listener wired');
           heldListener(held);
+        },
+        emitReceipt: (receipt) => {
+          if (!receiptListener) throw new Error('no receipt listener wired');
+          receiptListener(receipt);
         },
       };
     };
@@ -7211,6 +7224,57 @@ describe('AppContainer State Management', () => {
       });
 
       expect(addPeerMessage).not.toHaveBeenCalled();
+    });
+
+    it('announces held and denied receipts, and delivery only after a hold', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+      renderWithPeer(peer);
+      const notices = () =>
+        addItem.mock.calls
+          .map((call) => String((call[0] as { text?: string })?.text ?? ''))
+          .filter((text) => text.startsWith('Your message to '));
+
+      // The common case: delivered straight away. Nothing to say.
+      act(() => {
+        peer.emitReceipt({
+          status: 'delivered',
+          address: 'docs-cd',
+          origMsgId: 'm1',
+        });
+      });
+      expect(notices()).toEqual([]);
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'held',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+        });
+      });
+      expect(notices()).toHaveLength(1);
+      expect(notices()[0]).toContain('docs-cd was held');
+
+      // The user over there released it: that ends a hold they saw.
+      act(() => {
+        peer.emitReceipt({
+          status: 'delivered',
+          address: 'docs-cd',
+          origMsgId: 'm2',
+        });
+      });
+      expect(notices()).toHaveLength(2);
+      expect(notices()[1]).toContain('was delivered');
+
+      act(() => {
+        peer.emitReceipt({
+          status: 'denied',
+          address: 'app-ab [ab12cd]',
+          origMsgId: 'm3',
+        });
+      });
+      expect(notices()).toHaveLength(3);
+      expect(notices()[2]).toContain('app-ab [ab12cd] was denied');
     });
 
     it('announces a newly held message once and stays quiet when one is released', () => {

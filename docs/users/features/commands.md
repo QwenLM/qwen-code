@@ -794,3 +794,32 @@ qwen sessions ps
 # raw-data note above); pipe through a sanitizer if the path is untrusted.
 qwen sessions ps --json | jq -r .cwd
 ```
+
+#### Messaging another running session
+
+Two interactive sessions on the same machine can send each other
+messages. The feature is experimental and **off by default**; turn it on
+in `settings.json` and restart:
+
+```json
+{ "agents": { "crossSessionMessaging": true } }
+```
+
+Once on, the model in one session can discover the others with
+`list_agents` — each appears under `sessions` with the same `name` that
+`qwen sessions ps` prints — and address one with `send_message` using
+that name as `to`. When two sessions share a name, `list_agents` appends
+a short `[ref]` and the full `name [ref]` is required; a bare name that
+could mean either is refused rather than guessed. `list_agents` also
+reports the session's own name under `self`, and `to: "*"` still means
+"my Agent Team teammates" and never reaches other sessions.
+
+A message arrives in the other session marked as coming from another
+session, not from its user, and carries none of your authority there:
+the receiving session acts on it only within its own permission settings.
+Its user can choose what happens to incoming messages with
+`agents.crossSessionInbound` (`accept`, `hold`, or `refuse`); when unset,
+a message is delivered as long as the receiving session still reviews
+each action, and held for review otherwise. Held messages are listed and
+released with `/peers` in the receiving session. The sender's `send_message`
+call reports whether the message was delivered, held, or refused.

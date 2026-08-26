@@ -54,6 +54,18 @@ describe('parsePeerFrame — user frames', () => {
     });
   });
 
+  it('carries the recipient session id through', () => {
+    expect(
+      parsePeerFrame(line({ ...validUser, toSessionId: 'sess-9' })),
+    ).toMatchObject({ toSessionId: 'sess-9' });
+  });
+
+  it('treats a non-string toSessionId as unaddressed', () => {
+    const frame = parsePeerFrame(line({ ...validUser, toSessionId: 7 }));
+    expect(frame).not.toBeNull();
+    expect(frame && 'toSessionId' in frame).toBe(false);
+  });
+
   it('drops an unrecognized fromMode rather than trusting it', () => {
     const frame = parsePeerFrame(line({ ...validUser, fromMode: 'root' }));
     expect(frame).not.toBeNull();
@@ -207,6 +219,16 @@ describe('round trip', () => {
     expect(encoded.endsWith('\n')).toBe(true);
     expect(encoded.indexOf('\n')).toBe(encoded.length - 1);
     expect(parsePeerFrame(encoded.trimEnd())).toEqual(frame);
+  });
+
+  it('round-trips the recipient session id', () => {
+    const frame = buildUserFrame({ content: 'hi', toSessionId: 'sess-9' });
+    expect(frame.toSessionId).toBe('sess-9');
+    expect(parsePeerFrame(encodePeerFrame(frame).trimEnd())).toEqual(frame);
+  });
+
+  it('omits the recipient key rather than writing undefined', () => {
+    expect('toSessionId' in buildUserFrame({ content: 'hi' })).toBe(false);
   });
 
   it('survives content containing newlines', () => {

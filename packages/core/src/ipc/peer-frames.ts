@@ -59,6 +59,14 @@ export interface PeerUserFrame {
    * treats as the cautious case rather than as a match.
    */
   fromMode?: 'bypass' | 'prompting';
+  /**
+   * Session id of the intended recipient. The address a sender dials is
+   * keyed by PID, and PIDs get reused, so a receiver whose session id
+   * differs refuses the frame: it was written for whoever held this
+   * address when the sender last looked, not for the session holding it
+   * now. Absent means the sender did not say, which older senders don't.
+   */
+  toSessionId?: string;
   priority: PeerMessagePriority;
   message: { role: 'user'; content: string };
 }
@@ -147,6 +155,7 @@ export function parsePeerFrame(line: string): PeerFrame | null {
 
     const priority = parsed['priority'];
     const fromMode = parsed['fromMode'];
+    const toSessionId = optionalString(parsed['toSessionId']);
     return {
       msgV,
       msgId,
@@ -156,6 +165,7 @@ export function parsePeerFrame(line: string): PeerFrame | null {
       ...(fromMode === 'bypass' || fromMode === 'prompting'
         ? { fromMode }
         : {}),
+      ...(toSessionId !== undefined ? { toSessionId } : {}),
       priority: priority === 'now' ? 'now' : 'next',
       message: { role: 'user', content },
     };
@@ -200,6 +210,7 @@ export interface BuildUserFrameFields {
   from?: string;
   fromName?: string;
   fromMode?: 'bypass' | 'prompting';
+  toSessionId?: string;
   priority?: PeerMessagePriority;
 }
 
@@ -211,6 +222,9 @@ export function buildUserFrame(fields: BuildUserFrameFields): PeerUserFrame {
     ...(fields.from !== undefined ? { from: fields.from } : {}),
     ...(fields.fromName !== undefined ? { fromName: fields.fromName } : {}),
     ...(fields.fromMode !== undefined ? { fromMode: fields.fromMode } : {}),
+    ...(fields.toSessionId !== undefined
+      ? { toSessionId: fields.toSessionId }
+      : {}),
     priority: fields.priority ?? 'next',
     message: { role: 'user', content: fields.content },
   };

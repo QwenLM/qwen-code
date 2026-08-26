@@ -453,6 +453,7 @@ export async function startInteractiveUI(
               | undefined,
           updateSessionRegistryIpcPath: (ipcPath) =>
             config.updateSessionRegistryIpcPath(ipcPath),
+          getSessionId: () => config.getSessionId(),
         });
         if (exiting) {
           await peerMessaging?.close();

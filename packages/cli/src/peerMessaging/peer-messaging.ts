@@ -27,10 +27,13 @@ import {
   MAX_HELD_MESSAGES,
   type HeldMessage,
   type InboundPolicy,
+  lookupSentPeerMessage,
+  type PeerDeliveryStatus,
   type PeerFrame,
   type PeerInbox,
   type PeerUserFrame,
   sendDeliveryStatus,
+  type SentPeerMessage,
   startPeerInbox,
 } from '@qwen-code/qwen-code-core';
 
@@ -53,10 +56,33 @@ export type PeerSubmitFn = (modelText: string, displayText: string) => boolean;
  */
 export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
 
+/**
+ * A delivery receipt for a message this session sent, as surfaced to
+ * the UI: which address it went to and what became of it there.
+ */
+export interface PeerReceipt {
+  status: PeerDeliveryStatus;
+  address: string;
+  origMsgId: string;
+}
+
 export interface PeerMessagingOptions {
   getApprovalMode: () => ApprovalMode | null;
   getPolicySetting: () => InboundPolicy | undefined;
   updateSessionRegistryIpcPath: (ipcPath: string | undefined) => Promise<void>;
+  /**
+   * Resolve a receipt's message id to the send it answers. Defaults to
+   * the send-side ledger; injectable so the wiring can be tested without
+   * a real send.
+   */
+  lookupSentMessage?: (msgId: string) => SentPeerMessage | undefined;
+  /**
+   * This session's current id. A getter, not a value: /clear and /resume
+   * swap the id under a running process, and a frame pinned to the id a
+   * sender read from the registry must be judged against the id this
+   * session holds now. Absent means frames are never checked against it.
+   */
+  getSessionId?: () => string;
   socketPath?: string;
 }
 
@@ -66,6 +92,10 @@ export class PeerMessaging {
   private updateSessionRegistryIpcPath: (
     ipcPath: string | undefined,
   ) => Promise<void> = async () => {};
+  private getSessionId: (() => string) | null = null;
+  private lookupSentMessage: (msgId: string) => SentPeerMessage | undefined =
+    lookupSentPeerMessage;
+  private readonly receiptListeners = new Set<(receipt: PeerReceipt) => void>();
   private submitFn: PeerSubmitFn | null = null;
   private readonly buffered: PeerUserFrame[] = [];
   /**
@@ -129,6 +159,9 @@ export class PeerMessaging {
     messaging.inbox = inbox;
     messaging.updateSessionRegistryIpcPath =
       options.updateSessionRegistryIpcPath;
+    messaging.getSessionId = options.getSessionId ?? null;
+    messaging.lookupSentMessage =
+      options.lookupSentMessage ?? lookupSentPeerMessage;
 
     // Advertise the address only once the socket is actually accepting.
     // Publishing it earlier would hand peers an address that refuses
@@ -238,6 +271,26 @@ export class PeerMessaging {
     return () => this.heldListeners.delete(listener);
   }
 
+  /** Subscribe to receipts for messages this session sent. */
+  onReceipt(listener: (receipt: PeerReceipt) => void): () => void {
+    this.receiptListeners.add(listener);
+    return () => this.receiptListeners.delete(listener);
+  }
+
+  private emitReceipt(receipt: PeerReceipt): void {
+    for (const listener of this.receiptListeners) {
+      try {
+        listener(receipt);
+      } catch (error) {
+        debugLogger.debug(
+          `receipt listener threw: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -277,12 +330,48 @@ export class PeerMessaging {
 
   private onFrame(frame: PeerFrame): void {
     if (frame.type === 'control') {
-      // Receipts about messages *we* sent. Nothing consumes them until
-      // the sender lands, so log and move on rather than inventing a
-      // half-used delivery-tracking table now.
+      // A receipt for a message this session sent. Any process that can
+      // reach the socket can write one for any id, so only ids the
+      // send-side ledger knows are surfaced; the rest are logged and
+      // dropped.
+      const sent = this.lookupSentMessage(frame.origMsgId);
+      if (!sent) {
+        debugLogger.debug(
+          `ignoring delivery status ${frame.status} for unknown message ${frame.origMsgId}`,
+        );
+        return;
+      }
       debugLogger.debug(
-        `delivery status from peer: ${frame.status} for ${frame.origMsgId}`,
+        `delivery status from ${sent.address}: ${frame.status} for ${frame.origMsgId}`,
       );
+      this.emitReceipt({
+        status: frame.status,
+        address: sent.address,
+        origMsgId: frame.origMsgId,
+      });
+      return;
+    }
+    // The socket address is keyed by PID and PIDs get reused, so a frame
+    // can arrive here that was written for whoever held this address when
+    // the sender last looked. One pinned to a different session id is not
+    // ours to act on — refuse it with a receipt, so the sender learns its
+    // directory is stale instead of reading silence as delivery.
+    const ownSessionId = this.getSessionId?.();
+    if (
+      frame.toSessionId !== undefined &&
+      ownSessionId !== undefined &&
+      frame.toSessionId !== ownSessionId
+    ) {
+      debugLogger.debug(
+        `refusing peer message ${frame.msgId}: addressed to session ${frame.toSessionId}, this is ${ownSessionId}`,
+      );
+      if (frame.from) {
+        void sendDeliveryStatus(frame.from, {
+          status: 'denied',
+          origMsgId: frame.msgId,
+          from: this.inbox?.socketPath,
+        });
+      }
       return;
     }
     this.gate?.admit(frame);

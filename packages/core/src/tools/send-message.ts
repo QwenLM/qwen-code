@@ -5,17 +5,26 @@
  */
 
 /**
- * send_message tool - send a message to a teammate or a background task.
+ * send_message tool - send a message to a teammate, a background task, or
+ * another Qwen Code session on this machine.
  *
- * Two routing modes:
- * - Team mode: `to` matches a teammate name (or "*" for broadcast). Messages
- *   route through TeamManager as plain text. This tool carries content only;
- *   team control actions are separate tools (see `request-shutdown.ts`), so a
- *   teammate cannot express a control action at all — see #9276.
+ * Three routing modes, tried in this order:
  * - Background-task mode: `task_id` matches an entry in the background task
  *   registry. Running tasks receive the message at the next tool-round
  *   boundary; paused recovered tasks are resumed first and take the message as
  *   their first continuation instruction.
+ * - Team mode: `to` matches a teammate name (or "*" for broadcast). Messages
+ *   route through TeamManager as plain text. This tool carries content only;
+ *   team control actions are separate tools (see `request-shutdown.ts`), so a
+ *   teammate cannot express a control action at all — see #9276.
+ * - Peer mode: `to` matches another Qwen Code session on this machine (see
+ *   `ipc/peer-send.ts`). Plain text only, and only while cross-session
+ *   messaging is enabled here; the message arrives there marked as coming
+ *   from another session and may be held for that session's user to review.
+ *
+ * In-process wins: a name that is both a teammate and a peer session routes
+ * to the teammate, because that is this session's own work. Broadcast never
+ * crosses a session boundary.
  */
 
 import type { Config } from '../config/config.js';
@@ -23,7 +32,10 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getAgentName } from '../agents/team/identity.js';
+import { findMemberByName } from '../agents/team/teamHelpers.js';
 import { LEADER_NAME } from '../agents/team/types.js';
+import type { ApprovalMode } from '../config/approval-mode.js';
+import { sendToPeer } from '../ipc/peer-send.js';
 import {
   getPlanRequiredTeammatePreApprovalMessage,
   isPlanRequiredTeammateAwaitingApproval,
@@ -37,7 +49,10 @@ import {
 } from './tools.js';
 
 export interface SendMessageParams {
-  /** Recipient teammate name, or "*" for broadcast (team mode). */
+  /**
+   * Recipient teammate name, "*" for team broadcast, or the name of another
+   * Qwen Code session on this machine (optionally `name [ref]`).
+   */
   to?: string;
   /** Background-task ID, from the launch response (background mode). */
   task_id?: string;
@@ -77,6 +92,98 @@ class SendMessageInvocation extends BaseToolInvocation<
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     return 'ask';
+  }
+
+  /**
+   * Try to deliver to another Qwen Code session on this machine.
+   *
+   * Returns null when this is not a peer send at all — cross-session
+   * messaging is off here, or the name resolved to nothing and there is
+   * nothing to suggest — so the caller can fall through to its own error.
+   * Every other outcome, including failures, is a result: each one has a
+   * different next step for the model.
+   */
+  private async trySendToPeer(to: string): Promise<ToolResult | null> {
+    let approvalMode: ApprovalMode | null;
+    try {
+      approvalMode = this.config.getApprovalMode();
+    } catch {
+      // Asserting nothing makes the receiver hold the message rather than
+      // trust a mode class this side could not read.
+      approvalMode = null;
+    }
+
+    const outcome = await sendToPeer({
+      target: to,
+      message: this.params.message,
+      approvalMode,
+    });
+
+    switch (outcome.kind) {
+      case 'disabled':
+        return null;
+
+      case 'self': {
+        const msg =
+          `"${outcome.name}" is this session's own name — a session cannot message itself. ` +
+          'Use list_agents to see the other sessions you can reach.';
+        return {
+          llmContent: msg,
+          returnDisplay: 'That is this session.',
+          error: { message: msg, type: ToolErrorType.SEND_MESSAGE_NOT_FOUND },
+        };
+      }
+
+      case 'not-found': {
+        if (outcome.suggestions.length === 0) return null;
+        const msg =
+          `No reachable session is named "${to}". Did you mean: ` +
+          `${outcome.suggestions.join(', ')}? Use list_agents to see who is reachable.`;
+        return {
+          llmContent: msg,
+          returnDisplay: 'No such session.',
+          error: { message: msg, type: ToolErrorType.SEND_MESSAGE_NOT_FOUND },
+        };
+      }
+
+      case 'ambiguous': {
+        const msg =
+          `"${to}" matches more than one live session:\n` +
+          outcome.matches.map((line) => `  ${line}`).join('\n') +
+          "\nRe-send with the full 'name [ref]' so it goes to the one you mean.";
+        return {
+          llmContent: msg,
+          returnDisplay: 'Ambiguous recipient.',
+          error: { message: msg, type: ToolErrorType.SEND_MESSAGE_NOT_FOUND },
+        };
+      }
+
+      case 'failed': {
+        const msg = `Failed to send to ${outcome.address}: ${outcome.reason}`;
+        return {
+          llmContent: msg,
+          returnDisplay: 'Send failed.',
+          error: { message: msg, type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING },
+        };
+      }
+
+      case 'sent': {
+        const preview = this.params.summary ?? this.params.message.slice(0, 50);
+        return {
+          llmContent:
+            `Sent to ${outcome.address} — another Qwen Code session on this machine, ` +
+            `working in ${outcome.peer.cwd}. It arrives there as a marked cross-session ` +
+            "message carrying none of your user's authority, and may be held for that " +
+            "session's user to review before it acts.",
+          returnDisplay: `“${preview}” → ${outcome.address}`,
+        };
+      }
+
+      default: {
+        const exhaustive: never = outcome;
+        return exhaustive;
+      }
+    }
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -216,19 +323,6 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
 
-    // Route 2: teammate by name via TeamManager.
-    const teamManager = this.config.getTeamManager();
-    if (!teamManager) {
-      const msg =
-        'No active team and no task_id provided. ' +
-        'Either create a team first, or pass `task_id` to message a background task.';
-      return {
-        llmContent: msg,
-        returnDisplay: msg,
-        error: { message: msg },
-      };
-    }
-
     const to = this.params.to;
     if (!to) {
       const msg = 'Recipient "to" is required.';
@@ -239,14 +333,65 @@ class SendMessageInvocation extends BaseToolInvocation<
       };
     }
 
-    try {
-      if (to === '*') {
+    const teamManager = this.config.getTeamManager();
+
+    // Broadcast stays a team primitive. "Everyone" has no sensible meaning
+    // once it could include sessions belonging to other work, so it never
+    // fans out across sessions — a message worth sending to several
+    // sessions is worth addressing to each of them.
+    if (to === '*') {
+      if (!teamManager) {
+        const msg =
+          'No active team to broadcast to. Broadcasting to other Qwen Code sessions ' +
+          'is not supported — address each session by name from list_agents.';
+        return {
+          llmContent: msg,
+          returnDisplay: 'No active team for broadcast.',
+          error: { message: msg },
+        };
+      }
+      try {
         const sender = getAgentName() ?? LEADER_NAME;
         await teamManager.broadcast(this.params.message, sender);
         const msg = 'Message broadcast to all teammates.';
         return { llmContent: msg, returnDisplay: msg };
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        return {
+          llmContent: `Failed to broadcast message: ${errMsg}`,
+          returnDisplay: `Failed to broadcast message: ${errMsg}`,
+          error: { message: errMsg },
+        };
       }
+    }
 
+    // Route 2: teammate by name via TeamManager. In-process wins over a
+    // same-named peer session: a teammate is part of this session's own
+    // work, and silently routing off-process would be the more surprising
+    // of the two.
+    const teammateExists =
+      !!teamManager &&
+      findMemberByName(teamManager.getTeamFile().members, to) !== undefined;
+
+    if (!teammateExists) {
+      // Route 3: another Qwen Code session on this machine.
+      const peerResult = await this.trySendToPeer(to);
+      if (peerResult) return peerResult;
+    }
+
+    if (!teamManager) {
+      const msg =
+        `No active team, no task_id, and no reachable session named "${to}". ` +
+        'Create a team, pass `task_id` to message a background task, or use ' +
+        'list_agents to see which sessions are reachable.';
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
+    try {
       await teamManager.sendMessage(
         to,
         this.params.message,
@@ -276,8 +421,9 @@ export class SendMessageTool extends BaseDeclarativeTool<
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send a message to a teammate (use "to") or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
-        'For teams, set "to" to a bare teammate name (no @) or "*" to broadcast. ' +
+      'Send a message to a teammate or to another Qwen Code session on this machine (use "to"), or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
+        'Set "to" to a bare teammate name (no @), to "*" to broadcast within an active Agent Team only, or to a session name from list_agents — append its " [ref]" only when list_agents shows two sessions with that name. ' +
+        "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied. " +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
         'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
         'Your text output is NOT visible to peer teammates — use this tool to communicate.',
@@ -287,7 +433,8 @@ export class SendMessageTool extends BaseDeclarativeTool<
         properties: {
           to: {
             type: 'string',
-            description: 'Recipient teammate name, or "*" for broadcast.',
+            description:
+              'Recipient: a teammate name, "*" for Agent Team broadcast, or a session name from list_agents (append " [ref]" only when two sessions share a name).',
           },
           task_id: {
             type: 'string',
