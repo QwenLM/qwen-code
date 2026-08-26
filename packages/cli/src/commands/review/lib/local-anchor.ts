@@ -589,11 +589,21 @@ export function invisibleTrackedPaths(repoRoot: string): string[] | null {
   if (!sparse) return tagged;
   const absent = new Set(
     tagged.filter((p) => {
+      // A name that did not survive the decode cannot be measured OR fed to
+      // check-rules faithfully (the re-encoded U+FFFD spelling matches
+      // nothing git knows) — the same discipline `hashWorktreeFiles` and
+      // `revisionIdentities` apply to undecodable paths. Never exempt it:
+      // it stays flagged (R19-1).
+      if (p.includes('\ufffd')) return false;
       try {
         lstatSync(join(repoRoot, p));
         return false;
-      } catch {
-        return true;
+      } catch (err) {
+        // Only ENOENT proves absence: an EACCES/ENOTDIR/ELOOP failure on a
+        // PRESENT flagged path folded into "absent" and the exemption then
+        // certified bytes `git diff` was blind to (R19-2). Unmeasurable is
+        // uncertifiable — it stays flagged.
+        return (err as NodeJS.ErrnoException).code === 'ENOENT';
       }
     }),
   );
