@@ -9985,6 +9985,11 @@ exit 1
     // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
     expect(reviewScanJob).toContain('FLEET_FILE="${WORKDIR}/fleet.tsv"');
     expect(reviewScanJob).not.toContain('FLEET_FILE="$(mktemp)"');
+    // The EXIT trap is the in-step cleanup twin of the always() step; it
+    // must remove both the fleet file and the per-run dir.
+    expect(reviewScanJob).toContain(
+      'trap \'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"\' EXIT',
+    );
     // Pin the cleanup step's command inside its own slice, not job-wide: a
     // no-op cleanup with the right name and if: shipped green before.
     const scanCleanupStep =
@@ -10263,6 +10268,13 @@ exit 1
       // world-readable window on the shared /tmp.
       expect(step).toContain('(umask 077; mkdir -p "${WORKDIR}")');
       expect(step).not.toContain('chmod 700');
+      // Consumer side of the scan lane's reclaim contract: after a hard
+      // runner kill neither its EXIT trap nor its always() step fires, so
+      // this sweep is the only channel left — the glob must keep matching
+      // the scan WORKDIR basename pinned in the carve-out test.
+      expect(step).toContain(
+        "find /tmp -maxdepth 1 -name 'autofix*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true",
+      );
     }
     // Per-run/per-target teardown after the artifact upload: nothing else
     // removes these dirs on the persistent pool (PR numbers only increase).
