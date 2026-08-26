@@ -48,6 +48,30 @@ vi.mock('../../config/storage.js', async (importOriginal) => {
   };
 });
 
+// Mock node:fs/promises to allow per-test override of fs.rm.
+// All other functions pass through to the real implementation.
+let rmMockOverride:
+  | ((...args: Parameters<typeof fs.rm>) => Promise<unknown>)
+  | null = null;
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...original,
+    default: original,
+    rm: (...args: Parameters<typeof fs.rm>) => {
+      if (rmMockOverride) return rmMockOverride(...args);
+      return original.rm(...args);
+    },
+  };
+});
+
+function setFsRmMock(
+  fn: ((...args: Parameters<typeof fs.rm>) => Promise<unknown>) | null,
+) {
+  rmMockOverride = fn;
+}
+
 // ─── Fixtures ─────────────────────────────────────────────────
 
 function makeMember(
@@ -361,6 +385,11 @@ describe('file I/O', () => {
   });
 
   describe('deleteTeamDirs', () => {
+    afterEach(() => {
+      setFsRmMock(null);
+      vi.restoreAllMocks();
+    });
+
     it('deletes team and task directories', async () => {
       await writeTeamFile('doomed', makeTeamFile());
       const tasksDir = getTasksDir('doomed');
@@ -375,6 +404,33 @@ describe('file I/O', () => {
 
     it('does not throw for missing directories', async () => {
       await expect(deleteTeamDirs('nonexistent')).resolves.not.toThrow();
+    });
+
+    it('throws on non-ENOENT filesystem errors (e.g. EACCES)', async () => {
+      const eaccesError = Object.assign(new Error('permission denied'), {
+        code: 'EACCES',
+      });
+      setFsRmMock(() => Promise.reject(eaccesError));
+
+      await expect(deleteTeamDirs('any-team')).rejects.toThrow(
+        'permission denied',
+      );
+    });
+
+    it('throws on EIO errors', async () => {
+      const eioError = Object.assign(new Error('I/O error'), { code: 'EIO' });
+      setFsRmMock(() => Promise.reject(eioError));
+
+      await expect(deleteTeamDirs('any-team')).rejects.toThrow('I/O error');
+    });
+
+    it('still ignores ENOENT when fs.rm rejects with ENOENT', async () => {
+      const enoentError = Object.assign(new Error('no such file'), {
+        code: 'ENOENT',
+      });
+      setFsRmMock(() => Promise.reject(enoentError));
+
+      await expect(deleteTeamDirs('any-team')).resolves.not.toThrow();
     });
   });
 

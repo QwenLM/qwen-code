@@ -336,16 +336,28 @@ export async function tryReclaimStaleTeam(teamName: string): Promise<boolean> {
 
 /**
  * Delete an entire team directory and its associated task
- * directory. Silently ignores missing directories.
+ * directory. Silently ignores missing directories (ENOENT).
+ * Throws on real filesystem failures (EACCES, EIO, etc.).
  */
 export async function deleteTeamDirs(teamName: string): Promise<void> {
   const teamDir = getTeamDir(teamName);
   const tasksDir = getTasksDir(teamName);
 
-  await Promise.allSettled([
+  const results = await Promise.allSettled([
     fs.rm(teamDir, { recursive: true, force: true }),
     fs.rm(tasksDir, { recursive: true, force: true }),
   ]);
+
+  for (const result of results) {
+    if (result.status === 'rejected') {
+      const err = result.reason;
+      // ENOENT is expected when the directory doesn't exist (idempotent delete).
+      if (isNodeError(err) && err.code === 'ENOENT') {
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 /**
