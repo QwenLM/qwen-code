@@ -2474,6 +2474,21 @@ export class CoreToolScheduler {
             if (matchingRule) {
               permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined. Matching deny rule: "${matchingRule}".`;
             } else if (
+              // The legacy `coreTools` allowlist (`--core-tools` / settings
+              // `tools.core`) keeps its hard-disable semantic: an unlisted
+              // core tool is never registered (#9827). Attribute the miss
+              // to the real knob — since #10075 an uncovered
+              // `permissions.allow` tool is deferred (still registered),
+              // never rejected here, so a rejection without a deny rule
+              // points at the coreTools list. The optional call keeps
+              // scoped PermissionManager shims (installed via `as unknown
+              // as PermissionManager`, e.g. memory-scoped-agent-config.ts)
+              // from throwing until they grow the delegation.
+              typeof pm.isToolDisabledByCoreToolsAllowList === 'function' &&
+              pm.isToolDisabledByCoreToolsAllowList(canonicalName)
+            ) {
+              permissionErrorMessage = `"${reqInfo.name}" is not listed in the active core tools allowlist (--core-tools or settings tools.core), so the tool is not available. Add it to the core tools list to re-enable it.`;
+            } else if (
               pm.isPermissionsAllowListActive() &&
               // Only attribute the miss to `permissions.allow` when the tool
               // is genuinely uncovered. While the allowlist is active a
@@ -2486,14 +2501,15 @@ export class CoreToolScheduler {
               // memory-scoped-agent-config.ts) from throwing until they grow
               // the delegation; when coverage is unknown the fallback stays
               // on the pre-#9827 message rather than risk the wrong
-              // attribution (#9827).
+              // attribution (#9827). Since #10075 uncovered tools are
+              // deferred rather than rejected, so this branch only fires
+              // for scoped-shim rejections under an active allowlist.
               (typeof pm.isCoveredByAllowOrAskRule === 'function'
                 ? !pm.isCoveredByAllowOrAskRule(canonicalName)
                 : false)
             ) {
-              // The tool was rejected by the `permissions.allow` registry
-              // allowlist, not by any deny rule: it is not covered by an
-              // allow/ask rule and so was never registered. Point at the
+              // The tool was rejected while the `permissions.allow` registry
+              // allowlist is active and no deny rule matched. Point at the
               // real config knob instead of a denial that never happened
               // (nothing was ever asked or declined on this path).
               permissionErrorMessage = `"${reqInfo.name}" is not covered by any permissions.allow rule in the active registry allowlist, so the tool is not available. Add a rule covering it to settings permissions.allow (or permissions.ask) and restart to re-enable it.`;
