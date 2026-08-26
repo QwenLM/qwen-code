@@ -54,6 +54,7 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected handleInbound(_env: unknown): Promise<void> {
       return Promise.resolve();
     }
+    protected onSessionDied(_sessionId: string): void {}
   },
   SessionRouter: class {
     restoreSessions(): Promise<void> {
@@ -77,7 +78,9 @@ function mockResponse(
   return { ok, status, text: async () => '' };
 }
 
-function makeChannel(): QQChannelClass {
+function makeChannel(
+  configOverrides?: Record<string, unknown>,
+): QQChannelClass {
   textChunkHandlers.length = 0;
 
   const router = {
@@ -109,6 +112,7 @@ function makeChannel(): QQChannelClass {
       appID: 'test-app-id',
       appSecret: 'test-secret',
       'cron-msg-experimental': true,
+      ...configOverrides,
     },
     bridge as unknown as import('@qwen-code/channel-base').AcpBridge,
     { router } as unknown as Record<string, unknown>,
@@ -312,21 +316,22 @@ describe('cronTextHandler', () => {
     stderrSpy.mockRestore();
   });
 
-  // A6: streamState isolation — cron handler skips sessions owned by prompt path
-  it('streamState isolation: cron handler skips sessions with existing streamState entry', async () => {
+  // A6: prompt-path isolation — cron handler skips sessions with an active
+  // prompt turn. (Discriminator is activePromptSessions, keyed by
+  // onPromptStart/onPromptEnd — see #6094. A bare streamState entry no
+  // longer blocks cron; covered by the #6094 item 2 test below.)
+  it('prompt-path isolation: cron handler skips sessions with an active prompt turn', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
     pvt['_inCronFlow'] = 1;
 
-    // Pre-populate streamState for this session — prompt path owns it
-    const ss = pvt['streamState'] as Map<string, unknown>;
-    ss.set('sess-stream', {
-      chatId: 'test-chat',
-      buffer: 'existing prompt text',
-      timer: null,
-      retryCount: 0,
-    });
+    // ChannelBase brackets the prompt turn with onPromptStart/onPromptEnd.
+    (
+      ch as unknown as {
+        onPromptStart: (chatId: string, sessionId: string) => void;
+      }
+    ).onPromptStart('test-chat', 'sess-stream');
 
     triggerTextChunk('sess-stream', 'should be ignored by cron');
     await flushSetImmediate();
@@ -566,5 +571,174 @@ describe('disconnect cron cleanup', () => {
     (ch as unknown as { disconnect: () => void }).disconnect();
 
     expect(pvt['_inCronFlow']).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// prompt/cron discriminator (issue #6094)
+// ---------------------------------------------------------------------------
+describe('prompt/cron textChunk discriminator (#6094)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    textChunkHandlers.length = 0;
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function flushSetImmediate(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  function promptHooks(ch: QQChannelClass): {
+    onPromptStart: (chatId: string, sessionId: string) => void;
+    onPromptEnd: (chatId: string, sessionId: string) => void;
+  } {
+    return ch as unknown as {
+      onPromptStart: (chatId: string, sessionId: string) => void;
+      onPromptEnd: (chatId: string, sessionId: string) => void;
+    };
+  }
+
+  // #6094 item 1: with blockStreaming:'on', onResponseChunk early-returns
+  // without populating streamState, so the streamState.has(sessionId) guard
+  // cannot tell prompt chunks from cron chunks. While a cron flow is active,
+  // every prompt-response chunk leaks into cronBuffer and is re-sent by the
+  // 2s idle flush on top of the BlockStreamer delivery.
+  it('item 1: blockStreaming=on prompt chunks during a cron flow are not duplicated into cronBuffer', async () => {
+    const ch = makeChannel({ blockStreaming: 'on' });
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+
+    // ChannelBase brackets every prompt turn with onPromptStart/onPromptEnd.
+    promptHooks(ch).onPromptStart('test-chat', 'sess-prompt');
+
+    // A cron flow is active concurrently (scheduled-message flow in flight).
+    pvt['_inCronFlow'] = 1;
+
+    // Prompt response chunk arrives. With blockStreaming:'on' the streaming
+    // path early-returns, so no streamState entry exists for this session.
+    triggerTextChunk('sess-prompt', 'prompt response text');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
+    // The prompt text belongs to an active prompt — it must not be captured
+    // by the cron buffer (BlockStreamer already delivers it).
+    expect(cronBuffer.has('sess-prompt')).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+    promptHooks(ch).onPromptEnd('test-chat', 'sess-prompt');
+  });
+
+  // Regression guard for item 1 fix: genuine cron chunks (no active prompt
+  // for the session) must still be buffered and delivered with
+  // blockStreaming:'on'.
+  it('item 1 regression: cron chunks without an active prompt are still delivered (blockStreaming=on)', async () => {
+    const ch = makeChannel({ blockStreaming: 'on' });
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    triggerTextChunk('sess-cron', 'cron text');
+    await flushSetImmediate();
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'cron text' } },
+    );
+  });
+
+  // #6094 item 2: a lingering streamState entry from an earlier prompt (e.g.
+  // cancelled/errored turn whose cleanup has not settled) silently drops all
+  // subsequent cron textChunks for the same sessionId because the guard keys
+  // on streamState. The guard must key on whether a prompt turn is actually
+  // active, not on residual streaming state.
+  it('item 2: lingering streamState entry after prompt end does not block cron delivery', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+
+    // A prompt turn streams a partial answer, then ends (ChannelBase always
+    // runs onPromptEnd in its finally, even on error/cancel).
+    promptHooks(ch).onPromptStart('test-chat', 'sess-leak');
+    (
+      ch as unknown as {
+        onResponseChunk: (
+          chatId: string,
+          chunk: string,
+          sessionId: string,
+        ) => void;
+      }
+    ).onResponseChunk('test-chat', 'partial answer', 'sess-leak');
+    promptHooks(ch).onPromptEnd('test-chat', 'sess-leak');
+
+    // The streamState entry lingers until its idle flush settles.
+    const ss = pvt['streamState'] as Map<string, unknown>;
+    expect(ss.has('sess-leak')).toBe(true);
+
+    // A cron flow now emits output for the same session.
+    pvt['_inCronFlow'] = 1;
+    triggerTextChunk('sess-leak', 'cron text');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
+    expect(cronBuffer.get('sess-leak')?.buffer).toBe('cron text');
+
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // The cron text must be delivered despite the lingering streamState.
+    const sentBodies = mockSendQQMessage.mock.calls.map(
+      (call) => call[3] as { markdown?: { content?: string } },
+    );
+    expect(
+      sentBodies.some((body) => body.markdown?.content === 'cron text'),
+    ).toBe(true);
+  });
+
+  // After the prompt turn ends, cron chunks for the session flow again.
+  it('resumes cron capture after the prompt turn ends', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    promptHooks(ch).onPromptStart('test-chat', 'sess-resume');
+    promptHooks(ch).onPromptEnd('test-chat', 'sess-resume');
+
+    triggerTextChunk('sess-resume', 'cron after prompt');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
+    expect(cronBuffer.get('sess-resume')?.buffer).toBe('cron after prompt');
+  });
+
+  // Session-death cleanup: a dead session must not stay marked as an active
+  // prompt (mirrors streamState cleanup in onSessionDied).
+  it('onSessionDied clears the active-prompt marker', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    promptHooks(ch).onPromptStart('test-chat', 'sess-died');
+    (
+      ch as unknown as { onSessionDied: (sessionId: string) => void }
+    ).onSessionDied('sess-died');
+
+    triggerTextChunk('sess-died', 'cron after death');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, { buffer: string }>;
+    expect(cronBuffer.get('sess-died')?.buffer).toBe('cron after death');
   });
 });

@@ -286,6 +286,38 @@ describe('history replay page', () => {
     ).toBe(false);
   });
 
+  it('finalizes a dangling tool call as failed by default', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [userRecord(), toolCallRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.replayError).toBeUndefined();
+    expect(result.updates).toContainEqual(
+      expect.objectContaining({
+        sessionUpdate: 'tool_call_update',
+        status: 'failed',
+      }),
+    );
+  });
+
+  it('keeps a dangling tool call in flight when finalizeDangling is false', async () => {
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      records: [userRecord(), toolCallRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+      finalizeDangling: false,
+    });
+
+    expect(result.replayError).toBeUndefined();
+    expect(
+      result.updates.some(
+        (update) => update.sessionUpdate === 'tool_call_update',
+      ),
+    ).toBe(false);
+  });
+
   it('bounds textual tool results collected for bulk replay', async () => {
     const source = 'x'.repeat(499_999);
     const result = await collectHistoryReplayUpdates({

@@ -935,7 +935,7 @@ describe("the verify brief's bound-address recipe actually captures", () => {
 
   it.skipIf(!have('curl') || !have('mktemp'))(
     "puts the service's own address in the drive log, not the response body",
-    () => {
+    async () => {
       const { pattern, script } = recipe();
       const dir = mkdtempSync(join(tmpdir(), 'drv-recipe-'));
       // A service whose RESPONSE BODY also carries a listening-on line: if the
@@ -948,7 +948,7 @@ describe("the verify brief's bound-address recipe actually captures", () => {
           "import http from 'node:http';",
           "const s=http.createServer((_q,r)=>{r.writeHead(200);r.end('listening on http://127.0.0.1:59999\\n')});",
           "s.listen(0,'127.0.0.1',()=>console.log(`svc listening on http://127.0.0.1:${s.address().port}`));",
-          'setTimeout(()=>process.exit(0),20000);',
+          'setTimeout(()=>process.exit(0),5000);',
         ].join('\n'),
       );
 
@@ -990,7 +990,18 @@ describe("the verify brief's bound-address recipe actually captures", () => {
         readdirSync(dir).filter((f) => f.endsWith('.log') && f !== 'drive.log'),
       ).toEqual([]);
 
-      rmSync(dir, { recursive: true, force: true });
+      // On Windows the backgrounded service keeps the working directory
+      // busy (EBUSY) until its self-exit timer fires; retry the removal
+      // until the handle is released.
+      for (let attempt = 0; ; attempt++) {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+          break;
+        } catch (error) {
+          if (attempt >= 40) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+      }
     },
   );
 });
