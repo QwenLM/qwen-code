@@ -203,6 +203,38 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalled();
   });
 
+  it('does not default to Off when the configured Advisor model is unavailable', async () => {
+    const setAdvisorModel = vi.fn().mockResolvedValue(undefined);
+    const { mockSettings } = renderComponent(
+      { isAdvisorModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAdvisorModel: vi.fn(() => 'stale-advisor-model'),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'available-advisor-model',
+            label: 'Available Advisor Model',
+            authType: AuthType.USE_OPENAI,
+          },
+        ]),
+        setAdvisorModel,
+      },
+    );
+    const select = mockedSelect.mock.calls[0][0];
+
+    expect(select.initialIndex).toBe(1);
+    await select.onSelect(select.items[1]!.value);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'advisorModel',
+      `${AuthType.USE_OPENAI}:available-advisor-model`,
+    );
+    expect(setAdvisorModel).toHaveBeenCalledWith(
+      `${AuthType.USE_OPENAI}:available-advisor-model`,
+    );
+  });
+
   it('caps visible model options to the available dialog height', () => {
     renderComponent(
       { availableTerminalHeight: 20 },

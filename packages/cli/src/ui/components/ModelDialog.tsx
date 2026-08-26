@@ -670,7 +670,7 @@ export function ModelDialog({
       : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
-    : isAdvisorModelMode && !preferredAdvisorModelEntry
+    : isAdvisorModelMode && !advisorModelSetting
       ? ADVISOR_OFF_OPTION
       : preferredVoiceModelEntry
         ? buildModelSelectionKey(
@@ -775,8 +775,11 @@ export function ModelDialog({
     const index = MODEL_OPTIONS.findIndex(
       (option) => option.value === preferredKey,
     );
-    return index === -1 ? 0 : index;
-  }, [MODEL_OPTIONS, preferredKey]);
+    if (index !== -1) return index;
+    return isAdvisorModelMode && advisorModelSetting && MODEL_OPTIONS.length > 1
+      ? 1
+      : 0;
+  }, [MODEL_OPTIONS, preferredKey, isAdvisorModelMode, advisorModelSetting]);
 
   const handleHighlight = useCallback((value: string) => {
     setHighlightedValue(value);
