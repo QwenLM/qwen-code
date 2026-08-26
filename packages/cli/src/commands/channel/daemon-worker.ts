@@ -95,6 +95,7 @@ import {
 } from './loop-runtime.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
+const SESSION_ATTACHMENTS_FEATURE = 'session_attachments';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
@@ -324,8 +325,11 @@ function validateDaemonWorkerUrl(daemonUrl: string): void {
   } catch {
     throw new Error(`${QWEN_DAEMON_URL_ENV} must be a valid URL.`);
   }
-  if (parsed.protocol !== 'http:' || !isLoopbackBind(parsed.hostname)) {
-    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http loopback URL.`);
+  if (
+    (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+    !isLoopbackBind(parsed.hostname)
+  ) {
+    throw new Error(`${QWEN_DAEMON_URL_ENV} must use an http(s) loopback URL.`);
   }
 }
 
@@ -489,6 +493,9 @@ export async function runChannelDaemonWorker(
       DaemonSessionClient: sdk.DaemonSessionClient,
       clientId: `qwen-channel-worker:${process.pid}`,
     }),
+    sessionAttachments: capabilities.features.includes(
+      SESSION_ATTACHMENTS_FEATURE,
+    ),
     ...(opts.promptAuthorization
       ? { promptAuthorization: opts.promptAuthorization }
       : {}),

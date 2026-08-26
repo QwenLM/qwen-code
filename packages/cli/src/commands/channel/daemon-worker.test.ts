@@ -1319,6 +1319,43 @@ describe('runChannelDaemonWorker', () => {
     expect(bridgeFacade.shellCommand).toBeTypeOf('function');
   });
 
+  it('enables attachment uploads only when capabilities include session_attachments', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['session_attachments'],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+    });
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionAttachments: true }),
+    );
+  });
+
+  it('keeps attachment uploads off for daemons without session_attachments', async () => {
+    const sdk = createSdk();
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionAttachments: false }),
+    );
+  });
+
   it('fails fast for unknown selected channel names', async () => {
     const sdk = createSdk();
 
@@ -1332,18 +1369,67 @@ describe('runChannelDaemonWorker', () => {
     ).rejects.toThrow('Channel "missing" not found in settings.');
   });
 
-  it('rejects daemon URLs that are not http loopback URLs', async () => {
+  it('rejects daemon URLs that are not http(s) loopback URLs', async () => {
     const sdk = createSdk();
 
-    await expect(
-      runChannelDaemonWorker({
-        daemonUrl: 'http://attacker.example:4170',
-        workspace: '/workspace',
-        selection: { mode: 'names', names: ['telegram'] },
-        loadDaemonSdk: async () => sdk,
-      }),
-    ).rejects.toThrow('QWEN_DAEMON_URL must use an http loopback URL.');
+    for (const daemonUrl of [
+      'http://attacker.example:4170',
+      'https://attacker.example:4170',
+    ]) {
+      await expect(
+        runChannelDaemonWorker({
+          daemonUrl,
+          workspace: '/workspace',
+          selection: { mode: 'names', names: ['telegram'] },
+          loadDaemonSdk: async () => sdk,
+        }),
+      ).rejects.toThrow('QWEN_DAEMON_URL must use an http(s) loopback URL.');
+    }
     expect(sdk.DaemonClient).not.toHaveBeenCalled();
+  });
+
+  it('accepts https loopback daemon URLs for TLS daemons', async () => {
+    const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'https://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(sdk.DaemonClient).toHaveBeenCalledWith({
+      baseUrl: 'https://127.0.0.1:4170',
+    });
+  });
+
+  it('accepts an IPv6 loopback daemon URL for a ::1-bound TLS daemon', async () => {
+    // R2-14: formatChannelWorkerDaemonUrl emits `https://[::1]:<port>` for a
+    // `::1` TLS bind, and this side accepts it only because `'[::1]'` sits in
+    // LOOPBACK_BINDS. Nothing else pins that entry, so dropping it as
+    // redundant keeps every test green while every ::1-bound TLS daemon's
+    // workers reject their own URL at boot and restart-loop — the exact
+    // failure this PR exists to remove, regressing on IPv6 alone.
+    const sdk = createSdk();
+    mockLoadChannelsConfig.mockReturnValueOnce({
+      telegram: { type: 'telegram' },
+    });
+    mockParseConfiguredChannels.mockResolvedValueOnce([parsedTelegram]);
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'https://[::1]:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(sdk.DaemonClient).toHaveBeenCalledWith({
+      baseUrl: 'https://[::1]:4170',
+    });
   });
 
   it('fails fast when no channels are configured', async () => {

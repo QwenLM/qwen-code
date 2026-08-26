@@ -1946,6 +1946,54 @@ export class SessionService {
     };
   }
 
+  async getSessionListItem(
+    sessionId: string,
+    archiveState: SessionArchiveState = 'active',
+  ): Promise<SessionListItem | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
+    const filePath = this.getSessionFilePath(sessionId, archiveState);
+    let stats: fs.Stats;
+    try {
+      stats = fs.statSync(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+    const records = await jsonl.readLines<ChatRecord>(
+      filePath,
+      MAX_PROMPT_SCAN_LINES,
+    );
+    if (records.length === 0) return undefined;
+    const firstRecord = records[0];
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        firstRecord.sessionId,
+        firstRecord.cwd,
+      ))
+    ) {
+      return undefined;
+    }
+    const titleInfo = this.readSessionTitleInfoFromFile(filePath);
+    const source = this.extractCreationMetadataFromRecords(records);
+    return {
+      sessionId: firstRecord.sessionId,
+      cwd: firstRecord.cwd,
+      startTime: firstRecord.timestamp,
+      mtime: stats.mtimeMs,
+      prompt: this.extractFirstPromptFromRecords(records),
+      gitBranch: firstRecord.gitBranch,
+      filePath,
+      customTitle: titleInfo.title,
+      titleSource: titleInfo.source,
+      ...(source.parentSessionId
+        ? { parentSessionId: source.parentSessionId }
+        : {}),
+      ...(source.sourceType ? { sourceType: source.sourceType } : {}),
+      ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
+      isArchived: archiveState === 'archived',
+    };
+  }
+
   /**
    * Counts persisted sessions for this project by scanning the active and
    * archived chats directories.
@@ -3105,6 +3153,40 @@ export class SessionService {
     return this.readSessionTitleFromFile(filePath);
   }
 
+  private async readSessionDisplayNameFromFile(
+    filePath: string,
+    titleInfo = this.readSessionTitleInfoFromFile(filePath),
+  ): Promise<string | undefined> {
+    const records = await jsonl.readLines<ChatRecord>(
+      filePath,
+      titleInfo.title ? 1 : MAX_PROMPT_SCAN_LINES,
+    );
+    if (records.length === 0) return undefined;
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        records[0].sessionId,
+        records[0].cwd,
+      ))
+    ) {
+      return undefined;
+    }
+    return (
+      titleInfo.title ||
+      this.extractFirstPromptFromRecords(records) ||
+      undefined
+    );
+  }
+
+  async getSessionDisplayName(sessionId: string): Promise<string | undefined> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
+    const filePath = path.join(this.getChatsDir(), `${sessionId}.jsonl`);
+    try {
+      return await this.readSessionDisplayNameFromFile(filePath);
+    } catch {
+      return undefined;
+    }
+  }
+
   /**
    * Finds sessions by custom title.
    * Returns all matching sessions ordered by most recent first.
@@ -3203,15 +3285,14 @@ export class SessionService {
   }
 
   /**
-   * Returns the customTitles in this project that start with `prefix`
+   * Returns the picker display names in this project that start with `prefix`
    * (case-insensitive). Single project-wide scan — meant to replace
    * repeated `findSessionsByTitle()` probes when the caller needs to
-   * pick the first free `(Branch N)` slot in memory.
+   * pick the first free numeric suffix in memory.
    *
-   * Skips the heavy hydration steps (message count, prompt extraction)
-   * that `findSessionsByTitle` does — collision lookup only needs the
-   * title and a project filter, so we read the first record only when
-   * the title actually matches the prefix.
+   * Matches the session picker by preferring `customTitle` and falling back
+   * to the first prompt. Each untitled candidate performs one head read
+   * bounded by `MAX_PROMPT_SCAN_LINES`; other metadata stays unhydrated.
    *
    * @param prefix Case-insensitive title prefix to match.
    */
@@ -3238,26 +3319,26 @@ export class SessionService {
 
       const filePath = path.join(chatsDir, name);
       const titleInfo = this.readSessionTitleInfoFromFile(filePath);
-      if (!titleInfo.title) continue;
-      if (!titleInfo.title.toLowerCase().trim().startsWith(normalizedPrefix)) {
+      if (
+        titleInfo.title &&
+        !titleInfo.title.toLowerCase().trim().startsWith(normalizedPrefix)
+      ) {
         continue;
       }
 
       try {
-        const records = await jsonl.readLines<ChatRecord>(filePath, 1);
-        if (records.length === 0) continue;
-        if (
-          !(await this.sessionBelongsToCurrentProject(
-            records[0].sessionId,
-            records[0].cwd,
-          ))
-        ) {
+        const displayName = await this.readSessionDisplayNameFromFile(
+          filePath,
+          titleInfo,
+        );
+        if (!displayName) continue;
+        if (!displayName.toLowerCase().trim().startsWith(normalizedPrefix)) {
           continue;
         }
+        titles.push(displayName);
       } catch {
         continue;
       }
-      titles.push(titleInfo.title);
     }
 
     return titles;
@@ -3376,6 +3457,22 @@ function remapSystemPayloadForFork(
       sourceSessionId,
       newSessionId,
     );
+  }
+  if (record.subtype === 'ui_telemetry') {
+    const payload = record.systemPayload as
+      | { uiEvent?: Record<string, unknown> }
+      | undefined;
+    const promptId = payload?.uiEvent?.['prompt_id'];
+    const sourcePrefix = `${sourceSessionId}#`;
+    if (typeof promptId === 'string' && promptId.startsWith(sourcePrefix)) {
+      return {
+        ...(payload ?? {}),
+        uiEvent: {
+          ...payload?.uiEvent,
+          prompt_id: `${newSessionId}${promptId.slice(sourceSessionId.length)}`,
+        },
+      } as ChatRecord['systemPayload'];
+    }
   }
   if (
     record.subtype === 'session_artifact_event' ||
@@ -3519,26 +3616,32 @@ export function replayUiTelemetryFromConversation(
   return resumeTokenCounts;
 }
 
-const MAX_BRANCH_COLLISION_SCAN = 99;
-
 export async function computeUniqueBranchTitle(
   baseName: string,
   sessionService: SessionService,
 ): Promise<string> {
-  const maxSuffixLen = ' (Branch 1234567890123)'.length;
+  const maxSuffixLen = '(1234567890123)'.length;
   const trimmed = baseName
     .trim()
     .slice(0, SESSION_TITLE_MAX_LENGTH - maxSuffixLen);
   const taken = new Set(
-    (await sessionService.findSessionTitlesByPrefix(`${trimmed} (Branch`)).map(
-      (t) => t.toLowerCase().trim(),
+    (await sessionService.findSessionTitlesByPrefix(`${trimmed}(`)).map((t) =>
+      t.toLowerCase().trim(),
     ),
   );
-  const first = `${trimmed} (Branch)`;
-  if (!taken.has(first.toLowerCase())) return first;
-  for (let n = 2; n <= MAX_BRANCH_COLLISION_SCAN; n++) {
-    const candidate = `${trimmed} (Branch ${n})`;
+  for (let n = 1; ; n++) {
+    const candidate = `${trimmed}(${n})`;
     if (!taken.has(candidate.toLowerCase())) return candidate;
   }
-  return `${trimmed} (Branch ${Date.now()})`;
+}
+
+export function normalizeDerivedBranchTitle(
+  baseName: string,
+): string | undefined {
+  const normalized = baseName
+    .trim()
+    .replace(/\s*\(Branch(?:\s+\d+)?\)$/, '')
+    .replace(/(\S)\(\d+\)$/, '$1')
+    .trim();
+  return normalized || undefined;
 }
