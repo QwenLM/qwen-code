@@ -54,6 +54,9 @@ vi.mock('@qwen-code/channel-base', () => ({
     protected handleInbound(_env: unknown): Promise<void> {
       return Promise.resolve();
     }
+    protected getResponseMessageId(_sessionId: string): string | undefined {
+      return undefined;
+    }
     protected onSessionDied(_sessionId: string): void {}
   },
   SessionRouter: class {
