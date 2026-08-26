@@ -1,0 +1,134 @@
+name: PR 10202 review fixes
+
+on:
+  push:
+    branches:
+      - fix/10199-mcp-permission-collisions
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-test:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply review fixes
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{path}: expected exactly one match, found {count}')
+              p.write_text(text.replace(old, new, 1))
+
+          # Critical R1-1: stop reconstructing raw MCP identity from a lossy
+          # provider-safe name. PermissionFlow now carries the authoritative raw
+          # identity as an internal alias; the matcher uses that identity for
+          # server/wildcard matching and uses filtered legacy aliases only for
+          # exact backwards-compatible rules.
+          rule_parser = Path('packages/core/src/permissions/rule-parser.ts')
+          text = rule_parser.read_text()
+          old_import = """import {\n  normalizeMcpToolName,\n  sanitizeToolNameForProvider,\n} from '../utils/tool-name-utils.js';"""
+          new_import = """import { normalizeMcpToolName } from '../utils/tool-name-utils.js';"""
+          if text.count(old_import) != 1:
+              raise SystemExit('rule-parser.ts: tool-name-utils import did not match exactly once')
+          text = text.replace(old_import, new_import, 1)
+
+          start_marker = "const PROVIDER_HASH_SUFFIX = /_[0-9a-z]{7}$/;"
+          end_marker = "// ─────────────────────────────────────────────────────────────────────────────\n// Unified rule matching"
+          start = text.find(start_marker)
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('rule-parser.ts: MCP matcher section markers not found')
+          replacement = """export function matchesMcpPattern(\n  pattern: string,\n  toolName: string,\n  rawToolName?: string,\n): boolean {\n  // The registered provider-safe name is authoritative for exact modern\n  // rules. Server-level and wildcard rules must instead use the raw MCP\n  // identity when available: provider normalization is intentionally lossy\n  // and cannot be inverted safely.\n  const matchTarget = rawToolName ?? toolName;\n\n  if (pattern === toolName || pattern === matchTarget) {\n    return true;\n  }\n\n  if (pattern.endsWith('*')) {\n    return matchTarget.startsWith(pattern.slice(0, -1));\n  }\n\n  // Server-level rule: \"mcp__server\" matches only tools whose RAW identity\n  // belongs to that exact server. This deliberately does not sanitize either\n  // side, so foo.bar can never broaden to foo_bar.\n  const patternParts = pattern.split('__');\n  const targetParts = matchTarget.split('__');\n  if (\n    patternParts.length === 2 &&\n    targetParts.length >= 3 &&\n    patternParts[0] === targetParts[0]\n  ) {\n    return matchTarget.startsWith(`${pattern}__`);\n  }\n\n  return false;\n}\n\n"""
+          text = text[:start] + replacement + text[end:]
+
+          old_mcp_block = """    const matchesLegacyExactName =\n      !rule.toolName.endsWith('*') &&\n      rule.toolName.split('__').length >= 3 &&\n      (toolAliases ?? []).some(\n        (alias) => rule.toolName === resolveToolName(alias),\n      );\n    const matchesMcpName =\n      matchesMcpPattern(rule.toolName, canonicalCtxToolName) ||\n      matchesLegacyExactName;"""
+          new_mcp_block = """    // PermissionFlow appends the authoritative raw MCP identity to the alias\n    // list. It is the one alias whose provider normalization equals the actual\n    // registered name. Use it only as the raw matching target; do not treat it\n    // as a legacy alias, because legacy aliases are separately filtered for\n    // ambiguity by ToolRegistry.\n    const rawMcpToolName = (toolAliases ?? []).find(\n      (alias) => normalizeMcpToolName(alias) === canonicalCtxToolName,\n    );\n    const matchesLegacyExactName =\n      !rule.toolName.endsWith('*') &&\n      rule.toolName.split('__').length >= 3 &&\n      (toolAliases ?? []).some(\n        (alias) =>\n          alias !== rawMcpToolName &&\n          rule.toolName === resolveToolName(alias),\n      );\n    const matchesMcpName =\n      matchesMcpPattern(\n        rule.toolName,\n        canonicalCtxToolName,\n        rawMcpToolName,\n      ) || matchesLegacyExactName;"""
+          if text.count(old_mcp_block) != 1:
+              raise SystemExit(f'rule-parser.ts: MCP rule block expected once, found {text.count(old_mcp_block)}')
+          text = text.replace(old_mcp_block, new_mcp_block, 1)
+          rule_parser.write_text(text)
+
+          # Critical R1-2: an alias is ambiguous if another MCP tool owns the
+          # same string as its registered name, not only when another alias
+          # claims it.
+          replace_once(
+              'packages/core/src/tools/tool-registry.ts',
+              """  for (const tool of tools) {\n    for (const alias of tool.permissionAliases) {""",
+              """  for (const tool of tools) {\n    for (const alias of [...tool.permissionAliases, tool.name]) {""",
+          )
+          replace_once(
+              'packages/core/src/tools/tool-registry.ts',
+              """  return aliases.filter((alias) => {\n    const aliasOwners = owners.get(alias);\n    return aliasOwners?.size === 1 && aliasOwners.has(toolName);\n  });""",
+              """  return aliases.filter((alias) => {\n    const aliasOwners = owners.get(alias);\n    const isUniqueOwner =\n      aliasOwners?.size === 1 && aliasOwners.has(toolName);\n    if (!isUniqueOwner && aliasOwners && aliasOwners.size > 0) {\n      debugLogger.debug(\n        `Dropping ambiguous MCP permission alias \"${alias}\" for \"${toolName}\"; claimed by: ${[...aliasOwners].join(', ')}`,\n      );\n    }\n    return isUniqueOwner;\n  });""",
+          )
+
+          # Critical R1-3 + R1-4: make the registry call defensive for test and
+          # adapter mocks, filter legacy aliases through the real registry when
+          # available, and always carry the raw MCP identity to the matcher.
+          replace_once(
+              'packages/core/src/core/permissionFlow.ts',
+              """  const pm = config.getPermissionManager?.();\n  const toolRegistry = config.getToolRegistry?.();\n  const permissionAliases =\n    toolName.startsWith('mcp__') && invocation.permissionAliases && toolRegistry\n      ? toolRegistry.getUnambiguousMcpPermissionAliases(\n          toolName,\n          invocation.permissionAliases,\n        )\n      : invocation.permissionAliases;""",
+              """  const pm = config.getPermissionManager?.();\n  const toolRegistry = config.getToolRegistry?.();\n  const mcpInvocation = invocation as AnyToolInvocation & {\n    serverName?: unknown;\n    serverToolName?: unknown;\n  };\n  const rawMcpToolName =\n    toolName.startsWith('mcp__') &&\n    typeof mcpInvocation.serverName === 'string' &&\n    typeof mcpInvocation.serverToolName === 'string'\n      ? `mcp__${mcpInvocation.serverName}__${mcpInvocation.serverToolName}`\n      : undefined;\n  const registryAliasResolver =\n    toolRegistry?.getUnambiguousMcpPermissionAliases;\n  const legacyPermissionAliases =\n    toolName.startsWith('mcp__') &&\n    invocation.permissionAliases &&\n    toolRegistry &&\n    typeof registryAliasResolver === 'function'\n      ? registryAliasResolver.call(\n          toolRegistry,\n          toolName,\n          invocation.permissionAliases,\n        )\n      : invocation.permissionAliases;\n  const permissionAliases = rawMcpToolName\n    ? [...new Set([...(legacyPermissionAliases ?? []), rawMcpToolName])]\n    : legacyPermissionAliases;""",
+          )
+
+          # Add live-flow regression coverage for the registry filtering and the
+          # missing-method scheduler/mock case.
+          permission_flow_test = Path('packages/core/src/core/permissionFlow.test.ts')
+          text = permission_flow_test.read_text()
+          marker = """  it('forces interaction even when PM allows the tool', async () => {"""
+          if text.count(marker) != 1:
+              raise SystemExit('permissionFlow.test.ts: insertion marker not found exactly once')
+          tests = """  it('filters ambiguous MCP aliases through the registry and carries raw identity', async () => {\n    const legacyName = 'mcp__srv__foo_bar';\n    const rawName = 'mcp__srv__foo/bar';\n    const aliasResolver = vi.fn().mockReturnValue([]);\n    const mockPm = {\n      hasRelevantRules: vi.fn().mockReturnValue(true),\n      evaluate: vi.fn().mockResolvedValue('allow'),\n      hasMatchingAskRule: vi.fn().mockReturnValue(false),\n    };\n    const invocation = mockInvocation({\n      getDefaultPermission: vi.fn().mockResolvedValue('ask'),\n      permissionAliases: [legacyName],\n    });\n    Object.assign(invocation, { serverName: 'srv', serverToolName: 'foo/bar' });\n\n    await evaluatePermissionFlow(\n      mockConfig({\n        getPermissionManager: vi.fn().mockReturnValue(mockPm),\n        getToolRegistry: vi.fn().mockReturnValue({\n          getUnambiguousMcpPermissionAliases: aliasResolver,\n        }) as unknown as Config['getToolRegistry'],\n      }),\n      invocation,\n      'mcp__srv__foo_bar_0cnn7di',\n      {},\n    );\n\n    expect(aliasResolver).toHaveBeenCalledWith(\n      'mcp__srv__foo_bar_0cnn7di',\n      [legacyName],\n    );\n    expect(mockPm.hasRelevantRules).toHaveBeenCalledWith(\n      expect.objectContaining({ toolAliases: [rawName] }),\n    );\n  });\n\n  it('falls back safely when a registry mock lacks the alias resolver', async () => {\n    const legacyName = 'mcp__srv__foo_bar';\n    const rawName = 'mcp__srv__foo/bar';\n    const mockPm = {\n      hasRelevantRules: vi.fn().mockReturnValue(true),\n      evaluate: vi.fn().mockResolvedValue('allow'),\n      hasMatchingAskRule: vi.fn().mockReturnValue(false),\n    };\n    const invocation = mockInvocation({\n      getDefaultPermission: vi.fn().mockResolvedValue('ask'),\n      permissionAliases: [legacyName],\n    });\n    Object.assign(invocation, { serverName: 'srv', serverToolName: 'foo/bar' });\n\n    await expect(\n      evaluatePermissionFlow(\n        mockConfig({\n          getPermissionManager: vi.fn().mockReturnValue(mockPm),\n          getToolRegistry: vi.fn().mockReturnValue(\n            {},\n          ) as unknown as Config['getToolRegistry'],\n        }),\n        invocation,\n        'mcp__srv__foo_bar_0cnn7di',\n        {},\n      ),\n    ).resolves.toBeDefined();\n\n    expect(mockPm.hasRelevantRules).toHaveBeenCalledWith(\n      expect.objectContaining({ toolAliases: [legacyName, rawName] }),\n    );\n  });\n\n"""
+          text = text.replace(marker, tests + marker, 1)
+          permission_flow_test.write_text(text)
+
+          # Replace the focused collision suite with witnesses for all three
+          # critical review findings, including unsafe tool chars, truncation,
+          # hash-suffix forgery, and alias-vs-registered-name ambiguity.
+          collision_test = Path('packages/core/src/permissions/mcp-permission-collision.test.ts')
+          collision_test.write_text("""/**\n * @license\n * Copyright 2026 Qwen\n * SPDX-License-Identifier: Apache-2.0\n */\n\nimport { describe, expect, it } from 'vitest';\nimport { matchesRule, parseRule } from './rule-parser.js';\nimport {\n  generateLegacyMcpToolName,\n  normalizeToolNameForProvider,\n} from '../utils/tool-name-utils.js';\nimport { filterUnambiguousMcpPermissionAliases } from '../tools/tool-registry.js';\n\nfunction matchesRawMcpRule(ruleText: string, rawToolName: string): boolean {\n  const registeredName = normalizeToolNameForProvider(rawToolName);\n  return matchesRule(\n    parseRule(ruleText),\n    registeredName,\n    undefined,\n    undefined,\n    undefined,\n    undefined,\n    undefined,\n    undefined,\n    [rawToolName],\n  );\n}\n\ndescribe('MCP permission identity collisions (#10199)', () => {\n  it('binds server and wildcard rules to the exact raw server identity', () => {\n    const rawToolName = 'mcp__foo.bar__evil';\n\n    expect(matchesRawMcpRule('mcp__foo.bar', rawToolName)).toBe(true);\n    expect(matchesRawMcpRule('mcp__foo.bar__*', rawToolName)).toBe(true);\n    expect(matchesRawMcpRule('mcp__foo_bar', rawToolName)).toBe(false);\n    expect(matchesRawMcpRule('mcp__foo_bar__*', rawToolName)).toBe(false);\n\n    expect(matchesRawMcpRule('mcp__foo.bar', 'mcp__foo_bar__evil')).toBe(\n      false,\n    );\n    expect(matchesRawMcpRule('mcp__foo.bar__*', 'mcp__foo_bar__evil')).toBe(\n      false,\n    );\n  });\n\n  it('keeps raw server rules working when the tool segment is provider-unsafe', () => {\n    const rawToolName = 'mcp__foo.bar__do.it';\n\n    expect(matchesRawMcpRule('mcp__foo.bar', rawToolName)).toBe(true);\n    expect(matchesRawMcpRule('mcp__foo.bar__*', rawToolName)).toBe(true);\n  });\n\n  it('keeps raw server rules working for names that require provider truncation', () => {\n    const rawToolName = `mcp__foo.bar__${'x'.repeat(90)}`;\n\n    expect(normalizeToolNameForProvider(rawToolName)).not.toBe(rawToolName);\n    expect(matchesRawMcpRule('mcp__foo.bar', rawToolName)).toBe(true);\n    expect(matchesRawMcpRule('mcp__foo.bar__*', rawToolName)).toBe(true);\n  });\n\n  it('does not accept a forged public hash suffix as proof of raw identity', () => {\n    const trustedRawName = 'mcp__foo.bar__evil';\n    const forgedRawName = normalizeToolNameForProvider(trustedRawName);\n\n    expect(forgedRawName).not.toBe(trustedRawName);\n    expect(matchesRawMcpRule('mcp__foo.bar', forgedRawName)).toBe(false);\n    expect(matchesRawMcpRule('mcp__foo.bar__*', forgedRawName)).toBe(false);\n  });\n\n  it('keeps ordinary safe server and intra-segment wildcard rules working', () => {\n    expect(matchesRawMcpRule('mcp__chrome', 'mcp__chrome__navigate')).toBe(\n      true,\n    );\n    expect(\n      matchesRawMcpRule('mcp__chrome__use_*', 'mcp__chrome__use_browser'),\n    ).toBe(true);\n  });\n\n  it('drops a legacy exact alias owned by two modern tools', () => {\n    const sharedAlias = 'mcp__srv__foo_bar';\n    const first = normalizeToolNameForProvider('mcp__srv__foo/bar');\n    const second = normalizeToolNameForProvider('mcp__srv__foo:bar');\n    const tools = [\n      { name: first, permissionAliases: [sharedAlias] },\n      { name: second, permissionAliases: [sharedAlias] },\n    ];\n\n    expect(\n      filterUnambiguousMcpPermissionAliases(first, [sharedAlias], tools),\n    ).toEqual([]);\n    expect(\n      filterUnambiguousMcpPermissionAliases(second, [sharedAlias], tools),\n    ).toEqual([]);\n  });\n\n  it('drops a legacy alias that is another tool registered name', () => {\n    const sharedName = 'mcp__srv__foo_bar';\n    const hashedName = normalizeToolNameForProvider('mcp__srv__foo/bar');\n    const tools = [\n      { name: hashedName, permissionAliases: [sharedName] },\n      { name: sharedName, permissionAliases: [] },\n    ];\n\n    expect(\n      filterUnambiguousMcpPermissionAliases(hashedName, [sharedName], tools),\n    ).toEqual([]);\n  });\n\n  it('keeps a unique legacy exact alias', () => {\n    const legacyName = 'mcp__srv__foo.bar';\n    const registeredName = normalizeToolNameForProvider(legacyName);\n    expect(\n      filterUnambiguousMcpPermissionAliases(\n        registeredName,\n        [legacyName],\n        [{ name: registeredName, permissionAliases: [legacyName] }],\n      ),\n    ).toEqual([legacyName]);\n  });\n\n  it('keeps a unique legacy truncated alias', () => {\n    const rawName = `mcp__server__${'x'.repeat(80)}`;\n    const legacyName = generateLegacyMcpToolName(rawName);\n    const registeredName = normalizeToolNameForProvider(rawName);\n\n    expect(\n      filterUnambiguousMcpPermissionAliases(\n        registeredName,\n        [legacyName],\n        [{ name: registeredName, permissionAliases: [legacyName] }],\n      ),\n    ).toEqual([legacyName]);\n  });\n\n  it('matches an exact unsafe raw tool rule through authoritative identity', () => {\n    const rawToolName = 'mcp__srv__foo/bar';\n    expect(matchesRawMcpRule(rawToolName, rawToolName)).toBe(true);\n  });\n});\n""")
+          PY
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run focused regression suite
+        run: >-
+          npx vitest run
+          packages/core/src/permissions/mcp-permission-collision.test.ts
+          packages/core/src/permissions/permission-manager.test.ts
+          packages/core/src/core/permissionFlow.test.ts
+          packages/core/src/core/coreToolScheduler.test.ts
+
+      - name: Check formatting
+        run: npx prettier --check packages/core/src/permissions/rule-parser.ts packages/core/src/tools/tool-registry.ts packages/core/src/core/permissionFlow.ts packages/core/src/core/permissionFlow.test.ts packages/core/src/permissions/mcp-permission-collision.test.ts
+
+      - name: Commit fixes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/core/src/permissions/rule-parser.ts \
+                  packages/core/src/tools/tool-registry.ts \
+                  packages/core/src/core/permissionFlow.ts \
+                  packages/core/src/core/permissionFlow.test.ts \
+                  packages/core/src/permissions/mcp-permission-collision.test.ts
+          git commit -m "fix(permissions): match MCP rules against raw identity"
+          git push origin HEAD:fix/10199-mcp-permission-collisions
