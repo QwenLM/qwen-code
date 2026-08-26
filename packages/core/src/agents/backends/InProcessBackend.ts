@@ -248,6 +248,25 @@ export class InProcessBackend implements Backend {
     // already logged inside.
     const registry = this.agentRegistries.get(agentId);
     this.releaseAgentResources(agentId, registry);
+    // Mirror the spawn-start-failure cleanup: forget the agent entirely
+    // so its id can be spawned again. Without this the `agents.has`
+    // gate in spawnAgent rejects the id for the life of the backend —
+    // a teammate rolled back by TeamManager (route verification failure)
+    // could never respawn under the same name, and every retry died
+    // with 'Agent "X" already exists.' masking the real cause. The
+    // exit callback is NOT fired here: abort() settles the agent to a
+    // terminal status, so the spawn-time completion watcher already
+    // reports the exit; firing it again would double-report.
+    this.agents.delete(agentId);
+    this.agentContentGenerators.delete(agentId);
+    this.agentContentGeneratorErrors.delete(agentId);
+    const index = this.agentOrder.indexOf(agentId);
+    if (index >= 0) {
+      this.agentOrder.splice(index, 1);
+    }
+    if (this.activeAgentId === agentId) {
+      this.activeAgentId = this.agentOrder[0] ?? null;
+    }
   }
 
   stopAll(): void {

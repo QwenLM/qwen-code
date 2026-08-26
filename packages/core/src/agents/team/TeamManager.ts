@@ -307,6 +307,13 @@ export class TeamManager {
       );
     }
 
+    // Normalize the spawn-time model override once: an empty string
+    // means "no override", same as undefined. The guards below used to
+    // mix `??` (nullish) and `!` (falsy), so `model: ''` kept the
+    // empty override for the model while the route guard saw it as
+    // absent — the two halves of the spawn disagreed.
+    const effectiveModel = config.model || undefined;
+
     const name = generateUniqueTeammateName(config.name, this.teamFile.members);
     const agentId = formatAgentId(name, this.teamFile.name);
     const color = assignTeammateColor(this.teamFile.members);
@@ -316,7 +323,7 @@ export class TeamManager {
       agentId,
       name,
       agentType: config.agentType,
-      model: config.model,
+      model: effectiveModel,
       prompt: config.prompt,
       color,
       joinedAt: Date.now(),
@@ -474,13 +481,13 @@ export class TeamManager {
       // Reflect the model the teammate will actually run on — including a
       // model selected by the definition's frontmatter (#10071), not just
       // an explicit spawn-time override — in the team file and join event.
-      member.model = config.model ?? subagentModel;
+      member.model = effectiveModel ?? subagentModel;
 
       // The definition's resolved route is applied only when the leader
       // did not override the model at spawn time. Computed once so the
       // authOverrides build below and the post-spawn route verification
       // cannot drift apart (#10071).
-      const dedicatedRoute = !config.model ? subagentModelRoute : undefined;
+      const dedicatedRoute = !effectiveModel ? subagentModelRoute : undefined;
 
       // Build spawn config for the backend.
       const spawnConfig: AgentSpawnConfig = {
@@ -517,7 +524,7 @@ export class TeamManager {
               systemPrompt,
             },
             modelConfig: {
-              model: config.model ?? subagentModel,
+              model: effectiveModel ?? subagentModel,
             },
             runConfig: {
               ...subagentRunConfig,

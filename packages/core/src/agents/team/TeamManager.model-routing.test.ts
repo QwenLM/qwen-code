@@ -407,15 +407,106 @@ describe('TeamManager teammate model routing (#10071)', () => {
       /could not create a dedicated ContentGenerator for model "claude-worker" \(anthropic\): The API key for Anthropic is not set/,
     );
 
-    // Rollback must run: no member persisted, and the spawned agent was
-    // stopped (the backend keeps the handle until its exit watcher drops
-    // it, so assert the terminal state rather than absence).
+    // Rollback must run: no member persisted, and the backend released
+    // the agent handle during stopAgent — keeping it (the old behaviour
+    // held it until cleanup()) permanently blocks respawning the same
+    // teammate name, masking this route failure behind 'Agent "X"
+    // already exists.' on every retry.
     expect(teamManager.getTeamFile().members).toHaveLength(0);
     const agentId = formatAgentId('w6', TEAM_NAME);
-    const stopped = backend.getAgent(agentId);
-    if (stopped) {
-      expect(stopped.getStatus()).toBe(AgentStatus.CANCELLED);
-    }
+    expect(backend.getAgent(agentId)).toBeUndefined();
+  });
+
+  it('releases a rolled-back teammate name so the same spawn can retry', async () => {
+    // Route-verification failure rolls the teammate back via
+    // backend.stopAgent. The backend used to keep the agent id in its
+    // `agents` map after stopAgent, so the retry — which reuses the
+    // same name/agentId (generateUniqueTeammateName only dedupes
+    // against current members) — was permanently rejected with
+    // 'Agent "X" already exists.', masking the real route failure.
+    await writeAgentDefinition(projectDir, 'retry-worker.md', {
+      name: 'retry-worker',
+      description: 'A worker whose route fails then succeeds',
+      model: 'anthropic:claude-worker',
+    });
+
+    mockCreateContentGenerator.mockRejectedValueOnce(
+      new Error('The API key for Anthropic is not set'),
+    );
+
+    // First attempt: route creation fails, spawn fails, rollback runs.
+    await expect(
+      teamManager.spawnTeammate({
+        name: 'w8',
+        agentType: 'retry-worker',
+        cwd: projectDir,
+      }),
+    ).rejects.toThrow(
+      /could not create a dedicated ContentGenerator for model "claude-worker" \(anthropic\)/,
+    );
+    expect(teamManager.getTeamFile().members).toHaveLength(0);
+
+    // Same-name respawn must succeed once the route is creatable.
+    await teamManager.spawnTeammate({
+      name: 'w8',
+      agentType: 'retry-worker',
+      cwd: projectDir,
+    });
+
+    const agentId = formatAgentId('w8', TEAM_NAME);
+    expect(teamManager.getTeamFile().members).toHaveLength(1);
+    expect(backend.getAgent(agentId)).toBeDefined();
+    expect(backend.getAgentContentGenerator(agentId)).toBeDefined();
+
+    // A third spawn with the same name now fails with the genuine
+    // team-level name collision — not the stale backend gate.
+    await expect(
+      teamManager.spawnTeammate({
+        name: 'w8',
+        agentType: 'retry-worker',
+        cwd: projectDir,
+      }),
+    ).rejects.toThrow(/already exists in this team/);
+    expect(teamManager.getTeamFile().members).toHaveLength(1);
+  });
+
+  it('treats an empty spawn-time model override the same as none', async () => {
+    // `model: ''` must fall back to the definition's route/model exactly
+    // like `undefined`. The guards used to mix nullish (`??`) and falsy
+    // (`!`) checks, so '' kept the empty override as the model while the
+    // route guard saw no override — the teammate was pinned to '' over
+    // the leader's generator instead of its definition's route.
+    await writeAgentDefinition(projectDir, 'empty-override-worker.md', {
+      name: 'empty-override-worker',
+      description: 'A worker with a custom model route',
+      model: 'anthropic:claude-worker',
+    });
+
+    await teamManager.spawnTeammate({
+      name: 'w9',
+      agentType: 'empty-override-worker',
+      model: '',
+      cwd: projectDir,
+    });
+
+    const agentId = formatAgentId('w9', TEAM_NAME);
+
+    expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authType: 'anthropic',
+        model: 'claude-worker',
+      }),
+      expect.anything(),
+    );
+    expect(backend.getAgentContentGenerator(agentId)).toBeDefined();
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const { modelConfig } = destructureAgentCoreCall(
+      MockAgentCore.mock.calls.at(-1)!,
+    );
+    expect(modelConfig.model).toBe('claude-worker');
+    const member = teamManager.getTeamFile().members[0]!;
+    expect(member.model).toBe('claude-worker');
   });
 
   it('fails loudly on a backend that omits getAgentContentGenerator', async () => {
