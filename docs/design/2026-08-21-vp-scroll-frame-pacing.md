@@ -20,6 +20,12 @@ semantics:
 - Keep the existing trailing 16 ms input coalescer. A leading-and-trailing
   variant was rejected because high-frequency direct-PTY testing showed
   path-dependent scroll distance through the dynamically measured list.
+  **Superseded:** `docs/design/virtualized-history-scroll-scheduling.md`
+  re-introduces a leading-and-trailing coalescer after showing the accumulated
+  row delta is preserved regardless of flush timing (burst-preservation test
+  plus real-PTY row-delta capture). That doc is now authoritative for VP
+  scroll input coalescing; the trailing-only decision recorded here no longer
+  applies.
 
 No rendering-library fork or virtual-list rewrite is part of the first pass.
 Broader work is justified only if the measured result remains below the
