@@ -2412,4 +2412,111 @@ describe('ResponsesPipeline', () => {
       ]);
     });
   });
+
+  // A per-send `request.config` carries the caller's own sampling and thinking
+  // decisions. The sibling Chat wire honors both (pipeline.ts:
+  // addParameterIfDefined's request fallback, and buildReasoningConfig's
+  // includeThoughts:false opt-out); this wire dropped them on the floor, so
+  // the same call produced a different body depending only on which wire it
+  // took.
+  describe('request-scoped controls', () => {
+    function requestWith(
+      config: NonNullable<GenerateContentParameters['config']>,
+    ): GenerateContentParameters {
+      return { ...textRequest('hi'), config };
+    }
+
+    async function sentBody(
+      pipeline: ResponsesPipeline,
+      request: GenerateContentParameters,
+    ): Promise<Record<string, unknown>> {
+      mockResponse(
+        sseEvent('response.completed', { response: { status: 'completed' } }),
+      );
+      for await (const _ of pipeline.executeStream(request, 'p1')) {
+        // drain
+      }
+      return JSON.parse(fetchMock.mock.calls[0]![1].body) as Record<
+        string,
+        unknown
+      >;
+    }
+
+    it('honors request temperature and topP when samplingParams omits those keys', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(
+          makeGeneratorConfig({ samplingParams: { max_tokens: 321 } }),
+          makeCliConfig(),
+        ),
+        requestWith({ temperature: 0, topP: 0.25 }),
+      );
+      // 0 is a meaningful temperature, not an absent one.
+      expect(body['temperature']).toBe(0);
+      expect(body['top_p']).toBe(0.25);
+      // Max-token reconciliation is untouched by this.
+      expect(body['max_output_tokens']).toBe(321);
+    });
+
+    it('control: honors request temperature and topP when there are no samplingParams at all', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(makeGeneratorConfig(), makeCliConfig()),
+        requestWith({ temperature: 0.7, topP: 0.9 }),
+      );
+      expect(body['temperature']).toBe(0.7);
+      expect(body['top_p']).toBe(0.9);
+    });
+
+    it('control: an explicit samplingParams value still wins over the request value', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(
+          makeGeneratorConfig({
+            samplingParams: { temperature: 0.9, top_p: 0.1 },
+          }),
+          makeCliConfig(),
+        ),
+        requestWith({ temperature: 0, topP: 0.25 }),
+      );
+      expect(body['temperature']).toBe(0.9);
+      expect(body['top_p']).toBe(0.1);
+    });
+
+    it('suppresses reasoning and include when the request opts out with includeThoughts:false', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(
+          makeGeneratorConfig({ reasoning: { effort: 'high' } }),
+          makeCliConfig(),
+        ),
+        requestWith({ thinkingConfig: { includeThoughts: false } }),
+      );
+      expect(body['reasoning']).toBeUndefined();
+      // The encrypted-reasoning include exists only to round-trip reasoning;
+      // it must go with it.
+      expect(body['include']).toBeUndefined();
+    });
+
+    it('suppresses a legacy extra_body.enable_thinking when the request opts out', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(
+          makeGeneratorConfig({ extra_body: { enable_thinking: true } }),
+          makeCliConfig(),
+        ),
+        requestWith({ thinkingConfig: { includeThoughts: false } }),
+      );
+      expect(body['reasoning']).toBeUndefined();
+      expect(body['include']).toBeUndefined();
+      expect(body['enable_thinking']).toBeUndefined();
+    });
+
+    it('control: a thinkingConfig without includeThoughts leaves configured reasoning intact', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(
+          makeGeneratorConfig({ reasoning: { effort: 'high' } }),
+          makeCliConfig(),
+        ),
+        requestWith({ thinkingConfig: { thinkingBudget: 1024 } }),
+      );
+      expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+  });
 });

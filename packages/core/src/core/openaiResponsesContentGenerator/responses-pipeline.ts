@@ -395,7 +395,7 @@ export class ResponsesPipeline {
     // continued via previous_response_id, so context editing, compaction, and
     // mid-session model switching all keep working the same way they already
     // do for the other wires.
-    const reasoning = this.buildReasoning();
+    const reasoning = this.buildReasoning(request);
 
     const apiRequest: ResponsesApiRequest = {
       model: this.config.model,
@@ -444,13 +444,18 @@ export class ResponsesPipeline {
       apiRequest.include = ['reasoning.encrypted_content'];
     }
 
-    if (this.config.samplingParams) {
-      if (this.config.samplingParams.temperature != null) {
-        apiRequest.temperature = this.config.samplingParams.temperature;
-      }
-      if (this.config.samplingParams.top_p != null) {
-        apiRequest.top_p = this.config.samplingParams.top_p;
-      }
+    // Static config wins, then the per-send request value, then omitted --
+    // the same per-key precedence the sibling Chat wire applies through
+    // addParameterIfDefined. `??` rather than a truthiness check, so a
+    // deliberate `0` on either side survives.
+    const temperature =
+      this.config.samplingParams?.temperature ?? request.config?.temperature;
+    if (temperature != null) {
+      apiRequest.temperature = temperature;
+    }
+    const topP = this.config.samplingParams?.top_p ?? request.config?.topP;
+    if (topP != null) {
+      apiRequest.top_p = topP;
     }
 
     // Reconcile the user's configured max_tokens ceiling with the per-send
@@ -492,7 +497,17 @@ export class ResponsesPipeline {
     return apiRequest;
   }
 
-  private buildReasoning(): ResponsesApiReasoning | undefined {
+  private buildReasoning(
+    request: GenerateContentParameters,
+  ): ResponsesApiReasoning | undefined {
+    // A per-send opt-out, mirroring the sibling Chat wire's
+    // buildReasoningConfig: `includeThoughts:false` is the caller saying this
+    // particular request wants no thinking, and it outranks any static
+    // configuration. Only the explicit `false` opts out -- no other value of
+    // thinkingConfig is given a meaning on this wire.
+    if (request.config?.thinkingConfig?.includeThoughts === false) {
+      return undefined;
+    }
     const r = this.config.reasoning;
     if (r === false) return undefined;
     // `extra_body.enable_thinking` is the DashScope/Qwen-specific on/off
