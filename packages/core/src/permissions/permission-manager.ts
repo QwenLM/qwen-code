@@ -781,12 +781,21 @@ export class PermissionManager {
     //   (tool-search.ts), so its own schema cost is unchanged by keeping
     //   it listed. Pre-#9827 it always bypassed the legacy coreTools gate
     //   as a non-core tool (#9827).
+    // - `tool_call`: the bridge that executes what tool_search finds. It
+    //   must be exempt for the tool_search exemption above to mean
+    //   anything: config.ts registers the two as a pair and unregisters
+    //   tool_search when tool_call is unavailable, so gating tool_call
+    //   alone reaches the identical eager-reveal bloat by another route.
+    //   Exempting it grants no execution — normalization rewrites the
+    //   request to the real target before scheduling, so the target's own
+    //   allow/deny rules still gate the call.
     if (
       this.permissionsAllowListActive &&
       canonicalName !== ToolNames.STRUCTURED_OUTPUT &&
       !PermissionManager.PLAN_LIFECYCLE_TOOLS.has(canonicalName) &&
       canonicalName !== ToolNames.TASK_STOP &&
       canonicalName !== ToolNames.TOOL_SEARCH &&
+      canonicalName !== ToolNames.DEFERRED_TOOL_CALL &&
       !canonicalName.startsWith('mcp__') &&
       !canonicalName.startsWith('computer_use__') &&
       !this.isCoveredByAllowOrAskRule(canonicalName)

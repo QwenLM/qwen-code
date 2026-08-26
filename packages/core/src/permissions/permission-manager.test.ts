@@ -2985,6 +2985,37 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('read_file')).toBe(false);
     });
 
+    it('tool_call is exempt from the allowlist, pairing with tool_search', async () => {
+      // config.ts registers the two as a pair and unregisters tool_search
+      // when tool_call is unavailable, so exempting tool_search alone would
+      // still reach the eager-reveal bloat the exemption exists to prevent.
+      // The exemption grants no execution: normalization rewrites the
+      // request to the real target, whose own rules still gate the call.
+      pm = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(npm test)'] }),
+      );
+      pm.initialize();
+      expect(pm.isPermissionsAllowListActive()).toBe(true);
+      expect(await pm.isToolEnabled('tool_call')).toBe(true);
+      // The display name users copy out of /tools resolves the same way.
+      expect(await pm.isToolEnabled('ToolCall')).toBe(true);
+      // The real target is unaffected by the bridge's exemption.
+      expect(await pm.isToolEnabled('read_file')).toBe(false);
+    });
+
+    it('a whole-tool deny rule still wins over the tool_call exemption', async () => {
+      // Same escape hatch as tool_search: an explicit denial must remove
+      // the bridge, which then also unregisters tool_search in config.ts.
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['read_file'],
+          permissionsDeny: ['tool_call'],
+        }),
+      );
+      pm.initialize();
+      expect(await pm.isToolEnabled('tool_call')).toBe(false);
+    });
+
     it('a whole-tool deny rule still wins over the tool_search exemption', async () => {
       // Explicit denial (e.g. the deepseek prefix-cache path pushes
       // 'tool_search' into mergedDeny) must still remove it.
