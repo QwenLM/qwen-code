@@ -249,6 +249,9 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [145. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…](#af-145)
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
+- [148. run — Convergence-signal circuit breaker — the off-ramp the round and growth brakes cannot…](#af-148)
+- [149. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…](#af-149)
+- [150. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…](#af-150)
 
 ---
 
@@ -3726,4 +3729,136 @@ wrapper: a translation quoting HTML is pathological (SKILL
 forbids HTML in failure.zh.md), but must not be able to open
 or close a <details>/<summary> that swallows the closing tag
 the workflow emits below.
+```
+
+<a id="af-148"></a>
+
+### 148. run — Convergence-signal circuit breaker — the off-ramp the round and growth brakes cannot…
+
+In `run`.
+
+```text
+Convergence-signal circuit breaker — the off-ramp the round and growth
+brakes cannot provide (#10107). Every brake this loop had bounded its OWN
+telemetry: rounds (CRITICAL_ONLY_AFTER_ROUND, the caps), bytes (the growth
+budgets), failures (the consecutive-failure and timeout breakers). None of
+them could see the one diagnosis that matters on a non-converging pair:
+the REVIEW side has measured, since #9461/#9623, whether its own loop is
+settling — recurrence clusters, a first-time-finding rate that is not
+falling — and publishes the matched handling recommendations as a closed
+code set (`rec` in the posted ledger marker, RECOMMENDATION_CODES in
+packages/cli/src/commands/review/lib/convergence.ts). Measured on #9729:
+the observation named the failure mode in round 3 and repeated it through
+round 15, both sides' brakes engaged (critical floor from ~round 5; growth
+brake, Critical-only), and the loop still ran ~13 more rounds — ~50
+runner-hours, the PR growing +1.7k → +5.6k lines, round 15 still posting
+fresh Criticals in loop-written code. The brakes slow each side; neither
+can stop the pair, and the human who could is exactly the one takeover
+removed from the loop.
+
+The breaker consumes the codes instead of re-deriving the diagnosis: the
+review module's contract is that it measures and holds no threshold ("a
+caller wires actions to these codes without parsing prose"), so the
+threshold lives here — CONVERGENCE_BREAK_ROUNDS consecutive signal-bearing
+review rounds, with no trusted-human response in between, pause the loop.
+Three by default: the review engages its own critical posting floor after
+two flat rounds (#9938), so three signal rounds mean the posture rung has
+already been taken and the pair demonstrably did not respond to it.
+
+The action is a PARK in the growth-audit-conflict mold, not a terminal
+stop: one visible notice, then silence; a trusted-human response resumes
+the loop with a fresh N-round runway (the response steers the next rounds
+as ordinary feedback); /retry or re-engaging takeover resets via the
+window key like every other census. No NEEDS_HUMAN_LABEL — that label
+marks stops only a re-arm can lift, and a self-lifting park wearing it
+would leave the label lying the moment a maintainer's comment resumed
+the loop. Downshifting automatic re-review falls out for free: reviews
+are push-triggered, so a loop that stops pushing stops re-reviewing —
+on-demand review (a human push, /review) keeps working.
+
+'land-and-defer' and the persistently-critical exit advisory are
+deliberately NOT signal codes: both mean "this loop can end by merging",
+and pausing on them would park exactly the PR a human should merge. They
+stay visible in the review body; acting on them is a different feature.
+```
+
+<a id="af-149"></a>
+
+### 149. review-scan · Scan for PRs with new feedback — Convergence-signal circuit breaker (#10107): the review side diagnoses a non-converging…
+
+In `review-scan` · `Scan for PRs with new feedback`.
+
+```text
+Convergence-signal circuit breaker (#10107): the review side diagnoses a
+non-converging loop in machine-readable form — the `rec` codes in its
+posted ledger marker — and this gate is the consumer. See af-148 for the
+concept; this section carries the reading's mechanics.
+
+The streak is TRAILING and CONSECUTIVE: review-bot reviews after the
+boundary, last ledger marker per body (an edited body can hold more than
+one; the newest describes the round), one entry per ROUND keeping the
+newest (the review workflow dismisses its own superseded reviews but the
+dismissed body — and its marker — survives in the list, and a re-run of
+one round must not count twice), reset to zero by any marker round whose
+codes do not intersect CONVERGENCE_SIGNAL_CODES. A review without a
+parseable marker contributes nothing either way — fallback comments and
+dismissal stubs are not rounds — while a marker without `rec` is a round
+that measured no divergence (a healthy round, or one from a CLI predating
+the field) and resets: the fail-open direction, one delayed breaker, never
+a false park.
+
+The boundary is max(window key, newest trusted-human activity). The
+window-key half makes /retry and re-engagement reset the breaker exactly
+like every other census. The human-activity half is the resume signal the
+notice promises: a maintainer response moves the boundary past the streak,
+the loop wakes with a fresh CONVERGENCE_BREAK_ROUNDS of runway, and the
+response itself reaches the agent as ordinary feedback. The legs mirror
+the conflict park's wake legs (trusted-human reviews, inline comments,
+issue comments minus bot markers and @qwen-code commands) with one
+deliberate difference: NO failed-check leg. The conflict park wakes on
+outside CI going red because its parked item is a size judgment and a
+broken tree outranks it; this park's whole claim is that more automatic
+rounds are the problem, and a red check resuming the general loop would
+re-open it with zero human input. Trust: the streak reads only reviews
+the REVIEW_BOT account submitted — a review is not a forgeable surface
+the way an issue comment is — and the boundary can only be moved LATER by
+untrusted input, which is the safe direction (a later boundary shortens
+the streak and delays the park).
+
+The notice posts once per boundary, not once per window: a loop that
+resumed on a human response and re-tripped earned a fresh notice, and the
+earlier one is older than the activity that resumed it, so the dedup
+(AUTOFIX_BOT comments carrying the marker, newer than the boundary) reads
+exactly that. It deliberately does NOT begin "🤖 AutoFix stopped" — the
+fleet shepherd's REASON regex reads that prefix as a terminal stop, and
+this is a self-lifting park. The gate sits after the idle fast-path (an
+idle PR dispatches nothing anyway, and the streak jq is not free) and
+before target emission, so a parked PR spends no dispatch, no runner, and
+no round.
+```
+
+<a id="af-150"></a>
+
+### 150. review-address · Prepare branch and feedback — Convergence-break mirror (#10107): the scan refuses to select while the breaker holds,…
+
+In `review-address` · `Prepare branch and feedback`.
+
+```text
+Convergence-break mirror (#10107): the scan refuses to select while the
+breaker holds, but a target can be emitted moments before the tripping
+review lands — the review's own pull_request_review trigger routes a
+round for exactly the review that completes the streak — or forced past
+the scan by dispatch. The leg therefore re-derives the same reading over
+its own live fetch and idles via STALE, the same shape as the conflict
+park above it and the live-watermark revalidation before it: discard
+without action, marker, or comment. The notice stays the scan's job — a
+leg that posted it would race the scan's dedup, and the once-per-boundary
+guarantee is only checkable where the comment list and the decision live
+in one place; the next scheduled scan (10-minute cron) posts it, so the
+visible escalation lags the park by at most one scan interval.
+
+Keep the two readings in LOCKSTEP with the scan gate (boundary, streak,
+codes) — a divergence between them either burns agent rounds the scan
+already refused, or silently discards rounds the scan still allows. A
+test replays both against the same fixture.
 ```

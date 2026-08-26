@@ -508,6 +508,17 @@ function coveredWithLedger(prev: Record<string, unknown>): string {
   return p;
 }
 
+/**
+ * The raw `rec` array inside the body's ledger marker. `parseLedger` is
+ * deliberately blind to it (write-only telemetry for the workflow consumer),
+ * so the tests read the serialized JSON exactly the way that consumer does.
+ */
+function markerRec(body: string): string[] | undefined {
+  const m = /<!-- qwen-review-ledger (.*?) -->/.exec(body);
+  if (!m) return undefined;
+  return (JSON.parse(m[1]) as { rec?: string[] }).rec;
+}
+
 /** Agents given the diff, that never opened it — and said so at length. */
 function idlePlan(): string {
   transcript('a1', goodPrompt(1), {
@@ -12541,6 +12552,35 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body).not.toContain('Convergence:');
     expect(r.recommendations).toBeUndefined();
+    expect(markerRec(r.body)).toBeUndefined();
+  });
+
+  it('republishes the matched codes in the ledger marker, off the same derivation (#10107)', () => {
+    // The marker is the one surface an OUTSIDE consumer can reach — the
+    // takeover loop reads the posted review body, not the composed result —
+    // and the codes it carries must be the SAME set the result carries and
+    // the paragraph renders from, or the loop would wire actions to a round
+    // the human-readable half does not describe.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    const codes = (r.recommendations ?? []).map((x) => x.code);
+    expect(codes.length).toBeGreaterThan(0);
+    expect(markerRec(r.body)).toEqual(codes);
   });
 
   it('discloses a posture that is engaged in name and not in effect', () => {

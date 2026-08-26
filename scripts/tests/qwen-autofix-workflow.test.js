@@ -3111,13 +3111,16 @@ describe('qwen-autofix workflow', () => {
     // invocations never burn an agent cycle on a no-action report.
     expect(reviewScanJob).toContain("COMMAND_FILTER='^\\s*@qwen-code /'");
     expect(reviewScanJob).toContain('test($cf) | not');
-    // Seven sites now: the four feedback/deferral exclusions, the
+    // Nine sites now: the four feedback/deferral exclusions, the
     // over-budget census (command comments are not feedback batches), the
-    // conflict handoff wake filter, and its scan-side mirror for the
+    // conflict handoff wake filter, its scan-side mirror for the
     // stale-base park gate (a /command comment is not a trusted-human
-    // response and must not unpark a conflict verdict in either).
+    // response and must not unpark a conflict verdict in either), and the
+    // convergence breaker's human-activity boundary in both its scan gate
+    // and its prepare mirror (a /command comment is not a maintainer
+    // weighing in, and must not hand the loop a fresh runway).
     expect(workflow.split('test("^\\\\s*@qwen-code /") | not').length - 1).toBe(
-      7,
+      9,
     );
   });
 
@@ -19877,6 +19880,315 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
         ],
       }),
     ).toBe('false');
+  });
+
+  it('behaviorally trips the convergence breaker on N signal rounds and resumes on a human response (#10107)', () => {
+    // The review side publishes its convergence diagnosis as `rec` codes in
+    // the posted ledger marker; the scan gate is the consumer. The streak
+    // is trailing-consecutive over marker ROUNDS (a dismissed review and
+    // its same-round re-run count once), a healthy or pre-field marker
+    // resets it, and the boundary is max(window key, newest trusted-human
+    // activity) — a human response IS the resume signal. Execute the real
+    // boundary+streak block against fixture state.
+    const streakBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    expect(streakBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-'));
+    try {
+      const led = (round, rec) =>
+        `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          ...(rec === undefined ? {} : { rec }),
+        })} -->`;
+      const botReview = (at, round, rec) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `findings… ${led(round, rec)}`,
+      });
+      const readState = ({ rv = [], rc = [], ic = [], rearmKey = 'none' }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nREARM_KEY='${rearmKey}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='not-a-number'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","batch-fixes","stem-surface"]'\n` +
+              `${streakBlock.replace(/\n {12}/g, '\n')}\n` +
+              `printf '\\n%s %s' "$CONV_STREAK" "$CONVERGENCE_BREAK_ROUNDS"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        const [streak, cap] = out.split('\n').at(-1).split(' ');
+        return { streak: Number(streak), cap: Number(cap) };
+      };
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const threeSignals = [
+        botReview(T(1), 3, ['root-cause-triage']),
+        botReview(T(2), 4, ['batch-fixes', 'stem-surface']),
+        botReview(T(3), 5, ['root-cause-triage', 'batch-fixes']),
+      ];
+      // Three signal rounds, nobody in between → the breaker's bar, and the
+      // malformed knob fell back to its default at the read site.
+      expect(readState({ rv: threeSignals })).toEqual({ streak: 3, cap: 3 });
+      // A healthy round (marker, no codes) resets; so does a pre-field
+      // marker from a CLI predating `rec` — not evidence of divergence.
+      for (const rec of [undefined, []]) {
+        expect(
+          readState({
+            rv: [
+              botReview(T(1), 3, ['batch-fixes']),
+              botReview(T(2), 4, rec),
+              botReview(T(3), 5, ['batch-fixes']),
+            ],
+          }).streak,
+        ).toBe(1);
+      }
+      // 'land-and-defer' is an exit signal, not a divergence one.
+      expect(
+        readState({ rv: [botReview(T(1), 3, ['land-and-defer'])] }).streak,
+      ).toBe(0);
+      // A dismissed review and its same-round re-run count once — the
+      // NEWEST marker speaks for the round (here: the healthy re-run).
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            { ...botReview(T(2), 4, ['batch-fixes']), state: 'DISMISSED' },
+            botReview(T(3), 4, []),
+          ],
+        }).streak,
+      ).toBe(0);
+      // A review with no parseable marker is not a round — a fallback stub
+      // between signal rounds neither counts nor resets.
+      expect(
+        readState({
+          rv: [
+            botReview(T(1), 3, ['batch-fixes']),
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              submitted_at: T(2),
+              state: 'COMMENTED',
+              body: 'fallback — no marker',
+            },
+            botReview(T(3), 4, ['batch-fixes']),
+          ],
+        }).streak,
+      ).toBe(2);
+      // A trusted-human response moves the boundary: only rounds AFTER it
+      // count, so every human touch grants a fresh N-round runway.
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: 'split the cluster out',
+            },
+          ],
+        }).streak,
+      ).toBe(1);
+      // …but the review bot, an untrusted login, and @qwen-code command
+      // comments move nothing (commands act through their own routes).
+      expect(
+        readState({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'qwen-code-ci-bot' },
+              author_association: 'NONE',
+              created_at: T(2),
+              body: 'suggestion digest',
+            },
+            {
+              user: { login: 'drive-by' },
+              author_association: 'NONE',
+              created_at: T(2),
+              body: 'bump',
+            },
+            {
+              user: { login: 'alice' },
+              author_association: 'OWNER',
+              created_at: T(2),
+              body: '@qwen-code /takeover',
+            },
+          ],
+        }).streak,
+      ).toBe(3);
+      // The window key is the other boundary: /retry or re-engaging resets
+      // the breaker exactly like every other census.
+      expect(readState({ rv: threeSignals, rearmKey: T(2) }).streak).toBe(1);
+      // Wiring: the trip parks the candidate before target emission, posts
+      // the once-per-boundary notice under its own marker, and is a PARK —
+      // never the fleet shepherd's terminal-stop headline.
+      expect(reviewScanJob).toContain(
+        'fleet_row "${PR}" \'convergence-parked\'',
+      );
+      const notice = reviewScanJob.match(
+        /elif ! gh pr comment "\$\{PR\}" --repo "\$\{REPO\}" --body "\$\(printf '⏸️ AutoFix paused by a review convergence signal[^\n]*/,
+      )?.[0];
+      expect(notice).toBeTruthy();
+      expect(notice).toContain('<!-- autofix-convergence-break -->');
+      expect(notice).not.toContain('🤖 AutoFix stopped');
+      expect(reviewScanJob).toContain(
+        'select((.body // "") | contains("<!-- autofix-convergence-break -->"))',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('mirrors the convergence breaker live in prepare, discarding without comment (#10107)', () => {
+    // A target can be emitted moments before the tripping review lands (the
+    // review's own submitted trigger routes a round for exactly that
+    // review), so the leg re-derives the scan gate's reading and idles via
+    // STALE — no agent run, no marker, no comment; the notice stays the
+    // scan's job. Execute the real mirror block.
+    const mirrorBlock = prepareBranchAndFeedbackStep.match(
+      /# Convergence-break mirror[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    expect(mirrorBlock).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-conv-mirror-'));
+    try {
+      const botReview = (at, round) => ({
+        user: { login: 'qwen-code-ci-bot' },
+        submitted_at: at,
+        state: 'CHANGES_REQUESTED',
+        body: `<!-- qwen-review-ledger ${JSON.stringify({
+          v: 1,
+          round,
+          findings: [],
+          rec: ['batch-fixes'],
+        })} -->`,
+      });
+      const staleOf = ({ rv = [], rc = [], ic = [], stale = 'false' }) => {
+        writeFileSync(join(dir, 'rv.json'), JSON.stringify(rv));
+        writeFileSync(join(dir, 'rc.json'), JSON.stringify(rc));
+        writeFileSync(join(dir, 'ic.json'), JSON.stringify(ic));
+        const out = execFileSync(
+          'bash',
+          [
+            '-c',
+            `set -e\nWORKDIR='${dir}'\nLIVE_REARM_KEY='none'\nSTALE='${stale}'\n` +
+              `REVIEW_BOT=qwen-code-ci-bot\nAUTOFIX_BOT=qwen-code-dev-bot\n` +
+              `TRUSTED_ASSOC='["OWNER", "MEMBER", "COLLABORATOR"]'\n` +
+              `CONVERGENCE_BREAK_ROUNDS='3'\n` +
+              `CONVERGENCE_SIGNAL_CODES='["root-cause-triage","batch-fixes","stem-surface"]'\n` +
+              `${mirrorBlock.replace(/\n {10}/g, '\n')}\nprintf '\\n%s' "$STALE"`,
+          ],
+          { encoding: 'utf8' },
+        );
+        return {
+          stale: out.trim().split('\n').pop(),
+          parked: out.includes('convergence break pending'),
+        };
+      };
+      const T = (h) => `2026-01-01T0${h}:00:00Z`;
+      const threeSignals = [
+        botReview(T(1), 3),
+        botReview(T(2), 4),
+        botReview(T(3), 5),
+      ];
+      // The breaker holds → the leg discards, and says why.
+      expect(staleOf({ rv: threeSignals })).toEqual({
+        stale: 'true',
+        parked: true,
+      });
+      // Under the bar → the leg runs.
+      expect(staleOf({ rv: threeSignals.slice(0, 2) })).toEqual({
+        stale: 'false',
+        parked: false,
+      });
+      // A trusted-human response since the streak → resumed.
+      expect(
+        staleOf({
+          rv: threeSignals,
+          ic: [
+            {
+              user: { login: 'alice' },
+              author_association: 'MEMBER',
+              created_at: T(4),
+              body: 'batching these myself',
+            },
+          ],
+        }),
+      ).toEqual({ stale: 'false', parked: false });
+      // An already-stale leg is not re-derived (the block never unsets it).
+      expect(staleOf({ rv: threeSignals, stale: 'true' }).stale).toBe('true');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the convergence signal codes inside the review CLI vocabulary, and the two gates in lockstep (#10107)', () => {
+    // The vocabulary is a CONTRACT owned by the review CLI: the workflow
+    // wires actions to codes the marker publishes, so a workflow code the
+    // CLI can never emit is a breaker that can never trip, and a renamed
+    // CLI code silently disarms it. Pin membership on both ends, and the
+    // deliberate absence of the exit code.
+    const codesEnv = workflow.match(
+      /CONVERGENCE_SIGNAL_CODES: '(\[[^\n]*\])'/,
+    )?.[1];
+    expect(codesEnv).toBeTruthy();
+    const signalCodes = JSON.parse(codesEnv);
+    expect(signalCodes.length).toBeGreaterThan(0);
+    const convergenceTs = readFileSync(
+      'packages/cli/src/commands/review/lib/convergence.ts',
+      'utf8',
+    );
+    const vocab = convergenceTs
+      .match(/RECOMMENDATION_CODES = \[([\s\S]*?)\] as const/)?.[1]
+      .match(/'([a-z-]+)'/g)
+      .map((c) => c.replaceAll("'", ''));
+    expect(vocab).toBeTruthy();
+    for (const code of signalCodes) {
+      expect(vocab).toContain(code);
+    }
+    // 'land-and-defer' means "this loop can end by merging" — pausing on it
+    // would park exactly the PR a human should merge.
+    expect(vocab).toContain('land-and-defer');
+    expect(signalCodes).not.toContain('land-and-defer');
+    // The marker really publishes the field the gates read.
+    const ledgerTs = readFileSync(
+      'packages/cli/src/commands/review/lib/ledger.ts',
+      'utf8',
+    );
+    expect(ledgerTs).toContain('payload.rec = rec');
+    // Lockstep: the scan gate and the prepare mirror must read the SAME
+    // streak and the SAME boundary, or one side burns rounds the other
+    // refused. The jq programs reference only their own --arg names, so
+    // the two sides' programs must be verbatim-identical modulo
+    // indentation; only the shell variable names around them differ.
+    // A program opens as `--arg… "${VAR}" '` + newline and contains no
+    // single quote of its own, so the next `'` closes it.
+    const jqProgramsOf = (block) =>
+      [...block.matchAll(/" '\n([\s\S]+?)'/g)].map((m) =>
+        m[1].replace(/\s+/g, ' ').trim(),
+      );
+    const scanBlock = reviewScanJob.match(
+      /\[\[ "\$\{CONVERGENCE_BREAK_ROUNDS\}" =~ [\s\S]*?\|\| CONV_STREAK=0\n/,
+    )?.[0];
+    const mirrorBlock = prepareBranchAndFeedbackStep.match(
+      /# Convergence-break mirror[\s\S]*?\n {10}fi\n/,
+    )?.[0];
+    const scanPrograms = jqProgramsOf(scanBlock);
+    // Two programs each: the human-activity boundary and the streak.
+    expect(scanPrograms).toHaveLength(2);
+    expect(jqProgramsOf(mirrorBlock)).toEqual(scanPrograms);
+    // Both design pointers resolve.
+    expect(designDoc).toContain('<a id="af-148"></a>');
+    expect(designDoc).toContain('<a id="af-149"></a>');
+    expect(designDoc).toContain('<a id="af-150"></a>');
   });
 
   it('a conflict round parks quietly — no stale-base merge in its report', () => {
