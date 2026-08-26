@@ -38,6 +38,7 @@ const tempDirs = [];
 const corePr = {
   state: 'OPEN',
   isDraft: false,
+  headRefOid: 'head-1',
   author: { login: 'some-contributor' },
   assignees: [],
   latestReviews: [],
@@ -100,9 +101,8 @@ describe('assign-pr-owner: pure routing', () => {
       );
       for (const prefix of prefixes) {
         assert.equal(
-          matchedAreasByPath(policy, [
-            { path: `${prefix}routing-probe.ts` },
-          ])[0]?.name,
+          matchedAreasByPath(policy, [{ path: `${prefix}routing-probe.ts` }])[0]
+            ?.name,
           area.name,
           `probe under ${prefix} does not route to ${area.name}`,
         );
@@ -209,6 +209,7 @@ function runAssign(dryRun, options = {}) {
     // Raw filename list; overrides `files` when a test needs names a
     // newline-joined string cannot carry (git allows newlines in paths).
     fileList,
+    previousFiles = [],
     zeroLoadOwner = 'DennisYu07',
     // What every collaborator permission lookup answers; 'error' fails the
     // lookup outright instead of answering.
@@ -238,6 +239,12 @@ case "$*" in
       printf '%s' "$GH_STUB_PR_LATEST"
     else
       printf '%s' "$GH_STUB_PR"
+    fi
+    ;;
+  *"pulls/77/files"*"previous_filename"*"@base64"*)
+    printf '%s' "$GH_STUB_FILES_B64"
+    if [ -n "$GH_STUB_PREVIOUS_FILES_B64" ]; then
+      printf '\n%s' "$GH_STUB_PREVIOUS_FILES_B64"
     fi
     ;;
   *"pulls/77/files"*"@base64"*) printf '%s' "$GH_STUB_FILES_B64" ;;
@@ -272,6 +279,9 @@ esac
       // What the fixed `| @base64` filter prints: one base64 token per
       // filename, so an embedded newline stays inside one entry.
       GH_STUB_FILES_B64: fileNames
+        .map((name) => Buffer.from(name, 'utf8').toString('base64'))
+        .join('\n'),
+      GH_STUB_PREVIOUS_FILES_B64: previousFiles
         .map((name) => Buffer.from(name, 'utf8').toString('base64'))
         .join('\n'),
       GH_STUB_PERMISSION: permission,
@@ -372,6 +382,15 @@ describe('assign-pr-owner: apply boundary', () => {
     assert.match(stdout, /skipped — PR is not open/);
   });
 
+  it('skips the write when the PR head changes mid-run', () => {
+    const { log, stdout } = runAssign(false, {
+      prLatestJson: JSON.stringify({ ...corePr, headRefOid: 'head-2' }),
+    });
+    assert.equal((log.match(/headRefOid/g) ?? []).length, 2);
+    assert.doesNotMatch(log, /pr edit/);
+    assert.match(stdout, /skipped — PR head changed during routing/);
+  });
+
   it('falls back to the coarser area when the module owner authored the PR', () => {
     const module = policy.areas.find((area) => area.name === 'core-skills');
     const { log, stdout } = runAssign(false, {
@@ -435,6 +454,16 @@ describe('assign-pr-owner: apply boundary', () => {
 });
 
 describe('assign-pr-owner: untrusted filename decoding', () => {
+  it('includes both paths for renamed files', () => {
+    const { log, stdout } = runAssign(false, {
+      files: 'packages/cli/src/new.ts',
+      previousFiles: ['packages/core/src/old.ts'],
+    });
+    assert.match(log, /previous_filename/);
+    assert.match(log, /pr edit 77 .*--add-assignee DennisYu07/);
+    assert.match(stdout, /Area: core/);
+  });
+
   it('keeps a newline inside a changed filename from forging a second path', () => {
     // Changed filenames are attacker-controlled on fork PRs, and git accepts
     // newlines in path components. Decoding each filename structurally must

@@ -127,7 +127,7 @@ export function changedFiles(repository, prNumber) {
     `repos/${repository}/pulls/${prNumber}/files`,
     '--paginate',
     '--jq',
-    '.[].filename | @base64',
+    '.[] | (.filename, (.previous_filename // empty)) | @base64',
   ])
     .split('\n')
     .filter(Boolean)
@@ -156,7 +156,7 @@ function main() {
       '--repo',
       repository,
       '--json',
-      'state,isDraft,author,assignees,latestReviews',
+      'state,isDraft,author,assignees,latestReviews,headRefOid',
     ]),
   );
   pr.files = changedFiles(repository, prNumber);
@@ -231,12 +231,16 @@ function main() {
       '--repo',
       repository,
       '--json',
-      'state,isDraft,author,assignees,latestReviews',
+      'state,isDraft,author,assignees,latestReviews,headRefOid',
     ]),
   );
   const latestSkip = skipPrReason(latestPr);
   if (latestSkip) {
     record([`Assignment: skipped — ${latestSkip}`]);
+    return;
+  }
+  if (latestPr.headRefOid !== pr.headRefOid) {
+    record(['Assignment: skipped — PR head changed during routing']);
     return;
   }
   if (alreadyCovered(policy, latestPr)) {
