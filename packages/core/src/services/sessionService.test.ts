@@ -41,6 +41,7 @@ import {
   stableSessionArtifactId,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
+import { SessionTranscriptChangedError } from './session-writer-lease.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -2053,6 +2054,117 @@ describe('SessionService', () => {
       expect(unlinkSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.ledger.jsonl`),
       );
+    });
+
+    it('can commit only the active transcript for lifecycle deletion', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+      existsSyncSpy.mockReturnValue(true);
+      const removeOrganizationSpy = vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      );
+
+      const removed = await sessionService.removeSessionTranscriptForLifecycle(
+        sessionIdA,
+        'active',
+      );
+
+      expect(removed).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(1);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+      expect(commitUsageBeforeTranscriptDeletion).toHaveBeenCalledOnce();
+      expect(rmSyncSpy).not.toHaveBeenCalled();
+      expect(removeOrganizationSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects lifecycle deletion when active and archived transcripts conflict', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+        ),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+
+      expect(prepareUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects lifecycle deletion when the transcript moved states', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (!filePath.includes('/chats/archive/')) {
+            const error = new Error('ENOENT') as NodeJS.ErrnoException;
+            error.code = 'ENOENT';
+            throw error;
+          }
+          return [recordA1];
+        },
+      );
+
+      await expect(
+        sessionService.removeSessionTranscriptForLifecycle(
+          sessionIdA,
+          'active',
+        ),
+      ).rejects.toBeInstanceOf(SessionTranscriptChangedError);
+
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+
+    it('cleans sidecars after the transcript is already absent', async () => {
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) => {
+        const value = filePath.toString();
+        return (
+          value.endsWith(`${sessionIdA}.worktree.json`) ||
+          value.endsWith(`${sessionIdA}.pr.json`) ||
+          value.endsWith(`${sessionIdA}.ledger.jsonl`)
+        );
+      });
+      const removeOrganizationSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSession')
+        .mockResolvedValue();
+
+      await sessionService.cleanupRemovedSessionState(sessionIdA);
+
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.worktree.json`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.pr.json`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.ledger.jsonl`),
+      );
+      expect(rmSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`file-history/${sessionIdA}`),
+        { recursive: true, force: true },
+      );
+      expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA);
+    });
+
+    it('surfaces lifecycle sidecar cleanup failures for retry', async () => {
+      const cleanupError = new Error('organization cleanup failed');
+      vi.spyOn(
+        SessionOrganizationService.prototype,
+        'removeSession',
+      ).mockRejectedValue(cleanupError);
+
+      await expect(
+        sessionService.cleanupRemovedSessionState(sessionIdA),
+      ).rejects.toBe(cleanupError);
     });
   });
 

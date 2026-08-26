@@ -1391,6 +1391,7 @@ export class SessionService {
   private async removeSessionOrganization(
     sessionId: string,
     assertCanMutate?: () => void,
+    propagateFailure = false,
   ): Promise<void> {
     try {
       const service = new SessionOrganizationService(
@@ -1408,6 +1409,7 @@ export class SessionService {
       }
     } catch (error) {
       assertCanMutate?.();
+      if (propagateFailure) throw error;
       this.warn(
         `removeSession: failed to clear session organization for ${sessionId}: ${error}`,
       );
@@ -2374,11 +2376,26 @@ export class SessionService {
     sessionId: string,
     options: RemoveSessionOptions = {},
   ): Promise<boolean> {
-    const removed = await this.removeSessionFiles(sessionId, options);
+    const removed = await this.removeSessionTranscripts(sessionId, options);
     if (removed) {
-      await this.removeSessionOrganization(sessionId, options.assertCanMutate);
+      await this.cleanupRemovedSessionStateInternal(sessionId, options, false);
     }
     return removed;
+  }
+
+  async removeSessionTranscriptForLifecycle(
+    sessionId: string,
+    expectedLocation: SessionArchiveState,
+    options: RemoveSessionOptions = {},
+  ): Promise<boolean> {
+    return this.removeSessionTranscripts(sessionId, options, expectedLocation);
+  }
+
+  async cleanupRemovedSessionState(
+    sessionId: string,
+    options: RemoveSessionOptions = {},
+  ): Promise<void> {
+    await this.cleanupRemovedSessionStateInternal(sessionId, options, true);
   }
 
   /**
@@ -2411,9 +2428,10 @@ export class SessionService {
     }
   }
 
-  private async removeSessionFiles(
+  private async removeSessionTranscripts(
     sessionId: string,
     options: RemoveSessionOptions = {},
+    expectedLocation?: SessionArchiveState,
   ): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
@@ -2423,6 +2441,13 @@ export class SessionService {
       const physicalSnapshot =
         await this.resolveMaintainableSessionSnapshot(sessionId);
       if (physicalSnapshot.location === undefined) return false;
+      if (
+        expectedLocation !== undefined &&
+        (physicalSnapshot.location !== expectedLocation ||
+          physicalSnapshot.identities.length !== 1)
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
       const preparedUsage = new Map<
         string,
         PreparedUsageBeforeTranscriptDeletion
@@ -2446,16 +2471,9 @@ export class SessionService {
           preparedUsage.get(identity.filePath) ?? null,
         );
       }
-      options.assertCanMutate?.();
-      this.removeWorktreeSidecars(sessionId);
-      options.assertCanMutate?.();
-      this.removePrSidecars(sessionId);
-      options.assertCanMutate?.();
-      this.removePromptLedgers(sessionId);
-      options.assertCanMutate?.();
-      this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
+      if (expectedLocation !== undefined) throw error;
       if (
         error instanceof SessionStorageEntryError &&
         error.reason === 'foreign_project'
@@ -2467,6 +2485,40 @@ export class SessionService {
       }
       throw error;
     }
+  }
+
+  private async cleanupRemovedSessionStateInternal(
+    sessionId: string,
+    options: RemoveSessionOptions,
+    propagateOrganizationFailure: boolean,
+  ): Promise<void> {
+    this.cleanupRemovedSessionFiles(sessionId, options);
+    options.assertCanMutate?.();
+    await this.removeSessionOrganization(
+      sessionId,
+      options.assertCanMutate,
+      propagateOrganizationFailure,
+    );
+  }
+
+  private cleanupRemovedSessionFiles(
+    sessionId: string,
+    options: RemoveSessionOptions,
+  ): void {
+    options.assertCanMutate?.();
+    this.removeWorktreeSidecars(sessionId);
+    options.assertCanMutate?.();
+    this.removePrSidecars(sessionId);
+    options.assertCanMutate?.();
+    this.removePromptLedgers(sessionId);
+    options.assertCanMutate?.();
+    this.removeFileHistoryBackups(sessionId);
+  }
+
+  private async removeSessionFiles(sessionId: string): Promise<boolean> {
+    const removed = await this.removeSessionTranscripts(sessionId);
+    if (removed) this.cleanupRemovedSessionFiles(sessionId, {});
+    return removed;
   }
 
   async archiveSessions(
