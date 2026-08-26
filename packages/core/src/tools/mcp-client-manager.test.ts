@@ -1527,6 +1527,65 @@ describe('McpClientManager', () => {
     }
   });
 
+  it('unrefs health-check timers so they never hold the event loop open (issue #9944)', async () => {
+    // `qwen mcp reconnect` (and other short-lived Config consumers) call
+    // `config.shutdown()` while an incremental discovery pass is still in
+    // flight; that pass's `finally` block re-arms health checks AFTER
+    // `stop()` cleared them. Pre-fix those intervals were ref'd, so the
+    // process hung forever. Health monitoring is background bookkeeping —
+    // the timer must be unref'd so it never keeps the loop alive on its own.
+    // Real timers here: the assertion is about `hasRef()`, which fake timers
+    // do not model faithfully.
+    const client = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(client as unknown as McpClient);
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ 'test-server': {} }),
+      getMcpServerCommand: () => undefined,
+      getTargetDir: () => '/session/worktree',
+      getPromptRegistry: () =>
+        ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+    } as unknown as Config;
+    const manager = mkManager({
+      config: mockConfig,
+      options: {
+        healthConfig: {
+          autoReconnect: true,
+          // Long interval: we only inspect the armed timer, we never let it
+          // fire.
+          checkIntervalMs: 60_000,
+          maxConsecutiveFailures: 3,
+          reconnectDelayMs: 10,
+        },
+      },
+    });
+
+    try {
+      await manager.discoverMcpToolsForServer(
+        'test-server',
+        {} as unknown as Config,
+      );
+      const timer = (
+        manager as unknown as {
+          healthCheckTimers: Map<string, NodeJS.Timeout>;
+        }
+      ).healthCheckTimers.get('test-server');
+      expect(timer).toBeDefined();
+      expect(timer?.hasRef()).toBe(false);
+    } finally {
+      await manager.stop();
+    }
+  });
+
   it('should clear in-flight discovery tracking when stopping', async () => {
     let resolveConnect!: () => void;
     const connectPromise = new Promise<void>((resolve) => {
