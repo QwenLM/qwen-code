@@ -75,6 +75,7 @@ import {
 import { buildTeammatePromptAddendum } from './promptAddendum.js';
 import { runWithTeammateIdentity } from './identity.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
+import type { SubagentModelRoute } from '../../subagents/types.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
 import { runOutsideAgentContext } from '../runtime/agent-context.js';
 import { READ_ONLY_INSPECTION_TOOLS } from '../runtime/subagent-plan-tool-policy.js';
@@ -382,6 +383,7 @@ export class TeamManager {
       // definition so the teammate behaves like that agent type.
       let subagentPrompt: string | undefined;
       let subagentModel: string | undefined;
+      let subagentModelRoute: SubagentModelRoute | undefined;
       let subagentRunConfig: Record<string, unknown> | undefined;
       let toolConfig: ToolConfig | undefined;
       if (config.agentType && this.subagentManager) {
@@ -397,6 +399,18 @@ export class TeamManager {
         subagentModel = runtimeCfg.modelConfig.model;
         subagentRunConfig = runtimeCfg.runConfig as Record<string, unknown>;
         toolConfig = runtimeCfg.toolConfig;
+        // Resolve the definition's model selector with the runtime context,
+        // the same way the ordinary-subagent path does (#10071).
+        // convertToRuntimeConfig is called without a context, so it keeps
+        // only a bare model ID and cannot resolve `fast`; both the
+        // selector's authType and the resolved model ID are needed below
+        // to give the teammate the definition's provider route instead of
+        // the leader's.
+        subagentModelRoute =
+          this.subagentManager.resolveSubagentModelRoute(subagentConfig);
+        if (subagentModelRoute) {
+          subagentModel = subagentModelRoute.modelId;
+        }
         // Ensure team coordination tools are always available,
         // even when the subagent defines a restricted tool set.
         if (toolConfig) {
@@ -457,6 +471,11 @@ export class TeamManager {
         ? `${basePrompt}\n\n${addendum}`
         : addendum;
 
+      // Reflect the model the teammate will actually run on — including a
+      // model selected by the definition's frontmatter (#10071), not just
+      // an explicit spawn-time override — in the team file and join event.
+      member.model = config.model ?? subagentModel;
+
       // Build spawn config for the backend.
       const spawnConfig: AgentSpawnConfig = {
         agentId,
@@ -477,6 +496,17 @@ export class TeamManager {
                 '(status: "in_progress"), do the work, report ' +
                 'via send_message(to: "leader"), then mark ' +
                 'completed with task_update.'),
+          // The definition's resolved provider route (#10071). InProcess
+          // backends build a dedicated per-agent ContentGenerator only
+          // when authOverrides.authType is present; without this the
+          // teammate falls back to the leader's generator and streams the
+          // definition's model ID over the leader's route. Skipped when
+          // the leader overrode the model at spawn time — the definition
+          // does not vouch for the route of a model it did not select.
+          authOverrides:
+            subagentModelRoute && !config.model
+              ? { authType: subagentModelRoute.authType }
+              : undefined,
           runtimeConfig: {
             promptConfig: {
               systemPrompt,

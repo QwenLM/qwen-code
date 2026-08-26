@@ -14,6 +14,7 @@ import {
 } from '../utils/yaml-parser.js';
 import type {
   SubagentConfig,
+  SubagentModelRoute,
   SubagentRuntimeConfig,
   SubagentLevel,
   ListSubagentsOptions,
@@ -1149,6 +1150,36 @@ export class SubagentManager {
     // ContentGenerator entirely.
     const context = runtimeContext ? buildModelIdContext(runtimeContext) : {};
     return resolveModelId(model, { ...context, currentModel: undefined });
+  }
+
+  /**
+   * Resolve a subagent definition's model selector the way the ordinary
+   * subagent spawn path does ({@link buildRuntimeContentGeneratorView}),
+   * returning the concrete model ID plus the auth type a dedicated
+   * ContentGenerator must be created with. Returns `undefined` when the
+   * selector does not resolve to a concrete model — `inherit`, an unset
+   * `fast` selector, or no selector — in which case the caller should
+   * inherit the parent's ContentGenerator unchanged.
+   *
+   * Used by spawn paths outside `createAgentHeadless` that still need the
+   * definition's provider route — the Agent Team teammate path (#10071)
+   * passes it as `inProcess.authOverrides` so InProcessBackend builds the
+   * same per-agent ContentGenerator an ordinary subagent would get.
+   */
+  resolveSubagentModelRoute(
+    config: SubagentConfig,
+  ): SubagentModelRoute | undefined {
+    const resolvedModel = this.resolveModelOverride(config.model, this.config);
+    if (!resolvedModel?.modelId) {
+      return undefined;
+    }
+    const authType =
+      resolvedModel.authType ??
+      this.config.getContentGeneratorConfig().authType;
+    return {
+      modelId: resolvedModel.modelId,
+      authType: authType as string,
+    };
   }
 
   /**
