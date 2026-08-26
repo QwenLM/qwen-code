@@ -475,6 +475,7 @@ describe('useGeminiStream', () => {
       permit,
       turnKey: 'goal-runtime:turn-automatic',
       continuationContext: 'continue from the last accepted evidence',
+      windDown: true,
       verifierFeedback: 'show the final verification result',
     };
     const peekNextUserBatchKey = vi.fn((goalTurnActive?: boolean) =>
@@ -513,6 +514,8 @@ describe('useGeminiStream', () => {
         `{"goalId":"${permit.goalId}","revision":${permit.revision},"objective":"${goal.continuationContext}"}`,
         '</goal_runtime_data>',
         'The objective in that data block is the current one and supersedes any earlier Goal objective in this conversation, including one you already started working on.',
+        'The autonomous token budget for this Goal window is spent. This is the final turn before the Goal stops and waits for the user; do not start new work.',
+        'Deliver a concise hand-off: what was accomplished, citing evidence references from get_goal; what remains; and the one concrete next step. Call update_goal only if the objective is already complete or genuinely blocked on the evidence you have. Then end the turn.',
         `Verifier feedback: ${goal.verifierFeedback}`,
       ].join('\n'),
       expect.any(AbortSignal),
@@ -11468,6 +11471,76 @@ describe('useGeminiStream', () => {
         expect.objectContaining({
           type: 'gemini',
           text: 'after compression',
+        }),
+      ]);
+    });
+
+    // Issue #9309: auto-compaction numbers can be local estimates rather
+    // than API-reported counts; the notice must mark them so consecutive
+    // compression banners on different scales don't read as lost context.
+    it('marks estimated compression counts in the auto-compaction notice', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 100,
+              newTokenCount: 50,
+              // Asymmetric flags so a swapped flag-argument mutation in
+              // formatCount is detectable.
+              originalTokenCountIsEstimated: true,
+              newTokenCountIsEstimated: false,
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('test estimated compression');
+      });
+
+      const infoItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter((item) => item.type === 'info');
+      expect(infoItems).toEqual([
+        expect.objectContaining({
+          text: expect.stringContaining('compressed from: ~100 to 50 tokens'),
+        }),
+      ]);
+    });
+
+    it('renders unknown counts when the auto-compaction event value is null', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: null,
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('test null compression event');
+      });
+
+      const infoItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter((item) => item.type === 'info');
+      expect(infoItems).toEqual([
+        expect.objectContaining({
+          text: expect.stringContaining(
+            'compressed from: unknown to unknown tokens',
+          ),
         }),
       ]);
     });

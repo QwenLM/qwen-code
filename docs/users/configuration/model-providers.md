@@ -659,6 +659,8 @@ Setting `reasoning: false` (the literal boolean) explicitly disables thinking on
 
 On a `api.deepseek.com` baseURL, the OpenAI pipeline emits the explicit `thinking: { type: 'disabled' }` field that DeepSeek V4+ requires — the server-side default is `'enabled'`, so simply omitting `reasoning_effort` would still pay thinking latency/cost. Self-hosted DeepSeek backends (sglang/vllm) and other OpenAI-compatible servers do **not** receive this field; if you need to disable thinking on those, inject `thinking: { type: 'disabled' }` (or whatever knob your inference framework exposes) via `samplingParams`/`extra_body`.
 
+On an `openrouter.ai` baseURL, the OpenAI pipeline emits OpenRouter's provider-level `reasoning: { enabled: false }` field when reasoning is disabled. Other OpenAI-compatible servers do not receive this OpenRouter-specific field; use `samplingParams`/`extra_body` for their native disable knob.
+
 ### Interaction with `samplingParams` (OpenAI-compatible only)
 
 > [!warning]

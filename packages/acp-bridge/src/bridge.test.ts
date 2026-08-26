@@ -44,8 +44,12 @@ import {
   TotalSessionLimitExceededError,
   WorkspaceMismatchError,
 } from './bridgeErrors.js';
+import type { StandaloneSessionSpawnError } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
-import { SESSION_SOURCE_META_KEY } from './session-source.js';
+import {
+  DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  SESSION_SOURCE_META_KEY,
+} from './session-source.js';
 import {
   classifyTurnErrorKind,
   extractErrorMessage,
@@ -87,6 +91,8 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   ACTIVE_WORK_STALE_INTERVALS,
+  CHANNEL_LIVENESS_META_KEY,
+  CHANNEL_LIVENESS_VERSION,
   gradeActiveWorkCoverage,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
@@ -94,6 +100,11 @@ import {
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
 } from './bridgeTypes.js';
+import {
+  CHANNEL_LIVENESS_INTERVAL_MS,
+  CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+  CHANNEL_LIVENESS_TIMEOUT_CODE,
+} from './channel-liveness.js';
 import {
   ApprovalMode,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -112,7 +123,10 @@ import {
   WS_B,
   SESS_A,
 } from './internal/testUtils.js';
-import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactStore,
+} from './sessionArtifacts.js';
 import { SessionAttachmentStore } from './sessionAttachments.js';
 import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
@@ -272,6 +286,18 @@ function activeWorkInitializeResponse(
         categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
         ...overrides,
       },
+    },
+  };
+}
+
+function channelLivenessInitializeResponse(): InitializeResponse {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    agentInfo: { name: 'channel-liveness-agent', version: '0' },
+    authMethods: [],
+    agentCapabilities: {},
+    _meta: {
+      [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
     },
   };
 }
@@ -1928,6 +1954,16 @@ describe('createAcpSessionBridge', () => {
 
   it('forwards the Live managed relocation capability to the ACP child', async () => {
     const target = path.join(WS_A, 'conversation-managed');
+    const expectation = {
+      canonicalSessionId: '11111111-1111-1111-1111-111111111111',
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-managed',
+        canonicalPath: target,
+        device: 1,
+        inode: 3,
+      },
+    };
     const sessionCdCalls: unknown[] = [];
     const handle = makeChannel({
       extMethodImpl: async (method, params) => {
@@ -1951,6 +1987,7 @@ describe('createAcpSessionBridge', () => {
       path: target,
       allowedRoots: [WS_A],
       managedRelocation: 'live-conversation',
+      conversationDirectoryExpectation: expectation,
     });
     const attached = await bridge.resumeSession({
       sessionId: session.sessionId,
@@ -1963,6 +2000,7 @@ describe('createAcpSessionBridge', () => {
         path: target,
         allowedRoots: [WS_A],
         managedRelocation: 'live-conversation',
+        conversationDirectoryExpectation: expectation,
       },
     ]);
     expect(attached).toMatchObject({
@@ -1970,6 +2008,300 @@ describe('createAcpSessionBridge', () => {
       currentCwd: target,
       attached: true,
     });
+    await bridge.shutdown();
+  });
+
+  it('holds standalone prompts until the exact managed binding is released', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const target = path.join(WS_A, 'conversation-standalone');
+    const expectation = {
+      canonicalSessionId: sessionId,
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-standalone',
+        canonicalPath: target,
+        device: 1,
+        inode: 3,
+      },
+    };
+    const handle = makeChannel({
+      resumeSessionImpl: () => ({}),
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+          return { previousCwd: WS_A, newCwd: target, warnings: [] };
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit
+        ) {
+          return { committed: true };
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingRelease
+        ) {
+          return { released: true };
+        }
+        return {};
+      },
+    });
+    const artifactRestores: Array<{
+      workspaceCwd: string;
+      workspaceAccess?: 'metadata-only';
+    }> = [];
+    const artifactRestoreSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'restore')
+      .mockImplementation(async function (
+        this: SessionArtifactStore,
+        _snapshot,
+        options,
+      ) {
+        const workspaceCwd = (this as unknown as { workspaceCwd: string })
+          .workspaceCwd;
+        artifactRestores.push({
+          workspaceCwd,
+          ...(options?.workspaceAccess
+            ? { workspaceAccess: options.workspaceAccess }
+            : {}),
+        });
+        return workspaceCwd === target ? ['late binding warning'] : [];
+      });
+    const originalUpsertMany = SessionArtifactStore.prototype.upsertMany;
+    const artifactUpsertWorkspaceRoots: string[] = [];
+    const artifactUpsertSpy = vi
+      .spyOn(SessionArtifactStore.prototype, 'upsertMany')
+      .mockImplementation(function (this: SessionArtifactStore, ...args) {
+        artifactUpsertWorkspaceRoots.push(
+          (this as unknown as { workspaceCwd: string }).workspaceCwd,
+        );
+        return originalUpsertMany.apply(this, args);
+      });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      await bridge.restoreStandaloneSession('resume', {
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+      const prompt = {
+        sessionId,
+        prompt: [{ type: 'text' as const, text: 'hello' }],
+      };
+
+      await expect(bridge.sendPrompt(sessionId, prompt)).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+      await expect(bridge.getSessionArtifacts(sessionId)).rejects.toMatchObject(
+        {
+          data: { errorKind: 'working_directory_missing' },
+        },
+      );
+      expect(artifactRestores).toEqual([
+        { workspaceCwd: WS_A, workspaceAccess: 'metadata-only' },
+      ]);
+      await bridge.changeSessionCwd(sessionId, {
+        path: target,
+        allowedRoots: [WS_A],
+        managedRelocation: 'live-conversation',
+        conversationDirectoryExpectation: expectation,
+      });
+      await expect(bridge.sendPrompt(sessionId, prompt)).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+      await bridge.commitManagedConversationBinding(sessionId, expectation);
+      expect(artifactRestores).toEqual([
+        { workspaceCwd: WS_A, workspaceAccess: 'metadata-only' },
+        { workspaceCwd: target, workspaceAccess: 'metadata-only' },
+      ]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `session=${sessionId} action=restore_warning warning="late binding warning"`,
+        ),
+      );
+      await handle.agentConnection.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'artifact-before-release',
+          status: 'completed',
+          content: [],
+          _meta: {
+            toolName: ToolNames.ARTIFACT,
+            artifacts: [
+              {
+                title: 'Deferred artifact',
+                url: 'https://example.com/deferred-artifact',
+              },
+            ],
+          },
+        },
+      });
+      expect(artifactUpsertWorkspaceRoots).toEqual([]);
+      await expect(bridge.sendPrompt(sessionId, prompt)).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+      await expect(bridge.getSessionArtifacts(sessionId)).rejects.toMatchObject(
+        {
+          data: { errorKind: 'working_directory_missing' },
+        },
+      );
+      await bridge.releaseManagedConversationBinding(sessionId, expectation);
+      expect(artifactUpsertWorkspaceRoots).toEqual([]);
+      const deferredArtifactId = stableSessionArtifactId(
+        sessionId,
+        'url:https://example.com/deferred-artifact',
+      );
+      await expect(
+        bridge.removeSessionArtifact(sessionId, deferredArtifactId),
+      ).resolves.toMatchObject({
+        changes: [
+          {
+            action: 'removed',
+            artifactId: deferredArtifactId,
+            reason: 'explicit',
+          },
+        ],
+      });
+      expect(artifactUpsertWorkspaceRoots).toEqual([target]);
+      await expect(
+        bridge.getSessionArtifacts(sessionId),
+      ).resolves.toMatchObject({ artifacts: [] });
+      await expect(bridge.sendPrompt(sessionId, prompt)).resolves.toMatchObject(
+        {
+          stopReason: 'end_turn',
+        },
+      );
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    } finally {
+      artifactRestoreSpy.mockRestore();
+      artifactUpsertSpy.mockRestore();
+      stderr.mockRestore();
+      await bridge.shutdown();
+    }
+  });
+
+  it('rejects a standalone managed relocation when the child reports another cwd', async () => {
+    const sessionId = '33333333-3333-4333-8333-333333333333';
+    const target = path.join(WS_A, 'conversation-standalone');
+    const expectation = {
+      canonicalSessionId: sessionId,
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-standalone',
+        canonicalPath: target,
+        device: 1,
+        inode: 3,
+      },
+    };
+    const handle = makeChannel({
+      resumeSessionImpl: () => ({}),
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionCd
+          ? {
+              previousCwd: WS_A,
+              newCwd: path.join(WS_A, 'unexpected'),
+              warnings: [],
+            }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    await bridge.restoreStandaloneSession('resume', {
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+
+    await expect(
+      bridge.changeSessionCwd(sessionId, {
+        path: target,
+        allowedRoots: [WS_A],
+        managedRelocation: 'live-conversation',
+        conversationDirectoryExpectation: expectation,
+      }),
+    ).rejects.toMatchObject({
+      data: { errorKind: 'working_directory_missing' },
+    });
+    expect(bridge.getSessionCurrentCwd(sessionId)).toBe(WS_A);
+
+    await bridge.shutdown();
+  });
+
+  it('rechecks a standalone binding when a queued prompt reaches dispatch', async () => {
+    const sessionId = '22222222-2222-4222-8222-222222222222';
+    const target = path.join(WS_A, 'conversation-standalone');
+    const expectation = {
+      canonicalSessionId: sessionId,
+      root: { canonicalPath: WS_A, device: 1, inode: 2 },
+      child: {
+        name: 'conversation-standalone',
+        canonicalPath: target,
+        device: 1,
+        inode: 3,
+      },
+    };
+    const secondCd = deferred<{
+      previousCwd: string;
+      newCwd: string;
+      warnings: string[];
+    }>();
+    let cdCalls = 0;
+    const handle = makeChannel({
+      resumeSessionImpl: () => ({}),
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+          cdCalls++;
+          return cdCalls === 1
+            ? { previousCwd: WS_A, newCwd: target, warnings: [] }
+            : secondCd.promise;
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit
+        ) {
+          return { committed: true };
+        }
+        if (
+          method ===
+          SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingRelease
+        ) {
+          return { released: true };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    await bridge.restoreStandaloneSession('resume', {
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+    await bridge.changeSessionCwd(sessionId, {
+      path: target,
+      allowedRoots: [WS_A],
+      managedRelocation: 'live-conversation',
+      conversationDirectoryExpectation: expectation,
+    });
+    await bridge.commitManagedConversationBinding(sessionId, expectation);
+    await bridge.releaseManagedConversationBinding(sessionId, expectation);
+
+    const relocation = bridge.changeSessionCwd(sessionId, {
+      path: target,
+      allowedRoots: [WS_A],
+      managedRelocation: 'live-conversation',
+      conversationDirectoryExpectation: expectation,
+    });
+    const queuedPrompt = bridge.sendPrompt(sessionId, {
+      sessionId,
+      prompt: [{ type: 'text', text: 'must remain held' }],
+    });
+    secondCd.resolve({ previousCwd: target, newCwd: target, warnings: [] });
+
+    await relocation;
+    await expect(queuedPrompt).rejects.toMatchObject({
+      data: { errorKind: 'working_directory_missing' },
+    });
+    expect(handle.agent.promptCalls).toHaveLength(0);
+
     await bridge.shutdown();
   });
 
@@ -11857,6 +12189,155 @@ describe('createAcpSessionBridge', () => {
     void killPromise;
   });
 
+  describe('channel liveness', () => {
+    it('advertises v1 but stays disabled when the child does not acknowledge it', async () => {
+      vi.useFakeTimers();
+      try {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        expect(handle.agent.initializeCalls[0]?._meta).toMatchObject({
+          [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
+        });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS + CHANNEL_LIVENESS_PROBE_TIMEOUT_MS * 2,
+        );
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({
+            method: SERVE_STATUS_EXT_METHODS.channelPing,
+          }),
+        );
+        expect(handle.killed).toBe(false);
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('fails the transport after two unanswered channel probes', async () => {
+      vi.useFakeTimers();
+      try {
+        const event = vi.fn();
+        const channelLifecycle = vi.fn();
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        const baseKill = handle.channel.kill;
+        const transportFail = vi.fn((error: unknown) => {
+          void baseKill();
+          return error;
+        });
+        handle.channel = {
+          ...handle.channel,
+          transportGuard: {
+            maxActiveHandlers: 10,
+            maxActiveHandlerBytes: 1024 * 1024,
+            reserveOutboundOperation: () => () => {},
+            reservePreparedResponse: () => {},
+            fail: transportFail,
+          },
+        };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionScope: 'thread',
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle,
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(bridge.sessionCount).toBe(2);
+        const firstEvents: BridgeEvent[] = [];
+        const secondEvents: BridgeEvent[] = [];
+        const firstDrain = (async () => {
+          for await (const event of bridge.subscribeEvents(first.sessionId)) {
+            firstEvents.push(event);
+          }
+        })();
+        const secondDrain = (async () => {
+          for await (const event of bridge.subscribeEvents(second.sessionId)) {
+            secondEvents.push(event);
+          }
+        })();
+
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_INTERVAL_MS);
+        const firstProbeCalls = handle.agent.extMethodCalls.filter(
+          ({ method }) => method === SERVE_STATUS_EXT_METHODS.channelPing,
+        );
+        expect(firstProbeCalls).toEqual([
+          {
+            method: SERVE_STATUS_EXT_METHODS.channelPing,
+            params: { v: CHANNEL_LIVENESS_VERSION, nonce: 0 },
+          },
+        ]);
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+        expect(transportFail).not.toHaveBeenCalled();
+        expect(
+          handle.agent.extMethodCalls.filter(
+            ({ method }) => method === SERVE_STATUS_EXT_METHODS.channelPing,
+          ),
+        ).toHaveLength(2);
+
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+        await handle.channel.exited;
+        await Promise.all([firstDrain, secondDrain]);
+
+        expect(transportFail).toHaveBeenCalledOnce();
+        expect(transportFail.mock.calls[0]?.[0]).toMatchObject({
+          code: CHANNEL_LIVENESS_TIMEOUT_CODE,
+        });
+        expect(bridge.sessionCount).toBe(0);
+        expect(firstEvents.at(-1)).toMatchObject({
+          type: 'session_died',
+          data: { sessionId: first.sessionId, reason: 'channel_closed' },
+        });
+        expect(secondEvents.at(-1)).toMatchObject({
+          type: 'session_died',
+          data: { sessionId: second.sessionId, reason: 'channel_closed' },
+        });
+        expect(channelLifecycle).toHaveBeenCalledWith('exit', false);
+        expect(event).toHaveBeenCalledWith(
+          'channel.liveness_failed',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.session_count': 2,
+            'qwen-code.daemon.channel.transport_error_code':
+              CHANNEL_LIVENESS_TIMEOUT_CODE,
+          }),
+        );
+        expect(event).toHaveBeenCalledWith(
+          'channel.exited',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.transport_failed': true,
+            'qwen-code.daemon.channel.transport_failure_initiated_teardown': true,
+            'qwen-code.daemon.channel.transport_error_code':
+              CHANNEL_LIVENESS_TIMEOUT_CODE,
+          }),
+        );
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('transport failure marks the channel dying before process exit', async () => {
     const handles: ChannelHandle[] = [];
     const failures: Array<ReturnType<typeof deferred<unknown>>> = [];
@@ -21267,9 +21748,423 @@ describe('createAcpSessionBridge', () => {
       );
       await bridge.shutdown();
     });
+
+    it('keeps exact current-cwd inspection separate from the public summary', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(bridge.getSessionCurrentCwd(session.sessionId)).toBe(WS_A);
+      expect(bridge.getSessionSummary(session.sessionId)).not.toHaveProperty(
+        'currentCwd',
+      );
+      expect(() => bridge.getSessionCurrentCwd('missing')).toThrow(
+        SessionNotFoundError,
+      );
+
+      await bridge.shutdown();
+    });
   });
 
   describe('session source metadata', () => {
+    it('durably anchors a source-less default session on demand', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      await expect(
+        bridge.ensureDefaultSessionPersisted!(session.sessionId),
+      ).resolves.toBeUndefined();
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId: session.sessionId,
+          sourceType: 'default',
+        },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('rejects when the child cannot persist the default session anchor', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: false }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.ensureDefaultSessionPersisted!(session.sessionId),
+      ).rejects.toThrow('could not be persisted');
+      await expect(
+        bridge.ensureDefaultSessionPersisted!('missing'),
+      ).rejects.toThrow(SessionNotFoundError);
+
+      await bridge.shutdown();
+    });
+
+    it('rejects the reserved standalone source before spawning a child', async () => {
+      const factory = vi.fn<ChannelFactory>();
+      const bridge = makeBridge({ channelFactory: factory });
+
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+          sourceType: 'standalone',
+        }),
+      ).rejects.toThrow(InvalidSessionMetadataError);
+      expect(factory).not.toHaveBeenCalled();
+
+      await bridge.shutdown();
+    });
+
+    it.each(['load', 'resume'] as const)(
+      'rejects the reserved standalone source before generic %s restore',
+      async (action) => {
+        const factory = vi.fn<ChannelFactory>();
+        const bridge = makeBridge({ channelFactory: factory });
+        const request = {
+          sessionId: `standalone-${action}`,
+          workspaceCwd: WS_A,
+          sourceType: 'standalone',
+        };
+
+        await expect(
+          action === 'load'
+            ? bridge.loadSession(request)
+            : bridge.resumeSession(request),
+        ).rejects.toThrow(InvalidSessionMetadataError);
+        expect(factory).not.toHaveBeenCalled();
+
+        await bridge.shutdown();
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'restores standalone sessions only through the daemon-owned %s surface',
+      async (action) => {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+
+        await bridge.restoreStandaloneSession(action, {
+          sessionId: `standalone-${action}`,
+          workspaceCwd: WS_A,
+          ...(action === 'load' ? { historyReplay: 'response' as const } : {}),
+        });
+
+        const call =
+          action === 'load'
+            ? handle.agent.loadSessionCalls[0]
+            : handle.agent.resumeSessionCalls[0];
+        expect(call?._meta).toMatchObject({
+          [SESSION_SOURCE_META_KEY]: {
+            sourceType: 'standalone',
+            [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+          },
+        });
+
+        await bridge.shutdown();
+      },
+    );
+
+    it('creates standalone sessions only through the daemon-owned surface', async () => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        newSessionImpl: (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        sessionScope: 'single',
+        channelFactory: async () => handle.channel,
+      });
+
+      const session = await bridge.spawnStandaloneSession({
+        workspaceCwd: WS_A,
+        sessionId,
+      });
+
+      expect(session).toMatchObject({
+        sessionId,
+        attached: false,
+        sourceType: 'standalone',
+        sourcePersisted: true,
+      });
+      expect(handle.agent.newSessionCalls[0]?._meta).toMatchObject({
+        [REQUESTED_SESSION_ID_META_KEY]: sessionId,
+        [SESSION_SOURCE_META_KEY]: {
+          sourceType: 'standalone',
+          [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+        },
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionSource,
+        params: {
+          sessionId,
+          sourceType: 'standalone',
+          [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true,
+        },
+      });
+      await expect(
+        bridge.sendPrompt(sessionId, {
+          sessionId,
+          prompt: [{ type: 'text', text: 'must remain held' }],
+        }),
+      ).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('persists standalone parent lineage through the daemon-owned child surface', async () => {
+      const sessionId = '33333333-3333-4333-8333-333333333333';
+      const parentSessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        newSessionImpl: (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionParent ||
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      const session = await bridge.spawnStandaloneSession({
+        workspaceCwd: WS_A,
+        sessionId,
+        parentSessionId,
+      });
+
+      expect(session).toMatchObject({
+        sessionId,
+        sourceType: 'standalone',
+        sourcePersisted: true,
+        parentSessionPersisted: true,
+      });
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionParent,
+        params: { sessionId, parentSessionId },
+      });
+      expect(bridge.getSessionSummary(sessionId)).toMatchObject({
+        sourceType: 'standalone',
+        parentSessionId,
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('rejects generic standalone branch, cwd, and persistent approval mutations before ACP dispatch', async () => {
+      const sessionId = '22222222-2222-4222-8222-222222222222';
+      const handle = makeChannel({
+        newSessionImpl: (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      await bridge.spawnStandaloneSession({ workspaceCwd: WS_A, sessionId });
+      const callsBeforeMutations = handle.agent.extMethodCalls.length;
+
+      await expect(bridge.branchSession(sessionId, {})).rejects.toThrow(
+        InvalidSessionMetadataError,
+      );
+      await expect(
+        bridge.changeSessionCwd(sessionId, { path: path.join(WS_A, 'other') }),
+      ).rejects.toMatchObject({
+        data: { errorKind: 'working_directory_missing' },
+      });
+      await expect(
+        bridge.setSessionApprovalMode(sessionId, ApprovalMode.YOLO, {
+          persist: true,
+        }),
+      ).rejects.toThrow(InvalidSessionMetadataError);
+      expect(handle.agent.extMethodCalls).toHaveLength(callsBeforeMutations);
+
+      await bridge.shutdown();
+    });
+
+    it('keeps a standalone model selection session-scoped', async () => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const handle = makeChannel({
+        newSessionImpl: (params) => ({
+          sessionId: String(params._meta?.[REQUESTED_SESSION_ID_META_KEY]),
+        }),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionSource
+            ? { persisted: true }
+            : {},
+      });
+      const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
+      (
+        handle.agent as unknown as {
+          unstable_setSessionModel: (params: {
+            sessionId: string;
+            modelId: string;
+          }) => Promise<Record<string, unknown>>;
+        }
+      ).unstable_setSessionModel = async (params) => {
+        setModelCalls.push(params);
+        return {
+          _meta: { qwenModelSwitch: { modelId: params.modelId } },
+        };
+      };
+      const bridge = makeBridge({
+        sessionScope: 'single',
+        channelFactory: async () => handle.channel,
+      });
+
+      await bridge.spawnStandaloneSession({
+        workspaceCwd: WS_A,
+        sessionId,
+        modelServiceId: 'standalone-model',
+      });
+
+      expect(setModelCalls).toEqual([
+        { sessionId, modelId: 'standalone-model' },
+      ]);
+      const abort = new AbortController();
+      const iterator = bridge
+        .subscribeEvents(sessionId, {
+          lastEventId: 0,
+          signal: abort.signal,
+        })
+        [Symbol.asyncIterator]();
+      await expect(iterator.next()).resolves.toMatchObject({
+        value: {
+          type: 'model_switched',
+          data: { sessionId, modelId: 'standalone-model' },
+        },
+      });
+      const nextEvent = iterator.next();
+      const noSettingsChanged = await Promise.race([
+        nextEvent.then((result) => result.value?.type !== 'settings_changed'),
+        new Promise<true>((resolve) => setTimeout(() => resolve(true), 20)),
+      ]);
+      expect(noSettingsChanged).toBe(true);
+      abort.abort();
+
+      const directAbort = new AbortController();
+      const directIterator = bridge
+        .subscribeEvents(sessionId, {
+          lastEventId: bridge.getSessionLastEventId(sessionId),
+          signal: directAbort.signal,
+        })
+        [Symbol.asyncIterator]();
+      await bridge.setSessionModel(sessionId, {
+        sessionId,
+        modelId: 'standalone-model-2',
+      });
+      await expect(directIterator.next()).resolves.toMatchObject({
+        value: { type: 'replay_complete' },
+      });
+      await expect(directIterator.next()).resolves.toMatchObject({
+        value: {
+          type: 'model_switched',
+          data: { sessionId, modelId: 'standalone-model-2' },
+        },
+      });
+      const directNextEvent = directIterator.next();
+      const noDirectSettingsChanged = await Promise.race([
+        directNextEvent.then(
+          (result) => result.value?.type !== 'settings_changed',
+        ),
+        new Promise<true>((resolve) => setTimeout(() => resolve(true), 20)),
+      ]);
+      expect(noDirectSettingsChanged).toBe(true);
+      directAbort.abort();
+
+      await bridge.shutdown();
+    });
+
+    it('reports whether standalone creation reached newSession dispatch', async () => {
+      const sessionId = '11111111-1111-4111-8111-111111111111';
+      const beforeDispatch = makeBridge({
+        channelFactory: async () => Promise.reject(new Error('spawn failed')),
+      });
+      const afterDispatchHandle = makeChannel({
+        newSessionImpl: async () => Promise.reject(new Error('agent failed')),
+      });
+      const afterDispatch = makeBridge({
+        channelFactory: async () => afterDispatchHandle.channel,
+      });
+
+      await expect(
+        beforeDispatch.spawnStandaloneSession({
+          workspaceCwd: WS_A,
+          sessionId,
+        }),
+      ).rejects.toMatchObject({
+        name: 'StandaloneSessionSpawnError',
+        dispatched: false,
+      } satisfies Partial<StandaloneSessionSpawnError>);
+      await expect(
+        afterDispatch.spawnStandaloneSession({
+          workspaceCwd: WS_A,
+          sessionId,
+        }),
+      ).rejects.toMatchObject({
+        name: 'StandaloneSessionSpawnError',
+        dispatched: true,
+      } satisfies Partial<StandaloneSessionSpawnError>);
+
+      await beforeDispatch.shutdown();
+      await afterDispatch.shutdown();
+    });
+
+    it('rejects the reserved standalone source before branching', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.branchSession(session.sessionId, {
+          sourceType: 'standalone',
+        }),
+      ).rejects.toThrow(InvalidSessionMetadataError);
+      expect(handle.agent.extMethodCalls).not.toContainEqual(
+        expect.objectContaining({
+          method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        }),
+      );
+
+      await bridge.shutdown();
+    });
+
     it('persists and returns source metadata in status and list summaries', async () => {
       const handles: ChannelHandle[] = [];
       const bridge = makeBridge({
@@ -26794,8 +27689,12 @@ describe('createAcpSessionBridge', () => {
         expect(stderrSpy).toHaveBeenCalledWith(
           expect.stringContaining('updated session metadata'),
         );
+        // The audit line prints the id through JSON.stringify, which escapes
+        // the backslashes of a Windows-spelled session id.
         expect(stderrSpy).toHaveBeenCalledWith(
-          expect.stringContaining(session.sessionId),
+          expect.stringContaining(
+            JSON.stringify(session.sessionId).slice(1, -1),
+          ),
         );
         expect(stderrSpy).toHaveBeenCalledWith(
           expect.stringContaining('pr=9517'),

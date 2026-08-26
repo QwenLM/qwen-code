@@ -21,6 +21,7 @@ import {
   WORKFLOW_SUBAGENT_MAX_TURNS_ENV,
 } from '../../agents/runtime/workflow-orchestrator.js';
 import { Storage } from '../../config/storage.js';
+import { ToolErrorType } from '../tool-error.js';
 import { MAX_TOKENS_PER_WORKFLOW_ENV } from '../../agents/runtime/workflow-budget.js';
 import { matchesRule, parseRule } from '../../permissions/rule-parser.js';
 
@@ -45,6 +46,17 @@ function configWithRegistry(): {
     getWorkflowRunRegistry: () => registry,
   } as unknown as Config;
   return { config, registry };
+}
+
+/**
+ * The scriptPath approval/description surface classifies the path against
+ * the generated-scripts root, so it needs a config with a real `storage`.
+ * The `storage` handle comes back too — the label tests derive their
+ * expected roots from it (same shape as {@link configWithRegistry}).
+ */
+function configWithStorage(): { config: Config; storage: Storage } {
+  const storage = new Storage(path.join(os.tmpdir(), 'workflow-label-test'));
+  return { config: { storage } as unknown as Config, storage };
 }
 
 describe('WorkflowTool', () => {
@@ -313,9 +325,10 @@ await agent('scan package.json')
     });
 
     it('scopes a saved-workflow grant to the path that was approved', async () => {
-      const details = (await detailsFor({
-        scriptPath: '/home/u/.qwen/workflows/audit.js',
-      })) as { hideAlwaysAllow?: boolean; permissionRules?: string[] };
+      const details = (await detailsFor(
+        { scriptPath: '/home/u/.qwen/workflows/audit.js' },
+        configWithStorage().config,
+      )) as { hideAlwaysAllow?: boolean; permissionRules?: string[] };
       expect(details.hideAlwaysAllow).toBeFalsy();
       expect(details.permissionRules).toHaveLength(1);
 
@@ -342,6 +355,171 @@ await agent('scan package.json')
         wouldAllow({ scriptPath: '/home/u/.qwen/workflows/other.js' }),
       ).toBe(false);
       expect(wouldAllow({ script: 'await agent("x")' })).toBe(false);
+    });
+
+    // A generated-root script is a throwaway artifact a tool emitted for this
+    // run. Labeling it as a saved workflow would have the user approve — and
+    // maybe pre-approve the path rule — under a wrong identity.
+    it('labels a generated-root scriptPath as a generated script, not a saved workflow', async () => {
+      const { config, storage } = configWithStorage();
+      const scriptPath = path.join(
+        storage.getGeneratedWorkflowsDir(),
+        'fanout-1a2b3c.js',
+      );
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run generated workflow script (fanout-1a2b3c.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(
+        `Generated workflow script: ${scriptPath}`,
+      );
+      expect(details.prompt).not.toContain('Saved workflow');
+    });
+
+    it('keeps the saved-workflow label for a saved-root scriptPath', async () => {
+      const { config, storage } = configWithStorage();
+      const scriptPath = path.join(
+        storage.getProjectWorkflowsDir(),
+        'deep-research.js',
+      );
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run saved workflow (deep-research.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+    });
+
+    // The loader canonicalizes `scriptPath` with realpath, so a `..`-laced
+    // path can load a file far from its raw spelling. Classifying the raw
+    // string would show the opposite identity from what actually loads.
+    it('classifies a ..-laced scriptPath by its normalized location', async () => {
+      const { config, storage } = configWithStorage();
+      // Raw string sits inside the generated root; the `..` segments climb
+      // out of it, so the normalized path is no longer under the root.
+      const scriptPath = [
+        storage.getGeneratedWorkflowsDir(),
+        '..',
+        '..',
+        '..',
+        '..',
+        'workflows',
+        'audit.js',
+      ].join(path.sep);
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run saved workflow (audit.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+    });
+
+    // The loader trusts the whole subtree under the generated root (writers
+    // nest per session), so the label must follow nested scripts too, not
+    // just files sitting directly under the root.
+    it('labels a nested generated-root scriptPath as a generated script', async () => {
+      const { config, storage } = configWithStorage();
+      const scriptPath = path.join(
+        storage.getGeneratedWorkflowsDir(),
+        's-abc',
+        'fanout.js',
+      );
+      const tool = new WorkflowTool(config);
+      expect(tool.build({ scriptPath }).getDescription()).toBe(
+        'Run generated workflow script (fanout.js)',
+      );
+      const details = (await detailsFor({ scriptPath }, config)) as {
+        prompt: string;
+      };
+      expect(details.prompt).toContain(
+        `Generated workflow script: ${scriptPath}`,
+      );
+      expect(details.prompt).not.toContain('Saved workflow');
+    });
+
+    // The loader decides loadability with `fs.realpath`, so a scriptPath
+    // whose spelling diverges from its realpath (a symlink crossing roots)
+    // must be labeled by the content that actually loads — classifying the
+    // raw string shows the opposite identity from what runs.
+    it('labels a symlinked scriptPath by the content that loads', async () => {
+      const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-'));
+      const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-rt-'));
+      try {
+        const storage = new Storage(projectDir, runtimeDir);
+        const config = { storage } as unknown as Config;
+        const generatedDir = storage.getGeneratedWorkflowsDir();
+        const savedDir = storage.getProjectWorkflowsDir();
+        await fs.mkdir(generatedDir, { recursive: true });
+        await fs.mkdir(savedDir, { recursive: true });
+
+        // A generated-spelled link whose realpath is a saved workflow.
+        await fs.writeFile(path.join(savedDir, 'deploy.js'), 'return 1;');
+        const generatedSpelling = path.join(generatedDir, 'run.js');
+        await fs.symlink(path.join(savedDir, 'deploy.js'), generatedSpelling);
+
+        // A saved-spelled link whose realpath is a generated script.
+        const nested = path.join(generatedDir, 's-abc');
+        await fs.mkdir(nested, { recursive: true });
+        await fs.writeFile(path.join(nested, 'throwaway.js'), 'return 1;');
+        const savedSpelling = path.join(savedDir, 'toolgen.js');
+        await fs.symlink(path.join(nested, 'throwaway.js'), savedSpelling);
+
+        const savedLoaded = (await detailsFor(
+          { scriptPath: generatedSpelling },
+          config,
+        )) as { prompt: string };
+        expect(savedLoaded.prompt).toContain(
+          `Saved workflow: ${generatedSpelling}`,
+        );
+        expect(savedLoaded.prompt).not.toContain('Generated workflow script');
+
+        const generatedLoaded = (await detailsFor(
+          { scriptPath: savedSpelling },
+          config,
+        )) as { prompt: string };
+        expect(generatedLoaded.prompt).toContain(
+          `Generated workflow script: ${savedSpelling}`,
+        );
+        expect(generatedLoaded.prompt).not.toContain('Saved workflow');
+      } finally {
+        await fs.rm(projectDir, { recursive: true, force: true });
+        await fs.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    // The loader refuses a symlinked generated-scripts root outright, so the
+    // dialog must not claim a generated identity for a path under one — the
+    // content it appears to name will not load as a generated script.
+    it('labels nothing generated through a symlinked generated root', async () => {
+      const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-'));
+      const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-rt-'));
+      const external = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-lbl-ext-'));
+      try {
+        const storage = new Storage(projectDir, runtimeDir);
+        const config = { storage } as unknown as Config;
+        const generatedDir = storage.getGeneratedWorkflowsDir();
+        await fs.mkdir(path.dirname(generatedDir), { recursive: true });
+        await fs.writeFile(path.join(external, 'leak.js'), 'return 1;');
+        await fs.symlink(external, generatedDir, 'dir');
+        const scriptPath = path.join(generatedDir, 'leak.js');
+
+        const details = (await detailsFor({ scriptPath }, config)) as {
+          prompt: string;
+        };
+        expect(details.prompt).toContain(`Saved workflow: ${scriptPath}`);
+        expect(details.prompt).not.toContain('Generated workflow script');
+      } finally {
+        await fs.rm(projectDir, { recursive: true, force: true });
+        await fs.rm(runtimeDir, { recursive: true, force: true });
+        await fs.rm(external, { recursive: true, force: true });
+      }
     });
 
     // The cost warning used to arrive only after a successful run — i.e.
@@ -373,6 +551,26 @@ await agent('scan package.json')
         tool.build({ script: 'await agent("x")' } as never).getDescription(),
       ).toContain('chars)');
     });
+  });
+
+  // A script that never compiled has no run behind it. Reporting it as a
+  // failed workflow sends the model looking for a runId that was never
+  // minted, and reads as "the orchestration broke" when the real problem is
+  // a typo it can fix and re-send.
+  it('reports an uncompilable script as not launched, not as a failure', async () => {
+    const { config } = configWithRegistry();
+    const tool = new WorkflowTool(config);
+    const result = await tool
+      .build({ script: "const x: string = 'a';\nawait agent(x);" } as never)
+      .execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+    const text = JSON.stringify(result.llmContent);
+    expect(text).toContain('was not launched');
+    expect(text).toContain('plain JavaScript');
+    // No run happened, so there is no run id to hand back.
+    expect(result.workflowRunId).toBeUndefined();
+    expect(text).not.toContain('Workflow failed');
   });
 
   // The tool description is not the only model-visible copy of the caps —
@@ -431,7 +629,7 @@ await agent('scan package.json')
   });
 
   it('build() accepts a scriptPath without inline script', () => {
-    const tool = new WorkflowTool(fakeConfig());
+    const tool = new WorkflowTool(configWithStorage().config);
     const invocation = tool.build({
       scriptPath: '/abs/deep-research.js',
     });

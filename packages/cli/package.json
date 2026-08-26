@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.22.0",
+  "version": "0.22.2",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -37,7 +37,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.22.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.22.2"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
@@ -49,6 +49,7 @@
     "@qwen-code/audio-capture": "file:../audio-capture",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
+    "@qwen-code/channel-dws": "file:../channels/dws",
     "@qwen-code/channel-feishu": "file:../channels/feishu",
     "@qwen-code/channel-github": "file:../channels/github",
     "@qwen-code/channel-gitlab": "file:../channels/gitlab",
