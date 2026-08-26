@@ -565,21 +565,27 @@ const DIGEST_WINDOW_MS = 5000;
  * shape. The words `chunk N of M` anywhere else in a launch are not an
  * assignment: `buildRoleLaunchPrompt` renders a PR-controlled filename on
  * the identity line (`inertPath` preserves spaces, colons and digits), so a
- * file named `chunk 2 of 5.ts` carries the phrase, and a first-match read
+ * file named `chunk 2 of 5.ts` carries the phrase, and an unanchored read
  * would take it as the record's assignment. A filename cannot forge the
- * anchored shape — `inertPath` strips backticks — but the assignment reads
- * still take a match at index 0 only: a whole-diff launch legitimately
- * carries NO identity line while it does append repo-controlled text
- * (`buildWholeDiffBlock`'s `tail(rules)`, `foldFindings`' inlined findings
- * on the write-failure fallback), and a standalone identity line inside
- * that text is foreign, not an assignment.
+ * anchored shape — `inertPath` strips backticks.
+ *
+ * The assignment is the FIRST line-anchored identity line, not an index-0
+ * match: orchestrators prepend context lines to the launches they deliver —
+ * the one-sentence change summary the skill tells them to add; measured,
+ * every chunk launch in a dogfooded session carried one — and an index-0
+ * read stripped the assignment from every such record, skipping the
+ * declaration branch, so an honest `Uncoverable:` return was dropped and
+ * its chunk certified COVERED off the told-range presumption. The same
+ * scan `labelFromLaunchPrompt` uses: a prepended context line is prose and
+ * never matches, so the launch's own identity line is still the first hit,
+ * and a forged line APPENDED below it cannot take the assignment.
  */
 export const CHUNK_RE = /^You are review agent `chunk (\d+) of (\d+)`/m;
 
 /** The chunk this agent owns, when it was launched to own one. */
 export function assignedChunk(rec: AgentRecord): number | null {
   const m = CHUNK_RE.exec(rec.launchPrompt);
-  return m && m.index === 0 ? Number(m[1]) : null;
+  return m ? Number(m[1]) : null;
 }
 
 /**
@@ -590,7 +596,7 @@ export function assignedChunk(rec: AgentRecord): number | null {
  */
 function assignedChunkTotal(rec: AgentRecord): number | null {
   const m = CHUNK_RE.exec(rec.launchPrompt);
-  return m && m.index === 0 ? Number(m[2]) : null;
+  return m ? Number(m[2]) : null;
 }
 
 /**
@@ -1459,7 +1465,18 @@ export function coverageFromTranscripts(
     // are geometrically identical to this plan's — only the token tells the
     // plans apart. Its ranges earned coverage for the plan that wrote it,
     // not this one; marker-less launches keep the geometry seals alone.
-    if (launchOfThisPlan(rec.launchPrompt)) {
+    // A chunk-assigned record ALSO carries membership and the `of M` count
+    // here — not the territory conjunct, which a pasted-two-blocks launch
+    // legitimately fails (its merged told-range spans both chunks, neither
+    // exactly): a count-changed stale record the walk already discloses as
+    // rewritten must not also certify the chunk covered off the same
+    // record's read while `missingChunks` withholds the relaunch.
+    if (
+      launchOfThisPlan(rec.launchPrompt) &&
+      (chunk === null ||
+        (plan.chunks.some((c) => c.id === chunk) &&
+          assignedChunkTotal(rec) === plan.chunks.length))
+    ) {
       for (const c of plan.chunks) {
         if (ranges.some(([s, e]) => s <= c.startLine && e >= c.endLine)) {
           covered.add(c.id);
