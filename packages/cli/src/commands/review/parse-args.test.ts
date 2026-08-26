@@ -1516,6 +1516,7 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     fsState.stdin = '';
     fsState.written.clear();
     vi.mocked(writeStdoutLine).mockClear();
+    vi.mocked(writeStderrLineSafe).mockClear();
     reviewSettingsMock.mockReturnValue({});
     vi.mocked(atomicWriteFileSync).mockClear();
   });
@@ -1704,6 +1705,44 @@ describe('parseArgsCommand — configured defaults wiring', () => {
     expect(got.effort).toBe('medium');
     expect(got.effortSource).toBe('explicit');
     expect(fsState.written.get(storedEffort)).toBe('medium\n');
+  });
+
+  it('ignores malformed remembered state when no explicit effort replaces it', async () => {
+    const storedEffort = lastReviewEffortPath(
+      process.cwd(),
+      process.env['QWEN_CODE_PROJECT_DIR'],
+    );
+    fsState.written.set(storedEffort, 'not-an-effort\n');
+
+    const got = await verdictFor('6711\n');
+    expect(got.effort).toBe('high');
+    expect(got.effortSource).toBe('default');
+    expect(fsState.written.get(storedEffort)).toBe('not-an-effort\n');
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      `${storedEffort} must contain low, medium, or high`,
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'resolving from review.effort and the target default instead',
+    );
+  });
+
+  it('uses an explicit effort when remembering it fails', async () => {
+    vi.mocked(atomicWriteFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC: no space left on device');
+    });
+
+    const got = await verdictFor('6711 --effort low\n');
+    expect(got.effort).toBe('low');
+    expect(got.effortSource).toBe('explicit');
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'could not be remembered',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'ENOSPC: no space left on device',
+    );
+    expect(vi.mocked(writeStderrLineSafe).mock.calls[0]?.[0]).toContain(
+      'this review still uses low',
+    );
   });
 
   it('uses the project storage owner exported by the parent session', async () => {

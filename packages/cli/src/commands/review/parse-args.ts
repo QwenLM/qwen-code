@@ -1140,24 +1140,43 @@ function reviewDefaultsFromSettings(): {
 }
 
 function readLastReviewEffort(path: string): ReviewEffort | undefined {
-  if (!existsSync(path)) return undefined;
-  const value = readFileSync(path, 'utf8').trim();
+  let value: string;
+  try {
+    if (!existsSync(path)) return undefined;
+    value = readFileSync(path, 'utf8').trim();
+  } catch (error) {
+    writeStderrLineSafe(
+      `NOTE: the remembered review effort at ${path} could not be read (${
+        error instanceof Error ? error.message.split('\n')[0] : String(error)
+      }); resolving from review.effort and the target default instead. Type \`--effort <level>\` to record a new one.`,
+    );
+    return undefined;
+  }
   const effort = asEffort(value);
   if (effort === null) {
-    throw new Error(
-      `${path} must contain low, medium, or high; got ${JSON.stringify(value)}`,
+    writeStderrLineSafe(
+      `NOTE: ${path} must contain low, medium, or high; got ${JSON.stringify(value)}. Ignoring it; resolving from review.effort and the target default instead. Type \`--effort <level>\` to record a new one.`,
     );
+    return undefined;
   }
   return effort;
 }
 
 function writeLastReviewEffort(path: string, effort: ReviewEffort): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  atomicWriteFileSync(path, `${effort}\n`, {
-    mode: 0o600,
-    forceMode: true,
-    noFollow: true,
-  });
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    atomicWriteFileSync(path, `${effort}\n`, {
+      mode: 0o600,
+      forceMode: true,
+      noFollow: true,
+    });
+  } catch (error) {
+    writeStderrLineSafe(
+      `NOTE: the explicit review effort ${effort} could not be remembered at ${path} (${
+        error instanceof Error ? error.message.split('\n')[0] : String(error)
+      }); this review still uses ${effort}.`,
+    );
+  }
 }
 
 function parseReviewArgsWithMemory(
