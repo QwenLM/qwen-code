@@ -1859,7 +1859,7 @@ export class SessionArtifactStore {
     const now = Date.now();
     const staleWorkspaceCandidates = candidates
       .filter((artifact) => artifact.workspacePath)
-      .filter((artifact) => shouldRefreshWorkspaceStatus(artifact, now));
+      .filter((artifact) => needsWorkspaceStatusRefresh(artifact, now));
     await runInBatches(
       staleWorkspaceCandidates,
       WORKSPACE_STATUS_REFRESH_BATCH_SIZE,

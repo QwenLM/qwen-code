@@ -689,9 +689,11 @@ public final class DaemonSessionClient implements AutoCloseable {
                     try {
                         body = readSseError(response, deadline);
                     } catch (DaemonProtocolException e) {
+                        awaitPriorStreamClose(deadline);
                         throw indeterminate("SSE error response was malformed", e);
                     } catch (DaemonTransportException e) {
                         if (!RETRYABLE_SSE_STATUS.contains(statusCode)) {
+                            awaitPriorStreamClose(deadline);
                             throw indeterminate("SSE failed with HTTP "
                                     + statusCode, e);
                         }

@@ -3848,6 +3848,55 @@ describe('SessionArtifactStore', () => {
     ).toContain(restored.changes[0]?.artifactId);
   });
 
+  it('evicts a vanished write_file artifact before a healthy one during overflow', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T00:00:00.000Z'));
+    const store = new SessionArtifactStore({
+      sessionId: 's8-write-file-overflow',
+      workspaceCwd: workspace,
+      maxArtifacts: 2,
+    });
+    await fs.writeFile(path.join(workspace, 'keep.html'), '<html>a</html>');
+    await fs.writeFile(path.join(workspace, 'gone.html'), '<html>b</html>');
+    const keep = await store.upsertMany([
+      {
+        title: 'keep.html',
+        workspacePath: 'keep.html',
+        toolName: 'write_file',
+      },
+    ]);
+    const gone = await store.upsertMany([
+      {
+        title: 'gone.html',
+        workspacePath: 'gone.html',
+        toolName: 'write_file',
+      },
+    ]);
+
+    await fs.rm(path.join(workspace, 'gone.html'));
+    vi.setSystemTime(new Date('2026-08-24T00:00:02.000Z'));
+    const overflow = await store.upsertMany([
+      { title: 'New link', url: 'https://example.com/new' },
+    ]);
+    const createdId = overflow.changes.find(
+      (change) => change.action === 'created',
+    )?.artifactId;
+
+    expect(overflow.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: gone.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({ id: keep.changes[0]?.artifactId }),
+        expect.objectContaining({ id: createdId }),
+      ],
+    });
+  });
+
   it('keeps fresh cached workspace status during overflow eviction', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's8-fresh-overflow-cache',
