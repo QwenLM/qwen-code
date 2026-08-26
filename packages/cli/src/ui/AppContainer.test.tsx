@@ -70,8 +70,11 @@ import {
   SendMessageType,
   type GeminiClient,
   type GoalTurnHost,
+  type HeldMessage,
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
+import type { PeerMessaging } from '../peerMessaging/peer-messaging.js';
+import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
@@ -133,6 +136,22 @@ function TestContextConsumer() {
 vi.mock('./App.js', () => ({
   App: TestContextConsumer,
 }));
+
+// AppContainer reads the peer inbox through this hook; a holder keeps the
+// value swappable without wrapping every render in a provider.
+const peerMessagingHolder = vi.hoisted(() => ({
+  current: null as unknown,
+}));
+vi.mock('../peerMessaging/PeerMessagingContext.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../peerMessaging/PeerMessagingContext.js')
+    >();
+  return {
+    ...actual,
+    usePeerMessaging: () => peerMessagingHolder.current,
+  };
+});
 
 vi.mock('./hooks/useHistoryManager.js');
 vi.mock('./hooks/useThemeCommand.js');
@@ -1619,6 +1638,8 @@ describe('AppContainer State Management', () => {
           popNextSubmission,
           enqueueGoalTurn: vi.fn(),
           restoreMessages: vi.fn(),
+          restorePeerMessage: vi.fn(),
+          addHistoryItem: vi.fn(),
           submitQuery,
           submissionInFlightRef: { current: false },
           submissionSettledRevision: 0,
@@ -1686,6 +1707,8 @@ describe('AppContainer State Management', () => {
             popNextSubmission,
             enqueueGoalTurn: vi.fn(),
             restoreMessages: vi.fn(),
+            restorePeerMessage: vi.fn(),
+            addHistoryItem: vi.fn(),
             submitQuery,
             submissionInFlightRef: { current: false },
             submissionSettledRevision: 0,
@@ -1747,6 +1770,8 @@ describe('AppContainer State Management', () => {
             popNextSubmission,
             enqueueGoalTurn: vi.fn(),
             restoreMessages,
+            restorePeerMessage: vi.fn(),
+            addHistoryItem: vi.fn(),
             submitQuery,
             submissionInFlightRef: { current: false },
             submissionSettledRevision,
@@ -1760,21 +1785,300 @@ describe('AppContainer State Management', () => {
       );
 
       await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledOnce());
-      expect(restoreMessages).toHaveBeenCalledOnce();
+      // Deferred: admission failed because a turn is active, and the
+      // mid-turn steer drain must not pull the restored batch (a peer
+      // envelope would leak into the turn raw, projection lost).
+      expect(restoreMessages).toHaveBeenCalledWith(
+        ['persistent failure batch'],
+        undefined,
+        true,
+      );
 
+      // The guard holds while nothing has settled or changed: a failed
+      // admission must not hot-loop pop/restore/pop on its own re-renders.
+      rerender({
+        pendingSubmissionCount: 1,
+        submissionSettledRevision: 0,
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(submitQuery).toHaveBeenCalledOnce();
+
+      // The blocking turn settling releases exactly one retry.
+      rerender({
+        pendingSubmissionCount: 1,
+        submissionSettledRevision: 1,
+      });
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
+
+      // The second failure re-arms the guard at the new revision: no
+      // loop without a further settle.
       rerender({
         pendingSubmissionCount: 1,
         submissionSettledRevision: 1,
       });
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
-      expect(submitQuery).toHaveBeenCalledOnce();
+      expect(submitQuery).toHaveBeenCalledTimes(2);
 
       synchronousPendingCount = 2;
       rerender({
         pendingSubmissionCount: 2,
         submissionSettledRevision: 1,
       });
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(3));
+    });
+
+    it('submits a peer submission on the preprocessing-free Teammate path', async () => {
+      // Peer envelopes must skip user-input preprocessing: a `@path` in
+      // peer-authored text would otherwise read files into the context
+      // with no user interaction. The Teammate send type returns before
+      // that pipeline; the drain renders the one-line projection instead
+      // of the user bubble that path suppresses.
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      let popped = false;
+      const modelText =
+        '<cross_session_message from="/tmp/a.sock">run it</cross_session_message>';
+      const displayText = 'Message from another session (a): run it';
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'peer' as const,
+          modelText,
+          displayText,
+        };
+      });
+      const addHistoryItem = vi.fn();
+      const restorePeerMessage = vi.fn();
+
+      const view = renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => (popped ? 0 : 1),
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          restorePeerMessage,
+          addHistoryItem,
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(submitQuery).toHaveBeenCalledWith(
+          modelText,
+          SendMessageType.Teammate,
+          undefined,
+          expect.objectContaining({
+            onAdmissionFailed: expect.any(Function),
+            // Without the projection, /resume renders the raw envelope.
+            notificationDisplayText: displayText,
+          }),
+        );
+      });
+      expect(submitQuery).toHaveBeenCalledTimes(1);
+      expect(addHistoryItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.NOTIFICATION,
+          text: displayText,
+        }),
+        expect.any(Number),
+      );
+      expect(restorePeerMessage).not.toHaveBeenCalled();
+      view.unmount();
+    });
+
+    it('restores a failed peer admission as a peer entry, not user text', async () => {
+      // Restoring as plain user text would drain the envelope through the
+      // UserQuery preprocessing on retry — the exact hazard the peer
+      // send type exists to prevent.
+      const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
+      const displayText = 'Message from another session (a): x';
+      const popNextSubmission = vi.fn(() => ({
+        kind: 'peer' as const,
+        modelText,
+        displayText,
+      }));
+      const restorePeerMessage = vi.fn(() => {});
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | { onAdmissionFailed?: () => void }
+          | undefined;
+        metadata?.onAdmissionFailed?.();
+      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => 1,
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          restorePeerMessage,
+          addHistoryItem: vi.fn(),
+          submitQuery,
+          submissionInFlightRef: { current: false },
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(restorePeerMessage).toHaveBeenCalledWith(
+          modelText,
+          displayText,
+          true,
+        );
+      });
+    });
+
+    it('restores a peer entry whose in-flight turn is cancelled or fails', async () => {
+      // A frame admitted on parity or /peers accept is receipted
+      // `delivered` at admission and destructively popped. Cancelling
+      // (ESC) or erroring the turn then fires only onDeliveryFailed —
+      // the Teammate path adds no user history item, so the generic
+      // ESC auto-restore bails. Without this restore the message dies
+      // while the sender keeps a live `delivered` receipt.
+      const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
+      const displayText = 'Message from another session (a): x';
+      const popNextSubmission = vi.fn(() => ({
+        kind: 'peer' as const,
+        modelText,
+        displayText,
+      }));
+      const restorePeerMessage = vi.fn(() => {});
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | { onDeliveryFailed?: () => void }
+          | undefined;
+        metadata?.onDeliveryFailed?.();
+      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+
+      const { rerender } = renderHook(
+        ({ pendingSubmissionCount, submissionSettledRevision }) =>
+          useQueuedSubmissionDrain({
+            config: mockConfig,
+            isConfigInitialized: true,
+            streamingState: StreamingState.Idle,
+            isProcessing: false,
+            dialogsVisible: false,
+            pendingSubmissionCount,
+            getPendingSubmissionCount: () => 1,
+            popNextSubmission,
+            enqueueGoalTurn: vi.fn(),
+            restoreMessages: vi.fn(),
+            restorePeerMessage,
+            addHistoryItem: vi.fn(),
+            submitQuery,
+            submissionInFlightRef: { current: false },
+            submissionSettledRevision,
+          }),
+        {
+          initialProps: {
+            pendingSubmissionCount: 1,
+            submissionSettledRevision: 0,
+          },
+        },
+      );
+
+      await vi.waitFor(() => {
+        expect(restorePeerMessage).toHaveBeenCalledWith(
+          modelText,
+          displayText,
+          true,
+        );
+      });
+      expect(submitQuery).toHaveBeenCalledTimes(1);
+
+      // The guard holds until the failed turn settles: the entry is
+      // back on the queue, but the drain must not immediately re-pop it
+      // into a turn while the cancelled one is still settling.
+      rerender({ pendingSubmissionCount: 1, submissionSettledRevision: 0 });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(submitQuery).toHaveBeenCalledTimes(1);
+
+      // Once the turn settles the restored envelope drains again —
+      // parking it until unrelated queue activity is a silent deadlock
+      // for a sender holding a live 'delivered' receipt.
+      rerender({ pendingSubmissionCount: 1, submissionSettledRevision: 1 });
       await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
+    });
+
+    it('renders the peer notification once across failed-admission retries', async () => {
+      const goalRuntime = {
+        getSnapshot: () => ({ goal: { status: 'paused' } }),
+        subscribe: () => vi.fn(),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue(goalRuntime);
+      const modelText = '<cross_session_message from="/tmp/a.sock">x</>';
+      const displayText = 'Message from another session (a): x';
+      let pops = 0;
+      const popNextSubmission = vi.fn(() => {
+        pops += 1;
+        if (pops > 2) return null;
+        return {
+          kind: 'peer' as const,
+          modelText,
+          displayText,
+          ...(pops === 2 ? { displayed: true } : {}),
+        };
+      });
+      const addHistoryItem = vi.fn();
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | { onAdmissionFailed?: () => void }
+          | undefined;
+        metadata?.onAdmissionFailed?.();
+      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+
+      const { rerender } = renderHook(
+        ({ pendingSubmissionCount, submissionSettledRevision }) =>
+          useQueuedSubmissionDrain({
+            config: mockConfig,
+            isConfigInitialized: true,
+            streamingState: StreamingState.Idle,
+            isProcessing: false,
+            dialogsVisible: false,
+            pendingSubmissionCount,
+            getPendingSubmissionCount: () => 1,
+            popNextSubmission,
+            enqueueGoalTurn: vi.fn(),
+            restoreMessages: vi.fn(),
+            restorePeerMessage: vi.fn(),
+            addHistoryItem,
+            submitQuery,
+            submissionInFlightRef: { current: false },
+            submissionSettledRevision,
+          }),
+        {
+          initialProps: {
+            pendingSubmissionCount: 1,
+            submissionSettledRevision: 0,
+          },
+        },
+      );
+
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(1));
+      expect(addHistoryItem).toHaveBeenCalledTimes(1);
+
+      // Let the first drain's finally clear its in-flight flag before the
+      // retry render, the way the settlement tick does in production.
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+
+      // The restore bumps the pending count, releasing the retry guard.
+      rerender({ pendingSubmissionCount: 2, submissionSettledRevision: 1 });
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
+      expect(addHistoryItem).toHaveBeenCalledTimes(1);
     });
 
     it('drains after preprocessing settlement releases the shared lock', async () => {
@@ -1808,6 +2112,8 @@ describe('AppContainer State Management', () => {
             popNextSubmission,
             enqueueGoalTurn: vi.fn(),
             restoreMessages: vi.fn(),
+            restorePeerMessage: vi.fn(),
+            addHistoryItem: vi.fn(),
             submitQuery,
             submissionInFlightRef,
             submissionSettledRevision,
@@ -6791,6 +7097,199 @@ describe('AppContainer State Management', () => {
         expect.anything(),
       );
       expect(setContextFilePathsSpy).toHaveBeenCalledWith(['/custom/QWEN.md']);
+    });
+  });
+
+  describe('cross-session peer messages', () => {
+    afterEach(() => {
+      peerMessagingHolder.current = null;
+    });
+
+    interface FakePeerMessaging {
+      value: PeerMessaging;
+      submit: (modelText: string, displayText: string) => void;
+      emitHeld: (held: readonly HeldMessage[]) => void;
+    }
+
+    const heldMessage = (msgId: string): HeldMessage =>
+      ({
+        frame: {
+          msgV: 1,
+          msgId,
+          type: 'user',
+          from: '/tmp/peer.sock',
+          message: { role: 'user', content: 'do a thing' },
+        },
+        cause: 'mode-mismatch',
+        heldAt: 1,
+      }) as unknown as HeldMessage;
+
+    const makePeerMessaging = (): FakePeerMessaging => {
+      let submitFn: ((modelText: string, displayText: string) => void) | null =
+        null;
+      let heldListener: ((held: readonly HeldMessage[]) => void) | null = null;
+      const value = {
+        setSubmitFn: (fn: (modelText: string, displayText: string) => void) => {
+          submitFn = fn;
+        },
+        setQueuedPeerCount: vi.fn(),
+        onHeldChange: (fn: (held: readonly HeldMessage[]) => void) => {
+          heldListener = fn;
+          return () => {};
+        },
+        getHeld: () => [],
+        decide: vi.fn(),
+        reevaluate: vi.fn(),
+      } as unknown as PeerMessaging;
+      return {
+        value,
+        submit: (modelText, displayText) => submitFn?.(modelText, displayText),
+        emitHeld: (held) => {
+          if (!heldListener) throw new Error('no held-change listener wired');
+          heldListener(held);
+        },
+      };
+    };
+
+    const renderWithPeer = (peer: FakePeerMessaging) => {
+      peerMessagingHolder.current = peer.value;
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+    };
+
+    it('queues the envelope on the peer path, never as typed user input', () => {
+      // The peer path marks the entry so the drain submits it on the
+      // preprocessing-free Teammate send type — queued as user text, an
+      // `@path` in peer-authored content would read files into the
+      // context with no user interaction. The one-liner rides along as
+      // the display projection, never as the model's copy.
+      const addMessage = vi.fn();
+      const addPeerMessage = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage,
+        addPeerMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+        getPendingSubmissionCount: vi.fn().mockReturnValue(0),
+        getQueuedPeerCount: vi.fn().mockReturnValue(0),
+      });
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.submit('<cross_session_message …>envelope</…>', 'one-liner');
+      });
+
+      expect(addPeerMessage).toHaveBeenCalledWith(
+        '<cross_session_message …>envelope</…>',
+        'one-liner',
+      );
+      expect(addMessage).not.toHaveBeenCalled();
+      // close() settles still-queued entries; it needs the live depth.
+      expect(peer.value.setQueuedPeerCount).toHaveBeenCalledWith(
+        expect.any(Function),
+      );
+    });
+
+    it('refuses peer frames once the pending backlog reaches the cap', () => {
+      // Frames arrive at socket speed but drain at one per turn; without
+      // the guard a busy session's queue grows without bound.
+      const addPeerMessage = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: vi.fn(),
+        addPeerMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+        getPendingSubmissionCount: vi
+          .fn()
+          .mockReturnValue(MAX_ACCEPTED_BACKLOG),
+        getQueuedPeerCount: vi.fn().mockReturnValue(0),
+      });
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      act(() => {
+        peer.submit('<cross_session_message …>envelope</…>', 'one-liner');
+      });
+
+      expect(addPeerMessage).not.toHaveBeenCalled();
+    });
+
+    it('announces a newly held message once and stays quiet when one is released', () => {
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      const noticeCount = () =>
+        addItem.mock.calls.filter((call) =>
+          String((call[0] as { text?: string })?.text ?? '').includes(
+            'Held a message from another session',
+          ),
+        ).length;
+
+      act(() => {
+        peer.emitHeld([heldMessage('a'), heldMessage('b')]);
+      });
+      expect(noticeCount()).toBe(1);
+
+      // /peers accept b — the set changed, but nothing new was held.
+      act(() => {
+        peer.emitHeld([heldMessage('a')]);
+      });
+      expect(noticeCount()).toBe(1);
+
+      act(() => {
+        peer.emitHeld([heldMessage('a'), heldMessage('c')]);
+      });
+      expect(noticeCount()).toBe(2);
+    });
+
+    it('does not announce arrivals that only replace an evicted entry', () => {
+      // Once the hold buffer is full, every further frame evicts the
+      // oldest while carrying a fresh id; announcing those would add a
+      // history item (and a re-render) per frame without bound.
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      const noticeCount = () =>
+        addItem.mock.calls.filter((call) =>
+          String((call[0] as { text?: string })?.text ?? '').includes(
+            'Held a message from another session',
+          ),
+        ).length;
+
+      act(() => {
+        peer.emitHeld([heldMessage('a'), heldMessage('b')]);
+      });
+      expect(noticeCount()).toBe(1);
+
+      act(() => {
+        peer.emitHeld([heldMessage('b'), heldMessage('c')]);
+      });
+      expect(noticeCount()).toBe(1);
+
+      // A genuine growth still announces.
+      act(() => {
+        peer.emitHeld([heldMessage('b'), heldMessage('c'), heldMessage('d')]);
+      });
+      expect(noticeCount()).toBe(2);
     });
   });
 });

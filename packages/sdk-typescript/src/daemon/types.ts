@@ -39,9 +39,13 @@ export interface TranscriptCursor {
  * `lastReason` — that stays the human-readable half, this is the half a client
  * may key behavior off. Resuming an evidence-limited Goal restarts its evidence
  * window: the objective and revision carry over, but evidence recorded before
- * the resume is no longer citable.
+ * the resume is no longer citable. `token_budget` marks a spent autonomous-spend
+ * authorization that a resume re-arms.
  */
-export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
+export type GoalLimitKind =
+  | 'evidence_catalog'
+  | 'checkpoint_request'
+  | 'token_budget';
 
 export interface GoalRecord {
   goalId: string;
@@ -2635,9 +2639,12 @@ export interface DaemonSessionStatsModelMetrics {
   };
   tokens: {
     prompt: number;
+    /** Provider-reported candidate tokens; may already include reasoning. */
     candidates: number;
+    /** Prompt plus all generated output, with reasoning counted once. */
     total: number;
     cached: number;
+    /** Reasoning tokens, shown as a subset of generated output. */
     thoughts: number;
   };
 }
@@ -2661,6 +2668,17 @@ export interface DaemonSessionStatsSkillByName {
   fail: number;
 }
 
+/** One subagent invocation's token consumption, with readable labels. */
+export interface DaemonSessionStatsSource {
+  /** Unique invocation id of the subagent. */
+  id: string;
+  /** Agent type name (e.g. "general-purpose"). */
+  type: string;
+  /** Business/task name for this invocation. */
+  name: string;
+  tokens: DaemonSessionStatsModelMetrics['tokens'];
+}
+
 /** Returned from `GET /session/:id/stats`. */
 export interface DaemonSessionStatsStatus {
   v: 1;
@@ -2670,6 +2688,11 @@ export interface DaemonSessionStatsStatus {
   durationMs: number;
   promptCount: number;
   models: Record<string, DaemonSessionStatsModelMetrics>;
+  /**
+   * Per-subagent-invocation token totals, sorted by total tokens desc.
+   * `main` conversation calls are excluded — they are the aggregate remainder.
+   */
+  sources?: DaemonSessionStatsSource[];
   tools: {
     totalCalls: number;
     totalSuccess: number;
