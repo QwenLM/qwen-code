@@ -7647,6 +7647,14 @@ export class Session implements SessionContext {
           compressed.compressionStatus,
         );
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          // R13-18: compression replaces the WHOLE live history, and the
+          // undo staleness fingerprint is add-only — it cannot detect the
+          // removal. In an all-unmarked (legacy-projection) session the
+          // user-text count lands back at the checkpoint's with every
+          // per-index comparison null===null, so a replayed undo pair would
+          // apply the pre-rewind rollback across whatever landed after the
+          // rewind. Drop the checkpoint so the undo fails closed instead.
+          this.rewindCheckpoint = undefined;
           // Context was just compacted; a loop.md tick must re-deliver the full
           // task block (a short reminder refers back to a message that is no
           // longer in context).

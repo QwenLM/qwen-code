@@ -5838,6 +5838,63 @@ describe('Session', () => {
       ).not.toHaveBeenCalled();
     });
 
+    it('drops the rewind checkpoint when compression rewrites the chat', async () => {
+      // R13-18: summarizing compression is a whole-history replacement that
+      // REMOVES user entries. The staleness fingerprint is add-only, and in
+      // an all-unmarked session the count lands back at the checkpoint's
+      // with every comparison null===null — a replayed undo pair would
+      // apply the pre-rewind rollback across whatever landed. Drop the
+      // checkpoint when compression fires so the undo fails closed.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
+      core.markApiHistoryPrompt(history[2]!, 'prompt-2');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-1',
+        'prompt-2',
+      ]);
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        {
+          promptId: 'prompt-1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'prompt-2',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ]);
+
+      session.rewindToTurn(1);
+
+      // The resend after the rewind triggers compression.
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      mockGeminiClient.tryCompressChat = vi.fn().mockResolvedValue({
+        originalTokenCount: 1000,
+        newTokenCount: 500,
+        compressionStatus: core.CompressionStatus.COMPRESSED,
+      });
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'next prompt' }],
+      } as PromptRequest);
+
+      // The undo pair the client still holds must now fail closed — the
+      // checkpoint is gone, not merely stale.
+      expect(() =>
+        session.restoreHistory(history, ['prompt-1', null, 'prompt-2', null]),
+      ).toThrow('without a live rewind checkpoint');
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+
     it('drops the rewind checkpoint when a new session is rebound', () => {
       // /clear swaps in fresh recording/file-history services; the
       // checkpoint captured the old services' state, and a later
