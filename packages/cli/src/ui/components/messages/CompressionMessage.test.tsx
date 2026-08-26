@@ -252,5 +252,36 @@ describe('<CompressionMessage />', () => {
         'Could not compress chat history due to an API error.',
       );
     });
+
+    it('shows empty summary failure message', () => {
+      const props = createCompressionProps({
+        isPending: false,
+        originalTokenCount: 100000,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+      const output = lastFrame();
+
+      expect(output).toContain(
+        'Could not compress chat history because the compression summary was empty.',
+      );
+    });
+
+    it('shows truncated output failure message', () => {
+      const props = createCompressionProps({
+        isPending: false,
+        originalTokenCount: 100000,
+        newTokenCount: 0,
+        compressionStatus:
+          CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+      const output = lastFrame();
+
+      expect(output).toContain(
+        'Could not compress chat history because the compression summary was truncated.',
+      );
+    });
   });
 });

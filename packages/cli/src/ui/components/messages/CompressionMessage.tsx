@@ -9,9 +9,8 @@ import type { CompressionProps } from '../../types.js';
 import Spinner from 'ink-spinner';
 import { theme } from '../../semantic-colors.js';
 import { SCREEN_READER_MODEL_PREFIX } from '../../textConstants.js';
-import { CompressionStatus } from '@qwen-code/qwen-code-core';
-import { t } from '../../../i18n/index.js';
 import { ICON } from '../../constants.js';
+import { getCompressionStatusText } from '../../utils/compression-text.js';
 
 export interface CompressionDisplayProps {
   compression: CompressionProps;
@@ -33,56 +32,14 @@ export function CompressionMessage({
     newTokenCountIsEstimated,
   } = compression;
 
-  const originalTokens = originalTokenCount ?? 0;
-  const newTokens = newTokenCount ?? 0;
-
-  // Estimated counts (#9309): the two compression paths measure on different
-  // scales, so a '~' prefix marks which banner numbers are local estimates
-  // rather than API-reported counts.
-  const formatTokens = (count: number, isEstimated?: boolean) =>
-    isEstimated ? `~${count}` : String(count);
-
-  const getCompressionText = () => {
-    if (isPending) {
-      return t('Compressing chat history');
-    }
-
-    switch (compressionStatus) {
-      case CompressionStatus.COMPRESSED:
-        return t(
-          'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.',
-          {
-            originalTokens: formatTokens(
-              originalTokens,
-              originalTokenCountIsEstimated,
-            ),
-            newTokens: formatTokens(newTokens, newTokenCountIsEstimated),
-          },
-        );
-      case CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT:
-        // For smaller histories (< 50k tokens), compression overhead likely exceeds benefits
-        if (originalTokens < 50000) {
-          return t('Compression was not beneficial for this history size.');
-        }
-        // For larger histories where compression should work but didn't,
-        // this suggests an issue with the compression process itself
-        return t(
-          'Chat history compression did not reduce size. This may indicate issues with the compression prompt.',
-        );
-      case CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR:
-        return t(
-          'Could not compress chat history due to a token counting error.',
-        );
-      case CompressionStatus.COMPRESSION_FAILED_API_ERROR:
-        return t('Could not compress chat history due to an API error.');
-      case CompressionStatus.NOOP:
-        return 'Nothing to compress.';
-      default:
-        return '';
-    }
-  };
-
-  const text = getCompressionText();
+  const text = getCompressionStatusText({
+    isPending,
+    originalTokenCount,
+    newTokenCount,
+    compressionStatus,
+    originalTokenCountIsEstimated,
+    newTokenCountIsEstimated,
+  });
 
   return (
     <Box flexDirection="row">

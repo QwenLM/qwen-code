@@ -206,7 +206,7 @@ describe('compressCommand', () => {
     await expect(compressCommand.action!(ctx, '')).resolves.toEqual({
       type: 'message',
       messageType: 'error',
-      content: 'Failed to compress chat history.',
+      content: 'Could not compress chat history due to an API error.',
     });
   });
 
@@ -234,7 +234,10 @@ describe('compressCommand', () => {
 
     expect(messages).toEqual([
       { messageType: 'info', content: 'Compressing context...' },
-      { messageType: 'error', content: 'Failed to compress chat history.' },
+      {
+        messageType: 'error',
+        content: 'Could not compress chat history due to an API error.',
+      },
     ]);
   });
 
