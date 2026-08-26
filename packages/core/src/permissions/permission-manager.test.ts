@@ -342,13 +342,13 @@ describe('matchesCommandPattern', () => {
       expect(matchesCommandPattern('npm run *', 'npm run build')).toBe(true);
     });
 
-    it('matches commands with leading env var assignments', async () => {
+    it('does not let env assignments inherit a glob Bash rule', async () => {
       expect(
         matchesCommandPattern(
           'python3 *',
           'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
         ),
-      ).toBe(true);
+      ).toBe(false);
     });
 
     it('matches commands containing embedded newlines (dotAll)', async () => {

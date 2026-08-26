@@ -970,7 +970,7 @@ export function matchesCommandPattern(
 ): boolean {
   // This function matches a single pattern against a single simple command.
   // Compound command splitting is handled by the caller (PermissionManager).
-  const normalizedCommand = stripLeadingVariableAssignments(command);
+  const normalizedCommand = normalizeCommandForPermissionMatch(command);
 
   // Special case: lone `*` matches any single command
   if (pattern === '*') {
@@ -1144,7 +1144,7 @@ function escapeRegex(s: string): string {
 
 const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
-function stripLeadingVariableAssignments(command: string): string {
+function normalizeCommandForPermissionMatch(command: string): string {
   const trimmed = command.trim();
   if (!trimmed) {
     return trimmed;
@@ -1174,12 +1174,13 @@ function stripLeadingVariableAssignments(command: string): string {
       firstCommandToken++;
     }
 
-    // Environment assignments are part of the execution semantics. A concrete
-    // Bash allow rule must not silently widen from `cmd` to arbitrary
-    // `NAME=value cmd` invocations, because runtimes and applications may
-    // interpret those variables before the trusted command runs. Preserve the
-    // original command whenever such a prefix is present so the rule must
-    // explicitly include it.
+    // Environment assignments are part of the execution semantics. Any
+    // command-specific Bash pattern (exact, prefix, or glob) must not silently
+    // widen from `cmd` to arbitrary `NAME=value cmd` invocations, because
+    // runtimes and applications may interpret those variables before the
+    // trusted command runs. Preserve the original command whenever such a
+    // prefix is present so the rule must explicitly include it. The lone `*`
+    // rule is the intentional allow-all case.
     if (firstCommandToken > 0) {
       return trimmed;
     }
