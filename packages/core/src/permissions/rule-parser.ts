@@ -15,6 +15,7 @@ import {
   sanitizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
+import { hasShellSubstitution } from '../utils/shell-utils.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -970,7 +971,14 @@ export function matchesCommandPattern(
 ): boolean {
   // This function matches a single pattern against a single simple command.
   // Compound command splitting is handled by the caller (PermissionManager).
-  const normalizedCommand = stripLeadingVariableAssignments(command);
+  // Leading environment assignments are compatibility-normalized so a
+  // static `FOO=bar npm --version` can match `Bash(npm --version)`.
+  // Never apply that widening when the raw command carries shell
+  // substitution: stripping the assignment would hide execution that
+  // happens before the trusted main command (#10192).
+  const normalizedCommand = hasShellSubstitution(command)
+    ? command.trim()
+    : stripLeadingVariableAssignments(command);
 
   // Special case: lone `*` matches any single command
   if (pattern === '*') {
