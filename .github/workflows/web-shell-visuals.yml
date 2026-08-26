@@ -9,10 +9,14 @@ name: 'Web-shell Visuals'
 #
 # Security model: this workflow BUILDS AND RENDERS untrusted PR code, so it runs
 # on the `pull_request` trigger (fork PRs get a read-only token and NO secrets),
-# on an ephemeral hosted runner, with `contents: read` and no secrets of its
-# own. It produces only image/video bytes as an artifact. The privileged step
-# that needs a write token — pushing the images and commenting on the PR — lives
-# in the separate workflow_run workflow that never checks out PR code.
+# with `contents: read` and no secrets of its own. It produces only image/video
+# bytes as an artifact. Runner choice follows the fleet's trust split (ci.yml
+# classify_pr, serve-ab): same-repo PRs and write-access fork authors render on
+# the persistent ECS pool — the same lanes whose code ci.yml already builds and
+# tests there — while every other fork PR keeps the ephemeral hosted runner.
+# The privileged step that needs a write token — pushing the images and
+# commenting on the PR — lives in the separate workflow_run workflow that never
+# checks out PR code and deliberately stays on hosted runners.
 on:
   pull_request:
     branches:
@@ -58,12 +62,30 @@ defaults:
 
 jobs:
   capture:
-    name: 'Capture web-shell visuals (ubuntu-latest, Node 22.x)'
+    name: 'Capture web-shell visuals (Node 22.x)'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: 'ubuntu-latest'
+    # Same-repo PRs and write-access fork authors render on the persistent
+    # ECS pool; other fork PRs stay on ephemeral hosted runners. Keep in
+    # sync with serve-ab.yml. Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # ~2x the original: the job now also builds + renders the merge-base arm.
     timeout-minutes: 30
     steps:
+      # Pre-checkout heal, mirroring ci.yml: a previous containerised job on
+      # this persistent runner may leave root-owned or read-only files in the
+      # shared workspace, and checkout's clean would die on EACCES. Hosted
+      # runners are ephemeral and never take this branch.
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
       - name: 'Checkout PR head'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -203,6 +225,15 @@ jobs:
             # ${OUT_DIR}/screenshots so the PR still gets a (head-only) preview.
             echo "::warning::compose failed; publishing raw after-shots without a before/after."
           fi
+
+      # Hosted images ship ffmpeg; the pool may not. Best-effort install so
+      # the GIF conversion below keeps working there — on failure it already
+      # degrades to uploading the raw .webm with a visible warning. sudo -n:
+      # never prompt (mirrors the fleet's Install tmux pattern).
+      - name: 'Install ffmpeg'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          command -v ffmpeg > /dev/null 2>&1 || sudo -n apt-get install -y ffmpeg > /dev/null 2>&1 || echo "::warning::could not install ffmpeg; flow recordings will be uploaded as raw .webm without GIF previews"
 
       - name: 'Convert flow recordings to inline GIFs'
         env:

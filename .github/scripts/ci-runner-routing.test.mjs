@@ -72,6 +72,7 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
     ],
+    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
       String(sameRepo),
@@ -419,5 +420,106 @@ describe('serve-ab.yml runner routing', () => {
       '{ git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\\.|branch\\.|extensions\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
       "the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist, anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
+  });
+});
+
+describe('web-shell-visuals.yml capture runner routing', () => {
+  // The capture job builds and renders PR code, so it follows the fleet's
+  // trust split exactly as serve-ab does: same-repo PRs and write-access
+  // fork authors reach the persistent pool, every other fork PR keeps the
+  // ephemeral hosted runner, and the kill-switch forces everything hosted.
+  const visualsDoc = parse(
+    readFileSync(join(workflowsDir, 'web-shell-visuals.yml'), 'utf8'),
+  );
+  // evalRunsOn unwraps the winning fromJSON label to the array it names.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+  const job = visualsDoc.jobs.capture;
+  const runsOn = String(job['runs-on']);
+
+  it('routes pull requests by fork trust', () => {
+    assert.deepEqual(
+      evalRunsOn(runsOn, {
+        ecsDisabled: false,
+        eventName: 'pull_request',
+        sameRepo: true,
+        assoc: 'NONE',
+      }),
+      ECS_LABELS,
+      'same-repo PRs must render on the pool',
+    );
+    assert.deepEqual(
+      evalRunsOn(runsOn, {
+        ecsDisabled: false,
+        eventName: 'pull_request',
+        sameRepo: false,
+        assoc: 'MEMBER',
+      }),
+      ECS_LABELS,
+      'write-access fork authors must render on the pool',
+    );
+    for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE', '']) {
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc,
+        }),
+        HOSTED_LABELS,
+        `assoc '${assoc}' fork PRs must stay on ephemeral hosted runners`,
+      );
+    }
+  });
+
+  it('obeys the kill-switch', () => {
+    assert.deepEqual(
+      evalRunsOn(runsOn, {
+        ecsDisabled: true,
+        eventName: 'pull_request',
+        sameRepo: true,
+        assoc: 'OWNER',
+      }),
+      HOSTED_LABELS,
+      'kill-switch must force the capture back to hosted',
+    );
+  });
+
+  it('matches serve-ab routing byte for byte', () => {
+    // One trust split, one edit site: a clause change on either side must
+    // touch both or fail here.
+    assert.equal(runsOn, String(serveAbDoc.jobs.ab['runs-on']));
+  });
+
+  it('heals workspace ownership before the first checkout', () => {
+    const steps = job.steps;
+    const heal = steps.findIndex(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    const checkout = steps.findIndex((s) =>
+      String(s.uses || '').startsWith('actions/checkout'),
+    );
+    assert.ok(heal !== -1, 'the ownership heal must exist');
+    assert.equal(steps[heal].if, "${{ runner.environment == 'self-hosted' }}");
+    assert.match(steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
+    assert.ok(heal < checkout, 'the heal must precede the checkout');
+  });
+
+  it('keeps the capture job free of ambient secrets', () => {
+    // The security-model header promises the render job holds no secrets of
+    // its own; the merge-base resolve step's read-only GITHUB_TOKEN is the
+    // one permitted exception.
+    for (const step of job.steps) {
+      for (const value of Object.values(step.env ?? {})) {
+        const refs = String(value).match(/secrets\.[A-Za-z_]+/g) ?? [];
+        for (const ref of refs) {
+          assert.equal(
+            ref,
+            'secrets.GITHUB_TOKEN',
+            `capture step '${step.name}' references ${ref}; the render side must stay secret-free`,
+          );
+        }
+      }
+    }
   });
 });
