@@ -209,6 +209,11 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
+import {
+  buildScheduledTaskRunPrompt,
+  scheduledTaskRunSourceId,
+  SCHEDULED_TASK_RUN_SOURCE_TYPE,
+} from '../../runtime/scheduled-task-run.js';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
 import {
@@ -1363,6 +1368,8 @@ interface CronFire {
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
+  sessionMode?: 'persistent' | 'per_run';
+  name?: string;
   delivery?: CronTaskDelivery;
   todoWorkChainId?: string;
 }
@@ -7525,6 +7532,15 @@ export class Session implements SessionContext {
     scheduler.start((job: CronFire) => {
       if (this.cronDisabledByTokenLimit) return;
       if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+      if (
+        job.sessionMode === 'per_run' &&
+        job.cronExpr !== '@wakeup' &&
+        !job.delivery &&
+        !detectAutonomousSentinel(job.prompt)
+      ) {
+        void this.#dispatchCronToFreshSession(job);
+        return;
+      }
       this.#enqueueCronPrompt({
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
@@ -7537,6 +7553,67 @@ export class Session implements SessionContext {
       });
       void this.#drainCronQueue();
     });
+  }
+
+  async #dispatchCronToFreshSession(job: CronFire): Promise<void> {
+    const scheduler = this.config.getCronScheduler();
+    let sessionId: string;
+    try {
+      const response = await this.client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: buildScheduledTaskRunPrompt({
+            id: job.id ?? 'unknown',
+            name: job.name,
+            cron: job.cronExpr ?? '',
+            prompt: job.prompt,
+            triggeredAt: job.lastFiredAt ?? Date.now(),
+            trigger: 'scheduled',
+          }),
+          completion: 'sent',
+          ...(job.name ? { name: job.name } : {}),
+          ...(job.id
+            ? {
+                sourceType: SCHEDULED_TASK_RUN_SOURCE_TYPE,
+                sourceId: scheduledTaskRunSourceId(job.id),
+              }
+            : {}),
+          callerSessionId: this.sessionId,
+        },
+      );
+      const responseSessionId = response['sessionId'];
+      if (
+        typeof responseSessionId !== 'string' ||
+        responseSessionId.length === 0
+      ) {
+        throw new Error('bridge returned a missing session id');
+      }
+      sessionId = responseSessionId;
+      this.relatedAgentIds.add(sessionId);
+    } catch (error) {
+      debugLogger.warn(
+        `Scheduled task ${job.id ?? 'unknown'} could not create a fresh session: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      if (job.id && job.lastFiredAt !== undefined) {
+        await scheduler
+          .annotateRunSession(job.id, job.lastFiredAt, { failed: true })
+          .catch((persistError) => {
+            debugLogger.warn(
+              `Scheduled task ${job.id} could not record its session dispatch failure: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
+            );
+          });
+      }
+      return;
+    }
+    if (job.id && job.lastFiredAt !== undefined) {
+      await scheduler
+        .annotateRunSession(job.id, job.lastFiredAt, { sessionId })
+        .catch((persistError) => {
+          debugLogger.warn(
+            `Scheduled task ${job.id} could not record its fresh session ${sessionId}: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
+          );
+        });
+    }
   }
 
   #startCronSchedulerInRuntime(): Promise<void> {

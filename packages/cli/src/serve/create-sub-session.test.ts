@@ -347,6 +347,29 @@ describe('sub-session launcher', () => {
     expect(fake.spawns[0]!.parentSessionId).toBe('caller-42');
   });
 
+  it('keeps scheduled-task run titles flat and persists their attribution', async () => {
+    const fake = makeFakeBridge();
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+    });
+
+    await launcher.launch({
+      prompt: 'run the task',
+      completion: 'sent',
+      name: 'Hourly review',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+      callerSessionId: 'caller-1',
+    });
+
+    expect(fake.spawns[0]).toMatchObject({
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+    expect(fake.names[0]?.displayName).toBe('Hourly review');
+  });
+
   it('first-turn: accumulates chunk text until turn_complete and returns it', async () => {
     const fake = makeFakeBridge({
       events: (pid) => [chunk('Hello '), chunk('world'), turnComplete(pid)],

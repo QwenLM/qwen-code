@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { RefreshCwIcon } from 'lucide-react';
+import { CalendarClockIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
 import {
   getComposerTagIconUrl,
@@ -63,6 +63,98 @@ interface UserMessageProps {
   /** Click an uploaded image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+}
+
+interface ScheduledTaskRunContent {
+  name: string;
+  id: string;
+  cron: string;
+  triggeredAt: string;
+  trigger: 'scheduled' | 'manual';
+  prompt: string;
+}
+
+const SCHEDULED_TASK_RUN_INSTRUCTION =
+  'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.';
+
+function parseScheduledTaskRunContent(
+  content: string,
+): ScheduledTaskRunContent | null {
+  const separator = `\n\n${SCHEDULED_TASK_RUN_INSTRUCTION}\n\n`;
+  const separatorIndex = content.indexOf(separator);
+  if (separatorIndex < 0) return null;
+  const lines = content.slice(0, separatorIndex).split('\n');
+  if (lines.length !== 6 || lines[5] !== 'Session: new chat for this run') {
+    return null;
+  }
+  const values = [
+    ['Scheduled task: ', lines[0]],
+    ['Task ID: ', lines[1]],
+    ['Schedule: ', lines[2]],
+    ['Triggered at: ', lines[3]],
+    ['Trigger: ', lines[4]],
+  ] as const;
+  if (values.some(([prefix, line]) => !line?.startsWith(prefix))) return null;
+  const trigger = lines[4]!.slice('Trigger: '.length);
+  if (trigger !== 'scheduled' && trigger !== 'manual') return null;
+  return {
+    name: lines[0]!.slice('Scheduled task: '.length),
+    id: lines[1]!.slice('Task ID: '.length),
+    cron: lines[2]!.slice('Schedule: '.length),
+    triggeredAt: lines[3]!.slice('Triggered at: '.length),
+    trigger,
+    prompt: content.slice(separatorIndex + separator.length),
+  };
+}
+
+function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
+  const { language, t } = useI18n();
+  const triggeredAt = new Date(run.triggeredAt);
+  const triggeredAtLabel = Number.isNaN(triggeredAt.getTime())
+    ? run.triggeredAt
+    : triggeredAt.toLocaleString(language);
+  return (
+    <div
+      className={styles.scheduledTaskRun}
+      data-web-shell-scheduled-task-run-message
+    >
+      <div className={styles.scheduledTaskHeader}>
+        <span className={styles.scheduledTaskIcon} aria-hidden="true">
+          <CalendarClockIcon />
+        </span>
+        <span className={styles.scheduledTaskHeading}>
+          <span className={styles.scheduledTaskEyebrow}>
+            {t('scheduledTasks.runContext.title')}
+          </span>
+          <strong className={styles.scheduledTaskName}>{run.name}</strong>
+        </span>
+      </div>
+      <div className={styles.scheduledTaskMeta}>
+        <span className={styles.scheduledTaskMetaItem}>
+          <span>{t('scheduledTasks.runContext.schedule')}</span>
+          <code>{run.cron}</code>
+        </span>
+        <span className={styles.scheduledTaskMetaItem}>
+          <span>{t('scheduledTasks.runContext.triggeredAt')}</span>
+          <time dateTime={run.triggeredAt}>{triggeredAtLabel}</time>
+        </span>
+        <span className={styles.scheduledTaskBadge}>
+          {t(
+            run.trigger === 'manual'
+              ? 'scheduledTasks.runContext.trigger.manual'
+              : 'scheduledTasks.runContext.trigger.scheduled',
+          )}
+        </span>
+        <span className={styles.scheduledTaskBadge}>
+          {t('scheduledTasks.sessionMode.perRun')}
+        </span>
+      </div>
+      <div className={styles.scheduledTaskId}>
+        {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
+      </div>
+      <div className={styles.scheduledTaskPrompt}>{run.prompt}</div>
+    </div>
+  );
 }
 
 function DefaultUserMessageContent({
@@ -155,7 +247,14 @@ export const UserMessage = memo(function UserMessage({
     onAttachmentPreview || onComposerTagClick
       ? handleComposerTagClick
       : undefined;
+  const scheduledTaskRun = useMemo(
+    () => parseScheduledTaskRunContent(content),
+    [content],
+  );
   const renderedContent = useMemo(() => {
+    if (scheduledTaskRun) {
+      return <ScheduledTaskRunMessage run={scheduledTaskRun} />;
+    }
     const explicit = renderUserMessageContent?.({
       content,
       images,
@@ -213,6 +312,7 @@ export const UserMessage = memo(function UserMessage({
     renderComposerTag,
     renderComposerTagTooltip,
     renderUserMessageContent,
+    scheduledTaskRun,
   ]);
 
   const measureOverflow = useCallback(() => {
@@ -318,8 +418,8 @@ export const UserMessage = memo(function UserMessage({
         {content.trim().length > 0 && (
           <div
             className={`${styles.chatBubble}${
-              isLocateFlashing ? ` ${flashStyles.flash}` : ''
-            }`}
+              scheduledTaskRun ? ` ${styles.scheduledTaskBubble}` : ''
+            }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
             data-web-shell-user-bubble
           >
             <div

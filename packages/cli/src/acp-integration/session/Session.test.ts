@@ -55,6 +55,7 @@ import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../live/capture-screen-context.js';
 import { SPEAK_TO_USER_TOOL_NAME } from '../live/live-speak-to-user.js';
 import {
@@ -2530,6 +2531,67 @@ describe('Session', () => {
 
     expect(observedStarts).toEqual([runtimeDir, runtimeDir]);
     expect(observedStops).toEqual([runtimeDir]);
+  });
+
+  it('dispatches a per-run scheduled task into a fresh daemon session', async () => {
+    const annotateRunSession = vi.fn().mockResolvedValue(undefined);
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            id: string;
+            name: string;
+            prompt: string;
+            cronExpr: string;
+            lastFiredAt: number;
+            sessionMode: 'per_run';
+          }) => void,
+        ) => {
+          callback({
+            id: 'task-1',
+            name: 'Review PRs',
+            prompt: 'review the next PR',
+            cronExpr: '0 * * * *',
+            lastFiredAt: 123,
+            sessionMode: 'per_run',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      annotateRunSession,
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+    vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+      sessionId: 'child-session',
+    });
+
+    session.startCronScheduler();
+
+    await vi.waitFor(() => {
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.createSubSession,
+        {
+          prompt: expect.stringMatching(
+            /^Scheduled task: Review PRs\nTask ID: task-1\nSchedule: 0 \* \* \* \*\nTriggered at: 1970-01-01T00:00:00\.123Z\nTrigger: scheduled\nSession: new chat for this run\n\nThis is a scheduled task run\. Execute the instructions below now\. Do not create or modify a schedule unless the instructions explicitly ask you to\.\n\nreview the next PR$/,
+          ),
+          completion: 'sent',
+          name: 'Review PRs',
+          sourceType: 'default',
+          sourceId: 'scheduled_task_run:task-1',
+          callerSessionId: 'test-session-id',
+        },
+      );
+    });
+    await vi.waitFor(() => {
+      expect(annotateRunSession).toHaveBeenCalledWith('task-1', 123, {
+        sessionId: 'child-session',
+      });
+    });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('does not resume automatic turns until an aborted prompt settles', async () => {

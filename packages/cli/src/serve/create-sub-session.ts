@@ -53,6 +53,7 @@ import type {
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX } from '../runtime/scheduled-task-run.js';
 
 const log = createDebugLogger('SUB_SESSION');
 
@@ -167,7 +168,7 @@ const BIDI_CONTROL_MARKS = new RegExp(
   'g',
 );
 
-function subSessionName(label: string): string {
+function subSessionName(label: string, includeThreadGlyph = true): string {
   const cleaned = stripTerminalControlSequences(label)
     .replace(BIDI_CONTROL_MARKS, '')
     .trim()
@@ -179,7 +180,7 @@ function subSessionName(label: string): string {
     if (boundary >= 0xd800 && boundary <= 0xdbff) cut -= 1;
     short = `${cleaned.slice(0, cut)}…`;
   }
-  return `🧵 ${short}`;
+  return includeThreadGlyph ? `🧵 ${short}` : short;
 }
 
 function sentCompletionStatus(
@@ -784,6 +785,8 @@ export function createSubSessionLauncher(
         // Record the caller as the sub-session's parent so the UI can link it
         // back. Persisted into the sub-session's transcript at spawn time.
         parentSessionId: info.callerSessionId,
+        ...(info.sourceType ? { sourceType: info.sourceType } : {}),
+        ...(info.sourceId ? { sourceId: info.sourceId } : {}),
         ...(info.model ? { modelServiceId: info.model } : {}),
       });
       spawnedSession = sub;
@@ -806,7 +809,14 @@ export function createSubSessionLauncher(
 
       try {
         bridge.updateSessionMetadata(sessionId, {
-          displayName: subSessionName(info.name ?? info.prompt),
+          displayName: subSessionName(
+            info.name ?? info.prompt,
+            !(
+              info.sourceType === 'default' &&
+              info.sourceId?.startsWith(SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX) ===
+                true
+            ),
+          ),
         });
       } catch (err) {
         log.debug('sub-session: updateSessionMetadata failed', sessionId, err);

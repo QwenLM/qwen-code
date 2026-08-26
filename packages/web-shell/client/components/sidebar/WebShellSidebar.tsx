@@ -140,6 +140,7 @@ const SESSION_MENU_PORTAL_STYLE: CSSProperties = {
 const GROUP_MENU_MARGIN = 8;
 const CUSTOM_GROUP_COLOR_OPTION = '__custom__';
 const DEFAULT_CUSTOM_GROUP_COLOR: DaemonSessionGroupHexColor = '#416ef5';
+const SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX = 'scheduled_task_run:';
 
 type SidebarSessionSource = 'default' | 'channel';
 
@@ -152,6 +153,15 @@ function matchesSessionSource(
     return session.sourceType === undefined || session.sourceType === 'default';
   }
   return true;
+}
+
+function isScheduledTaskSession(session: DaemonSessionSummary): boolean {
+  return (
+    session.sourceType === 'scheduled_task' ||
+    (session.sourceType === 'default' &&
+      session.sourceId?.startsWith(SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX) ===
+        true)
+  );
 }
 
 function getSessionIdentity(
@@ -3810,6 +3820,9 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
+      const scheduledTaskIcon = isScheduledTaskSession(session) ? (
+        <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
+      ) : null;
       const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
@@ -3855,6 +3868,17 @@ export function WebShellSidebar({
               measureSessionTitleScroll(event.currentTarget)
             }
           >
+            {scheduledTaskIcon && (
+              <span className={styles.sessionStatusSlot}>
+                <span
+                  className={styles.sessionSourceIcon}
+                  data-web-shell-scheduled-task-session
+                  title={t('sidebar.scheduledTasks')}
+                >
+                  {scheduledTaskIcon}
+                </span>
+              </span>
+            )}
             {isEditing ? (
               <form
                 className={styles.renameForm}
@@ -4024,8 +4048,24 @@ export function WebShellSidebar({
           }}
         >
           <span className={styles.sessionStatusSlot}>
+            {scheduledTaskIcon ? (
+              <span
+                className={styles.sessionSourceIcon}
+                data-web-shell-scheduled-task-session
+                title={t('sidebar.scheduledTasks')}
+              >
+                {scheduledTaskIcon}
+              </span>
+            ) : null}
             {completedUnread ? (
-              <span className={styles.sessionStatusDot} aria-hidden="true" />
+              <span
+                className={cx(
+                  styles.sessionStatusDot,
+                  Boolean(scheduledTaskIcon) && styles.sessionStatusDotOverlay,
+                )}
+                data-web-shell-session-completed-unread
+                aria-hidden="true"
+              />
             ) : null}
           </span>
           {isEditing && canRenameSession(session) ? (

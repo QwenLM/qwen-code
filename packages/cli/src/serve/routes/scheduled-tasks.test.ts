@@ -50,9 +50,14 @@ interface StubBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    parentSessionId?: string;
     sourceType?: string;
     sourceId?: string;
   }): Promise<{ sessionId: string }>;
+  sendPrompt(
+    sessionId: string,
+    req: { sessionId: string; prompt: Array<{ type: 'text'; text: string }> },
+  ): Promise<unknown>;
   closeSession(sessionId: string): Promise<unknown>;
   updateSessionMetadata(
     sessionId: string,
@@ -83,6 +88,8 @@ interface StubBridge {
   spawned: string[];
   spawnScopes: Array<'single' | 'thread' | undefined>;
   spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
+  spawnParents: Array<string | undefined>;
+  prompts: Array<{ sessionId: string; text: string }>;
   closed: string[];
   named: Array<{ sessionId: string; displayName?: string }>;
   failNext: boolean;
@@ -94,6 +101,8 @@ function makeStubBridge(): StubBridge {
     spawned: [],
     spawnScopes: [],
     spawnSources: [],
+    spawnParents: [],
+    prompts: [],
     closed: [],
     named: [],
     markSessionCatalogChanged: vi.fn(),
@@ -107,6 +116,7 @@ function makeStubBridge(): StubBridge {
       const sessionId = `sess-${++seq}`;
       bridge.spawned.push(sessionId);
       bridge.spawnScopes.push(req.sessionScope);
+      bridge.spawnParents.push(req.parentSessionId);
       bridge.spawnSources.push({
         ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
         ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
@@ -118,6 +128,10 @@ function makeStubBridge(): StubBridge {
         ...(req.sourceType !== undefined ? { sourceType: req.sourceType } : {}),
       });
       return { sessionId };
+    },
+    async sendPrompt(sessionId, req) {
+      bridge.prompts.push({ sessionId, text: req.prompt[0]?.text ?? '' });
+      return { stopReason: 'end_turn' };
     },
     async closeSession(sessionId: string) {
       bridge.closed.push(sessionId);
@@ -403,12 +417,107 @@ describe('scheduled-tasks routes', () => {
       prompt: 'summarize the day',
       recurring: true,
       enabled: true,
+      sessionMode: 'persistent',
     });
     expect(typeof res.body.id).toBe('string');
 
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks).toHaveLength(1);
     expect(list.body.tasks[0].id).toBe(res.body.id);
+  });
+
+  it('dispatches each manual per-run fire into a fresh child session', async () => {
+    const created = await create({
+      name: 'Review PRs',
+      cron: '0 * * * *',
+      prompt: 'review the next PR',
+      sessionMode: 'per_run',
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.sessionMode).toBe('per_run');
+    const controllerSessionId = created.body.sessionId as string;
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(200);
+    const childSessionId = h.bridge.spawned[1]!;
+    expect(childSessionId).not.toBe(controllerSessionId);
+    expect(h.bridge.spawnParents[1]).toBe(controllerSessionId);
+    expect(h.bridge.spawnSources[1]).toEqual({
+      sourceType: 'default',
+      sourceId: `scheduled_task_run:${created.body.id}`,
+    });
+    expect(h.bridge.named[1]).toEqual({
+      sessionId: childSessionId,
+      displayName: 'Review PRs',
+    });
+    expect(h.bridge.prompts).toHaveLength(1);
+    expect(h.bridge.prompts[0]).toMatchObject({ sessionId: childSessionId });
+    expect(h.bridge.prompts[0]?.text).toContain('Scheduled task: Review PRs');
+    expect(h.bridge.prompts[0]?.text).toContain(`Task ID: ${created.body.id}`);
+    expect(h.bridge.prompts[0]?.text).toContain('Schedule: 0 * * * *');
+    expect(h.bridge.prompts[0]?.text).toContain('Trigger: manual');
+    expect(h.bridge.prompts[0]?.text).toContain(
+      'This is a scheduled task run. Execute the instructions below now.',
+    );
+    expect(h.bridge.prompts[0]?.text).toMatch(/\n\nreview the next PR$/);
+    expect(run.body.runs.at(-1)).toMatchObject({
+      kind: 'manual',
+      sessionId: childSessionId,
+    });
+    const stored = await readCronTasks(h.workspace);
+    expect(stored[0]?.sessionMode).toBe('per_run');
+    expect(stored[0]?.runs?.at(-1)?.sessionId).toBe(childSessionId);
+  });
+
+  it('restores a per-run one-shot when fresh-session admission fails', async () => {
+    const created = await create({
+      cron: '0 0 1 1 *',
+      prompt: 'run once',
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    h.bridge.failNext = true;
+
+    const run = await request(h.app).post(
+      `/scheduled-tasks/${created.body.id}/run`,
+    );
+
+    expect(run.status).toBe(500);
+    expect(run.body.code).toBe('scheduled_task_session_dispatch_failed');
+    const stored = await readCronTasks(h.workspace);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({
+      id: created.body.id,
+      recurring: false,
+      sessionMode: 'per_run',
+    });
+    expect(stored[0]?.runs).toBeUndefined();
+  });
+
+  it('rejects invalid or channel-delivery per-run session modes', async () => {
+    const invalid = await create({
+      cron: '0 * * * *',
+      prompt: 'p',
+      sessionMode: 'new',
+    });
+    expect(invalid.status).toBe(400);
+    expect(invalid.body.code).toBe('invalid_session_mode');
+
+    const delivery = await create({
+      cron: '0 * * * *',
+      prompt: 'p',
+      sessionMode: 'per_run',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'user', id: 'u1' },
+      },
+    });
+    expect(delivery.status).toBe(400);
+    expect(delivery.body.code).toBe('session_mode_delivery_unsupported');
+    expect(h.bridge.spawned).toEqual([]);
   });
 
   it('creates and persists a task with channel delivery', async () => {
@@ -676,6 +785,14 @@ describe('scheduled-tasks routes', () => {
     });
     expect(rejected.status).toBe(409);
     expect(rejected.body.code).toBe('session_binding_unavailable');
+
+    const perRun = await request(app).post('/scheduled-tasks').send({
+      cron: '0 11 * * *',
+      prompt: 'p',
+      sessionMode: 'per_run',
+    });
+    expect(perRun.status).toBe(409);
+    expect(perRun.body.code).toBe('session_mode_unavailable');
   });
 
   it('rejects requested binding when management is off even with an active runtime bridge', async () => {
@@ -1034,13 +1151,13 @@ describe('scheduled-tasks routes', () => {
       prompt: 'summarize the day',
     });
     expect(h.bridge.named).toEqual([
-      { sessionId: named.body.sessionId, displayName: '⏰ Digest' },
+      { sessionId: named.body.sessionId, displayName: 'Digest' },
     ]);
 
     const unnamed = await create({ cron: '0 9 * * *', prompt: 'do the thing' });
     expect(h.bridge.named[1]).toEqual({
       sessionId: unnamed.body.sessionId,
-      displayName: '⏰ do the thing',
+      displayName: 'do the thing',
     });
   });
 
@@ -1654,7 +1771,7 @@ describe('scheduled-tasks routes', () => {
     });
     const id = created.body.id as string;
     const sid = created.body.sessionId as string;
-    expect(h.bridge.named).toEqual([{ sessionId: sid, displayName: '⏰ Old' }]);
+    expect(h.bridge.named).toEqual([{ sessionId: sid, displayName: 'Old' }]);
 
     // Renaming the task re-labels its session.
     const rename = await request(h.app)
@@ -1663,7 +1780,7 @@ describe('scheduled-tasks routes', () => {
     expect(rename.status).toBe(200);
     expect(h.bridge.named).toContainEqual({
       sessionId: sid,
-      displayName: '⏰ New',
+      displayName: 'New',
     });
 
     // A bare cron edit does NOT re-touch the session name.
@@ -1677,7 +1794,7 @@ describe('scheduled-tasks routes', () => {
     await request(h.app).patch(`/scheduled-tasks/${id}`).send({ name: '' });
     expect(h.bridge.named).toContainEqual({
       sessionId: sid,
-      displayName: '⏰ p',
+      displayName: 'p',
     });
   });
 
@@ -2229,17 +2346,15 @@ describe('scheduled-tasks routes', () => {
 });
 
 describe('scheduledTaskSessionName', () => {
-  it('prefixes the clock and collapses whitespace', () => {
-    expect(scheduledTaskSessionName('  Daily   digest ')).toBe(
-      '⏰ Daily digest',
-    );
+  it('keeps the title flat and collapses whitespace', () => {
+    expect(scheduledTaskSessionName('  Daily   digest ')).toBe('Daily digest');
   });
 
   it('strips terminal control sequences (else the bridge guard drops the rename)', () => {
     // The CSI sequence is flattened to a space (and collapsed), leaving no
     // control char to trip the bridge's title guard.
     const name = scheduledTaskSessionName('ab\x1b[31mc');
-    expect(name).toBe('⏰ ab c');
+    expect(name).toBe('ab c');
     // eslint-disable-next-line no-control-regex
     expect(/[\x00-\x1f\x7f-\x9f]/.test(name)).toBe(false);
   });
@@ -2264,23 +2379,23 @@ describe('scheduledTaskSessionName', () => {
     // that honor bidi. Inputs are built from code points so this test file
     // itself carries no reordering controls.
     const RLO = String.fromCodePoint(0x202e); // right-to-left override
-    expect(scheduledTaskSessionName(`inv${RLO}fdp.exe`)).toBe('⏰ invfdp.exe');
+    expect(scheduledTaskSessionName(`inv${RLO}fdp.exe`)).toBe('invfdp.exe');
     // Every isolate (U+2066 LRI, U+2067 RLI, U+2068 FSI, U+2069 PDI) too.
     const isolates = [0x2066, 0x2067, 0x2068, 0x2069]
       .map((c) => String.fromCodePoint(c))
       .join('');
-    expect(scheduledTaskSessionName(`a${isolates}b`)).toBe('⏰ ab');
+    expect(scheduledTaskSessionName(`a${isolates}b`)).toBe('ab');
     // And the remaining embedding/override chars (U+202A-U+202D).
     const embeds = [0x202a, 0x202b, 0x202c, 0x202d]
       .map((c) => String.fromCodePoint(c))
       .join('');
-    expect(scheduledTaskSessionName(`x${embeds}y`)).toBe('⏰ xy');
+    expect(scheduledTaskSessionName(`x${embeds}y`)).toBe('xy');
     // And the standalone directional marks (U+061C ALM, U+200E LRM, U+200F RLM),
     // which are also Bidi_Control but invisible rather than reordering.
     const marks = [0x061c, 0x200e, 0x200f]
       .map((c) => String.fromCodePoint(c))
       .join('');
-    expect(scheduledTaskSessionName(`m${marks}n`)).toBe('⏰ mn');
+    expect(scheduledTaskSessionName(`m${marks}n`)).toBe('mn');
   });
 });
 
