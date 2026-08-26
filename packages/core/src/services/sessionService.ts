@@ -3256,7 +3256,11 @@ export class SessionService {
       this.findSessionTitlesByPrefixInState(normalizedPrefix, 'active'),
       this.findSessionTitlesByPrefixInState(normalizedPrefix, 'archived'),
     ]);
-    return [...active, ...archived];
+    // A session file can exist in both `chats/` and `chats/archive/` at once
+    // (the 'conflict' location `unarchiveSessions`/`archiveSessions` know how
+    // to resolve, reachable via an interrupted move); when it does, both
+    // scans read the same file and its title would otherwise appear twice.
+    return [...new Set([...active, ...archived])];
   }
 
   private async findSessionTitlesByPrefixInState(

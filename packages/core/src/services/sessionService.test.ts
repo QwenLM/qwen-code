@@ -6279,6 +6279,28 @@ describe('SessionService', () => {
       );
     });
 
+    it('deduplicates a title held by the same session in both active and archived state', async () => {
+      // getSessionLocation's 'conflict' state (reachable via an interrupted
+      // move) leaves one session file in both chats/ and chats/archive/;
+      // both scans read it and must not report its title twice.
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        cwd,
+        'active',
+      );
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch(1)',
+        cwd,
+        'archived',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('my-branch(');
+
+      expect(titles).toEqual(['my-branch(1)']);
+    });
+
     it('skips archived sessions from other projects (collisions stay project-scoped)', async () => {
       seedSessionWithTitle(
         '11111111-1111-1111-1111-111111111111',
