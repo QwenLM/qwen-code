@@ -1158,6 +1158,70 @@ describe('SessionAttachmentStore', () => {
       }
     });
 
+    it('reads the fallback when the primary root cannot be created', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        await writeIn(fallback, 'notes.txt', 'legacy bytes');
+        // A degraded configured volume must not fail a read that the healthy
+        // fallback can serve; the read path must not force-create the
+        // primary directory.
+        const mkdir = vi.spyOn(fs, 'mkdir').mockRejectedValueOnce(
+          Object.assign(new Error('permission denied'), {
+            code: 'EACCES',
+          }),
+        );
+        try {
+          expect(await store.read('notes.txt')).toEqual({
+            data: Buffer.from('legacy bytes'),
+            mimeType: 'text/plain',
+          });
+          expect(mkdir).not.toHaveBeenCalled();
+        } finally {
+          mkdir.mockRestore();
+        }
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
+    it('reads the fallback when an established primary root degrades', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        await store.putAttachment(
+          new TextEncoder().encode('current'),
+          'text/plain',
+          'current.txt',
+        );
+        await writeIn(fallback, 'notes.txt', 'legacy bytes');
+        // A non-ENOENT primary read failure (the volume degraded after boot)
+        // must degrade to the fallback instead of rejecting.
+        const readFile = vi
+          .spyOn(fs, 'readFile')
+          .mockRejectedValueOnce(
+            Object.assign(new Error('volume degraded'), { code: 'EIO' }),
+          );
+        try {
+          expect(await store.read('notes.txt')).toEqual({
+            data: Buffer.from('legacy bytes'),
+            mimeType: 'text/plain',
+          });
+          expect(readFile.mock.calls[0]?.[0]).toBe(
+            path.join(main, sessionDir, 'notes.txt'),
+          );
+        } finally {
+          readFile.mockRestore();
+        }
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
     it('prefers the primary root over the fallback', async () => {
       const { main, fallback } = await createRoots();
       const store = new SessionAttachmentStore(main, sessionId, fallback);
@@ -1173,6 +1237,27 @@ describe('SessionAttachmentStore', () => {
           data: Buffer.from('primary'),
           mimeType: 'text/plain',
         });
+
+        // With both roots holding the name, the authoritative primary
+        // reference must validate while the stale fallback size must not.
+        expect(() =>
+          store.assertReference({
+            type: 'resource',
+            attachmentId: reference.attachmentId,
+            mimeType: 'text/plain',
+            size: 7,
+          }),
+        ).not.toThrow();
+        expect(() =>
+          store.assertReference({
+            type: 'resource',
+            attachmentId: reference.attachmentId,
+            mimeType: 'text/plain',
+            size: 14,
+          }),
+        ).toThrowError(
+          expect.objectContaining({ code: 'session_attachment_gone' }),
+        );
       } finally {
         await store.close();
         await fs.rm(main, { recursive: true, force: true });
@@ -1238,23 +1323,40 @@ describe('SessionAttachmentStore', () => {
     it('still degrades reference validation when the fallback stat fails', async () => {
       const { main, fallback } = await createRoots();
       const store = new SessionAttachmentStore(main, sessionId, fallback);
-      const stat = vi.mocked(statSync).mockImplementationOnce(() => {
-        throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
-      });
+      // Arm the faults per call order: ENOENT for the primary stat, EACCES
+      // for the fallback stat the test name targets.
+      const stat = vi
+        .mocked(statSync)
+        .mockImplementationOnce(() => {
+          throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+        })
+        .mockImplementationOnce(() => {
+          throw Object.assign(new Error('permission denied'), {
+            code: 'EACCES',
+          });
+        });
       try {
         await writeIn(fallback, 'notes.txt', 'stale fallback');
 
         // Reference validation must degrade to session_attachment_gone, not
-        // surface the raw stat error and abort the prompt.
+        // surface the raw stat error and abort the prompt. The reference size
+        // matches the fallback file, so the throw can only come from the
+        // degradation path.
         expect(() =>
           store.assertReference({
             type: 'resource',
             attachmentId: 'notes.txt',
             mimeType: 'text/plain',
-            size: 13,
+            size: 14,
           }),
         ).toThrowError(
           expect.objectContaining({ code: 'session_attachment_gone' }),
+        );
+        expect(stat.mock.calls[0]?.[0]).toBe(
+          path.join(main, sessionDir, 'notes.txt'),
+        );
+        expect(stat.mock.calls[1]?.[0]).toBe(
+          path.join(fallback, sessionDir, 'notes.txt'),
         );
       } finally {
         stat.mockRestore();
@@ -1292,6 +1394,34 @@ describe('SessionAttachmentStore', () => {
       }
     });
 
+    it('removes a fallback attachment when the primary root cannot be created', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      try {
+        await writeIn(fallback, 'notes.txt', 'legacy bytes');
+        // The removal must not force-create the primary directory: a
+        // degraded configured volume must not fail a deletion whose only
+        // copy lives in the healthy fallback.
+        const mkdir = vi.spyOn(fs, 'mkdir').mockRejectedValueOnce(
+          Object.assign(new Error('permission denied'), {
+            code: 'EACCES',
+          }),
+        );
+        try {
+          expect(await store.remove('notes.txt')).toBe(true);
+          expect(mkdir).not.toHaveBeenCalled();
+          expect(await fs.readdir(path.join(fallback, sessionDir))).toEqual([]);
+          expect(await fs.readdir(main)).toEqual([]);
+        } finally {
+          mkdir.mockRestore();
+        }
+      } finally {
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
+    });
+
     it('removes both copies when both roots hold the same name', async () => {
       const { main, fallback } = await createRoots();
       const store = new SessionAttachmentStore(main, sessionId, fallback);
@@ -1313,18 +1443,26 @@ describe('SessionAttachmentStore', () => {
     it('keeps the primary readable when the fallback unlink fails', async () => {
       const { main, fallback } = await createRoots();
       const store = new SessionAttachmentStore(main, sessionId, fallback);
+      const realUnlink = fs.unlink.bind(fs);
       const unlink = vi
         .spyOn(fs, 'unlink')
-        .mockRejectedValueOnce(
-          Object.assign(new Error('read-only volume'), { code: 'EROFS' }),
-        );
+        .mockImplementation(async (filePath) => {
+          if (String(filePath).startsWith(path.join(fallback, sessionDir))) {
+            throw Object.assign(new Error('read-only volume'), {
+              code: 'EROFS',
+            });
+          }
+          return realUnlink(filePath);
+        });
       try {
         await writeIn(main, 'notes.txt', 'from primary');
         await writeIn(fallback, 'notes.txt', 'stale fallback copy');
 
         // The fallback copy cannot be removed; remove() must fail cleanly and
         // leave the authoritative primary copy readable instead of deleting it
-        // and resurrecting stale fallback bytes on the next read.
+        // and resurrecting stale fallback bytes on the next read. Rejecting
+        // only fallback-targeted unlinks also pins the fallback-first order:
+        // a primary-first remove() would really delete the primary copy.
         await expect(store.remove('notes.txt')).rejects.toThrow(
           'read-only volume',
         );
@@ -1373,6 +1511,37 @@ describe('SessionAttachmentStore', () => {
       await expect(
         fs.readdir(path.join(fallback, sessionDir)),
       ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('keeps the primary directory intact when the fallback removal fails', async () => {
+      const { main, fallback } = await createRoots();
+      const store = new SessionAttachmentStore(main, sessionId, fallback);
+      await writeIn(main, 'current.txt', 'primary data');
+      await writeIn(fallback, 'legacy.txt', 'legacy data');
+      const realRename = fs.rename.bind(fs);
+      const rename = vi
+        .spyOn(fs, 'rename')
+        .mockImplementation(async (from, to) => {
+          if (String(from).startsWith(fallback)) {
+            throw Object.assign(new Error('read-only volume'), {
+              code: 'EROFS',
+            });
+          }
+          return realRename(from, to);
+        });
+      try {
+        // delete() removes the fallback root first so a failure there keeps
+        // the authoritative primary copy intact.
+        await expect(store.delete()).rejects.toMatchObject({ code: 'EROFS' });
+        expect(
+          await fs.readFile(path.join(main, sessionDir, 'current.txt'), 'utf8'),
+        ).toBe('primary data');
+      } finally {
+        rename.mockRestore();
+        await store.close();
+        await fs.rm(main, { recursive: true, force: true });
+        await fs.rm(fallback, { recursive: true, force: true });
+      }
     });
 
     it('delete tombstones both roots so a recreated session dir survives', async () => {

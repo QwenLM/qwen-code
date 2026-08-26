@@ -717,7 +717,7 @@ Scope and limits:
 
 - **One-way migration.** When the env is set, new attachments are written only under the configured root. Reads and removes that miss the configured root fall back to the default runtime temp dir, so attachments uploaded **before** the switch remain readable and removable. The reverse direction — removing the env after attachments were written to the configured root — makes those attachments unreachable; keep the variable stable for a given workspace.
 - **Per-session layout.** Files live under `<root>/<projectHash>/attachments/session-<sessionId>/` in both locations, where `<projectHash>` is the same workspace hash used by the default runtime temp dir; the fallback lookup uses the same session layout in the default dir. Two workspaces pointing at the same configured root stay isolated from each other.
-- **Archive cleanup.** When a session is archived, its attachment directory is removed from both the configured root and the default fallback dir.
+- **Delete cleanup.** When a session is deleted, its attachment directory is removed from both the configured root and the default fallback dir. Archiving a session keeps its attachments so they survive unarchive.
 - The daemon reads the variable at startup; restart the daemon after changing it. The directory must be writable by the daemon process.
 
 ## Multi-session & multi-workspace deployment

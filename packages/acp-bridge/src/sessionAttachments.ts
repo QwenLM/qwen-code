@@ -475,7 +475,15 @@ export class SessionAttachmentStore {
   ): Promise<{ data: Buffer; mimeType: string } | undefined> {
     const name = safeAttachmentName(attachmentId);
     if (!name || name !== attachmentId) return undefined;
-    const primary = await this.tryRead(await this.directory(), name);
+    let primary: { data: Buffer; mimeType: string } | undefined;
+    try {
+      primary = await this.tryRead(await this.peekDirectory(), name);
+    } catch (error) {
+      if (!this.persistentFallbackDirectory) throw error;
+      // A degraded primary root must not hide healthy fallback bytes: any
+      // primary lookup failure degrades to the fallback read.
+      primary = undefined;
+    }
     if (primary) return primary;
     return await this.tryRead(this.persistentFallbackDirectory, name);
   }
@@ -597,7 +605,7 @@ export class SessionAttachmentStore {
     const fallbackHit =
       (await this.tryUnlink(this.persistentFallbackDirectory, name)) === true;
     const primaryHit =
-      (await this.tryUnlink(await this.directory(), name)) === true;
+      (await this.tryUnlink(await this.peekDirectory(), name)) === true;
     return primaryHit || fallbackHit;
   }
 
@@ -640,18 +648,20 @@ export class SessionAttachmentStore {
       this.pendingNames.clear();
       this.resolvePendingDrainWaiters();
     }
+    // Fallback first, mirroring remove(): if the legacy root cannot be
+    // removed, the authoritative primary copy must stay intact.
+    if (this.persistentFallbackDirectory) {
+      await this.removeDirectoryWithTombstone(
+        this.persistentFallbackDirectory,
+        options.assertCanCommit,
+      );
+    }
     const directory =
       this.persistentDirectory ??
       (await this.directoryPromise?.catch(() => undefined));
     if (directory) {
       await this.removeDirectoryWithTombstone(
         directory,
-        options.assertCanCommit,
-      );
-    }
-    if (this.persistentFallbackDirectory) {
-      await this.removeDirectoryWithTombstone(
-        this.persistentFallbackDirectory,
         options.assertCanCommit,
       );
     }
@@ -763,6 +773,14 @@ export class SessionAttachmentStore {
       data: attachment.data.toString('base64'),
       mimeType: attachment.mimeType,
     } as ContentBlock;
+  }
+
+  // The storage directory without forcing creation: reads and removes must
+  // degrade to the fallback when the configured root is unavailable, not
+  // fail on a forced mkdir of a degraded volume.
+  private async peekDirectory(): Promise<string | undefined> {
+    const established = await this.directoryPromise?.catch(() => undefined);
+    return established ?? this.persistentDirectory;
   }
 
   private async directory(): Promise<string> {

@@ -44,7 +44,7 @@ export function sessionAttachmentsRoots(
   runtimeBaseDir: string,
 ): { root: string; fallback?: string } {
   const defaultRoot = defaultSessionAttachmentsRoot(workspace, runtimeBaseDir);
-  const configured = process.env[SESSION_ATTACHMENTS_ROOT_ENV];
+  const configured = process.env[SESSION_ATTACHMENTS_ROOT_ENV]?.trim();
   if (!configured) return { root: defaultRoot };
   const projectHash = path.basename(path.dirname(defaultRoot));
   return {

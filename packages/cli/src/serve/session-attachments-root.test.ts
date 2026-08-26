@@ -41,10 +41,33 @@ describe('session attachment root resolution', () => {
     });
   });
 
+  it('pins the default root to the legacy runtime temp layout', () => {
+    // The fallback only works while the default root equals the pre-env
+    // layout; assert it from the raw segments, not via the resolver.
+    expect(defaultRoot).toBe(
+      path.join(runtimeBaseDir, 'tmp', projectHash, 'attachments'),
+    );
+  });
+
   it('treats an empty env value as unset', () => {
     process.env[SESSION_ATTACHMENTS_ROOT_ENV] = '';
     expect(sessionAttachmentsRoots(workspace, runtimeBaseDir)).toEqual({
       root: defaultRoot,
+    });
+  });
+
+  it('treats a whitespace-only env value as unset', () => {
+    process.env[SESSION_ATTACHMENTS_ROOT_ENV] = '   ';
+    expect(sessionAttachmentsRoots(workspace, runtimeBaseDir)).toEqual({
+      root: defaultRoot,
+    });
+  });
+
+  it('trims surrounding whitespace from a configured root', () => {
+    process.env[SESSION_ATTACHMENTS_ROOT_ENV] = `  ${configuredRoot}  `;
+    expect(sessionAttachmentsRoots(workspace, runtimeBaseDir)).toEqual({
+      root: path.join(configuredRoot, projectHash, 'attachments'),
+      fallback: defaultRoot,
     });
   });
 
