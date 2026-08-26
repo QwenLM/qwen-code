@@ -42,6 +42,7 @@ import { formatContextTokens } from '../utils/formatTokenCount';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { MessageItem } from './MessageItem';
+import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
@@ -88,6 +89,13 @@ interface MessageListProps {
   historyCapacityReached?: boolean;
   historyPaginationError?: boolean;
   onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
+  /**
+   * Identity of the session whose transcript `messages` show. Block ids are
+   * per-session ordinals, so changing it resets every session-scoped UI state
+   * (collapse overrides, pagination keep-open, pending page snapshots, the
+   * scroll anchor) — a direct session switch never renders empty messages.
+   */
+  sessionKey?: string;
   transcriptBlockCount?: number;
   transcriptActivity?: {
     getSnapshot(): {
@@ -286,14 +294,6 @@ export interface SessionTimelineRange {
   endIndex: number;
   currentIndex: number;
 }
-
-const SUMMARY_RUN_ID_PREFIX = 'summary-';
-const summaryRunId = (firstMemberId: string): string =>
-  `${SUMMARY_RUN_ID_PREFIX}${firstMemberId}`;
-const summaryRunFirstMemberId = (id: string): string | undefined =>
-  id.startsWith(SUMMARY_RUN_ID_PREFIX)
-    ? id.slice(SUMMARY_RUN_ID_PREFIX.length)
-    : undefined;
 
 // Synthetic compact summaries carry a folded thought next to their single
 // tool; the parallel-agent path must never swallow that row, so agent-only
@@ -2787,6 +2787,7 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
       onShowContextDetail,
@@ -3419,6 +3420,25 @@ export const MessageList = memo(
       suppressOlderHistoryLoadingStatus,
       setSuppressOlderHistoryLoadingStatus,
     ] = useState(false);
+
+    // A direct session switch never renders empty messages (the provider
+    // batches the store reset and the replay into one notification), so the
+    // /clear reset never runs for it. Block ids are per-session ordinals, so
+    // every session-scoped state must drop when the displayed session
+    // changes: stale keep-open and snapshot entries would collide with the
+    // new session's reused ids, and an old anchor would restore the previous
+    // session's scroll metrics into the new transcript.
+    const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
+    if (trackedSessionKey !== sessionKey) {
+      setTrackedSessionKey(sessionKey);
+      pendingPaginationTurnCompares.current.clear();
+      olderHistoryLoadGeneration.current += 1;
+      olderHistoryLoadInFlight.current = false;
+      olderHistoryRetryBlocked.current = false;
+      setOlderHistoryAnchor(null);
+      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+      setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
+    }
 
     useEffect(() => {
       if (!hasOlderHistory) {
@@ -4651,10 +4671,13 @@ export const MessageList = memo(
             resolved: false,
           });
           await onLoadOlderHistory(force ? { force: true } : undefined);
+          // The snapshot belongs to this load regardless of anchor state: a
+          // superseding anchor drop bumps the generation mid-flight and would
+          // otherwise orphan the entry unresolved at the FIFO head, wedging
+          // every later split-turn detection.
+          const compare = pendingPaginationTurnCompares.current.get(generation);
+          if (compare) compare.resolved = true;
           if (generation === olderHistoryLoadGeneration.current) {
-            const compare =
-              pendingPaginationTurnCompares.current.get(generation);
-            if (compare) compare.resolved = true;
             setOlderHistoryAnchor((anchor) =>
               anchor?.generation === generation
                 ? { ...anchor, settled: true }
@@ -4662,10 +4685,12 @@ export const MessageList = memo(
             );
           }
         } catch {
+          // A failed load commits no page, so its snapshot is always safe to
+          // drop, including when the load was superseded mid-flight.
+          pendingPaginationTurnCompares.current.delete(generation);
           if (generation === olderHistoryLoadGeneration.current) {
             olderHistoryRetryBlocked.current = true;
             olderHistoryLoadInFlight.current = false;
-            pendingPaginationTurnCompares.current.delete(generation);
             setOlderHistoryAnchor(null);
           }
         } finally {

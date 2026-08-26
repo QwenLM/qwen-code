@@ -319,6 +319,7 @@ function mount(
     historyCapacityReached?: boolean;
     historyPaginationError?: boolean;
     onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
+    sessionKey?: string;
     transcriptBlockCount?: number;
     transcriptActivity?: {
       getSnapshot(): {
@@ -370,6 +371,7 @@ function mount(
                 historyCapacityReached={opts.historyCapacityReached}
                 historyPaginationError={opts.historyPaginationError}
                 onLoadOlderHistory={opts.onLoadOlderHistory}
+                sessionKey={opts.sessionKey}
                 transcriptBlockCount={opts.transcriptBlockCount}
                 transcriptActivity={opts.transcriptActivity}
                 onReloadTranscript={opts.onReloadTranscript}
@@ -408,6 +410,7 @@ function rerenderMessages(
     isResponding?: boolean;
     hasOlderHistory?: boolean;
     onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
+    sessionKey?: string;
   } = {},
 ): void {
   const entry = mounted.find((item) => item.container === container);
@@ -426,6 +429,7 @@ function rerenderMessages(
                 isResponding={opts.isResponding}
                 hasOlderHistory={opts.hasOlderHistory}
                 onLoadOlderHistory={opts.onLoadOlderHistory}
+                sessionKey={opts.sessionKey}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -1380,9 +1384,500 @@ describe('MessageList — turn collapse (DOM)', () => {
         await Promise.resolve();
       });
       expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
+
+      // The superseded load's snapshot must not wedge later detection: page 3
+      // lands mid-turn...
+      rerenderMessages(c, [thinkingMsg('tC1'), asstMsg('aC1'), ...completed], {
+        hasOlderHistory: true,
+        onLoadOlderHistory,
+      });
+      await act(async () => {
+        resolveLoad();
+        await Promise.resolve();
+      });
+      // ...page 4 then completes that turn's head while its tail is already
+      // on screen, so it stays expanded.
+      // Re-top the container: re-renders snap it to the bottom while
+      // following; the scroll event must start near the top to trigger.
+      list.scrollTop = 0;
+      await act(async () => {
+        list.dispatchEvent(new Event('scroll'));
+        await Promise.resolve();
+      });
+      expect(onLoadOlderHistory).toHaveBeenCalledTimes(4);
+      rerenderMessages(
+        c,
+        [userMsg('uC'), thinkingMsg('tC1'), asstMsg('aC1'), ...completed],
+        { hasOlderHistory: true, onLoadOlderHistory },
+      );
+      expect(has(c, 'tC1')).toBe(true);
+      expect(toggleRow(c, 'uC').getAttribute('aria-expanded')).toBe('true');
     } finally {
       rectSpy.mockRestore();
     }
+  });
+
+  it('keeps split-turn detection alive when a superseded load fails', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        const rowKey = this.getAttribute('data-message-row-key');
+        if (rowKey === 'msg:u1') return rect(800, 50, 50);
+        if (rowKey === 'msg:t1') return rect(800, 50, 100);
+        if (rowKey === 'msg:a1') return rect(800, 50, 150);
+        if (this.hasAttribute('data-web-shell-message-list')) {
+          return rect(800, 600, 100);
+        }
+        return rect(800, 50, 0);
+      });
+    let rejectLoad!: (error: Error) => void;
+    const onLoadOlderHistory = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_, reject) => {
+            rejectLoad = reject;
+          }),
+      )
+      .mockResolvedValue(undefined);
+    const tail = [
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      asstMsg('a2'),
+    ];
+    const completed = [userMsg('u1'), ...tail];
+    const c = mount(tail, undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    try {
+      // Page 1 completes the split turn's head; the keep-open expands it.
+      await act(async () => {
+        list.dispatchEvent(new Event('scroll'));
+        await Promise.resolve();
+      });
+      rerenderMessages(c, completed, {
+        hasOlderHistory: true,
+        onLoadOlderHistory,
+      });
+      expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+
+      // Page 2 anchors on the visible t1 row; the user collapses the turn
+      // before the fetch settles, superseding the load.
+      list.scrollTop = 0;
+      await act(async () => {
+        list.dispatchEvent(new Event('scroll'));
+        await Promise.resolve();
+      });
+      expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+      click(toggle(c, 'u1'));
+      expect(isCollapsed(c, 't1')).toBe(true);
+
+      // The superseded load fails: its snapshot must still be dropped.
+      await act(async () => {
+        rejectLoad(new Error('load failed'));
+        await Promise.resolve();
+      });
+
+      // Page 3 lands mid-turn...
+      rerenderMessages(c, [thinkingMsg('tC1'), asstMsg('aC1'), ...completed], {
+        hasOlderHistory: true,
+        onLoadOlderHistory,
+      });
+      // ...and page 4 completes turn uC, whose tail page 3 showed: it stays
+      // expanded instead of collapsing mid-read behind the orphan snapshot.
+      list.scrollTop = 0;
+      await act(async () => {
+        list.dispatchEvent(new Event('scroll'));
+        await Promise.resolve();
+      });
+      expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
+      rerenderMessages(
+        c,
+        [userMsg('uC'), thinkingMsg('tC1'), asstMsg('aC1'), ...completed],
+        { hasOlderHistory: true, onLoadOlderHistory },
+      );
+      expect(has(c, 'tC1')).toBe(true);
+      expect(toggleRow(c, 'uC').getAttribute('aria-expanded')).toBe('true');
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('resets pagination state on a direct session switch without empty messages', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        const rowKey = this.getAttribute('data-message-row-key');
+        if (rowKey === 'msg:u1') return rect(800, 50, 50);
+        if (rowKey === 'msg:t1') return rect(800, 50, 100);
+        if (rowKey === 'msg:a1') return rect(800, 50, 150);
+        if (this.hasAttribute('data-web-shell-message-list')) {
+          return rect(800, 600, 100);
+        }
+        return rect(800, 50, 0);
+      });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveLoad = resolve;
+        }),
+    );
+    const tail = [
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(tail, undefined, {
+      sessionKey: 'session-a',
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    try {
+      // Page 1 completes the split turn's head: a keep-open entry for u1.
+      await act(async () => {
+        list.dispatchEvent(new Event('scroll'));
+        await Promise.resolve();
+      });
+      rerenderMessages(c, [userMsg('u1'), ...tail], {
+        sessionKey: 'session-a',
+        hasOlderHistory: true,
+        onLoadOlderHistory,
+      });
+      await act(async () => {
+        resolveLoad();
+        await Promise.resolve();
+      });
+      expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+
+      // The user expands turn u2 explicitly: an override entry.
+      click(toggle(c, 'u2'));
+      expect(has(c, 't2')).toBe(true);
+
+      // Load 2 flies with an anchor on the visible t1 row.
+      list.scrollTop = 0;
+      await act(async () => {
+        list.dispatchEvent(new Event('scroll'));
+        await Promise.resolve();
+      });
+      expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+
+      // Direct switch to session B, which reuses the same ids, with no empty
+      // render in between and load 2 still pending: B's complete turns
+      // collapse by default — neither A's keep-open entry, nor A's override,
+      // nor A's orphaned anchor may force them open.
+      rerenderMessages(
+        c,
+        [
+          userMsg('u1'),
+          thinkingMsg('t1'),
+          asstMsg('a1'),
+          userMsg('u2'),
+          thinkingMsg('t2'),
+          asstMsg('a2'),
+        ],
+        { sessionKey: 'session-b', hasOlderHistory: true, onLoadOlderHistory },
+      );
+      expect(isCollapsed(c, 't1')).toBe(true);
+      expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+      expect(isCollapsed(c, 't2')).toBe(true);
+      expect(toggleRow(c, 'u2').getAttribute('aria-expanded')).toBe('false');
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('lets the next session paginate after switching away from an in-flight load', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const resolvers: Array<() => void> = [];
+    const onLoadOlderHistory = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const sessionATail = [
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(sessionATail, undefined, {
+      sessionKey: 'session-a',
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    // Session A's load never settles: its snapshot is pending at switch time.
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // Direct switch to session B with distinct ids and no empty intermediate.
+    rerenderMessages(c, [userMsg('u5'), thinkingMsg('t5'), asstMsg('a5')], {
+      sessionKey: 'session-b',
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(isCollapsed(c, 't5')).toBe(true);
+
+    // B paginates: page 1 lands mid-turn u4...
+    list.scrollTop = 0;
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      resolvers[1]?.();
+      await Promise.resolve();
+    });
+    rerenderMessages(
+      c,
+      [
+        thinkingMsg('t4'),
+        asstMsg('a4'),
+        userMsg('u5'),
+        thinkingMsg('t5'),
+        asstMsg('a5'),
+      ],
+      { sessionKey: 'session-b', hasOlderHistory: true, onLoadOlderHistory },
+    );
+
+    // ...page 2 completes u4's head while its tail is on screen: the turn
+    // must stay expanded, detected through B's own snapshot.
+    list.scrollTop = 0;
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      resolvers[2]?.();
+      await Promise.resolve();
+    });
+    rerenderMessages(
+      c,
+      [
+        userMsg('u4'),
+        thinkingMsg('t4'),
+        asstMsg('a4'),
+        userMsg('u5'),
+        thinkingMsg('t5'),
+        asstMsg('a5'),
+      ],
+      { sessionKey: 'session-b', hasOlderHistory: true, onLoadOlderHistory },
+    );
+    expect(has(c, 't4')).toBe(true);
+    expect(toggleRow(c, 'u4').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('does not block the next session when the previous load fails after a switch', async () => {
+    let scrollHeight = 1200;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const rejects: Array<(error: Error) => void> = [];
+    const onLoadOlderHistory = vi.fn(
+      () =>
+        new Promise<void>((_, reject) => {
+          rejects.push(reject);
+        }),
+    );
+    const c = mount(
+      [
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      { sessionKey: 'session-a', hasOlderHistory: true, onLoadOlderHistory },
+    );
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // Switch while A's load is still in flight.
+    rerenderMessages(c, [userMsg('u5'), thinkingMsg('t5'), asstMsg('a5')], {
+      sessionKey: 'session-b',
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    // A's load fails only after the switch: its stale failure must not
+    // retry-block the new session's pagination.
+    await act(async () => {
+      rejects[0]?.(new Error('session A load failed'));
+      await Promise.resolve();
+    });
+
+    // B's transcript is short: pagination is underfill-driven. A live update
+    // re-renders, and the auto-load must fire.
+    scrollHeight = 600;
+    rerenderMessages(
+      c,
+      [userMsg('u5'), thinkingMsg('t5'), asstMsg('a5'), asstMsg('a5b')],
+      { sessionKey: 'session-b', hasOlderHistory: true, onLoadOlderHistory },
+    );
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears the retry block of a failed previous-session load on switch', async () => {
+    let scrollHeight = 1200;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('load failed'))
+      .mockResolvedValue(undefined);
+    const c = mount(
+      [
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      { sessionKey: 'session-a', hasOlderHistory: true, onLoadOlderHistory },
+    );
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // Switch to session B, whose transcript is short (underfill-driven
+    // pagination): A's failed load must not block B's auto-load.
+    scrollHeight = 600;
+    rerenderMessages(c, [userMsg('u5'), thinkingMsg('t5'), asstMsg('a5')], {
+      sessionKey: 'session-b',
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
   });
 
   it('does not let a live message landing mid-fetch consume the split-turn detection', async () => {
