@@ -16,7 +16,7 @@ The response contains the trimmed requested name, requested state, whether persi
 
 ## Semantics
 
-The API changes workspace `skills.disabled` and `skills.enabled` by name without consulting the runtime Skill catalog. Enabling a default-disabled Skill writes an explicit opt-in; disabling it removes the opt-in and writes a hard workspace disable. Updating one target removes target duplicates and case variants without deleting orphan entries for unavailable Skills. Names may be configured before installation, while hidden from user invocation, or while their Extension is inactive. A second identical request is a no-op.
+The API changes workspace `skills.disabled` and `skills.enabled` by name without consulting the runtime Skill catalog. Enabling a default-disabled Skill writes an explicit opt-in; disabling it removes the opt-in and writes a hard workspace disable. Updating one target removes target duplicates and case variants without deleting orphan entries for unavailable Skills. A name may be disabled before installation, while hidden from user invocation, or while its Extension is inactive. Enabling removes an existing workspace disable or records an opt-in for an effective `skills.defaultDisabled` entry; with neither condition, it is a no-op. A second identical request is also a no-op.
 
 A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries. The route retains request-shape, authentication, client identity, workspace trust, and runtime-generation gates; none of those require a Skill catalog lookup.
 
@@ -31,12 +31,13 @@ The workspace read-modify-write happens inside the daemon's per-workspace settin
 ## Activation flow
 
 1. Validate the request name, authorization, workspace trust, client identity, and runtime generation.
-2. Under the workspace settings lock, re-read every scope and commit the requested name to the workspace list.
-3. Invalidate the daemon's cached skill status.
-4. If an ACP child is live, invoke `qwen/control/workspace/skills/refresh`.
-5. The child reloads workspace-scope settings and refreshes every active session, including busy sessions.
-6. Each session reloads its own workspace settings, rebuilds and pushes `available_commands_update`, and notifies SkillManager consumers.
-7. Publish the existing workspace `settings_changed` event for each changed skill-settings key.
+2. Under the workspace settings lock, re-read every scope, compute the resulting workspace declaration changes, and commit them in at most one write.
+3. If no declaration changed, return `changed: false` without cache invalidation, refresh, or event publication.
+4. Otherwise, invalidate the daemon's cached skill status.
+5. If an ACP child is live, invoke `qwen/control/workspace/skills/refresh`.
+6. The child reloads workspace-scope settings and refreshes every active session, including busy sessions.
+7. Each session reloads its own workspace settings, rebuilds and pushes `available_commands_update`, and notifies SkillManager consumers.
+8. Publish the existing workspace `settings_changed` event for each changed skill-settings key.
 
 An in-flight model request cannot be rewritten. Subsequent skill execution checks, command snapshots, and model contexts read the new state.
 
@@ -55,6 +56,7 @@ An in-flight model request cannot be rewritten. Subsequent skill execution check
 ## Failure behavior
 
 - Persistence failure: the HTTP request fails; no ACP refresh and no event.
-- No child: persistence succeeds with `deferred`; the next child loads the setting at startup.
+- No child after a declaration changed: persistence succeeds with `deferred`; the next child loads the setting at startup.
+- No declaration change: the response reports `changed: false`; no refresh or event occurs. `activation` still reflects whether a child was live, but no activation work is needed.
 - Per-session refresh failure: persistence remains committed; successful sessions stay refreshed and the response is `partial`.
 - Child transport race: if the child disappears after the liveness check, the response is `deferred`; other refresh failures are reported as `partial`.

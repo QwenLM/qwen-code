@@ -4,8 +4,9 @@
 
 Remote Skill managers need both single and batch mutations to behave like
 workspace settings writes. A runtime Skill snapshot is not an ownership source
-for `skills.disabled` or `skills.enabled`: entries may be declared before
-installation and may intentionally outlive the currently loaded catalog.
+for `skills.disabled` or `skills.enabled`: disabled entries and applicable
+default-disabled opt-ins may be declared before installation and may
+intentionally outlive the currently loaded catalog.
 
 ## API
 
@@ -25,15 +26,16 @@ The request body is:
 
 `skillNames` is a non-empty string array with at most 100 entries. Names are
 trimmed and deduplicated case-insensitively while preserving first-seen order.
-The daemon does not read or validate against runtime Skill status. Every name
-is persisted in one locked write, and changes are applied with one live-session
-refresh. Enabling one removes a matching workspace `skills.disabled` entry and
-is otherwise a no-op, except for the existing `defaultDisabled` override
-behavior; disabling one writes `skills.disabled`. Unknown, non-user-invocable,
-inactive-Extension, and higher-scope-disabled names use the same settings path.
-Higher scopes still determine effective availability after settings merge, but
-do not prevent the workspace scope from recording its own declaration.
-Unexpected persistence and runtime-generation failures fail the whole request.
+The daemon does not read or validate against runtime Skill status. It applies
+all resulting declaration changes in at most one locked settings write and,
+when anything changed, performs one live-session refresh. Enabling one removes
+a matching workspace `skills.disabled` entry and is otherwise a no-op, except
+for the existing `defaultDisabled` override behavior; disabling one writes
+`skills.disabled`. Unknown, non-user-invocable, inactive-Extension, and
+higher-scope-disabled names use the same settings path. Higher scopes still
+determine effective availability after settings merge, but do not prevent the
+workspace scope from recording its own declaration. Unexpected persistence and
+runtime-generation failures fail the whole request.
 
 ```json
 {
