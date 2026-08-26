@@ -182,9 +182,6 @@ export function SkillsManagerPage({
   const [levelFilter, setLevelFilter] = useState<SkillLevelFilter>('all');
   const [statusFilter, setStatusFilter] =
     useState<SkillStatusFilter>('enabled');
-  const [statusOverrides, setStatusOverrides] = useState<
-    Record<string, 'ok' | 'disabled'>
-  >({});
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [busySkill, setBusySkill] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
@@ -195,14 +192,7 @@ export function SkillsManagerPage({
     text: string;
     error: boolean;
   } | null>(null);
-  const displayedSkills = useMemo(
-    () =>
-      skills.map((skill) => ({
-        ...skill,
-        status: statusOverrides[skill.name] ?? skill.status,
-      })),
-    [skills, statusOverrides],
-  );
+  const displayedSkills = skills;
   const selectedSkill = useMemo(
     () => displayedSkills.find((skill) => skill.name === selectedName),
     [displayedSkills, selectedName],
@@ -231,20 +221,6 @@ export function SkillsManagerPage({
   }, [displayedSkills]);
 
   useEffect(() => {
-    setStatusOverrides((current) => {
-      const next = { ...current };
-      let changed = false;
-      for (const skill of skills) {
-        if (next[skill.name] === skill.status) {
-          delete next[skill.name];
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [skills]);
-
-  useEffect(() => {
     embedded?.onDetailChange(Boolean(selectedSkill));
   }, [embedded, selectedSkill]);
 
@@ -254,14 +230,18 @@ export function SkillsManagerPage({
     setNotice(null);
     try {
       await setEnabled(skill.name, enabled);
-      setStatusOverrides((current) => ({
-        ...current,
-        [skill.name]: enabled ? 'ok' : 'disabled',
-      }));
-      await reload();
+      const refreshed = await reload();
+      const refreshedSkill = refreshed?.skills.find(
+        (item) => item.name.toLowerCase() === skill.name.toLowerCase(),
+      );
+      const expectedStatus = enabled ? 'ok' : 'disabled';
       setNotice({
         skillName: skill.name,
-        text: t(enabled ? 'skills.enabled' : 'skills.disabled'),
+        text: !refreshedSkill
+          ? t('skills.settingUpdated')
+          : refreshedSkill.status === expectedStatus
+            ? t(enabled ? 'skills.enabled' : 'skills.disabled')
+            : t('skills.settingUpdatedAvailabilityUnchanged'),
         error: false,
       });
     } catch (toggleError) {

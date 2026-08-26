@@ -2364,6 +2364,9 @@ const EN: Messages = {
   'skills.notToggleable': 'This skill cannot be enabled or disabled.',
   'skills.run': 'Reference skill',
   'skills.search': 'Search skills…',
+  'skills.settingUpdated': 'Workspace setting updated.',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace setting updated. Effective Skill availability did not change.',
   'skills.status': 'Status',
   'skills.status.disabled': 'disabled',
   'skills.status.enabled': 'enabled',
@@ -5291,6 +5294,9 @@ const ZH: Messages = {
   'skills.notToggleable': '此 Skill 不支持启用或禁用。',
   'skills.run': '引用 skill',
   'skills.search': '搜索 Skills…',
+  'skills.settingUpdated': 'Workspace 设置已更新。',
+  'skills.settingUpdatedAvailabilityUnchanged':
+    'Workspace 设置已更新，Skill 的实际可用状态未改变。',
   'skills.status': '状态',
   'skills.status.disabled': '已禁用',
   'skills.status.enabled': '已启用',
