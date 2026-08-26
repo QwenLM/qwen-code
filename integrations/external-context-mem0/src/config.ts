@@ -5,7 +5,7 @@
  */
 
 import { isAbsolute } from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { open, type FileHandle } from 'node:fs/promises';
 import {
   ConfigurationError,
   parseDialect,
@@ -53,12 +53,28 @@ export async function loadRuntimeConfiguration(options: {
 
 async function readConfigFile(path: string): Promise<unknown> {
   let source: Buffer;
+  let file: FileHandle | undefined;
   try {
-    source = await readFile(path);
+    file = await open(path, 'r');
+    source = Buffer.allocUnsafe(MAX_CONFIG_BYTES + 1);
+    let offset = 0;
+    while (offset < source.byteLength) {
+      const { bytesRead } = await file.read(
+        source,
+        offset,
+        source.byteLength - offset,
+        null,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    source = source.subarray(0, offset);
   } catch {
     throw new ConfigurationError(
       'Mem0 extension configuration is unavailable.',
     );
+  } finally {
+    await file?.close().catch(() => undefined);
   }
   if (source.byteLength > MAX_CONFIG_BYTES) {
     throw new ConfigurationError('Mem0 extension configuration is invalid.');

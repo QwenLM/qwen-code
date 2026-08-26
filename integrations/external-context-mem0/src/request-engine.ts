@@ -44,10 +44,13 @@ export function createRequestEngine(
       throw new Error('Provider request failed.');
     }
 
-    return normalizeResponse(
-      JSON.parse(await readBoundedBody(response)) as unknown,
-      runtime.dialect,
-    );
+    let payload: unknown;
+    try {
+      payload = JSON.parse(await readBoundedBody(response)) as unknown;
+    } catch {
+      throw new Error('Provider response is invalid.');
+    }
+    return normalizeResponse(payload, runtime.dialect);
   };
 }
 

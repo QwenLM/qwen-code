@@ -158,13 +158,17 @@ retrieval request and normalize its response. For example:
     "queryLocation": "json",
     "userIdLocation": "json.filters",
     "agentIdLocation": "json",
+    "appIdLocation": "omit",
     "limitField": "limit"
   },
   "response": {
     "collection": "results",
     "idField": "id",
     "contentField": "memory",
-    "scoreField": "score"
+    "titleField": "omit",
+    "uriField": "omit",
+    "scoreField": "score",
+    "updatedAtField": "omit"
   }
 }
 ```

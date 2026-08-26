@@ -82,6 +82,48 @@ describe('bounded Mem0 request engine', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it('sends bearer authentication when selected by the dialect', async () => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+    const configured = runtime(fixture);
+    configured.dialect = {
+      ...configured.dialect,
+      auth: 'authorization-bearer',
+    };
+    const fetcher: FetchLike = vi.fn(async (_input, init) => {
+      expect(new Headers(init?.headers).get('authorization')).toBe(
+        'Bearer fixture-token',
+      );
+      return Response.json({ results: [] });
+    });
+
+    await createRequestEngine(
+      configured,
+      fetcher,
+    )({
+      query: fixture.query,
+      signal: AbortSignal.timeout(5000),
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a non-success provider response', async () => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+    const fetcher: FetchLike = vi.fn(
+      async () => new Response('upstream details', { status: 500 }),
+    );
+
+    await expect(
+      createRequestEngine(
+        runtime(fixture),
+        fetcher,
+      )({
+        query: fixture.query,
+        signal: AbortSignal.timeout(5000),
+      }),
+    ).rejects.toThrow('Provider request failed.');
+  });
+
   it('caps the response before parsing it', async () => {
     const fixture = await readFixture('synthetic-filtered-post-v1.json');
     const fetcher: FetchLike = vi.fn(async () =>
@@ -122,6 +164,41 @@ describe('bounded Mem0 request engine', () => {
   it('rejects a response whose collection does not match the dialect', async () => {
     const fixture = await readFixture('synthetic-filtered-post-v1.json');
     const fetcher: FetchLike = vi.fn(async () => Response.json({ items: [] }));
+
+    await expect(
+      createRequestEngine(
+        runtime(fixture),
+        fetcher,
+      )({
+        query: fixture.query,
+        signal: AbortSignal.timeout(5000),
+      }),
+    ).rejects.toThrow('Provider response is invalid.');
+  });
+
+  it('rejects invalid UTF-8 in a successful provider response', async () => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+    const response = Buffer.concat([
+      Buffer.from('{"results":[{"id":"memory-1","memory":"'),
+      Buffer.from([0xc3, 0x28]),
+      Buffer.from('"}]}'),
+    ]);
+    const fetcher: FetchLike = vi.fn(async () => new Response(response));
+
+    await expect(
+      createRequestEngine(
+        runtime(fixture),
+        fetcher,
+      )({
+        query: fixture.query,
+        signal: AbortSignal.timeout(5000),
+      }),
+    ).rejects.toThrow('Provider response is invalid.');
+  });
+
+  it('rejects malformed JSON in a successful provider response', async () => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+    const fetcher: FetchLike = vi.fn(async () => new Response('not JSON'));
 
     await expect(
       createRequestEngine(

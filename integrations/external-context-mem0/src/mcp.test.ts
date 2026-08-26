@@ -179,9 +179,37 @@ describe('Mem0 External Context MCP server', () => {
     await expect(result).rejects.toThrow();
     await vi.waitFor(() => expect(providerSignal?.aborted).toBe(true));
   });
+
+  it('returns a bounded error when the provider timeout aborts the search', async () => {
+    let providerSignal: AbortSignal | undefined;
+    const search = vi.fn<SearchProvider>(
+      ({ signal }) =>
+        new Promise<never>((_resolve, reject) => {
+          providerSignal = signal;
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const client = await connect(search, 100);
+
+    const result = await client.callTool({
+      name: 'context_search',
+      arguments: { query: 'time out this search' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([
+      { type: 'text', text: 'External context search failed.' },
+    ]);
+    expect(providerSignal?.aborted).toBe(true);
+  });
 });
 
-async function connect(search: SearchProvider): Promise<Client> {
+async function connect(
+  search: SearchProvider,
+  timeoutMs = 5000,
+): Promise<Client> {
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
   const server = createMem0McpServer({
@@ -191,7 +219,7 @@ async function connect(search: SearchProvider): Promise<Client> {
       endpoint: { origin: 'https://memory.example.com' },
       credentialEnv: 'SYNTHETIC_MEMORY_TOKEN',
       scope: {},
-      timeoutMs: 5000,
+      timeoutMs,
     }),
     search,
   });

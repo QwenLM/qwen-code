@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Ajv, type AnySchema } from 'ajv';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadRuntimeConfiguration } from './config.js';
+import { buildSearchUrl, loadRuntimeConfiguration } from './config.js';
 import {
   ConfigurationError,
   parseDialect,
@@ -74,6 +74,17 @@ describe('Mem0 Extension schemas', () => {
     ).toThrow(ConfigurationError);
   });
 
+  it('rejects unsupported instance and dialect versions', async () => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+
+    expect(() =>
+      parseInstanceConfig({ ...fixture.instance, schemaVersion: 2 }),
+    ).toThrow(ConfigurationError);
+    expect(() =>
+      parseDialect({ ...fixture.dialect, dialectVersion: 2 }),
+    ).toThrow(ConfigurationError);
+  });
+
   it('loads one preset, credential, endpoint, and scope at startup', async () => {
     const fixture = await readFixture('synthetic-query-get-v1.json');
     const instance = structuredClone(fixture.instance) as unknown as Record<
@@ -135,6 +146,100 @@ describe('Mem0 Extension schemas', () => {
         env: { QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: configPath },
       }),
     ).rejects.toThrow('configuration is unavailable');
+  });
+
+  it('fails closed for unavailable, malformed, and oversized configuration files', async () => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+    const presets = new Map([[fixture.dialect.id, fixture.dialect]]);
+    const directory = await makeTemporaryDirectory();
+    const environment = {
+      SYNTHETIC_MEMORY_TOKEN: 'runtime-token',
+    };
+
+    await expect(
+      loadRuntimeConfiguration({
+        presets,
+        env: {
+          ...environment,
+          QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: join(directory, 'missing.json'),
+        },
+      }),
+    ).rejects.toThrow('configuration is unavailable');
+
+    const malformedPath = await writeConfigSource('{');
+    await expect(
+      loadRuntimeConfiguration({
+        presets,
+        env: {
+          ...environment,
+          QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: malformedPath,
+        },
+      }),
+    ).rejects.toThrow('configuration is invalid');
+
+    const exactLimitSource = JSON.stringify(fixture.instance).padEnd(
+      64 * 1024,
+      ' ',
+    );
+    const exactLimitPath = await writeConfigSource(exactLimitSource);
+    await expect(
+      loadRuntimeConfiguration({
+        presets,
+        env: {
+          ...environment,
+          QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: exactLimitPath,
+        },
+      }),
+    ).resolves.toMatchObject({ dialect: { id: fixture.dialect.id } });
+
+    const oversizedPath = await writeConfigSource(`${exactLimitSource} `);
+    await expect(
+      loadRuntimeConfiguration({
+        presets,
+        env: {
+          ...environment,
+          QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: oversizedPath,
+        },
+      }),
+    ).rejects.toThrow('configuration is invalid');
+  });
+
+  it('rejects a preset whose id differs from its registry key', async () => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+    const configPath = await writeConfig(fixture.instance);
+
+    await expect(
+      loadRuntimeConfiguration({
+        presets: new Map([
+          [
+            fixture.instance.preset,
+            { ...fixture.dialect, id: 'different-preset-v1' },
+          ],
+        ]),
+        env: {
+          QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: configPath,
+          SYNTHETIC_MEMORY_TOKEN: 'runtime-token',
+        },
+      }),
+    ).rejects.toThrow('preset is invalid');
+  });
+
+  it('joins a trailing-slash base path without introducing a double slash', async () => {
+    const fixture = await readFixture('synthetic-filtered-post-v1.json');
+    const instance = structuredClone(fixture.instance);
+    instance.endpoint.basePath = '/tenant-a/';
+    const configPath = await writeConfig(instance);
+    const runtime = await loadRuntimeConfiguration({
+      presets: new Map([[fixture.dialect.id, fixture.dialect]]),
+      env: {
+        QWEN_EXTERNAL_CONTEXT_MEM0_CONFIG: configPath,
+        SYNTHETIC_MEMORY_TOKEN: 'runtime-token',
+      },
+    });
+
+    expect(buildSearchUrl(runtime.instance, runtime.dialect).href).toBe(
+      'https://memory.example.com/tenant-a/v2/memories/search/',
+    );
   });
 
   it('accepts explicitly opted-in plain HTTP', async () => {
@@ -267,9 +372,18 @@ async function readJson(relativePath: string): Promise<unknown> {
 }
 
 async function writeConfig(value: unknown): Promise<string> {
+  return writeConfigSource(JSON.stringify(value));
+}
+
+async function writeConfigSource(value: string | Buffer): Promise<string> {
+  const directory = await makeTemporaryDirectory();
+  const path = join(directory, 'config.json');
+  await writeFile(path, value);
+  return path;
+}
+
+async function makeTemporaryDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), 'qwen-mem0-config-'));
   temporaryDirectories.push(directory);
-  const path = join(directory, 'config.json');
-  await writeFile(path, JSON.stringify(value));
-  return path;
+  return directory;
 }
