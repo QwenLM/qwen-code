@@ -3977,6 +3977,11 @@ export function WebShellSidebar({
         : needsUserInput
           ? t('sidebar.userInputNeeded')
           : null;
+      const attentionShortLabel = session.isWaitingForPermission
+        ? t('sidebar.waitingForApprovalShort')
+        : needsUserInput
+          ? t('sidebar.userInputNeededShort')
+          : null;
       const showPin = canOrganizeSession(session, 'pin');
       const showArchive =
         sessionActionItems.has('archive') && canMutateSessionArchive(session);
@@ -4083,7 +4088,7 @@ export function WebShellSidebar({
                     )}
                     aria-label={attentionLabel}
                   >
-                    {attentionLabel}
+                    {attentionShortLabel}
                   </span>
                 )}
                 {session.hasActivePrompt ? (
