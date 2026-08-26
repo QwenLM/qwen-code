@@ -26285,6 +26285,25 @@ describe('createServeApp', () => {
       expect(bridge.updateMetadataCalls).toHaveLength(0);
     });
 
+    it('400 invalid_metadata when the pr state is not open/merged/closed', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      for (const state of ['draft', 'MERGED', '']) {
+        const res = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({
+          pr: { number: 1, url: 'https://github.com/o/r/pull/1', state },
+        });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_metadata');
+        expect(res.body.field).toBe('pr');
+        expect(res.body.error).toContain('state');
+      }
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+    });
+
     it('400 invalid_metadata when the pr url exceeds the length cap', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, {

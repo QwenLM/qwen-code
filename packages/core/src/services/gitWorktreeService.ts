@@ -1601,6 +1601,15 @@ export class GitWorktreeService {
     if (slug.includes('..') || slug.startsWith('.') || slug.startsWith('-')) {
       return 'Worktree name must not start with "." or "-" or contain "..".';
     }
+    if (/^pr-[1-9]\d{0,8}$/.test(slug)) {
+      // `--worktree=#<N>` launches own this shape; a user-chosen slug with
+      // it would bind the session to PR N (and take the sweep's state
+      // stamps) although the session never touched that PR.
+      return (
+        'Worktree name must not look like "pr-<number>": that shape is ' +
+        'reserved for PR-backed worktrees.'
+      );
+    }
     if (slug.startsWith(`${AGENT_WORKTREE_PREFIX}-`)) {
       // The exact `agent-<7hex>` slugs that `generateAgentWorktreeSlug`
       // produces ARE allowed — those are the legitimate ephemeral

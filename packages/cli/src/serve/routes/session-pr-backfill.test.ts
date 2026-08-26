@@ -205,6 +205,11 @@ describe('backfillWorkspaceSessionPrs', () => {
     const result = await backfillWorkspaceSessionPrs(runtime);
 
     expect(result).toMatchObject({ scanned: 1, bound: 1, unresolved: 0 });
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
+      workspaceCwd,
+      undefined,
+      { state: 'all', limit: 500, slim: true },
+    );
     const prs = await readSessionPrs(
       sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
     );
@@ -305,6 +310,10 @@ describe('backfillWorkspaceSessionPrs', () => {
     const result = await backfillWorkspaceSessionPrs(runtime);
 
     expect(result).toMatchObject({ bound: 0, alreadyBound: 1 });
+    // A mutant that re-upserts already-bound numbers would refresh
+    // createdAt and violate the binding-time order the badge renders by.
+    const after = await readSessionPrs(prPath);
+    expect(after?.[0]?.createdAt).toBe('2026-08-01T00:00:00.000Z');
   });
 
   it('scans sessions without worktree sidecars without binding them', async () => {
