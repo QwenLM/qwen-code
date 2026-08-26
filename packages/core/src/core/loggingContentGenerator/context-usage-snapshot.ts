@@ -132,50 +132,66 @@ function extractMemoryTokens(
   return { systemInstruction: remaining, memoryTokens };
 }
 
-function loadedSkillBodies(config: Config): Map<string, number> {
+type LoadedSkillBodies = {
+  tokensByOutput: Map<string, number>;
+  outputByHeader: Map<string, string | undefined>;
+};
+
+function indexLoadedSkillBodies(outputs: Iterable<string>): LoadedSkillBodies {
+  const tokensByOutput = new Map<string, number>();
+  const outputByHeader = new Map<string, string | undefined>();
+  for (const output of outputs) {
+    if (tokensByOutput.has(output)) continue;
+    tokensByOutput.set(output, estimateContextTextTokens(output));
+    const lineEnd = output.indexOf('\n');
+    const header = lineEnd < 0 ? output : output.slice(0, lineEnd);
+    if (!outputByHeader.has(header)) {
+      outputByHeader.set(header, output);
+    } else if (outputByHeader.get(header) !== output) {
+      outputByHeader.set(header, undefined);
+    }
+  }
+  return { tokensByOutput, outputByHeader };
+}
+
+function loadedSkillBodies(config: Config): LoadedSkillBodies {
   const skillTool = config.getToolRegistry().getTool(ToolNames.SKILL);
   if (
     !skillTool ||
     !('getLoadedSkillNames' in skillTool) ||
     typeof skillTool.getLoadedSkillNames !== 'function'
   ) {
-    return new Map();
+    return indexLoadedSkillBodies([]);
   }
 
   if (
     'getLoadedSkillContents' in skillTool &&
     typeof skillTool.getLoadedSkillContents === 'function'
   ) {
-    return new Map(
-      [...(skillTool.getLoadedSkillContents() as ReadonlySet<string>)].map(
-        (content) => [content, estimateContextTextTokens(content)],
-      ),
+    return indexLoadedSkillBodies(
+      skillTool.getLoadedSkillContents() as ReadonlySet<string>,
     );
   }
 
   const cachedSkills = config.getSkillManager()?.getCachedSkills();
-  if (!cachedSkills) return new Map();
+  if (!cachedSkills) return indexLoadedSkillBodies([]);
 
   const loadedNames = skillTool.getLoadedSkillNames() as ReadonlySet<string>;
-  const indexedBodies = new Map<string, number>();
+  const outputs: string[] = [];
   for (const skill of cachedSkills) {
     if (!loadedNames.has(skill.name)) continue;
-    const output = buildSkillLlmContent(
-      path.dirname(skill.filePath),
-      skill.body,
+    outputs.push(
+      buildSkillLlmContent(path.dirname(skill.filePath), skill.body),
     );
-    if (!indexedBodies.has(output)) {
-      indexedBodies.set(output, estimateContextTextTokens(output));
-    }
   }
-  return indexedBodies;
+  return indexLoadedSkillBodies(outputs);
 }
 
 function attributeLoadedSkillBodies(
   contents: Content[],
-  indexedBodies: Map<string, number>,
+  indexedBodies: LoadedSkillBodies,
 ): { contents: Content[]; skillBodyTokens: number } {
-  if (indexedBodies.size === 0) {
+  if (indexedBodies.tokensByOutput.size === 0) {
     return { contents, skillBodyTokens: 0 };
   }
 
@@ -189,17 +205,30 @@ function attributeLoadedSkillBodies(
       if (response?.name !== ToolNames.SKILL || typeof output !== 'string') {
         return part;
       }
-      const tokens = indexedBodies.get(output);
+      let matchedOutput = output;
+      let tokens = indexedBodies.tokensByOutput.get(output);
+      if (tokens === undefined) {
+        const lineEnd = output.indexOf('\n');
+        const header = lineEnd < 0 ? output : output.slice(0, lineEnd);
+        const candidate = indexedBodies.outputByHeader.get(header);
+        if (candidate && output.startsWith(`${candidate}\n`)) {
+          matchedOutput = candidate;
+          tokens = indexedBodies.tokensByOutput.get(candidate);
+        }
+      }
       if (tokens === undefined) return part;
 
-      indexedBodies.delete(output);
+      indexedBodies.tokensByOutput.delete(matchedOutput);
       skillBodyTokens += tokens;
       partsChanged = true;
       return {
         ...part,
         functionResponse: {
           ...response,
-          response: { ...response.response, output: '' },
+          response: {
+            ...response.response,
+            output: output.slice(matchedOutput.length),
+          },
         },
       };
     });

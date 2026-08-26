@@ -182,10 +182,13 @@ historical attribution. One pass over request parts matches only parts whose
 `functionResponse.name === "skill"`, comparing
 `functionResponse.response.output` exactly against the retained outputs. It
 does not stringify the whole part or match `parts[].text`. A matched output is
-counted once in `skills_tokens` and excluded from `messages_tokens`. This avoids
-substring matches and per-skill scans of the full request. Subsequent
-already-loaded confirmations and microcompacted outputs do not match the
-indexed first-load body and remain in `messages_tokens`. When compaction has
+counted once in `skills_tokens` and excluded from `messages_tokens`. A body
+followed by the scheduler's newline context-appending boundary is also matched;
+only the immutable body is attributed to `skills_tokens`, while the suffix
+remains in `messages_tokens`. Truncation and persistence wrappers do not
+retain that exact body prefix and therefore remain entirely in
+`messages_tokens`. Subsequent already-loaded confirmations and microcompacted
+outputs likewise do not match the indexed first-load body. When compaction has
 removed the exact body, no body tokens are added to `skills_tokens`; any
 remaining summary stays in `messages_tokens`. The attribute remains complete
 and non-blocking, while `estimated: true` communicates that attribution is

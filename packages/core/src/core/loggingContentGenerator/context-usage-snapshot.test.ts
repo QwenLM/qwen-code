@@ -22,6 +22,8 @@ import { DiscoveredMCPTool } from '../../tools/mcp-tool.js';
 import { buildSkillLlmContent } from '../../tools/skill-utils.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { serializeContextUsage } from '../../telemetry/context-usage.js';
+import { convertToFunctionResponse } from '../coreToolScheduler.js';
+import { appendAdditionalContext } from '../toolHookTriggers.js';
 import { createContextUsageSnapshot } from './context-usage-snapshot.js';
 
 function createConfig(options?: {
@@ -310,6 +312,97 @@ describe('createContextUsageSnapshot', () => {
           ],
         },
       ]),
+    );
+  });
+
+  it('attributes a retained Skill body while leaving an appended hook suffix in messages', () => {
+    const loadedOutput = buildSkillLlmContent(
+      '/skills/example-skill',
+      '# Example body',
+    );
+    const responseParts = convertToFunctionResponse(
+      ToolNames.SKILL,
+      'skill-call',
+      appendAdditionalContext([{ text: loadedOutput }], 'hook context'),
+    );
+    const output = responseParts[0]?.functionResponse?.response?.['output'];
+    expect(typeof output).toBe('string');
+    const hookSuffix = (output as string).slice(loadedOutput.length);
+    const request: GenerateContentParameters = {
+      model: 'test-model',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: ToolNames.SKILL,
+                response: { output },
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const config = createConfig({
+      loadedSkillContents: new Set([loadedOutput]),
+    });
+
+    const snapshot = createContextUsageSnapshot(request, config, 200_000);
+
+    expect(snapshot?.breakdown.skills_tokens).toBe(
+      estimateContextTextTokens(loadedOutput),
+    );
+    expect(snapshot?.breakdown.messages_tokens).toBe(
+      estimateContentTokens([
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: ToolNames.SKILL,
+                response: { output: hookSuffix },
+              },
+            },
+          ],
+        },
+      ]),
+    );
+  });
+
+  it.each([
+    ['truncated', 'Tool output was too large and has been truncated\npreview'],
+    ['persisted', '<persisted-output>\npreview\n</persisted-output>'],
+  ])('keeps a %s Skill output in messages', (_, transformedOutput) => {
+    const loadedOutput = buildSkillLlmContent(
+      '/skills/example-skill',
+      '# Example body',
+    );
+    const request: GenerateContentParameters = {
+      model: 'test-model',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: ToolNames.SKILL,
+                response: { output: transformedOutput },
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const config = createConfig({
+      loadedSkillContents: new Set([loadedOutput]),
+    });
+
+    const snapshot = createContextUsageSnapshot(request, config, 200_000);
+
+    expect(snapshot?.breakdown.skills_tokens).toBe(0);
+    expect(snapshot?.breakdown.messages_tokens).toBe(
+      estimateContentTokens(request.contents as Content[]),
     );
   });
 
