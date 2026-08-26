@@ -154,6 +154,18 @@ export interface ScratchTreeArgs {
  */
 const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
 
+// A ceiling on the screen's own read-only git calls. Every candidate path
+// they touch lives in the never-wiped common dir — the planting surface — so
+// a FIFO (or any file that never answers a read) mkfifo'd at a config path or
+// a worktree-admin `gitdir` wedges `spawnSync` forever with no `timeout`,
+// and the screen that exists to emit a fail-closed refusal instead hangs
+// indefinitely (R19-4, probed live). Expiry sets `r.error`, which every
+// caller here already reads as the fail-closed answer. Generous enough that a
+// loaded machine's slow `git config` never trips it, short enough that a
+// wedge is caught in seconds. The regular-file gate below closes the arms a
+// timeout alone cannot (a `git worktree add` that reads a FIFO admin entry).
+const GIT_READ_TIMEOUT_MS = 30_000;
+
 // Repo-local key shapes git never executes, whatever value they hold — the
 // fail-closed half of the screen in `localCommandConfig`. A shape listed here
 // must stay inert for EVERY value; anything executable, or uncertifiable,
@@ -163,6 +175,15 @@ const INERT_KEY_SHAPES: RegExp[] = [
   // `core.worktree` — written by `git submodule` into every module gitdir —
   // is value-checked below: it redirects where checkouts WRITE (R18-3).
   /^core\.(repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks|sharedrepository)$/,
+  // Sparse-checkout selectors: booleans (and `index.sparse`) that change
+  // which tracked paths a checkout writes, never a command. `actions/checkout`
+  // and other CI plumbing set them repo-locally, so refusing them left the
+  // screen unable to certify a GitHub Actions checkout at all — the tree it
+  // ships never stood up in that environment (R19-6). The sparse-checkout
+  // PATTERNS live in `<gitdir>/info/sparse-checkout`, not in config, so no
+  // value here carries a path git executes.
+  /^core\.(sparsecheckout|sparsecheckoutcone)$/,
+  /^index\.sparse$/,
   // Identity and per-branch plumbing — names, addresses, refs, booleans.
   /^(user|author|committer)\./,
   /^branch\./,
@@ -246,19 +267,135 @@ const VALUE_CHECKED_SHAPES: Array<{
     valueIsInert: (value, ctx) => {
       const v = value.trim();
       if (v === '' || v.startsWith('~') || isAbsolute(v)) return false;
-      const target = resolve(dirname(ctx.file), v);
+      const lexical = resolve(dirname(ctx.file), v);
+      // `resolve()` is purely lexical — it neither follows symlinks nor folds
+      // case — so a value naming a symlink inside a registered worktree
+      // (R19-1), or a case variant like `../.GIT` that lands on the common
+      // dir on a case-insensitive volume (R19-3), passes lexical containment
+      // while git writes the checkout THROUGH it to an arbitrary directory.
+      // Certify the REAL destination: realpath the target and every anchor so
+      // the comparison is what git will actually reach. Fail closed when the
+      // target cannot be resolved — a value pointing where git cannot chdir
+      // writes nothing, and an uncertifiable one is refused by construction.
+      const real = (p: string): string | null => {
+        try {
+          return realpathSync(p);
+        } catch {
+          return null;
+        }
+      };
+      const target = real(lexical);
+      if (target === null) return false;
       // The common dir sits INSIDE the main worktree's path in the standard
       // layout, so containment alone admits it — and a checkout aimed there
-      // writes through the hooks dir and the metadata git executes from.
-      if (target === ctx.commonDir || target.startsWith(ctx.commonDir + sep)) {
+      // writes through the hooks dir and the metadata git executes from. A
+      // common dir that will not resolve certifies nothing — refuse rather
+      // than fall through to the roots check, where the (unrefused) common dir
+      // is itself contained by the main worktree root.
+      const common = real(ctx.commonDir);
+      if (
+        common === null ||
+        target === common ||
+        target.startsWith(common + sep)
+      ) {
         return false;
       }
-      return ctx.worktreeRoots.some(
-        (root) => target === root || target.startsWith(root + sep),
-      );
+      return ctx.worktreeRoots.some((root) => {
+        const rr = real(root);
+        return rr !== null && (target === rr || target.startsWith(rr + sep));
+      });
     },
   },
 ];
+
+// The config files git reads at the STARTUP of every call in the worktree —
+// the common `config`, and the worktree's own `config.worktree` once
+// `extensions.worktreeConfig` is on — are read before any screen or timeout,
+// so a FIFO/socket/device planted at one wedges even the first
+// `--show-toplevel` read (R19-4). Gate them with pure-filesystem `stat`s
+// before any git process is spawned: derive the gitdir and common dir from the
+// worktree's own `.git` (a directory for the main worktree, a `gitdir:` file
+// for a linked one — whose grandparent is the common dir) and refuse a `.git`,
+// a `config`, or a `config.worktree` that is not a regular file (or a clean
+// absence). `stat` never opens the inode, so it cannot itself hang. `null` is
+// the safe state.
+function startupWorktreeConfigRefusal(worktree: string): string | null {
+  const dotgit = join(worktree, '.git');
+  let st;
+  try {
+    st = statSync(dotgit);
+  } catch {
+    // Absent or dangling `.git` — the `--show-toplevel` gate reports it.
+    return null;
+  }
+  let gitdir: string;
+  let common: string;
+  if (st.isDirectory()) {
+    gitdir = dotgit;
+    common = dotgit;
+  } else if (st.isFile()) {
+    let match: RegExpExecArray | null;
+    try {
+      match = /^gitdir:\s*(.*)$/.exec(readFileSync(dotgit, 'utf8').trim());
+    } catch {
+      return null;
+    }
+    if (!match) return null;
+    gitdir = resolve(worktree, match[1].trim());
+    // A linked worktree's gitdir is `<common>/worktrees/<name>`.
+    common = dirname(dirname(gitdir));
+  } else {
+    // A FIFO/socket/device at `.git` blocks git the moment it opens it.
+    return '(the worktree .git is not a regular file or directory)';
+  }
+  const gate: Array<[string, string]> = [
+    [join(common, 'config'), 'config'],
+    [join(gitdir, 'config.worktree'), 'config.worktree'],
+  ];
+  for (const [path, label] of gate) {
+    try {
+      if (!statSync(path).isFile()) {
+        return `(the worktree ${label} is not a regular file)`;
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        return `(the worktree ${label} could not be read)`;
+      }
+    }
+  }
+  return null;
+}
+
+// lstat the superproject's worktree-admin metadata (`<common>/worktrees/*/{
+// gitdir,commondir}`) and refuse anything that is not a regular file, BEFORE
+// any git call reads it. A FIFO/socket/device there wedges `git worktree
+// list` and the timeout-less `git worktree add` forever; catching it with a
+// non-blocking `lstat` turns the wedge into a fail-closed refusal (R19-4).
+// `null` means every admin metadata file is a regular file or genuinely
+// absent — the safe state.
+function worktreeAdminMetaRefusal(common: string): string | null {
+  let entries: string[];
+  try {
+    entries = readdirSync(join(common, 'worktrees'));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    return '(the worktrees admin directory could not be listed)';
+  }
+  for (const entry of entries) {
+    for (const meta of ['gitdir', 'commondir'] as const) {
+      try {
+        if (!lstatSync(join(common, 'worktrees', entry, meta)).isFile()) {
+          return `(a worktree admin ${meta} is not a regular file)`;
+        }
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          return `(a worktree admin ${meta} could not be read)`;
+        }
+      }
+    }
+  }
+  return null;
+}
 
 /**
  * The repo-local config entries this screen cannot certify as inert.
@@ -295,7 +432,12 @@ function localCommandConfig(worktree: string): string[] {
   const files = spawnSync(
     'git',
     ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+      timeout: GIT_READ_TIMEOUT_MS,
+    },
   );
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
     // Fail closed: with the candidates unknowable, nothing can be certified.
@@ -303,6 +445,14 @@ function localCommandConfig(worktree: string): string[] {
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
+  // A FIFO/socket/device planted at a worktree admin `gitdir`/`commondir`
+  // wedges both `git worktree list` (below) and the later `git worktree add`
+  // (which carries no timeout) — a plant in the never-wiped common dir that
+  // hangs the screen instead of tripping it. lstat every admin metadata file
+  // BEFORE any git call reads it and fail closed on anything that is not a
+  // regular file, so the wedge becomes an instant refusal (R19-4).
+  const adminMetaRefusal = worktreeAdminMetaRefusal(common);
+  if (adminMetaRefusal) return [adminMetaRefusal];
   // Registered worktree paths anchor the core.worktree value check below;
   // a list that cannot be read certifies nothing — fail closed there.
   const worktreeRoots = registeredWorktreePaths(worktree);
@@ -368,7 +518,24 @@ function localCommandConfig(worktree: string): string[] {
   candidates.push(...layout.worktreeConfigs);
   const found: string[] = [];
   for (const file of candidates) {
-    if (!existsSync(file)) continue;
+    // A FIFO/socket/device at a candidate config path wedges `git config
+    // --file` (the read timeout catches it, but a regular-file gate turns a
+    // multi-second hang into an instant fail-closed refusal); a directory or
+    // a symlink there is uncertifiable too. Only a plain regular file is a
+    // config file — anything else planted at a config path is refused, and a
+    // genuine absence (ENOENT) is simply skipped (R19-4).
+    let st;
+    try {
+      st = lstatSync(file);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      found.push(`${file} (unreadable or malformed)`);
+      continue;
+    }
+    if (!st.isFile()) {
+      found.push(`${file} (unreadable or malformed)`);
+      continue;
+    }
     const keys = configKeysIn(file, worktree);
     if (keys === null) {
       found.push(`${file} (unreadable or malformed)`);
@@ -398,7 +565,12 @@ function configKeysIn(file: string, worktree: string): string[] | null {
   const r = spawnSync(
     'git',
     ['config', '--file', file, '--list', '--name-only', '-z'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+      timeout: GIT_READ_TIMEOUT_MS,
+    },
   );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return null;
   return r.stdout.split('\0').filter(Boolean);
@@ -412,7 +584,12 @@ function configValuesIn(
   const r = spawnSync(
     'git',
     ['config', '--file', file, '--get-all', '--null', key],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+      timeout: GIT_READ_TIMEOUT_MS,
+    },
   );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return null;
   return r.stdout.split('\0').filter(Boolean);
@@ -498,6 +675,67 @@ function submoduleLayoutUnder(base: string): {
   return { gitdirs, worktreeConfigs };
 }
 
+/**
+ * Whether the common dir the review worktree self-reports can be trusted as
+ * the surface to scan.
+ *
+ * Both screens take the common dir from `git rev-parse --git-common-dir`,
+ * which resolves it through the worktree's admin `commondir` file — a file
+ * that lives in the never-wiped common dir, the planting surface itself.
+ * Rewriting it redirects the self-report to an attacker-controlled decoy git
+ * dir, so the fail-closed screens certify the decoy and never scan the real
+ * common dir carrying the plant, while `--show-toplevel` and the per-worktree
+ * HEAD are unaffected so nothing upstream notices (R19-5). Derive the common
+ * dir STRUCTURALLY from the worktree's own `.git` — which sits in the
+ * worktree, not in the common dir — and refuse when it disagrees with the
+ * self-report. Git's linked-worktree layout is fixed: the `.git` gitfile
+ * names the admin entry `<common>/worktrees/<name>`, whose grandparent is the
+ * common dir; a main worktree's `.git` IS the common dir. A non-standard
+ * layout that legitimately diverges (a moved or separate git dir) degrades to
+ * a refusal — fail-closed, like every other uncertifiable state here.
+ */
+function commonDirSelfReportTrustworthy(worktree: string): boolean {
+  const reported = spawnSync(
+    'git',
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+      timeout: GIT_READ_TIMEOUT_MS,
+    },
+  );
+  if (
+    reported.error ||
+    reported.status !== 0 ||
+    typeof reported.stdout !== 'string'
+  ) {
+    return false;
+  }
+  const dotgit = join(worktree, '.git');
+  try {
+    const reportedCommon = realpathSync(reported.stdout.trim());
+    const st = lstatSync(dotgit);
+    let structural: string;
+    if (st.isDirectory()) {
+      // Main worktree: `.git` IS the common dir.
+      structural = realpathSync(dotgit);
+    } else if (st.isFile()) {
+      const match = /^gitdir:\s*(.*)$/.exec(
+        readFileSync(dotgit, 'utf8').trim(),
+      );
+      if (!match) return false;
+      const admin = resolve(worktree, match[1].trim());
+      structural = realpathSync(dirname(dirname(admin)));
+    } else {
+      return false;
+    }
+    return structural === reportedCommon;
+  } catch {
+    return false;
+  }
+}
+
 // The paths `git worktree list` records — the containment anchors for the
 // core.worktree value check (R18-3). An unreadable list certifies nothing:
 // the check then admits no value, and the screen fails closed on the key.
@@ -506,12 +744,31 @@ function registeredWorktreePaths(worktree: string): string[] {
     cwd: worktree,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
+    timeout: GIT_READ_TIMEOUT_MS,
   });
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') return [];
   const roots: string[] = [];
-  for (const line of r.stdout.split('\n')) {
-    if (!line.startsWith('worktree ')) continue;
-    roots.push(line.slice('worktree '.length));
+  // Porcelain records are blank-line separated. `git worktree list` emits a
+  // `worktree ` line even for a broken admin entry an attacker plants in the
+  // common dir (`<common>/worktrees/x/gitdir` pointing anywhere) and marks
+  // that entry `prunable`. Admitting such a root unfiltered lets a plant
+  // widen the containment anchors the `core.worktree` value check trusts,
+  // aiming a checkout at an attacker-chosen directory (R19-2). Drop every
+  // block git itself flags prunable; the survivors are realpath'd where they
+  // are compared, so the containment test is canonical rather than lexical.
+  // (A fully self-consistent forgery — a `.git` gitfile planted at the target
+  // that round-trips — is not prunable and remains at the boundary this
+  // screen already lives on: an adversary with common-dir write also has
+  // direct hook/config execution, which the screens above refuse.)
+  for (const block of r.stdout.split('\n\n')) {
+    const lines = block.split('\n');
+    if (
+      lines.some((line) => line === 'prunable' || line.startsWith('prunable '))
+    ) {
+      continue;
+    }
+    const wt = lines.find((line) => line.startsWith('worktree '));
+    if (wt) roots.push(wt.slice('worktree '.length));
   }
   return roots;
 }
@@ -537,7 +794,12 @@ function localExecutableHooks(worktree: string): string[] {
   const r = spawnSync(
     'git',
     ['rev-parse', '--git-common-dir', '--git-path', 'hooks'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+      timeout: GIT_READ_TIMEOUT_MS,
+    },
   );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
     // Fail closed, like the config screen.
@@ -561,12 +823,22 @@ function localExecutableHooks(worktree: string): string[] {
     cwd: worktree,
     encoding: 'utf8',
     env: sanitizedGitEnv(),
+    timeout: GIT_READ_TIMEOUT_MS,
   });
   const redirectValue =
     redirect.status === 0 && typeof redirect.stdout === 'string'
       ? redirect.stdout.trim()
       : '';
-  if (redirectValue !== '' && !isAbsolute(redirectValue)) {
+  // A `~`-leading value is NOT the per-cwd relative shape this refuses: git
+  // expands `~`/`~user` through `$HOME`/passwd, deterministically and
+  // independent of cwd, and `hooksPath` above already carries that expanded
+  // absolute path (`--git-path hooks` expands it) — so admit it and let the
+  // resolved dir decide, exactly as an absolute value is honored (R19-7).
+  if (
+    redirectValue !== '' &&
+    !isAbsolute(redirectValue) &&
+    !redirectValue.startsWith('~')
+  ) {
     return ['(the hooks redirect could not be certified)'];
   }
   // The resolved path honors any hooksPath redirect; only the default dirs
@@ -865,6 +1137,19 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     );
   }
 
+  // BEFORE the first git process is spawned: a FIFO planted at the worktree's
+  // own `.git` or `config.worktree` wedges git at startup, past the timeout on
+  // the reads below (`gitOut` here carries none), so a pure-filesystem gate
+  // has to catch it first (R19-4).
+  const startupRefusal = startupWorktreeConfigRefusal(worktree);
+  if (startupRefusal) {
+    return unavailable(
+      `the review worktree ${worktree} carries a git-startup file that cannot ` +
+        `be certified: ${startupRefusal}. A plant there wedges git before this ` +
+        'command can screen it, so no scratch tree is created.',
+    );
+  }
+
   // The directory alone is not identity enough for what follows: with the
   // `.git` file gone — a crash mid-`worktree add`, a cleanup whose `rmSync`
   // failed — every git call walks UP into the user's checkout: HEAD resolves
@@ -887,6 +1172,20 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   } catch (err) {
     return unavailable(
       `cannot read HEAD in ${worktree}: ${inertPath((err as Error).message)}`,
+    );
+  }
+
+  // BEFORE the screens: they resolve the surface to scan through the admin
+  // `commondir` file, which a plant in the common dir can rewrite to a decoy —
+  // certifying the decoy clean while the real common dir keeps its plant
+  // (R19-5). Confirm the self-reported common dir against the worktree's own
+  // `.git` structurally, and refuse rather than screen a redirected surface.
+  if (!commonDirSelfReportTrustworthy(worktree)) {
+    return unavailable(
+      `the review worktree ${worktree} reports a git common dir its own .git ` +
+        'does not structurally confirm — the worktree admin `commondir` may ' +
+        'be redirected, which would point the fail-closed screens at a decoy; ' +
+        'no scratch tree is created until the two agree',
     );
   }
 

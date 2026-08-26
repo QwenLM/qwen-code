@@ -455,7 +455,7 @@ describe('runScratchTree', () => {
     expect(r2.note).toContain('filter.evil.smudge');
   });
 
-  it.skipIf(process.platform === 'win32')(
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'fails CLOSED when a module gitdir’s worktrees dir cannot be listed',
     () => {
       // The per-worktree configs of worktrees inside a submodule are read
@@ -657,6 +657,29 @@ describe('runScratchTree', () => {
     },
   );
 
+  it('honors a TILDE-leading global hooksPath — git expands it through $HOME', () => {
+    // A `~`-leading value is NOT the per-cwd relative shape the check above
+    // refuses: git expands `~` through $HOME deterministically, and the
+    // resolved hooks dir (from `--git-path hooks`) already carries that
+    // absolute path — so it is honored like any absolute redirect, and a
+    // common dotfiles pattern (`[core] hooksPath = ~/githooks`) no longer
+    // renders every review of that user's repos unavailable (R19-7). ($HOME is
+    // the isolated one `isolateHostGitConfig` set, where `~/githooks` does not
+    // exist, so the redirect resolves away from the default hooks dir.)
+    git(repo, 'config', '--global', 'core.hooksPath', '~/githooks');
+    // A hook standing in the DEFAULT dir must not block: the redirect points
+    // away from it, so the default dir is not the active surface.
+    const defaultHook = join(repo, '.git', 'hooks', 'pre-commit');
+    writeFileSync(defaultHook, '#!/bin/sh\ntouch PWNED\n');
+    chmodSync(defaultHook, 0o755);
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    // The value is admitted, never refused as uncertifiable.
+    expect(r.note).not.toContain('hooks redirect could not be certified');
+  });
+
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'fails CLOSED when the modules dir cannot be listed — git still reads module gitdirs by name',
     () => {
@@ -782,6 +805,21 @@ describe('runScratchTree', () => {
     expect(r.available).toBe(true);
   });
 
+  it('admits the sparse-checkout selectors a CI checkout writes repo-locally', () => {
+    // `actions/checkout` and other CI plumbing write `core.sparseCheckout`,
+    // `core.sparseCheckoutCone` and `index.sparse` into repo-local config;
+    // they are booleans that change which tracked paths a checkout writes,
+    // never a command, and refusing them left the screen unable to certify a
+    // GitHub Actions checkout at all — the tree never stood up there (R19-6).
+    git(worktree, 'config', 'core.sparseCheckout', 'true');
+    git(worktree, 'config', 'core.sparseCheckoutCone', 'true');
+    git(worktree, 'config', 'index.sparse', 'true');
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+  });
+
   it('refuses core.worktree VALUES that redirect checkouts outside the repository', () => {
     // core.worktree is the config analogue of GIT_WORK_TREE: the screen
     // used to admit it unread for every value, so a plant in the common
@@ -814,6 +852,87 @@ describe('runScratchTree', () => {
         force: true,
       });
       git(worktree, 'worktree', 'prune');
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a core.worktree pointing at a SYMLINK that escapes the repository',
+    () => {
+      // `resolve()` is purely lexical, so a value naming a symlink inside a
+      // registered worktree passes containment while git writes the checkout
+      // THROUGH the link to an arbitrary directory. Certifying the realpath'd
+      // destination closes it (R19-1); the same realpath fold closes the
+      // case-insensitive `../.GIT` variant that resolves onto the common dir
+      // (R19-3), which cannot be exercised on this case-sensitive volume.
+      const victim = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-victim-')));
+      try {
+        symlinkSync(victim, join(repo, 'link'));
+        // Plant into the common config, resolving to `<repo>/link` — inside a
+        // registered worktree lexically, but a symlink OUT of it in reality.
+        execFileSync(
+          'git',
+          [
+            'config',
+            '--file',
+            join(repo, '.git', 'config'),
+            'core.worktree',
+            '../link',
+          ],
+          {},
+        );
+
+        const r = run();
+
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('core.worktree');
+      } finally {
+        rmSync(victim, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('does not let a PRUNABLE forged worktree entry widen core.worktree containment', () => {
+    // `git worktree list --porcelain` emits a `worktree ` line even for a
+    // broken admin entry an attacker plants in the common dir, marking it
+    // prunable. Admitting it as a containment anchor lets a `core.worktree`
+    // plant escape into an attacker-chosen directory; dropping prunable
+    // blocks flags it fail-closed (R19-2). (A fully self-consistent forgery —
+    // a `.git` gitfile planted at the target that round-trips — is not
+    // prunable and stays at the adversary-owns-common-dir boundary, where
+    // direct hook/config planting the screens already refuse is the simpler
+    // attack.)
+    const forged = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-forged-')));
+    try {
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const admin = join(common, 'worktrees', 'forged');
+      mkdirSync(admin, { recursive: true });
+      // gitdir points at a nonexistent target → git marks the entry prunable.
+      writeFileSync(join(admin, 'gitdir'), join(forged, '.git') + '\n');
+      writeFileSync(join(admin, 'HEAD'), headSha + '\n');
+      writeFileSync(join(admin, 'commondir'), '../..\n');
+      mkdirSync(join(forged, 'loot'), { recursive: true });
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--file',
+          join(common, 'config'),
+          'core.worktree',
+          '../../../../..' + forged + '/loot',
+        ],
+        {},
+      );
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('core.worktree');
+    } finally {
+      rmSync(forged, { recursive: true, force: true });
     }
   });
 
@@ -881,6 +1000,114 @@ describe('runScratchTree', () => {
       git(worktree, 'config', '--unset', 'alias.st');
     }
     expect(run().available).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses — without hanging — a FIFO planted at a worktree admin gitdir',
+    () => {
+      // The screen's git reads and the later `git worktree add` open admin
+      // metadata files by name; a FIFO planted at one wedges them forever
+      // (no writer ever comes), past every refusal the screen exists to emit
+      // (R19-4). A non-blocking regular-file gate turns the wedge into a
+      // fail-closed refusal in milliseconds.
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const admin = join(common, 'worktrees', 'fifo-entry');
+      mkdirSync(admin, { recursive: true });
+      execFileSync('mkfifo', [join(admin, 'gitdir')]);
+
+      const started = Date.now();
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('is not a regular file');
+      // Bounded: the gate must fire well under the read timeout, not block on
+      // the FIFO. (Generous ceiling to stay stable on a loaded machine.)
+      expect(Date.now() - started).toBeLessThan(20_000);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses — without hanging — a FIFO at the worktree config.worktree',
+    () => {
+      // A per-worktree `config.worktree` is read at git STARTUP once
+      // `extensions.worktreeConfig` is on, before any screen or timeout, so a
+      // FIFO there wedges even the first `--show-toplevel` read. A pure-fs gate
+      // before the first git call catches it (R19-4).
+      git(worktree, 'config', 'extensions.worktreeConfig', 'true');
+      const gitdir = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      execFileSync('mkfifo', [join(gitdir, 'config.worktree')]);
+
+      const started = Date.now();
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('config.worktree is not a regular file');
+      expect(Date.now() - started).toBeLessThan(20_000);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses — without hanging — a FIFO at the common config',
+    () => {
+      // The common `config` is read at git STARTUP of every call, before any
+      // screen, so a FIFO there wedges the first `--show-toplevel` read too;
+      // the pure-fs startup gate catches it (R19-4).
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      rmSync(join(common, 'config'));
+      execFileSync('mkfifo', [join(common, 'config')]);
+
+      const started = Date.now();
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('config is not a regular file');
+      expect(Date.now() - started).toBeLessThan(20_000);
+    },
+  );
+
+  it('refuses when the worktree admin commondir is redirected to a decoy', () => {
+    // Both screens take the surface to scan from `rev-parse --git-common-dir`,
+    // which resolves through the admin `commondir` file — a file in the
+    // never-wiped common dir. Rewriting it points the fail-closed screens at
+    // an attacker-controlled decoy git dir while the real common dir keeps its
+    // plant (R19-5). A structural cross-check against the worktree's own .git
+    // refuses the redirect.
+    const decoy = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-decoy-')));
+    try {
+      git(decoy, 'init', '-q', '-b', 'main');
+      const admin = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      // Sanity: a clean tree is available before the redirect.
+      expect(run().available).toBe(true);
+      rmSync(scratchWorktreePath(worktree, 'verify--round-1--abc123'), {
+        recursive: true,
+        force: true,
+      });
+      git(worktree, 'worktree', 'prune');
+      writeFileSync(join(admin, 'commondir'), join(decoy, '.git') + '\n');
+
+      const r = run();
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('does not structurally confirm');
+    } finally {
+      rmSync(decoy, { recursive: true, force: true });
+    }
   });
 
   it('places it BESIDE the review worktree, never inside it', () => {
