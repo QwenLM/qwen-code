@@ -66,7 +66,10 @@ import {
   MID_TURN_RECONCILIATION_RING_SIZE,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from './bridgeTypes.js';
-import type { ClientMcpMessageSender } from './bridgeOptions.js';
+import type {
+  ClientMcpMessageSender,
+  CurrentSessionScheduledTaskCreateInfo,
+} from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 import { SessionArtifactStore } from './sessionArtifacts.js';
@@ -93,6 +96,13 @@ function makeClient(
     ownsSession?: (sessionId: string) => boolean;
     handler: ExternalToolGuardHandler;
   },
+  currentSessionTask?: {
+    resolveEntry: (sessionId?: string) => unknown;
+    ownsSession?: (sessionId: string) => boolean;
+    handler: NonNullable<
+      import('./bridgeOptions.js').BridgeOptions['onCreateCurrentSessionScheduledTask']
+    >;
+  },
 ): BridgeClient {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run in fs-path tests');
@@ -104,7 +114,9 @@ function makeClient(
   // required (policy/vote/forgetSession/peekSessionFor/pendingCount).
   const throwerMediator = { request: noPermissionFlow } as never;
   return new BridgeClient(
-    (managedGuard?.resolveEntry ?? noPermissionFlow) as never, // resolveEntry
+    (managedGuard?.resolveEntry ??
+      currentSessionTask?.resolveEntry ??
+      noPermissionFlow) as never, // resolveEntry
     noPermissionFlow as never, // resolvePendingRestoreEvents
     throwerMediator, // mediator (F3 Commit 3)
     0, // permissionTimeoutMs (disabled)
@@ -113,7 +125,9 @@ function makeClient(
     undefined,
     undefined,
     undefined,
-    managedGuard?.ownsSession ?? (() => true),
+    managedGuard?.ownsSession ??
+      currentSessionTask?.ownsSession ??
+      (() => true),
     undefined,
     undefined,
     undefined,
@@ -124,6 +138,10 @@ function makeClient(
     undefined,
     undefined,
     managedGuard?.handler,
+    undefined,
+    undefined,
+    undefined,
+    currentSessionTask?.handler,
   );
 }
 
@@ -1646,6 +1664,142 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
       callerSessionId: 'caller-1',
     });
     expect(onCreate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BridgeClient — current-session scheduled-task dispatch', () => {
+  const request = {
+    callerSessionId: 'session-1',
+    promptId: 'prompt-1',
+    cron: '5 9 * * *',
+    prompt: 'continue the work',
+    recurring: true,
+  };
+
+  function makeCurrentSessionClient(
+    overrides: Record<string, unknown> = {},
+    ownsSession: (sessionId: string) => boolean = () => true,
+  ) {
+    const entry = {
+      sessionId: 'session-1',
+      workspaceCwd: '/workspace',
+      effectiveCwd: '/workspace',
+      promptActive: true,
+      activePromptId: 'prompt-1',
+      ...overrides,
+    };
+    const handler = vi.fn(
+      async (_info: CurrentSessionScheduledTaskCreateInfo) => ({
+        id: 'cron-1',
+        cron: request.cron,
+      }),
+    );
+    const client = makeClient(undefined, undefined, {
+      resolveEntry: (sessionId) =>
+        sessionId === entry.sessionId ? entry : undefined,
+      ownsSession,
+      handler,
+    });
+    return { client, entry, handler };
+  }
+
+  it('forwards only the bridge-owned active prompt', async () => {
+    const { client, handler } = makeCurrentSessionClient();
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      ),
+    ).resolves.toEqual({ id: 'cron-1', cron: request.cron });
+    expect(handler).toHaveBeenCalledWith({
+      ...request,
+      assertCallerPromptActive: expect.any(Function),
+    });
+  });
+
+  it('lets the host revalidate the exact prompt before committing', async () => {
+    const { client, entry, handler } = makeCurrentSessionClient();
+    handler.mockImplementation(async (info) => {
+      info.assertCallerPromptActive();
+      entry.activePromptId = 'prompt-2';
+      expect(() => info.assertCallerPromptActive()).toThrow(/active prompt/i);
+      throw new Error('stale prompt');
+    });
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      ),
+    ).rejects.toThrow('stale prompt');
+  });
+
+  it('preserves scheduled-task business rejections as structured ACP errors', async () => {
+    const { client, handler } = makeCurrentSessionClient();
+    const rejection = new Error('The caller session has a pending interaction');
+    rejection.name = 'ExistingSessionScheduledTaskCreateError';
+    Object.assign(rejection, { status: 409, code: 'session_busy' });
+    handler.mockRejectedValueOnce(rejection);
+
+    const error = await client
+      .extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      )
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(RequestError);
+    expect(error).toMatchObject({
+      code: -32602,
+      message: 'The caller session has a pending interaction',
+      data: {
+        errorKind: 'session_busy',
+        status: 409,
+        hint: 'The caller session has a pending interaction',
+      },
+    });
+  });
+
+  it('rejects a forged session or prompt identity', async () => {
+    const { client, handler } = makeCurrentSessionClient(
+      {},
+      (sessionId) => sessionId === 'session-1',
+    );
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        { ...request, callerSessionId: 'session-2' },
+      ),
+    ).rejects.toThrow(/callerSessionId/i);
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        { ...request, promptId: 'prompt-2' },
+      ),
+    ).rejects.toThrow(/active prompt/i);
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { parentSessionId: 'parent-1' },
+    { sourceType: 'channel' },
+    { sourceType: 'scheduled_task' },
+    { sourceType: 'standalone' },
+    { sourceType: 'live_voice' },
+    { sourceType: 'unknown' },
+    { sourceId: 'source-1' },
+  ])('rejects an ineligible session source: %j', async (overrides) => {
+    const { client, handler } = makeCurrentSessionClient(overrides);
+
+    await expect(
+      client.extMethod(
+        SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+        request,
+      ),
+    ).rejects.toThrow(/source/i);
+    expect(handler).not.toHaveBeenCalled();
   });
 });
 
