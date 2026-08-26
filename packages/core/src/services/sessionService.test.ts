@@ -6597,6 +6597,26 @@ describe('SessionService', () => {
       });
     });
 
+    it('reads one exact persisted summary without paging the catalog', async () => {
+      const sessionId = '79777777-7777-4777-8777-777777777777';
+      writeSession(sessionId, [
+        userLine(sessionId, 'exact prompt'),
+        sessionSourceLine(sessionId),
+      ]);
+
+      await expect(
+        service.getSessionListItem(sessionId),
+      ).resolves.toMatchObject({
+        sessionId,
+        cwd,
+        startTime: '2026-04-22T00:00:00.000Z',
+        prompt: 'exact prompt',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+        isArchived: false,
+      });
+    });
+
     it('keeps the first immutable source record', async () => {
       const sessionId = '88888888-8888-8888-8888-888888888888';
       writeSession(sessionId, [

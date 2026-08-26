@@ -984,6 +984,11 @@ export interface ConfigParameters {
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
+  /**
+   * Internal host-only bootstrap mode for a managed workspace whose exact
+   * directory is bound after session registration. It is not a user setting.
+   */
+  provisionalWorkspace?: boolean;
   debugMode: boolean;
   includePartialMessages?: boolean;
   question?: string;
@@ -1893,6 +1898,9 @@ export class Config {
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
   private readonly sessionRuntimeBaseDir: string;
+  private readonly provisionalWorkspace: boolean;
+  private provisionalWorkspaceActivated = false;
+  private provisionalWorkspaceActivation?: Promise<void>;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
   private pendingSessionWriterRelease:
@@ -2292,6 +2300,7 @@ export class Config {
 
   constructor(params: ConfigParameters) {
     this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
+    this.provisionalWorkspace = params.provisionalWorkspace === true;
     this.sessionId = params.sessionId ?? randomUUID();
     // Only set the global env marker once per process lifetime, so
     // throwaway Config instances (e.g. telemetry-only) don't clobber
@@ -2796,6 +2805,34 @@ export class Config {
     }
   }
 
+  /**
+   * Completes the cwd-sensitive half of a host-managed provisional bootstrap.
+   * Calls are one-flight and a failed activation stays failed; callers must
+   * discard the partially activated session instead of retrying individual
+   * initialization steps.
+   */
+  async activateProvisionalWorkspace(): Promise<void> {
+    if (!this.provisionalWorkspace || this.provisionalWorkspaceActivated) {
+      return;
+    }
+    if (this.provisionalWorkspaceActivation) {
+      return this.provisionalWorkspaceActivation;
+    }
+    const activation = (async () => {
+      this.getFileService();
+      await this.geminiClient.initialize();
+      await this.toolRegistry.warmAll({ strict: true });
+      logStartSession(this, new StartSessionEvent(this));
+      this.provisionalWorkspaceActivated = true;
+    })();
+    this.provisionalWorkspaceActivation = activation;
+    return activation;
+  }
+
+  isProvisionalWorkspace(): boolean {
+    return this.provisionalWorkspace;
+  }
+
   private async initializeOnce(
     options?: ConfigInitializeOptions,
   ): Promise<void> {
@@ -2845,8 +2882,12 @@ export class Config {
       this.fileHistoryService = undefined;
     }
 
-    // Initialize centralized FileDiscoveryService
-    this.getFileService();
+    // A managed provisional Config is still rooted at the shared ownership
+    // directory here. Its first cwd-sensitive service is created only after
+    // the daemon binds the exact private child.
+    if (!this.provisionalWorkspace) {
+      this.getFileService();
+    }
     this.promptRegistry = new PromptRegistry();
     this.resourceRegistry = new ResourceRegistry();
     this.extensionManager.setConfig(this);
@@ -3124,7 +3165,11 @@ export class Config {
     this.subagentManager = new SubagentManager(this);
     recordStartupEvent('config_initialize_skills_start');
     if (!options?.skipSkillManager) {
-      if (this.getAutoSkillEnabled() && this.isTrustedFolder()) {
+      if (
+        !this.provisionalWorkspace &&
+        this.getAutoSkillEnabled() &&
+        this.isTrustedFolder()
+      ) {
         try {
           const curatorResult = await maybeRunAutoSkillCurator(
             this.getProjectRoot(),
@@ -3174,10 +3219,12 @@ export class Config {
     }
     recordStartupEvent('config_initialize_extensions_final_end');
 
-    recordStartupEvent('config_initialize_hierarchical_memory_start');
-    await this.refreshHierarchicalMemory('session_start');
-    recordStartupEvent('config_initialize_hierarchical_memory_end');
-    this.debugLogger.debug('Hierarchical memory loaded');
+    if (!this.provisionalWorkspace) {
+      recordStartupEvent('config_initialize_hierarchical_memory_start');
+      await this.refreshHierarchicalMemory('session_start');
+      recordStartupEvent('config_initialize_hierarchical_memory_end');
+      this.debugLogger.debug('Hierarchical memory loaded');
+    }
 
     // Progressive MCP availability: skip MCP discovery in the synchronous
     // tool-registry construction path and kick it off in the background
@@ -3195,6 +3242,7 @@ export class Config {
     const skipInlineMcpDiscovery =
       this.getBareMode() ||
       this.isSafeMode() ||
+      this.provisionalWorkspace ||
       !legacyBlockingMcp ||
       options?.skipMcpDiscovery === true;
 
@@ -3212,7 +3260,7 @@ export class Config {
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
 
-    if (!options?.skipGeminiInitialization) {
+    if (!options?.skipGeminiInitialization && !this.provisionalWorkspace) {
       await this.geminiClient.initialize();
       this.debugLogger.info('Gemini client initialized');
     } else {
@@ -3227,11 +3275,13 @@ export class Config {
     // read-only replay Configs pass `lenientToolWarmup` so a tool that cannot be
     // constructed under their deliberately-skipped subsystems (e.g. SkillTool without
     // a SkillManager) is logged and skipped instead of aborting initialize().
-    recordStartupEvent('config_initialize_tool_warmup_start');
-    await this.toolRegistry.warmAll({
-      strict: options?.lenientToolWarmup !== true,
-    });
-    recordStartupEvent('config_initialize_tool_warmup_end');
+    if (!this.provisionalWorkspace) {
+      recordStartupEvent('config_initialize_tool_warmup_start');
+      await this.toolRegistry.warmAll({
+        strict: options?.lenientToolWarmup !== true,
+      });
+      recordStartupEvent('config_initialize_tool_warmup_end');
+    }
 
     // Fire-and-forget MCP discovery. Each server's tools land in the
     // registry as it becomes ready; the cli's AppContainer debounces
@@ -3260,12 +3310,15 @@ export class Config {
     if (
       skipInlineMcpDiscovery &&
       (!(this.getBareMode() || this.isSafeMode()) || hasMcpServers) &&
+      !this.provisionalWorkspace &&
       !options?.skipMcpDiscovery
     ) {
       this.startMcpDiscoveryInBackground();
     }
 
-    logStartSession(this, new StartSessionEvent(this));
+    if (!this.provisionalWorkspace) {
+      logStartSession(this, new StartSessionEvent(this));
+    }
     this.debugLogger.info('Config initialization completed');
 
     // Fire-and-forget sweep of stale ephemeral worktrees left behind by
@@ -3283,7 +3336,7 @@ export class Config {
     // directly would cause launches from a monorepo subdirectory to
     // scan `<subdir>/.qwen/worktrees/` — which never exists — and the
     // sweep would silently be a no-op forever.
-    if (!this.getBareMode()) {
+    if (!this.getBareMode() && !this.provisionalWorkspace) {
       void (async () => {
         try {
           // Resolve the repo top-level FIRST. The previous code bailed
@@ -6272,7 +6325,7 @@ export class Config {
   }
 
   isLspEnabled(): boolean {
-    return this.lspEnabled && !this.getBareMode();
+    return this.lspEnabled && !this.getBareMode() && !this.provisionalWorkspace;
   }
 
   getLspClient(): LspClient | undefined {
@@ -7320,6 +7373,7 @@ export class Config {
   }
 
   isWorkflowsEnabled(): boolean {
+    if (this.provisionalWorkspace) return false;
     // Workflows are experimental and opt-in: enabled via settings or env var
     // P1 also honors a kill switch: QWEN_CODE_DISABLE_WORKFLOWS=1 forces off
     if (process.env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
@@ -7541,7 +7595,7 @@ export class Config {
    * for tests / power users ('0' forces off, '1' forces on).
    */
   getTeamMemoryEnabled(): boolean {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.provisionalWorkspace) {
       return false;
     }
     const override = process.env['QWEN_CODE_MEMORY_TEAM'];
@@ -7561,7 +7615,7 @@ export class Config {
    * Off by default since it mutates the repo and pushes. Inert in bare mode.
    */
   getTeamMemorySyncEnabled(): boolean {
-    if (this.getBareMode()) {
+    if (this.getBareMode() || this.provisionalWorkspace) {
       return false;
     }
     const override = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
@@ -7585,7 +7639,12 @@ export class Config {
   }
 
   getAutoSkillEnabled(): boolean {
-    return this.enableAutoSkill && !this.getBareMode() && !this.isSafeMode();
+    return (
+      this.enableAutoSkill &&
+      !this.getBareMode() &&
+      !this.isSafeMode() &&
+      !this.provisionalWorkspace
+    );
   }
 
   /**

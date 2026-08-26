@@ -39,9 +39,13 @@ export interface TranscriptCursor {
  * `lastReason` — that stays the human-readable half, this is the half a client
  * may key behavior off. Resuming an evidence-limited Goal restarts its evidence
  * window: the objective and revision carry over, but evidence recorded before
- * the resume is no longer citable.
+ * the resume is no longer citable. `token_budget` marks a spent autonomous-spend
+ * authorization that a resume re-arms.
  */
-export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
+export type GoalLimitKind =
+  | 'evidence_catalog'
+  | 'checkpoint_request'
+  | 'token_budget';
 
 export interface GoalRecord {
   goalId: string;

@@ -28,6 +28,13 @@ import type {
 } from '../state/extensions.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 
+export interface NonInteractiveSlashCommandPolicy {
+  readonly allowSessionReset: boolean;
+  readonly allowWorkspaceSettingsWrite: boolean;
+  readonly persistModelSelection: boolean;
+  readonly blockedBuiltinCommandNames: readonly string[];
+}
+
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
   /**
@@ -38,6 +45,7 @@ export interface CommandContext {
    * - acp: ACP/Zed integration mode
    */
   executionMode?: 'interactive' | 'non_interactive' | 'acp';
+  executionPolicy?: NonInteractiveSlashCommandPolicy;
   // Invocation properties for when commands are called.
   invocation?: {
     /** The raw, untrimmed input string from the user. */

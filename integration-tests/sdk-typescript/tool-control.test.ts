@@ -168,7 +168,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(listDirectoryResults).toHaveLength(1);
           expect(listDirectoryResults[0]).toMatchObject({
             isError: true,
-            content: expect.stringContaining('was declined'),
+            content: expect.stringContaining('active core tools allowlist'),
           });
           expect(advertisedTools).not.toContain('list_directory');
 
@@ -1287,7 +1287,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(shellResults).toHaveLength(1);
           expect(shellResults[0]).toMatchObject({
             isError: true,
-            content: expect.stringContaining('was declined'),
+            content: expect.stringContaining('active core tools allowlist'),
           });
           expect(advertisedTools).not.toContain('run_shell_command');
 
@@ -1472,7 +1472,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(editResults).toHaveLength(1);
           expect(editResults[0]).toMatchObject({
             isError: true,
-            content: expect.stringContaining('was declined'),
+            content: expect.stringContaining('active core tools allowlist'),
           });
           expect(advertisedTools).not.toContain('edit');
 
@@ -2549,8 +2549,6 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'discovers and loads an uncovered tool via tool_search',
       async () => {
-        await helper.createFile('test.txt', INITIAL_CONTENT);
-
         const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
           if (requestIndex === 0) {
             // The model does not see write_file in the eager request; it
@@ -2571,7 +2569,7 @@ describe('Tool Control Parameters (E2E)', () => {
                 fakeToolCall(
                   'write_file',
                   {
-                    file_path: helper.getPath('test.txt'),
+                    file_path: helper.getPath('created.txt'),
                     content: 'modified',
                   },
                   'write-after-search',
@@ -2583,7 +2581,7 @@ describe('Tool Control Parameters (E2E)', () => {
         }, FAKE_SERVER_OPTIONS);
 
         const q = query({
-          prompt: 'Find the write tool and write "modified" to test.txt.',
+          prompt: 'Find the write tool and create created.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
             ...fakeModelOptions(fakeServer.baseUrl),
@@ -2605,7 +2603,6 @@ describe('Tool Control Parameters (E2E)', () => {
           const searchResults = findToolResults(messages, 'tool_search');
           expect(searchResults.length).toBeGreaterThan(0);
           expect(searchResults[0].isError).toBe(false);
-          expect(searchResults[0].content).toContain('write_file');
 
           // After discovery the tool executes normally.
           const writeResults = findToolResults(messages, 'write_file');

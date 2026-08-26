@@ -1031,6 +1031,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
+      onMobileClose?: () => void;
       onNewSession?: () => Promise<boolean> | boolean;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
       onOpenAddWorkspace?: () => void;
@@ -1114,6 +1115,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: props.onOpenSplitView,
           },
           'split view',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'close-mobile-sidebar',
+            type: 'button',
+            onClick: props.onMobileClose,
+          },
+          'close mobile sidebar',
         ),
       );
     },
@@ -18047,6 +18057,36 @@ describe('App session callbacks', () => {
     );
     expect(drawer).not.toBeNull();
     expect(drawer?.className).toContain('mobileDrawerForced');
+  });
+
+  it('closes the forced compact drawer from the sidebar control', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="close-mobile-sidebar"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(
+      container.querySelector('[data-sidebar-shell][role="dialog"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-sidebar-shell]')?.className,
+    ).not.toContain('mobileDrawerForced');
   });
 
   it('does not open or lock scrolling when the sidebar is disabled', async () => {

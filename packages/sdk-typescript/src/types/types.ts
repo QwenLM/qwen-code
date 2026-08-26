@@ -482,10 +482,10 @@ export interface QueryOptions {
   /**
    * Authentication type for the AI service.
    * - 'openai': Use OpenAI-compatible authentication
+   * - 'anthropic': Use Anthropic-compatible authentication
    * - 'qwen-oauth': Legacy Qwen OAuth authentication
-   *
-   * Qwen OAuth free tier was discontinued on 2026-04-15. New SDK setups should
-   * use OpenAI-compatible authentication or another supported provider.
+   * - 'gemini': Use Gemini authentication
+   * - 'vertex-ai': Use Vertex AI authentication
    */
   authType?: AuthType;
 
