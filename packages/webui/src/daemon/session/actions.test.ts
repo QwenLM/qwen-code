@@ -2476,6 +2476,52 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('applies a reasoning effort only when the daemon confirms it', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: reasoningConfigOptions('medium'),
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+      },
+      session,
+    });
+
+    await expect(actions.setReasoningEffort('medium')).resolves.toBeUndefined();
+
+    expect(session.setConfigOption).toHaveBeenCalledWith(
+      'reasoning_effort',
+      'medium',
+    );
+    expect(getConnection().reasoning).toEqual({
+      enabled: true,
+      effort: 'medium',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it('rejects a reasoning effort when live config options do not confirm it', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({ configOptions: [] });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+      },
+      session,
+    });
+
+    await expect(actions.setReasoningEffort('medium')).rejects.toThrow(
+      'Daemon did not confirm reasoning effort "medium"',
+    );
+
+    expect(getConnection().reasoning).toBeUndefined();
+  });
+
   it('does not apply a late approval mode to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
@@ -2698,6 +2744,9 @@ function createMockSession(
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    setConfigOption: vi.fn(async (_configId: string, value: string) => ({
+      configOptions: reasoningConfigOptions(value),
+    })),
     uploadAttachment: vi.fn(
       async (data: Blob, name: string, mimeType: string) => ({
         type: mimeType.startsWith('image/')
@@ -2726,6 +2775,21 @@ function createMockSession(
     goal: vi.fn(),
     controlGoal: vi.fn(),
   };
+}
+
+function reasoningConfigOptions(currentValue: string) {
+  return [
+    {
+      id: 'reasoning_effort',
+      currentValue,
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+    },
+  ];
 }
 
 function createDeferred<T>() {
