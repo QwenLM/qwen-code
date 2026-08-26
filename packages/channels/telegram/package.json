@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-telegram",
-  "version": "0.22.0",
+  "version": "0.22.0-nightly.20260826.a6d30ebc6b",
   "description": "Telegram channel adapter for Qwen Code",
   "repository": {
     "type": "git",
@@ -25,7 +25,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.22.0",
+    "@qwen-code/channel-base": "0.22.0-nightly.20260826.a6d30ebc6b",
     "grammy": "^1.41.1",
     "https-proxy-agent": "^7.0.6",
     "telegram-markdown-formatter": "^0.1.2"

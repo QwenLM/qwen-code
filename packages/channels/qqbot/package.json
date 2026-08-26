@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-qqbot",
-  "version": "0.22.0",
+  "version": "0.22.0-nightly.20260826.a6d30ebc6b",
   "description": "QQ Bot (QQ机器人) channel adapter for Qwen Code",
   "repository": {
     "type": "git",
@@ -25,7 +25,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "0.22.0",
+    "@qwen-code/channel-base": "0.22.0-nightly.20260826.a6d30ebc6b",
     "@tencent-connect/qqbot-connector": "^1.1.0",
     "ws": "^8.18.0"
   },
