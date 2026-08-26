@@ -14,6 +14,7 @@ import {
   SESSION_PR_LIST_LIMIT,
   SESSION_PR_URL_MAX_LENGTH,
   commandRunsGhPrCreate,
+  ghPrCreateInlineEnv,
   mergeSessionPrLists,
   moveSessionPrSidecar,
   readSessionPrs,
@@ -756,6 +757,41 @@ describe('commandRunsGhPrCreate', () => {
     expect(commandRunsGhPrCreate('git commit -m gh')).toBe(false);
     // The phrase as a search argument is not an execution.
     expect(commandRunsGhPrCreate(`grep -rn 'gh pr create' .`)).toBe(false);
+  });
+});
+
+describe('ghPrCreateInlineEnv', () => {
+  it('extracts leading GH_* and GITHUB_* assignments', () => {
+    expect(ghPrCreateInlineEnv('GH_TOKEN=x gh pr create --fill')).toEqual({
+      GH_TOKEN: 'x',
+    });
+    expect(
+      ghPrCreateInlineEnv('env GITHUB_TOKEN=y gh pr create --fill'),
+    ).toEqual({ GITHUB_TOKEN: 'y' });
+  });
+
+  it('skips wrapper flags and their values', () => {
+    expect(
+      ghPrCreateInlineEnv('sudo -u runner GH_TOKEN=x gh pr create --fill'),
+    ).toEqual({ GH_TOKEN: 'x' });
+  });
+
+  it('reads the segment that runs the create', () => {
+    expect(
+      ghPrCreateInlineEnv('git push\nGH_TOKEN=x gh pr create --fill'),
+    ).toEqual({ GH_TOKEN: 'x' });
+  });
+
+  it('returns undefined when the create carries no gh credentials', () => {
+    expect(ghPrCreateInlineEnv('gh pr create --fill')).toBeUndefined();
+    expect(ghPrCreateInlineEnv('FOO=bar gh pr create --fill')).toBeUndefined();
+    expect(ghPrCreateInlineEnv('git push')).toBeUndefined();
+  });
+
+  it('ignores assignments after the binary (gh arguments)', () => {
+    expect(
+      ghPrCreateInlineEnv('gh pr create --title GH_TOKEN=x'),
+    ).toBeUndefined();
   });
 });
 

@@ -38,6 +38,7 @@ import {
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
 import {
   commandRunsGhPrCreate,
+  ghPrCreateInlineEnv,
   upsertSessionPrs,
 } from '../services/session-pr-service.js';
 import {
@@ -2352,9 +2353,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let preRunPrSnapshot: BranchPullRequestSnapshot | undefined;
     let preRunBranch: string | undefined;
     let preRunRepoKeys: AttributionRepoKeys | undefined;
+    let preRunGhEnv: Readonly<Record<string, string>> | undefined;
     if (commandRunsGhPrCreate(commandToExecute)) {
+      // The verification legs must authenticate the way the create itself
+      // does (inline GH_TOKEN with no ambient gh auth), or the gate's
+      // advertised token shape binds nothing.
+      preRunGhEnv = ghPrCreateInlineEnv(commandToExecute);
       [preRunPrSnapshot, preRunBranch, preRunRepoKeys] = await Promise.all([
-        fetchCurrentBranchPullRequest(cwd),
+        fetchCurrentBranchPullRequest(cwd, preRunGhEnv),
         fetchCurrentBranchName(cwd),
         fetchAttributionRepoKeys(cwd),
       ]);
@@ -2763,6 +2769,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         preRunPrSnapshot,
         preRunBranch,
         preRunRepoKeys,
+        preRunGhEnv,
       );
     }
 
@@ -3122,6 +3129,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     preRunPrSnapshot: BranchPullRequestSnapshot | undefined,
     preRunBranch: string | undefined,
     preRunRepoKeys: AttributionRepoKeys | undefined,
+    ghCreateEnv?: Readonly<Record<string, string>>,
   ): void {
     void (async () => {
       try {
@@ -3134,7 +3142,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // repo the command may have `cd`'d into: gh resolves THIS repo's
         // branch, so an internal-`cd` create binds only when this branch's
         // PR URL is what the output carries — backfill recovers the rest.
-        const created = await fetchCurrentBranchPullRequest(cwd);
+        const created = await fetchCurrentBranchPullRequest(cwd, ghCreateEnv);
         if (created.status !== 'pr' || created.state !== 'open') return;
         // The run resolved the branch's EXISTING PR — nothing was created
         // (a retry's view segment exits 0 and prints the existing URL).

@@ -170,6 +170,52 @@ export function commandRunsGhPrCreate(command: string): boolean {
   );
 }
 
+const GH_INLINE_ENV_ASSIGNMENT_PATTERN =
+  /^(GH_[A-Za-z0-9_]*|GITHUB_[A-Za-z0-9_]*)=(\S+)$/;
+const GH_CREATE_WRAPPER_NAMES = new Set(['sudo', 'env', 'nohup', 'command']);
+const GH_BINARY_PATTERN = /(?:^|[/\\])gh(?:\.exe|\.cmd|\.bat)?$/;
+
+/**
+ * The inline `GH_*`/`GITHUB_*` assignments prefixing the first segment that
+ * runs `gh pr create` (e.g. `GH_TOKEN=… gh pr create --fill`). The gh legs
+ * that verify a create must authenticate the same way the create itself
+ * did: with an inline token and no ambient gh auth, a bare verification
+ * run errors and the binding silently misses. The token scan mirrors the
+ * gate's approximate prefix grammar (assignments, wrapper names, flags and
+ * their values) and stops at the gh binary — assignments after it are gh
+ * arguments, not environment.
+ */
+export function ghPrCreateInlineEnv(
+  command: string,
+): Readonly<Record<string, string>> | undefined {
+  for (const segment of command.split(/&&|\|\||[;|\n]/)) {
+    if (!GH_PR_CREATE_SEGMENT_PATTERN.test(segment)) continue;
+    const env: Record<string, string> = {};
+    let previousWasFlag = false;
+    for (const token of segment.trim().split(/\s+/)) {
+      const assignment = GH_INLINE_ENV_ASSIGNMENT_PATTERN.exec(token);
+      if (assignment !== null) {
+        env[assignment[1]] = assignment[2];
+        previousWasFlag = false;
+        continue;
+      }
+      if (GH_BINARY_PATTERN.test(token)) break;
+      if (GH_CREATE_WRAPPER_NAMES.has(token) || token.startsWith('-')) {
+        previousWasFlag = token.startsWith('-');
+        continue;
+      }
+      if (previousWasFlag) {
+        // A flag's value (`sudo -u runner`), not the binary.
+        previousWasFlag = false;
+        continue;
+      }
+      break;
+    }
+    return Object.keys(env).length > 0 ? env : undefined;
+  }
+  return undefined;
+}
+
 /**
  * Union two binding lists, deduping by PR number and keeping each number's
  * freshest entry (by createdAt), ordered by binding time and capped. Used

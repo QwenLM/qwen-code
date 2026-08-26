@@ -484,10 +484,37 @@ describe('ShellTool', () => {
 
       expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
         '/test/dir/nested',
+        undefined,
       );
       expect(upsertSessionPrsMock).toHaveBeenCalledWith(
         '/test/proj/chats/test-session.pr.json',
         [expect.objectContaining({ number: 77 })],
+      );
+    });
+
+    it('passes inline gh credentials from the command to the verification legs', async () => {
+      // The gate advertises `GH_TOKEN=x gh pr create --fill`; both gh legs
+      // must authenticate the way the create itself did, or an inline-token
+      // create with no ambient gh auth verifies bare and silently misses.
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'none',
+      });
+      fetchCurrentBranchPullRequestMock.mockResolvedValueOnce({
+        status: 'pr',
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        state: 'open',
+        headRefName: 'main',
+      });
+      await runShell('GH_TOKEN=t0ken gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(fetchCurrentBranchPullRequestMock).toHaveBeenCalledWith(
+        '/test/dir',
+        { GH_TOKEN: 't0ken' },
       );
     });
 
