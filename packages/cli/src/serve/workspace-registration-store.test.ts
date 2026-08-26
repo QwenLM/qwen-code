@@ -391,6 +391,57 @@ describe('WorkspaceRegistrationStore', () => {
     await expect(store.read()).rejects.toThrow(/regular file/);
   });
 
+  it('reports an unverifiable store identity as a store error', async () => {
+    const home = await tempHome();
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const modifiedPromises = {
+        ...actual.promises,
+        lstat: vi.fn(
+          async (...args: Parameters<typeof actual.promises.lstat>) => {
+            const stats = await actual.promises.lstat(...args);
+            return new Proxy(stats, {
+              get: (target, property, receiver) =>
+                property === 'ino'
+                  ? 0
+                  : Reflect.get(target, property, receiver),
+            });
+          },
+        ),
+      };
+      const modified = {
+        ...actual,
+        constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        promises: modifiedPromises,
+      };
+      return { ...modified, default: modified };
+    });
+    try {
+      const storeModule = await import('./workspace-registration-store.js');
+      const store = new storeModule.WorkspaceRegistrationStore(
+        '/work/primary',
+        home,
+      );
+      await fs.mkdir(path.dirname(store.filePath), { recursive: true });
+      await fs.writeFile(
+        store.filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          primaryWorkspace: '/work/primary',
+          workspaces: [],
+        }),
+      );
+
+      await expect(store.read()).rejects.toThrow(
+        /identity could not be verified/,
+      );
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
   it('rejects an oversized store', async () => {
     const home = await tempHome();
     const store = new WorkspaceRegistrationStore('/work/primary', home);
