@@ -2124,10 +2124,17 @@ describe('gitPull incoming-tip guards', () => {
 
     // A listing past runGitBuffer's fixed 10MB maxBuffer — the ordinary
     // case for a large node_modules, which enumerates entry-by-entry.
-    const bulkDir = path.join(dir, 'bulk');
+    // Long paths reach the listing size with fewer files: NTFS creates
+    // files far slower than ext4, and 41,500 one-by-one writes exceeded
+    // the test's 60s budget on the Windows lane.
+    let bulkDir = path.join(dir, 'bulk');
     fs.mkdirSync(bulkDir);
+    for (let level = 0; level < 5; level++) {
+      bulkDir = path.join(bulkDir, `${'d'.repeat(245)}${level}`);
+      fs.mkdirSync(bulkDir);
+    }
     const nameFiller = 'x'.repeat(245);
-    for (let i = 0; i < 41_500; i++) {
+    for (let i = 0; i < 8_192; i++) {
       fs.writeFileSync(path.join(bulkDir, `${nameFiller}-${i}.tmp`), '');
     }
     const listingBytes = execFileSync(
@@ -2374,31 +2381,48 @@ describe('gitPull incoming-tip guards', () => {
       git(dir, 'config', 'user.email', 'test@example.com');
       git(dir, 'config', 'user.name', 'Test');
       git(dir, 'config', 'commit.gpgsign', 'false');
+      git(dir, 'config', 'core.autocrlf', 'false');
+      git(dir, 'config', 'core.eol', 'lf');
       return dir;
     };
-    const remote = makeSha256Repo(true);
-    const writer = makeSha256Repo(false);
-    git(writer, 'remote', 'add', 'origin', remote);
-    fs.writeFileSync(path.join(writer, 'upstream.txt'), 'upstream\n');
-    git(writer, 'add', '.');
-    git(writer, 'commit', '-q', '-m', 'upstream commit');
-    git(writer, 'push', '-q', 'origin', 'HEAD');
+    // The Windows runners' compiled-in system config sets
+    // core.autocrlf=true; gitEnv() strips GIT_CONFIG_GLOBAL/SYSTEM, so
+    // that host channel reaches the product's git but not the fixture
+    // helper. Plant the hermetic HOME's global config — which only the
+    // product channel reads — to stand in for it on every platform: the
+    // fixture's repo-local pin above must outrank it or the merge checks
+    // the incoming file out CRLF and the content assertion fails.
+    const ambient = path.join(hermeticHome, '.gitconfig');
+    fs.writeFileSync(ambient, '[core]\n\tautocrlf = true\n');
+    try {
+      const remote = makeSha256Repo(true);
+      const writer = makeSha256Repo(false);
+      git(writer, 'remote', 'add', 'origin', remote);
+      fs.writeFileSync(path.join(writer, 'upstream.txt'), 'upstream\n');
+      git(writer, 'add', '.');
+      git(writer, 'commit', '-q', '-m', 'upstream commit');
+      git(writer, 'push', '-q', 'origin', 'HEAD');
 
-    const dir = makeSha256Repo(false);
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'config', 'branch.master.remote', 'origin');
-    git(dir, 'config', 'branch.master.merge', 'refs/heads/master');
-    // Fixture pin: a sha1 repository would pass this test vacuously.
-    expect(git(dir, 'config', 'extensions.objectformat').trim()).toBe('sha256');
-    git(dir, 'fetch', '-q', 'origin');
-    expect(() => git(dir, 'rev-parse', '-q', '--verify', 'HEAD')).toThrow();
+      const dir = makeSha256Repo(false);
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'config', 'branch.master.remote', 'origin');
+      git(dir, 'config', 'branch.master.merge', 'refs/heads/master');
+      // Fixture pin: a sha1 repository would pass this test vacuously.
+      expect(git(dir, 'config', 'extensions.objectformat').trim()).toBe(
+        'sha256',
+      );
+      git(dir, 'fetch', '-q', 'origin');
+      expect(() => git(dir, 'rev-parse', '-q', '--verify', 'HEAD')).toThrow();
 
-    const result = await gitPull(dir);
+      const result = await gitPull(dir);
 
-    expect(result.success).toBe(true);
-    expect(fs.readFileSync(path.join(dir, 'upstream.txt'), 'utf8')).toBe(
-      'upstream\n',
-    );
+      expect(result.success).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'upstream.txt'), 'utf8')).toBe(
+        'upstream\n',
+      );
+    } finally {
+      fs.rmSync(ambient, { force: true });
+    }
   });
 
   it('refuses a force pull when an incoming non-ASCII path collides with a local ignored file', async () => {
@@ -2608,6 +2632,259 @@ describe('gitPull incoming-tip guards', () => {
       fs.rmSync(userGitconfig, { force: true });
     }
   });
+
+  // Ambient merge.ff / merge.verifySignatures / commit.gpgsign reach the
+  // product's git through the HOME channel gitEnv() keeps; the pinned
+  // merge/rebase must neutralize them or the resolution flow dead-ends
+  // host-config-dependently.
+  it('stash pull merges divergent branches when ambient merge.ff is only', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    const userGitconfig = path.join(hermeticHome, '.gitconfig');
+    fs.writeFileSync(userGitconfig, '[merge]\n\tff = only\n');
+    try {
+      const result = await gitPull(dir, { stash: true });
+
+      expect(result.success).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+      expect(git(dir, 'log', '--merges', '--oneline').trim()).not.toBe('');
+      expect(git(dir, 'stash', 'list').trim()).toBe('');
+    } finally {
+      fs.rmSync(userGitconfig, { force: true });
+    }
+  });
+
+  it('fast-forwards an unsigned tip when ambient merge.verifySignatures is true', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    const userGitconfig = path.join(hermeticHome, '.gitconfig');
+    fs.writeFileSync(userGitconfig, '[merge]\n\tverifySignatures = true\n');
+    try {
+      const result = await gitPull(dir);
+
+      expect(result.success).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'remote-only.txt'), 'utf8')).toBe(
+        'remote\n',
+      );
+    } finally {
+      fs.rmSync(userGitconfig, { force: true });
+    }
+  });
+
+  it('pulls every divergent shape when ambient commit.gpgsign cannot sign', async () => {
+    // The repo-local commit.gpgsign=false pin every fixture carries would
+    // outrank the ambient channel and make this witness vacuous, so build
+    // the diverged fixture without it.
+    const makeDivergedRepo = () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitgpgsign-'));
+      tmpRoots.push(dir);
+      git(dir, 'init', '-q', '-b', 'master');
+      git(dir, 'config', 'user.email', 'test@example.com');
+      git(dir, 'config', 'user.name', 'Test');
+      git(dir, 'config', 'core.autocrlf', 'false');
+      git(dir, 'config', 'core.eol', 'lf');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'init');
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'local commit');
+      return dir;
+    };
+
+    const userGitconfig = path.join(hermeticHome, '.gitconfig');
+    fs.writeFileSync(
+      userGitconfig,
+      '[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = /nonexistent/qwen-gpg\n',
+    );
+    try {
+      for (const opts of [{}, { rebase: true }] as const) {
+        const dir = makeDivergedRepo();
+        const headBefore = headSha(dir);
+
+        const result = await gitPull(dir, opts);
+
+        expect(result.success).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+        expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+        expect(headSha(dir)).not.toBe(headBefore);
+        expect(() =>
+          git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'),
+        ).toThrow();
+        // The merge arm reconciles with a merge commit; the rebase arm
+        // replays linearly.
+        if (opts.rebase === true) {
+          expect(git(dir, 'log', '--merges', '--oneline').trim()).toBe('');
+        } else {
+          expect(git(dir, 'log', '--merges', '--oneline').trim()).not.toBe('');
+        }
+      }
+    } finally {
+      fs.rmSync(userGitconfig, { force: true });
+    }
+  });
+
+  it('refuses a pull when incoming files land inside a tracked gitlink the probe cannot enumerate', async () => {
+    const dir = makeRepo();
+    // An embedded repository tracked as a gitlink (mode 160000): the
+    // superproject's ls-files never descends into a nested repository's
+    // directory, so files inside it are invisible to the probe's local
+    // enumeration no matter what the ignore rules say.
+    const vendorDir = path.join(dir, 'vendor');
+    fs.mkdirSync(vendorDir);
+    git(vendorDir, 'init', '-q', '-b', 'master');
+    git(vendorDir, 'config', 'user.email', 'vendor@example.com');
+    git(vendorDir, 'config', 'user.name', 'Vendor');
+    git(vendorDir, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(vendorDir, 'lib.txt'), 'vendored\n');
+    git(vendorDir, 'add', '.');
+    git(vendorDir, 'commit', '-q', '-m', 'vendor init');
+    git(dir, 'add', 'vendor');
+    git(dir, 'commit', '-q', '-m', 'track vendor as a gitlink');
+    // The shadowing file must be ignored for the overwrite to be silent:
+    // git's merge refuses to clobber an untracked-and-NOT-ignored file
+    // even inside a nested repository's directory. The probe's local
+    // enumeration is blind inside the nested repository either way.
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'secret.env\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'ignore secret.env');
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    // Upstream converts the gitlink into a regular tree carrying a file
+    // that shadows one held inside the local nested repository.
+    const clone = makeClone(remote);
+    git(clone, 'rm', '-q', '--cached', 'vendor');
+    fs.mkdirSync(path.join(clone, 'vendor'), { recursive: true });
+    fs.writeFileSync(path.join(clone, 'vendor', 'secret.env'), 'INCOMING\n');
+    git(clone, 'add', '-f', '.');
+    git(clone, 'commit', '-q', '-m', 'convert the gitlink to a tree');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(vendorDir, 'secret.env'), 'TOPSECRET-LOCAL\n');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+    await expect(gitPull(dir)).rejects.toMatchObject({
+      code: 'ignored_collision',
+    });
+
+    expect(fs.readFileSync(path.join(vendorDir, 'secret.env'), 'utf8')).toBe(
+      'TOPSECRET-LOCAL\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+  });
+
+  // The POSIX shim below stands in for a concurrent actor whose merge of
+  // the SAME fetched tip lands inside the collision probe while the pull
+  // also faces a real ignored collision; it has no Windows equivalent in
+  // this suite.
+  it.runIf(process.platform !== 'win32' && !hostHasSystemGitConfig())(
+    "keeps a concurrent actor's merge when an ignored collision refuses the pull",
+    async () => {
+      const dir = makeRepo();
+      fs.writeFileSync(path.join(dir, '.gitignore'), 'secret.txt\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'ignore secret.txt');
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'secret.txt'), 'incoming\n');
+      git(clone, 'add', '-f', 'secret.txt');
+      git(clone, 'commit', '-q', '-m', 'add secret.txt');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'secret.txt'), 'local secret\n');
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'actor-collision-once');
+      // The actor's merge of exactly the fetched tip parks its staged
+      // resolution while the collision probe runs. A real merge is not the
+      // simulation here: it would check the incoming file out over the
+      // ignored one, making it tracked and dropping it from the ignored
+      // listing the probe reads. MERGE_HEAD carries no writer identity,
+      // and the collision throws before the update and its guard re-run,
+      // so tip equality cannot tell this state from this pull's own.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "ls-files" ]; then\n` +
+          `  case " $* " in\n` +
+          `  *" --ignored "*)\n` +
+          `    if [ ! -e "${marker}" ]; then\n` +
+          `      : > "${marker}"\n` +
+          `      "${realGit}" -C "${dir}" rev-parse origin/master > "$("${realGit}" -C "${dir}" rev-parse --git-dir)/MERGE_HEAD"\n` +
+          `      "${realGit}" -C "${dir}" rev-parse HEAD > "$("${realGit}" -C "${dir}" rev-parse --git-dir)/ORIG_HEAD"\n` +
+          `      printf 'actor staged resolution\\n' > "${dir}/resolved-by-actor.txt"\n` +
+          `      "${realGit}" -C "${dir}" add resolved-by-actor.txt\n` +
+          `    fi\n` +
+          `    ;;\n` +
+          `  esac\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      await expect(
+        withPathPrefix(shimDir, () => gitPull(dir, { stash: true })),
+      ).rejects.toMatchObject({ code: 'ignored_collision' });
+
+      // The collision refused the pull before the update ran, so any
+      // merge state present is the actor's and must survive.
+      expect(() =>
+        git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'),
+      ).not.toThrow();
+      expect(git(dir, 'diff', '--cached', '--name-only')).toContain(
+        'resolved-by-actor.txt',
+      );
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(git(dir, 'stash', 'list').trim()).toBe('');
+    },
+  );
 
   // The POSIX shim below stands in for a concurrent actor pushing into the
   // probe->merge window; it has no Windows equivalent in this suite.

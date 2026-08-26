@@ -91,14 +91,19 @@ function runGitBuffer(
   cwd: string,
   args: string[],
   env?: Readonly<Record<string, string | undefined>>,
+  input?: Buffer,
 ): Promise<Buffer> {
-  return execFileAsync('git', args, {
+  const pending = execFileAsync('git', args, {
     cwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
     env: gitEnv(env),
     encoding: 'buffer',
-  }).then(({ stdout }) => stdout);
+  });
+  if (input !== undefined) {
+    pending.child.stdin?.end(input);
+  }
+  return pending.then(({ stdout }) => stdout);
 }
 
 function runGit(
@@ -807,14 +812,25 @@ function splitBuffer(buf: Buffer, byte: number): Buffer[] {
 // format — a sha256 repository's empty tree is a different id — so
 // derive it per repository instead of hardcoding one. It is the merge
 // base for a pull into an unborn HEAD (every incoming path is new), and
-// for a pull whose upstream shares no common ancestor with HEAD.
+// for a pull whose upstream shares no common ancestor with HEAD. The id
+// comes from an empty --stdin rather than a named null device:
+// hash-object reads the path through hash_fd(), which — unlike diff's
+// --no-index path — has no /dev/null or NUL special case, so a named
+// device is an ordinary file that does not exist on Windows.
 async function emptyTreeSha(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string> {
   return (
-    await runGit(cwd, ['hash-object', '-t', 'tree', '/dev/null'], env)
-  ).trim();
+    await runGitBuffer(
+      cwd,
+      ['hash-object', '-t', 'tree', '--stdin'],
+      env,
+      Buffer.alloc(0),
+    )
+  )
+    .toString('utf8')
+    .trim();
 }
 
 // Paths the incoming update would add over local IGNORED files: git
@@ -847,7 +863,10 @@ async function emptyTreeSha(
 // (core.ignorecase) — on both the byte-mapped form and the decoded-UTF-8
 // form, since the byte-mapped fold covers ASCII only: a case-variant
 // incoming path is the same file there, and git's own ignore matching
-// folds too, so nothing else catches the overwrite. A collision is an exact match or a
+// folds too, so nothing else catches the overwrite. Tracked gitlinks
+// (mode 160000) join the blocking set: ls-files never descends into a
+// nested repository's directory, so the ignored listing cannot see files
+// an incoming gitlink->tree conversion would check out over them. A collision is an exact match or a
 // segment-boundary prefix in either direction: an ignored file `docs`
 // blocks an incoming `docs/guide.md`, and an incoming file `dist`
 // replaces an ignored `dist/` with everything inside it. A rebase
@@ -918,13 +937,13 @@ async function incomingIgnoredPaths(
   if (includeReplayedAdditions && headExists) {
     collect(
       splitBuffer(
-        await runGitBuffer(
-          toplevel,
-          ['ls-tree', '-r', '--name-only', '-z', fetchedTip],
-          env,
-        ),
+        await runGitBuffer(toplevel, ['ls-tree', '-r', '-z', fetchedTip], env),
         0,
-      ),
+      )
+        // A path the tip still tracks as a gitlink is not an overwrite;
+        // drop mode-160000 entries and keep the paths of the rest.
+        .filter((entry) => !entry.toString('binary').startsWith('160000 '))
+        .map((entry) => entry.subarray(entry.indexOf(0x09) + 1)),
     );
   }
   for (const base of bases) {
@@ -959,25 +978,58 @@ async function incomingIgnoredPaths(
     );
   }
   if (additions.length === 0) return [];
+  // The local enumeration is structurally blind inside a tracked gitlink
+  // (mode 160000): ls-files never descends into a nested repository's
+  // directory, and the gitlink itself is not "others" — so an upstream
+  // gitlink->tree conversion checks incoming files out over local files
+  // the probe cannot see. Fail closed where the local side cannot be
+  // enumerated: every gitlink path blocks the additions at and under it,
+  // like an ignored file.
+  const gitlinks = new Set<string>();
+  await streamGitListing(
+    toplevel,
+    ['ls-files', '--stage', '-z'],
+    env,
+    (entry) => {
+      // '<mode> <oid> <stage>\t<path>'; only gitlinks matter here.
+      if (!entry.toString('binary').startsWith('160000 ')) return;
+      const tab = entry.indexOf(0x09);
+      if (tab === -1) return;
+      for (const key of collisionKeys(entry.subarray(tab + 1), foldCase)) {
+        gitlinks.add(key);
+      }
+    },
+  );
   const ignoredFiles = new Set<string>();
   const ignoredDirs = new Set<string>();
-  await streamIgnoredListing(toplevel, env, (entry) => {
-    for (let key of collisionKeys(entry, foldCase)) {
-      // Collapsed directory entries (a nested repository under an ignored
-      // path) carry a trailing slash; strip it so the entry compares like
-      // its path.
-      if (key.endsWith('/')) key = key.slice(0, -1);
-      ignoredFiles.add(key);
-      for (
-        let slash = key.indexOf('/');
-        slash !== -1;
-        slash = key.indexOf('/', slash + 1)
-      ) {
-        ignoredDirs.add(key.slice(0, slash));
+  await streamGitListing(
+    toplevel,
+    ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
+    env,
+    (entry) => {
+      for (let key of collisionKeys(entry, foldCase)) {
+        // Collapsed directory entries (a nested repository under an ignored
+        // path) carry a trailing slash; strip it so the entry compares like
+        // its path.
+        if (key.endsWith('/')) key = key.slice(0, -1);
+        ignoredFiles.add(key);
+        for (
+          let slash = key.indexOf('/');
+          slash !== -1;
+          slash = key.indexOf('/', slash + 1)
+        ) {
+          ignoredDirs.add(key.slice(0, slash));
+        }
       }
-    }
-  });
-  return findIgnoredCollisions(additions, ignoredFiles, ignoredDirs, foldCase);
+    },
+  );
+  return findIgnoredCollisions(
+    additions,
+    ignoredFiles,
+    ignoredDirs,
+    gitlinks,
+    foldCase,
+  );
 }
 
 // 'binary' maps bytes 1:1 onto code units, unlike UTF-8 which corrupts
@@ -1005,20 +1057,26 @@ function findIgnoredCollisions(
   additions: Buffer[],
   ignoredFiles: ReadonlySet<string>,
   ignoredDirs: ReadonlySet<string>,
+  gitlinks: ReadonlySet<string>,
   foldCase: boolean,
 ): Buffer[] {
   return additions.filter((addition) =>
     collisionKeys(addition, foldCase).some((key) => {
       // Exact match, or the incoming file sits where an ignored
-      // directory's contents live.
-      if (ignoredFiles.has(key) || ignoredDirs.has(key)) return true;
-      // An ignored file sits at a directory prefix of the incoming path.
+      // directory's contents — or a tracked gitlink's nested repository —
+      // live.
+      if (ignoredFiles.has(key) || ignoredDirs.has(key) || gitlinks.has(key)) {
+        return true;
+      }
+      // An ignored file or a tracked gitlink sits at a directory prefix
+      // of the incoming path.
       for (
         let slash = key.indexOf('/');
         slash !== -1;
         slash = key.indexOf('/', slash + 1)
       ) {
-        if (ignoredFiles.has(key.slice(0, slash))) return true;
+        const prefix = key.slice(0, slash);
+        if (ignoredFiles.has(prefix) || gitlinks.has(prefix)) return true;
       }
       return false;
     }),
@@ -1044,21 +1102,18 @@ async function repoFoldsCase(
   return value === 'true';
 }
 
-// Streams the ignored listing entry-by-entry instead of buffering it:
+// Streams a `-z` listing entry-by-entry instead of buffering it:
 // workspaces whose listing exceeds runGitBuffer's fixed maxBuffer must
 // not die in the probe. Non-zero exits and timeouts reject, refusing the
 // pull like any other probe failure.
-function streamIgnoredListing(
+function streamGitListing(
   cwd: string,
+  args: string[],
   env: Readonly<Record<string, string | undefined>> | undefined,
   onEntry: (entry: Buffer) => void,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      'git',
-      ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'],
-      { cwd, env: gitEnv(env) },
-    );
+    const child = spawn('git', args, { cwd, env: gitEnv(env) });
     let rest: Buffer | undefined;
     let stderr = '';
     const timer = setTimeout(() => {
@@ -1519,13 +1574,22 @@ async function gitPullInner(
           : '';
     }
   }
-  // Merge or rebase exactly the probed tip. --no-autostash neutralizes
-  // ambient merge.autostash/rebase.autostash config: an auto-stash inside
-  // the update can exit 0 on a pop conflict, leaving conflict markers in
-  // the tree and the user's changes stranded in a stash entry the caller
-  // never learns about.
+  // Merge or rebase exactly the probed tip. The flags neutralize ambient
+  // config the HOME/system channels keep reachable, so the resolution
+  // flow behaves the same on every host: --no-autostash — an auto-stash
+  // inside the update can exit 0 on a pop conflict, leaving conflict
+  // markers in the tree and the user's changes stranded in a stash entry
+  // the caller never learns about; --ff — merge.ff = only fatals the
+  // pinned merge on diverged branches, recreating the exact dead-end this
+  // flow exists to eliminate; --no-verify-signatures —
+  // merge.verifySignatures = true fatals on every unsigned tip, even a
+  // fast-forward; --no-gpg-sign — commit.gpgsign = true fatals the commit
+  // write whenever the daemon process cannot sign (no TTY/agent), leaving
+  // the MERGE_HEAD this update created behind with no recovery on the
+  // plain shape. (git rebase has no verifySignatures knob to neutralize.)
   let output: string;
   let restoreFailed = false;
+  let updateAttempted = false;
   try {
     // Every pull shape refuses an incoming collision with local ignored
     // files: ignored paths never appear in `git status`, so the plain
@@ -1567,11 +1631,20 @@ async function gitPullInner(
     // irreducible check-then-act window already documented for
     // refs/stash.
     await reverifyPullIdentities(cwd, headRef, env);
+    updateAttempted = true;
     output = await runGit(
       cwd,
       useRebase
-        ? ['rebase', '--no-autostash', fetchedTip]
-        : ['merge', '--no-edit', '--no-autostash', fetchedTip],
+        ? ['rebase', '--no-autostash', '--no-gpg-sign', fetchedTip]
+        : [
+            'merge',
+            '--ff',
+            '--no-edit',
+            '--no-autostash',
+            '--no-verify-signatures',
+            '--no-gpg-sign',
+            fetchedTip,
+          ],
       env,
     );
   } catch (err) {
@@ -1579,16 +1652,22 @@ async function gitPullInner(
       err instanceof GitPullFailure &&
       (err.code === 'merge_in_progress' || err.code === 'rebase_in_progress');
     if (stashed || opts?.force) {
-      if (!foreignState) {
+      if (!foreignState && updateAttempted) {
         // Never leave the repository wedged mid-merge: abort the partial
         // merge/rebase this update started (restoring the pre-pull HEAD) —
         // and only that. The guard re-ran immediately before the update,
         // but a concurrent actor can still create state in the window
         // between the two; the update then fails fast without touching the
         // foreign state, and aborting it would destroy the actor's work.
-        // Identify ours first: a merge this pull started wrote the
-        // fetched tip to MERGE_HEAD, and a rebase it started wrote it to
-        // the state directory's `onto` file.
+        // The updateAttempted gate closes the other direction: errors
+        // thrown before the update — the ignored-collision refusal, a
+        // head_changed re-verify — never started any state, and tip
+        // identity alone cannot tell a concurrent actor's merge/rebase of
+        // the SAME fetched tip from this pull's, so state present then is
+        // foreign by definition and must not be aborted. Identify ours
+        // first: a merge this pull started wrote the fetched tip to
+        // MERGE_HEAD, and a rebase it started wrote it to the state
+        // directory's `onto` file.
         if (!useRebase) {
           const mergeHead = (
             await runGit(
