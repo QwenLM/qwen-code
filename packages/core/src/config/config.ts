@@ -1769,6 +1769,24 @@ export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,
 ) => Promise<SubSessionSpawnResult>;
 
+export interface CurrentSessionScheduledTaskCreateRequest {
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  promptId: string;
+}
+
+export interface CurrentSessionScheduledTaskCreateResult {
+  id: string;
+  cron: string;
+}
+
+/** Daemon-only capability used by `cron_create` to bind a durable task to the
+ * session whose active turn is executing the tool. */
+export type CurrentSessionScheduledTaskCreator = (
+  req: CurrentSessionScheduledTaskCreateRequest,
+) => Promise<CurrentSessionScheduledTaskCreateResult>;
+
 /**
  * A higher-priority static DashScope thinking knob that shadows the global
  * reasoning-effort tier on the wire (see getReasoningEffortOverride).
@@ -9216,6 +9234,8 @@ export class Config {
 
   private subSessionSpawner?: SubSessionSpawner;
 
+  private currentSessionScheduledTaskCreator?: CurrentSessionScheduledTaskCreator;
+
   /**
    * Wire the sub-session spawner used by the `create_sub_session` tool. Set by
    * the daemon/ACP session layer (which routes it to the bridge over
@@ -9229,5 +9249,17 @@ export class Config {
   /** The injected sub-session spawner, or undefined outside daemon mode. */
   getSubSessionSpawner(): SubSessionSpawner | undefined {
     return this.subSessionSpawner;
+  }
+
+  setCurrentSessionScheduledTaskCreator(
+    creator: CurrentSessionScheduledTaskCreator | undefined,
+  ): void {
+    this.currentSessionScheduledTaskCreator = creator;
+  }
+
+  getCurrentSessionScheduledTaskCreator():
+    | CurrentSessionScheduledTaskCreator
+    | undefined {
+    return this.currentSessionScheduledTaskCreator;
   }
 }

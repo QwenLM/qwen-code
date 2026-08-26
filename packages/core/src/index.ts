@@ -260,6 +260,11 @@ export type {
   PublishedArtifact,
 } from './tools/artifact/publisher.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
+export type {
+  CurrentSessionScheduledTaskCreateRequest,
+  CurrentSessionScheduledTaskCreateResult,
+  CurrentSessionScheduledTaskCreator,
+} from './config/config.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';

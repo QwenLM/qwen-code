@@ -56,6 +56,7 @@ import {
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -1980,6 +1981,15 @@ export class GeminiChat {
   private manualPlanExitNoticesEnabled = false;
 
   /**
+   * True for forked/speculative chats built by `createForkedChat` on the
+   * parent's Config. They share the parent's ToolRegistry (and the single
+   * SkillTool tracking instance) while rewriting only a copy of a parent
+   * history slice, so their rewrites must not touch loaded-skill tracking —
+   * only the chat owning the authoritative session may.
+   */
+  isForkedChat = false;
+
+  /**
    * Reset both partial-push markers in lockstep. Every history-mutation
    * site uses this — single-field resets are a bug because the fields
    * are always paired by lifecycle.
@@ -2401,6 +2411,8 @@ export class GeminiChat {
       // the session-token-limit gate blocks a prompt that fits the
       // compressed history (#9506).
       this.tokenCountsByRouteKey.clear();
+      // Loaded-skill tracking was conservatively cleared by the setHistory
+      // above — no second sync here.
       this.setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated,
@@ -2879,6 +2891,8 @@ export class GeminiChat {
           // state. The JSONL compression checkpoint is intentionally not
           // written because the send is about to be rejected.
           this.setHistory(historyBeforeHardRescue);
+          // setHistory conservatively cleared loaded-skill tracking; the
+          // restored bodies re-arm it on their next invoke.
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
@@ -4935,9 +4949,18 @@ export class GeminiChat {
     // function-declaration list regardless of history.
     this.clearProxySchemaPresentationsIfRegistryAvailable();
     this.redactApprovedPlansFromLoadedHistory();
+    // Wholesale replacement can drop resident skill bodies (compression,
+    // /restore, session-manager load_history, ACP restoreSessionHistory
+    // all land here). Conservatively clear the tracking so an evicted
+    // skill never stays stuck behind the dedup guard; a still-resident
+    // body costs at most one duplicate injection on the next invoke.
+    if (!this.isForkedChat) {
+      clearLoadedSkillTracking(this.config.getToolRegistry(), 'setHistory');
+    }
   }
 
   truncateHistory(keepCount: number): void {
+    const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
@@ -4945,6 +4968,14 @@ export class GeminiChat {
     // ephemeral, so losing them across a truncate is safe (the
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
+    if (this.history.length < prevLen && !this.isForkedChat) {
+      // Truncation may have dropped a skill body; conservative clear
+      // re-arms reload (see setHistory for the trade-off).
+      clearLoadedSkillTracking(
+        this.config.getToolRegistry(),
+        'truncateHistory',
+      );
+    }
     this.clearPendingPartialState();
     // Rewind/truncation can evict the tool_search result carrying a
     // presented schema; clear the ledger for the same reason setHistory
@@ -5051,6 +5082,16 @@ export class GeminiChat {
     // `sendMessageStream` would otherwise leave a stale marker that
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
+    if (strippedEntries.length > 0 && !this.isForkedChat) {
+      // The stripped entries may have carried a skill body; conservative
+      // clear re-arms reload (see setHistory for the trade-off). A forked
+      // chat shares the parent's tracker while holding only a tail slice,
+      // so only the authoritative session's chat may clear.
+      clearLoadedSkillTracking(
+        this.config.getToolRegistry(),
+        'stripOrphanedUserEntries',
+      );
+    }
     this.clearPendingPartialState();
     return strippedEntries;
   }

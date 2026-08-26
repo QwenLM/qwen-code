@@ -308,6 +308,107 @@ describe('GeminiChat', async () => {
     } as unknown as GenerateContentResponse;
   }
 
+  describe('history-rewrite loaded-skill tracking', () => {
+    // Destructive rewrites (compaction, truncation, orphan stripping)
+    // conservatively clear the SkillTool's loaded-skill tracking so an
+    // evicted body can never stay stuck behind the dedup guard. The
+    // trade-off is at most one duplicate body on the next invoke.
+    const wireSkillTracker = () => {
+      const skillTool = { clearLoadedSkills: vi.fn() };
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      return skillTool;
+    };
+
+    it('setHistory clears tracking on wholesale replacement', () => {
+      const skillTool = wireSkillTracker();
+      chat.setHistory([{ role: 'user', parts: [{ text: 'hi' }] }]);
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalled();
+    });
+
+    it('tryCompress clears tracking through its setHistory', async () => {
+      const skillTool = wireSkillTracker();
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 30_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+
+      await chat.tryCompress('prompt-skill-clear', true);
+
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalled();
+    });
+
+    it('tryCompress leaves tracking untouched on NOOP', async () => {
+      const skillTool = wireSkillTracker();
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: null,
+        info: {
+          originalTokenCount: 1_000,
+          newTokenCount: 1_000,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+
+      await chat.tryCompress('prompt-skill-noop', true);
+
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+    });
+
+    it('truncateHistory clears tracking when entries were dropped', () => {
+      const skillTool = wireSkillTracker();
+      chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
+      chat.addHistory({ role: 'model', parts: [{ text: 'b' }] });
+      chat.truncateHistory(1);
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalled();
+    });
+
+    it('truncateHistory leaves tracking when nothing was dropped', () => {
+      const skillTool = wireSkillTracker();
+      chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
+      chat.truncateHistory(5);
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+    });
+
+    it('stripOrphanedUserEntriesFromHistory clears tracking when it strips', () => {
+      const skillTool = wireSkillTracker();
+      chat.addHistory({ role: 'model', parts: [{ text: 'ack' }] });
+      chat.addHistory({ role: 'user', parts: [{ text: 'orphan' }] });
+      chat.stripOrphanedUserEntriesFromHistory();
+      expect(skillTool.clearLoadedSkills).toHaveBeenCalled();
+    });
+
+    it('stripOrphanedUserEntriesFromHistory leaves tracking when nothing is stripped', () => {
+      const skillTool = wireSkillTracker();
+      chat.addHistory({ role: 'model', parts: [{ text: 'ack' }] });
+      chat.stripOrphanedUserEntriesFromHistory();
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+    });
+
+    it('forked chats never touch the shared parent tracker', () => {
+      const skillTool = wireSkillTracker();
+      chat.isForkedChat = true;
+
+      chat.setHistory([{ role: 'model', parts: [{ text: 'ack' }] }]);
+      chat.addHistory({ role: 'user', parts: [{ text: 'orphan' }] });
+      chat.stripOrphanedUserEntriesFromHistory();
+      chat.addHistory({ role: 'model', parts: [{ text: 'ack2' }] });
+      chat.truncateHistory(1);
+
+      expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
+    });
+  });
+
   describe('system instruction helpers', () => {
     it('replaces prior session-start context instead of appending indefinitely', () => {
       const isolatedChat = new GeminiChat(
@@ -16937,7 +17038,10 @@ describe('GeminiChat', async () => {
       mockFileSystem.set(planFile, PLAN);
       try {
         const chat = new GeminiChat(
-          { getPlanFilePath: () => planFile } as unknown as Config,
+          {
+            getPlanFilePath: () => planFile,
+            getToolRegistry: () => undefined,
+          } as unknown as Config,
           {},
           [],
         );
@@ -16969,6 +17073,7 @@ describe('GeminiChat', async () => {
       const chat = new GeminiChat(
         {
           getPlanFilePath: () => '/plans/never-written.md',
+          getToolRegistry: () => undefined,
         } as unknown as Config,
         {},
         [],

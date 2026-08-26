@@ -26,8 +26,11 @@ import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_CHECKPOINT_STALLED_REASON,
+  GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   GOAL_STATE_VERSION,
+  goalTokenBudgetReason,
+  isGoalTokenBudgetSpent,
   isRepeatedBlockerProposal,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
@@ -74,6 +77,15 @@ export interface CreateGoalRuntimeOptions {
   verifier?: GoalVerifier;
   checkpointVerifier?: GoalCheckpointVerifier;
   tokenLedger?: GoalTurnTokenLedger;
+  /**
+   * The autonomous spend window one user action (create, edit of a spent
+   * Goal, or resume of a Goal whose ceiling is spent) arms, in `tokensUsed`
+   * tokens. Defaults to `GOAL_DEFAULT_TOKEN_BUDGET`; tests shrink it to
+   * make the bound reachable. A non-finite grant (`Infinity`) opts out:
+   * Goals are then created unbounded, exactly like Goals persisted before
+   * budgets existed.
+   */
+  tokenBudgetGrant?: number;
 }
 
 /**
@@ -288,6 +300,104 @@ export function createGoalRuntime(
     }
   };
 
+  const tokenBudgetGrant =
+    options.tokenBudgetGrant ?? GOAL_DEFAULT_TOKEN_BUDGET;
+
+  /**
+   * The shared `usage_limited` settle: every stop builds the same limited
+   * snapshot, journals it, then commits it in memory and broadcasts. Each
+   * settling site keeps its own re-entry guard and flag resets around this.
+   */
+  const usageLimitedSnapshot = (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    reason: string,
+    limitKind?: GoalLimitKind,
+  ): GoalSnapshotV2 => {
+    const now = Date.now();
+    return {
+      v: GOAL_STATE_VERSION,
+      goal: {
+        ...goal,
+        status: 'usage_limited',
+        activeTimeMs: elapsedActiveTime(goal, now),
+        updatedAt: now,
+        lastReason: reason,
+        ...(limitKind === undefined ? {} : { limitKind }),
+      },
+      activity: 'idle',
+    };
+  };
+
+  const journalUsageLimitedSettle = async (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    reason: string,
+    limitKind?: GoalLimitKind,
+  ): Promise<GoalSnapshotV2> => {
+    const limitedSnapshot = usageLimitedSnapshot(goal, reason, limitKind);
+    await options.journal.recordGoalState(randomUUID(), {
+      v: GOAL_STATE_VERSION,
+      cause: 'usage_limited',
+      snapshot: limitedSnapshot,
+    });
+    return limitedSnapshot;
+  };
+
+  const commitUsageLimitedSettle = (limitedSnapshot: GoalSnapshotV2): void => {
+    continuationQueued = false;
+    currentTurnFeedback = undefined;
+    snapshot = structuredClone(limitedSnapshot);
+    broadcast('usage_limited');
+  };
+
+  /**
+   * Settle a spent budget instead of minting a continuation.
+   *
+   * Runs from `queueContinuation`, the single point every autonomous
+   * continuation passes through, so one gate bounds every continuation loop
+   * at once -- turn cadence, verifier-rejection retries, checkpoint cycles,
+   * and families not yet discovered. User-driven turns never pass through
+   * here and are never blocked by the budget.
+   */
+  const stopForSpentBudget = () => {
+    void enqueue(async () => {
+      const goal = snapshot.goal;
+      if (
+        !goal ||
+        goal.status !== 'active' ||
+        !isGoalTokenBudgetSpent(goal) ||
+        currentPermit ||
+        pendingProposal ||
+        verificationAttempt ||
+        checkpointAttempt
+      ) {
+        return;
+      }
+      const reason = goalTokenBudgetReason(goal.tokenBudget);
+      let limitedSnapshot: GoalSnapshotV2;
+      try {
+        limitedSnapshot = await journalUsageLimitedSettle(
+          goal,
+          reason,
+          'token_budget',
+        );
+      } catch {
+        // A lost settle write must not strand an "active" Goal the gate will
+        // never continue: the window is spent either way, so show the stop
+        // and let the user's next action surface the persistence loss.
+        limitedSnapshot = usageLimitedSnapshot(goal, reason, 'token_budget');
+      }
+      if (
+        snapshot.goal?.goalId !== goal.goalId ||
+        snapshot.goal.revision !== goal.revision ||
+        snapshot.goal.status !== 'active' ||
+        currentPermit
+      ) {
+        return;
+      }
+      commitUsageLimitedSettle(limitedSnapshot);
+    }).catch(() => undefined);
+  };
+
   const withCheckpointStalls = (
     goal: NonNullable<GoalSnapshotV2['goal']>,
     checkpointStalls: number,
@@ -411,6 +521,10 @@ export function createGoalRuntime(
       verificationAttempt ||
       checkpointAttempt
     ) {
+      return;
+    }
+    if (isGoalTokenBudgetSpent(snapshot.goal)) {
+      stopForSpentBudget();
       return;
     }
     continuationQueued = true;
@@ -590,33 +704,16 @@ export function createGoalRuntime(
       }
 
       if (outcome.kind === 'usage_limited') {
-        const limitedSnapshot: GoalSnapshotV2 = {
-          v: GOAL_STATE_VERSION,
-          goal: {
-            ...snapshot.goal,
-            status: 'usage_limited',
-            activeTimeMs: elapsedActiveTime(snapshot.goal, now),
-            updatedAt: now,
-            lastReason: outcome.reason,
-            ...(outcome.limitKind === undefined
-              ? {}
-              : { limitKind: outcome.limitKind }),
-          },
-          activity: 'idle',
-        };
-        await options.journal.recordGoalState(randomUUID(), {
-          v: GOAL_STATE_VERSION,
-          cause: 'usage_limited',
-          snapshot: limitedSnapshot,
-        });
+        const limitedSnapshot = await journalUsageLimitedSettle(
+          snapshot.goal,
+          outcome.reason,
+          outcome.limitKind,
+        );
         if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
         verificationAttempt = undefined;
         pendingProposal = undefined;
-        continuationQueued = false;
         nextVerifierFeedback = undefined;
-        currentTurnFeedback = undefined;
-        snapshot = structuredClone(limitedSnapshot);
-        broadcast('usage_limited');
+        commitUsageLimitedSettle(limitedSnapshot);
         return undefined;
       }
 
@@ -824,32 +921,16 @@ export function createGoalRuntime(
     reason: string,
     limitKind?: GoalLimitKind,
   ): Promise<void> => {
-    const now = Date.now();
-    const limitedSnapshot: GoalSnapshotV2 = {
-      v: GOAL_STATE_VERSION,
-      goal: {
-        ...goal,
-        status: 'usage_limited',
-        activeTimeMs: elapsedActiveTime(goal, now),
-        updatedAt: now,
-        lastReason: reason,
-        ...(limitKind === undefined ? {} : { limitKind }),
-      },
-      activity: 'idle',
-    };
-    await options.journal.recordGoalState(randomUUID(), {
-      v: GOAL_STATE_VERSION,
-      cause: 'usage_limited',
-      snapshot: limitedSnapshot,
-    });
+    const limitedSnapshot = await journalUsageLimitedSettle(
+      goal,
+      reason,
+      limitKind,
+    );
     if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
     checkpointAttempt = undefined;
-    continuationQueued = false;
     // Keep nextVerifierFeedback: a rejection committed before this
     // checkpoint failure must still reach the resumed continuation.
-    currentTurnFeedback = undefined;
-    snapshot = structuredClone(limitedSnapshot);
-    broadcast('usage_limited');
+    commitUsageLimitedSettle(limitedSnapshot);
   };
 
   /**
@@ -1537,6 +1618,7 @@ export function createGoalRuntime(
             request.action === 'edit'
               ? { recordId: recordUuid }
               : options.journal.getTranscriptCursor(),
+          tokenBudgetGrant,
         });
         const nextSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,

@@ -16,6 +16,7 @@ import type {
   AnsiOutput,
   AnsiOutputDisplay,
   Config,
+  TodoResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
 import { getScreenBuffer } from '../../selection/screen-buffer.js';
@@ -139,6 +140,14 @@ vi.mock('./ToolConfirmationMessage.js', () => ({
       </Text>
     );
   },
+}));
+
+vi.mock('../TodoDisplay.js', () => ({
+  TodoDisplay: ({
+    todos,
+  }: {
+    todos: Array<{ content: string; status: string }>;
+  }) => <Text>{todos.map((t) => t.content).join(', ')}</Text>,
 }));
 
 // Mock settings
@@ -849,6 +858,57 @@ describe('<ToolMessage />', () => {
     );
     // Check that the output contains the MockDiff content as part of the whole message
     expect(lastFrame()).toMatch(/MockDiff:--- a\/file\.txt/);
+  });
+
+  it('suppresses todo panel when resultDisplay has unchanged flag', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="TodoWrite"
+        description="Update todos"
+        resultDisplay={
+          {
+            type: 'todo_list',
+            todos: [
+              { id: '1', content: 'Task A', status: 'in_progress' },
+              { id: '2', content: 'Task B', status: 'pending' },
+            ],
+            unchanged: true,
+          } as TodoResultDisplay
+        }
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('TodoWrite');
+    // TodoDisplay should NOT render when unchanged is true
+    expect(output).not.toContain('Task A');
+    expect(output).not.toContain('Task B');
+    expect(output).not.toContain('in_progress');
+  });
+
+  it('renders todo panel normally when unchanged flag is absent', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="TodoWrite"
+        description="Update todos"
+        resultDisplay={{
+          type: 'todo_list',
+          todos: [
+            { id: '1', content: 'Task A', status: 'in_progress' },
+            { id: '2', content: 'Task B', status: 'pending' },
+          ],
+        }}
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame() ?? '';
+    expect(output).toContain('TodoWrite');
+    expect(output).toContain('Task A');
+    expect(output).toContain('Task B');
   });
 
   it('diff results are not collapsed for completed collapsible tools (bypass shouldCollapseResult)', () => {

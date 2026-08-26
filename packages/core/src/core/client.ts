@@ -1094,6 +1094,98 @@ export class GeminiClient {
     );
   }
 
+  /** @internal */
+  beginManagedAutoMemoryRecall(query: string, signal: AbortSignal): void {
+    if (
+      !this.config.isManagedMemoryAvailable() ||
+      !this.config.getManagedAutoMemoryEnabled()
+    ) {
+      return;
+    }
+
+    // A previous recall may still be pending (slow side-query, new user turn
+    // arrived before it settled). Abort it before installing the new handle so
+    // the orphan doesn't keep running indefinitely.
+    this.cancelPendingMemoryPrefetch('new_query');
+    const controller = new AbortController();
+    // Bridge the caller's signal into the prefetch controller so a user abort
+    // on the parent turn also terminates the recall side-query.
+    let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
+    const onParentAbort = () => {
+      prefetchAbortReason = 'abort';
+      controller.abort();
+      this.cancelPendingMemoryPrefetch('abort');
+    };
+    if (signal.aborted) {
+      prefetchAbortReason = 'abort';
+      controller.abort();
+    } else {
+      signal.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const fastResultRef: MemoryFastResultBox = { current: null };
+    const promise = this.config
+      .getMemoryManager()
+      .recall(this.config.getProjectRoot(), query, {
+        config: this.config,
+        excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+        recentTools: [...this.recentCompletedToolNames],
+        abortSignal: controller.signal,
+        onFastResult: (result) => {
+          fastResultRef.current = result;
+          fastResultRef.onArrive?.();
+        },
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          debugLogger.debug('Managed auto-memory recall prefetch aborted.');
+        } else {
+          debugLogger.warn(
+            'Managed auto-memory recall prefetch failed.',
+            error,
+          );
+        }
+        return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+      });
+    const handle: MemoryPrefetchHandle = {
+      promise,
+      settledAt: null,
+      result: null,
+      consumed: false,
+      terminalLogged: false,
+      firedAt: Date.now(),
+      controller,
+      fastResultRef,
+      fastDelivered: false,
+      fastDeliveredPaths: new Set<string>(),
+    };
+    void promise.then((result) => {
+      handle.result = result;
+    });
+    void promise.finally(() => {
+      handle.settledAt = Date.now();
+      signal.removeEventListener('abort', onParentAbort);
+    });
+    this.pendingMemoryPrefetch = handle;
+    if (prefetchAbortReason) {
+      this.cancelPendingMemoryPrefetch(prefetchAbortReason);
+    }
+  }
+
+  /** @internal */
+  consumeManagedAutoMemoryRecall(
+    deliveryPoint: 'initial' | 'tool_result',
+  ): Promise<RelevantAutoMemoryPromptResult | null> {
+    return this.tryConsumeMemoryPrefetch(
+      deliveryPoint,
+      deliveryPoint === 'initial' ? INITIAL_MEMORY_RECALL_WAIT_MS : 0,
+    );
+  }
+
+  /** @internal */
+  finishManagedAutoMemoryRecall(): void {
+    this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+  }
+
   private cancelPendingMemoryPrefetch(
     discardReason: MemoryRecallDiscardReason,
   ): void {
@@ -2367,6 +2459,7 @@ export class GeminiClient {
       const m = mcResult.meta;
       const changed = m.tokensSaved > 0;
       if (changed) {
+        // setHistory conservatively clears loaded-skill tracking.
         this.getChat().setHistory(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
@@ -2665,6 +2758,8 @@ export class GeminiClient {
           this.getChat().addHistory(entry);
         }
       }
+      // Loaded-skill tracking was conservatively cleared by the strip
+      // above; restored bodies simply re-inject on their next invoke.
       strippedRetryEntries = [];
     };
 
@@ -2987,94 +3082,10 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        if (
-          this.config.isManagedMemoryAvailable() &&
-          this.config.getManagedAutoMemoryEnabled()
-        ) {
-          // A previous recall may still be pending (slow side-query, new user
-          // turn arrived before it settled). Abort it before installing the
-          // new handle so the orphan doesn't keep running indefinitely.
-          this.cancelPendingMemoryPrefetch('new_query');
-          const controller = new AbortController();
-          // Bridge the caller's signal into the prefetch controller so a user
-          // abort (Ctrl-C / Esc) on the parent turn also terminates the
-          // recall side-query. `{ once: true }` lets the listener clean itself
-          // up after firing; we still call removeEventListener on the promise's
-          // finally to cover the normal-completion case so a long-lived parent
-          // signal doesn't accumulate listeners across many turns.
-          let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
-          const onParentAbort = () => {
-            prefetchAbortReason = 'abort';
-            controller.abort();
-            this.cancelPendingMemoryPrefetch('abort');
-          };
-          if (signal.aborted) {
-            prefetchAbortReason = 'abort';
-            controller.abort();
-          } else {
-            signal.addEventListener('abort', onParentAbort, { once: true });
-          }
-          const fastResultRef: MemoryFastResultBox = { current: null };
-          const promise = this.config
-            .getMemoryManager()
-            .recall(
-              this.config.getProjectRoot(),
-              preHookUserPromptText ?? partToString(request),
-              {
-                config: this.config,
-                excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-                recentTools: [...this.recentCompletedToolNames],
-                abortSignal: controller.signal,
-                onFastResult: (result) => {
-                  fastResultRef.current = result;
-                  fastResultRef.onArrive?.();
-                },
-              },
-            )
-            .catch((error: unknown) => {
-              // Abort sources are now numerous (caller signal, new UserQuery,
-              // cleanup paths, safety-net timeout). Keep a debug trace so
-              // operators can diagnose missing-memory scenarios without
-              // raising noise on the common abort path.
-              if (
-                error instanceof DOMException &&
-                error.name === 'AbortError'
-              ) {
-                debugLogger.debug(
-                  'Managed auto-memory recall prefetch aborted.',
-                );
-              } else {
-                debugLogger.warn(
-                  'Managed auto-memory recall prefetch failed.',
-                  error,
-                );
-              }
-              return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-            });
-          const handle: MemoryPrefetchHandle = {
-            promise,
-            settledAt: null,
-            result: null,
-            consumed: false,
-            terminalLogged: false,
-            firedAt: Date.now(),
-            controller,
-            fastResultRef,
-            fastDelivered: false,
-            fastDeliveredPaths: new Set<string>(),
-          };
-          void promise.then((result) => {
-            handle.result = result;
-          });
-          void promise.finally(() => {
-            handle.settledAt = Date.now();
-            signal.removeEventListener('abort', onParentAbort);
-          });
-          this.pendingMemoryPrefetch = handle;
-          if (prefetchAbortReason) {
-            this.cancelPendingMemoryPrefetch(prefetchAbortReason);
-          }
-        }
+        this.beginManagedAutoMemoryRecall(
+          preHookUserPromptText ?? partToString(request),
+          signal,
+        );
 
         // Track prompt count for commit attribution. Only the user typing a
         // fresh prompt should bump the counter — `ToolResult` (tool-call
@@ -3396,12 +3407,10 @@ export class GeminiClient {
           }
         }
 
-        const userQueryMemory = await this.tryConsumeMemoryPrefetch(
-          'initial',
+        const userQueryMemory =
           messageType === SendMessageType.UserQuery
-            ? INITIAL_MEMORY_RECALL_WAIT_MS
-            : 0,
-        );
+            ? await this.consumeManagedAutoMemoryRecall('initial')
+            : await this.tryConsumeMemoryPrefetch('initial');
         if (userQueryMemory?.prompt) {
           // Unshift to the front of systemReminders: on a UserQuery turn
           // requestToSend leads with user text, so positioning memory at
@@ -3449,7 +3458,7 @@ export class GeminiClient {
 
       if (messageType === SendMessageType.ToolResult) {
         const toolResultMemory =
-          await this.tryConsumeMemoryPrefetch('tool_result');
+          await this.consumeManagedAutoMemoryRecall('tool_result');
         if (toolResultMemory?.prompt) {
           // Append (not prepend): on a ToolResult turn, requestToSend leads
           // with functionResponse parts that must immediately follow the
@@ -4261,7 +4270,7 @@ export class GeminiClient {
       // pending, preserve the handle so the next ToolResult turn can
       // consume it (the fire-and-forget design).
       if (!hasToolCalls) {
-        this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+        this.finishManagedAutoMemoryRecall();
       }
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;
