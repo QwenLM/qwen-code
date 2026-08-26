@@ -1698,6 +1698,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       durationMs: 0,
       promptCount: 0,
       models: {},
+      sources: [],
       tools: {
         totalCalls: 0,
         totalSuccess: 0,
@@ -8965,6 +8966,7 @@ describe('createServeApp', () => {
         durationMs: 1200,
         promptCount: 2,
         models: {},
+        sources: [],
         tools: {
           totalCalls: 0,
           totalSuccess: 0,
@@ -9060,6 +9062,7 @@ describe('createServeApp', () => {
       expect(commandsRes.status).toBe(200);
       expect(commandsRes.body).toEqual(commands);
       expect(statsRes.status).toBe(200);
+      expect(statsRes.headers['cache-control']).toBe('no-store');
       expect(statsRes.body).toEqual(stats);
       expect(tasksRes.status).toBe(200);
       expect(tasksRes.body).toEqual(tasks);

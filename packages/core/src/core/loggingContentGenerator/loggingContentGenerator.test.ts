@@ -510,6 +510,7 @@ describe('LoggingContentGenerator', () => {
       expect.anything(),
       expect.anything(),
       'parent-session',
+      undefined,
     );
   });
 
@@ -567,6 +568,7 @@ describe('LoggingContentGenerator', () => {
       expect.anything(),
       expect.anything(),
       'stream-session-B',
+      undefined,
     );
     expect(activeOtelContext.current).toBe('root');
   });
