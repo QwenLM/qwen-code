@@ -234,6 +234,76 @@ describe('GitWorktreeService.createUserWorktree() — hooksPath setup', () => {
     },
   );
 
+  // All the screens above protect only the FINAL path component — the
+  // lstat/isFile check, the byte-equality read, the tracked probe, and the
+  // O_NOFOLLOW open all resolve intermediate symlinks. Git stores symlinks,
+  // so a checked-out branch can commit `.qwen` ITSELF as a link to another
+  // directory; every step then operates on the target, and the upgrade
+  // rewrites a tracked file OUTSIDE `.qwen/` — re-creating, from hostile
+  // repo content, the exact dirty-parent DoS this repair exists to
+  // eliminate. The repair must refuse a non-directory `.qwen` before any
+  // write. Same platform caveat as the fixtures above.
+  it.skipIf(process.platform === 'win32')(
+    'does not rewrite a tracked file through a symlinked .qwen directory',
+    async () => {
+      // Faithful attack fixture: `.qwen` committed as a symlink to `docs/`,
+      // `docs/.gitignore` committed with the legacy body.
+      const docsDir = path.join(repoRoot, 'docs');
+      await fs.mkdir(docsDir);
+      await fs.writeFile(
+        path.join(docsDir, '.gitignore'),
+        LEGACY_WORKTREES_GITIGNORE_BODY,
+      );
+      await fs.symlink('docs', path.join(repoRoot, '.qwen'));
+      execFileSync('git', ['add', '.qwen', 'docs'], { cwd: repoRoot });
+      execFileSync('git', ['commit', '-q', '-m', 'plant', '--no-verify'], {
+        cwd: repoRoot,
+      });
+
+      const svc = new GitWorktreeService(repoRoot);
+      await svc.ensureWorktreesGitignored();
+
+      // The tracked file outside `.qwen/` is untouched...
+      expect(await fs.readFile(path.join(docsDir, '.gitignore'), 'utf8')).toBe(
+        LEGACY_WORKTREES_GITIGNORE_BODY,
+      );
+      // ...so the parent is still clean and gated provisions are not
+      // refused over a change the user never made.
+      expect(await svc.hasWorktreeChanges(repoRoot)).toBe(false);
+    },
+  );
+
+  // Create arm of the same guard: with `.qwen` committed as a directory
+  // symlink whose target has no `.gitignore` yet, the `wx` create lands the
+  // new file outside `.qwen/` — an untracked file that dirties the parent
+  // the same way the rewritten one does.
+  it.skipIf(process.platform === 'win32')(
+    'does not create its gitignore through a symlinked .qwen directory',
+    async () => {
+      const elsewhere = path.join(repoRoot, 'elsewhere');
+      await fs.mkdir(elsewhere);
+      await fs.writeFile(path.join(elsewhere, 'README.md'), 'anchor\n');
+      await fs.symlink('elsewhere', path.join(repoRoot, '.qwen'));
+      execFileSync('git', ['add', '.qwen', 'elsewhere'], { cwd: repoRoot });
+      execFileSync('git', ['commit', '-q', '-m', 'plant', '--no-verify'], {
+        cwd: repoRoot,
+      });
+
+      const svc = new GitWorktreeService(repoRoot);
+      await svc.ensureWorktreesGitignored();
+
+      const created = await fs.access(path.join(elsewhere, '.gitignore')).then(
+        () => true,
+        () => false,
+      );
+      expect(created).toBe(false);
+      expect(
+        (await fs.lstat(path.join(repoRoot, '.qwen'))).isSymbolicLink(),
+      ).toBe(true);
+      expect(await svc.hasWorktreeChanges(repoRoot)).toBe(false);
+    },
+  );
+
   // The gated provision paths run the repair BEFORE the dirty check: an
   // untracked pre-fix body is exactly what makes the gate report dirty, so
   // a repair queued behind the gate would never run. Witness the exact

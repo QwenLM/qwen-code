@@ -2160,6 +2160,14 @@ export class GitWorktreeService {
     try {
       const qwenDir = path.join(this.sourceRepoPath, '.qwen');
       await fs.mkdir(qwenDir, { recursive: true });
+      // Git stores symlinks, so a checked-out branch can commit `.qwen`
+      // itself as a link to another directory. Every screen below resolves
+      // intermediate path components — only the FINAL one is guarded — so
+      // both the create and the upgrade arm would write through the link,
+      // outside `.qwen/`. `lstat` on the directory itself is the screen:
+      // a real directory passes, a planted link refuses the whole repair.
+      const dirStat = await fs.lstat(qwenDir);
+      if (!dirStat.isDirectory()) return;
       const gitignorePath = path.join(qwenDir, '.gitignore');
       // `flag: 'wx'` is "open for write, fail if exists" — one atomic
       // syscall that handles the "preserve user-curated file" case
