@@ -66,8 +66,12 @@ class TaskListInvocation extends BaseToolInvocation<
       };
     }
 
+    // Blank (empty/whitespace-only) optional filters behave as absent:
+    // the schema marks them optional and `getDescription()` only shows
+    // truthy filter values, so a blank value must not activate a
+    // filter (#9281).
     let ownerFilter: string | undefined;
-    if (this.params.owner !== undefined) {
+    if (this.params.owner !== undefined && this.params.owner.trim() !== '') {
       ownerFilter = sanitizeName(this.params.owner);
       if (!ownerFilter) {
         const msg =
@@ -81,10 +85,15 @@ class TaskListInvocation extends BaseToolInvocation<
       }
     }
 
+    const blockedByFilter =
+      this.params.blockedBy !== undefined && this.params.blockedBy.trim() !== ''
+        ? this.params.blockedBy
+        : undefined;
+
     const tasks = await listTasks(teamName, {
       status: this.params.status,
       owner: ownerFilter,
-      blockedBy: this.params.blockedBy,
+      blockedBy: blockedByFilter,
     });
 
     if (tasks.length === 0) {
