@@ -1597,7 +1597,6 @@ const EN: Messages = {
   'help.shortcut.shell': 'Run shell commands',
   'help.shortcut.togglePanel': 'Toggle this panel',
   'help.shortcut.retry': 'Retry last request',
-  'help.shortcut.compact': 'Toggle compact mode',
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
   'system.taskNotification': 'Task notification',
@@ -1663,9 +1662,6 @@ const EN: Messages = {
   'error.loopDetected':
     'The model got stuck while using tools or reached a safety limit, so this turn was stopped. Your session is still open—try a more specific instruction to continue.',
   'shell.command': 'Shell Command',
-  'compact.enabled': 'Compact mode enabled',
-  'compact.disabled': 'Compact mode disabled',
-  'compact.saveFailed': 'Failed to save compact mode',
   'help.subcommands': 'subcommands',
   'help.tab.commands': 'Built-in commands',
   'help.tab.custom': 'custom-commands',
@@ -4701,7 +4697,6 @@ const ZH: Messages = {
   'help.shortcut.shell': '运行 shell 命令',
   'help.shortcut.togglePanel': '切换此面板',
   'help.shortcut.retry': '重试上次请求',
-  'help.shortcut.compact': '切换紧凑模式',
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
   'system.taskNotification': '后台任务通知',
@@ -4757,9 +4752,6 @@ const ZH: Messages = {
   'error.loopDetected':
     '模型在调用工具时反复尝试或达到了安全上限，因此系统停止了本轮操作。会话并未结束，你可以换一个更明确的指令继续。',
   'shell.command': 'Shell 命令',
-  'compact.enabled': '紧凑模式已开启',
-  'compact.disabled': '紧凑模式已关闭',
-  'compact.saveFailed': '保存紧凑模式失败',
   'help.subcommands': '子命令',
   'help.tab.commands': '内置命令',
   'help.tab.custom': '自定义命令',
@@ -6173,12 +6165,6 @@ const ZH: Messages = {
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
     '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
-  'settings.label.ui.compactMode': '紧凑模式',
-  'settings.description.ui.compactMode':
-    '隐藏工具输出和思考内容，显示更简洁的视图（可用 Ctrl+O 切换）。',
-  'settings.label.ui.compactInline': '紧凑内联',
-  'settings.description.ui.compactInline':
-    '在每个分组内紧凑显示工具内容，而不是跨分组合并。需要先启用紧凑模式。',
   'settings.label.ui.shellOutputMaxLines': 'Shell 输出最大行数',
   'settings.description.ui.shellOutputMaxLines':
     '内联显示的 shell 输出最大行数。设为 0 可取消限制并显示完整输出；隐藏行数仍会通过 +N lines 指示器展示。',
@@ -6220,7 +6206,7 @@ const ZH: Messages = {
     '显示 Session Workflow DAG，并将 Plan 模式展示为计划并审阅。',
   'settings.label.experimental.emitToolUseSummaries': '工具使用摘要',
   'settings.description.experimental.emitToolUseSummaries':
-    '每个工具批次完成后生成一个简短的 LLM 标签。紧凑模式下会替代通用的 Tool × N 标题；完整模式下显示为工具组下方的弱化 ● <label> 行。需要配置快速模型。',
+    '每个工具批次完成后生成一个简短的 LLM 标签。已完成工具组的标签会替代通用的 Tool × N 标题；强制展开的工具组下方显示弱化的 ● <label> 行。需要配置快速模型。',
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',

@@ -587,6 +587,27 @@ export function thoughtTextEvent(
   );
 }
 
+export function toolCallEvent(
+  toolCallId: string,
+  toolName: string,
+  rawInput: Record<string, unknown>,
+  options: { id?: number; rawOutput?: Record<string, unknown> } = {},
+): DaemonEvent {
+  return sessionUpdateEvent(
+    {
+      sessionUpdate: 'tool_call',
+      toolCallId,
+      toolName,
+      title: toolName,
+      kind: 'other',
+      status: 'completed',
+      rawInput,
+      ...(options.rawOutput ? { rawOutput: options.rawOutput } : {}),
+    },
+    options.id,
+  );
+}
+
 export function turnCompleteEvent(
   promptId: string,
   options: { id?: number; sessionId?: string } = {},

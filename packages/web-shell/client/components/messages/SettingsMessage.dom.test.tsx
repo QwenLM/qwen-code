@@ -439,6 +439,30 @@ describe('SettingsMessage user-scope editing', () => {
     expect(labels).not.toContain('settings.category.UI');
   });
 
+  it('keeps retired daemon keys like ui.compactMode out of the panel', () => {
+    const setValue = vi.fn(() =>
+      Promise.resolve({} as DaemonSettingUpdateResult),
+    );
+    const retiredCompactMode: DaemonSettingDescriptor = {
+      key: 'ui.compactMode',
+      type: 'boolean',
+      label: 'Compact Mode',
+      category: 'General',
+      requiresRestart: false,
+      default: false,
+      values: { effective: false },
+    };
+    const container = renderPanel(
+      makeState([boolSetting(), retiredCompactMode], setValue),
+    );
+
+    // The visible control proves the panel rendered settings rows; the
+    // retired key must stay hidden even though the daemon still lists it.
+    expect(container.textContent).toContain('Test Flag');
+    expect(switchButton(container)).toBeTruthy();
+    expect(container.textContent).not.toContain('Compact Mode');
+  });
+
   it('renders the model-management block inside the Model category', () => {
     const setValue = vi.fn(() =>
       Promise.resolve({} as DaemonSettingUpdateResult),

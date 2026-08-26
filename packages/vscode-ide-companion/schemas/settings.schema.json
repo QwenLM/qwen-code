@@ -451,7 +451,7 @@
           "default": 0
         },
         "compactMode": {
-          "description": "Compact view (web shell only; not used by the TUI).",
+          "description": "Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.",
           "type": "boolean",
           "default": false
         },

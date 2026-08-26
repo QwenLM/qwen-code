@@ -1177,12 +1177,13 @@ const SETTINGS_SCHEMA = {
         category: 'UI',
         requiresRestart: false,
         default: false,
-        // Retired from the TUI (compact tool output is now always-on there, and
-        // Ctrl+O opens the transcript instead of toggling this). Kept as a
-        // hidden, schema-only setting so the web shell's independent compact
-        // toggle can still persist via the daemon settings routes (mirrors
-        // `voiceModel`). Not shown in the TUI settings dialog.
-        description: 'Compact view (web shell only; not used by the TUI).',
+        // Retired everywhere: compact tool output is always on in the TUI
+        // (Ctrl+O opens the transcript there), and the web shell now fixes
+        // its compact view on too. Kept schema-registered (mirrors
+        // `voiceModel`) so settings files that still carry the key load
+        // without warnings; nothing reads the value anymore.
+        description:
+          'Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.',
         showInDialog: false,
       },
       useTerminalBuffer: {
