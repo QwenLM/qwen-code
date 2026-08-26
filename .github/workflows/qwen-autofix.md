@@ -249,6 +249,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [145. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…](#af-145)
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
+- [148. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…](#af-148)
 
 ---
 
@@ -3726,4 +3727,74 @@ wrapper: a translation quoting HTML is pathological (SKILL
 forbids HTML in failure.zh.md), but must not be able to open
 or close a <details>/<summary> that swallows the closing tag
 the workflow emits below.
+```
+
+<a id="af-148"></a>
+
+### 148. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…
+
+In `review-address` · `Prepare branch and feedback`.
+
+```text
+Classify the live head: a round that pushes onto a fully
+GREEN head and leaves it red introduced the red. Until this
+existed the loop had no notion of a regression at all —
+`grep -rE 'regress|introduced'` over the workflow, the gate
+script and the SKILL hit only prose about WRITING regression
+tests. The consecutive-failure brake counts "rounds that
+pushed nothing", so a round that pushed a fix and turned CI
+red counted as a SUCCESS and reset the counter; the red it
+created came back as the next round's input and was paid for
+out of the round budget. A PR could alternate regress /
+repair indefinitely while every brake read it as converging.
+
+The gate cannot close this on its own. It runs build,
+typecheck, lint and `--changed` tests for the touched
+workspaces only, and says so — "Full regression is covered by
+regular CI on the PR after the push". Everything the gate
+does run IS already charged: a check that fails on the round
+tree and passes at `origin/<branch>` is a rejection, and a
+rejected round pushes nothing and feeds the brake. What is
+left over is precisely the post-push signal — the full suite,
+the other packages, other platforms — and that verdict does
+not exist until CI finishes, long after the job has ended.
+
+So the accounting is deferred rather than waited on, and it
+is measured, never inferred:
+
+  - Every ACTED round stamps `autofix-push round= head= pre=
+    key=`. `pre=` is this classifier's verdict on the head
+    the round STARTED from; `head=` is the sha it pushed
+    (NOT the redcheck marker's, which deliberately records
+    the pre-round head).
+  - The next round's prepare charges a regression only when
+    all four hold: the live head is exactly the sha that
+    marker names (nothing else moved the branch), `pre=green`
+    (fully green — `pending` and `none` are not green, so a
+    check still running at push time can never be charged),
+    the marker's window key matches, and the head is red NOW.
+  - The observing round writes `autofix-regression round=
+    key=` into whichever report it posts — pushed, no-op or
+    failure — so the record survives the round that made it.
+  - The consecutive-failure walk stops resetting on a
+    regressing round's headline, reading the round number out
+    of the headline the report already wrote it into. The
+    walk also adds THIS round's own observation, which is not
+    in the fetched comment list yet: without it the newest
+    regressing push escapes by exactly one round, and that is
+    the round that matters.
+
+Attribution is deliberately conservative on every axis that
+could charge the loop for someone else's red. A head that
+moved (a human push, a base update) breaks the head equality
+and drops the charge. A re-arm changes the window key and
+drops the whole set with it. Cancelled checks are not red
+here, matching the scan's own N_RED_NOW filter, and the
+autofix workflow's own checks are excluded the same way the
+feedback renderer excludes them. What remains uncovered is a
+flake: a genuinely flaky check failing on the bot's push
+reads as a regression. The consequence is bounded on purpose
+— one regression only declines to RESET a counter that needs
+five consecutive non-progress rounds to trip, and the
+recovery is automatic, since a clean push resets it.
 ```

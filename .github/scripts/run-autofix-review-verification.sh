@@ -990,6 +990,162 @@ if [[ -n "${DELETED_TESTS}" || "${NET_TEST_LINES}" -le -25 ]]; then
   echo '⚖️ test coverage shrank this round — advisory written for the report' | tee -a "${GATE_LOG}"
 fi
 
+# --- Test-weakening gate ----------------------------------------------------
+# The advisory above renders in the round report only AFTER the round has
+# already been accepted, and the SKILL rule it points at ("deleting or
+# weakening tests requires content evidence, not an author's say-so") had no
+# deterministic enforcement at all. Relaxing an existing assertion is the
+# cheapest way for a fix to reach green while the behaviour it broke goes
+# unpinned, and it is structurally invisible to every other check here:
+# build/typecheck/lint never read assertions, the package tests run the
+# WEAKENED file, and the bite check reads only the tests a round ADDS --
+# never the ones it edits away.
+#
+# So: any pre-existing runnable test file this round deletes, whose assertion
+# density it lowers, or into which it introduces a skip/todo marker, must be
+# named in <workdir>/test-weakening.json -- a JSON array of
+# {"path": "<file>", "reason": "<evidence>"}. The gate judges PRESENCE and a
+# non-trivial reason, never the reason's merit: no semantic oracle is
+# available here, and turning a silent edit into an explicit attributable
+# claim is the whole point -- the reasons ride into the round report, where a
+# maintainer reads them against the diff.
+#
+# Signals, all measured against the PRE-ROUND tree with merge freight
+# filtered out (a base-merging round is judged on its own changes):
+#   - the file was DELETED;
+#   - assertion lines removed exceed assertion lines added, an assertion line
+#     being one that contains `expect(`, `assert(`, or `assert.` (the repo's
+#     three idioms). An assertion moved within a file nets zero; one moved
+#     OUT of a file nets negative and is answered by naming its new home;
+#   - a skip/todo marker was ADDED: `it`/`test`/`describe` `.skip`/`.todo`/
+#     `.failing`, or `xit(`/`xdescribe(`. `.skipIf` is deliberately NOT a
+#     signal -- it is this repo's standard environment guard (237 uses) and
+#     flagging it would charge every platform-conditional test to this gate.
+# Snapshots are out of scope on both signals: they carry no assertion token,
+# and an obsolete snapshot removed by `vitest -u` is routine bookkeeping.
+# Fails OPEN -- a diff the gate cannot read skips the check rather than
+# rejecting a round it could not measure.
+WEAKEN_PATHSPEC=(':(glob)**/*.test.*' ':(glob)**/*.spec.*' ':(exclude,glob)**/__snapshots__/**')
+WEAKEN_ASSERT_RE='expect\(|assert\(|assert\.'
+WEAKEN_SKIP_RE='(^|[^A-Za-z0-9_$.])(it|test|describe)[[:space:]]*\.[[:space:]]*(skip|todo|failing)[[:space:]]*[(<]|(^|[^A-Za-z0-9_$.])x(it|describe)[[:space:]]*\('
+WEAKENED=''
+WEAKEN_MEASURED='true'
+while IFS= read -r -d '' f; do
+  [[ -n "${f}" ]] || continue
+  if ! WEAKEN_DIFF="$(git diff -U0 --no-renames "${ROUND_RANGE}" -- "${f}" 2> /dev/null)"; then
+    WEAKEN_MEASURED='false'
+    break
+  fi
+  # Everything from the first `@@` on is hunk content, so the ---/+++ file
+  # headers are dropped by construction rather than by a `^+[^+]` guard that
+  # would also eat the first CONTENT character (and with it every marker
+  # anchored at column 1, `it.skip(` among them). -U0 emits no context lines,
+  # so each remaining +/- line is a real edit; stripping the marker lets the
+  # patterns below anchor on the source line itself.
+  WEAKEN_BODY="$(sed -n '/^@@/,$p' <<< "${WEAKEN_DIFF}")"
+  W_ADD_LINES="$(sed -n 's/^+//p' <<< "${WEAKEN_BODY}")"
+  W_DEL_LINES="$(sed -n 's/^-//p' <<< "${WEAKEN_BODY}")"
+  W_DEL="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${W_DEL_LINES}" || true)"
+  W_ADD="$(grep -cE "${WEAKEN_ASSERT_RE}" <<< "${W_ADD_LINES}" || true)"
+  W_SKIP="$(grep -cE "${WEAKEN_SKIP_RE}" <<< "${W_ADD_LINES}" || true)"
+  if (( W_DEL > W_ADD )); then
+    WEAKENED+="${f}"$'\t'"net $(( W_DEL - W_ADD )) assertion line(s) removed"$'\n'
+  elif (( W_SKIP > 0 )); then
+    WEAKENED+="${f}"$'\t'"${W_SKIP} skip/todo marker(s) added"$'\n'
+  fi
+done < <(git diff --name-only -z --no-renames --diff-filter=M "${ROUND_RANGE}" \
+  -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null | not_merge_freight)
+# Deletions cannot use not_merge_freight: its content-equality test reads
+# "absent on both sides" as identical, so a round deleting a test the PR
+# ITSELF added (the classic round-5-deletes-what-round-3-pinned shape) looks
+# like freight and escapes. The distinguishing fact is the MERGE BASE — main
+# can only delete what it tracked, so freight is exactly "present at the
+# merge base, gone from main's tip". A PR-added test is in neither. When
+# the merge base is unresolvable PR_BASE degrades to origin/main above,
+# which makes this condition unsatisfiable — every deletion is then
+# surfaced rather than silently dropped, and the escape hatch is one
+# recorded entry.
+while IFS= read -r -d '' f; do
+  [[ -n "${f}" ]] || continue
+  if git cat-file -e "${PR_BASE}:${f}" 2> /dev/null &&
+    ! git cat-file -e "origin/main:${f}" 2> /dev/null; then
+    continue
+  fi
+  WEAKENED+="${f}"$'\t'"test file deleted"$'\n'
+done < <(git diff --name-only -z --no-renames --diff-filter=D "${ROUND_RANGE}" \
+  -- "${WEAKEN_PATHSPEC[@]}" 2> /dev/null)
+if [[ "${WEAKEN_MEASURED}" != 'true' ]]; then
+  echo '🧪 test-weakening measurement UNAVAILABLE this round (diff producer failed) — check skipped' | tee -a "${GATE_LOG}"
+elif [[ -n "${WEAKENED}" ]]; then
+  # The acknowledgement is the agent's own machine-readable claim, held to
+  # the same shape rules as deferred-findings.json: an array, a string path,
+  # and a reason with enough substance to be read as evidence. A malformed or
+  # unreadable file acknowledges nothing rather than everything.
+  WEAKEN_ACKED=''
+  if [[ -s "${WORKDIR}/test-weakening.json" ]]; then
+    WEAKEN_ACKED="$(jq -r '
+      if type == "array" then
+        .[]
+        | select((.path? | type) == "string")
+        | select((.path | length) > 0)
+        | select((.reason? | type) == "string")
+        | select((.reason | gsub("\\s+"; " ") | ltrimstr(" ") | rtrimstr(" ") | length) >= 40)
+        | .path
+      else empty end' "${WORKDIR}/test-weakening.json" 2> /dev/null)" || WEAKEN_ACKED=''
+  fi
+  WEAKEN_MISSING=''
+  WEAKEN_OK=''
+  WEAKEN_OK_PATHS=''
+  while IFS=$'\t' read -r f signal; do
+    [[ -n "${f}" ]] || continue
+    # Filenames are branch-controlled bytes rendered inside gate-authored
+    # (trusted-voice) documents, so they go through the same conservative
+    # safe-character set the shrink advisory above uses.
+    if grep -qxF "${f}" <<< "${WEAKEN_ACKED}"; then
+      WEAKEN_OK+="- \`${f//[^A-Za-z0-9._\/ -]/?}\` — ${signal}"$'\n'
+      WEAKEN_OK_PATHS+="${f}"$'\n'
+    else
+      WEAKEN_MISSING+="- \`${f//[^A-Za-z0-9._\/ -]/?}\` — ${signal}"$'\n'
+    fi
+  done <<< "${WEAKENED}"
+  if [[ -n "${WEAKEN_MISSING}" ]]; then
+    {
+      echo 'This round deleted or weakened pre-existing tests without recording the required evidence:'
+      printf '%s' "${WEAKEN_MISSING}"
+      echo 'Deleting or weakening a test is sound only when the pinned behaviour itself was wrong (show the probe that proves the correct behaviour) or the coverage demonstrably survives in a named surviving test.'
+      echo 'Either restore the assertions, or record the evidence: write <workdir>/test-weakening.json — a JSON array of {"path": "<file>", "reason": "<evidence, at least 40 characters>"} carrying one entry for every file listed above.'
+    } >> "${GATE_LOG}"
+    reject_fix 'round weakened pre-existing tests without recorded evidence'
+  fi
+  {
+    echo '🧪 **Gate advisory — this round weakened or removed pre-existing tests** (machine-measured, not agent-authored):'
+    printf '%s' "${WEAKEN_OK}"
+    echo
+    echo 'The round recorded evidence for each (below, agent-authored). Weakening is sound only when the pinned behaviour itself was wrong or the coverage demonstrably survives elsewhere — read each reason against the diff. · 本轮弱化或删除了既有测试（门自动测量，非 agent 文本）。下列理由由 agent 撰写：仅当被钉住的行为本身有误、或覆盖确有替代时才成立，请对照 diff 逐条审阅。'
+    # Agent-authored bytes inside a gate-authored document: neutralize both
+    # comment-marker and details/summary forms (a severed <details> would
+    # swallow the rest of the posted comment) and cap each reason, the same
+    # hygiene the report step applies to failure.md excerpts.
+    # Rendered from the MEASURED set, one line per file: the entries are
+    # agent-authored and otherwise unbounded, so an ack file stuffed with
+    # thousands of junk rows would decide the size of a posted PR comment.
+    jq -r --arg ok "${WEAKEN_OK_PATHS}" '
+      ($ok | split("\n") | map(select(length > 0))) as $ok
+      | if type == "array" then
+          map(select((.path? | type) == "string")
+            | select(.path | IN($ok[]))
+            | select((.reason? | type) == "string"))
+          | unique_by(.path) | .[]
+          | "  - \(.path | gsub("[^A-Za-z0-9._/ -]"; "?")): \(.reason | gsub("\\s+"; " "))"
+        else empty end' "${WORKDIR}/test-weakening.json" 2> /dev/null |
+      cut -b1-300 | iconv -f utf-8 -t utf-8 -c |
+      sed -e 's/<!--/<!\\-\\-/g' -e 's/<[dD][eE][tT][aA][iI][lL][sS]/＜details/g' \
+        -e 's/<\/[dD][eE][tT][aA][iI][lL][sS]/＜\/details/g' \
+        -e 's/<[sS][uU][mM][mM][aA][rR][yY]/＜summary/g' || true
+  } >> "${WORKDIR}/gate-advisories.md"
+  echo "🧪 test weakening recorded and acknowledged: $(grep -c '^- ' <<< "${WEAKEN_OK}" || true) file(s)" | tee -a "${GATE_LOG}"
+fi
+
 echo '🔬 Re-running deterministic checks (independent of the agent)...'
 run_check 'build failed on the agent-committed fix' npm run build
 # Typecheck consumes core's dist (sdk-typescript resolves

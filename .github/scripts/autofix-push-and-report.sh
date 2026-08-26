@@ -453,6 +453,10 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
   # the per-PR tracking issue (script content from expression
   # context; append-only comment design — see the script).
   run_deferred_upsert
+  # The sha the push loop above actually left on the branch — the merge
+  # retry can advance it past the verified head, and the regression marker
+  # must name what the PR now carries.
+  PUSHED_HEAD="$(git rev-parse HEAD 2> /dev/null || echo '')"
   {
     echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
     echo
@@ -484,6 +488,10 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
       echo
       echo "⚠️ The branch received new commits while this round ran; they were merged into this push, but this round's verification predates that merge — re-check anything that landed mid-run. · 本轮运行期间分支收到了新的提交；本次推送已将其合并，但本轮验证在合并之前完成——请复查运行期间落地的改动。"
     fi
+    if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+      echo
+      echo "🩸 Regression charged to round ${REGRESSED_ROUND}: that round pushed onto a head whose checks were all green and left them red. It no longer counts as progress for the consecutive-failure brake. · 已将回归记在第 ${REGRESSED_ROUND} 轮：该轮在检查全绿的 head 上推送后检查转红，因此不再计入连续失败熔断的有进展判定。"
+    fi
     echo
     echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
     echo
@@ -492,6 +500,21 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+    # Regression accounting (af-148). Two distinct facts, both keyed to the
+    # eval marker's window so the consecutive-failure walk reads them with
+    # the same filter it already applies to the eval markers:
+    #   autofix-push       — what THIS round pushed, and whether the head it
+    #                        pushed ONTO was fully green. Only an acted round
+    #                        writes it; a no-op pushed nothing to regress.
+    #                        head= is the PUSHED sha, not REPORT_HEAD (which
+    #                        deliberately records the pre-round head).
+    #   autofix-regression — the PRIOR round prepare found had left a green
+    #                        head red. Written by whichever report this round
+    #                        posts, so the record survives a later failure.
+    echo "<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${CHECK_STATE:-none} key=${WINDOW:-none} -->"
+    if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+      echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
+    fi
     if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
       echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
     fi
@@ -530,6 +553,11 @@ else
     echo
     echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+    # No autofix-push marker: a no-op round pushed nothing that could
+    # regress. The regression it OBSERVED still has to be recorded here.
+    if [[ -n "${REGRESSED_ROUND:-}" ]]; then
+      echo "<!-- autofix-regression round=${REGRESSED_ROUND} key=${WINDOW:-none} -->"
+    fi
     if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
       echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
     fi
