@@ -2817,7 +2817,7 @@ SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originato
 
 Capability tag: `workspace_skill_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
 
-Toggle a loaded, user-invocable skill through the workspace skill settings, matching the CLI `/skills` panel's Space-key behavior. Lookup is case-insensitive, while persistence and the response use the skill's canonical name. Enabling a `skills.defaultDisabled` skill adds a workspace `skills.enabled` opt-in; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard-disable entry inherited from system defaults, user, or system scope locks the skill: workspace scope cannot override it.
+Update the workspace Skill settings for a name without consulting the loaded Skill catalog. The trimmed request name is passed to persistence and returned in the response. Enabling a `skills.defaultDisabled` Skill adds a workspace `skills.enabled` opt-in; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for Skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. Higher-scope settings remain authoritative for effective availability, but they do not prevent the workspace scope from recording or removing its own declaration.
 
 This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. Effective skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled`. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
 
@@ -2847,16 +2847,14 @@ Errors:
 - `400 {code: 'invalid_skill_name'}` — empty path parameter, or more than 256 characters.
 - `400 {code: 'invalid_enabled_flag'}` — `enabled` missing or non-boolean.
 - `403 {code: 'untrusted_workspace'}` — the selected workspace is not trusted.
-- `404 {code: 'skill_not_found'}` — no loaded skill matches the name.
-- `409 {code: 'skill_not_toggleable', reason: 'not_user_invocable' | 'inactive_extension' | 'locked', lockedScope?: 'system' | 'user' | 'systemDefaults'}` — the CLI panel would not allow the target to be toggled. `lockedScope` is present only when `reason` is `locked`.
 
-The mutation reuses the workspace-scoped `settings_changed` event for each changed key (`skills.disabled` and/or `skills.enabled`); it does not add a new event type. Each of those events includes the same `mutation` object: `{ id, kind: 'skill_toggle', skills: [{ name, enabled }], activation, sessionsRefreshed, sessionsFailed }`. `id` correlates every settings event produced by one toggle request. `skills` lists the canonical names and resulting enabled states of Skills that actually changed. Workspace skill status cells include optional `disabledReason: 'hard' | 'default' | 'inactive_extension'` and `lockedScope: 'system' | 'user' | 'systemDefaults'` fields.
+The mutation reuses the workspace-scoped `settings_changed` event for each changed key (`skills.disabled` and/or `skills.enabled`); it does not add a new event type. Each of those events includes the same `mutation` object: `{ id, kind: 'skill_toggle', skills: [{ name, enabled }], activation, sessionsRefreshed, sessionsFailed }`. `id` correlates every settings event produced by one toggle request. `skills` lists the requested names and resulting enabled states of Skills that actually changed. Workspace skill status cells include optional `disabledReason: 'hard' | 'default' | 'inactive_extension'` and `lockedScope: 'system' | 'user' | 'systemDefaults'` fields.
 
 #### `POST /workspace/skills/enable`
 
 Capability tag: `workspace_skill_batch_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/enable`.
 
-Toggle up to 100 loaded Skills in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order. The daemon validates against one Skill status snapshot, persists all valid changes in one locked settings write, and refreshes active sessions once. Processing is best-effort for expected target errors: an unknown, hidden, inactive-extension, or locked target is recorded in `errors` without preventing other valid targets from being applied. Unexpected persistence or runtime-generation failures still fail the whole request.
+Update workspace Skill settings for up to 100 names in one request; the cap counts the raw `skillNames` entries before deduplication. Names are trimmed and deduplicated case-insensitively while preserving first-seen order and casing. The daemon does not consult the loaded Skill catalog. It persists all names in one locked settings write and refreshes active sessions once. Unexpected persistence or runtime-generation failures fail the whole request.
 
 Request:
 
@@ -2885,19 +2883,18 @@ Response (200):
       "skillName": "deploy",
       "enabled": false,
       "changed": true
-    }
-  ],
-  "errors": [
+    },
     {
       "skillName": "missing",
-      "code": "skill_not_found",
-      "error": "Skill not found: missing"
+      "enabled": false,
+      "changed": true
     }
-  ]
+  ],
+  "errors": []
 }
 ```
 
-Target errors use `skill_not_found`, `skill_not_toggleable`, or `skill_inactive_extension`. Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe the single live-session refresh shared by all changed results. `activation` reports the refresh attempt rather than the outcome: a batch in which no target changed (for example, every target errored) still answers `applied` when a session is live, matching the single-Skill no-op response, so derive what actually changed from each result's `changed` flag and the `errors` array. When at least one target changes, the daemon emits the same `settings_changed` mutation metadata as the single-Skill route; every `skills.disabled` / `skills.enabled` event from that request shares one `mutation.id`.
+Malformed requests return HTTP 400 with `invalid_skill_names`, `invalid_skill_name`, or `invalid_enabled_flag`. Authentication, workspace trust, client identity, unexpected persistence failures, and runtime-generation failures fail the whole request through the standard route gates. `errors` remains in the response for wire compatibility and is empty for structurally valid names. Batch-level `activation`, `sessionsRefreshed`, and `sessionsFailed` describe the single live-session refresh shared by all changed results. `activation` reports the refresh attempt rather than the outcome: a batch in which no target changed still answers `applied` when a session is live, matching the single-Skill no-op response, so derive what actually changed from each result's `changed` flag. When at least one target changes, the daemon emits the same `settings_changed` mutation metadata as the single-Skill route; every `skills.disabled` / `skills.enabled` event from that request shares one `mutation.id`.
 
 #### `POST /workspace/init`
 

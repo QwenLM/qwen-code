@@ -2,7 +2,7 @@
 
 ## Goal
 
-Expose the CLI `/skills` panel's workspace enable/disable behavior through daemon REST and the TypeScript SDK, including immediate refresh of active ACP sessions.
+Expose workspace Skill settings writes through daemon REST and the TypeScript SDK, including immediate refresh of active ACP sessions without making the runtime Skill catalog an ownership source.
 
 ## Public contract
 
@@ -12,21 +12,15 @@ Expose the CLI `/skills` panel's workspace enable/disable behavior through daemo
 - SDK: `DaemonClient.setWorkspaceSkillEnabled` and `WorkspaceDaemonClient.setWorkspaceSkillEnabled`
 - Capability: `workspace_skill_toggle`
 
-The response contains the canonical skill name, requested state, whether persistence changed, activation state, and session refresh counts. `applied` means every active session refreshed, `deferred` means no ACP child was running, and `partial` means at least one session failed to refresh after persistence committed.
+The response contains the trimmed requested name, requested state, whether persistence changed, activation state, and session refresh counts. `applied` means every active session refreshed, `deferred` means no ACP child was running, and `partial` means at least one session failed to refresh after persistence committed.
 
 ## Semantics
 
-The API changes workspace `skills.disabled` and `skills.enabled` as needed. Skill lookup is case-insensitive, but the canonical discovered name is persisted. Enabling a default-disabled skill writes an explicit opt-in; disabling it removes the opt-in and writes a hard workspace disable. Updating one target removes target duplicates and case variants without deleting orphan entries for unavailable skills. A second identical request is a no-op.
+The API changes workspace `skills.disabled` and `skills.enabled` by name without consulting the runtime Skill catalog. Enabling a default-disabled Skill writes an explicit opt-in; disabling it removes the opt-in and writes a hard workspace disable. Updating one target removes target duplicates and case variants without deleting orphan entries for unavailable Skills. Names may be configured before installation, while hidden from user invocation, or while their Extension is inactive. A second identical request is a no-op.
 
-The route rejects states the CLI panel cannot toggle:
+Higher-scope settings still determine effective availability after settings merge, but do not prevent workspace scope from recording or removing its own declaration. The route retains request-shape, authentication, client identity, workspace trust, and runtime-generation gates; none of those require a Skill catalog lookup.
 
-- unknown skill: `404 skill_not_found`;
-- `userInvocable === false`: `409 skill_not_toggleable`;
-- skill from an inactive extension: `409 skill_not_toggleable`;
-- disabled in system defaults, user, or system scope: `409 skill_not_toggleable` with the locking scope;
-- untrusted workspace: `403 untrusted_workspace`.
-
-The scope lock check and workspace read-modify-write happen inside the daemon's per-workspace settings lock. A failed write stops before refresh and event publication.
+The workspace read-modify-write happens inside the daemon's per-workspace settings lock. A failed write stops before refresh and event publication.
 
 ## Skill availability versus `disable-model-invocation`
 
@@ -36,8 +30,8 @@ The scope lock check and workspace read-modify-write happen inside the daemon's 
 
 ## Activation flow
 
-1. Resolve the canonical, toggleable skill from the workspace status snapshot.
-2. Under the workspace settings lock, re-read every scope, reject higher-scope locks, and commit the canonical workspace list.
+1. Validate the request name, authorization, workspace trust, client identity, and runtime generation.
+2. Under the workspace settings lock, re-read every scope and commit the requested name to the workspace list.
 3. Invalidate the daemon's cached skill status.
 4. If an ACP child is live, invoke `qwen/control/workspace/skills/refresh`.
 5. The child reloads workspace-scope settings and refreshes every active session, including busy sessions.
@@ -53,9 +47,9 @@ An in-flight model request cannot be rewritten. Subsequent skill execution check
 - Slash commands: available-command construction removes disabled skills and sends updated command metadata to daemon clients.
 - Model context: SkillManager change listeners refresh the Skill tool description and available-skill context.
 - Execution validation: the Skill tool re-reads the disabled-name provider before invocation, so later calls are rejected immediately.
-- Extension state: inactive extension skills remain non-toggleable even when they are not disabled by settings.
+- Extension state: inactive Extensions still keep their Skills unavailable at runtime, independently of whether workspace settings record those names.
 - Daemon cache: the cached live-child skill snapshot is invalidated after persistence so later GET requests cannot replay stale state.
-- SDK consumers: both primary-workspace and workspace-qualified clients share the response and error contract.
+- SDK consumers: both primary-workspace and workspace-qualified clients share the settings-only response contract.
 - Events: existing `settings_changed` consumers observe each committed `skills.disabled` or `skills.enabled` value; there is no new event type.
 
 ## Failure behavior

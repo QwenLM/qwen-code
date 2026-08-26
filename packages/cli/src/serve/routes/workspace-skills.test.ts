@@ -173,7 +173,7 @@ describe('workspace Skill management routes', () => {
     expect(harness.deleteWorkspaceSkill).not.toHaveBeenCalled();
   });
 
-  it('toggles a deduplicated Skill batch and returns per-target outcomes', async () => {
+  it('forwards a deduplicated Skill batch response with legacy errors', async () => {
     const harness = createHarness();
     harness.setWorkspaceSkillsEnabled.mockResolvedValueOnce({
       enabled: false,

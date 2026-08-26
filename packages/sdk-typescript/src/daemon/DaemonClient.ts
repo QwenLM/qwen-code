@@ -3628,7 +3628,7 @@ export class DaemonClient {
   }
 
   /**
-   * Toggle a user-invocable skill in workspace `skills.disabled` settings.
+   * Update workspace Skill settings by name without requiring a loaded Skill.
    * Active ACP sessions refresh their skill validation and command lists before
    * the response returns; `activation` reports deferred or partial refreshes.
    *
@@ -3662,7 +3662,7 @@ export class DaemonClient {
   }
 
   /**
-   * Toggle up to 100 user-invocable skills and return every target outcome.
+   * Update workspace Skill settings for up to 100 names in one write.
    *
    * Pre-flight
    * `caps.features.includes('workspace_skill_batch_toggle')` before calling.
