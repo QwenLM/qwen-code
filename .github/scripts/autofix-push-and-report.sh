@@ -126,10 +126,13 @@ resolve_and_reply_threads() {
   RESOLUTION_GUARD=''
   RESOLUTION_SELECTED_N=0
   CONFIRMED_RESOLVED_N=0
+  RESOLVED_BY_OTHERS_N=0
   if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-    # Same id grammar as the resolve loop below: optional rc: prefix,
-    # optional trailing CR, digits only.
-    RESOLUTION_SELECTED_N="$(sed 's/\r$//; s/^rc://' "${WORKDIR}/resolved-comments.txt" | grep -cE '^[0-9]+$' || true)"
+    # One spelling of the id grammar (optional rc: prefix, optional
+    # trailing CR, digits only, deduplicated), shared by the counter
+    # and the resolve loop below.
+    RESOLVED_IDS="$(sed 's/\r$//; s/^rc://' "${WORKDIR}/resolved-comments.txt" | grep -E '^[0-9]+$' | sort -u || true)"
+    RESOLUTION_SELECTED_N="$(grep -c . <<< "${RESOLVED_IDS}" || true)"
     LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
     if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
       RESOLUTION_GUARD='salvage merge'
@@ -152,16 +155,23 @@ resolve_and_reply_threads() {
       # (e.g. a GITHUB_ENV plant stalling this PAT-bearing step) falls
       # back to the default.
       [[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5
+      LIVE_HEAD_EVER_READ='false'
       for live_head_attempt in 1 2 3 4 5; do
         LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" || LIVE_PR_HEAD=''
-        if [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
-          CAN_RESOLVE_THREADS='true'
-          break
+        if [[ -n "${LIVE_PR_HEAD}" ]]; then
+          LIVE_HEAD_EVER_READ='true'
+          if [[ "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
+            CAN_RESOLVE_THREADS='true'
+            break
+          fi
         fi
         [[ "${live_head_attempt}" == 5 ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"
       done
       if [[ "${CAN_RESOLVE_THREADS}" != 'true' ]]; then
+        # drift: a head was read but never matched; unreadable: no read
+        # returned any head (auth/API health, not a contributor push).
         RESOLUTION_GUARD='live-head drift'
+        [[ "${LIVE_HEAD_EVER_READ}" == 'true' ]] || RESOLUTION_GUARD='live-head unreadable'
         echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
       fi
     fi
@@ -213,9 +223,9 @@ resolve_and_reply_threads() {
         }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
     }
     while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
-      rc_id="${rc_id%$'\r'}"
-      rc_id="${rc_id#rc:}"
-      [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
+      # A file with no valid ids normalizes to an empty list; the
+      # here-string still yields one empty iteration.
+      [[ -n "${rc_id}" ]] || continue
       thread_id="$(jq -r --argjson id "${rc_id}" \
         'map(select(.isResolved | not)
            | select(any(.comments.nodes[]; .databaseId == $id)))
@@ -230,6 +240,7 @@ resolve_and_reply_threads() {
         echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
         break
       elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
+        RESOLVED_BY_OTHERS_N=$(( RESOLVED_BY_OTHERS_N + 1 ))
         echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
         continue
       elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
@@ -260,7 +271,7 @@ resolve_and_reply_threads() {
         echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
         break
       fi
-    done < "${WORKDIR}/resolved-comments.txt"
+    done <<< "${RESOLVED_IDS}"
     echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
   fi
   # One host-authored line for the round report (#10106): name the
@@ -268,7 +279,7 @@ resolve_and_reply_threads() {
   # host strings plus counts — nothing agent-controlled.
   RESOLUTION_NOTE=''
   if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then
-    RESOLUTION_LEFT_N=$(( RESOLUTION_SELECTED_N - CONFIRMED_RESOLVED_N ))
+    RESOLUTION_LEFT_N=$(( RESOLUTION_SELECTED_N - CONFIRMED_RESOLVED_N - RESOLVED_BY_OTHERS_N ))
     if [[ -n "${RESOLUTION_GUARD}" ]]; then
       RESOLUTION_PHASE='skipped'
       RESOLUTION_PHASE_ZH='被跳过'

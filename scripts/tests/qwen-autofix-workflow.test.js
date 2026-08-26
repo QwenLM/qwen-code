@@ -17647,6 +17647,12 @@ exit 1
     expect(block).toContain(
       '[[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5',
     );
+    // The wait itself is the #10106 fix: with the sleep gone all five
+    // reads fire inside the propagation window, every one returns the
+    // stale head, and resolution silently skips every pushed round.
+    expect(block).toContain(
+      '[[ "${live_head_attempt}" == 5 ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"',
+    );
 
     const movedBeforeMutation = runResolve({
       LIVE_HEAD_SEQUENCE: `${localHead},new-contributor-head`,
@@ -18002,7 +18008,7 @@ exit 1
       [{ VERIFIED_HEAD: '' }, 'missing verified_head'],
       [{ VERIFIED_HEAD: 'different-verified-head' }, 'verified_head mismatch'],
       [{ LIVE_HEAD: 'new-contributor-head' }, 'live-head drift'],
-      [{ LIVE_HEAD_EXIT: '1' }, 'live-head drift'],
+      [{ LIVE_HEAD_EXIT: '1' }, 'live-head unreadable'],
     ]) {
       const note = runNote(env);
       expect(note).toContain('Review-thread resolution skipped');
@@ -18046,9 +18052,40 @@ exit 1
     expect(partialNote).not.toContain('guard:');
     const fetchNote = runNote({ THREADS_FETCH_EXIT: '1' });
     expect(fetchNote).toContain('thread fetch incomplete');
+    // A thread another actor resolved between the fetch and the per-thread
+    // guard is not work left for a later round: before it had its own
+    // counter the note said "3 left" while only 2 threads were open.
+    writeFileSync(
+      join(dir, 'resolved-comments.txt'),
+      'rc:222\nrc:111\nrc:444\n',
+    );
+    // The shared normalization iterates ids in sorted order (111, 222,
+    // 444), so the first thread hits the another-actor continue and the
+    // second trips the drift break.
+    const anotherActorThenDrift = runNote({
+      OTHER_ACTOR_RESOLVED: 'T_open_1',
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},new-contributor-head`,
+    });
+    expect(anotherActorThenDrift).toContain(
+      'Review-thread resolution stopped early',
+    );
+    expect(anotherActorThenDrift).toContain('guard: `live-head drift`');
+    expect(anotherActorThenDrift).toContain(
+      'resolved 0 of 3 selected thread(s), 2 left for a later round',
+    );
+    // A duplicate id selects one thread, so it counts once: before the
+    // shared normalization deduplicated, the note reported "1 of 2".
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n111\n');
+    expect(runNote()).toContain('Resolved all 1 selected review thread(s)');
     // No ids selected → no note: the line appears only when the agent
     // asked for resolution.
     writeFileSync(join(dir, 'resolved-comments.txt'), '');
+    expect(runNote()).toBe('');
+    // Non-empty but zero valid ids — agent-authored files do carry
+    // malformed lines. grep -c exits 1 on zero matches, so the || true is
+    // load-bearing under the step's bash -eo pipefail: without it the
+    // assignment aborts the whole push-and-report step.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:abc\n');
     expect(runNote()).toBe('');
     writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
 
