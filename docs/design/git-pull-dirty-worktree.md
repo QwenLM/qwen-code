@@ -83,7 +83,13 @@ writes): the failure recovery aborts merge/rebase state
 indiscriminately, so it must only ever abort state the pull itself
 started, and the stash/discard steps would abandon the staged
 resolution a cherry-pick, revert, or am carries (unrecoverable by
-reflog). Every pull shape — plain, stash, and
+reflog). Every mutating step re-verifies both identities immediately
+before it — the foreign-state guard plus HEAD still being the branch the
+upstream resolved for — and refuses with `head_changed` (retryable; the
+auto-stash is restored) when a concurrent checkout moved HEAD during the
+slow probe window: the merge would land on the foreign branch, and on
+the force path `reset --hard` would erase foreign sequence heads before
+any later guard could see them. Every pull shape — plain, stash, and
 force — is also refused when the incoming commits add paths that exist
 locally as ignored files: git would silently check the incoming file
 out over the ignored one (ignored paths never appear in `git status`,
@@ -144,7 +150,10 @@ incoming changes colliding with local ignored files — return their own
 `ignored_collision`) and render terminal guidance instead of the
 stash/discard buttons, surfacing the daemon's 409 message alongside the
 fixed guidance text — it is the sole carrier of the unrestored-stash
-pointer. The dirty-tree panel does the same in its message line.
+pointer. The dirty-tree panel does the same in its message line. A
+`head_changed` refusal (a concurrent checkout moved the branch mid-pull)
+is retryable: it carries no fixed guidance and renders the daemon
+message through the generic error line.
 
 ## Ownership
 

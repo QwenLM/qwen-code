@@ -125,6 +125,13 @@ function makeRepo(): string {
   git(dir, 'config', 'user.email', 'test@example.com');
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
+  // Pin line endings repo-locally (like the gpgsign pin above):
+  // gitEnv() strips GIT_CONFIG_GLOBAL/SYSTEM for the product’s git, so
+  // a host config — the Windows runners’ system core.autocrlf=true —
+  // reaches the product’s git but not the fixture channel, and the
+  // repo-local pin outranks the host config on both channels.
+  git(dir, 'config', 'core.autocrlf', 'false');
+  git(dir, 'config', 'core.eol', 'lf');
   git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
   git(dir, 'add', '.');
@@ -147,6 +154,8 @@ function makeClone(remote: string): string {
   git(clone, 'config', 'user.email', 'other@example.com');
   git(clone, 'config', 'user.name', 'Other');
   git(clone, 'config', 'commit.gpgsign', 'false');
+  git(clone, 'config', 'core.autocrlf', 'false');
+  git(clone, 'config', 'core.eol', 'lf');
   return clone;
 }
 
@@ -1155,6 +1164,8 @@ describe('gitCommit index rollback (R10 #1)', () => {
     git(clone, 'config', 'user.email', 'other@example.com');
     git(clone, 'config', 'user.name', 'Other');
     git(clone, 'config', 'commit.gpgsign', 'false');
+    git(clone, 'config', 'core.autocrlf', 'false');
+    git(clone, 'config', 'core.eol', 'lf');
     fs.writeFileSync(path.join(clone, 'a.txt'), 'remote change\n');
     git(clone, 'add', '.');
     git(clone, 'commit', '-q', '-m', 'remote edit');
@@ -1205,6 +1216,8 @@ describe('gitCheckout remote-tracking refs (R10 #4)', () => {
     git(clone, 'config', 'user.email', 'other@example.com');
     git(clone, 'config', 'user.name', 'Other');
     git(clone, 'config', 'commit.gpgsign', 'false');
+    git(clone, 'config', 'core.autocrlf', 'false');
+    git(clone, 'config', 'core.eol', 'lf');
     fs.writeFileSync(path.join(clone, fileName), 'remote\n');
     git(clone, 'add', '.');
     git(clone, 'commit', '-q', '-m', `advance ${fileName}`);
@@ -2896,6 +2909,65 @@ describe('gitPull incoming-tip guards', () => {
     },
   );
 
+  // The POSIX shim below stands in for a concurrent actor creating state
+  // inside the force path's guard->discard window (the slow pre-discard
+  // probe); it has no Windows equivalent in this suite.
+  it.runIf(process.platform !== 'win32')(
+    "refuses a force discard when an actor's cherry-pick lands during the pre-discard probe",
+    async () => {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'cherry-pick-once');
+      // The actor concludes a cherry-pick resolution while the pre-discard
+      // probe runs: the discard must refuse it instead of destroying it —
+      // `reset --hard` would erase CHERRY_PICK_HEAD and the staged
+      // resolution before any later guard could see them.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "ls-files" ] && [ ! -e "${marker}" ]; then\n` +
+          `  : > "${marker}"\n` +
+          `  "${realGit}" rev-parse HEAD > "$("${realGit}" rev-parse --git-dir)/CHERRY_PICK_HEAD"\n` +
+          `  printf 'actor staged resolution\\n' > "${dir}/resolved-by-actor.txt"\n` +
+          `  "${realGit}" add resolved-by-actor.txt\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      await withPathPrefix(shimDir, () =>
+        expect(gitPull(dir, { force: true })).rejects.toMatchObject({
+          code: 'merge_in_progress',
+        }),
+      );
+
+      // The refusal precedes the discard: the actor's cherry-pick state and
+      // its staged resolution survive, and the local edit was never reset.
+      expect(() =>
+        git(dir, 'rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD'),
+      ).not.toThrow();
+      expect(git(dir, 'diff', '--cached', '--name-only')).toContain(
+        'resolved-by-actor.txt',
+      );
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(git(dir, 'stash', 'list').trim()).toBe('');
+    },
+  );
+
   it.runIf(process.platform !== 'win32')(
     'refuses the pull when the collision probe itself fails',
     async () => {
@@ -3107,7 +3179,10 @@ describe('gitPull incoming-tip guards', () => {
     },
   );
 
-  it.runIf(process.platform !== 'win32')(
+  // The fixture writes a raw 0xFF byte through fs.writeFileSync, which
+  // throws EILSEQ on APFS; like the case-variant tests, gate the
+  // filesystem-sensitive fixture on both platforms.
+  it.runIf(process.platform !== 'win32' && process.platform !== 'darwin')(
     'refuses a pull when a non-UTF-8 incoming path collides with a local ignored file',
     async () => {
       // A legacy Latin-1 name: 0xFF is not valid UTF-8, so a string
@@ -3444,6 +3519,127 @@ describe('gitPull incoming-tip guards', () => {
       expect(git(dir, 'stash', 'list').trim()).toBe('');
     },
   );
+  // The POSIX shim below stands in for a concurrent actor checking out
+  // another branch inside the guard->merge window (the slow collision
+  // probe); it has no Windows equivalent in this suite.
+  it.runIf(process.platform !== 'win32')(
+    'refuses the merge and restores the auto-stash when HEAD moves during the probe',
+    async () => {
+      const dir = makeRepo();
+      git(dir, 'branch', 'other');
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'checkout-once');
+      // The auto-stash manufactures the clean tree that admits the actor's
+      // checkout inside the probe window; the pinned-tip merge must not
+      // land on the foreign branch.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `if [ "$1" = "ls-files" ] && [ ! -e "${marker}" ]; then\n` +
+          `  : > "${marker}"\n` +
+          `  "${realGit}" checkout -q other\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      let thrown: unknown;
+      await withPathPrefix(shimDir, () => gitPull(dir, { stash: true })).catch(
+        (err) => {
+          thrown = err;
+        },
+      );
+
+      expect(thrown).toMatchObject({ code: 'head_changed' });
+      // Nothing merged into the foreign branch; the auto-stash is popped
+      // back and the actor's checkout stands.
+      expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(false);
+      expect(currentBranch(dir)).toBe('other');
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(git(dir, 'stash', 'list').trim()).toBe('');
+    },
+  );
+
+  // The POSIX shim below stands in for a concurrent actor whose conflicted
+  // merge of the SAME upstream tip lands inside the guard->merge window; it
+  // has no Windows equivalent in this suite.
+  it.runIf(process.platform !== 'win32')(
+    "keeps a concurrent actor's merge of the same tip that appears during the probe",
+    async () => {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const marker = path.join(dir, '.git', 'actor-merge-once');
+      const callLog = path.join(dir, '.git', 'pull-calls.log');
+      // The actor's merge of exactly the fetched tip parks its staged
+      // resolution while the probe runs: tip equality cannot tell it from
+      // this pull's own state, so the guard re-run must see it before the
+      // merge instead of the recovery aborting it afterwards.
+      const shimDir = installGitShim(
+        `#!/bin/sh\n` +
+          `printf '%s\\n' "$*" >> "${callLog}"\n` +
+          `if [ "$1" = "ls-files" ] && [ ! -e "${marker}" ]; then\n` +
+          `  : > "${marker}"\n` +
+          `  "${realGit}" rev-parse "@{u}" > "$("${realGit}" rev-parse --git-dir)/MERGE_HEAD"\n` +
+          `  printf 'actor staged resolution\\n' > "${dir}/resolved-by-actor.txt"\n` +
+          `  "${realGit}" add resolved-by-actor.txt\n` +
+          `fi\n` +
+          `exec "${realGit}" "$@"\n`,
+      );
+
+      await withPathPrefix(shimDir, () =>
+        expect(gitPull(dir, { stash: true })).rejects.toMatchObject({
+          code: 'merge_in_progress',
+        }),
+      );
+
+      // The actor's merge state and staged resolution survive (this pull
+      // did not start them), and no abort ran.
+      expect(() =>
+        git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'),
+      ).not.toThrow();
+      expect(fs.readFileSync(callLog, 'utf8')).not.toContain('merge --abort');
+      expect(git(dir, 'diff', '--cached', '--name-only')).toContain(
+        'resolved-by-actor.txt',
+      );
+      // The local edit survives whatever the restore achieved: applied to
+      // the worktree, or kept in the entry the restore-failure note names.
+      const restored =
+        fs.readFileSync(path.join(dir, 'a.txt'), 'utf8') === 'local edit\n' ||
+        git(dir, 'stash', 'list', '--oneline').includes(
+          'auto-stash before pull',
+        );
+      expect(restored).toBe(true);
+    },
+  );
+
   it.runIf(process.platform !== 'win32')(
     'refuses the pull when the fetched-tip probe fails transiently',
     async () => {
@@ -4188,6 +4384,8 @@ describe('gitPull incoming-tip guards', () => {
     git(dir, 'config', 'user.email', 'test@example.com');
     git(dir, 'config', 'user.name', 'Test');
     git(dir, 'config', 'commit.gpgsign', 'false');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    git(dir, 'config', 'core.eol', 'lf');
     fs.writeFileSync(path.join(dir, 'F.txt'), 'base\n');
     git(dir, 'add', '.');
     dated('2020-01-01T00:00:00', 'commit', '-q', '-m', 'O');
@@ -4279,5 +4477,40 @@ describe('gitPull incoming-tip guards', () => {
       'local edit\n',
     );
     expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+});
+describe('gitPull fixture line endings', () => {
+  it('pins fixture line endings against ambient config only the product channel reads', async () => {
+    // gitEnv() strips GIT_CONFIG_GLOBAL/SYSTEM, so ambient global config
+    // reaches the product's git but not the fixture helpers — the channel
+    // asymmetry that made the Windows runners' system core.autocrlf=true
+    // rewrite the fixtures' LF-pinned files. Plant the hermetic HOME's
+    // global config, which only the product channel reads, to stand in for
+    // that host config on every platform: the fixture repos' repo-local
+    // pin must outrank it or the merge checks the incoming file out CRLF.
+    const ambient = path.join(hermeticHome, '.gitconfig');
+    fs.writeFileSync(ambient, '[core]\n\tautocrlf = true\n');
+    try {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'a.txt'), 'remote edit\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote edit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      await expect(gitPull(dir, {})).resolves.toMatchObject({
+        success: true,
+      });
+
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'remote edit\n',
+      );
+    } finally {
+      fs.rmSync(ambient);
+    }
   });
 });

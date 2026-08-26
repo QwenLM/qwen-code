@@ -540,7 +540,8 @@ export type GitPullFailureCode =
   | 'merge_in_progress'
   | 'rebase_in_progress'
   | 'diverged'
-  | 'ignored_collision';
+  | 'ignored_collision'
+  | 'head_changed';
 
 /**
  * Pointer to the unrestored changes when a failure-recovery stash restore
@@ -553,6 +554,11 @@ export const STASH_RESTORE_NOTE =
 // attributes the entry by this marker plus the recorded SHA instead of
 // by stack movement, which a concurrent actor's push also changes.
 const AUTO_STASH_MESSAGE = 'qwen-code: auto-stash before pull';
+
+// A checkout raced the pull’s upstream resolution. Retry resolves it,
+// so the message says so instead of pointing at a terminal flow.
+const HEAD_CHANGED_MESSAGE =
+  'cannot update: the checked-out branch changed while the pull was preparing — retry the update from the current branch';
 
 /**
  * A pull refusal or failure classified from repository state instead of
@@ -1233,6 +1239,27 @@ async function refuseForeignMergeOrRebase(
   }
 }
 
+// The mutating steps depend on identities — no foreign merge/rebase
+// state, HEAD still on the branch @{u} resolved for — that were checked
+// before the slow ignored-collision probe. Re-verify both immediately
+// before each mutation: state created or a checkout completed during
+// that window belongs to a concurrent actor. The discard is the worst
+// case — `reset --hard` erases MERGE_HEAD/CHERRY_PICK_HEAD, so foreign
+// state it destroys is invisible to every later guard.
+async function reverifyPullIdentities(
+  cwd: string,
+  headRef: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  await refuseForeignMergeOrRebase(cwd, env);
+  const headNow = await runGit(cwd, ['symbolic-ref', '-q', 'HEAD'], env).catch(
+    () => '',
+  );
+  if (headNow !== headRef) {
+    throw new GitPullFailure('head_changed', HEAD_CHANGED_MESSAGE);
+  }
+}
+
 /**
  * Pull (fetch + merge) or fetch-only from the remote.
  */
@@ -1298,6 +1325,15 @@ async function gitPullInner(
   const fetchedTipCommit = (
     await runGit(cwd, ['rev-parse', `${fetchedTip}^{commit}`], env)
   ).trim();
+  // The branch @{u} resolved for; the mutating steps re-verify HEAD is
+  // still on it. @{u} only resolves for a branch with an upstream, so
+  // HEAD is symbolic here — a checkout racing even this resolution
+  // refuses typed instead of leaking a raw probe error.
+  const headRef = await runGit(cwd, ['symbolic-ref', '-q', 'HEAD'], env).catch(
+    () => {
+      throw new GitPullFailure('head_changed', HEAD_CHANGED_MESSAGE);
+    },
+  );
   if (opts?.force) {
     // Without a catch: a missing upstream must surface here, before
     // anything is discarded. A diverged branch is refused because the
@@ -1349,6 +1385,12 @@ async function gitPullInner(
     if (preDiscardIgnored.length > 0) {
       throw refusedIgnoredCollision(preDiscardIgnored);
     }
+    // The guard and HEAD check ran before the slow probe above;
+    // re-verify both immediately before the destructive step — state an
+    // actor created during the probe must refuse it, since `reset --hard`
+    // would destroy that state and erase its sequence heads before any
+    // later guard could see them.
+    await reverifyPullIdentities(cwd, headRef, env);
     await runGit(cwd, ['reset', '--hard'], env);
     await runGit(cwd, ['clean', '-fd'], env);
   } else if (opts?.stash) {
@@ -1440,17 +1482,11 @@ async function gitPullInner(
   let output: string;
   let restoreFailed = false;
   try {
-    // Re-run the guard immediately before the update: merge/rebase state
-    // that appeared since the pre-fetch check belongs to a concurrent
-    // actor. The recovery below aborts whatever state exists, which is
-    // only safe for state this pull started — so refuse here (restoring
-    // the auto-stash) instead of merging into the foreign state.
-    await refuseForeignMergeOrRebase(cwd, env);
     // Every pull shape refuses an incoming collision with local ignored
     // files: ignored paths never appear in `git status`, so the plain
     // path reads clean and would silently check the incoming file out
     // over the local one. The probe runs here — after the stash/discard,
-    // next to the guard re-run — because neither of those steps touches
+    // before the guard re-run — because neither of those steps touches
     // ignored files, and an ignored file a concurrent actor (a dev
     // server, a build watcher) creates while they run must still refuse
     // the update instead of being overwritten by it.
@@ -1475,6 +1511,17 @@ async function gitPullInner(
     if (ignored.length > 0) {
       throw refusedIgnoredCollision(ignored);
     }
+    // Re-verify the guard identities immediately before the update,
+    // after the slow probe: state created or a checkout completed
+    // during it belongs to a concurrent actor. The recovery below aborts
+    // whatever state exists, which is only safe for state this pull
+    // started — so refuse here (restoring the auto-stash) instead of
+    // merging into the foreign state. This re-run is also the
+    // recovery’s snapshot of foreign-state absence: the tip comparison
+    // there attributes whatever appears afterwards, leaving only the
+    // irreducible check-then-act window already documented for
+    // refs/stash.
+    await reverifyPullIdentities(cwd, headRef, env);
     output = await runGit(
       cwd,
       useRebase

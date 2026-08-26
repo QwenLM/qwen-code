@@ -278,6 +278,13 @@ function makeRepo(): string {
   git(dir, 'config', 'user.email', 'test@example.com');
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
+  // Pin line endings repo-locally (like the gpgsign pin above):
+  // gitEnv() strips GIT_CONFIG_GLOBAL/SYSTEM for the product’s git, so
+  // a host config — the Windows runners’ system core.autocrlf=true —
+  // reaches the product’s git but not the fixture channel, and the
+  // repo-local pin outranks the host config on both channels.
+  git(dir, 'config', 'core.autocrlf', 'false');
+  git(dir, 'config', 'core.eol', 'lf');
   fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
   git(dir, 'add', '.');
   git(dir, 'commit', '-q', '-m', 'init');
@@ -321,6 +328,8 @@ function makeDirtyPullRepo(): string {
   git(clone, 'config', 'user.email', 'other@example.com');
   git(clone, 'config', 'user.name', 'Other');
   git(clone, 'config', 'commit.gpgsign', 'false');
+  git(clone, 'config', 'core.autocrlf', 'false');
+  git(clone, 'config', 'core.eol', 'lf');
   const remoteContent = fs
     .readFileSync(path.join(clone, 'a.txt'), 'utf8')
     .replace('line 10', 'line 10 remote');
@@ -356,6 +365,8 @@ function makeUnmergedRepo(): string {
   git(clone, 'config', 'user.email', 'other@example.com');
   git(clone, 'config', 'user.name', 'Other');
   git(clone, 'config', 'commit.gpgsign', 'false');
+  git(clone, 'config', 'core.autocrlf', 'false');
+  git(clone, 'config', 'core.eol', 'lf');
   fs.writeFileSync(path.join(clone, 'a.txt'), 'remote change\n');
   git(clone, 'add', '.');
   git(clone, 'commit', '-q', '-m', 'remote edit');
@@ -540,6 +551,8 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     git(clone, 'config', 'user.email', 'other@example.com');
     git(clone, 'config', 'user.name', 'Other');
     git(clone, 'config', 'commit.gpgsign', 'false');
+    git(clone, 'config', 'core.autocrlf', 'false');
+    git(clone, 'config', 'core.eol', 'lf');
     fs.writeFileSync(path.join(clone, 'a.txt'), 'remote change\n');
     git(clone, 'add', '.');
     git(clone, 'commit', '-q', '-m', 'remote edit');
@@ -625,6 +638,8 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
         git(clone, 'config', 'user.email', 'other@example.com');
         git(clone, 'config', 'user.name', 'Other');
         git(clone, 'config', 'commit.gpgsign', 'false');
+        git(clone, 'config', 'core.autocrlf', 'false');
+        git(clone, 'config', 'core.eol', 'lf');
         for (let i = 1; i <= fileCount; i += 1) {
           fs.writeFileSync(path.join(clone, `f${i}.txt`), `remote ${i}\n`);
         }
@@ -742,6 +757,8 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     git(clone, 'config', 'user.email', 'other@example.com');
     git(clone, 'config', 'user.name', 'Other');
     git(clone, 'config', 'commit.gpgsign', 'false');
+    git(clone, 'config', 'core.autocrlf', 'false');
+    git(clone, 'config', 'core.eol', 'lf');
     // The incoming commit touches the awkwardly named file, so the plain
     // pull refuses on it and the error text carries the name.
     fs.writeFileSync(path.join(clone, 'needs merge.txt'), 'remote edit\n');
@@ -794,6 +811,8 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     git(clone, 'config', 'user.email', 'other@example.com');
     git(clone, 'config', 'user.name', 'Other');
     git(clone, 'config', 'commit.gpgsign', 'false');
+    git(clone, 'config', 'core.autocrlf', 'false');
+    git(clone, 'config', 'core.eol', 'lf');
     for (const rel of files) {
       fs.writeFileSync(path.join(clone, rel), 'remote version\n');
     }
@@ -876,6 +895,8 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     git(clone, 'config', 'user.email', 'other@example.com');
     git(clone, 'config', 'user.name', 'Other');
     git(clone, 'config', 'commit.gpgsign', 'false');
+    git(clone, 'config', 'core.autocrlf', 'false');
+    git(clone, 'config', 'core.eol', 'lf');
     fs.writeFileSync(path.join(clone, 'a.txt'), 'remote edit\n');
     fs.writeFileSync(path.join(clone, 'config.json'), 'incoming\n');
     git(clone, 'add', '.');
@@ -937,6 +958,8 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     git(dir, 'config', 'user.email', 'test@example.com');
     git(dir, 'config', 'user.name', 'Test');
     git(dir, 'config', 'commit.gpgsign', 'false');
+    git(dir, 'config', 'core.autocrlf', 'false');
+    git(dir, 'config', 'core.eol', 'lf');
     fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'init');
