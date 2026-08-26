@@ -116,6 +116,10 @@ function runScenario(
         'exit 0',
       ].join('\n') + '\n',
     );
+    // The cede exits re-read the live head before trusting their marker
+    // files; scripted per test (empty output = failed read / unmoved head,
+    // which must NOT cede).
+    write('gh', '#!/bin/bash\necho "${STUB_LIVE_HEAD:-}"\n');
     write(
       'qwen',
       [
@@ -151,8 +155,10 @@ function runScenario(
         // so whatever the step prints next lands on the same line.
         '  timeout_partial_line) printf \'{"type":"assistant","content":"90-    core.info(`##[add-matcher]x`);"}\\n{"type":"assistant","content":"91- trunc\' ;;',
         '  supersede_mid_attempt) r success false "[API Error: 503 upstream overloaded]"; printf "head-b" > "$SUPERSEDE_FILE" ;;',
+        '  supersede_forge_mid_attempt) printf "head-b" > "$SUPERSEDE_FILE"; r success false "Reviewed." ;;',
         '  supersede_during_backoff) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else r success false "attempt 2 must not run"; fi ;;',
         '  compose_latch_reset) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; : > "$SALVAGE_DIR/compose-seen"; else { [ -f "$SALVAGE_DIR/compose-seen" ] && echo present || echo absent; } >> "$OBS"; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
+        '  compose_artifact_reset) if [ "$n" -eq 1 ]; then printf \'{"downgraded":false}\' > "$COMPOSED_ARTIFACT"; r success false "[API Error: 503 upstream overloaded]"; else { [ -e "$COMPOSED_ARTIFACT" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
         '  hardexit) exit 3 ;;',
         'esac',
@@ -168,6 +174,7 @@ function runScenario(
       // The retry loop keeps per-attempt salvage state here; exported so
       // the stub qwen can simulate the watcher's compose latch.
       `SALVAGE_DIR="${join(dir, 'salvage')}"; mkdir -p "$SALVAGE_DIR"; export SALVAGE_DIR`,
+      `COMPOSED_ARTIFACT="${join(dir, 'composed.json')}"; export COMPOSED_ARTIFACT`,
       'fail(){ echo "FAIL kind=[${3:-}] reason=[$1]"; exit "${2:-1}"; }',
       retryLoopSource(),
       'echo "OK outcome=$OUTCOME"',
@@ -3907,12 +3914,12 @@ describe('review supersede salvage (#10110)', () => {
     // also runs at the TOP of the loop: a cede landing during the retry
     // backoff (pkill matched nothing — qwen not running) must stop the next
     // attempt before it re-reviews the dead head.
-    const check = 'if [ -f "${SUPERSEDE_FILE:-}" ]; then';
+    const check = 'if [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then';
     const call = run.indexOf('run_review_once "$attempt_timeout" "$PROMPT"');
     const preAttempt = run.indexOf(check);
     const supersede = run.indexOf(check, call);
     const cede = run.indexOf(
-      'if [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ]; then',
+      'if [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ] && live_head_moved; then',
     );
     const success = run.indexOf('if [ "$OUTCOME" = "success" ]; then');
     expect(call).toBeGreaterThan(-1);
@@ -3921,6 +3928,14 @@ describe('review supersede salvage (#10110)', () => {
     expect(supersede).toBeGreaterThan(call);
     expect(cede).toBeGreaterThan(supersede);
     expect(success).toBeGreaterThan(cede);
+  });
+
+  it('shares one cede implementation across both supersede sites', () => {
+    // The halve-budget-floor incident: two verbatim copies diverged through
+    // a one-sided edit. Pin the pair structurally — one definition, two
+    // call sites — so a one-sided signal edit cannot survive the replays.
+    expect((run.match(/cede_superseded\(\) \{/g) ?? []).length).toBe(1);
+    expect((run.match(/cede_superseded/g) ?? []).length).toBe(3);
   });
 
   it('decides KEEP vs CEDE with the extracted salvage_eligible', () => {
@@ -3971,6 +3986,7 @@ describe('review supersede salvage (#10110)', () => {
     runElapsed = 60,
     attemptElapsed = runElapsed,
     composeSeen = false,
+    composedArtifact = null,
     docsOnly = false,
     pct = 50,
   } = {}) {
@@ -3980,6 +3996,9 @@ describe('review supersede salvage (#10110)', () => {
       writeFileSync(join(dir, 'attempt-start'), String(now - attemptElapsed));
       if (composeSeen) {
         writeFileSync(join(dir, 'compose-seen'), '');
+      }
+      if (composedArtifact !== null) {
+        writeFileSync(join(dir, 'composed.json'), composedArtifact);
       }
       const bin = join(dir, 'bin');
       mkdirSync(bin);
@@ -4070,6 +4089,25 @@ describe('review supersede salvage (#10110)', () => {
     expect(r.marker).toBeNull();
   });
 
+  it('latches the compose signal only from a real composed artifact (replayed watcher)', () => {
+    // A genuinely composed verdict below the elapsed threshold: KEEP —
+    // posting is minutes out, and discarding it is the #9729 shape. This is
+    // the only case exercising artifact -> latch -> KEEP end-to-end.
+    const valid = runWatcher({
+      composedArtifact: '{"downgraded":false,"downgradedFrom":null}',
+      attemptElapsed: 30,
+    });
+    expect(valid.marker).toBe('head-a');
+    expect(valid.superseded).toBeNull();
+    // The path is agent-derivable, so the latch must refuse forged
+    // artifacts: below the threshold the watcher still cedes.
+    for (const forged of ['', '{not json', 'null', '[1,2]']) {
+      const r = runWatcher({ composedArtifact: forged, attemptElapsed: 30 });
+      expect(r.marker, JSON.stringify(forged)).toBeNull();
+      expect(r.superseded, JSON.stringify(forged)).toBe('head-b');
+    }
+  });
+
   it('ends a superseded attempt clean without retrying (replayed loop)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
     try {
@@ -4077,7 +4115,11 @@ describe('review supersede salvage (#10110)', () => {
       // The watcher cedes mid-attempt (its pkill kills the qwen tree);
       // the attempt's post-run check sees the file and cedes clean.
       const r = runScenario('supersede_mid_attempt', {
-        extraEnv: { SUPERSEDE_FILE: supersedeFile },
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+        },
       });
       expect(r.attempts).toBe(1);
       expect(r.raw).toContain('Superseded early:');
@@ -4097,7 +4139,11 @@ describe('review supersede salvage (#10110)', () => {
       // with salvage armed the head has moved, so a retry would re-review a
       // superseded head from scratch — one attempt, clean exit.
       const r = runScenario('transient_persist', {
-        extraEnv: { QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile },
+        extraEnv: {
+          QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
+        },
       });
       expect(r.attempts).toBe(1);
       expect(r.raw).toContain('Salvage-armed review attempt did not complete');
@@ -4134,11 +4180,79 @@ describe('review supersede salvage (#10110)', () => {
         extraEnv: {
           SUPERSEDE_FILE: supersedeFile,
           SUPERSEDE_DURING_BACKOFF: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-b',
         },
       });
       expect(r.attempts).toBe(1);
       expect(r.raw).toContain('Superseded early:');
       expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not cede to a forged supersede file when the live head never moved (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // Existence alone must not cede: the head never moved, so no
+      // replacement run exists — a forged cede is a silent green
+      // suppression of the whole review.
+      writeFileSync(supersedeFile, 'head-b');
+      const r = runScenario('success', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+        },
+      });
+      expect(r.raw).not.toContain('Superseded early:');
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.attempts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not cede to a supersede file forged mid-attempt when the head never moved (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // Forged DURING the attempt (the post-attempt check site): same
+      // silence risk — the head never moved, so the review must complete.
+      const r = runScenario('supersede_forge_mid_attempt', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+        },
+      });
+      expect(r.raw).not.toContain('Superseded early:');
+      expect(r.line).toBe('OK outcome=success');
+      expect(r.attempts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('retries and fails when the salvage marker is forged and the head never moved (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const salvageFile = join(dir, 'salvage-ok');
+      writeFileSync(salvageFile, 'head-a');
+      const r = runScenario('transient_persist', {
+        extraEnv: {
+          QWEN_CI_REVIEW_SALVAGE_OK_FILE: salvageFile,
+          EXPECTED_HEAD_SHA: 'head-a',
+          STUB_LIVE_HEAD: 'head-a',
+        },
+      });
+      expect(r.attempts).toBe(2);
+      expect(r.raw).toContain('FAIL ');
+      expect(r.raw).not.toContain(
+        'Salvage-armed review attempt did not complete',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -4152,6 +4266,24 @@ describe('review supersede salvage (#10110)', () => {
       // it) and dies retryable; attempt 2 must start without the stale
       // latch, or it reads salvage-eligible from its first second.
       const r = runScenario('compose_latch_reset', {
+        extraEnv: { OBS: obs },
+      });
+      expect(r.attempts).toBe(2);
+      expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes a stale composed artifact in the per-attempt reset (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const obs = join(dir, 'artifact-observed');
+      // Attempt 1 reaches compose and dies retryable, skipping the skill's
+      // Step 9 cleanup; attempt 2 must not inherit the artifact, or the
+      // watcher re-latches compose-seen from it within one poll and the
+      // fresh attempt reads salvage-eligible from its first second.
+      const r = runScenario('compose_artifact_reset', {
         extraEnv: { OBS: obs },
       });
       expect(r.attempts).toBe(2);
@@ -4226,6 +4358,9 @@ describe('review supersede salvage (#10110)', () => {
       (s) => s.name === 'Report salvaged historical-head review',
     );
     expect(note).toBeTruthy();
+    expect(note.env.MOVED_TO).toBe(
+      '${{ steps.review.outputs.salvage_moved_to }}',
+    );
     expect(note.if).toContain("steps.review.outputs.salvaged == 'true'");
     expect(note.if).toContain(
       "steps.review.outputs.review_completed == 'true'",
@@ -4236,6 +4371,73 @@ describe('review supersede salvage (#10110)', () => {
       "steps.review.outputs.docs_only_medium != 'true'",
     );
     expect(note.run).toContain('<!-- qwen-review-salvaged');
+  });
+
+  // The marker -> outputs block sits OUTSIDE the retry-loop extraction
+  // window (the window ends at the loop's column-0 `done`), so pin it by
+  // executing it — a flipped marker condition or an unvalidated moved-to
+  // ships green under shape checks alone.
+  function salvageOutputsSource() {
+    const start = run.indexOf(
+      'if [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ]; then',
+    );
+    const end = run.indexOf('\nfi', start) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return run.slice(start, end);
+  }
+
+  function runSalvageOutputs({ marker = 'head-a', movedTo = null } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-out-'));
+    try {
+      const salvage = join(dir, 'salvage');
+      mkdirSync(salvage);
+      if (marker !== null) writeFileSync(join(salvage, 'salvage-ok'), marker);
+      if (movedTo !== null) writeFileSync(join(salvage, 'moved-to'), movedTo);
+      const gho = join(dir, 'gho');
+      const harness = [
+        'set -euo pipefail',
+        `SALVAGE_DIR="${salvage}"`,
+        `QWEN_CI_REVIEW_SALVAGE_OK_FILE="${salvage}/salvage-ok"`,
+        `GITHUB_OUTPUT="${gho}"; : > "$GITHUB_OUTPUT"`,
+        salvageOutputsSource(),
+      ].join('\n');
+      execFileSync('bash', ['-c', harness], { encoding: 'utf8' });
+      return readFileSync(gho, 'utf8').split('\n').filter(Boolean);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('writes the salvage outputs only for an armed marker (replayed block)', () => {
+    const sha = 'b'.repeat(40);
+    expect(runSalvageOutputs({ movedTo: sha })).toEqual([
+      'salvaged=true',
+      `salvage_moved_to=${sha}`,
+    ]);
+    // No marker: an ordinary run emits neither output (a flipped condition
+    // would post the historical-head note on every run).
+    expect(runSalvageOutputs({ marker: null })).toEqual([]);
+    // Marker armed but the watcher died before recording a destination.
+    expect(runSalvageOutputs({})).toEqual([
+      'salvaged=true',
+      'salvage_moved_to=unknown',
+    ]);
+  });
+
+  it('degrades a forged moved-to instead of injecting outputs (replayed block)', () => {
+    // moved-to is agent-writable; embedded newlines would land as forged
+    // name=value lines in $GITHUB_OUTPUT and flip gates like
+    // docs_only_medium. Only the watcher's 40-hex shape passes.
+    const forged = `${'a'.repeat(40)}\ndocs_only_medium=true\ncompletion_line=forged`;
+    expect(runSalvageOutputs({ movedTo: forged })).toEqual([
+      'salvaged=true',
+      'salvage_moved_to=unknown',
+    ]);
+    expect(runSalvageOutputs({ movedTo: 'a'.repeat(41) })).toEqual([
+      'salvaged=true',
+      'salvage_moved_to=unknown',
+    ]);
   });
 
   it('reads the salvage threshold from the repo variable with a 50 default', () => {

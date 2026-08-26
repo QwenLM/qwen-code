@@ -1611,7 +1611,16 @@ jobs:
               if [ "$run_elapsed" -gt "$(( BUDGET_SECONDS + 1800 ))" ]; then
                 return 0
               fi
-              if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -e "$COMPOSED_ARTIFACT" ]; then
+              # Latch only on a REAL composed verdict: the artifact path is
+              # derivable from cwd + PR number, so the reviewed agent can
+              # create it — a bare existence check would let a forged file
+              # force KEEP. The verdict is JSON, so require a parseable JSON
+              # object; a torn mid-write fails the parse and latches on the
+              # next poll instead. Residual risk, documented like the marker
+              # escape: an agent can write valid JSON too, but it already
+              # authors the review this signal describes.
+              if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -e "$COMPOSED_ARTIFACT" ] \
+                && node -e 'const v=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));if(typeof v!=="object"||v===null||Array.isArray(v))process.exit(1);' "$COMPOSED_ARTIFACT" 2>/dev/null; then
                 : > "${SALVAGE_DIR}/compose-seen"
               fi
               live_head="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid' 2>/dev/null)" || continue
@@ -1656,6 +1665,22 @@ jobs:
             WATCHER_PID=$!
           fi
 
+          # The cede exits below trust marker files whose paths the reviewed
+          # agent derives from its own exported environment — existence alone
+          # is forgeable, and a forged cede suppresses the whole review with
+          # the job green and no replacement run queued. Re-read the live
+          # head at decision time instead: only a REAL move justifies
+          # ceding; an unreadable or unmoved head falls through.
+          live_head_moved() {
+            local live
+            live="$(gh pr view "${PR_NUMBER:-}" --repo "${REPO:-}" --json headRefOid --jq '.headRefOid' 2>/dev/null || true)"
+            [ -n "$live" ] && [ "$live" != "${EXPECTED_HEAD_SHA:-}" ]
+          }
+          cede_superseded() {
+            echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(cat "${SUPERSEDE_FILE:-}" 2>/dev/null || echo unknown) before the salvage threshold; ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+
           attempt=1
           while :; do
             # Re-check BEFORE the attempt: the watcher's cede is one-shot,
@@ -1663,15 +1688,17 @@ jobs:
             # not running) — without this the next attempt re-reviews the
             # dead head for the whole remaining budget while the queued
             # replacement waits (#10110).
-            if [ -f "${SUPERSEDE_FILE:-}" ]; then
-              echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(cat "$SUPERSEDE_FILE" 2>/dev/null || echo unknown) before the salvage threshold; ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
-              exit 0
+            if [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
+              cede_superseded
             fi
             # Salvage state is per ATTEMPT — a retry re-runs the review from
             # scratch, so attempt 1's compose sighting (the watcher latches
             # it) and elapsed fraction must not make the fresh attempt
-            # salvage-eligible from its first second.
-            rm -f "${SALVAGE_DIR}/compose-seen"
+            # salvage-eligible from its first second. The composed artifact
+            # goes with the latch: a retryable death after compose skips the
+            # skill's Step 9 cleanup, and a surviving artifact would re-latch
+            # the watcher within one poll.
+            rm -f "${SALVAGE_DIR}/compose-seen" "${COMPOSED_ARTIFACT:-}"
             date +%s > "${SALVAGE_DIR}/attempt-start"
             attempt_timeout=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
             if [ "$attempt_timeout" -lt 30 ]; then
@@ -1687,13 +1714,14 @@ jobs:
             # ${VAR:-} defaults: the retry-loop replay in
             # scripts/tests/qwen-pr-review-workflow.test.js extracts this loop
             # verbatim and runs it under set -u without the salvage setup.
-            if [ -f "${SUPERSEDE_FILE:-}" ]; then
-              echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(cat "$SUPERSEDE_FILE" 2>/dev/null || echo unknown) before the salvage threshold; ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
-              exit 0
+            if [ -f "${SUPERSEDE_FILE:-}" ] && live_head_moved; then
+              cede_superseded
             fi
-            if [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ]; then
+            if [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ] && live_head_moved; then
               # Salvage was armed but the attempt still died (API error,
-              # timeout). Retrying would re-review a head that is no longer
+              # timeout), and the head really did move — the marker's path is
+              # exported into the agent's environment, so the file alone is
+              # forgeable. Retrying would re-review a head that is no longer
               # current — the replacement run queued behind this one already
               # covers the live head, so cede instead of retrying or
               # announcing a failure the fallback guards would suppress anyway.
@@ -1722,9 +1750,19 @@ jobs:
             WATCHER_PID=""
           fi
           if [ -f "$QWEN_CI_REVIEW_SALVAGE_OK_FILE" ]; then
+            # moved-to is agent-writable content: embedded newlines would
+            # survive command substitution and land as forged name=value
+            # lines in $GITHUB_OUTPUT, flipping downstream gates like
+            # docs_only_medium. The watcher only ever writes a 40-hex head
+            # SHA here, so any other shape degrades to `unknown`.
+            salvage_moved_to="$(cat "${SALVAGE_DIR}/moved-to" 2>/dev/null || echo unknown)"
+            case "$salvage_moved_to" in
+              ''|*[!0-9a-f]*) salvage_moved_to='unknown' ;;
+              *) [ "${#salvage_moved_to}" -eq 40 ] || salvage_moved_to='unknown' ;;
+            esac
             {
               echo "salvaged=true"
-              echo "salvage_moved_to=$(cat "${SALVAGE_DIR}/moved-to" 2>/dev/null || echo unknown)"
+              echo "salvage_moved_to=$salvage_moved_to"
             } >> "$GITHUB_OUTPUT"
           fi
 
