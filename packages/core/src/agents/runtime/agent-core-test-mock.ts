@@ -118,6 +118,8 @@ export function destructureAgentCoreCall(call: unknown[]) {
           contentGeneratorConfig: { authType?: string; model?: string };
         }
       | undefined,
+    taskName: call[9] as string | undefined,
+    subagentId: call[10] as string | undefined,
   };
 }
 
