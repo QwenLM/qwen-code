@@ -997,7 +997,14 @@ function turnIdOfMessageRow(
   rowKey: string,
 ): string | undefined {
   if (!rowKey.startsWith('msg:')) return undefined;
-  const messageId = rowKey.slice('msg:'.length);
+  let messageId = rowKey.slice('msg:'.length);
+  if (messageId.startsWith('summary-')) {
+    // Compact-aggregate row keys embed the run's first member id. Resolve
+    // through it so the key still maps to its turn when looked up in the raw
+    // message list, including after a page extending the run re-keyed the
+    // aggregate.
+    messageId = messageId.slice('summary-'.length);
+  }
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (message?.id !== messageId) continue;
@@ -3319,6 +3326,7 @@ export const MessageList = memo(
       null,
     );
     const pendingPaginationTurnCompare = useRef(false);
+    const paginationLoadResolved = useRef(false);
     const [turnLayoutPending, startTurnLayoutTransition] = useTransition();
     const turnLayoutTransitionStarted = useRef(false);
     const turnLayoutRowTops = useRef(new Map<string, number>());
@@ -3394,10 +3402,10 @@ export const MessageList = memo(
     useLayoutEffect(() => {
       mergedMessageCountRef.current = mergedMessages.length;
     }, [mergedMessages.length]);
-    const mergedMessagesRef = useRef(mergedMessages);
+    const rawMessagesRef = useRef(messages);
     useLayoutEffect(() => {
-      mergedMessagesRef.current = mergedMessages;
-    }, [mergedMessages]);
+      rawMessagesRef.current = messages;
+    }, [messages]);
     const [
       suppressOlderHistoryLoadingStatus,
       setSuppressOlderHistoryLoadingStatus,
@@ -3469,6 +3477,7 @@ export const MessageList = memo(
         turnFileChanges,
         turnArtifacts,
         turnScheduledTasks,
+        paginatedExpandedTurns,
       ] as const;
       const cached = visibleItemsCache.current;
       const currentTail = displayItems[displayItems.length - 1];
@@ -4145,7 +4154,7 @@ export const MessageList = memo(
         // was loading (a turn completed by pagination). Re-expand that turn so
         // the anchor can be restored instead of dropping the reader's position.
         const anchorTurnId = turnIdOfMessageRow(
-          mergedMessagesRef.current,
+          rawMessagesRef.current,
           olderHistoryAnchor.rowKey,
         );
         if (
@@ -4622,11 +4631,13 @@ export const MessageList = memo(
           // a turn the daemon split across pages (tail shown first, head
           // completing later) can be detected and kept expanded.
           previousPaginationMessageIds.current = new Set(
-            mergedMessagesRef.current.map((message) => message.id),
+            rawMessagesRef.current.map((message) => message.id),
           );
           pendingPaginationTurnCompare.current = true;
+          paginationLoadResolved.current = false;
           await onLoadOlderHistory(force ? { force: true } : undefined);
           if (generation === olderHistoryLoadGeneration.current) {
+            paginationLoadResolved.current = true;
             setOlderHistoryAnchor((anchor) =>
               anchor?.generation === generation
                 ? { ...anchor, settled: true }
@@ -4675,11 +4686,14 @@ export const MessageList = memo(
       // while the fetch is in flight append at the tail. Wait for the head to
       // change so a mid-flight live update cannot consume the snapshot before
       // the page commits (which would silently skip the split-turn detection).
-      const first = mergedMessages[0];
+      // Compare raw message ids, not the compact-mode aggregate ids: a page
+      // that extends an aggregated run re-keys the synthetic summary id, but
+      // the run members keep their daemon ids.
+      const first = messages[0];
       if (!first || before.has(first.id)) return;
       const newTurnIds: string[] = [];
-      for (let i = 0; i < mergedMessages.length; i++) {
-        const message = mergedMessages[i];
+      for (let i = 0; i < messages.length; i++) {
+        const message = messages[i];
         if (
           !message ||
           !isTurnStartMessage(message) ||
@@ -4688,8 +4702,8 @@ export const MessageList = memo(
           continue;
         }
         let tailShown = false;
-        for (let j = i + 1; j < mergedMessages.length; j++) {
-          const next = mergedMessages[j];
+        for (let j = i + 1; j < messages.length; j++) {
+          const next = messages[j];
           if (isTurnStartMessage(next)) break;
           if (before.has(next.id)) {
             tailShown = true;
@@ -4698,12 +4712,21 @@ export const MessageList = memo(
         }
         if (tailShown) newTurnIds.push(message.id);
       }
-      // Consume the snapshot only once detection actually ran against a
-      // page-like commit. A head change that is not the page landing (a
-      // transcript reload, a session/branch switch) otherwise discards the
-      // snapshot and the page commit that follows silently skips detection —
-      // the split turn collapses again, the bug this code exists to fix.
-      if (newTurnIds.length === 0) return;
+      if (newTurnIds.length === 0) {
+        // A changed head while the load is resolved is the page landing, so
+        // consume the snapshot even when it completed no split turn —
+        // otherwise every later transcript update rescans it for the rest of
+        // the session. While the load is still in flight a head change is
+        // not the page (a transcript reload or session/branch switch);
+        // discarding the snapshot there would let the page commit that
+        // follows silently skip detection — the split turn collapses again,
+        // the bug this code exists to fix.
+        if (paginationLoadResolved.current) {
+          pendingPaginationTurnCompare.current = false;
+          previousPaginationMessageIds.current = null;
+        }
+        return;
+      }
       pendingPaginationTurnCompare.current = false;
       previousPaginationMessageIds.current = null;
       setPaginatedExpandedTurns((prev) => {
@@ -4716,7 +4739,7 @@ export const MessageList = memo(
         }
         return next ?? prev;
       });
-    }, [mergedMessages]);
+    }, [messages]);
 
     useEffect(() => {
       const pendingGeneration = pendingOlderHistoryTopLoad.current;

@@ -1509,7 +1509,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
   });
 
-  it('clears the in-flight pagination snapshot on /clear so the next session is not mislabeled', async () => {
+  it('clears the pagination snapshot and keep-open set on /clear so the next session is not mislabeled', async () => {
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,
       value: 1200,
@@ -1546,8 +1546,16 @@ describe('MessageList — turn collapse (DOM)', () => {
       await Promise.resolve();
     });
 
-    // /clear while the load is still in flight: the snapshot must not leak
-    // into the next session.
+    // The page completes the split turn's head first, so the keep-open set
+    // holds an entry by the time the screen clears.
+    rerenderMessages(c, [userMsg('u1'), ...sessionATail], {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+
+    // /clear must drop the snapshot and the keep-open entry alike, or the
+    // entry leaks into the next session.
     rerenderMessages(c, [], { hasOlderHistory: true, onLoadOlderHistory });
 
     // Session B arrives with a complete, never-split turn that reuses the
@@ -1560,6 +1568,331 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'u1')).toBe(true);
     expect(isCollapsed(c, 't1')).toBe(true);
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('keeps the pagination-completed turn expanded while the tail streams', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const streamingTail = (content: string): AssistantMessage => ({
+      ...asstMsg('a2'),
+      content,
+      isStreaming: true,
+    });
+    const tail: Message[] = [
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      streamingTail('partial'),
+    ];
+    const c = mount(tail, undefined, {
+      isResponding: true,
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // The page commits while the tail is still streaming. The head object is
+    // reused verbatim by the later snapshots, mirroring how the daemon reuses
+    // message identities and only replaces the streaming tail.
+    const head = userMsg('u1');
+    rerenderMessages(c, [head, ...tail], {
+      isResponding: true,
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+
+    // Streaming keeps updating the tail over the same messages; the keep-open
+    // added by the detection must not be masked by the streaming-tail
+    // fast-path cache serving the page-commit render's collapsed value.
+    rerenderMessages(
+      c,
+      [head, ...tail.slice(0, -1), streamingTail('partial answer')],
+      { isResponding: true, hasOlderHistory: true, onLoadOlderHistory },
+    );
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 't1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps a split turn expanded in compact mode when the page extends its aggregated run', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    // Interrupted (assistant-less) turn: only its thinking/tool tail fragment
+    // is loaded, aggregated into one summary row in compact mode, plus a
+    // newer complete turn.
+    const c = mount(
+      [
+        thinkingMsg('t1'),
+        toolMsg('g1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      { compactMode: true, hasOlderHistory: true, onLoadOlderHistory },
+    );
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    // Sanity: aggregation is live — the fragment renders as one summary row.
+    expect(has(c, 'summary-t1')).toBe(true);
+    expect(has(c, 't1')).toBe(false);
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // The page prepends the turn's head and extends the aggregated run
+    // (summary-t1 re-keys to summary-t0); the turn the user is reading must
+    // stay expanded.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        thinkingMsg('t0'),
+        toolMsg('g0'),
+        thinkingMsg('t1'),
+        toolMsg('g1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      { hasOlderHistory: true, onLoadOlderHistory },
+    );
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 'summary-t0')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('re-expands the anchored turn through a compact aggregate row key', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const rect = (
+      width: number,
+      height: number,
+      top: number,
+      left = 0,
+    ): DOMRect => ({
+      width,
+      height,
+      top,
+      right: left + width,
+      bottom: top + height,
+      left,
+      x: left,
+      y: top,
+      toJSON: () => ({}),
+    });
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        const rowKey = this.getAttribute('data-message-row-key');
+        if (rowKey === 'msg:u1') return rect(800, 50, 50);
+        if (rowKey === 'msg:summary-t1') return rect(800, 50, 100);
+        if (this.hasAttribute('data-web-shell-message-list')) {
+          return rect(800, 600, 100);
+        }
+        return rect(800, 50, 0);
+      });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () => new Promise<void>((resolve) => (resolveLoad = resolve)),
+    );
+    const messages = [userMsg('u1'), thinkingMsg('t1'), toolMsg('g1')];
+    // Compact mode aggregates the run into one row; the anchor captures it.
+    const c = mount(messages, undefined, {
+      compactMode: true,
+      isResponding: true,
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    expect(has(c, 'summary-t1')).toBe(true);
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    try {
+      // The response completes while the page is still in flight: the turn
+      // collapses and the anchored aggregate row disappears.
+      rerenderMessages(c, [...messages, asstMsg('a1')], {
+        isResponding: false,
+      });
+
+      // The anchor restore resolves the aggregate row key and re-expands the
+      // turn instead of dropping the anchor.
+      expect(has(c, 'summary-t1')).toBe(true);
+      await act(async () => {
+        resolveLoad();
+        await Promise.resolve();
+      });
+      await nextFrame();
+      expect(has(c, 'summary-t1')).toBe(true);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('resets the pagination snapshot when a history load fails', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('load failed'));
+    const sessionATail = [
+      thinkingMsg('t1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      thinkingMsg('t2'),
+      asstMsg('a2'),
+    ];
+    const c = mount(sessionATail, undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // Session B reuses the tail ids in a complete, never-split turn: it must
+    // collapse by default, not stay expanded off the failed load's snapshot.
+    rerenderMessages(c, [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')], {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(has(c, 'u1')).toBe(true);
+    expect(isCollapsed(c, 't1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('consumes the pagination snapshot when the page completes no split turn', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const c = mount(
+      [userMsg('u2'), thinkingMsg('t2'), asstMsg('a2')],
+      undefined,
+      {
+        hasOlderHistory: true,
+        onLoadOlderHistory,
+      },
+    );
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    // The page lands a whole turn at once: no split turn, so nothing is
+    // marked keep-open and the snapshot is consumed.
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        thinkingMsg('t2'),
+        asstMsg('a2'),
+      ],
+      { hasOlderHistory: true, onLoadOlderHistory },
+    );
+    expect(isCollapsed(c, 't1')).toBe(true);
+    expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+
+    // A later head change must not be compared against the stale snapshot:
+    // reused tail ids alone cannot force a turn open.
+    rerenderMessages(c, [userMsg('u3'), thinkingMsg('t2'), asstMsg('a2')], {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    expect(isCollapsed(c, 't2')).toBe(true);
+    expect(toggleRow(c, 'u3').getAttribute('aria-expanded')).toBe('false');
   });
 
   it('keeps latest assistant content when active agents are pinned after it', () => {
