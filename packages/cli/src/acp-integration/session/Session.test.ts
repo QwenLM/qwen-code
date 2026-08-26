@@ -5407,12 +5407,12 @@ describe('Session', () => {
             extensionName: 'active-ext',
           },
           {
-            name: 'display-name-collision-skill',
-            description: 'Active extension skill with colliding name',
+            name: 'stale-but-unlisted-skill',
+            description: 'Stale cache entry the manifest no longer lists',
             body: 'Visible collision instructions',
             filePath: '/skills/collision/SKILL.md',
             level: 'extension',
-            extensionName: 'Disabled Extension',
+            extensionName: 'disabled-ext',
           },
           {
             name: 'disabled-extension-skill',
@@ -5420,7 +5420,15 @@ describe('Session', () => {
             body: 'Hidden instructions',
             filePath: '/skills/disabled/SKILL.md',
             level: 'extension',
-            extensionName: 'Disabled Extension',
+            extensionName: 'disabled-ext',
+          },
+          {
+            name: 'disabled-ext:disabled-extension-skill',
+            description: 'Collision-qualified disabled extension skill',
+            body: 'Hidden qualified instructions',
+            filePath: '/skills/disabled/SKILL.md',
+            level: 'extension',
+            extensionName: 'disabled-ext',
           },
         ]),
       });
@@ -5443,11 +5451,11 @@ describe('Session', () => {
       const meta = update.update._meta;
       expect(meta.availableSkills).toEqual([
         'active-extension-skill',
-        'display-name-collision-skill',
+        'stale-but-unlisted-skill',
       ]);
       expect(meta.availableSkillDetails.map((detail) => detail.name)).toEqual([
         'active-extension-skill',
-        'display-name-collision-skill',
+        'stale-but-unlisted-skill',
       ]);
     });
 

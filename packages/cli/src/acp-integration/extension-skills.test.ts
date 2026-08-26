@@ -56,7 +56,7 @@ function extensionSkill(name: string): SkillConfig {
 }
 
 describe('extension skill activity helpers', () => {
-  it('matches skills from inactive extensions by name and displayName', () => {
+  it('matches bare and collision-qualified names from inactive extensions', () => {
     const refs = inactiveExtensionSkillRefs(
       configWithExtensions([
         extension({
@@ -71,8 +71,16 @@ describe('extension skill activity helpers', () => {
     expect(
       isInactiveExtensionSkill(skill('audit', 'canonical-ext'), refs),
     ).toBe(true);
+    expect(
+      isInactiveExtensionSkill(
+        skill('canonical-ext:audit', 'canonical-ext'),
+        refs,
+      ),
+    ).toBe(true);
+    // SkillManager stopped using displayName as the owner (#9408), so a
+    // display-prefixed name no longer appears in the registry.
     expect(isInactiveExtensionSkill(skill('audit', 'Display Ext'), refs)).toBe(
-      true,
+      false,
     );
   });
 

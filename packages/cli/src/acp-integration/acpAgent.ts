@@ -6821,12 +6821,13 @@ class QwenAgent implements Agent {
       for (const extension of config.getExtensions()) {
         if (extension.isActive) continue;
         for (const skill of extension.skills ?? []) {
-          const extensionName = extension.displayName ?? extension.name;
-          const key = `extension:${extensionName}:${skill.name}`;
-          if (
-            skillsByKey.has(`extension:${extension.name}:${skill.name}`) ||
-            skillsByKey.has(key)
-          ) {
+          // The registry holds an entry under its manifest name or, after
+          // collision qualification (#9408), as
+          // `<extension.name>:<name>`. Probe both before synthesizing a
+          // placeholder so a stale qualified entry does not double up.
+          const key = `extension:${extension.name}:${skill.name}`;
+          const qualifiedKey = `extension:${extension.name}:${extension.name}:${skill.name}`;
+          if (skillsByKey.has(key) || skillsByKey.has(qualifiedKey)) {
             continue;
           }
           skillsByKey.set(
@@ -6835,7 +6836,7 @@ class QwenAgent implements Agent {
               {
                 ...skill,
                 level: 'extension',
-                extensionName,
+                extensionName: extension.name,
               },
               disablements,
               { disabled: true },

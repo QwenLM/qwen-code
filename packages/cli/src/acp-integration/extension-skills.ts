@@ -16,10 +16,12 @@ export function inactiveExtensionSkillRefs(config: Config): Set<string> {
     if (extension.isActive) continue;
     for (const skill of extension.skills ?? []) {
       refs.add(extensionSkillRef(extension.name, skill.name));
-      // SkillManager exposes extensionName as displayName ?? name.
-      if (extension.displayName) {
-        refs.add(extensionSkillRef(extension.displayName, skill.name));
-      }
+      // Collision-driven qualification renames a cached skill to
+      // `<extension.name>:<name>` (#9408), so a stale entry can carry
+      // either its manifest name or the qualified form.
+      refs.add(
+        extensionSkillRef(extension.name, `${extension.name}:${skill.name}`),
+      );
     }
   }
   return refs;

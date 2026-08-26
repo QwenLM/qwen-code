@@ -6294,10 +6294,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         filePath: '/ext/gsd-core/skills/gsd-audit-uat/SKILL.md',
       },
       {
-        name: 'gsd-display-stale',
-        description: 'Display-name stale extension skill',
+        name: 'gsd-core:gsd-display-stale',
+        description: 'Collision-qualified extension skill',
         level: 'extension',
-        extensionName: 'GSD Core',
+        extensionName: 'gsd-core',
         disableModelInvocation: false,
         body: 'display stale body',
         filePath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
@@ -6371,7 +6371,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             },
             {
               name: 'gsd-display-stale',
-              description: 'Display-name stale extension skill',
+              description: 'Collision-qualified extension skill',
               level: 'extension',
               disableModelInvocation: false,
               body: 'display stale body',
@@ -6598,10 +6598,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect.objectContaining({
           kind: 'skill',
           status: 'disabled',
-          name: 'gsd-display-stale',
-          description: 'Display-name stale extension skill',
+          name: 'gsd-core:gsd-display-stale',
+          description: 'Collision-qualified extension skill',
           level: 'extension',
-          extensionName: 'GSD Core',
+          extensionName: 'gsd-core',
           modelInvocable: true,
           installedPath: '/ext/gsd-core/skills/gsd-display-stale/SKILL.md',
         }),
@@ -6611,7 +6611,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           name: 'gsd-config-only',
           description: 'Config-only extension skill',
           level: 'extension',
-          extensionName: 'GSD Core',
+          extensionName: 'gsd-core',
           modelInvocable: true,
           installedPath: '/ext/gsd-core/skills/gsd-config-only/SKILL.md',
         }),
@@ -6620,8 +6620,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       skills.skills.filter((skill) => skill.name === 'gsd-audit-uat'),
     ).toHaveLength(1);
+    // The qualified cache entry suppresses synthesis of the bare
+    // manifest name; exactly one row carries each form.
     expect(
       skills.skills.filter((skill) => skill.name === 'gsd-display-stale'),
+    ).toHaveLength(0);
+    expect(
+      skills.skills.filter(
+        (skill) => skill.name === 'gsd-core:gsd-display-stale',
+      ),
     ).toHaveLength(1);
     expect(
       skills.skills.filter((skill) => skill.name === 'gsd-config-only'),
