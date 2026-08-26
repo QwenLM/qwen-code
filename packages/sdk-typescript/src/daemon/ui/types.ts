@@ -181,7 +181,10 @@ export interface DaemonTurnUsage {
 export interface DaemonUiAssistantUsageEvent extends DaemonUiEventBase {
   type: 'assistant.usage';
   usage: DaemonTurnUsage;
-  /** Set for sub-agent usage; folded only while its parent assistant block is active. */
+  /**
+   * Set for sub-agent usage; folded into its parent tool in compact mode and
+   * dropped when subagent blocks are retained.
+   */
   parentToolCallId?: string;
 }
 

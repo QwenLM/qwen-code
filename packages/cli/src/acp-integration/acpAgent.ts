@@ -7285,7 +7285,8 @@ class QwenAgent implements Agent {
     // Per-instance subagent token totals (keyed by unique invocation id), so
     // repeated calls of the same agent type stay distinguishable. Output as a
     // structured array with readable type/name labels from sourceMeta.
-    for (const [name, m] of Object.entries(metrics.models)) {
+    for (const [name, rawMetrics] of Object.entries(metrics.models)) {
+      const m = metrics.statsModels?.[name] ?? rawMetrics;
       models[name] = {
         api: { ...m.api },
         tokens: { ...m.tokens },

@@ -206,7 +206,12 @@ function makeFakeEnv() {
       sessionData = data;
       return currentSessionId;
     },
-    getChatRecordingService: () => undefined,
+    getChatRecordingService: () => ({
+      finalize: vi.fn(),
+      flush: vi.fn().mockResolvedValue(undefined),
+      rebuildTurnBoundaries: vi.fn(),
+      getCurrentCustomTitle: vi.fn().mockReturnValue(undefined),
+    }),
     getSessionService: () => sessionService,
     getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
     loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
@@ -322,7 +327,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     );
 
     await act(async () => {
-      await result.current.handleBranch('Telemetry branch');
+      await result.current.handleBranch();
     });
 
     // Guard: the scenario must fail at the injected point (after the fork's
@@ -437,7 +442,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     );
 
     await act(async () => {
-      await result.current.handleBranch('Telemetry branch');
+      await result.current.handleBranch();
     });
 
     // Committed swap: the fork's replayed history legitimately stays in the
@@ -477,7 +482,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     );
 
     await act(async () => {
-      await result.current.handleBranch('Telemetry branch');
+      await result.current.handleBranch();
     });
 
     expect(loadHistory).toHaveBeenCalledOnce();
@@ -723,7 +728,7 @@ describe('session swap telemetry accounting (#9833)', () => {
     const addItemBranch = vi.fn();
     const resultBranch = renderBranch(addItemBranch);
     await act(async () => {
-      await resultBranch.current.handleBranch('Telemetry branch');
+      await resultBranch.current.handleBranch();
     });
 
     // Rejected at the latch before any fork work: error item, no fork

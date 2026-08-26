@@ -200,6 +200,10 @@ describe('UiTelemetryService', () => {
 
       expect(
         service.getMetricsForSession(sessionId).models['qwen'].tokens.prompt,
+      ).toBe(100);
+      expect(
+        service.getMetricsForSession(sessionId).statsModels?.['qwen'].tokens
+          .prompt,
       ).toBe(300);
       expect(service.getMetrics().models['qwen'].tokens.prompt).toBe(100);
     });
@@ -672,6 +676,7 @@ describe('UiTelemetryService', () => {
       expect(metrics.sourceMetrics?.['constructor'].tokens.prompt).toBe(2);
       expect(Object.getPrototypeOf(metrics.sourceMetrics)).toBeNull();
       expect(Object.getPrototypeOf(metrics.sourceMeta)).toBeNull();
+      expect(Object.getPrototypeOf(metrics.statsModels)).toBeNull();
     });
 
     it('restores legacy invocation ids from session-scoped prompt ids', () => {
@@ -841,6 +846,15 @@ describe('UiTelemetryService', () => {
         expect(metrics.sourceMetrics).toBeUndefined();
         expect(
           service.getMetricsForSession(sessionId).models['glm-5'].tokens.total,
+        ).toBe(0);
+        expect(
+          service.getMetricsForSession(sessionId).models['glm-5'].bySource[
+            'general-purpose'
+          ].tokens.total,
+        ).toBe(0);
+        expect(
+          service.getMetricsForSession(sessionId).statsModels?.['glm-5'].tokens
+            .total,
         ).toBe(expected);
         expect(
           service.getMetricsForSession(sessionId).sourceMetrics?.['id-1'].tokens
@@ -872,8 +886,8 @@ describe('UiTelemetryService', () => {
           0,
         );
         expect(
-          service.getMetricsForSession(sessionId).models['openai-model'].tokens
-            .total,
+          service.getMetricsForSession(sessionId).statsModels?.['openai-model']
+            .tokens.total,
         ).toBe(50);
       },
     );

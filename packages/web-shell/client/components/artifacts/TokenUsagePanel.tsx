@@ -37,12 +37,10 @@ function inputTokens(tokens: DaemonSessionStatsModelMetrics['tokens']): number {
 }
 
 function totalTokens(tokens: DaemonSessionStatsModelMetrics['tokens']): number {
+  const input = inputTokens(tokens);
   return tokens.total > 0
-    ? tokens.total
-    : inputTokens(tokens) +
-        (tokens.candidates > tokens.thoughts
-          ? tokens.candidates
-          : tokens.candidates + tokens.thoughts);
+    ? Math.max(tokens.total, input + tokens.candidates)
+    : input + tokens.candidates + tokens.thoughts;
 }
 
 function outputTokens(
@@ -132,6 +130,7 @@ export function TokenUsagePanel({
           if (sessionId && snapshot.sessionId !== sessionId) {
             setStatus(null);
             setSessionMismatch(true);
+            setError(null);
             return;
           }
           setSessionMismatch(false);
@@ -141,7 +140,14 @@ export function TokenUsagePanel({
         })
         .catch((loadError: unknown) => {
           if (!mountedRef.current) return;
-          if (isSessionDisconnectedError(loadError)) {
+          if (
+            isSessionDisconnectedError(loadError) ||
+            (loadError instanceof Error &&
+              (loadError.name === 'DaemonTransportClosedError' ||
+                /(?:fetch failed|failed to fetch|networkerror|load failed)/i.test(
+                  loadError.message,
+                )))
+          ) {
             setError(null);
             return;
           }

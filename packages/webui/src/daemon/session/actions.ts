@@ -84,7 +84,9 @@ function isDaemonSessionDisconnectedError(error: unknown): boolean {
   return (
     error instanceof DaemonTransportClosedError ||
     (error instanceof TypeError &&
-      /(?:fetch failed|failed to fetch)/i.test(error.message)) ||
+      /(?:fetch failed|failed to fetch|networkerror|load failed)/i.test(
+        error.message,
+      )) ||
     (error instanceof Error &&
       error.message.endsWith('Daemon session is not connected'))
   );

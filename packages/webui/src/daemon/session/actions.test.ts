@@ -279,15 +279,23 @@ describe('createDaemonSessionActions', () => {
     expect(addNotice).not.toHaveBeenCalled();
   });
 
-  it('does not report a stats error when fetch disconnects in flight', async () => {
-    const addNotice = vi.fn();
-    const session = createMockSession('session-a');
-    session.stats.mockRejectedValueOnce(new TypeError('fetch failed'));
-    const { actions } = createActionsHarness({ addNotice, session });
+  it.each([
+    'fetch failed',
+    'Failed to fetch',
+    'NetworkError when attempting to fetch resource',
+    'Load failed',
+  ])(
+    'does not report a stats error when fetch disconnects in flight: %s',
+    async (message) => {
+      const addNotice = vi.fn();
+      const session = createMockSession('session-a');
+      session.stats.mockRejectedValueOnce(new TypeError(message));
+      const { actions } = createActionsHarness({ addNotice, session });
 
-    await expect(actions.getStats()).rejects.toThrow('fetch failed');
-    expect(addNotice).not.toHaveBeenCalled();
-  });
+      await expect(actions.getStats()).rejects.toThrow(message);
+      expect(addNotice).not.toHaveBeenCalled();
+    },
+  );
 
   it('reports non-disconnect stats errors', async () => {
     const addNotice = vi.fn((notice) => notice);

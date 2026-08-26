@@ -8271,6 +8271,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           },
         },
       },
+      statsModels: {
+        'model-a': {
+          api: { totalRequests: 3, totalErrors: 1, totalLatencyMs: 100 },
+          tokens: {
+            prompt: 333,
+            candidates: 150,
+            total: 483,
+            cached: 60,
+            thoughts: 10,
+          },
+        },
+      },
       sourceMeta: {
         'agent-id-echoer': { name: 'echoer', type: 'general-purpose' },
       },
@@ -8305,6 +8317,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // Sources use invocation metrics while legacy bySource remains keyed by
       // stable subagent names.
       expect(stats).toMatchObject({
+        models: {
+          'model-a': {
+            tokens: { prompt: 333, total: 483 },
+          },
+          'model-b': {
+            tokens: { prompt: 50, total: 75 },
+          },
+        },
         sources: [
           {
             id: 'agent-id-echoer',

@@ -326,11 +326,11 @@ describe('TokenUsagePanel', () => {
   });
 
   it.each([
-    { candidates: 10, thoughts: 2, expected: '50' },
-    { candidates: 10, thoughts: 20, expected: '70' },
+    { candidates: 10, thoughts: 2, expected: '52', expectedOutput: '12' },
+    { candidates: 10, thoughts: 20, expected: '70', expectedOutput: '30' },
   ])(
     'derives totals when a daemon omits totals ($candidates candidates, $thoughts thoughts)',
-    async ({ candidates, thoughts, expected }) => {
+    async ({ candidates, thoughts, expected, expectedOutput }) => {
       const stats = statsFixture();
       stats.models = {
         model: {
@@ -347,9 +347,38 @@ describe('TokenUsagePanel', () => {
       const container = renderPanel(vi.fn().mockResolvedValue(stats));
       await act(async () => {});
 
-      expect(container.textContent).toContain(expected);
+      const modelCard =
+        container.querySelector('[title="model"]')?.parentElement
+          ?.parentElement;
+      const hero = container.firstElementChild?.firstElementChild;
+      expect(hero?.textContent?.startsWith(expected)).toBe(true);
+      expect(modelCard?.textContent).toContain(`Total output${expectedOutput}`);
     },
   );
+
+  it('does not show a legacy reported total below input plus output', async () => {
+    const stats = statsFixture();
+    stats.models = {
+      model: {
+        api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 10 },
+        tokens: {
+          prompt: 100,
+          candidates: 10,
+          total: 90,
+          cached: 20,
+          thoughts: 2,
+        },
+      },
+    };
+    const container = renderPanel(vi.fn().mockResolvedValue(stats));
+    await act(async () => {});
+
+    const modelCard =
+      container.querySelector('[title="model"]')?.parentElement?.parentElement;
+    const hero = container.firstElementChild?.firstElementChild;
+    expect(hero?.textContent?.startsWith('110')).toBe(true);
+    expect(modelCard?.textContent).toContain('Total output10');
+  });
 
   it('shows an empty state when no model has API calls', async () => {
     const stats = statsFixture();
@@ -382,6 +411,46 @@ describe('TokenUsagePanel', () => {
       'Token usage is unavailable for this session.',
     );
     expect(container.textContent).not.toContain('qwen-plus::hybrid');
+  });
+
+  it('clears a previous error when retry returns another session', async () => {
+    const getStats = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Load stats timed out'))
+      .mockResolvedValueOnce(statsFixture());
+    const container = renderPanel(getStats, 'en', 's-2');
+    await act(async () => {});
+
+    act(() => container.querySelector('button')!.click());
+    await act(async () => {});
+
+    expect(container.textContent).toContain(
+      'Token usage is unavailable for this session.',
+    );
+    expect(container.textContent).not.toContain('Load stats timed out');
+  });
+
+  it.each([
+    'fetch failed',
+    'Failed to fetch',
+    'NetworkError when attempting to fetch resource',
+    'Load failed',
+  ])('keeps polling after transient transport error %s', async (message) => {
+    vi.useFakeTimers();
+    const getStats = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError(message))
+      .mockResolvedValue(statsFixture());
+    const container = renderPanel(getStats);
+    await act(async () => {});
+
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+    });
+    await act(async () => {});
+    expect(getStats).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('qwen-plus::hybrid');
   });
 
   it('shows unavailable when session actions are missing', () => {
