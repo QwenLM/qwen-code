@@ -932,6 +932,7 @@ export interface TodoResultDisplay {
     status: 'pending' | 'in_progress' | 'completed';
     blockedBy?: string[];
   }>;
+  unchanged?: boolean;
 }
 
 export interface PlanResultDisplay {

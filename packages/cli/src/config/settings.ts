@@ -384,7 +384,6 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       );
     }
   }
-
   return [...warningSet];
 }
 

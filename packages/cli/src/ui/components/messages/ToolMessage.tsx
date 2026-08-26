@@ -346,7 +346,12 @@ const useResultDisplayRenderer = (
  */
 const TodoResultRenderer: React.FC<{ data: TodoResultDisplay }> = ({
   data,
-}) => <TodoDisplay todos={data.todos} />;
+}) => {
+  if (data.unchanged) {
+    return null;
+  }
+  return <TodoDisplay todos={data.todos} />;
+};
 
 const PlanResultRenderer: React.FC<{
   data: PlanResultDisplay;

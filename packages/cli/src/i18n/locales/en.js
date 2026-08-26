@@ -2853,4 +2853,6 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.',
   'Kept model as {{model}}': 'Kept model as {{model}}',
+  'Review messages held from other Qwen Code sessions (accept | deny)':
+    'Review messages held from other Qwen Code sessions (accept | deny)',
 };

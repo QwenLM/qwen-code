@@ -132,6 +132,16 @@ export interface SessionRegistryRecord {
   /** Epoch milliseconds. */
   startedAt: number;
   qwenVersion: string | null;
+  /**
+   * Path to this session's peer-messaging socket, when it has one.
+   *
+   * Absent means the session is discoverable but not messageable — the
+   * feature is off, or the inbox failed to bind. Readers must treat this
+   * as a hint and dial the socket to confirm: a record can outlive the
+   * process by the width of a crash, and a stale socket file still stats
+   * fine.
+   */
+  ipcPath?: string;
 }
 
 export interface RegisterSessionFields {
@@ -351,12 +361,17 @@ export async function registerSession(
  * `procStart` and `pidNs` are excluded from the patch for the same
  * reason the pid is: they are the identity the sweep trusts, and a
  * caller-supplied value could only corrupt it.
+ *
+ * Reports whether the patch was actually written: every skip below is
+ * silent on the wire, and at least one caller (the peer inbox address
+ * advertise) has no later event that would retry a skipped patch, so it
+ * must be able to tell success from a no-op.
  */
 export async function patchSessionRecord(
   patch: Partial<
     Omit<SessionRegistryRecord, 'pid' | 'schemaVersion' | 'procStart' | 'pidNs'>
   >,
-): Promise<void> {
+): Promise<boolean> {
   try {
     // Inside the try: the fallback `getGlobalQwenDir()` resolution reads
     // the home directory and can throw, and this function promises never
@@ -370,7 +385,7 @@ export async function patchSessionRecord(
     // would write back something the reader will neither show nor sweep
     // — permanent litter.
     if (existing.status !== 'ok' || !matchesLocalIdentity(existing.record)) {
-      return;
+      return false;
     }
     const record = existing.record;
     // The identity check alone also passes for a stale record left by a
@@ -385,15 +400,17 @@ export async function patchSessionRecord(
     // patch and let a later /clear or /cd retry it.
     const currentToken = readProcStartToken(process.pid);
     if (record.procStart !== null && record.procStart !== currentToken) {
-      return;
+      return false;
     }
     await atomicWriteJSON(
       filePath,
       { ...record, ...patch },
       { mode: REGISTRY_FILE_MODE, forceMode: true, noFollow: true },
     );
+    return true;
   } catch (error) {
     debugLogger.debug(`patchSessionRecord failed: ${describe(error)}`);
+    return false;
   }
 }
 
@@ -669,6 +686,7 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
   const procStart = value['procStart'];
   const pidNs = value['pidNs'];
   const qwenVersion = value['qwenVersion'];
+  const ipcPath = value['ipcPath'];
 
   return {
     status: 'ok',
@@ -682,6 +700,10 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
       name,
       startedAt,
       qwenVersion: typeof qwenVersion === 'string' ? qwenVersion : null,
+      // Optional rather than nulled: absent and empty both mean "not
+      // messageable", and a record written before this field existed must
+      // read back identically to one written after it.
+      ...(typeof ipcPath === 'string' && ipcPath.length > 0 ? { ipcPath } : {}),
     },
   };
 }

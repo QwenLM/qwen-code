@@ -336,10 +336,13 @@ export function ModelDialog({
         (m.authType !== AuthType.QWEN_OAUTH ||
           authType === AuthType.QWEN_OAUTH) &&
         isSelectableImageModel &&
-        (isFastModelMode || !m.fastOnly) &&
+        (isFastModelMode ||
+          (isAdvisorModelMode && config?.getAdvisorModel?.() === 'fast') ||
+          !m.fastOnly) &&
         (isVoiceModelMode || !m.voiceOnly) &&
         (isVisionModelMode || isImageModelMode || !m.visionOnly) &&
-        (!isAdvisorModelMode || isAdvisorModelEligible(m))
+        (!isAdvisorModelMode ||
+          isAdvisorModelEligible(m, config?.getAdvisorModel?.() === 'fast'))
       );
     });
 
@@ -1169,7 +1172,7 @@ export function ModelDialog({
     ],
   );
 
-  const hasModels = MODEL_OPTIONS.length > 0;
+  const hasModels = availableModelEntries.length > 0;
 
   return (
     <Box
