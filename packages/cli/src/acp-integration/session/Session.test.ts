@@ -2658,6 +2658,60 @@ describe('Session', () => {
     );
   });
 
+  it('restores a matching unmarked last orphan when the retry exits before the push', async () => {
+    // R13-6: the R10-6 arm drops the matched last orphan from the re-add
+    // because the resend re-pushes it. When it is UNMARKED there is no
+    // identity to adopt, but the entry must still be handed to the
+    // push-count-gated restore pair — otherwise any pre-push exit (hook
+    // block, locally-handled slash, resolve throw) loses it permanently
+    // from live history while its record stays.
+    const orphanA: Content = {
+      role: 'user',
+      parts: [{ text: 'first failed prompt' }],
+    };
+    core.markApiHistoryPrompt(orphanA, 'original-a');
+    const orphanB: Content = {
+      role: 'user',
+      parts: [{ text: 'second failed prompt' }],
+    };
+    mockChat.stripOrphanedUserEntriesFromHistory = vi
+      .fn()
+      .mockReturnValue([orphanA, orphanB]);
+    const messageBus = {
+      request: vi.fn().mockResolvedValue({
+        success: true,
+        output: { decision: 'block', reason: 'Blocked by hook' },
+      }),
+    };
+    mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+    mockChat.sendMessageStream = vi.fn();
+
+    const result = await session.prompt({
+      sessionId: 'test-session-id',
+      prompt: [{ type: 'text', text: 'second failed prompt' }],
+      _meta: { 'qwen.daemon.retry': true },
+    } as PromptRequest);
+
+    expect(result.stopReason).toBe('end_turn');
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    // orphanA is re-added at strip time; orphanB (unmarked, matched,
+    // dropped from the re-add) comes back through the pre-send finally.
+    const readded = vi
+      .mocked(mockChat.addHistory)
+      .mock.calls.map((call) => call[0]);
+    expect(readded).toHaveLength(2);
+    expect(core.getApiHistoryPromptId(readded[0]!)).toBe('original-a');
+    expect(readded[1]!.parts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: 'second failed prompt' }),
+      ]),
+    );
+    // No adoption without a marking — the resend recorded a fresh boundary.
+    expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledTimes(1);
+  });
+
   it('adopts the matching textless media orphan instead of duplicating it', async () => {
     const orphanA: Content = {
       role: 'user',

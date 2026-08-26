@@ -5329,10 +5329,18 @@ export class Session implements SessionContext {
                     getApiHistoryPromptId(lastStrippedEntry);
                   if (lastStrippedIdentity !== undefined) {
                     resubmittedPromptIdentity = lastStrippedIdentity;
-                    strippedOrphanEntries = [lastStrippedEntry];
-                    orphanPushCountSnapshot =
-                      this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                   }
+                  // R13-6: hold the matched orphan for the push-count-gated
+                  // restore even when it is UNMARKED (no identity to adopt):
+                  // it was dropped from the re-add above because the resend
+                  // re-pushes its content, but any pre-push exit (hook
+                  // block, locally-handled slash, resolve throw) would
+                  // otherwise lose it permanently while its record stays.
+                  // On success the resend advances the push counter past
+                  // the snapshot, so the gate prevents a double-restore.
+                  strippedOrphanEntries = [lastStrippedEntry];
+                  orphanPushCountSnapshot =
+                    this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 } else {
                   for (const entry of strippedRetryEntries) {
                     this.#getCurrentChat().addHistory(entry);
