@@ -180,6 +180,7 @@ const SKILL_DESCRIPTION_KEYS: Record<string, string> = {
   batch: 'skilldesc.batch',
   dataviz: 'skilldesc.dataviz',
   'extension-creator': 'skilldesc.extensionCreator',
+  'goal-draft': 'skilldesc.goalDraft',
   loop: 'skilldesc.loop',
   'new-app': 'skilldesc.newApp',
   'qc-helper': 'skilldesc.qcHelper',

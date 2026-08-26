@@ -989,6 +989,8 @@ export class BackgroundAgentResumeService {
           resumeHistory ?? [],
           currentForkRuntime!,
           meta.executionAllowedTools,
+          meta.agentId,
+          meta.description,
         );
       } else {
         const resumeSubagentConfig =
@@ -999,6 +1001,8 @@ export class BackgroundAgentResumeService {
           .getSubagentManager()
           .createAgentHeadless(resumeSubagentConfig, activeAgentConfig, {
             eventEmitter: bgEventEmitter,
+            taskName: meta.description,
+            subagentId: meta.agentId,
             promptConfigOverrides: {
               initialMessages: resumeHistory,
             },
@@ -1670,6 +1674,8 @@ export class BackgroundAgentResumeService {
     initialMessages: Content[],
     runtime: CurrentForkRuntime,
     executionAllowedTools?: string[],
+    subagentId?: string,
+    taskName?: string,
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(runtime.systemInstruction),
@@ -1695,6 +1701,10 @@ export class BackgroundAgentResumeService {
       { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
+      undefined,
+      undefined,
+      taskName,
+      subagentId,
     );
   }
 
