@@ -17651,6 +17651,15 @@ describe('App session callbacks', () => {
         ?.getAttribute('data-show-session-source-switch'),
     ).toBe('false');
 
+    rerender({ sidebar: { enabled: true } });
+    await flush();
+
+    expect(
+      container
+        .querySelector('[data-testid="sidebar"]')
+        ?.getAttribute('data-show-session-source-switch'),
+    ).toBe('true');
+
     rerender({ sidebar: true });
     await flush();
 

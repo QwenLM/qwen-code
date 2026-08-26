@@ -3581,6 +3581,67 @@ describe('WebShellSidebar session source switch', () => {
     expect(tasksTab?.getAttribute('data-state')).toBe('active');
   });
 
+  it('preserves channel completion state when hidden at runtime', async () => {
+    const channelSession: DaemonSessionSummary = {
+      sessionId: 'channel-session',
+      displayName: 'Channel session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'channel',
+      hasActivePrompt: true,
+    };
+    const taskSession: DaemonSessionSummary = {
+      sessionId: 'task-session',
+      displayName: 'Task session',
+      workspaceCwd: '/tmp/project',
+      sourceType: 'default',
+    };
+    let channelResult = {
+      ...active,
+      sessions: [channelSession],
+      loading: false,
+    };
+    const taskResult = {
+      ...active,
+      sessions: [taskSession],
+      loading: false,
+    };
+    useSessions.mockImplementation(
+      (options?: { archiveState?: string; sourceType?: string }) => {
+        if (options?.archiveState === 'archived') return archived;
+        return options?.sourceType === 'channel' ? channelResult : taskResult;
+      },
+    );
+
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+    await switchSessionSource('Channels');
+    channelResult = { ...channelResult, loading: true };
+    renderSidebar();
+    channelResult = { ...channelResult, loading: false };
+    renderSidebar();
+    channelResult = { ...channelResult, loading: true };
+    renderSidebar();
+    channelResult = {
+      ...channelResult,
+      sessions: [{ ...channelSession, hasActivePrompt: false }],
+      loading: false,
+    };
+    renderSidebar();
+
+    const findChannelStatusDot = () =>
+      Array.from(container.querySelectorAll<HTMLElement>('[role="button"]'))
+        .find((candidate) => candidate.textContent?.includes('Channel session'))
+        ?.querySelector('[class*="sessionStatusDot"]');
+    expect(findChannelStatusDot()).not.toBeNull();
+
+    renderSidebar({ showSessionSourceSwitch: false });
+    expect(container.textContent).toContain('Task session');
+    renderSidebar();
+    await switchSessionSource('Channels');
+
+    expect(findChannelStatusDot()).not.toBeNull();
+  });
+
   it('never renders primary sessions from the inactive source', async () => {
     active.sessions.push(
       {

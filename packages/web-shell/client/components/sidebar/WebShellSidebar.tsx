@@ -894,9 +894,11 @@ export function WebShellSidebar({
   );
   const [sessionSource, setSessionSource] =
     useState<SidebarSessionSource>('default');
-  useEffect(() => {
-    if (!showSessionSourceSwitch) setSessionSource('default');
-  }, [showSessionSourceSwitch]);
+  // Reset before commit so effects that key bookkeeping by the raw source
+  // cannot observe a hidden switch with channel state and default catalogs.
+  if (!showSessionSourceSwitch && sessionSource !== 'default') {
+    setSessionSource('default');
+  }
   const selectedSessionSource = sourceMetadataEnabled
     ? showSessionSourceSwitch
       ? sessionSource
