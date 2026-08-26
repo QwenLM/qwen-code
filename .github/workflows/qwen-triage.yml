@@ -4962,25 +4962,13 @@ jobs:
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours.
     timeout-minutes: 10
-    # Checks out only trusted base-repo scripts (never the PR ref), so the
-    # persistent ECS pool is safe.
-    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # This job carries OSS credentials, so it must stay isolated from the
+    # persistent runner pool that executes untrusted PR code.
+    runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
       pull-requests: 'write'
     steps:
-      - name: 'Restore workspace ownership'
-        if: "${{ runner.environment == 'self-hosted' }}"
-        run: |-
-          set -uo pipefail
-          RUNNER_UID="$(id -u)"
-          RUNNER_GID="$(id -g)"
-          if [ "$RUNNER_UID" != "0" ]; then
-            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; artifact download may fail on leftover root-owned files"
-          fi
-          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; artifact download may fail on leftover read-only files"
-
       - name: 'Checkout the OSS publisher scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:

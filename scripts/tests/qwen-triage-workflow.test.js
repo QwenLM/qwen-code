@@ -6221,6 +6221,12 @@ describe('qwen-triage verify maintainer-review round', () => {
     expect(minutes).toBeLessThanOrEqual(30);
   });
 
+  it('keeps the credential-bearing publisher on a hosted runner', () => {
+    const publish = job('publish-verify');
+    expect(publish).toContain("runs-on: 'ubuntu-latest'");
+    expect(publish).not.toContain('ecs-qwen');
+  });
+
   // Upstream failure text can name resolved hosts and TLS detail; the agent
   // only needs to know the call failed.
   it('does not forward upstream error text to the agent', () => {
