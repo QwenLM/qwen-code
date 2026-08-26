@@ -78,8 +78,14 @@ function describeRun(run: DaemonScheduledTaskRun, t: TranslateFn): string {
   const withheld = run.withheld
     ? ` · ${t('scheduledTasks.runKind.withheld')}`
     : '';
+  // A per-run fire whose fresh session could not be created: with a sessionId
+  // it fell back to the task session and ran there; without one nothing ran.
   const dispatchFailed = run.sessionDispatchFailed
-    ? ` · ${t('scheduledTasks.runKind.sessionDispatchFailed')}`
+    ? ` · ${t(
+        run.sessionId
+          ? 'scheduledTasks.runKind.sessionDispatchFallback'
+          : 'scheduledTasks.runKind.sessionDispatchFailed',
+      )}`
     : '';
   return `${safeLocaleString(run.at)}${kind}${withheld}${dispatchFailed}`;
 }
@@ -1696,25 +1702,29 @@ export function ScheduledTasksDialog({
                       : 'scheduledTasks.runsOnce',
                   )}
                 </span>
-                <span
-                  className={styles.sessionModeTag}
-                  title={t(
-                    task.sessionMode === 'per_run'
-                      ? 'scheduledTasks.sessionMode.perRun.hint'
-                      : 'scheduledTasks.sessionMode.persistent.hint',
-                  )}
-                >
-                  {task.sessionMode === 'per_run' ? (
-                    <MessageSquarePlusIcon aria-hidden="true" />
-                  ) : (
-                    <MessagesSquareIcon aria-hidden="true" />
-                  )}
-                  {t(
-                    task.sessionMode === 'per_run'
-                      ? 'scheduledTasks.sessionMode.perRun'
-                      : 'scheduledTasks.sessionMode.persistent',
-                  )}
-                </span>
+                {/* Unbound tool-created / legacy tasks have no session at all,
+                    so neither mode label applies to them. */}
+                {(task.sessionMode === 'per_run' || task.sessionId) && (
+                  <span
+                    className={styles.sessionModeTag}
+                    title={t(
+                      task.sessionMode === 'per_run'
+                        ? 'scheduledTasks.sessionMode.perRun.hint'
+                        : 'scheduledTasks.sessionMode.persistent.hint',
+                    )}
+                  >
+                    {task.sessionMode === 'per_run' ? (
+                      <MessageSquarePlusIcon aria-hidden="true" />
+                    ) : (
+                      <MessagesSquareIcon aria-hidden="true" />
+                    )}
+                    {t(
+                      task.sessionMode === 'per_run'
+                        ? 'scheduledTasks.sessionMode.perRun'
+                        : 'scheduledTasks.sessionMode.persistent',
+                    )}
+                  </span>
+                )}
                 {task.nextRunAt != null && (
                   <span
                     className={styles.countdown}

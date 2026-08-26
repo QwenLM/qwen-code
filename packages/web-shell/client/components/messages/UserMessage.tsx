@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { CalendarClockIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
   getComposerTagIconUrl,
   getComposerTagViewModel,
@@ -133,9 +134,9 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
         </span>
       </div>
       <div className={styles.scheduledTaskMeta}>
-        <span className={styles.scheduledTaskMetaItem}>
+        <span className={styles.scheduledTaskMetaItem} title={run.cron}>
           <span>{t('scheduledTasks.runContext.schedule')}</span>
-          <code>{run.cron}</code>
+          <code>{describeCron(run.cron, t)}</code>
         </span>
         <span className={styles.scheduledTaskMetaItem}>
           <span>{t('scheduledTasks.runContext.triggeredAt')}</span>

@@ -1187,7 +1187,10 @@ const EN: Messages = {
   'scheduledTasks.runKind.catchUp': 'late',
   'scheduledTasks.runKind.manual': 'manual',
   'scheduledTasks.runKind.withheld': 'skipped',
-  'scheduledTasks.runKind.sessionDispatchFailed': 'session creation failed',
+  'scheduledTasks.runKind.sessionDispatchFailed':
+    'new session failed, nothing ran',
+  'scheduledTasks.runKind.sessionDispatchFallback':
+    'new session failed, ran in the task session',
   'scheduledTasks.openRunSession': 'Open this run session',
   'scheduledTasks.runContext.title': 'Scheduled task run',
   'scheduledTasks.runContext.taskId': 'Task ID',
@@ -4236,7 +4239,9 @@ const ZH: Messages = {
   'scheduledTasks.runKind.catchUp': '补跑',
   'scheduledTasks.runKind.manual': '手动',
   'scheduledTasks.runKind.withheld': '已跳过',
-  'scheduledTasks.runKind.sessionDispatchFailed': '创建会话失败',
+  'scheduledTasks.runKind.sessionDispatchFailed': '新建会话失败，未运行',
+  'scheduledTasks.runKind.sessionDispatchFallback':
+    '新建会话失败，已在任务会话中运行',
   'scheduledTasks.openRunSession': '打开本次运行会话',
   'scheduledTasks.runContext.title': '定时任务运行',
   'scheduledTasks.runContext.taskId': '任务 ID',
