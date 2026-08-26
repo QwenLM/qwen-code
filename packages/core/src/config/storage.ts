@@ -719,10 +719,6 @@ export class Storage {
         await release().catch(() => {});
       }
     }
-    const release = await Storage.acquireProjectDirLock(entryPath, true).catch(
-      () => undefined,
-    );
-    if (!release) return operation();
     try {
       if (fs.statSync(entryPath).isDirectory() && fs.existsSync(markerPath)) {
         const now = new Date();
@@ -733,9 +729,11 @@ export class Storage {
       // races us, EROFS/EACCES on a degraded mount, EIO/ENOSPC) must not
       // abort the read — the same filesystem error would block the
       // sweep's rmSync equally, so the claim-less read is safe.
-    } finally {
-      await release().catch(() => {});
     }
+    const release = await Storage.acquireProjectDirLock(entryPath, true).catch(
+      () => undefined,
+    );
+    await release?.().catch(() => {});
     return operation();
   }
 

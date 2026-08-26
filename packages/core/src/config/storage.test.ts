@@ -931,17 +931,17 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     expect(result.removed).not.toContain(entryName);
   });
 
-  it('degrades to the unclaimed read when the entry lock is contended (R18-1)', async () => {
+  it('renews the marker and degrades when the entry lock is contended (R18-1/R21-1)', async () => {
     // A crashed sweep or a slow multi-GiB rmSync can hold the entry
-    // lock; the read claim must wait out its retry budget and then
-    // degrade to the unclaimed read instead of failing the resume.
+    // lock; the read claim must renew the marker, wait out its retry
+    // budget, and then degrade instead of failing the resume.
     const resumeStorage = new Storage(goneCwd);
     const entryName = path.basename(resumeStorage.getProjectDir());
     writeSession(entryName, goneCwd);
-    actualFs.writeFileSync(
-      path.join(projectsDir, entryName, '.qwen-orphan-since'),
-      '',
-    );
+    const markerPath = path.join(projectsDir, entryName, '.qwen-orphan-since');
+    actualFs.writeFileSync(markerPath, '');
+    ageFile(markerPath);
+    const before = actualFs.statSync(markerPath).mtimeMs;
     const lockRoot = path.join(baseDir, 'tmp', 'orphan-cleanup-locks');
     const lockDir = path.join(lockRoot, `${entryName}.lock`);
     actualFs.mkdirSync(lockDir, { recursive: true });
@@ -953,6 +953,7 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     } finally {
       actualFs.rmSync(lockDir, { recursive: true, force: true });
     }
+    expect(actualFs.statSync(markerPath).mtimeMs).toBeGreaterThan(before);
   }, 10_000);
 
   it('reads on when the cleanup lock infrastructure is unavailable', async () => {
