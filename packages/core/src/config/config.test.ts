@@ -1655,7 +1655,9 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(child.getCwd()).toBe('/tmp/derived');
-      expect(parent.getCwd()).toBe(baseParams.targetDir);
+      // The constructor resolves targetDir, so on win32 the POSIX fixture
+      // spelling comes back drive-qualified — compare the resolved form.
+      expect(parent.getCwd()).toBe(path.resolve(baseParams.targetDir));
       expect(Object.getPrototypeOf(child)).toBe(parent);
     });
 
