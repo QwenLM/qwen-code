@@ -2367,6 +2367,8 @@ const EN: Messages = {
   'skills.settingUpdated': 'Workspace setting updated.',
   'skills.settingUpdatedAvailabilityUnchanged':
     'Workspace setting updated. Effective Skill availability did not change.',
+  'skills.settingUnchanged':
+    'Skill already has the requested workspace setting; no setting was changed.',
   'skills.status': 'Status',
   'skills.status.disabled': 'disabled',
   'skills.status.enabled': 'enabled',
@@ -5297,6 +5299,7 @@ const ZH: Messages = {
   'skills.settingUpdated': 'Workspace 设置已更新。',
   'skills.settingUpdatedAvailabilityUnchanged':
     'Workspace 设置已更新，Skill 的实际可用状态未改变。',
+  'skills.settingUnchanged': 'Skill 已处于请求的 Workspace 设置，无需更改。',
   'skills.status': '状态',
   'skills.status.disabled': '已禁用',
   'skills.status.enabled': '已启用',

@@ -230,7 +230,7 @@ export function SkillsManagerPage({
     setBusySkill(skill.name);
     setNotice(null);
     try {
-      await setEnabled(skill.name, enabled);
+      const result = await setEnabled(skill.name, enabled);
       const refreshed = await reload();
       const refreshedSkill = refreshed?.skills.find(
         (item) => item.name.toLowerCase() === skill.name.toLowerCase(),
@@ -238,11 +238,13 @@ export function SkillsManagerPage({
       const expectedStatus = enabled ? 'ok' : 'disabled';
       setNotice({
         skillName: skill.name,
-        text: !refreshedSkill
-          ? t('skills.settingUpdated')
-          : refreshedSkill.status === expectedStatus
-            ? t(enabled ? 'skills.enabled' : 'skills.disabled')
-            : t('skills.settingUpdatedAvailabilityUnchanged'),
+        text: !result.changed
+          ? t('skills.settingUnchanged')
+          : !refreshedSkill
+            ? t('skills.settingUpdated')
+            : refreshedSkill.status === expectedStatus
+              ? t(enabled ? 'skills.enabled' : 'skills.disabled')
+              : t('skills.settingUpdatedAvailabilityUnchanged'),
         error: false,
       });
     } catch (toggleError) {

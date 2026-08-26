@@ -115,7 +115,9 @@ beforeEach(() => {
   skillsState.current.loading = false;
   skillsState.current.error = undefined;
   skillsState.current.reload.mockReset();
-  skillsState.current.setEnabled.mockReset().mockResolvedValue(undefined);
+  skillsState.current.setEnabled.mockReset().mockResolvedValue({
+    changed: true,
+  });
   skillsState.current.install.mockReset();
   skillsState.current.remove.mockReset();
   workspaceState.current.capabilities.features = [
@@ -200,6 +202,9 @@ describe('SkillsManagerPage', () => {
   it.each([
     {
       label: 'higher-scope locked',
+      changed: false,
+      notice:
+        'Skill already has the requested workspace setting; no setting was changed.',
       skill: {
         kind: 'skill' as const,
         status: 'disabled' as const,
@@ -213,6 +218,9 @@ describe('SkillsManagerPage', () => {
     },
     {
       label: 'inactive Extension',
+      changed: false,
+      notice:
+        'Skill already has the requested workspace setting; no setting was changed.',
       skill: {
         kind: 'skill' as const,
         status: 'disabled' as const,
@@ -224,10 +232,27 @@ describe('SkillsManagerPage', () => {
         disabledReason: 'inactive_extension' as const,
       },
     },
+    {
+      label: 'changed default-disabled and higher-scope locked',
+      changed: true,
+      notice:
+        'Workspace setting updated. Effective Skill availability did not change.',
+      skill: {
+        kind: 'skill' as const,
+        status: 'disabled' as const,
+        name: 'default-locked',
+        description: 'Default-disabled and locked by user settings',
+        level: 'bundled' as const,
+        modelInvocable: true,
+        disabledReason: 'hard' as const,
+        lockedScope: 'user' as const,
+      },
+    },
   ])(
-    'keeps a $label Skill disabled after its workspace setting is enabled',
-    async ({ skill }) => {
+    'reports the workspace result for a $label Skill that stays disabled',
+    async ({ skill, changed, notice }) => {
       skillsState.current.skills = [skill];
+      skillsState.current.setEnabled.mockResolvedValueOnce({ changed });
       skillsState.current.reload.mockResolvedValue({
         v: 1,
         workspaceCwd: '/workspace/demo',
@@ -249,9 +274,7 @@ describe('SkillsManagerPage', () => {
       expect(skillsState.current.reload).toHaveBeenCalledTimes(1);
       skillsState.current.skills = [{ ...skill }];
       await renderPage();
-      expect(container.textContent).toContain(
-        'Workspace setting updated. Effective Skill availability did not change.',
-      );
+      expect(container.textContent).toContain(notice);
       expect(container.textContent).toContain('disabled');
       expect(runButton()?.disabled).toBe(true);
     },

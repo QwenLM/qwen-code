@@ -18,7 +18,7 @@ The response contains the trimmed requested name, requested state, whether persi
 
 The API changes workspace `skills.disabled` and `skills.enabled` by name without consulting the runtime Skill catalog. Enabling a default-disabled Skill writes an explicit opt-in; disabling it removes the opt-in and writes a hard workspace disable. Updating one target removes target duplicates and case variants without deleting orphan entries for unavailable Skills. Names may be configured before installation, while hidden from user invocation, or while their Extension is inactive. A second identical request is a no-op.
 
-Higher-scope settings still determine effective availability after settings merge, but do not prevent workspace scope from recording or removing its own declaration. The route retains request-shape, authentication, client identity, workspace trust, and runtime-generation gates; none of those require a Skill catalog lookup.
+A hard `skills.disabled` entry inherited from a higher scope remains authoritative for effective availability, but does not prevent workspace scope from recording or removing its own declaration. Workspace declarations otherwise participate in the usual `skills.disabled > skills.enabled > skills.defaultDisabled` resolution and can override higher-scope `skills.defaultDisabled` or `skills.enabled` entries. The route retains request-shape, authentication, client identity, workspace trust, and runtime-generation gates; none of those require a Skill catalog lookup.
 
 The workspace read-modify-write happens inside the daemon's per-workspace settings lock. A failed write stops before refresh and event publication.
 
