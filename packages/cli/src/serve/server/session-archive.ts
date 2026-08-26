@@ -64,6 +64,10 @@ export class DaemonDrainingError extends Error {
 export class SessionArchiveCoordinator {
   private readonly exclusive = new Set<string>();
   private readonly shared = new Map<string, number>();
+  private readonly sharedDrains = new Map<
+    string,
+    { promise: Promise<void>; resolve: () => void }
+  >();
   private maintenanceSealed = false;
   private activeMaintenance = 0;
   private maintenanceDrain:
@@ -115,6 +119,43 @@ export class SessionArchiveCoordinator {
     }
   }
 
+  async runExclusiveAfterShared<T>(
+    rawSessionId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    if (this.maintenanceSealed) {
+      throw new DaemonDrainingError();
+    }
+    const sessionId = normalizeSessionIdForLookup(rawSessionId);
+    this.assertNotTransitioning(sessionId);
+    this.exclusive.add(sessionId);
+    this.activeMaintenance++;
+    try {
+      const sharedCount = this.shared.get(sessionId) ?? 0;
+      if (sharedCount > 0) {
+        let drain = this.sharedDrains.get(sessionId);
+        if (!drain) {
+          let resolve!: () => void;
+          const promise = new Promise<void>((done) => {
+            resolve = done;
+          });
+          drain = { promise, resolve };
+          this.sharedDrains.set(sessionId, drain);
+        }
+        await drain.promise;
+      }
+      return await fn();
+    } finally {
+      this.sharedDrains.delete(sessionId);
+      this.exclusive.delete(sessionId);
+      this.activeMaintenance--;
+      if (this.activeMaintenance === 0) {
+        this.maintenanceDrain?.resolve();
+        this.maintenanceDrain = undefined;
+      }
+    }
+  }
+
   sealMaintenanceAndWait(): Promise<void> {
     this.maintenanceSealed = true;
     if (this.activeMaintenance === 0) {
@@ -154,6 +195,8 @@ export class SessionArchiveCoordinator {
         const count = (this.shared.get(sessionId) ?? 1) - 1;
         if (count <= 0) {
           this.shared.delete(sessionId);
+          this.sharedDrains.get(sessionId)?.resolve();
+          this.sharedDrains.delete(sessionId);
         } else {
           this.shared.set(sessionId, count);
         }

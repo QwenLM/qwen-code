@@ -67,7 +67,6 @@ import {
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
   sendConversationRuntimeUnavailable,
   sendGenerationClosedError,
-  sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 
@@ -106,7 +105,10 @@ export interface ScheduledTasksSessionBridge {
   getSessionSummary(sessionId: string): {
     workspaceCwd: string;
     hasActivePrompt: boolean;
+    pendingInteractionCount?: number;
+    parentSessionId?: string;
     sourceType?: string;
+    sourceId?: string;
   };
 }
 
@@ -149,7 +151,7 @@ export function scheduledTaskSessionName(label: string): string {
  * missing bridge means tasks are created unbound (shared per-project
  * durable-owner firing) — the same fallback a bridge-less embedding gets.
  */
-interface ScheduledTaskTarget {
+export interface ScheduledTaskTarget {
   workspaceCwd: string;
   runtimeBaseDir?: string;
   bridge?: ScheduledTasksSessionBridge;
@@ -157,6 +159,235 @@ interface ScheduledTaskTarget {
   assertGenerationOpen?: () => void;
   activity?: ConversationRuntimeActivityGate;
   resolveLiveSessionOwner?: WorkspaceRegistry['resolveLiveSessionOwner'];
+}
+
+export interface ExistingSessionScheduledTaskCreateInput {
+  sessionId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  enabled?: boolean;
+  name?: string;
+  delivery?: CronTaskDelivery;
+}
+
+export class ExistingSessionScheduledTaskCreateError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ExistingSessionScheduledTaskCreateError';
+  }
+}
+
+function assertReusableScheduledTaskSession(
+  target: ScheduledTaskTarget,
+  sessionId: string,
+  allowActivePrompt: boolean,
+  assertCallerPromptActive?: () => void,
+): void {
+  const { bridge, workspaceCwd } = target;
+  if (!bridge) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_binding_unavailable',
+      'Session management is not available for this workspace',
+    );
+  }
+  assertCallerPromptActive?.();
+  let owner:
+    | ReturnType<NonNullable<ScheduledTaskTarget['resolveLiveSessionOwner']>>
+    | undefined;
+  try {
+    owner = target.resolveLiveSessionOwner?.(sessionId);
+  } catch (error) {
+    writeStderrLine(
+      `qwen serve: failed to resolve scheduled-task session owner '${sessionId}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'scheduled_tasks_session_failed',
+      'Failed to look up the requested session',
+    );
+  }
+  if (owner?.kind === 'unavailable') {
+    throw new ExistingSessionScheduledTaskCreateError(
+      503,
+      'workspace_runtime_unavailable',
+      'The workspace runtime is unavailable',
+    );
+  }
+  if (owner?.kind === 'ambiguous') {
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'ambiguous_session_owner',
+      `Session owner is ambiguous for "${sessionId}"`,
+    );
+  }
+  if (owner?.kind === 'found' && owner.runtime.workspaceCwd !== workspaceCwd) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'session_workspace_mismatch',
+      "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
+    );
+  }
+
+  let summary: ReturnType<ScheduledTasksSessionBridge['getSessionSummary']>;
+  try {
+    summary = bridge.getSessionSummary(sessionId);
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      throw new ExistingSessionScheduledTaskCreateError(
+        404,
+        'session_not_found',
+        `Session '${sessionId}' was not found`,
+      );
+    }
+    writeStderrLine(
+      `qwen serve: failed to look up scheduled-task session '${sessionId}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'scheduled_tasks_session_failed',
+      'Failed to look up the requested session',
+    );
+  }
+  if (summary.workspaceCwd !== workspaceCwd) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'session_workspace_mismatch',
+      "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
+    );
+  }
+  if (
+    (!allowActivePrompt && summary.hasActivePrompt) ||
+    (summary.pendingInteractionCount ?? 0) > 0
+  ) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_busy',
+      allowActivePrompt
+        ? 'The caller session has a pending interaction; resolve it before binding the session to a task'
+        : 'The requested session is busy; wait for its active prompt or pending interaction to finish before binding it to a task',
+    );
+  }
+  if (summary.sourceType === 'scheduled_task') {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_already_bound',
+      'The requested session is already reserved for a scheduled task',
+    );
+  }
+  if (
+    summary.parentSessionId !== undefined ||
+    summary.sourceId !== undefined ||
+    (summary.sourceType !== undefined && summary.sourceType !== 'default')
+  ) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_source_ineligible',
+      'The requested session source cannot own a scheduled task',
+    );
+  }
+}
+
+export async function createScheduledTaskWithExistingSession(
+  target: ScheduledTaskTarget,
+  input: ExistingSessionScheduledTaskCreateInput,
+  options:
+    | { source: 'rest' }
+    | { source: 'cron-tool'; assertCallerPromptActive: () => void },
+): Promise<DurableCronTask> {
+  if (
+    input.cron.length === 0 ||
+    input.cron.length > MAX_CRON_LENGTH ||
+    validateCron(input.cron) !== null
+  ) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'invalid_cron',
+      'The scheduled-task cron expression is invalid',
+    );
+  }
+  const prompt = input.prompt.trim();
+  if (prompt.length === 0 || prompt.length > MAX_PROMPT_LENGTH) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'invalid_prompt',
+      'The scheduled-task prompt is invalid',
+    );
+  }
+  const allowActivePrompt = options.source === 'cron-tool';
+  const assertCallerPromptActive =
+    options.source === 'cron-tool'
+      ? options.assertCallerPromptActive
+      : undefined;
+  assertReusableScheduledTaskSession(
+    target,
+    input.sessionId,
+    allowActivePrompt,
+    assertCallerPromptActive,
+  );
+  target.assertGenerationOpen?.();
+
+  const now = Date.now();
+  const task: DurableCronTask = {
+    id: generateCronTaskId(),
+    cron: input.cron,
+    prompt,
+    recurring: input.recurring,
+    createdAt: now,
+    lastFiredAt: now - (now % 60_000),
+    enabled: input.enabled !== false,
+    sessionId: input.sessionId,
+    sessionOwnedByTask: false,
+    ...(input.delivery !== undefined ? { delivery: input.delivery } : {}),
+    ...(input.name !== undefined ? { name: input.name } : {}),
+  };
+  let before: DurableCronTask[] | undefined;
+  let after: DurableCronTask[] | undefined;
+  await runWithScheduledTaskTarget(target, () =>
+    updateCronTasks(
+      target.workspaceCwd,
+      (tasks) => {
+        assertReusableScheduledTaskSession(
+          target,
+          input.sessionId,
+          allowActivePrompt,
+          assertCallerPromptActive,
+        );
+        if (
+          tasks.some((candidate) => candidate.sessionId === input.sessionId)
+        ) {
+          throw new ExistingSessionScheduledTaskCreateError(
+            409,
+            'session_already_bound',
+            'The requested session is already bound to another scheduled task',
+          );
+        }
+        if (tasks.length >= MAX_SCHEDULED_TASKS) {
+          throw new ExistingSessionScheduledTaskCreateError(
+            409,
+            'max_tasks_reached',
+            `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
+          );
+        }
+        before = tasks;
+        after = [...tasks, task];
+        return after;
+      },
+      { assertCanCommit: target.assertGenerationOpen },
+    ),
+  );
+  try {
+    target.assertGenerationOpen?.();
+  } catch (error) {
+    await rollbackCronMutation(target, before, after, 'scheduled-task create');
+    throw error;
+  }
+  return task;
 }
 
 function requireOpenGeneration(
@@ -565,85 +796,59 @@ function registerScheduledTaskCrudRoutes(
       const enabled = body['enabled'] !== false;
       const taskId = generateCronTaskId();
 
-      let boundSessionId: string | undefined;
-      let sessionMintedHere = false;
-      if (providedSessionId !== undefined && !bridge) {
-        res.status(409).json({
-          error: 'Session management is not available for this workspace',
-          code: 'session_binding_unavailable',
-        });
-        return;
-      }
-      if (bridge) {
-        if (providedSessionId !== undefined) {
-          try {
-            const owner = target.resolveLiveSessionOwner?.(providedSessionId);
-            if (owner?.kind === 'unavailable') {
-              sendWorkspaceRuntimeUnavailable(res);
-              return;
-            }
-            if (owner?.kind === 'ambiguous') {
-              res.status(500).json({
-                error: `Session owner is ambiguous for "${providedSessionId}"`,
-                code: 'ambiguous_session_owner',
-              });
-              return;
-            }
-            if (
-              owner?.kind === 'found' &&
-              owner.runtime.workspaceCwd !== workspaceCwd
-            ) {
-              res.status(400).json({
-                error:
-                  "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
-                code: 'session_workspace_mismatch',
-              });
-              return;
-            }
-            const summary = bridge.getSessionSummary(providedSessionId);
-            if (summary.workspaceCwd !== workspaceCwd) {
-              res.status(400).json({
-                error:
-                  "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
-                code: 'session_workspace_mismatch',
-              });
-              return;
-            }
-            if (summary.hasActivePrompt) {
-              res.status(409).json({
-                error:
-                  'The requested session is busy; wait for its active prompt to finish before binding it to a task',
-                code: 'session_busy',
-              });
-              return;
-            }
-            if (summary.sourceType === 'scheduled_task') {
-              res.status(409).json({
-                error:
-                  'The requested session is already reserved for a scheduled task',
-                code: 'session_already_bound',
-              });
-              return;
-            }
-          } catch (err) {
-            if (err instanceof SessionNotFoundError) {
-              res.status(404).json({
-                error: `Session '${providedSessionId}' was not found`,
-                code: 'session_not_found',
-              });
-              return;
-            }
-            writeStderrLine(
-              `qwen serve: POST ${base} failed to look up session '${providedSessionId}': ${err instanceof Error ? err.message : String(err)}`,
-            );
-            res.status(500).json({
-              error: 'Failed to look up the requested session',
-              code: 'scheduled_tasks_session_failed',
+      if (providedSessionId !== undefined) {
+        try {
+          const task = await createScheduledTaskWithExistingSession(
+            target,
+            {
+              sessionId: providedSessionId,
+              cron,
+              prompt,
+              recurring,
+              enabled,
+              ...(delivery !== undefined ? { delivery } : {}),
+              ...(nameResult.value !== undefined
+                ? { name: nameResult.value }
+                : {}),
+            },
+            { source: 'rest' },
+          );
+          if (task.delivery && task.sessionId) {
+            channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
+              sessionId: task.sessionId,
+              taskId: task.id,
+              target: task.delivery.target,
+              recurring: task.recurring,
+              lastFiredAt: task.lastFiredAt ?? undefined,
             });
+          }
+          res.status(201).json(toView(task));
+        } catch (error) {
+          if (error instanceof ExistingSessionScheduledTaskCreateError) {
+            if (error.code === 'workspace_runtime_unavailable') {
+              res.set('Retry-After', '1');
+            }
+            res
+              .status(error.status)
+              .json({ error: error.message, code: error.code });
             return;
           }
+          if (sendActivityGateError(res, error)) return;
+          if (sendGenerationClosedError(res, error)) return;
+          writeStderrLine(
+            `qwen serve: POST ${base} failed to create a task for session '${providedSessionId}': ${error instanceof Error ? error.message : String(error)}`,
+          );
+          res.status(500).json({
+            error: 'Failed to create scheduled task',
+            code: 'scheduled_tasks_write_failed',
+          });
         }
+        return;
+      }
 
+      let boundSessionId: string | undefined;
+      let sessionMintedHere = false;
+      if (bridge) {
         // Best-effort pre-check; the write-lock checks below are authoritative.
         try {
           const tasks = await runWithScheduledTaskTarget(target, () =>
@@ -660,47 +865,43 @@ function registerScheduledTaskCrudRoutes(
           // Read failure → skip the pre-check; the write below is authoritative.
         }
         if (!requireOpenGeneration(target, res)) return;
-        if (providedSessionId !== undefined) {
-          boundSessionId = providedSessionId;
-        } else {
-          try {
-            const session = await runWithScheduledTaskTarget(target, () =>
-              bridge.spawnOrAttach({
-                workspaceCwd,
-                sessionScope: 'thread',
-                sourceType: 'scheduled_task',
-                sourceId: taskId,
-              }),
-            );
-            boundSessionId = session.sessionId;
-            sessionMintedHere = true;
-            if (!requireOpenGeneration(target, res)) {
-              await teardownBoundSession(target, boundSessionId);
-              return;
-            }
-            try {
-              await runWithScheduledTaskTarget(target, async () =>
-                bridge.updateSessionMetadata(boundSessionId!, {
-                  displayName: scheduledTaskSessionName(
-                    nameResult.value ?? prompt,
-                  ),
-                }),
-              );
-            } catch {
-              // metadata update is non-critical
-            }
-          } catch (err) {
-            if (sendActivityGateError(res, err)) return;
-            if (sendGenerationClosedError(res, err)) return;
-            writeStderrLine(
-              `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
-            );
-            res.status(500).json({
-              error: "Failed to create the task's session",
-              code: 'scheduled_tasks_session_failed',
-            });
+        try {
+          const session = await runWithScheduledTaskTarget(target, () =>
+            bridge.spawnOrAttach({
+              workspaceCwd,
+              sessionScope: 'thread',
+              sourceType: 'scheduled_task',
+              sourceId: taskId,
+            }),
+          );
+          boundSessionId = session.sessionId;
+          sessionMintedHere = true;
+          if (!requireOpenGeneration(target, res)) {
+            await teardownBoundSession(target, boundSessionId);
             return;
           }
+          try {
+            await runWithScheduledTaskTarget(target, async () =>
+              bridge.updateSessionMetadata(boundSessionId!, {
+                displayName: scheduledTaskSessionName(
+                  nameResult.value ?? prompt,
+                ),
+              }),
+            );
+          } catch {
+            // metadata update is non-critical
+          }
+        } catch (err) {
+          if (sendActivityGateError(res, err)) return;
+          if (sendGenerationClosedError(res, err)) return;
+          writeStderrLine(
+            `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          res.status(500).json({
+            error: "Failed to create the task's session",
+            code: 'scheduled_tasks_session_failed',
+          });
+          return;
         }
       }
 
@@ -719,9 +920,6 @@ function registerScheduledTaskCrudRoutes(
         ...(boundSessionId !== undefined
           ? {
               sessionId: boundSessionId,
-              ...(providedSessionId !== undefined
-                ? { sessionOwnedByTask: false }
-                : {}),
             }
           : {}),
         ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
@@ -740,8 +938,6 @@ function registerScheduledTaskCrudRoutes(
       };
 
       let overCap = false;
-      let alreadyBound = false;
-      let sessionNoLongerLive = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
       try {
@@ -749,30 +945,6 @@ function registerScheduledTaskCrudRoutes(
           updateCronTasks(
             workspaceCwd,
             (tasks) => {
-              if (
-                providedSessionId !== undefined &&
-                tasks.some((task) => task.sessionId === providedSessionId)
-              ) {
-                alreadyBound = true;
-                return tasks;
-              }
-              if (providedSessionId !== undefined && bridge) {
-                try {
-                  if (
-                    bridge.getSessionSummary(providedSessionId).sourceType ===
-                    'scheduled_task'
-                  ) {
-                    alreadyBound = true;
-                    return tasks;
-                  }
-                } catch (err) {
-                  if (err instanceof SessionNotFoundError) {
-                    sessionNoLongerLive = true;
-                    return tasks;
-                  }
-                  throw err;
-                }
-              }
               // Cap check under the write lock so two concurrent creates can't both
               // slip past a stale count. Returning the input unchanged is a no-op
               // (no write), which the flag below turns into a 409.
@@ -820,21 +992,6 @@ function registerScheduledTaskCrudRoutes(
         res.status(409).json({
           error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
           code: 'max_tasks_reached',
-        });
-        return;
-      }
-      if (alreadyBound) {
-        res.status(409).json({
-          error:
-            'The requested session is already bound to another scheduled task',
-          code: 'session_already_bound',
-        });
-        return;
-      }
-      if (sessionNoLongerLive) {
-        res.status(404).json({
-          error: `Session '${providedSessionId}' was not found`,
-          code: 'session_not_found',
         });
         return;
       }

@@ -213,6 +213,10 @@ export const SERVE_CONTROL_EXT_METHODS = {
    */
   externalToolGuardPrepare: 'qwen/control/external_tool_guard/prepare',
   sessionCd: 'qwen/control/session/cd',
+  sessionManagedConversationBindingCommit:
+    'qwen/control/session/managed-conversation-binding/commit',
+  sessionManagedConversationBindingRelease:
+    'qwen/control/session/managed-conversation-binding/release',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
    * `create_sub_session` tool, running inside a child's agent turn, asks the
@@ -222,6 +226,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `first-turn` mode, which waits for the sub-session's first turn to finish).
    */
   createSubSession: 'qwen/control/create-sub-session',
+  createCurrentSessionScheduledTask:
+    'qwen/control/scheduled-task/create-current',
   liveCaptureScreenContext: 'qwen/control/live/capture-screen-context',
   liveTaskTool: 'qwen/control/live/task-tool',
   liveSpeakToUser: 'qwen/control/live/speak-to-user',

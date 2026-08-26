@@ -28,6 +28,17 @@ import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 export const NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE =
   'Not currently generating' as const;
 
+export class StandaloneSessionSpawnError extends Error {
+  override readonly name = 'StandaloneSessionSpawnError';
+
+  constructor(
+    readonly dispatched: boolean,
+    cause: unknown,
+  ) {
+    super('Daemon-owned standalone session creation failed', { cause });
+  }
+}
+
 /**
  * ACP idle-cancel compatibility contract.
  *

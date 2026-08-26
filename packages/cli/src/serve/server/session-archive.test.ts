@@ -278,6 +278,89 @@ describe('SessionArchiveCoordinator', () => {
     ).resolves.toBe('exclusive');
   });
 
+  it('publishes an exclusive waiter before draining existing shared access', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440025';
+    let releaseShared!: () => void;
+    const sharedGate = new Promise<void>((resolve) => {
+      releaseShared = resolve;
+    });
+    const shared = coordinator.runSharedMany([sessionId], () => sharedGate);
+    let exclusiveEntered = false;
+    const exclusive = coordinator.runExclusiveAfterShared(
+      sessionId.toUpperCase(),
+      async () => {
+        exclusiveEntered = true;
+        return 'exclusive';
+      },
+    );
+
+    await Promise.resolve();
+    expect(exclusiveEntered).toBe(false);
+    await expect(
+      coordinator.runSharedMany([sessionId], async () => 'late shared'),
+    ).rejects.toThrow(SessionArchivingError);
+    await expect(
+      coordinator.runExclusiveAfterShared(sessionId, async () => 'second'),
+    ).rejects.toThrow(SessionArchivingError);
+
+    releaseShared();
+    await shared;
+    await expect(exclusive).resolves.toBe('exclusive');
+    expect(exclusiveEntered).toBe(true);
+  });
+
+  it('releases a wait-after-shared exclusive when its callback throws', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440026';
+
+    await expect(
+      coordinator.runExclusiveAfterShared(sessionId, async () => {
+        throw new Error('waiter failed');
+      }),
+    ).rejects.toThrow('waiter failed');
+    await expect(
+      coordinator.runSharedMany([sessionId], async () => 'shared'),
+    ).resolves.toBe('shared');
+  });
+
+  it('maintenance drain includes an exclusive waiting for shared access', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440027';
+    let releaseShared!: () => void;
+    const shared = coordinator.runSharedMany(
+      [sessionId],
+      () =>
+        new Promise<void>((resolve) => {
+          releaseShared = resolve;
+        }),
+    );
+    let releaseExclusive!: () => void;
+    const exclusive = coordinator.runExclusiveAfterShared(
+      sessionId,
+      () =>
+        new Promise<void>((resolve) => {
+          releaseExclusive = resolve;
+        }),
+    );
+    const drain = coordinator.sealMaintenanceAndWait();
+
+    releaseShared();
+    await shared;
+    await vi.waitFor(() => expect(releaseExclusive).toBeTypeOf('function'));
+    let drained = false;
+    void drain.then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
+
+    releaseExclusive();
+    await exclusive;
+    await drain;
+    expect(drained).toBe(true);
+  });
+
   it('assertNotTransitioning throws during exclusive access', async () => {
     const coordinator = new SessionArchiveCoordinator();
     const sessionId = '550e8400-e29b-41d4-a716-446655440022';
