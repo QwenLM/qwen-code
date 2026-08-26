@@ -9,6 +9,7 @@ import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
   goalLimitKindForReason,
+  goalTokenBudgetReason,
   goalRequiresExactPermit,
   type GoalControlRequest,
   type GoalRecord,
@@ -1105,4 +1106,229 @@ describe('goal reducer', () => {
       ).toBeUndefined();
     },
   );
+});
+
+describe('token budget transitions', () => {
+  const control = (request: GoalControlRequest, tokenBudgetGrant?: number) => ({
+    request,
+    now: 200,
+    nextGoalId: 'g-next',
+    cursor: { recordId: 'r-200' },
+    ...(tokenBudgetGrant === undefined ? {} : { tokenBudgetGrant }),
+  });
+
+  const budgetStopped = (overrides: Partial<GoalRecord> = {}): GoalRecord =>
+    goalRecord({
+      status: 'usage_limited',
+      tokensUsed: 1_200,
+      tokenBudget: 1_000,
+      lastReason: goalTokenBudgetReason(1_000),
+      limitKind: 'token_budget',
+      ...overrides,
+    });
+
+  it('stamps the armed grant on create and replace', () => {
+    const created = reduceGoalControl(
+      null,
+      control({ action: 'create', objective: 'ship' }, 1_000),
+    );
+    expect(created).toMatchObject({ tokenBudget: 1_000, tokensUsed: 0 });
+
+    const replaced = reduceGoalControl(
+      goalRecord({ tokensUsed: 900, tokenBudget: 1_000 }),
+      control(
+        {
+          action: 'replace',
+          objective: 'ship again',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        2_000,
+      ),
+    );
+    expect(replaced).toMatchObject({ tokenBudget: 2_000, tokensUsed: 0 });
+  });
+
+  it('creates an unbounded Goal when no grant is armed', () => {
+    const created = reduceGoalControl(
+      null,
+      control({ action: 'create', objective: 'ship' }),
+    );
+    expect(created).not.toHaveProperty('tokenBudget');
+  });
+
+  it('re-arms a budget-stopped Goal on resume: the ceiling moves ahead of the meter it never resets', () => {
+    const resumed = reduceGoalControl(
+      budgetStopped(),
+      control(
+        { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+        1_000,
+      ),
+    );
+    expect(resumed).toMatchObject({
+      status: 'active',
+      tokensUsed: 1_200,
+      tokenBudget: 2_200,
+      revision: 1,
+      evidenceCursor: { recordId: 'r-100' },
+    });
+    expect(resumed?.lastReason).toBeUndefined();
+    expect(resumed?.limitKind).toBeUndefined();
+  });
+
+  it('leaves an unspent ceiling alone on resume', () => {
+    const resumed = reduceGoalControl(
+      goalRecord({ status: 'paused', tokensUsed: 300, tokenBudget: 1_000 }),
+      control(
+        { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+        1_000,
+      ),
+    );
+    expect(resumed).toMatchObject({ status: 'active', tokenBudget: 1_000 });
+  });
+
+  it('re-arms when the spend lands exactly on the ceiling', () => {
+    const resumed = reduceGoalControl(
+      budgetStopped({ tokensUsed: 1_000, tokenBudget: 1_000 }),
+      control(
+        { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+        1_000,
+      ),
+    );
+    expect(resumed).toMatchObject({
+      status: 'active',
+      tokensUsed: 1_000,
+      tokenBudget: 2_000,
+    });
+  });
+
+  it.each(['paused', 'blocked'] as const)(
+    're-arms a spent ceiling when resuming a %s Goal',
+    (status) => {
+      const resumed = reduceGoalControl(
+        goalRecord({ status, tokensUsed: 1_200, tokenBudget: 1_000 }),
+        control(
+          { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+          1_000,
+        ),
+      );
+      expect(resumed).toMatchObject({
+        status: 'active',
+        tokensUsed: 1_200,
+        tokenBudget: 2_200,
+      });
+    },
+  );
+
+  it('clears a spent ceiling on resume or edit when the runtime opts out', () => {
+    const resumed = reduceGoalControl(
+      budgetStopped(),
+      control(
+        { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+        Number.POSITIVE_INFINITY,
+      ),
+    );
+    expect(resumed).toMatchObject({ status: 'active', tokensUsed: 1_200 });
+    expect(resumed).not.toHaveProperty('tokenBudget');
+
+    const edited = reduceGoalControl(
+      budgetStopped(),
+      control(
+        {
+          action: 'edit',
+          objective: 'ship without a budget',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        Number.POSITIVE_INFINITY,
+      ),
+    );
+    expect(edited).toMatchObject({
+      status: 'usage_limited',
+      objective: 'ship without a budget',
+      tokensUsed: 1_200,
+    });
+    expect(edited).not.toHaveProperty('tokenBudget');
+  });
+
+  it('re-arms a spent ceiling on edit, so the edited Goal can actually run', () => {
+    const edited = reduceGoalControl(
+      budgetStopped(),
+      control(
+        {
+          action: 'edit',
+          objective: 'ship the rest',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        1_000,
+      ),
+    );
+    expect(edited).toMatchObject({
+      status: 'usage_limited',
+      revision: 2,
+      tokensUsed: 1_200,
+      tokenBudget: 2_200,
+    });
+  });
+
+  it('never retrofits a budget onto an unbounded Goal', () => {
+    const edited = reduceGoalControl(
+      goalRecord({ tokensUsed: 5_000_000 }),
+      control(
+        {
+          action: 'edit',
+          objective: 'keep going',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        1_000,
+      ),
+    );
+    expect(edited).not.toHaveProperty('tokenBudget');
+  });
+
+  it('resumes an evidence-limited Goal through the fresh window, re-arming a spent budget on the way', () => {
+    const resumed = reduceGoalControl(
+      goalRecord({
+        status: 'usage_limited',
+        tokensUsed: 1_200,
+        tokenBudget: 1_000,
+        lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+        limitKind: 'evidence_catalog',
+      }),
+      control(
+        { action: 'resume', expectedGoalId: 'g-1', expectedRevision: 1 },
+        1_000,
+      ),
+    );
+    expect(resumed).toMatchObject({
+      status: 'active',
+      tokensUsed: 1_200,
+      tokenBudget: 2_200,
+      evidenceCursor: { recordId: 'r-200' },
+    });
+    expect(resumed?.lastReason).toBeUndefined();
+    expect(resumed?.limitKind).toBeUndefined();
+  });
+
+  it('restores a persisted budget and rejects a malformed one', () => {
+    const stored = snapshot(
+      goalRecord({
+        status: 'usage_limited',
+        tokensUsed: 1_200,
+        tokenBudget: 1_000,
+        lastReason: goalTokenBudgetReason(1_000),
+        limitKind: 'token_budget',
+      }),
+    );
+    expect(parseGoalSnapshotV2(stored)).toEqual(stored);
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ tokenBudget: -1 }))),
+    ).toBeUndefined();
+    // A Goal from before budgets existed restores unbounded, not defaulted.
+    expect(parseGoalSnapshotV2(snapshot(goalRecord()))).toEqual(
+      snapshot(goalRecord()),
+    );
+  });
 });
