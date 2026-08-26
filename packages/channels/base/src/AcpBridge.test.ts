@@ -588,6 +588,31 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('emits discrete vision bridge notices as text chunks', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const textChunks: Array<[string, string]> = [];
+    bridge.on('textChunk', (sessionId, text) => {
+      textChunks.push([sessionId, text]);
+    });
+
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Vision bridge cancelled.' },
+        _meta: {
+          source: 'vision_bridge_notice',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+
+    expect(textChunks).toEqual([['s-1', 'Vision bridge cancelled.']]);
+  });
+
   it('emits a completed background response separately from the active turn', () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

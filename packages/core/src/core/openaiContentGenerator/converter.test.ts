@@ -3732,6 +3732,72 @@ describe('OpenAIContentConverter', () => {
       expect(response.modelVersion).toBe('test-model');
     });
 
+    it('maps uppercase finish_reason values case-insensitively', () => {
+      const stop = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-stop',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'done' },
+              finish_reason: 'STOP',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+      const truncated = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-max-tokens',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'cut off' },
+              finish_reason: 'MAX_TOKENS',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(stop.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      expect(truncated.candidates?.[0]?.finishReason).toBe(
+        FinishReason.MAX_TOKENS,
+      );
+    });
+
+    it('does not throw on a non-string finish_reason from a malformed gateway', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-malformed',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: 'done' },
+              finish_reason: 42,
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.candidates?.[0]?.finishReason).toBe(
+        FinishReason.FINISH_REASON_UNSPECIFIED,
+      );
+    });
+
     it('omits the input/output breakdown when only total tokens are reported', () => {
       const response = converter.convertOpenAIResponseToGemini(
         {
@@ -5783,6 +5849,52 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('convertGeminiToolsToOpenAI', () => {
+    it('removes uniqueItems from function-calling wire schemas', async () => {
+      const parametersJsonSchema = {
+        type: 'object',
+        properties: {
+          blockedBy: {
+            type: 'array',
+            uniqueItems: true,
+            items: { type: 'string' },
+          },
+        },
+      };
+      const tools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'todo_write',
+              description: 'Update the todo list',
+              parametersJsonSchema,
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToOpenAI(tools);
+
+      expect(result).toEqual([
+        {
+          type: 'function',
+          function: {
+            name: 'todo_write',
+            description: 'Update the todo list',
+            parameters: {
+              type: 'object',
+              properties: {
+                blockedBy: {
+                  type: 'array',
+                  items: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+      ]);
+      expect(parametersJsonSchema.properties.blockedBy.uniqueItems).toBe(true);
+    });
+
     it('should convert Gemini tools with parameters field', async () => {
       const geminiTools = [
         {

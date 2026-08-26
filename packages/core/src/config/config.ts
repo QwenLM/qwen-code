@@ -112,7 +112,10 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
-import { parseRule } from '../permissions/rule-parser.js';
+import {
+  parseRule,
+  toolMatchesRuleToolName,
+} from '../permissions/rule-parser.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -1057,6 +1060,21 @@ export interface ConfigParameters {
     allow?: string[];
     ask?: string[];
     deny?: string[];
+    /**
+     * The subset of `allow` that comes from `settings.permissions.allow`
+     * (never `--allowed-tools`, the SDK `allowedTools` param, or the
+     * legacy `tools.allowed` key). When it contains at least one valid
+     * rule, the registry-level allowlist activates: built-in tools not
+     * covered by any allow or ask rule are excluded from registration, so
+     * their schemas are never sent to the model (MCP tools, the
+     * `--json-schema` `structured_output` contract, the plan-mode
+     * lifecycle tools, and the `computer_use__*` family are exempt)
+     * (#9827). Only this subset can ACTIVATE the allowlist; while it is
+     * active, `--allowed-tools` / SDK `allowedTools` rules are merged
+     * into the effective allow set and still count toward coverage,
+     * keeping covered built-ins registered.
+     */
+    registryAllowList?: string[];
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
   };
@@ -1182,9 +1200,6 @@ export interface ConfigParameters {
    * even when unset it fires at most once per process.
    */
   skipWorkflowUsageWarning?: boolean;
-  computerUseEnabled?: boolean;
-  computerUseMaxImageDimension?: number;
-  computerUseIdleTimeoutMs?: number;
   emitToolUseSummaries?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
@@ -1975,6 +1990,7 @@ export class Config {
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
+  private readonly permissionsRegistryAllowList: string[];
   private readonly permissionsAutoMode: AutoModeSettings;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
@@ -2147,9 +2163,6 @@ export class Config {
   private readonly artifactOss?: ArtifactOssConfig;
   private workflowsEnabled = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
-  private readonly computerUseEnabled: boolean = true;
-  private readonly computerUseMaxImageDimension?: number;
-  private readonly computerUseIdleTimeoutMs?: number;
   private readonly emitToolUseSummaries: boolean = true;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
@@ -2320,6 +2333,8 @@ export class Config {
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
+    this.permissionsRegistryAllowList =
+      params.permissions?.registryAllowList || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
     this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
@@ -2436,9 +2451,6 @@ export class Config {
     this.artifactOss = params.artifactOss;
     this.workflowsEnabled = params.workflowsEnabled ?? false;
     this.skipWorkflowUsageWarning = params.skipWorkflowUsageWarning ?? false;
-    this.computerUseEnabled = params.computerUseEnabled ?? true;
-    this.computerUseMaxImageDimension = params.computerUseMaxImageDimension;
-    this.computerUseIdleTimeoutMs = params.computerUseIdleTimeoutMs;
     this.emitToolUseSummaries = params.emitToolUseSummaries ?? true;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
@@ -5670,6 +5682,17 @@ export class Config {
   }
 
   /**
+   * Returns the allow rules that come from `settings.permissions.allow`
+   * only — never `--allowed-tools` / the SDK `allowedTools` param (merged
+   * into `getPermissionsAllow()` above) nor the legacy `tools.allowed`
+   * key. Consumed by `PermissionManager` to decide whether the
+   * registry-level allowlist is active (#9827).
+   */
+  getRegistryAllowList(): string[] {
+    return this.permissionsRegistryAllowList;
+  }
+
+  /**
    * Returns the merged deny-rules for PermissionManager.
    *
    * Merges:
@@ -7111,18 +7134,74 @@ export class Config {
 
   /**
    * Whether the built-in `list_directory` tool is enabled. Opt-in: the tool
-   * is disabled by default and turns on either through the
-   * `tools.listDirectory.enabled` setting or by being explicitly listed in
-   * the `coreTools` allowlist. Entries are normalised with `parseRule` — the
-   * same parser `PermissionManager` uses to build its allowlist — so alias
-   * forms (`ListFiles`) and specifier forms (`list_directory(/src)`) match.
+   * is disabled by default and turns on through the
+   * `tools.listDirectory.enabled` setting, by being explicitly listed in the
+   * `coreTools` allowlist, or by being covered by an allow OR ask rule while
+   * the `permissions.allow` registry allowlist is active (#9827). Coverage
+   * scans the merged allow set (`getPermissionsAllow()` — settings +
+   * `--allowed-tools` + SDK `allowedTools` + legacy `tools.allowed`) so it
+   * counts exactly what `PermissionManager.isToolEnabled()` counts, while
+   * activation still comes only from `settings.permissions.allow` rules
+   * (`getRegistryAllowList()`), ignoring empty/whitespace-only entries the
+   * same way `PermissionManager.initialize`'s `parseRules` does (and
+   * skipping non-string entries, which settings load never type-validates).
+   * Entries are
+   * normalised with `parseRule` — the same parser `PermissionManager` uses —
+   * so alias forms (`ListFiles`) and specifier forms (`list_directory(/src)`)
+   * match; the check honours meta-categories (`Read`) via
+   * `toolMatchesRuleToolName`, matching the coverage semantics of the
+   * registry gate itself (`isCoveredByAllowOrAskRule`, which counts ask
+   * rules too).
    */
   isLsToolEnabled(): boolean {
     if (this.lsToolEnabled) return true;
-    return (
+    if (
       this.getCoreTools()?.some(
         (name) => parseRule(name).toolName === ToolNames.LS,
-      ) ?? false
+      ) ??
+      false
+    ) {
+      return true;
+    }
+    // `permissions.allow` registry allowlist (#9827): without these branches
+    // an allowlisted tool passes `PermissionManager.isToolEnabled()` but the
+    // registry never registers it, so it silently vanishes from `/tools` and
+    // the model request while calls to it fail with TOOL_NOT_REGISTERED.
+    const coveredByPermissionRule = (raw: string): boolean => {
+      // Mirror the `parseRules` guard: settings load performs no
+      // element-type validation (the schema declares only `type: 'array'`),
+      // so a stray non-string/empty entry must be skipped here, never
+      // crash registry construction (#9827).
+      if (typeof raw !== 'string' || raw.trim() === '') return false;
+      const rule = parseRule(raw);
+      return (
+        !rule.invalid && toolMatchesRuleToolName(rule.toolName, ToolNames.LS)
+      );
+    };
+    // Activation comes only from settings `permissions.allow` rules and
+    // requires at least one non-empty valid entry — exactly how
+    // `PermissionManager.initialize` computes it (`parseRules` filters empty
+    // entries before parsing, and `parseRule('')` carries no `invalid` flag),
+    // so a degenerate `[""]` leaves the allowlist inactive in both places.
+    // The `typeof` guard mirrors that filter for non-string entries too:
+    // `PermissionManager.initialize` tolerates them in the same settings
+    // file, so this gate must not become a new startup crash (#9827).
+    const allowListActive = this.getRegistryAllowList().some(
+      (raw) =>
+        typeof raw === 'string' && raw.trim() !== '' && !parseRule(raw).invalid,
+    );
+    if (!allowListActive) return false;
+    // Coverage mirrors `PermissionManager.isToolEnabled`: the merged allow
+    // set and ask rules both count while the allowlist is active, so a tool
+    // the permission system reports as enabled is genuinely offered to
+    // `registerLazy` (#9827). Ask-only coverage counts for exactly the same
+    // reason it counts in `PermissionManager.isCoveredByAllowOrAskRule` —
+    // otherwise the ask rule could never fire and arriving calls would fail
+    // TOOL_NOT_REGISTERED. Gating both on the allowlist actually being
+    // active keeps the default opt-in behaviour when it is not.
+    return (
+      this.getPermissionsAllow().some(coveredByPermissionRule) ||
+      this.getPermissionsAsk().some(coveredByPermissionRule)
     );
   }
 
@@ -7241,24 +7320,6 @@ export class Config {
    */
   getSkipWorkflowUsageWarning(): boolean {
     return this.skipWorkflowUsageWarning;
-  }
-
-  isComputerUseEnabled(): boolean {
-    return this.computerUseEnabled;
-  }
-
-  /**
-   * Configured screenshot longest-edge cap for Computer Use, or `undefined`
-   * to leave cua-driver's built-in default (1568) in place. Resolved together
-   * with the `QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION` env override at the point
-   * the driver connects (see `resolveMaxImageDimension`).
-   */
-  getComputerUseMaxImageDimension(): number | undefined {
-    return this.computerUseMaxImageDimension;
-  }
-
-  getComputerUseIdleTimeoutMs(): number | undefined {
-    return this.computerUseIdleTimeoutMs;
   }
 
   /**
@@ -8501,6 +8562,11 @@ export class Config {
    * skills, user/project file commands, MCP prompts). Called by the CLI's
    * CommandService after initialisation so that the startup snapshot and
    * per-turn drain can include these in the `<available_skills>` listing.
+   *
+   * Unlike `disabledSkillNamesProvider`, late attachment (after
+   * `Config.initialize()` has warmed the tool registry) is supported:
+   * `SkillTool.validateToolParams` consults this provider live rather than
+   * relying on its construction-time snapshot (issue #9821).
    */
   setModelInvocableCommandsProvider(
     provider: () => ReadonlyArray<{ name: string; description: string }>,
@@ -8838,6 +8904,12 @@ export class Config {
       const { TodoWriteTool } = await import('../tools/todoWrite.js');
       return new TodoWriteTool(this);
     });
+    await registerLazy(ToolNames.REPORT_FINDINGS, async () => {
+      const { ReportFindingsTool } = await import(
+        '../tools/report-findings.js'
+      );
+      return new ReportFindingsTool();
+    });
     const supportsUserInteraction = resolveInteractionMode(this) !== 'headless';
     if (supportsUserInteraction) {
       await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
@@ -9024,21 +9096,6 @@ export class Config {
         const { WorkflowTool } = await import('../tools/workflow/workflow.js');
         return new WorkflowTool(this);
       });
-    }
-
-    // Register computer-use tools unless disabled. All 9 are deferred —
-    // they surface only via ToolSearch keyword match
-    // (see packages/core/src/tools/computer-use/).
-    //
-    // Pass `registerLazy` (not the bare `registry`) so the same
-    // PermissionManager.isToolEnabled() check that gates every other
-    // built-in also gates these. Direct registry.registerFactory() would
-    // bypass coreTools allowlist + whole-tool deny rules.
-    if (this.isComputerUseEnabled()) {
-      const { registerComputerUseTools } = await import(
-        '../tools/computer-use/index.js'
-      );
-      await registerComputerUseTools(registerLazy, this);
     }
 
     // Register monitor tool

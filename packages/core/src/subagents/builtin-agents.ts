@@ -292,7 +292,7 @@ Guidelines:
       // includeDeferred: true })` — and a review agent was handed all 51 tool
       // schemas, deferred ones included. Measured on a 6-file / 115-line diff:
       // 21,178 prompt tokens of tool declarations on EVERY turn of a four-turn
-      // agent, of which the 35 `computer_use__*` schemas alone were 11,011. A
+      // agent; at the time, the 35 `computer_use__*` schemas alone were 11,011. A
       // review names 13-14 such agents, so that is ~1.08M tokens per review
       // spent declaring tools no reviewer calls.
       //

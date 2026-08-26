@@ -464,7 +464,7 @@ export class ChatCompressionService {
       if (effectiveTokens < auto) {
         // Screenshot-overflow trigger: even below the token threshold,
         // compact once tool-returned images accumulate past the configured
-        // count, so computer-use sessions don't drown the model in stale
+        // count, so tool-driven visual sessions don't drown the model in stale
         // screenshots. Only counted in the would-be-NOOP path and only when
         // enabled, so the common case pays nothing. Counts NESTED tool media
         // only (countToolResponseImages), not user-pasted top-level images.
