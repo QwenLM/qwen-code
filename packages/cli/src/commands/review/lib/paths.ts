@@ -9,8 +9,10 @@
 // when the command is invoked). Use `path.join` rather than string
 // concatenation so Windows backslashes are produced when needed.
 
+import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { sanitizeFilenameComponent } from '@qwen-code/qwen-code-core';
 import { safeTarget } from '../../../utils/paths.js';
 
 /**
@@ -40,6 +42,84 @@ export function assertWritableOutPath(out: string): void {
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
+
+/**
+ * Where a generated review fan-out script has to live.
+ *
+ * Not a choice: `Workflow({scriptPath})` loads through
+ * `readWorkflowFileSecurely`, which realpaths the file and accepts only the
+ * two saved-workflow directories and the generated-scripts root,
+ * `Storage.getGeneratedWorkflowsDir()` = `<projectDir>/workflows/generated`.
+ * The saved directories are out: every `.js` in them is also a `/<name>`
+ * slash command, and a review's fan-out has no business in the user's
+ * command namespace. The generated root is reached through the same env the
+ * harness exports for the transcript readers — `QWEN_CODE_PROJECT_DIR` is
+ * `storage.getProjectDir()` of the session that will dispatch the script —
+ * so the writer and the loader compute the same directory by construction.
+ * Nested one level per session, so a session's scripts can be swept as a
+ * unit and two sessions reviewing in one project never share a file.
+ */
+export const GENERATED_WORKFLOWS_SUBDIR = join('workflows', 'generated');
+
+/** Subdirectory of the generated root that review scripts live under. */
+export const REVIEW_WORKFLOWS_SUBDIR = 'review';
+
+/** Filename prefix for generated fan-out scripts. */
+export const REVIEW_WORKFLOW_PREFIX = 'qwen-review-';
+
+/**
+ * Why a generated script has nowhere to go. Never conflated with a bad plan:
+ * the env contract is the harness's, not the caller's.
+ */
+export class GeneratedWorkflowDirUnavailableError extends Error {}
+
+/**
+ * The directory this session's generated review scripts live in:
+ * `$QWEN_CODE_PROJECT_DIR/workflows/generated/review/<session>`.
+ *
+ * Read from the environment, never from an argument, for the same reason the
+ * transcript readers do: a path the model can choose is a path the model can
+ * point somewhere the loader will refuse. The session component is sanitized
+ * exactly as the harness sanitizes its transcript directory, so a session id
+ * carrying a dot lands in a directory that exists.
+ */
+export function reviewWorkflowsDir(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const projectDir = env['QWEN_CODE_PROJECT_DIR']?.trim();
+  if (!projectDir) {
+    throw new GeneratedWorkflowDirUnavailableError(
+      'the CLI did not export QWEN_CODE_PROJECT_DIR, so there is no directory ' +
+        'the Workflow tool would load a generated script from. Run this ' +
+        'command from inside a qwen session.',
+    );
+  }
+  const session = env['QWEN_CODE_SESSION_ID']?.trim();
+  return join(
+    projectDir,
+    GENERATED_WORKFLOWS_SUBDIR,
+    REVIEW_WORKFLOWS_SUBDIR,
+    session ? sanitizeFilenameComponent(session) : 'no-session',
+  );
+}
+
+/**
+ * The generated fan-out script for one plan.
+ *
+ * Named by a digest of the plan path so two reviews running in one session
+ * do not overwrite each other's script, and so re-running `emit-workflow`
+ * for the same review replaces its own file rather than accumulating.
+ */
+export function reviewWorkflowScriptPath(
+  planPath: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const digest = createHash('sha256')
+    .update(resolve(planPath))
+    .digest('hex')
+    .slice(0, 10);
+  return join(reviewWorkflowsDir(env), `${REVIEW_WORKFLOW_PREFIX}${digest}.js`);
+}
 
 /**
  * Filename prefix for review-worktree lease files under `REVIEW_TMP_DIR`.

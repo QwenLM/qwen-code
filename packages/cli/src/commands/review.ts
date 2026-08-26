@@ -26,6 +26,7 @@ import { publishAssetsCommand } from './review/publish-assets.js';
 import { resolveAnchorsCommand } from './review/resolve-anchors.js';
 import { checkCoverageCommand } from './review/check-coverage.js';
 import { agentPromptCommand } from './review/agent-prompt.js';
+import { emitWorkflowCommand } from './review/emit-workflow.js';
 import { buildTestCommand } from './review/build-test.js';
 import { baseTreeCommand } from './review/base-tree.js';
 import { scratchTreeCommand } from './review/scratch-tree.js';
@@ -67,6 +68,7 @@ export const reviewCommand: CommandModule = {
       .command(commentStatusCommand)
       .command(loadRulesCommand)
       .command(agentPromptCommand)
+      .command(emitWorkflowCommand)
       .command(buildTestCommand)
       .command(baseTreeCommand)
       .command(scratchTreeCommand)
@@ -90,7 +92,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, scratch-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, emit-workflow, build-test, base-tree, scratch-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {
