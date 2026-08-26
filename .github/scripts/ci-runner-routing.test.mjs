@@ -1,4 +1,5 @@
-// Runner-routing regression guards for ci.yml and serve-ab.yml.
+// Runner-routing regression guards for ci.yml, serve-ab.yml, and
+// security-checks.yml.
 //
 // classify_pr carries the routing logic TWICE — the `runs-on` expression
 // (which selects the classify job's own runner) and the `pick_runner` shell
@@ -68,10 +69,12 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'merge_group'/,
       String(eventName === 'merge_group'),
     ],
+    [/github\.event_name == 'push'/, String(eventName === 'push')],
     [
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
     ],
+    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
       String(sameRepo),
@@ -420,4 +423,113 @@ describe('serve-ab.yml runner routing', () => {
       "the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist, anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
     );
   });
+});
+
+describe('security-checks.yml runner routing', () => {
+  // Both jobs run analysis only — npm ci is --ignore-scripts and TruffleHog
+  // scans text — so the trusted lanes (push, same-repo PRs, write+ fork
+  // authors) reach the persistent pool while other fork PRs stay on
+  // ephemeral hosted runners and the kill-switch forces everything hosted.
+  const securityDoc = parse(
+    readFileSync(join(workflowsDir, 'security-checks.yml'), 'utf8'),
+  );
+  // evalRunsOn unwraps the winning fromJSON label to the array it names.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+  const JOBS = ['dependency-cve', 'secret-scan'];
+
+  it('keeps the two routing expressions byte-identical', () => {
+    assert.equal(
+      String(securityDoc.jobs['dependency-cve']['runs-on']),
+      String(securityDoc.jobs['secret-scan']['runs-on']),
+      'dependency-cve and secret-scan must route from one expression',
+    );
+  });
+
+  for (const jobName of JOBS) {
+    const runsOn = String(securityDoc.jobs[jobName]['runs-on']);
+
+    it(`${jobName} reaches the persistent pool on push`, () => {
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'push',
+          sameRepo: false,
+          assoc: '',
+        }),
+        ECS_LABELS,
+        `${jobName} must run pushes to main/release from the pool`,
+      );
+    });
+
+    it(`${jobName} routes pull requests by fork trust`, () => {
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: true,
+          assoc: 'NONE',
+        }),
+        ECS_LABELS,
+        `${jobName} same-repo PRs must reach the pool`,
+      );
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc: 'MEMBER',
+        }),
+        ECS_LABELS,
+        `${jobName} write-access fork authors must reach the pool`,
+      );
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc: 'NONE',
+        }),
+        HOSTED_LABELS,
+        `${jobName} untrusted fork PRs must stay hosted`,
+      );
+    });
+
+    it(`${jobName} obeys the kill-switch on every event`, () => {
+      for (const eventName of ['push', 'pull_request']) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            ecsDisabled: true,
+            eventName,
+            sameRepo: true,
+            assoc: 'OWNER',
+          }),
+          HOSTED_LABELS,
+          `kill-switch must win on ${eventName}`,
+        );
+      }
+    });
+
+    it(`${jobName} heals workspace ownership before its checkout`, () => {
+      // The pool reuses workspaces; a prior containerised job can leave
+      // root-owned files that make checkout's clean die on EACCES.
+      const steps = securityDoc.jobs[jobName].steps;
+      const heal = steps.findIndex(
+        (s) => s.name === 'Restore workspace ownership',
+      );
+      const checkout = steps.findIndex((s) =>
+        String(s.uses || '').startsWith('actions/checkout'),
+      );
+      assert.ok(heal !== -1, `${jobName} must carry the ownership heal`);
+      assert.equal(
+        steps[heal].if,
+        "${{ runner.environment == 'self-hosted' }}",
+      );
+      assert.match(steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
+      assert.ok(
+        heal < checkout,
+        `${jobName} must heal ownership before checking out`,
+      );
+    });
+  }
 });
