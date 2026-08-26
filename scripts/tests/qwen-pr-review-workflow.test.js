@@ -3865,6 +3865,8 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
 const DEPS_LOCK = '{"name":"fixture","lockfileVersion":3}\n';
 const depsLockHash = createHash('sha256').update(DEPS_LOCK).digest('hex');
 
+const DEPS_CACHE_SCRIPT = '.github/scripts/provision-review-deps.sh';
+
 function depsCacheSource() {
   const doc = parse(workflow);
   const step = doc.jobs['review-pr'].steps.find(
@@ -3877,7 +3879,11 @@ function depsCacheSource() {
   // continue-on-error bounds failure, not duration: a hung registry would
   // otherwise eat the review's own job budget.
   expect(step['timeout-minutes']).toBe(30);
-  return step.run;
+  // The body lives in .github/scripts/ (the workflow-size ratchet's preferred
+  // shape); the step must actually invoke that script, or every scenario
+  // below exercises bash the workflow never runs.
+  expect(step.run).toBe(DEPS_CACHE_SCRIPT);
+  return readFileSync(DEPS_CACHE_SCRIPT, 'utf8');
 }
 
 function runDepsCacheStep({ stubs = {}, prepare = null } = {}) {
@@ -4104,6 +4110,13 @@ describe('dependency-cache step (real bash, stubbed npm)', () => {
 });
 
 describe('dependency-cache step wiring', () => {
+  it('ships the script executable', () => {
+    // The step invokes the script by bare path, so the run block executes the
+    // FILE — a dropped executable bit fails the step on every run while the
+    // scenario suite above, which feeds the bytes to bash itself, stays green.
+    expect(statSync(DEPS_CACHE_SCRIPT).mode & 0o111).not.toBe(0);
+  });
+
   it('runs on the persistent pool only, when the review runs', () => {
     // ubuntu-latest fallback runners have no persistent $HOME to cache in,
     // and a non-review firing must not install anything. The expression
