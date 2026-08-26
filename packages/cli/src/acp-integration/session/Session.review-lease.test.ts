@@ -92,6 +92,10 @@ describe('Session review-worktree lease sweep', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      beginManagedAutoMemoryRecall: vi.fn(),
+      consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      finishManagedAutoMemoryRecall: vi.fn(),
+      recordCompletedToolCall: vi.fn(),
     };
 
     mockConfig = {
@@ -144,6 +148,7 @@ describe('Session review-worktree lease sweep', () => {
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getMessageBus: vi.fn().mockReturnValue(undefined),
