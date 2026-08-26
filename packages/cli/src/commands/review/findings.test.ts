@@ -2133,7 +2133,22 @@ describe('validateFindings — the canonical artifact round-trips', () => {
     // the placeholder anyway must not hand the poster a "constraint" — the
     // literal is normalised to absence so presence alone is the signal.
     expect(validateFindings([{ ...base }])[0].fixConstraint).toBeUndefined();
-    for (const placeholder of ['N/A', 'n/a', 'NA', 'none', 'None.', ' N/A ']) {
+    for (const placeholder of [
+      'N/A',
+      'n/a',
+      'NA',
+      'none',
+      'None.',
+      ' N/A ',
+      // The omission literals the finding format and the posting rule name
+      // — the finder told to omit the line is the one most likely to write
+      // one, and carried through it would hand Step 7 a "constraint" that
+      // names no constant and no file:line.
+      'none observed',
+      'None observed',
+      'None observed.',
+      'no constraints observed',
+    ]) {
       expect(
         validateFindings([{ ...base, fixConstraint: placeholder }])[0]
           .fixConstraint,

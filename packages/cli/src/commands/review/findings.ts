@@ -202,11 +202,16 @@ function asString(o: Record<string, unknown>, key: string): string | undefined {
   return typeof v === 'string' && v.trim() !== '' ? v : undefined;
 }
 
-/** `N/A`, `n/a`, `NA`, `none` — the placeholders a field with no `N/A` form
- * must not carry. Kept narrow on purpose: a real constraint quotes a constant
- * or a `file:line`, and none of those collapse to one of these words. */
+/** `N/A`, `n/a`, `NA`, `none`, `none observed`, `no constraints observed` —
+ * the placeholders a field with no `N/A` form must not carry; the two long
+ * ones are the exact omission literals the pipeline itself names, so the
+ * finder told to omit the line is the one the drop catches. Kept narrow on
+ * purpose: a real constraint quotes a constant or a `file:line`, and none
+ * of those collapse to one of these words. */
 function isNotApplicable(v: string): boolean {
-  return /^(n\/?a|none)\.?$/i.test(v.trim());
+  return /^(none observed|no constraints observed|n\/?a|none)\.?$/i.test(
+    v.trim(),
+  );
 }
 
 /** A non-empty array of non-empty strings, or undefined; anything else fails
