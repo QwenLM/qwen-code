@@ -1,4 +1,4 @@
-name: PR 10202 review fixes v2
+name: PR 10202 final cleanup
 
 on:
   push:
@@ -9,75 +9,18 @@ permissions:
   contents: write
 
 jobs:
-  fix-build-test:
+  cleanup:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Apply review fixes
-        shell: bash
-        run: |
-          python3 - <<'BOOT'
-          from pathlib import Path
-          from textwrap import dedent
-
-          workflow = Path('.github/workflows/pr-10202-fix.yml').read_text()
-          marker = "          python3 <<'PY'\n"
-          start = workflow.index(marker) + len(marker)
-          end = workflow.index("\n          PY\n", start)
-          Path('/tmp/apply-pr-10202-fixes.py').write_text(
-              dedent(workflow[start:end]) + '\n'
-          )
-          BOOT
-          python3 /tmp/apply-pr-10202-fixes.py
-
-      - name: Install dependencies and workspace prerequisites
-        run: npm ci
-
-      - name: Format changed files
-        run: >-
-          npx prettier --write
-          packages/core/src/permissions/rule-parser.ts
-          packages/core/src/tools/tool-registry.ts
-          packages/core/src/core/permissionFlow.ts
-          packages/core/src/core/permissionFlow.test.ts
-          packages/core/src/permissions/mcp-permission-collision.test.ts
-
-      - name: Run focused regression suite
-        run: >-
-          npx vitest run
-          packages/core/src/permissions/mcp-permission-collision.test.ts
-          packages/core/src/permissions/permission-manager.test.ts
-          packages/core/src/core/permissionFlow.test.ts
-          packages/core/src/core/coreToolScheduler.test.ts
-
-      - name: Verify formatting
-        run: >-
-          npx prettier --check
-          packages/core/src/permissions/rule-parser.ts
-          packages/core/src/tools/tool-registry.ts
-          packages/core/src/core/permissionFlow.ts
-          packages/core/src/core/permissionFlow.test.ts
-          packages/core/src/permissions/mcp-permission-collision.test.ts
-
-      - name: Commit fixes and clean temporary workflow files
+      - name: Remove remaining temporary PR helpers
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm -f .github/workflows/pr-10202-fix.yml .github/workflows/pr-10202-fix-v2.yml .github/pr-10202-trigger .github/pr-10202-trigger-v2
-          git add packages/core/src/permissions/rule-parser.ts \
-                  packages/core/src/tools/tool-registry.ts \
-                  packages/core/src/core/permissionFlow.ts \
-                  packages/core/src/core/permissionFlow.test.ts \
-                  packages/core/src/permissions/mcp-permission-collision.test.ts
-          git commit -m "fix(permissions): match MCP rules against raw identity"
+          git rm .github/workflows/pr-10202-fix-v2.yml \
+                 .github/pr-10202-trigger \
+                 .github/pr-10202-trigger-v2
+          git commit -m "chore: remove temporary PR 10202 helpers"
           git push origin HEAD:fix/10199-mcp-permission-collisions
