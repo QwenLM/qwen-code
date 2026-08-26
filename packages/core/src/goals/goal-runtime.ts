@@ -26,8 +26,12 @@ import {
   GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON,
   GOAL_CHECKPOINT_STALL_LIMIT,
   GOAL_CHECKPOINT_STALLED_REASON,
+  GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
+  GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_STATE_VERSION,
+  goalTokenBudgetReason,
+  isGoalTokenBudgetSpent,
   isRepeatedBlockerProposal,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
@@ -74,6 +78,15 @@ export interface CreateGoalRuntimeOptions {
   verifier?: GoalVerifier;
   checkpointVerifier?: GoalCheckpointVerifier;
   tokenLedger?: GoalTurnTokenLedger;
+  /**
+   * The autonomous spend window one user action (create, edit of a spent
+   * Goal, or resume of a Goal whose ceiling is spent) arms, in `tokensUsed`
+   * tokens. Defaults to `GOAL_DEFAULT_TOKEN_BUDGET`; tests shrink it to
+   * make the bound reachable. A non-finite grant (`Infinity`) opts out:
+   * Goals are then created unbounded, exactly like Goals persisted before
+   * budgets existed.
+   */
+  tokenBudgetGrant?: number;
 }
 
 /**
@@ -107,6 +120,12 @@ export interface GoalTurnHost {
   startGoalTurn(input: {
     permit: GoalTurnPermit;
     continuationContext: string;
+    /**
+     * Set on the one continuation a spent budget still grants: the model is
+     * to hand off, not to keep working. Hosts pass it straight to
+     * `renderGoalContinuationPrompt`.
+     */
+    windDown?: boolean;
     verifierFeedback?: string;
   }): Promise<void>;
   preemptGoalTurn(reason: string): void;
@@ -240,6 +259,12 @@ export function createGoalRuntime(
   let currentTurnFeedback: string | undefined;
   let restored = false;
   let restoreActivationPending = false;
+  /**
+   * The permit turn of the wind-down continuation now in flight, if any.
+   * In memory only: a wind-down the host dropped undelivered must be minted
+   * again, and only the turn that actually finishes stamps the record.
+   */
+  let windDownTurnId: string | undefined;
   let restorePreparation: Promise<CheckpointAttempt | undefined> | undefined;
   let restoreActivation: Promise<void> | undefined;
   let preparedRestoreCause: GoalStateCause | undefined;
@@ -288,6 +313,104 @@ export function createGoalRuntime(
     }
   };
 
+  const tokenBudgetGrant =
+    options.tokenBudgetGrant ?? GOAL_DEFAULT_TOKEN_BUDGET;
+
+  /**
+   * The shared `usage_limited` settle: every stop builds the same limited
+   * snapshot, journals it, then commits it in memory and broadcasts. Each
+   * settling site keeps its own re-entry guard and flag resets around this.
+   */
+  const usageLimitedSnapshot = (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    reason: string,
+    limitKind?: GoalLimitKind,
+  ): GoalSnapshotV2 => {
+    const now = Date.now();
+    return {
+      v: GOAL_STATE_VERSION,
+      goal: {
+        ...goal,
+        status: 'usage_limited',
+        activeTimeMs: elapsedActiveTime(goal, now),
+        updatedAt: now,
+        lastReason: reason,
+        ...(limitKind === undefined ? {} : { limitKind }),
+      },
+      activity: 'idle',
+    };
+  };
+
+  const journalUsageLimitedSettle = async (
+    goal: NonNullable<GoalSnapshotV2['goal']>,
+    reason: string,
+    limitKind?: GoalLimitKind,
+  ): Promise<GoalSnapshotV2> => {
+    const limitedSnapshot = usageLimitedSnapshot(goal, reason, limitKind);
+    await options.journal.recordGoalState(randomUUID(), {
+      v: GOAL_STATE_VERSION,
+      cause: 'usage_limited',
+      snapshot: limitedSnapshot,
+    });
+    return limitedSnapshot;
+  };
+
+  const commitUsageLimitedSettle = (limitedSnapshot: GoalSnapshotV2): void => {
+    continuationQueued = false;
+    currentTurnFeedback = undefined;
+    snapshot = structuredClone(limitedSnapshot);
+    broadcast('usage_limited');
+  };
+
+  /**
+   * Settle a spent budget instead of minting a continuation.
+   *
+   * Runs from `queueContinuation`, the single point every autonomous
+   * continuation passes through, so one gate bounds every continuation loop
+   * at once -- turn cadence, verifier-rejection retries, checkpoint cycles,
+   * and families not yet discovered. User-driven turns never pass through
+   * here and are never blocked by the budget.
+   */
+  const stopForSpentBudget = () => {
+    void enqueue(async () => {
+      const goal = snapshot.goal;
+      if (
+        !goal ||
+        goal.status !== 'active' ||
+        !isGoalTokenBudgetSpent(goal) ||
+        currentPermit ||
+        pendingProposal ||
+        verificationAttempt ||
+        checkpointAttempt
+      ) {
+        return;
+      }
+      const reason = goalTokenBudgetReason(goal.tokenBudget);
+      let limitedSnapshot: GoalSnapshotV2;
+      try {
+        limitedSnapshot = await journalUsageLimitedSettle(
+          goal,
+          reason,
+          'token_budget',
+        );
+      } catch {
+        // A lost settle write must not strand an "active" Goal the gate will
+        // never continue: the window is spent either way, so show the stop
+        // and let the user's next action surface the persistence loss.
+        limitedSnapshot = usageLimitedSnapshot(goal, reason, 'token_budget');
+      }
+      if (
+        snapshot.goal?.goalId !== goal.goalId ||
+        snapshot.goal.revision !== goal.revision ||
+        snapshot.goal.status !== 'active' ||
+        currentPermit
+      ) {
+        return;
+      }
+      commitUsageLimitedSettle(limitedSnapshot);
+    }).catch(() => undefined);
+  };
+
   const withCheckpointStalls = (
     goal: NonNullable<GoalSnapshotV2['goal']>,
     checkpointStalls: number,
@@ -325,7 +448,7 @@ export function createGoalRuntime(
     }
   };
 
-  const flushContinuation = (cause?: GoalStateCause) => {
+  const flushContinuation = (cause?: GoalStateCause, windDown = false) => {
     if (
       !continuationQueued ||
       !host ||
@@ -352,6 +475,7 @@ export function createGoalRuntime(
     currentPermitHost = scheduledHost;
     currentTurnKey = `goal-runtime:${currentPermit.turnId}`;
     const startedPermit = structuredClone(currentPermit);
+    windDownTurnId = windDown ? startedPermit.turnId : undefined;
     snapshot = { ...snapshot, activity: 'running' };
     broadcast(cause);
     const handleStartFailure = () => {
@@ -393,6 +517,7 @@ export function createGoalRuntime(
       started = scheduledHost.startGoalTurn({
         permit: startedPermit,
         continuationContext,
+        ...(windDown ? { windDown } : {}),
         ...(verifierFeedback ? { verifierFeedback } : {}),
       });
     } catch {
@@ -411,6 +536,18 @@ export function createGoalRuntime(
       verificationAttempt ||
       checkpointAttempt
     ) {
+      return;
+    }
+    if (isGoalTokenBudgetSpent(snapshot.goal)) {
+      // A spent window buys one hand-off before it stops. The record marks
+      // the hand-off that finished; until then -- never granted, or granted
+      // and dropped by the host before the model saw it -- grant it.
+      if (snapshot.goal.windDownTurnId !== undefined) {
+        stopForSpentBudget();
+        return;
+      }
+      continuationQueued = true;
+      flushContinuation(cause, true);
       return;
     }
     continuationQueued = true;
@@ -500,7 +637,7 @@ export function createGoalRuntime(
       ...base,
       proposal: { ...attempt.proposal, status: 'blocked' },
       blockedPolicy:
-        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
+        'A blocked Goal is resumable. It may be accepted immediately only when the evidence shows that new user authority or a material user choice is required, or that an external state change is required, and no meaningful in-scope work remains. An infeasible blocker may also be accepted immediately, only when cited external_fact evidence shows the objective cannot be satisfied as written: it contradicts itself, it names a target that verifiably does not exist, or it requires an action outside what the tools can perform; reject it when the obstacle is difficulty, uncertainty, information the model could still obtain, or a preference to ask. An ordinary technical blocker requires evidence of the same cause from the current and two immediately preceding Goal turns. Difficulty, uncertainty, incomplete work, or a preference for clarification do not by themselves justify blocked.',
     };
   };
 
@@ -551,7 +688,10 @@ export function createGoalRuntime(
           ...snapshot.goal,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
-          lastReason: outcome.result.reason,
+          lastReason:
+            attempt.proposal.blockerKind === 'infeasible'
+              ? `${outcome.result.reason} ${GOAL_INFEASIBLE_NEXT_STEP}`
+              : outcome.result.reason,
         };
         const acceptedSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,
@@ -590,33 +730,16 @@ export function createGoalRuntime(
       }
 
       if (outcome.kind === 'usage_limited') {
-        const limitedSnapshot: GoalSnapshotV2 = {
-          v: GOAL_STATE_VERSION,
-          goal: {
-            ...snapshot.goal,
-            status: 'usage_limited',
-            activeTimeMs: elapsedActiveTime(snapshot.goal, now),
-            updatedAt: now,
-            lastReason: outcome.reason,
-            ...(outcome.limitKind === undefined
-              ? {}
-              : { limitKind: outcome.limitKind }),
-          },
-          activity: 'idle',
-        };
-        await options.journal.recordGoalState(randomUUID(), {
-          v: GOAL_STATE_VERSION,
-          cause: 'usage_limited',
-          snapshot: limitedSnapshot,
-        });
+        const limitedSnapshot = await journalUsageLimitedSettle(
+          snapshot.goal,
+          outcome.reason,
+          outcome.limitKind,
+        );
         if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
         verificationAttempt = undefined;
         pendingProposal = undefined;
-        continuationQueued = false;
         nextVerifierFeedback = undefined;
-        currentTurnFeedback = undefined;
-        snapshot = structuredClone(limitedSnapshot);
-        broadcast('usage_limited');
+        commitUsageLimitedSettle(limitedSnapshot);
         return undefined;
       }
 
@@ -824,32 +947,16 @@ export function createGoalRuntime(
     reason: string,
     limitKind?: GoalLimitKind,
   ): Promise<void> => {
-    const now = Date.now();
-    const limitedSnapshot: GoalSnapshotV2 = {
-      v: GOAL_STATE_VERSION,
-      goal: {
-        ...goal,
-        status: 'usage_limited',
-        activeTimeMs: elapsedActiveTime(goal, now),
-        updatedAt: now,
-        lastReason: reason,
-        ...(limitKind === undefined ? {} : { limitKind }),
-      },
-      activity: 'idle',
-    };
-    await options.journal.recordGoalState(randomUUID(), {
-      v: GOAL_STATE_VERSION,
-      cause: 'usage_limited',
-      snapshot: limitedSnapshot,
-    });
+    const limitedSnapshot = await journalUsageLimitedSettle(
+      goal,
+      reason,
+      limitKind,
+    );
     if (!isCurrentCheckpointAttempt(attempt) || !snapshot.goal) return;
     checkpointAttempt = undefined;
-    continuationQueued = false;
     // Keep nextVerifierFeedback: a rejection committed before this
     // checkpoint failure must still reach the resumed continuation.
-    currentTurnFeedback = undefined;
-    snapshot = structuredClone(limitedSnapshot);
-    broadcast('usage_limited');
+    commitUsageLimitedSettle(limitedSnapshot);
   };
 
   /**
@@ -1328,10 +1435,13 @@ export function createGoalRuntime(
             throw new Error(STALE_GOAL_TURN_MESSAGE);
           }
           const recordUuid = randomUUID();
+          const finishedWindDown = windDownTurnId === permit.turnId;
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
             tokensUsed: takeTurnTokens(permit.turnId),
+            ...(finishedWindDown ? { windDownTurnId: permit.turnId } : {}),
           });
+          if (finishedWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
             goal: nextGoal,
@@ -1537,6 +1647,7 @@ export function createGoalRuntime(
             request.action === 'edit'
               ? { recordId: recordUuid }
               : options.journal.getTranscriptCursor(),
+          tokenBudgetGrant,
         });
         const nextSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,

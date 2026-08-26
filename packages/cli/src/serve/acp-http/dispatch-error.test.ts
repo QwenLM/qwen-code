@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
 import { DaemonDrainingError } from '../server/session-archive.js';
+import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
 import {
   BridgeChannelQuarantinedError,
   InvalidSessionMetadataError,
@@ -23,6 +24,26 @@ describe('toRpcError', () => {
       message:
         'The daemon is draining and no longer accepts session maintenance.',
       data: { errorKind: 'daemon_draining' },
+    });
+  });
+
+  it('maps a missing standalone directory as retryable', () => {
+    const error = new StandaloneSessionServiceError(
+      'working_directory_missing',
+      'standalone-1',
+      'The standalone working directory is missing.',
+      true,
+    );
+    expect(toRpcError(error)).toEqual({
+      code: RPC.INTERNAL_ERROR,
+      message: error.message,
+      data: {
+        code: 'working_directory_missing',
+        errorKind: 'working_directory_missing',
+        httpStatus: 409,
+        retryable: true,
+        sessionId: 'standalone-1',
+      },
     });
   });
 
