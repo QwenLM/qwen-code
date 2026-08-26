@@ -544,36 +544,71 @@ export function invisibleTrackedPaths(repoRoot: string): string[] | null {
     // Unmeasured is uncertifiable, exactly like a listed bit.
     return null;
   }
-  // Sparse-checkout manages `S` bits itself: every out-of-cone tracked path
-  // is S-tagged BY DESIGN and absent from the worktree, so counting them
-  // made the oracle non-empty on every sample in every sparse repo — the
-  // candidate withheld and all three decided stops failed their visibility
-  // conjuncts on a completely clean materialized tree, for ever. An absent
-  // path holds no file to hide an edit in, so under sparse-checkout an
-  // S-tagged path counts only while it EXISTS on disk (a manually
-  // skip-worktree'd in-cone file keeps flagging). Outside sparse-checkout
-  // nothing is exempted — there `S` is always a user's hand, and an absent
-  // S path is a deletion the bit hides. The same reasoning never applies to
-  // the assume-unchanged family: git does not manage those bits for any
-  // feature, so an absent lowercase path IS a hidden deletion.
-  const sparse =
-    gitOpt('-C', repoRoot, 'config', '--get', 'core.sparseCheckout') === 'true';
-  const out: string[] = [];
+  const tagged: string[] = [];
   for (const rec of raw.toString('utf8').split('\0')) {
     // `<tag> <path>` records: lowercase tags are the assume-unchanged
-    // family, `S` is skip-worktree; every other tag leaves the path visible.
-    if (!/^[a-zS]/.test(rec)) continue;
-    const path = rec.slice(2);
-    if (sparse && rec.startsWith('S')) {
-      try {
-        lstatSync(join(repoRoot, path));
-      } catch {
-        continue;
-      }
-    }
-    out.push(path);
+    // family (and the COMBINED bits render lowercase `s`), `S` is
+    // skip-worktree alone; every other tag leaves the path visible.
+    if (/^[a-zS]/.test(rec)) tagged.push(rec.slice(2));
   }
-  return out;
+  if (tagged.length === 0) return tagged;
+  // Sparse-checkout manages visibility bits itself: every out-of-cone
+  // tracked path is S-tagged BY DESIGN and absent from the worktree (and an
+  // out-of-cone path that ALSO carries assume-unchanged renders `s`), so
+  // counting them wedged every sparse repo for ever — candidate withheld,
+  // all three decided stops failing their conjuncts on a clean materialized
+  // tree. An absent out-of-cone path holds no file to hide an edit in.
+  //
+  // The exemption asks GIT which paths its rules cover, at every step where
+  // a hand re-derivation went wrong in a review round:
+  // - the flag reads `--worktree --type=bool`, because `--get` alone echoes
+  //   the stored spelling (`yes`/`on`/`1` all failed a `=== 'true'`) and a
+  //   GLOBAL `core.sparseCheckout = true` inherited through HOME must not
+  //   turn the exemption on for a repo that is not sparse (R18-2);
+  // - membership comes from `git sparse-checkout check-rules`, not from the
+  //   bit or the tag's case: git versions differ on whether a MANUAL
+  //   `--skip-worktree` survives inside a cone (2.43 keeps it, 2.47
+  //   re-clears it), so "absent + S" is not "out of cone" (R18-3), and the
+  //   combined-bit `s` spelling is (R18-4);
+  // - only an ABSENT path can be exempt — an in-rules path absent with a
+  //   bit set is a deletion the bit hides, and a PRESENT out-of-rules path
+  //   can hold a hidden edit, so both keep flagging.
+  // A failed check-rules (an older git without the subcommand) exempts
+  // nothing: fail closed, at the cost of the pre-exemption wedge on that
+  // git, never a certification.
+  const sparse =
+    gitOpt(
+      '-C',
+      repoRoot,
+      'config',
+      '--worktree',
+      '--type=bool',
+      '--get',
+      'core.sparseCheckout',
+    ) === 'true';
+  if (!sparse) return tagged;
+  const absent = new Set(
+    tagged.filter((p) => {
+      try {
+        lstatSync(join(repoRoot, p));
+        return false;
+      } catch {
+        return true;
+      }
+    }),
+  );
+  if (absent.size === 0) return tagged;
+  let inRules: Set<string>;
+  try {
+    const out = gitWithInputRaw(
+      Buffer.from([...absent].map((p) => `${p}\0`).join(''), 'utf8'),
+      ['-C', repoRoot, 'sparse-checkout', 'check-rules', '-z'],
+    );
+    inRules = new Set(out.split('\0').filter((p) => p !== ''));
+  } catch {
+    return tagged;
+  }
+  return tagged.filter((p) => !(absent.has(p) && !inRules.has(p)));
 }
 
 /** One id for the whole state: order-independent, HEAD included. */
