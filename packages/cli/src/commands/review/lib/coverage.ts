@@ -565,18 +565,21 @@ const DIGEST_WINDOW_MS = 5000;
  * shape. The words `chunk N of M` anywhere else in a launch are not an
  * assignment: `buildRoleLaunchPrompt` renders a PR-controlled filename on
  * the identity line (`inertPath` preserves spaces, colons and digits), so a
- * file named `chunk 2 of 5.ts` carries the phrase, and an unanchored
- * first-match read it as the record's assignment — keying agents and causes
- * into the sealed ledger for a chunk the launch never owned. A filename
- * cannot forge the anchored shape: `inertPath` strips backticks, and no
- * PR-controlled text in a launch can open a line of its own.
+ * file named `chunk 2 of 5.ts` carries the phrase, and a first-match read
+ * would take it as the record's assignment. A filename cannot forge the
+ * anchored shape — `inertPath` strips backticks — but the assignment reads
+ * still take a match at index 0 only: a whole-diff launch legitimately
+ * carries NO identity line while it does append repo-controlled text
+ * (`buildWholeDiffBlock`'s `tail(rules)`, `foldFindings`' inlined findings
+ * on the write-failure fallback), and a standalone identity line inside
+ * that text is foreign, not an assignment.
  */
 export const CHUNK_RE = /^You are review agent `chunk (\d+) of (\d+)`/m;
 
 /** The chunk this agent owns, when it was launched to own one. */
 export function assignedChunk(rec: AgentRecord): number | null {
   const m = CHUNK_RE.exec(rec.launchPrompt);
-  return m ? Number(m[1]) : null;
+  return m && m.index === 0 ? Number(m[1]) : null;
 }
 
 /**
@@ -587,7 +590,7 @@ export function assignedChunk(rec: AgentRecord): number | null {
  */
 function assignedChunkTotal(rec: AgentRecord): number | null {
   const m = CHUNK_RE.exec(rec.launchPrompt);
-  return m ? Number(m[2]) : null;
+  return m && m.index === 0 ? Number(m[2]) : null;
 }
 
 /**
