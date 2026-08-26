@@ -2573,6 +2573,12 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('read_file')).toBe(false);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
       expect(await pm.isToolEnabled('agent')).toBe(false);
+      // The empty gate must also win against the `isToolEnabled`
+      // exemptions: `structured_output` bypasses the permissions.allow
+      // gate and `mcp__*` names bypass non-empty coreTools allowlists,
+      // so pin both as disabled under `[]` (#10065).
+      expect(await pm.isToolEnabled('structured_output')).toBe(false);
+      expect(await pm.isToolEnabled('mcp__server__tool')).toBe(false);
     });
 
     it('undefined coreTools keeps tools enabled', async () => {
