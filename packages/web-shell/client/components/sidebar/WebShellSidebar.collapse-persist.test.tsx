@@ -564,6 +564,29 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     );
     expect(pill?.textContent).toBe('Approval');
     expect(pill?.getAttribute('aria-label')).toBe('Waiting for approval');
+    expect(
+      pill?.classList.contains(sidebarStyles.sessionAttentionUserInput),
+    ).toBe(false);
+
+    active.sessions = [
+      makeSession('attention-approval-and-input', {
+        displayName: 'Needs approval and input',
+        isWaitingForPermission: true,
+        isWaitingForUserQuestion: true,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    pill = container.querySelector<HTMLElement>(
+      `.${sidebarStyles.sessionAttention}`,
+    );
+    expect(pill?.textContent).toBe('Approval');
+    expect(pill?.getAttribute('aria-label')).toBe('Waiting for approval');
+    expect(
+      pill?.classList.contains(sidebarStyles.sessionAttentionUserInput),
+    ).toBe(false);
 
     active.sessions = [
       makeSession('attention-input', {
