@@ -858,6 +858,50 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('keeps every sourced fixConstraint through the dedup merge', () => {
+    // R1-2 (#10168): the merge rules kept the most detailed description, the
+    // highest severity, and the source tags — never a fix-side field. Two
+    // agents reporting one root cause then lost the constraint only the less
+    // detailed copy recorded, before canonicalization ever saw the finding:
+    // the presence-keyed posting rule read "absent" on the deduplicated
+    // record and posted the unconstrained fix the field exists to prevent.
+    // The requirement has to stand at all three merging sites — Step 4's
+    // paragraph and the two pair-loop bullets that merge on their own
+    // wording — or a pair-merge ships green under the Step 4 pin while
+    // dropping the field the same way.
+    const body = skillBody();
+    expect(body).toContain(
+      '**Deduplication merges the fix side too: keep every sourced `fixConstraint` the merged findings carry.**',
+    );
+    expect(body).toContain('when two conflict, adjudicate explicitly');
+    expect(body).toContain(
+      'a sourced `fixConstraint` on either copy survives the merge',
+    );
+    expect(body).toContain(
+      'a sourced `fixConstraint` on any copy survives the merge',
+    );
+  });
+
+  it('carries the fixConstraint onto a Critical relocated into the body', () => {
+    // R1-1 (#10168): the carry rule was scoped to inline comment bodies, but
+    // a confirmed Critical whose locations all fail anchor resolution moves
+    // to `bodyCriticals` — the review body becomes its sole published copy,
+    // and a constraint the entry does not carry reaches no fixer. The
+    // requirement must stand at both sites the routing is spoken: the
+    // posting rule that performs the move, and the compose-state field that
+    // receives it.
+    const body = skillBody();
+    expect(body).toContain(
+      'a Critical carrying a `fixConstraint` that moves to `bodyCriticals`',
+    );
+    expect(body).toContain(
+      'appends the same constraint sentence to that entry, copied from the artifact',
+    );
+    expect(body).toContain(
+      'an entry whose finding carries a `fixConstraint` appends the constraint sentence',
+    );
+  });
+
   it('pins the fix-induced disposition and both of its operands', () => {
     // Attribution needs the DISPOSITION and the two-operand test together.
     // With only the disposition, a round folds any adjacent defect into an
