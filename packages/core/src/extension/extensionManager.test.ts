@@ -82,6 +82,20 @@ vi.mock('./github.js', async (importOriginal) => {
   };
 });
 
+// Wraps the real implementation (not a stub) so every existing scenario keeps
+// its actual validation behavior; only call-site wiring is asserted on.
+const mockAssertDirectorySymlinksAreSafe = vi.hoisted(() => vi.fn());
+vi.mock('./archive-safety.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./archive-safety.js')>();
+  mockAssertDirectorySymlinksAreSafe.mockImplementation(
+    actual.assertDirectorySymlinksAreSafe,
+  );
+  return {
+    ...actual,
+    assertDirectorySymlinksAreSafe: mockAssertDirectorySymlinksAreSafe,
+  };
+});
+
 vi.mock('./npm.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./npm.js')>();
   return {
@@ -238,6 +252,9 @@ describe('extension tests', () => {
     mockExtractArchiveFile.mockReset();
     mockDownloadFromNpmRegistry.mockReset();
     mockGit.revparse.mockResolvedValue('sample-commit');
+    // Clear call history only — mockImplementation (the real passthrough
+    // wired up in the vi.mock factory above) is set once at module load.
+    mockAssertDirectorySymlinksAreSafe.mockClear();
   });
 
   afterEach(() => {
@@ -604,6 +621,55 @@ describe('extension tests', () => {
         undefined,
       );
       expect(mockGit.clone).not.toHaveBeenCalled();
+    });
+
+    it('re-validates symlinks on the post-conversion tree when the old-Git archive fallback feeds a converter', async () => {
+      // The archive-fallback validation only ever proves
+      // sourceBeforeConversion safe. When conversion actually relocates the
+      // tree (unlike the AgentPlugins case above, which never does), the
+      // post-conversion directory must be re-validated rather than trusted
+      // on the strength of a check that ran against a different directory.
+      let fallbackDestination: string | undefined;
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+      mockDownloadPublicGitHubArchiveFallback.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          fallbackDestination = destination;
+          fs.writeFileSync(
+            path.join(destination, 'gemini-extension.json'),
+            JSON.stringify({
+              name: 'old-git-gemini-extension',
+              version: '1.0.0',
+            }),
+          );
+          return '0123456789abcdef0123456789abcdef01234567';
+        },
+      );
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      await manager.refreshCache();
+
+      const installed = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/example/gemini-extension',
+        },
+        async () => {},
+      );
+
+      expect(installed.name).toBe('old-git-gemini-extension');
+      expect(installed.installMetadata).toMatchObject({
+        originSource: 'Gemini',
+      });
+      expect(fallbackDestination).toBeDefined();
+      // Real Gemini conversion always copies to a fresh temp dir, so this
+      // only passes when the guard's
+      // `localSourcePath !== sourceBeforeConversion` half is reachable —
+      // gating it on `isAgentPlugin` as well (the bug this test guards
+      // against) would make it structurally unreachable, since AgentPlugins
+      // conversion never relocates the tree.
+      expect(mockAssertDirectorySymlinksAreSafe).toHaveBeenCalledWith(
+        expect.not.stringMatching(new RegExp(`^${fallbackDestination}$`)),
+        undefined,
+      );
     });
 
     it('keeps release installs ahead of the old-Git archive fallback', async () => {

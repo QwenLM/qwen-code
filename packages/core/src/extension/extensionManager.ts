@@ -2274,16 +2274,19 @@ export class ExtensionManager {
         if (installMetadata.type !== 'link') {
           if (
             archiveSymlinksValidated &&
-            isAgentPlugin &&
             localSourcePath !== sourceBeforeConversion
           ) {
             // archiveSymlinksValidated was only ever proven for
-            // sourceBeforeConversion. A converter that restructures the tree
-            // while preserving symlinks (today's Gemini/Claude/Qoder/
-            // AgentPlugins converters either leave it unchanged or
-            // materialize links, but that's not an invariant) would
-            // otherwise carry stale trust onto a directory that was never
-            // actually checked.
+            // sourceBeforeConversion. `isAgentPlugin` is true only when
+            // convertCompatibleExtension left the directory unchanged
+            // (extension-converter.ts's AgentPlugins branch never reassigns
+            // its output dir), so gating this on `isAgentPlugin` as well
+            // would make it unreachable: every branch that actually moves
+            // the tree sets a different originSource. A converter that
+            // restructures the tree while preserving symlinks (today's
+            // Gemini/Claude/Qoder converters materialize links instead, but
+            // that's not an invariant) would otherwise carry stale trust
+            // onto a directory that was never actually checked.
             await assertDirectorySymlinksAreSafe(localSourcePath, signal);
           }
           await copyExtension(localSourcePath, stagingPath, {
