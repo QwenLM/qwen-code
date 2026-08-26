@@ -179,6 +179,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
       writeFileSync(filePath, 'payload');
 
       vi.resetModules();
+      const closeSpy = vi.fn();
       vi.doMock('node:fs', async (importOriginal) => {
         const actual = await importOriginal<typeof import('node:fs')>();
         const modified = {
@@ -190,6 +191,56 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
               Object.create(Object.getPrototypeOf(stats)),
               stats,
               { ino: stats.ino + 1 },
+            );
+          }) as typeof actual.fstatSync,
+          // Pin the rejection-path fd close: without it every sync fallback
+          // refusal leaks the raw fd it opened for the identity re-check.
+          closeSync: ((fd: number) => {
+            closeSpy();
+            return actual.closeSync(fd);
+          }) as typeof actual.closeSync,
+        };
+        return { ...modified, default: modified };
+      });
+
+      try {
+        const { openSyncNoFollow: openSyncFallback } = await import(
+          './no-follow-open.js'
+        );
+        expect(() => openSyncFallback(filePath)).toThrow(
+          expect.objectContaining({ code: 'ELOOP' }),
+        );
+        expect(closeSpy).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.doUnmock('node:fs');
+        vi.resetModules();
+      }
+    },
+  );
+
+  itNoSymlink(
+    'refuses when the device identity changes between lstat and open',
+    async () => {
+      // dev half of the dev/ino identity re-check: inode numbers are unique
+      // only per-device, so a path swapped to a DIFFERENT device carrying a
+      // colliding inode (attacker-controlled second mount, bind mount) must
+      // still be refused. Mirrors the ino-mismatch variant with dev + 1.
+      const dir = makeTempDir();
+      const filePath = join(dir, 'data.txt');
+      writeFileSync(filePath, 'payload');
+
+      vi.resetModules();
+      vi.doMock('node:fs', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('node:fs')>();
+        const modified = {
+          ...actual,
+          constants: { ...actual.constants, O_NOFOLLOW: undefined },
+          fstatSync: ((fd: number) => {
+            const stats = actual.fstatSync(fd);
+            return Object.assign(
+              Object.create(Object.getPrototypeOf(stats)),
+              stats,
+              { dev: stats.dev + 1 },
             );
           }) as typeof actual.fstatSync,
         };
@@ -265,6 +316,88 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     }
   });
 
+  // The identity re-check must compare the opened fd against the PRE-OPEN
+  // lstat snapshot. These tests perturb every lstat AFTER the first call,
+  // so an implementation re-basing the comparison on a fresh post-open
+  // lstat would see the perturbed stats, mismatch the fd, and throw ELOOP;
+  // the correct single-lstat implementation opens and reads the payload.
+  function makeSnapshotMockFactory() {
+    return async (importOriginal: () => Promise<typeof import('node:fs')>) => {
+      const actual = await importOriginal();
+      let lstatCalls = 0;
+      const perturb = (stats: import('node:fs').Stats) =>
+        Object.assign(Object.create(Object.getPrototypeOf(stats)), stats, {
+          ino: stats.ino + 1,
+        });
+      const modified = {
+        ...actual,
+        constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        lstatSync: ((p: string) => {
+          const stats = actual.lstatSync(p);
+          lstatCalls += 1;
+          return lstatCalls === 1 ? stats : perturb(stats);
+        }) as typeof actual.lstatSync,
+        promises: {
+          ...actual.promises,
+          lstat: (async (p: string) => {
+            const stats = await actual.promises.lstat(p);
+            lstatCalls += 1;
+            return lstatCalls === 1 ? stats : perturb(stats);
+          }) as typeof actual.promises.lstat,
+        },
+      };
+      return { ...modified, default: modified };
+    };
+  }
+
+  it('compares the opened fd against the PRE-OPEN lstat snapshot (sync)', async () => {
+    const dir = makeTempDir();
+    const filePath = join(dir, 'data.txt');
+    writeFileSync(filePath, 'snapshot-payload');
+
+    vi.resetModules();
+    vi.doMock('node:fs', makeSnapshotMockFactory());
+
+    try {
+      const { openSyncNoFollow: openSyncFallback } = await import(
+        './no-follow-open.js'
+      );
+      const fd = openSyncFallback(filePath);
+      try {
+        expect(readFileSync(fd, 'utf8')).toBe('snapshot-payload');
+      } finally {
+        closeSync(fd);
+      }
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
+  it('compares the opened handle against the PRE-OPEN lstat snapshot (async)', async () => {
+    const dir = makeTempDir();
+    const filePath = join(dir, 'data.txt');
+    writeFileSync(filePath, 'snapshot-payload');
+
+    vi.resetModules();
+    vi.doMock('node:fs', makeSnapshotMockFactory());
+
+    try {
+      const { openNoFollow: openFallback } = await import('./no-follow-open.js');
+      const handle = await openFallback(filePath);
+      try {
+        const buffer = Buffer.alloc(16);
+        const { bytesRead } = await handle.read(buffer, 0, 16, 0);
+        expect(buffer.toString('utf8', 0, bytesRead)).toBe('snapshot-payload');
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
   it('refuses when the filesystem cannot prove identity (inode 0)', async () => {
     // FAT/exFAT/SMB volumes report ino 0 for every file; the comparison
     // would be vacuous there, so the helper fails closed (#8290 posture).
@@ -273,6 +406,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
     writeFileSync(filePath, 'payload');
 
     vi.resetModules();
+    const closeSpy = vi.fn();
     vi.doMock('node:fs', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs')>();
       const modified = {
@@ -286,6 +420,11 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
             { ino: 0 },
           );
         }) as typeof actual.lstatSync,
+        // Same rejection-path fd close pin as the identity-change test.
+        closeSync: ((fd: number) => {
+          closeSpy();
+          return actual.closeSync(fd);
+        }) as typeof actual.closeSync,
       };
       return { ...modified, default: modified };
     });
@@ -310,6 +449,7 @@ describe('openNoFollow without O_NOFOLLOW (Windows flag set)', () => {
       expect(error?.code).toBe(UNVERIFIABLE_IDENTITY_CODE);
       expect(error?.code).not.toBe('ELOOP');
       expect(isUnverifiableIdentityError(error)).toBe(true);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
     } finally {
       vi.doUnmock('node:fs');
       vi.resetModules();
