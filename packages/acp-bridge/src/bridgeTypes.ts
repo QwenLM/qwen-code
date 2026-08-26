@@ -252,6 +252,8 @@ export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';
 export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+export const CHANNEL_LIVENESS_META_KEY = 'qwen.daemon.channelLiveness';
+export const CHANNEL_LIVENESS_VERSION = 1 as const;
 export const ACTIVE_WORK_HEARTBEAT_META_KEY = 'qwen.daemon.activeWorkHeartbeat';
 export const ACTIVE_WORK_HEARTBEAT_VERSION = 1 as const;
 /** Reporting cadence the daemon asks for; the child may choose another value
@@ -281,11 +283,12 @@ export const ACTIVE_WORK_CLOSE_TIMEOUT_MS = 10_000;
 export function sessionCloseDrainBudgetMs(outerWaitMs: number): number {
   return Math.max(1, Math.floor(outerWaitMs * 0.8));
 }
-/** Bounds on a single snapshot. Generous next to any real deployment — they
- *  exist so a version-skewed or buggy child cannot make the daemon walk an
- *  unbounded structure per report, not to constrain legitimate use. A packet
- *  over either bound is discarded whole, like any other malformed one. */
+/** Bounds on a single snapshot. Generous next to any real deployment — it
+ *  exists so a version-skewed or buggy child cannot make the daemon walk an
+ *  unbounded Session list per report. An oversized packet is discarded whole. */
 export const ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS = 1024;
+/** Shared per-Session hold bound. Oversized snapshots are discarded whole;
+ *  oversized close refusals retain the Session without replacing its cache. */
 export const ACTIVE_WORK_MAX_SESSION_HOLDS = 1024;
 export const WORKTREE_MCP_DEFER_META_KEY = 'qwen.session.deferMcpDiscovery';
 
@@ -1264,7 +1267,24 @@ export type RuntimeMcpServerRemoveResult =
     }
   | { name: string; skipped: true; reason: 'not_present' };
 
-export interface AcpSessionBridge {
+export interface WorkspaceEventPublisher {
+  /**
+   * Workspace-level event fan-out for mutations that change daemon-wide state.
+   * Best-effort per session; closed buses silently skipped.
+   */
+  publishWorkspaceEvent(event: Omit<BridgeEvent, 'id' | 'v'>): void;
+}
+
+export interface WorkspaceEventBridge extends WorkspaceEventPublisher {
+  /**
+   * Union of every live session's `clientIds`. Used by workspace-level
+   * mutation routes to validate the optional `X-Qwen-Client-Id` header.
+   * Returns a snapshot — callers must not mutate.
+   */
+  knownClientIds(): ReadonlySet<string>;
+}
+
+export interface AcpSessionBridge extends WorkspaceEventBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
 
@@ -1568,19 +1588,6 @@ export interface AcpSessionBridge {
    * Returns `undefined` for unknown sessions.
    */
   getHeartbeatState(sessionId: string): BridgeHeartbeatState | undefined;
-
-  /**
-   * Workspace-level event fan-out for mutations that change daemon-wide state.
-   * Best-effort per session; closed buses silently skipped.
-   */
-  publishWorkspaceEvent(event: Omit<BridgeEvent, 'id' | 'v'>): void;
-
-  /**
-   * Union of every live session's `clientIds`. Used by workspace-level
-   * mutation routes to validate the optional `X-Qwen-Client-Id` header.
-   * Returns a snapshot — callers must not mutate.
-   */
-  knownClientIds(): ReadonlySet<string>;
 
   /**
    * Generic workspace-status query delegated through the live ACP channel.
@@ -1951,7 +1958,10 @@ export interface AcpSessionBridge {
   ): Promise<boolean>;
 
   /** Delete all persisted attachments after the session itself is deleted. */
-  deleteSessionAttachments(sessionId: string): Promise<void>;
+  deleteSessionAttachments(
+    sessionId: string,
+    options?: { assertCanCommit?: () => void },
+  ): Promise<void>;
 
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(

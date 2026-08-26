@@ -31,6 +31,7 @@ export type ModelGenerationConfig = Pick<
   ContentGeneratorConfig,
   | 'samplingParams'
   | 'timeout'
+  | 'streamIdleTimeoutMs'
   | 'maxRetries'
   | 'retryInitialDelayMs'
   | 'retryMaxDelayMs'

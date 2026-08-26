@@ -745,9 +745,12 @@ describe('updateConnectionFromDaemonEvent', () => {
   });
 
   it('carries limitKind through from the wire', () => {
-    // The client gates Resume on it: an evidence-limited Goal cannot be
-    // resumed, and dropping the field here leaves the UI offering a control the
-    // daemon always rejects.
+    // The mapper rebuilds the Goal record field-by-field after validating it,
+    // which is exactly how a newly added field gets dropped in silence. No
+    // client logic keys off `limitKind` any more (resumability is decided by
+    // status alone; the reducer resumes an evidence-limited Goal by restarting
+    // its window), but the wire copy is the client's only copy of the record
+    // -- the pin is that mapping does not quietly narrow it.
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
       {

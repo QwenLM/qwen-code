@@ -40,7 +40,7 @@ import type {
   GoalStateRecordPayloadV2,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
-import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 
 function branchTestRecord(
   uuid: string,
@@ -84,10 +84,10 @@ const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
 );
 vi.mock(
-  '../utils/tool-result-boundary-diagnostics.js',
+  '../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../tools/tool-result-boundary-diagnostics.js')
     >()),
     observeToolResultBoundary: boundaryObserveMock,
   }),

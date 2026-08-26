@@ -13,6 +13,11 @@
  * signals breaking wire changes (per the design doc).
  */
 
+import {
+  PERMISSION_MODES,
+  type PermissionMode,
+} from '../types/permission-mode.js';
+
 export type DaemonMode = 'http-bridge' | 'native';
 
 /** Goal v2 wire types, duplicated here to keep the SDK independent of Core. */
@@ -32,7 +37,9 @@ export interface TranscriptCursor {
 /**
  * Why the runtime stopped a Goal at one of its enumerated bounds. Set alongside
  * `lastReason` — that stays the human-readable half, this is the half a client
- * may key behavior off (an evidence-limited Goal cannot be resumed).
+ * may key behavior off. Resuming an evidence-limited Goal restarts its evidence
+ * window: the objective and revision carry over, but evidence recorded before
+ * the resume is no longer citable.
  */
 export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
 
@@ -1450,6 +1457,7 @@ export interface DaemonWorkspaceSessionInfo {
 export interface DaemonArchiveSessionsResult {
   archived: string[];
   alreadyArchived: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }
@@ -1457,6 +1465,7 @@ export interface DaemonArchiveSessionsResult {
 export interface DaemonUnarchiveSessionsResult {
   unarchived: string[];
   alreadyActive: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }
@@ -2782,14 +2791,8 @@ export interface SetSessionLanguageResult {
  * Order matters for diagnostic UIs that render the modes in the
  * advertised sequence.
  */
-export const DAEMON_APPROVAL_MODES = [
-  'plan',
-  'default',
-  'auto-edit',
-  'auto',
-  'yolo',
-] as const;
-export type DaemonApprovalMode = (typeof DAEMON_APPROVAL_MODES)[number];
+export const DAEMON_APPROVAL_MODES = PERMISSION_MODES;
+export type DaemonApprovalMode = PermissionMode;
 
 /**
  * Result body of `POST /session/:id/approval-mode`. `previous` and

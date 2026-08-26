@@ -23,7 +23,7 @@ import {
   observeToolResultBoundary,
   toolResultBoundaryArtifact,
   toolResultPartDiagnosticValues,
-} from '../utils/tool-result-boundary-diagnostics.js';
+} from '../tools/tool-result-boundary-diagnostics.js';
 import { compactToolResultDisplayForRecording } from '../utils/toolResultDisplayCompaction.js';
 import { stripRuntimeSnapshotPrefix } from '../utils/runtimeModelPrefix.js';
 import type { AttributionSnapshot } from './commitAttribution.js';

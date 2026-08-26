@@ -31,6 +31,21 @@ function readWorkflow(relativePath) {
 }
 
 describe('package scripts', () => {
+  it('does not couple Node REPL to Qwen release versions', () => {
+    const versionScript = readFileSync(
+      path.join(root, 'scripts/version.js'),
+      'utf8',
+    );
+
+    expect(versionScript).toContain(
+      'const workspacesToExclude = [\n' +
+        "  '@qwen-code/sdk',\n" +
+        "  '@qwen-code/mobile-mcp',\n" +
+        "  '@qwen-code/node-repl-mcp',\n" +
+        '];',
+    );
+  });
+
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
     const packageJson = readPackageJson();
 
@@ -539,6 +554,7 @@ describe('package scripts', () => {
       'packages/cli',
       'packages/channels/base',
       'packages/channels/dingtalk',
+      'packages/channels/dws',
       'packages/channels/feishu',
       'packages/channels/github',
       'packages/channels/qqbot',

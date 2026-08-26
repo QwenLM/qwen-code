@@ -203,6 +203,7 @@ import {
   buildBackgroundEntryLabel,
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
+  buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -558,23 +559,6 @@ function sameGoalPermit(
     left.revision === right.revision &&
     left.turnId === right.turnId
   );
-}
-
-function buildGoalContinuationParts(turn: AcpGoalTurn): Part[] {
-  return [
-    {
-      text: [
-        'Continue working on the active Goal.',
-        'Use get_goal for the authoritative objective and evidence state.',
-        "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-        'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-        `Runtime continuation context: ${turn.continuationContext}`,
-        ...(turn.verifierFeedback
-          ? [`Verifier feedback: ${turn.verifierFeedback}`]
-          : []),
-      ].join('\n'),
-    },
-  ];
 }
 
 async function claimGoalTurn(
@@ -6778,11 +6762,20 @@ export class Session implements SessionContext {
           const warningSuffix = compressed.warning
             ? `\n⚠️ ${compressed.warning}`
             : '';
+          // Estimated counts (#9309) get a '~' prefix so the notice doesn't
+          // read as an API-reported figure on a different scale than a later
+          // banner.
+          const formatCount = (count?: number, isEstimated?: boolean) =>
+            count === undefined
+              ? 'unknown'
+              : isEstimated
+                ? `~${count}`
+                : String(count);
           compressionDiagnostic =
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${compressed.originalTokenCount ?? 'unknown'} to ` +
-            `${compressed.newTokenCount ?? 'unknown'} tokens).` +
+            `${formatCount(compressed.originalTokenCount, compressed.originalTokenCountIsEstimated)} to ` +
+            `${formatCount(compressed.newTokenCount, compressed.newTokenCountIsEstimated)} tokens).` +
             warningSuffix;
         }
       } catch (compressionError) {
@@ -7375,17 +7368,27 @@ export class Session implements SessionContext {
         message.kind === 'text' ? message.message : message.displayText;
       let rawParts: Part[];
       try {
-        rawParts =
-          message.kind === 'text'
-            ? [{ text: message.message }]
-            : await withTimeoutSignal(
-                abortSignal,
-                MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
-                (signal) =>
-                  this.#resolvePrompt(message.content, signal, {
-                    onFullTurnModel: options.onFullTurnModel,
-                  }),
-              );
+        if (message.kind === 'text') {
+          rawParts = [{ text: message.message }];
+        } else {
+          rawParts = await withTimeoutSignal(
+            abortSignal,
+            MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
+            (signal) =>
+              this.#resolvePrompt(message.content, signal, {
+                deferBridgeConversions: true,
+              }),
+          );
+          // Keep local resolution bounded, then let media bridges own their
+          // longer timeouts while remaining cancellable by the real turn.
+          rawParts = await this.#applyBridgeConversionsIfNeeded(
+            rawParts,
+            abortSignal,
+            options.onFullTurnModel,
+          );
+          // Bridges report cancellation as skipped instead of throwing.
+          abortSignal.throwIfAborted();
+        }
       } catch (messageError) {
         if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
           return parts;
@@ -12092,6 +12095,7 @@ export class Session implements SessionContext {
     options: {
       promptLast?: boolean;
       onFullTurnModel?: (model: string) => boolean;
+      deferBridgeConversions?: boolean;
     } = {},
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
@@ -12103,6 +12107,14 @@ export class Session implements SessionContext {
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
+    const finish = (parts: Part[]) =>
+      options.deferBridgeConversions
+        ? parts
+        : this.#applyBridgeConversionsIfNeeded(
+            parts,
+            abortSignal,
+            options.onFullTurnModel,
+          );
 
     const parts = message.map((part) => {
       switch (part.type) {
@@ -12247,19 +12259,11 @@ export class Session implements SessionContext {
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
-      return this.#applyBridgeConversionsIfNeeded(
-        partsToSend,
-        abortSignal,
-        options.onFullTurnModel,
-      );
+      return finish(partsToSend);
     }
 
     if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
-      return this.#applyBridgeConversionsIfNeeded(
-        [...partsToSend, ...extensionParts, ...mcpServerParts],
-        abortSignal,
-        options.onFullTurnModel,
-      );
+      return finish([...partsToSend, ...extensionParts, ...mcpServerParts]);
     }
 
     // Construct the initial part of the query for the LLM
@@ -12366,11 +12370,7 @@ export class Session implements SessionContext {
       ? [...referenceParts, promptPart]
       : [promptPart, ...referenceParts];
 
-    return this.#applyBridgeConversionsIfNeeded(
-      processedQueryParts,
-      abortSignal,
-      options.onFullTurnModel,
-    );
+    return finish(processedQueryParts);
   }
 
   async #applyBridgeConversionsIfNeeded(
@@ -12431,8 +12431,9 @@ export class Session implements SessionContext {
 
     if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
       try {
-        await this.messageEmitter.emitAgentMessage(
+        await this.messageEmitter.emitVisionBridgeNotice(
           formatVisionBridgeNotice(bridgeResult),
+          bridgeResult,
         );
       } catch (error) {
         debugLogger.debug(

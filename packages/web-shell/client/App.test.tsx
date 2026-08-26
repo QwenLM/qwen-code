@@ -10,6 +10,7 @@ import {
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionShellTaskStatus,
   type DaemonSessionStatsStatus,
+  type DaemonSessionTaskStatus,
   type DaemonSettingDescriptor,
   type DaemonSkillToggleMutation,
   type DaemonWorkspaceGitStatus,
@@ -371,7 +372,12 @@ const {
       streamingState: 'idle' as StreamingState,
       sessionHasActivePrompt: false,
       blocks: [] as unknown[],
+      liveBlocks: undefined as unknown[] | undefined,
+      snapshotCallOptions: [] as Array<
+        { structuralOnly?: boolean } | undefined
+      >,
       messages: [] as unknown[],
+      streamingTailMessages: undefined as unknown[] | undefined,
       queuedPromptHoldHistory: [] as boolean[],
       queuedPromptStreamingState: 'idle',
       queuedPromptSessionHasActivePrompt: false,
@@ -400,6 +406,7 @@ const {
         isResponding?: boolean;
         transcriptReloadPaused?: boolean;
         activeTurnStartedAt?: number;
+        transcriptBlockCount?: number;
         terminalBackgroundShellTaskIds?: ReadonlySet<string>;
       } | null,
       latestBtwMessageProps: null as {
@@ -422,7 +429,7 @@ const {
         | ((error: unknown, fallback: string) => void)
         | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
-      backgroundTasks: [] as DaemonSessionMonitorTaskStatus[],
+      backgroundTasks: [] as DaemonSessionTaskStatus[],
       latestMonitorDetailsOnOpen: null as
         | ((tool: {
             callId: string;
@@ -585,12 +592,23 @@ vi.mock('@qwen-code/sdk/daemon', () => {
 });
 
 vi.mock('./hooks/useMessages', () => ({
+  projectStreamingTailMessages: () => testState.streamingTailMessages,
   useMessages: () => testState.messages,
   useMessagesFromBlocks: () => testState.messages,
 }));
 
 vi.mock('./hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptSnapshot: () => ({ blocks: testState.blocks }),
+  useAnimationFrameTranscriptSnapshot: (options?: {
+    structuralOnly?: boolean;
+  }) => {
+    testState.snapshotCallOptions.push(options);
+    return {
+      blocks:
+        options?.structuralOnly === true
+          ? testState.blocks
+          : (testState.liveBlocks ?? testState.blocks),
+    };
+  },
 }));
 
 vi.mock('./hooks/useBackgroundTasks', () => ({
@@ -4201,6 +4219,162 @@ describe('artifact panel fullscreen', () => {
 });
 
 describe('environment agent tasks', () => {
+  it('reports transcript agent tasks without enabling the overview panel', async () => {
+    testState.messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'agent',
+            title: 'Agent: Explore code',
+            status: 'completed',
+            args: {
+              description: 'Explore code',
+              run_in_background: false,
+            },
+            rawOutput: {
+              type: 'task_execution',
+              status: 'completed',
+            },
+          },
+        ],
+      },
+    ];
+    const onAgentTasksChange = vi.fn();
+
+    renderApp({
+      header: { items: [] },
+      environmentPanel: { items: [] },
+      onAgentTasksChange,
+    });
+    await flush();
+
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([
+      expect.objectContaining({
+        id: 'agent-call',
+        label: 'Explore code',
+        status: 'completed',
+        isBackgrounded: false,
+      }),
+    ]);
+  });
+
+  it('reports merged live tasks without duplication and clears for a new session', async () => {
+    const onAgentTasksChange = vi.fn();
+    const props = {
+      header: { items: [] as const },
+      environmentPanel: { items: [] as const },
+      onAgentTasksChange,
+    };
+    const { rerender } = renderApp(props);
+    await flush();
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([]);
+
+    testState.messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'agent',
+            title: 'Agent: Review code',
+            status: 'in_progress',
+            args: {
+              description: 'Review code',
+              subagent_type: 'reviewer',
+              run_in_background: true,
+            },
+          },
+        ],
+      },
+    ];
+    testState.backgroundTasks = [
+      {
+        kind: 'agent',
+        id: 'agent-task',
+        label: 'reviewer: Review code',
+        description: 'Review code',
+        subagentType: 'reviewer',
+        status: 'running',
+        startTime: 1,
+        runtimeMs: 1,
+        isBackgrounded: true,
+        toolUseId: 'agent-call',
+      },
+    ];
+    rerender(props);
+    await flush();
+
+    const mergedTasks = onAgentTasksChange.mock.lastCall?.[0];
+    expect(mergedTasks).toHaveLength(1);
+    expect(mergedTasks?.[0]).toMatchObject({
+      id: 'agent-task',
+      label: 'Review code',
+      status: 'running',
+      toolUseId: 'agent-call',
+    });
+
+    const mergeCallCount = onAgentTasksChange.mock.calls.length;
+    testState.messages = [...testState.messages];
+    testState.backgroundTasks = testState.backgroundTasks.map((task) => ({
+      ...task,
+      runtimeMs: 3_001,
+      ...(task.kind === 'agent'
+        ? {
+            stats: { totalTokens: 42, toolUses: 3, durationMs: 3_001 },
+            recentActivities: [
+              { name: 'read', description: 'Read App.tsx', at: 3_000 },
+            ],
+          }
+        : {}),
+    }));
+    rerender(props);
+    await flush();
+    expect(onAgentTasksChange).toHaveBeenCalledTimes(mergeCallCount);
+
+    mockConnection.sessionId = 'session-2';
+    testState.ownerVersion += 1;
+    testState.messages = [];
+    testState.backgroundTasks = [];
+    rerender(props);
+    await flush();
+
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it('reports the current snapshot after the callback is reattached', async () => {
+    testState.backgroundTasks = [
+      {
+        kind: 'agent',
+        id: 'agent-task',
+        label: 'Review code',
+        description: 'Review code',
+        status: 'running',
+        startTime: 1,
+        runtimeMs: 1,
+        isBackgrounded: true,
+      },
+    ];
+    const onAgentTasksChange = vi.fn();
+    const props = { onAgentTasksChange };
+    const { rerender } = renderApp(props);
+    await flush();
+    expect(onAgentTasksChange).toHaveBeenCalledTimes(1);
+
+    rerender({});
+    await flush();
+    rerender(props);
+    await flush();
+
+    expect(onAgentTasksChange).toHaveBeenCalledTimes(2);
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([
+      expect.objectContaining({ id: 'agent-task', status: 'running' }),
+    ]);
+  });
+
   it('keeps a completed foreground agent from the session transcript', () => {
     const messages = [
       {
@@ -4861,7 +5035,10 @@ beforeEach(() => {
   testState.streamingState = 'idle';
   testState.sessionHasActivePrompt = false;
   testState.blocks = [];
+  testState.liveBlocks = undefined;
+  testState.snapshotCallOptions = [];
   testState.messages = [];
+  testState.streamingTailMessages = undefined;
   testState.queuedPromptHoldHistory = [];
   testState.queuedPromptStreamingState = 'idle';
   testState.queuedPromptSessionHasActivePrompt = false;
@@ -5053,59 +5230,61 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('App compact mode', () => {
-  async function toggleCompactMode() {
+describe('App live transcript boundary', () => {
+  it('renders and copies the projected live tail over the structural baseline', async () => {
+    const writeText = vi
+      .spyOn(navigator.clipboard, 'writeText')
+      .mockResolvedValue();
+    testState.prompt = '/copy';
+    testState.blocks = [{ id: 'assistant', text: 'a' }];
+    testState.liveBlocks = [
+      { id: 'assistant', text: 'ab' },
+      { id: 'tool', kind: 'tool' },
+    ];
+    testState.messages = [{ id: 'assistant', role: 'assistant', content: 'a' }];
+    testState.streamingTailMessages = [
+      { id: 'assistant', role: 'assistant', content: 'ab' },
+    ];
+
+    renderApp();
+    await flush();
+
+    expect(testState.latestMessageListProps?.messages).toMatchObject([
+      { id: 'assistant', role: 'assistant', content: 'ab' },
+    ]);
+    expect(testState.latestMessageListProps?.transcriptBlockCount).toBe(2);
+    expect(testState.snapshotCallOptions).toContainEqual({
+      structuralOnly: true,
+    });
+    expect(testState.snapshotCallOptions).toContainEqual(undefined);
+
+    await clickSubmit(document.body);
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith('ab'));
+  });
+});
+
+describe('App global shortcuts', () => {
+  it('keeps Ctrl+O suppressed after the compact toggle retirement', async () => {
+    renderApp();
+
+    const event = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      ctrlKey: true,
+      key: 'o',
+    });
     await act(async () => {
-      window.dispatchEvent(
-        new KeyboardEvent('keydown', {
-          bubbles: true,
-          cancelable: true,
-          ctrlKey: true,
-          key: 'o',
-        }),
-      );
+      window.dispatchEvent(event);
       await Promise.resolve();
     });
-  }
 
-  it('uses Ctrl+O and persists the existing workspace setting', async () => {
-    renderApp();
-    await toggleCompactMode();
-
-    expect(settingsSetValue).toHaveBeenCalledWith(
+    // The toggle is gone, but the key must stay inert: without the global
+    // preventDefault the browser's Open File dialog fires on Ctrl+O.
+    expect(event.defaultPrevented).toBe(true);
+    expect(settingsSetValue).not.toHaveBeenCalledWith(
       'workspace',
       'ui.compactMode',
-      true,
-    );
-
-    await toggleCompactMode();
-    expect(settingsSetValue).toHaveBeenLastCalledWith(
-      'workspace',
-      'ui.compactMode',
-      false,
-    );
-  });
-
-  it('restores compact mode from the workspace setting', async () => {
-    testState.settings = [
-      {
-        key: 'ui.compactMode',
-        type: 'boolean',
-        label: 'Compact mode',
-        category: 'UI',
-        requiresRestart: false,
-        default: false,
-        values: { effective: true, workspace: true },
-      },
-    ];
-    renderApp();
-
-    await toggleCompactMode();
-
-    expect(settingsSetValue).toHaveBeenCalledWith(
-      'workspace',
-      'ui.compactMode',
-      false,
+      expect.anything(),
     );
   });
 });
@@ -5527,6 +5706,29 @@ describe('App conversation indicator keep-alive (#9487)', () => {
 });
 
 describe('App shell command queueing', () => {
+  it('skips prompt preparation for locally handled slash and shell commands', async () => {
+    const prepareSubmit = vi.fn(async () => undefined);
+    const onThemeChange = vi.fn();
+    renderApp({ prepareSubmit, onThemeChange });
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('/help');
+      testState.latestChatEditorProps?.onSubmit('/theme dark');
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!echo hello');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+          'echo hello',
+        );
+      });
+    });
+
+    expect(onThemeChange).toHaveBeenCalledWith('dark');
+    expect(prepareSubmit).not.toHaveBeenCalled();
+  });
+
   it('lazily creates a session for ! shell commands in a new task', async () => {
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockImplementation(async () => {
@@ -12074,6 +12276,428 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('prepares direct transport before the submit gate and session event', async () => {
+    const order: string[] = [];
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 8,
+        text: 'resolved',
+        reference: { id: 'resolved', kind: 'file' },
+      },
+    ];
+    const prepareSubmit = vi.fn(async () => {
+      order.push('prepare');
+      return { prompt: 'resolved', inputAnnotations };
+    });
+    const onSubmitBefore = vi.fn(async ({ prompt }: { prompt: string }) => {
+      order.push(`gate:${prompt}`);
+    });
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      async (prompt: string) => {
+        order.push(`transport:${prompt}`);
+      },
+    );
+    const onSessionChange = vi.fn();
+    const { container } = renderApp({
+      prepareSubmit,
+      onSubmitBefore,
+      onSessionChange,
+    });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+      inputAnnotations: [],
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'resolved',
+      expect.objectContaining({ inputAnnotations }),
+    );
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'submit',
+      sessionId: 'session-1',
+      prompt: 'resolved',
+      queued: false,
+    });
+    expect(order).toEqual(['prepare', 'gate:resolved', 'transport:resolved']);
+  });
+
+  it('keeps the draft when preparation removes all prompt content', async () => {
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: '',
+      inputAnnotations: [],
+    });
+    const { container } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('hello');
+  });
+
+  it('keeps the original payload when preparation resolves without a result', async () => {
+    const prepareSubmit = vi.fn().mockResolvedValue(undefined);
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: 'file:hello', kind: 'file', value: 'hello' },
+      },
+    ];
+    testState.inputAnnotations = inputAnnotations;
+    const { container } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+      inputAnnotations,
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'hello',
+      expect.objectContaining({ inputAnnotations }),
+    );
+  });
+
+  it('inherits the original annotations when preparation returns only a prompt', async () => {
+    const prepareSubmit = vi.fn().mockResolvedValue({ prompt: 'rewritten' });
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: 'file:hello', kind: 'file', value: 'hello' },
+      },
+    ];
+    testState.inputAnnotations = inputAnnotations;
+    const { container } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'rewritten',
+      expect.objectContaining({ inputAnnotations }),
+    );
+  });
+
+  it('cancels a direct submission when the session owner changes while preparing', async () => {
+    // No session yet: without the post-prepare staleness check the stale
+    // submit would run the host gate and allocate a session before the
+    // later guards run.
+    mockConnection.sessionId = undefined;
+    let finishPrepare: (() => void) | undefined;
+    const prepareSubmit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishPrepare = resolve;
+        }),
+    );
+    const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+    const { container, rerender } = renderApp({
+      prepareSubmit,
+      onSubmitBefore,
+    });
+    await flush();
+
+    await clickSubmit(container);
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/project-2';
+      testState.ownerVersion += 1;
+      rerender({ prepareSubmit, onSubmitBefore });
+    });
+    await act(async () => {
+      finishPrepare?.();
+      await Promise.resolve();
+    });
+
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('hello');
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
+  });
+
+  it('keeps the draft when prepareSubmit rejects', async () => {
+    const prepareSubmit = vi.fn().mockRejectedValue(new Error('host failed'));
+    const { container } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('hello');
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
+  });
+
+  it('classifies the retry payload from the prepared prompt, not the raw text', async () => {
+    const preparedAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 8,
+        text: 'prepared',
+        reference: { id: 'prepared', kind: 'file' },
+      },
+    ];
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: 'fix the CI pipeline',
+      inputAnnotations: preparedAnnotations,
+    });
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    testState.prompt = '/fix-ci';
+    await clickSubmit(container);
+
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: '/fix-ci',
+      inputAnnotations: [],
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'fix the CI pipeline',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-rewritten',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+      ];
+      rerender({ prepareSubmit });
+    });
+
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'fix the CI pipeline',
+      expect.objectContaining({
+        optimisticUserMessage: false,
+        retry: true,
+        inputAnnotations: preparedAnnotations,
+      }),
+    );
+  });
+
+  it('disarms retry state when preparation turns the submit into a slash command', async () => {
+    const prepareSubmit = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        prompt: '/compact foo',
+        inputAnnotations: [],
+      });
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'hello',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    testState.prompt = 'world';
+    await clickSubmit(container);
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      '/compact foo',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-slash-prepared',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+      ];
+      rerender({ prepareSubmit });
+    });
+
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+  });
+
+  it('keeps attachment retry state disarmed after a slash-prepared submit', async () => {
+    const images = [{ data: 'Ym1w', media_type: 'image/bmp' }];
+    const files = [{ name: 'app.log', media_type: 'text/plain', text: 'log' }];
+    const prepareSubmit = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        prompt: '/compact foo',
+        inputAnnotations: [],
+      });
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit(
+        'hello',
+        images,
+        files,
+        editorCommit,
+      );
+    });
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'hello',
+      expect.objectContaining({ images, files, retry: undefined }),
+    );
+
+    testState.prompt = 'world';
+    await clickSubmit(container);
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      '/compact foo',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-slash-prepared-attachments',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+      ];
+      rerender({ prepareSubmit });
+    });
+
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+  });
+
+  it('keeps a stashed turn-error retry disarmed after a slash-prepared submit', async () => {
+    const retrySend = deferred<void>();
+    const prepareSubmit = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({
+        prompt: '/compact foo',
+        inputAnnotations: [],
+      });
+    mockSessionActions.sendPrompt
+      .mockResolvedValueOnce(undefined)
+      .mockReturnValueOnce(retrySend.promise)
+      .mockResolvedValueOnce(undefined);
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-1',
+        },
+      ];
+      rerender({ prepareSubmit });
+    });
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+    });
+    await vi.waitFor(() => {
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(2);
+    });
+    const retryOptions = mockSessionActions.sendPrompt.mock.calls[1]?.[1];
+    act(() => {
+      retryOptions?.onAdmissionStarted?.();
+      retryOptions?.onAdmitted?.();
+    });
+    await act(async () => {
+      retrySend.reject(
+        Object.assign(new Error('retried turn failed'), {
+          _daemonTurnError: true,
+        }),
+      );
+      await Promise.resolve();
+    });
+    await flush();
+
+    testState.prompt = 'world';
+    await clickSubmit(container);
+    await flush();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      '/compact foo',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-1',
+          promptId: 'prompt-1',
+        },
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-2',
+          promptId: 'prompt-2',
+        },
+      ];
+      rerender({ prepareSubmit });
+    });
+    await flush();
+
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+  });
+
   it('does not attribute prompt admission when the active owner is unknown', async () => {
     mockConnection.workspaceCwd = undefined;
     const { container } = renderApp();
@@ -15013,6 +15637,56 @@ describe('App session callbacks', () => {
     expect(editorClear).not.toHaveBeenCalled();
   });
 
+  it('freezes a normalized prepared submission before it enters the queue', async () => {
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 6,
+        text: 'queued',
+        reference: { id: 'queued', kind: 'file' },
+      },
+    ];
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: 'queued target',
+      inputAnnotations,
+    });
+    const onSessionChange = vi.fn();
+    const { container, rerender } = renderApp({
+      prepareSubmit,
+      onSessionChange,
+    });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit, onSessionChange });
+    });
+    testState.prompt = 'queued';
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'queued',
+      inputAnnotations: [],
+    });
+    expect(rawEnqueuePrompt).toHaveBeenCalledWith(
+      'queued target',
+      undefined,
+      undefined,
+      undefined,
+      inputAnnotations,
+    );
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'submit',
+      sessionId: 'session-1',
+      prompt: 'queued target',
+      queued: true,
+    });
+  });
+
   it('cancels an approved queued submission after an A-to-B-to-A owner cycle', async () => {
     let approve: (() => void) | undefined;
     const onSubmitBefore = vi.fn(
@@ -15140,6 +15814,96 @@ describe('App session callbacks', () => {
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();
     expect(editorCommit).not.toHaveBeenCalled();
+  });
+
+  it('cancels a queued submission when the owner changes while preparing', async () => {
+    let finishPrepare: (() => void) | undefined;
+    const prepareSubmit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishPrepare = resolve;
+        }),
+    );
+    const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+    const { container, rerender } = renderApp({
+      prepareSubmit,
+      onSubmitBefore,
+    });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit, onSubmitBefore });
+    });
+    testState.prompt = 'queued';
+    await clickSubmit(container);
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/project-2';
+      testState.ownerVersion += 1;
+      rerender({ prepareSubmit, onSubmitBefore });
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-1';
+      mockConnection.workspaceCwd = '/tmp/project';
+      testState.ownerVersion += 1;
+      rerender({ prepareSubmit, onSubmitBefore });
+    });
+    await act(async () => {
+      finishPrepare?.();
+      await Promise.resolve();
+    });
+
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('queued');
+  });
+
+  it('cancels queued submissions when prepareSubmit rejects', async () => {
+    const prepareSubmit = vi.fn().mockRejectedValue(new Error('host failed'));
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit });
+    });
+    testState.prompt = 'queued';
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('queued');
+  });
+
+  it('keeps the draft when preparation empties a queued prompt', async () => {
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: '',
+      inputAnnotations: [],
+    });
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit });
+    });
+    testState.prompt = 'queued';
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('queued');
   });
 
   it('keeps goal controls on the control plane instead of prompt admission', async () => {
@@ -19670,6 +20434,71 @@ describe('App prompt send failure retry', () => {
     warn.mockRestore();
   });
 
+  it('reuses the first prepared payload without preparing retry again', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 8,
+        text: 'resolved',
+        reference: { id: 'resolved', kind: 'file' },
+      },
+    ];
+    const prepareSubmit = vi.fn().mockResolvedValueOnce({
+      prompt: 'resolved',
+      inputAnnotations,
+    });
+    const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user' }];
+      return firstSend.promise;
+    });
+    const { container } = renderApp({ prepareSubmit, onSubmitBefore });
+    await flush();
+
+    await clickSubmit(container);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'resolved',
+      expect.objectContaining({ inputAnnotations }),
+    );
+    testState.messages = [{ id: 'u1', role: 'user', content: 'resolved' }];
+    await act(async () => {
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+      inputAnnotations: [],
+    });
+    expect(onSubmitBefore).toHaveBeenNthCalledWith(1, {
+      sessionId: 'session-1',
+      prompt: 'resolved',
+    });
+    expect(onSubmitBefore).toHaveBeenNthCalledWith(2, {
+      sessionId: 'session-1',
+      prompt: 'resolved',
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'resolved',
+      expect.objectContaining({
+        inputAnnotations,
+        optimisticUserMessage: false,
+      }),
+    );
+  });
+
   it('marks and retries a failed prompt while an active Goal is known', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     mockConnection.goalState = activeGoalSnapshot('keep working');
@@ -19798,6 +20627,57 @@ describe('App prompt send failure retry', () => {
           }),
         ],
         optimisticUserMessage: false,
+      }),
+    );
+  });
+
+  it('does not resend a failed-prompt retry with daemon retry semantics', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: 'prepared hello',
+      inputAnnotations: [],
+    });
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user' }];
+      return firstSend.promise;
+    });
+    renderApp({ prepareSubmit });
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    testState.messages = [
+      { id: 'u1', role: 'user', content: 'prepared hello' },
+    ];
+    await act(async () => {
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
+      await Promise.resolve();
+    });
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    // The failed prompt was never admitted, so no user-message record exists
+    // for it; daemon retry semantics skip that record and would drop the
+    // turn's user message from the transcript. The retry must reuse the
+    // prepared payload without forwarding `retry` to the daemon.
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'prepared hello',
+      expect.objectContaining({
+        optimisticUserMessage: false,
+        retry: undefined,
       }),
     );
   });

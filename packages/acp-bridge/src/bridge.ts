@@ -133,7 +133,10 @@ import {
   ACTIVE_WORK_HEARTBEAT_META_KEY,
   ACTIVE_WORK_HEARTBEAT_VERSION,
   ACTIVE_WORK_HOLD_CATEGORIES,
+  ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_STALE_INTERVALS,
+  CHANNEL_LIVENESS_META_KEY,
+  CHANNEL_LIVENESS_VERSION,
   clampActiveWorkIntervalMs,
   type ActiveWorkHeartbeatCapabilityV1,
   type ActiveWorkHoldCategory,
@@ -162,6 +165,11 @@ import {
   isValidTrustedModelPrompt,
   sessionCloseDrainBudgetMs,
 } from './bridgeTypes.js';
+import {
+  startChannelLivenessMonitor,
+  type ChannelLivenessMonitor,
+  type ChannelLivenessFailure,
+} from './channel-liveness.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
   BridgeSession,
@@ -965,6 +973,7 @@ interface ChannelInfo {
     /** Highest snapshot sequence applied; guards against reordering only. */
     seq: number;
   };
+  channelLiveness?: ChannelLivenessMonitor;
   handshakeComplete: boolean;
 }
 
@@ -2505,14 +2514,10 @@ const CHAT_RECORD_UUID_RE =
  * operator-controlled), just typo defense.
  */
 const MAX_EVENT_RING_SIZE = 1_000_000;
-// Bd1yh: per-permission-request wall clock. Without this, an agent
-// calling `requestPermission` while no SSE subscriber is connected
-// would hang the per-session FIFO promptQueue forever (the prompt
-// can't complete, every subsequent prompt is blocked behind it).
-// 5 minutes is generous for "human reads UI, decides, clicks
-// approve" while still bounded enough to recover from a wedged
-// state. Configurable via `BridgeOptions.permissionResponseTimeoutMs`.
-const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
+// Human permissions wait indefinitely by default and still resolve through
+// voter cancellation, session cancellation, and shutdown. Operators can set
+// `BridgeOptions.permissionResponseTimeoutMs` when they need a wall-clock cap.
+const DEFAULT_PERMISSION_TIMEOUT_MS = 0;
 // Bd1z5: per-session cap on pending permissions in flight. A chatty
 // agent making rapid `requestPermission` calls would otherwise grow
 // `pendingPermissions` unboundedly — each entry is a UUID + closure
@@ -3133,10 +3138,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // The child is done with it; only local teardown remains.
         return true;
       }
-      // Refused: adopt the hold set it handed back so the cache reflects the
-      // reason we are backing off rather than the stale set that sent us here.
+      // Refused: adopt a bounded hold set so the cache reflects the reason we
+      // are backing off rather than the stale set that sent us here.
       const holds = response['holds'];
-      if (Array.isArray(holds)) {
+      if (
+        Array.isArray(holds) &&
+        holds.length <= ACTIVE_WORK_MAX_SESSION_HOLDS
+      ) {
         const adopted = new Map<string, ActiveWorkHoldCategory>();
         for (const hold of holds) {
           if (typeof hold !== 'object' || hold === null) continue;
@@ -3281,6 +3289,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     context?: string,
   ): Promise<void> {
     ci.isDying = true;
+    ci.channelLiveness?.stop();
     await ci.channel.kill().catch((err) => {
       writeStderrLine(
         `qwen serve: channel kill failed${context ? ` (${context})` : ''}: ${String(err)}`,
@@ -3432,6 +3441,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (!channelShouldReapWhenIdle(ci) || !hasNoChannelWork(ci)) return;
     ci.emptyReapPending = false;
     ci.isDying = true;
+    ci.channelLiveness?.stop();
     await ci.channel.kill().catch(() => {
       /* best-effort — channel.exited handler still runs */
     });
@@ -4131,6 +4141,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         info.transportFailed = true;
         info.transportFailureCode = safeTransportFailureCode(error);
         info.isDying = true;
+        info.channelLiveness?.stop();
         clearInFlightExtensionRefreshes(info.connection);
       };
       void channel.transportFailed?.then(
@@ -4176,6 +4187,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // the SIGTERM grace window — even if a concurrent `spawnOrAttach`
       // has already reassigned `channelInfo` to a fresh channel.
       void channel.exited.then((exitInfo) => {
+        info.channelLiveness?.stop();
         clearInFlightExtensionRefreshes(info.connection);
         if (channelInfo === info) cancelIdleTimer();
         if (info.workspaceMcpDiscoveryTimer) {
@@ -4295,6 +4307,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // registered, so failure paths (init throw, timeout, late
       // shutdown) only need to mark dying + kill — the handler does
       // the alive-set cleanup when the OS reaps the child.
+      let channelLivenessNegotiated = false;
       try {
         await telemetry.withSpan(
           'channel.initialize',
@@ -4315,6 +4328,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     },
                     [CHANNEL_STARTUP_PROFILE_META_KEY]: {
                       v: CHANNEL_STARTUP_PROFILE_VERSION,
+                    },
+                    [CHANNEL_LIVENESS_META_KEY]: {
+                      v: CHANNEL_LIVENESS_VERSION,
                     },
                     [PRIVATE_PARENT_CAPABILITY_META_KEY]:
                       privateParentCapability,
@@ -4364,6 +4380,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 seq: 0,
               };
             }
+            const channelLivenessCapability = isRecord(response._meta)
+              ? response._meta[CHANNEL_LIVENESS_META_KEY]
+              : undefined;
+            channelLivenessNegotiated =
+              isRecord(channelLivenessCapability) &&
+              channelLivenessCapability['v'] === CHANNEL_LIVENESS_VERSION;
             try {
               const attributes = getChannelStartupProfileAttributes(
                 response,
@@ -4418,6 +4440,38 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // caller.
       channelInfo = info;
       info.handshakeComplete = true;
+      if (channelLivenessNegotiated) {
+        const failChannelLiveness = (error: ChannelLivenessFailure) => {
+          if (info.isDying || !aliveChannels.has(info)) return;
+          markTransportFailed(error);
+          telemetry.event('channel.liveness_failed', {
+            'qwen-code.daemon.acp_channel.id': info.id,
+            'qwen-code.daemon.channel.session_count': info.sessionIds.size,
+            'qwen-code.daemon.channel.transport_error_code': error.code,
+          });
+          writeStderrLine(
+            `qwen serve: channel liveness failed (${error.code}); killing channel`,
+          );
+          if (info.channel.transportGuard) {
+            info.channel.transportGuard.fail(error);
+          } else {
+            void killChannelWithLog(info, 'channel liveness failure');
+          }
+        };
+        info.channelLiveness = startChannelLivenessMonitor({
+          probe: (nonce) =>
+            info.connection.extMethod(SERVE_STATUS_EXT_METHODS.channelPing, {
+              v: CHANNEL_LIVENESS_VERSION,
+              nonce,
+            }),
+          onFailure: failChannelLiveness,
+          isActive: () =>
+            channelInfo === info &&
+            aliveChannels.has(info) &&
+            !info.isDying &&
+            !shuttingDown,
+        });
+      }
       telemetry.metrics?.channelLifecycle('spawn');
       return info;
     })();
@@ -4559,6 +4613,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // stays set until OS reap so `killAllSync` mid-SIGTERM still
           // finds a target (BkUyD invariant).
           ci.isDying = true;
+          ci.channelLiveness?.stop();
           await ci.channel.kill().catch(() => {
             /* best-effort — channel.exited handler still runs */
           });
@@ -6574,7 +6629,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       restoreAskUserQuestionHint !== true ||
       // Nobody can answer the re-hung question without an attached client;
       // internal restores (boot rehydrate, keepalive, sub-session resume)
-      // pass no clientId and must not fabricate a 5-minute permission wait.
+      // pass no clientId and must not fabricate an unbounded permission wait.
       requestedClientId === undefined ||
       options.suppressRestorePrompt === true ||
       // Admission-time busy check: pendingPromptCount flips synchronously
@@ -11162,11 +11217,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return await entry.attachments.remove(attachmentId);
     },
 
-    async deleteSessionAttachments(sessionId) {
+    async deleteSessionAttachments(sessionId, options) {
       const store =
         byId.get(sessionId)?.attachments ??
         new SessionAttachmentStore(opts.sessionAttachmentsRoot, sessionId);
-      await store.delete();
+      await store.delete(options);
     },
 
     removePendingPrompt(sessionId, promptId, context) {
@@ -12565,6 +12620,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
       }
       for (const info of channels) {
+        info.channelLiveness?.stop();
         try {
           info.channel.killSync();
         } catch {
@@ -12605,7 +12661,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // `ensureChannel` past the gate would still see the dying
         // state and not attach).
         const channels = Array.from(aliveChannels);
-        for (const ci of channels) ci.isDying = true;
+        for (const ci of channels) {
+          ci.isDying = true;
+          ci.channelLiveness?.stop();
+        }
         // Drain mediator pending state before clearing byId so awaiting
         // `requestPermission` callers unwind. Each `forgetSession`
         // settles all matching pending as session_closed; the bridge's

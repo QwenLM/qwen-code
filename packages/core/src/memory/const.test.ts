@@ -11,7 +11,7 @@ import {
   setGeminiMdFilename,
   getCurrentGeminiMdFilename,
   getAllGeminiMdFilenames,
-} from './const.js';
+} from '../utils/memory-constants.js';
 import {
   setGeminiMdFilename as setToolGeminiMdFilename,
   getCurrentGeminiMdFilename as getToolCurrentGeminiMdFilename,

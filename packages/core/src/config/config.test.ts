@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -14,6 +15,7 @@ import {
   APPROVAL_MODES,
   APPROVAL_MODE_INFO,
   MCPServerConfig,
+  deriveConfig,
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
@@ -23,7 +25,7 @@ import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionServic
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
+import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../utils/memory-constants.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -65,8 +67,8 @@ import {
   type HookExecutionRequest,
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
-import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
-import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
+import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
+import type { LoadServerHierarchicalMemoryOptions } from '../memory/memoryDiscovery.js';
 import {
   readAutoMemoryIndexWithStats,
   readUserAutoMemoryIndexWithStats,
@@ -185,7 +187,7 @@ vi.mock('../tools/tool-registry', () => {
   return { ToolRegistry: ToolRegistryMock };
 });
 
-vi.mock('../utils/memoryDiscovery.js', () => ({
+vi.mock('../memory/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
     fileCount: 0,
@@ -286,7 +288,7 @@ vi.mock('../tools/web-fetch', () => ({
 vi.mock('../tools/read-many-files', () => ({
   ReadManyFilesTool: createToolMock('read_many_files'),
 }));
-vi.mock('../memory/const.js', () => ({
+vi.mock('../utils/memory-constants.js', () => ({
   setGeminiMdFilename: vi.fn(),
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
@@ -1644,17 +1646,246 @@ describe('Server Config (config.ts)', () => {
     }
   });
 
-  describe('FileReadCache isolation', () => {
-    it('returns a distinct cache for child Configs created via Object.create', () => {
-      // Subagent / scoped-agent / fork construction all use
-      // `Object.create(parent)`, which does NOT run field initializers.
-      // Without explicit handling the child would resolve fileReadCache
-      // through the prototype chain back to the parent's instance, so a
-      // subagent's ReadFile would see the parent's recorded reads and
-      // return file_unchanged placeholders for files the subagent has
-      // never received in its own transcript.
+  describe('derived Config ownership', () => {
+    it('applies public getter overrides without mutating the parent', () => {
       const parent = new Config(baseParams);
-      const child = Object.create(parent) as Config;
+      const child = deriveConfig(parent, {
+        getCwd: () => '/tmp/derived',
+      });
+
+      expect(child.getCwd()).toBe('/tmp/derived');
+      expect(parent.getCwd()).toBe(baseParams.targetDir);
+      expect(Object.getPrototypeOf(child)).toBe(parent);
+    });
+
+    it('ignores undefined getter overrides', () => {
+      const parent = new Config(baseParams);
+      const child = deriveConfig(parent, { getCwd: undefined });
+
+      expect(child.getCwd()).toBe(parent.getCwd());
+      expect(Object.hasOwn(child, 'getCwd')).toBe(false);
+    });
+
+    it('prohibits inherited session-writer lifecycle access', async () => {
+      const parent = new Config(baseParams);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const assertCanStartTurn = vi.fn().mockResolvedValue(undefined);
+      (
+        parent as unknown as {
+          chatRecordingService: {
+            hasWriteOwnership: () => boolean;
+            beginClose: () => void;
+            close: () => Promise<void>;
+            assertCanStartTurn: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        hasWriteOwnership: () => true,
+        beginClose,
+        close,
+        assertCanStartTurn,
+      };
+      const child = deriveConfig(parent);
+
+      expect(child.hasSessionWriteOwnership()).toBe(false);
+      expect(() => child.setSessionWriterReclaimPolicy('never')).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      expect(() => child.setSessionWriterTakeoverPolicy('certified')).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      expect(() => child.closeSessionWriter()).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      await expect(child.assertCanStartTurn()).resolves.toBeUndefined();
+      expect(assertCanStartTurn).not.toHaveBeenCalled();
+      expect(beginClose).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(parent.hasSessionWriteOwnership()).toBe(true);
+    });
+
+    it('prohibits initializing a derived Config', async () => {
+      const parent = new Config(baseParams);
+      const child = deriveConfig(parent);
+
+      await expect(child.initialize()).rejects.toThrow(
+        'Derived Configs cannot be initialized',
+      );
+    });
+
+    it('prohibits canonical lifecycle operations on derived Configs', async () => {
+      const parent = new Config(baseParams);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const teamCleanup = vi.fn().mockResolvedValue(undefined);
+      const arenaCleanup = vi.fn().mockResolvedValue(undefined);
+      const internal = parent as unknown as {
+        chatRecordingService: {
+          hasWriteOwnership: () => boolean;
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+        teamManager: { cleanup: () => Promise<void> };
+        arenaManager: { cleanup: () => Promise<void> };
+      };
+      internal.chatRecordingService = {
+        hasWriteOwnership: () => false,
+        finalize,
+        flush,
+      };
+      internal.teamManager = { cleanup: teamCleanup };
+      internal.arenaManager = { cleanup: arenaCleanup };
+      const child = deriveConfig(parent);
+
+      expect(() => child.startNewSession()).toThrow(
+        'Derived Configs cannot start new sessions',
+      );
+      await expect(
+        child.relocateWorkingDirectory(baseParams.targetDir),
+      ).rejects.toThrow('Derived Configs cannot relocate working directories');
+      await expect(child.cleanupTeamRuntime()).rejects.toThrow(
+        'Derived Configs cannot clean up Team runtime',
+      );
+      await expect(child.cleanupArenaRuntime(true)).rejects.toThrow(
+        'Derived Configs cannot clean up Arena runtime',
+      );
+
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      expect(teamCleanup).not.toHaveBeenCalled();
+      expect(arenaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('preserves ownership guards through nested prototype wrappers', async () => {
+      const parent = new Config(baseParams);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const teamCleanup = vi.fn().mockResolvedValue(undefined);
+      const arenaCleanup = vi.fn().mockResolvedValue(undefined);
+      const internal = parent as unknown as {
+        initialized: boolean;
+        toolRegistry: ToolRegistry;
+        chatRecordingService: {
+          hasWriteOwnership: () => boolean;
+          beginClose: () => void;
+          close: () => Promise<void>;
+          finalize: () => void;
+          flush: () => Promise<void>;
+        };
+        teamManager: { cleanup: () => Promise<void> };
+        arenaManager: { cleanup: () => Promise<void> };
+      };
+      internal.initialized = true;
+      internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      internal.chatRecordingService = {
+        hasWriteOwnership: () => false,
+        beginClose,
+        close,
+        finalize,
+        flush,
+      };
+      internal.teamManager = { cleanup: teamCleanup };
+      internal.arenaManager = { cleanup: arenaCleanup };
+      const wrapped = Object.create(deriveConfig(parent)) as Config;
+
+      expect(wrapped.hasSessionWriteOwnership()).toBe(false);
+      expect(() => wrapped.closeSessionWriter()).toThrow(
+        'Session write ownership could not be verified.',
+      );
+      expect(() => wrapped.startNewSession()).toThrow(
+        'Derived Configs cannot start new sessions',
+      );
+      await expect(
+        wrapped.relocateWorkingDirectory(baseParams.targetDir),
+      ).rejects.toThrow('Derived Configs cannot relocate working directories');
+      await expect(wrapped.cleanupTeamRuntime()).rejects.toThrow(
+        'Derived Configs cannot clean up Team runtime',
+      );
+      await expect(wrapped.cleanupArenaRuntime(true)).rejects.toThrow(
+        'Derived Configs cannot clean up Arena runtime',
+      );
+      await expect(
+        wrapped.shutdown({ shutdownTelemetry: false }),
+      ).resolves.toBeUndefined();
+
+      expect(stop).not.toHaveBeenCalled();
+      expect(beginClose).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      expect(teamCleanup).not.toHaveBeenCalled();
+      expect(arenaCleanup).not.toHaveBeenCalled();
+    });
+
+    it('prohibits derived approval changes from mutating parent permissions', () => {
+      const parent = new Config(baseParams);
+      const restoreDangerousRules = vi.fn();
+      const internal = parent as unknown as {
+        approvalMode: ApprovalMode;
+        permissionManager: {
+          stripDangerousRulesForAutoMode: () => void;
+          restoreDangerousRules: () => void;
+        };
+      };
+      internal.approvalMode = ApprovalMode.AUTO;
+      internal.permissionManager = {
+        stripDangerousRulesForAutoMode: vi.fn(),
+        restoreDangerousRules,
+      };
+      const child = deriveConfig(parent);
+
+      expect(() => child.setApprovalMode(ApprovalMode.DEFAULT)).toThrow(
+        'Derived Configs cannot change approval mode',
+      );
+      expect(restoreDangerousRules).not.toHaveBeenCalled();
+      expect(parent.getApprovalMode()).toBe(ApprovalMode.AUTO);
+    });
+
+    it('does not shut down resources inherited from the parent', async () => {
+      const parent = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const beginClose = vi.fn();
+      const close = vi.fn().mockResolvedValue(undefined);
+      const internal = parent as unknown as {
+        initialized: boolean;
+        toolRegistry: ToolRegistry;
+        chatRecordingService: {
+          finalize: () => void;
+          flush: () => Promise<void>;
+          beginClose: () => void;
+          close: () => Promise<void>;
+        };
+      };
+      internal.initialized = true;
+      internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      internal.chatRecordingService = {
+        finalize,
+        flush,
+        beginClose,
+        close,
+      };
+      const child = deriveConfig(parent);
+
+      await expect(
+        child.shutdown({ shutdownTelemetry: false }),
+      ).resolves.toBeUndefined();
+
+      expect(stop).not.toHaveBeenCalled();
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+      expect(beginClose).not.toHaveBeenCalled();
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('returns a distinct file-read cache for derived Configs', () => {
+      const parent = new Config(baseParams);
+      const child = deriveConfig(parent);
 
       const parentCache = parent.getFileReadCache();
       const childCache = child.getFileReadCache();
@@ -1670,7 +1901,7 @@ describe('Server Config (config.ts)', () => {
           ino: 100,
           mtimeMs: 1_000_000,
           size: 42,
-        } as unknown as import('node:fs').Stats,
+        } as unknown as Stats,
         { full: true, cacheable: true },
       );
 
@@ -1679,9 +1910,6 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('returns the same cache instance on repeated getter calls within one Config', () => {
-      // Sanity: the lazy own-property initialization in
-      // getFileReadCache() must not allocate a fresh cache on every
-      // call — recorded entries would vanish between operations.
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
     });
@@ -2078,10 +2306,10 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('MemoryPressureMonitor isolation', () => {
-    it('returns a distinct monitor for child Configs created via Object.create', async () => {
+    it('returns a distinct monitor for child Configs created via deriveConfig', async () => {
       const parent = new Config(baseParams);
       await parent.initialize({ skipGeminiInitialization: true });
-      const child = Object.create(parent) as Config;
+      const child = deriveConfig(parent);
 
       const parentMonitor = parent.getMemoryPressureMonitor();
       const childMonitor = child.getMemoryPressureMonitor();
@@ -2258,7 +2486,7 @@ describe('Server Config (config.ts)', () => {
       process.env['QWEN_MEMORY_PRESSURE_SOFT'] = '0.9';
       process.env['QWEN_MEMORY_PRESSURE_HARD'] = '0.95';
       process.env['QWEN_MEMORY_PRESSURE_CRITICAL'] = '0.97';
-      const child = Object.create(parent) as Config;
+      const child = deriveConfig(parent);
       mockMemoryRatio(0.35);
 
       expect(child.getMemoryPressureMonitor()?.getPressureLevel()).toBe('soft');
@@ -2726,7 +2954,7 @@ describe('Server Config (config.ts)', () => {
     it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
       const config = new Config({ ...baseParams, chatRecording: true });
       const canonical = config.getGoalRuntime();
-      const child = Object.create(config) as Config;
+      const child = deriveConfig(config);
 
       expect(() => child.getGoalRuntime()).toThrow(
         GoalPersistenceUnavailableError,
@@ -4516,6 +4744,20 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    it('registers report_findings even in headless sessions — review run depends on it', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.REPORT_FINDINGS);
+    });
+
     describe('isArtifactEnabled', () => {
       const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
       const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
@@ -5181,7 +5423,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5232,7 +5473,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5266,7 +5506,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5823,7 +6062,6 @@ describe('Server Config (config.ts)', () => {
       vi.mocked(createContentGenerator).mockResolvedValue({
         generateContent: vi.fn(),
         generateContentStream: vi.fn(),
-        countTokens: vi.fn(),
         embedContent: vi.fn(),
       } as unknown as ContentGenerator);
 
@@ -5905,7 +6143,7 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async () => {
+  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async (ctx) => {
     const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     const tempDir = await mkdtemp(path.join(os.tmpdir(), 'auto-memory-cache-'));
     const projectRoot = path.join(tempDir, 'project');
@@ -5922,6 +6160,32 @@ describe('Server Config (config.ts)', () => {
     await mkdir(path.dirname(userIndexPath), { recursive: true });
     await writeFile(managedIndexPath, '# managed memory\n', 'utf-8');
     await writeFile(userIndexPath, '# user memory\n', 'utf-8');
+
+    // FileReadCache keys entries by dev:ino. On volumes where distinct
+    // files report the same inode, the two index records collide under one
+    // key and the second record overwrites the first's fingerprint, so the
+    // managed index would be checked against the user index's stats. The
+    // seeding this test pins only makes sense where inode identity is real;
+    // skip where the volume cannot provide it.
+    const [managedStats, userStats] = await Promise.all([
+      stat(managedIndexPath),
+      stat(userIndexPath),
+    ]);
+    if (
+      Number(managedStats.ino) === 0 ||
+      Number(userStats.ino) === 0 ||
+      (managedStats.dev === userStats.dev && managedStats.ino === userStats.ino)
+    ) {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+      ctx.skip();
+      return;
+    }
 
     try {
       const config = new Config({
@@ -8007,6 +8271,244 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it.each([
+      { label: 'an alias', entry: 'ListFiles' },
+      { label: 'the canonical name', entry: ToolNames.LS },
+      { label: 'a path specifier', entry: `${ToolNames.LS}(/src)` },
+      { label: 'the Read meta-category', entry: 'Read' },
+    ])(
+      'registers list_directory when covered by permissions.allow via $label (#9827)',
+      async ({ entry }) => {
+        const settingsAllow = [entry];
+        const config = new Config({
+          ...baseParams,
+          coreTools: undefined,
+          permissions: {
+            allow: settingsAllow,
+            registryAllowList: settingsAllow,
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.LS);
+      },
+    );
+
+    it('does not register list_directory when an active permissions.allow does not cover it (#9827)', async () => {
+      // `edit` does not cover list_directory (it is not the Read
+      // meta-category), so the opt-in gate must stay closed even though the
+      // allowlist is active.
+      const settingsAllow = [ToolNames.EDIT];
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('registers list_directory when covered only by an ask rule under an active allowlist (#9827)', async () => {
+      // Probe scenario: allow:['edit'] activates the allowlist, and
+      // ask:['ListFiles'] is the ONLY coverage for list_directory.
+      // `PermissionManager.isToolEnabled('list_directory')` returns true
+      // (membership counts ask rules — see isCoveredByAllowOrAskRule), so
+      // the opt-in gate must offer the tool to registerLazy too; otherwise
+      // the schema is never sent, the ask rule can never fire, and arriving
+      // calls fail TOOL_NOT_REGISTERED.
+      const settingsAllow = [ToolNames.EDIT];
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: settingsAllow,
+          registryAllowList: settingsAllow,
+          ask: ['ListFiles'],
+        },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it('does not register list_directory for an ask rule when the allowlist is inactive (#9827)', async () => {
+      // Ask coverage only gates registration while the registry allowlist
+      // is active; without it list_directory stays opt-in, so an ask rule
+      // alone must not change the default-disabled behaviour.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { ask: ['ListFiles'] },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('registers list_directory when covered only by a merged (non-settings) allow rule under an active allowlist (#9827)', async () => {
+      // CLI-shaped wiring: settings `permissions.allow: ['Edit']` activates
+      // the allowlist, while `--allowed-tools ListFiles` (or the SDK
+      // `allowedTools` param) lands only in the merged allow set
+      // (`getPermissionsAllow()`), never in `getRegistryAllowList()`.
+      // `PermissionManager.isToolEnabled('list_directory')` returns true
+      // because it counts the merged set, so the opt-in gate must offer the
+      // tool to registerLazy too — otherwise it silently vanishes from
+      // `/tools` and the model request while arriving calls fail
+      // TOOL_NOT_REGISTERED.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [ToolNames.EDIT, 'ListFiles'],
+          registryAllowList: [ToolNames.EDIT],
+        },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it('does not register list_directory when only the merged allow set covers it but no settings allow rule activates the allowlist (#9827)', async () => {
+      // `--allowed-tools ListFiles` alone reaches `getPermissionsAllow()`
+      // but not `getRegistryAllowList()`; only settings
+      // `permissions.allow` rules can ACTIVATE the allowlist, so without
+      // one the opt-in gate must stay closed and the default-disabled
+      // behaviour holds.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { allow: ['ListFiles'], registryAllowList: [] },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('does not register list_directory when the settings allow list holds only empty entries (#9827)', async () => {
+      // `permissions.allow: ['']` is schema-valid but degenerate.
+      // `PermissionManager.initialize` computes activation through
+      // `parseRules`, which filters empty entries before parsing, so the
+      // allowlist stays inactive; the opt-in gate must agree — otherwise
+      // the ask branch would register list_directory while the permission
+      // system reports the allowlist inactive.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [''],
+          registryAllowList: [''],
+          ask: ['ListFiles'],
+        },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('does not crash when permissions arrays hold non-string entries (#9827)', async () => {
+      // Settings load performs no element-type validation (the schema
+      // declares only `type: 'array'`), and `PermissionManager.initialize`'s
+      // `parseRules` tolerates falsy entries like `[null]` in the same
+      // settings file. The opt-in gate scans the same arrays during
+      // `createToolRegistry`, so it must skip non-string entries the same
+      // way instead of throwing a `TypeError` and crashing startup.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [null, ToolNames.EDIT] as unknown as string[],
+          registryAllowList: [null, ToolNames.EDIT] as unknown as string[],
+          ask: [undefined, 'ListFiles'] as unknown as string[],
+        },
+      });
+      await expect(config.initialize()).resolves.not.toThrow();
+      // The valid entries still take effect: the settings rule activates
+      // the allowlist and the ask rule (after the non-string entry is
+      // skipped) covers list_directory.
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it('keeps the gate closed when the settings allow list holds only non-string entries (#9827)', async () => {
+      // `[null]` alone carries no valid rule: `parseRules` filters it out,
+      // so `PermissionManager.initialize` reports the allowlist inactive —
+      // the opt-in gate must agree (and must not throw on the entry).
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [null] as unknown as string[],
+          registryAllowList: [null] as unknown as string[],
+          ask: ['ListFiles'],
+        },
+      });
+      await expect(config.initialize()).resolves.not.toThrow();
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
@@ -8117,6 +8619,42 @@ describe('Server Config (config.ts)', () => {
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
       ]);
+    });
+
+    // The leader-only property of request_shutdown is "enforced by absence":
+    // a teammate's registry never contains it, so the call cannot be formed.
+    // That only holds if the skip actually fires, which nothing asserted.
+    it('registers request_shutdown for a leader but not for a subagent', async () => {
+      const config = new Config({
+        ...baseParams,
+        agentTeamEnabled: true,
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const leaderNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(leaderNames).toContain(ToolNames.REQUEST_SHUTDOWN);
+
+      (registerToolMock as Mock).mockClear();
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const subagentNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(subagentNames).not.toContain(ToolNames.REQUEST_SHUTDOWN);
+      // The rest of the team surface still registers — only the leader-only
+      // control tool is withheld.
+      expect(subagentNames).toContain(ToolNames.SEND_MESSAGE);
     });
 
     it('registers web_search when enabled with a usable env-declared backend', async () => {
@@ -8305,6 +8843,122 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0] === ToolNames.GREP,
       );
       expect(wasGrepToolRegistered).toBe(false);
+    });
+
+    // ── #9827: permissions.allow must shrink the tool schemas sent to the model ──
+    it('registers only allowlisted tools when permissions.allow is set (#9827)', async () => {
+      const settingsAllow = [
+        'ReadFile',
+        'WriteFile',
+        'Edit',
+        'Grep',
+        'Glob',
+        'ListFiles',
+        'Shell',
+        'WebFetch',
+      ];
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        // Mirrors the CLI wiring: merged allow list + the settings-sourced
+        // subset that activates the registry allowlist.
+        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registered = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+
+      // Allowlisted tools are registered
+      expect(registered).toContain(ToolNames.READ_FILE);
+      expect(registered).toContain(ToolNames.WRITE_FILE);
+      expect(registered).toContain(ToolNames.EDIT);
+      expect(registered).toContain(ToolNames.GREP);
+      expect(registered).toContain(ToolNames.GLOB);
+      expect(registered).toContain(ToolNames.SHELL);
+      expect(registered).toContain(ToolNames.WEB_FETCH);
+
+      // Unlisted built-ins are NOT registered, so their schemas are never
+      // sent to the model. The reporter's grammar-breaking tools must all
+      // be absent; non-core built-ins are gated too.
+      expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
+      expect(registered).not.toContain(ToolNames.UPDATE_GOAL);
+      expect(registered).not.toContain(ToolNames.GET_GOAL);
+      expect(registered).not.toContain(ToolNames.LOOP_WAKEUP);
+      expect(registered).not.toContain(ToolNames.READ_MCP_RESOURCE);
+      expect(registered).not.toContain(ToolNames.AGENT);
+      expect(registered).not.toContain(ToolNames.TODO_WRITE);
+      expect(registered).not.toContain(ToolNames.SKILL);
+      // monitor stays registered: the "Shell" allow rule covers it so the
+      // shell tool cannot be bypassed by switching to monitor.
+      expect(registered).toContain(ToolNames.MONITOR);
+    });
+
+    it('registers the full built-in set when no permissionsAllow is set (#9827 regression guard)', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registered = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+
+      // Without an allowlist nothing is gated at registry level
+      expect(registered).toContain(ToolNames.SEND_MESSAGE);
+      expect(registered).toContain(ToolNames.UPDATE_GOAL);
+      expect(registered).toContain(ToolNames.AGENT);
+      expect(registered).toContain(ToolNames.TODO_WRITE);
+      expect(registered).toContain(ToolNames.READ_FILE);
+    });
+
+    it('permissions.allow keeps the --exclude-tools (deny) path working (#9827)', async () => {
+      const settingsAllow = ['ReadFile', 'Shell'];
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        permissions: {
+          allow: settingsAllow,
+          registryAllowList: settingsAllow,
+          deny: ['Shell'],
+        },
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registered = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+
+      expect(registered).toContain(ToolNames.READ_FILE);
+      // deny wins over allowlist membership
+      expect(registered).not.toContain(ToolNames.SHELL);
+      expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
     });
 
     describe('with minified tool class names', () => {
@@ -9862,29 +10516,6 @@ describe('visibleTools', () => {
   });
 });
 
-describe('computer use settings', () => {
-  const baseParams: ConfigParameters = {
-    targetDir: '.',
-    debugMode: false,
-    model: 'test-model',
-    cwd: '.',
-    chatRecording: false,
-  };
-
-  it('exposes the configured idle timeout', () => {
-    const config = new Config({
-      ...baseParams,
-      computerUseIdleTimeoutMs: 12_345,
-    });
-    expect(config.getComputerUseIdleTimeoutMs()).toBe(12_345);
-  });
-
-  it('leaves the idle timeout undefined when not configured', () => {
-    const config = new Config(baseParams);
-    expect(config.getComputerUseIdleTimeoutMs()).toBeUndefined();
-  });
-});
-
 describe('BaseLlmClient Lifecycle', () => {
   const MODEL = 'gemini-pro';
   const SANDBOX: SandboxConfig = {
@@ -10815,7 +11446,7 @@ describe('Model Switching and Config Updates', () => {
 
   it('isolates active Todo reminders inherited through child Configs', () => {
     const parent = Object.create(Config.prototype) as Config;
-    const child = Object.create(parent) as Config;
+    const child = deriveConfig(parent);
     parent.setActiveTodoReminder('parent-prompt', 'parent work');
 
     child.setActiveTodoReminder('child-prompt', 'child work');

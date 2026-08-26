@@ -143,25 +143,49 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/pem-certificate-blocks.ts',
+    {
+      reason:
+        'The certificate-loader oracle child inherits the daemon process environment so it uses the same OpenSSL configuration as channel workers, while stripping NODE_OPTIONS that can alter eval input or corrupt its protocol.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/run-qwen-serve.ts',
     {
       reason:
-        'The serve entry point owns daemon bootstrap, feature flags, child-process defaults, and the launch-env loader scrub.',
+        'The serve entry point owns daemon bootstrap, feature flags, child-process defaults, and the launch-env loader scrub. ' +
+        'NODE_EXTRA_CA_CERTS is read from the daemon process environment on purpose: it is the trust store Node itself ' +
+        'already loaded for this process, so the worker TLS trust-gap check has to consult the same value to know whether ' +
+        "an operator has already supplied the issuing CA. Read once into a local: the check now needs the file's " +
+        'contents, not just the path, and a second read could see a different value. The whole-object read copies the ' +
+        'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
+        'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
+        'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
-        'computed:QWEN_SERVER_TOKEN_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
         'computed:QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV': 1,
         'computed:RUNTIME_STARTUP_TIMEOUT_ENV': 1,
         'key:DEV': 1,
+        'key:NODE_EXTRA_CA_CERTS': 1,
+        'key:NODE_TLS_REJECT_UNAUTHORIZED': 1,
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
-        whole: 5,
+        whole: 6,
       },
+    },
+  ],
+  [
+    'packages/cli/src/serve/serve-token.ts',
+    {
+      reason:
+        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN.',
+      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 1 },
     },
   ],
   [

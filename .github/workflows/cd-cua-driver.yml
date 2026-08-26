@@ -11,14 +11,15 @@ name: 'CD: Qwen CUA Driver'
 #     imported cert (no DEVELOPER_NAME secret needed).
 # Windows ships UNSIGNED (matches upstream — no EV cert).
 #
-# Artifact convention (matches the qwen-code computer-use downloader):
+# Artifact convention used by the @qwen-code/cua-sdk native installer:
 #   macOS  : cua-driver-rs-<v>-darwin-{arm64,x86_64,universal}.tar.gz
 #            (each contains the Qwen binary, SDK payload, and signed
 #            QwenCuaDriver.app) + *-binary.tar.gz (runtime + SDK payload)
 #   Linux  : cua-driver-rs-<v>-linux-{x86_64,arm64}.tar.gz + *-binary.tar.gz
 #   Windows: cua-driver-rs-<v>-windows-{x86_64,arm64}.zip + *-binary.zip
-#   npm    : one platform-neutral @qwen-code/cua-sdk package. Its postinstall
-#            downloads and verifies the matching *-binary archive above.
+#   npm    : @qwen-code/cua-sdk downloads and verifies the matching *-binary
+#            archive above. @qwen-code/node-repl-mcp is independently
+#            versioned and ships from the same verified workflow.
 on:
   push:
     tags: ['cua-driver-rs-v*']
@@ -37,11 +38,18 @@ on:
         default: true
       dry_run:
         description:
-          'Build all release assets and clean-install the npm package without
+          'Build release assets and clean-install both npm packages without
           creating a GitHub Release, npm version, tag, or installer sync PR.'
         required: false
         type: 'boolean'
         default: true
+      node_repl_only:
+        description:
+          'Only verify/publish @qwen-code/node-repl-mcp; do not build or release
+          cua-driver assets.'
+        required: false
+        type: 'boolean'
+        default: false
 permissions:
   contents: 'write'
 jobs:
@@ -50,6 +58,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     outputs:
       version: '${{ steps.release.outputs.version }}'
+      node_repl_version: '${{ steps.release.outputs.node_repl_version }}'
     steps:
       - uses: 'actions/checkout@v4'
         with:
@@ -82,11 +91,22 @@ jobs:
             exit 1
           fi
 
+          NODE_REPL_NAME=$(node -p "require('./packages/node-repl/package.json').name")
+          NODE_REPL_VERSION=$(node -p "require('./packages/node-repl/package.json').version")
+          if [[ "$NODE_REPL_NAME" != "@qwen-code/node-repl-mcp" ]]; then
+            echo "::error::Expected @qwen-code/node-repl-mcp, found $NODE_REPL_NAME"
+            exit 1
+          fi
+          if [[ ! "$NODE_REPL_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid Node REPL package version $NODE_REPL_VERSION"
+            exit 1
+          fi
+
           if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "::error::A production dispatch must run from protected main"
             exit 1
           fi
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "${{ inputs.notarize }}" != "true" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "${{ inputs.node_repl_only }}" != "true" && "${{ inputs.notarize }}" != "true" ]]; then
             echo "::error::A production dispatch must enable macOS codesigning and notarization"
             exit 1
           fi
@@ -98,8 +118,15 @@ jobs:
             fi
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "node_repl_version=$NODE_REPL_VERSION" >> "$GITHUB_OUTPUT"
       - uses: 'dtolnay/rust-toolchain@1.97.1'
+        if:
+          "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
+          false"
       - name: 'Test model payload filtering'
+        if:
+          "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
+          false"
         working-directory: 'packages/cua-driver/rust'
         run: 'cargo test -p cua-driver-core --locked model_payload'
 
@@ -110,6 +137,8 @@ jobs:
   build-linux:
     name: 'linux-${{ matrix.arch }}'
     needs: ['validate-version']
+    if: "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
+      false"
     runs-on: '${{ matrix.runner }}'
     strategy:
       fail-fast: false
@@ -200,6 +229,8 @@ jobs:
   build-windows:
     name: 'windows-${{ matrix.arch }}'
     needs: ['validate-version']
+    if: "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
+      false"
     runs-on: 'windows-latest'
     strategy:
       fail-fast: false
@@ -279,6 +310,8 @@ jobs:
   build-macos:
     name: 'macos-universal'
     needs: ['validate-version']
+    if: "github.event_name != 'workflow_dispatch' || inputs.node_repl_only ==
+      false"
     runs-on: 'macos-26'
     env:
       # Sign+notarize on tag push (real release); on manual dispatch honor the
@@ -513,7 +546,7 @@ jobs:
           done
 
   verify-sdk-package:
-    name: 'single npm package dry-run'
+    name: '@qwen-code/cua-sdk package dry-run'
     needs: ['validate-version', 'build-linux', 'verify-release-artifacts']
     runs-on: 'ubuntu-latest'
     permissions:
@@ -578,6 +611,46 @@ jobs:
           if-no-files-found: 'error'
           retention-days: 7
 
+  verify-node-repl-package:
+    name: '@qwen-code/node-repl-mcp package dry-run'
+    needs: ['validate-version']
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+      - name: 'Install workspace dependencies'
+        run: 'npm ci --ignore-scripts --no-audit --no-fund --progress=false'
+      - name: 'Test standalone Node REPL package'
+        working-directory: 'packages/node-repl'
+        run: |
+          npm run build
+          npm run typecheck
+          npm test
+          npm run smoke
+          npm run smoke:mcp
+          npm run smoke:lifecycle
+      - name: 'Pack, publish-dry-run, and clean-install Node REPL tarball'
+        run: |
+          node packages/node-repl/scripts/verify-package.mjs \
+            --output-dir "${RUNNER_TEMP}/node-repl-package"
+      - uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'node-repl-mcp-npm-${{
+            needs.validate-version.outputs.node_repl_version }}'
+          path: '${{ runner.temp }}/node-repl-package/*.tgz'
+          if-no-files-found: 'error'
+          retention-days: 7
+
   # ── Release ──────────────────────────────────────────────────────────────
   release:
     name: 'Create GitHub Release'
@@ -588,13 +661,15 @@ jobs:
         'build-macos',
         'verify-release-artifacts',
         'verify-sdk-package',
+        'verify-node-repl-package',
       ]
     runs-on: 'ubuntu-latest'
     outputs:
       version: '${{ steps.version.outputs.version }}'
     if:
       "startsWith(github.ref, 'refs/tags/cua-driver-rs-v') || (github.event_name
-      == 'workflow_dispatch' && inputs.dry_run == false)"
+      == 'workflow_dispatch' && inputs.dry_run == false &&
+      inputs.node_repl_only == false)"
     steps:
       - uses: 'actions/checkout@v4'
       - uses: 'actions/download-artifact@v4'
@@ -691,9 +766,10 @@ jobs:
             - **macOS**: codesigned + notarized universal binary + `QwenCuaDriver.app`
             - **Linux**: unsigned (x86_64 + arm64, glibc 2.31 floor)
             - **Windows**: unsigned (x86_64 + arm64)
-            - **Node.js**: the same workflow publishes the single
-              `@qwen-code/cua-sdk` npm package after a clean install against
-              these release assets
+            - **Node.js**: the same workflow publishes `@qwen-code/cua-sdk`
+              after a clean install against these release assets and publishes
+              the independently versioned `@qwen-code/node-repl-mcp` package
+              after its MCP protocol smoke tests
 
             Enable relative coordinates: `CUA_DRIVER_RS_COORDINATE_SPACE=1`
             (default `0` = off; optional `CUA_DRIVER_RS_COORDINATE_SCALE=1000`).
@@ -706,7 +782,8 @@ jobs:
     needs: ['validate-version', 'verify-sdk-package', 'release']
     if:
       "startsWith(github.ref, 'refs/tags/cua-driver-rs-v') || (github.event_name
-      == 'workflow_dispatch' && inputs.dry_run == false)"
+      == 'workflow_dispatch' && inputs.dry_run == false &&
+      inputs.node_repl_only == false)"
     runs-on: 'ubuntu-latest'
     environment:
       name: 'production-release'
@@ -818,9 +895,93 @@ jobs:
           echo '::error::Published npm version did not become visible'
           exit 1
 
+  publish-node-repl:
+    name: 'Publish @qwen-code/node-repl-mcp'
+    needs: ['validate-version', 'verify-node-repl-package', 'release']
+    if: "always() && needs.validate-version.result == 'success' &&
+      needs.verify-node-repl-package.result == 'success' &&
+      (needs.release.result == 'success' || (github.event_name ==
+      'workflow_dispatch' && inputs.node_repl_only == true)) &&
+      (startsWith(github.ref, 'refs/tags/cua-driver-rs-v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.dry_run == false))"
+    runs-on: 'ubuntu-latest'
+    environment:
+      name: 'production-release'
+      url: 'https://www.npmjs.com/package/@qwen-code/node-repl-mcp/v/${{
+        needs.validate-version.outputs.node_repl_version }}'
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    steps:
+      - uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+      - uses: 'actions/download-artifact@v4'
+        with:
+          name: 'node-repl-mcp-npm-${{
+            needs.validate-version.outputs.node_repl_version }}'
+          path: '${{ runner.temp }}/node-repl-package'
+      - name: 'Require npm publishing token'
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+        run: |
+          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
+            echo '::error::production-release NPM_TOKEN is required for the first @qwen-code/node-repl-mcp publication'
+            exit 1
+          fi
+      - name: 'Publish immutable Node REPL tarball'
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          VERSION: '${{ needs.validate-version.outputs.node_repl_version }}'
+        run: |
+          set -euo pipefail
+          TARBALL=$(find "${RUNNER_TEMP}/node-repl-package" -type f -name '*.tgz' -print -quit)
+          if [[ -z "$TARBALL" ]]; then
+            echo '::error::Packed @qwen-code/node-repl-mcp tarball is missing'
+            exit 1
+          fi
+          LOCAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | openssl base64 -A)"
+          REMOTE_INTEGRITY=$(npm view "@qwen-code/node-repl-mcp@${VERSION}" dist.integrity 2>/dev/null || true)
+          if [[ -n "$REMOTE_INTEGRITY" ]]; then
+            if [[ "$REMOTE_INTEGRITY" != "$LOCAL_INTEGRITY" ]]; then
+              echo "::error::@qwen-code/node-repl-mcp@${VERSION} already exists with different integrity"
+              exit 1
+            fi
+            echo "@qwen-code/node-repl-mcp@${VERSION} already contains this exact tarball"
+            exit 0
+          fi
+          NPM_TAG=latest
+          [[ "$VERSION" == *-* ]] && NPM_TAG=next
+          npm publish "$TARBALL" --provenance --access public --tag "$NPM_TAG"
+      - name: 'Verify npm registry integrity'
+        env:
+          VERSION: '${{ needs.validate-version.outputs.node_repl_version }}'
+        run: |
+          set -euo pipefail
+          TARBALL=$(find "${RUNNER_TEMP}/node-repl-package" -type f -name '*.tgz' -print -quit)
+          LOCAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | openssl base64 -A)"
+          for attempt in {1..20}; do
+            REMOTE_INTEGRITY=$(npm view "@qwen-code/node-repl-mcp@${VERSION}" dist.integrity 2>/dev/null || true)
+            if [[ "$REMOTE_INTEGRITY" == "$LOCAL_INTEGRITY" ]]; then
+              echo "Verified npm registry integrity on attempt $attempt"
+              exit 0
+            fi
+            if [[ -n "$REMOTE_INTEGRITY" ]]; then
+              echo '::error::Published npm artifact integrity does not match the verified tarball'
+              exit 1
+            fi
+            sleep 10
+          done
+          echo '::error::Published npm version did not become visible'
+          exit 1
+
   sync-installer-version:
     name: 'Sync installer version to main'
-    needs: ['release', 'publish-sdk']
+    needs: ['release', 'publish-sdk', 'publish-node-repl']
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'write'

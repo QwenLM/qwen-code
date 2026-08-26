@@ -21,8 +21,7 @@ import {
 import {
   DiscoveredMCPTool,
   uiTelemetryService,
-  getCoreSystemPrompt,
-  resolveInteractionMode,
+  getMainSessionBaseSystemPrompt,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildSkillLlmContent,
@@ -139,12 +138,7 @@ export async function collectContextData(
   // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
-  const systemPromptText = getCoreSystemPrompt(
-    undefined,
-    modelName,
-    undefined,
-    resolveInteractionMode(config),
-  );
+  const systemPromptText = getMainSessionBaseSystemPrompt(config);
   const systemPromptTokens = estimateTokens(systemPromptText);
 
   const toolRegistry = config.getToolRegistry();

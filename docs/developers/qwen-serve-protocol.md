@@ -12,6 +12,8 @@ Authorization: Bearer <token>
 
 Without a configured token (loopback dev default) the header is optional. Token comparison is constant-time. 401 responses are uniform across `missing header` / `wrong scheme` / `wrong token`.
 
+**`--open-with-auth`.** This default-off CLI mode requires a loopback bind and an available Web Shell. It reuses the normal `--token`-over-`QWEN_SERVER_TOKEN` selection, or generates 32 random bytes encoded as base64url before daemon startup when that selection is empty. The browser receives the selected bearer through `#token=` and stores it per tab; the protocol and middleware see an ordinary configured token. Bare `--open`, direct embedded callers, non-loopback binds, and other clients do not receive automatic credentials. Browser-ineligible environments print the secret-bearing fragment URL for manual opening. Loopback `/health` and static Web Shell assets retain the exemptions described below; `--require-auth` still gates `/health`.
+
 **`/health` exemption** (Bctum): on loopback binds (`127.0.0.1` / `localhost` / `::1` / `[::1]`) `/health` is registered BEFORE the bearer middleware, so liveness probes inside the pod don't need to carry the token even when the daemon was started with `--token`. Non-loopback binds (`--hostname 0.0.0.0` etc.) gate `/health` behind the bearer like every other route — see the [`GET /health`](#get-health) section for the rationale.
 
 **`--require-auth` (#4175 PR 15).** Pass this flag at boot to extend the "must have a token" rule to loopback as well. Boot fails without a token; the `/health` exemption is dropped (so `/health` also requires `Authorization: Bearer …`).
@@ -254,7 +256,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_organization` advertises custom session groups and pinning. It adds `GET/POST/PATCH/DELETE /workspace/:id/session-groups`, `PATCH /session/:id/organization`, and the opt-in organized list view `GET /workspace/:id/sessions?view=organized`. When both `session_organization` and `workspace_qualified_rest_core` are advertised, the workspace-qualified organization mutation `PATCH /workspaces/:workspace/session/:id/organization` is also available. The legacy mutation remains primary-workspace-only. Older daemons return `404` for the mutation/group routes and ignore the organized view contract, so WebShell/SDK clients must pre-flight these tags before showing the matching grouping or pinning UI.
 
-`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
+`session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived. `session_storage_conflict_repair` advertises the additive `resolveConflicts` request option and `resolvedConflicts` response bucket described below.
 
 `workspace_qualified_rest_core` advertises plural core REST routes under `/workspaces/:workspace/...`. The selector resolves as exact workspace id first, then as a URL-encoded absolute cwd after canonicalization. Newer single-workspace daemons include the primary runtime in `workspaces[]` even when `multi_workspace_sessions` is absent, allowing clients to discover the id required by workspace-qualified routes; clients should fall back to `capabilities.workspaceCwd` for older daemons that omit the array. Trust status and trust request routes are available for registered untrusted workspaces; file read routes follow the existing filesystem read policy. Registered untrusted secondary workspaces also expose persisted-only session and session-group catalogs: these reads do not attach to a session, start ACP, or merge live bridge state. File writes, catalog mutations, and other plural core routes require a trusted workspace unless a separate capability explicitly defines a narrower read-only policy, such as `workspace_persisted_transcript`. An untrusted primary continues to receive `403 { code: "untrusted_workspace" }` from the plural catalog and transcript routes; legacy singular primary routes keep their existing compatibility behavior. This tag covers the core file, status, settings, permissions, trust, lifecycle, MCP control, tool and skill toggles, memory, workspace agent CRUD, and session storage surfaces. It does not cover auth, voice, extensions, ACP/WebSocket transport, channel-worker routing, or workspace-qualified session export; pre-flight `workspace_session_export` or `workspace_archived_session_export` separately. Workspace trust is not an ACL: a client holding the daemon token can read every registered workspace surface allowed by this policy.
 
@@ -2432,7 +2434,7 @@ Archive one or more sessions. Archive is a state transition, not deletion: the J
 Request:
 
 ```json
-{ "sessionIds": ["<uuid>"] }
+{ "sessionIds": ["<uuid>"], "resolveConflicts": true }
 ```
 
 `sessionIds` must be a non-empty string array with at most 100 ids. Duplicates are collapsed.
@@ -2443,12 +2445,15 @@ Response:
 {
   "archived": ["<uuid>"],
   "alreadyArchived": [],
+  "resolvedConflicts": ["<uuid>"],
   "notFound": [],
   "errors": []
 }
 ```
 
-`errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`. Active and archived files with the same id are treated as a conflict and reported in `errors`; no file is overwritten.
+`resolveConflicts` is optional and defaults to `false`. By default, active and archived files with the same id are reported in `errors`, and neither copy is moved, removed, or overwritten. Archiving a live session still performs the strict close described above before classifying the conflict, so that close may flush queued records to the active transcript. With `resolveConflicts: true`, archive keeps the archived copy, removes the active copy, and reports the id in both `archived` and `resolvedConflicts`. `errors` entries have `{ "sessionId": "<uuid>", "error": "message" }`.
+
+Lifecycle conflicts are batch item outcomes: the workspace-less and workspace-qualified routes return HTTP `200` with the conflict in `errors`. This replaces the earlier workspace-qualified HTTP `409 session_conflict` envelope; clients that called that route must inspect the batch response. Internal-runtime REST batches preserve the safe conflict message while continuing to redact other per-session failure details.
 
 ### `POST /sessions/unarchive`
 
@@ -2457,7 +2462,7 @@ Restore archived sessions to the active directory. This does not resume the sess
 Request:
 
 ```json
-{ "sessionIds": ["<uuid>"] }
+{ "sessionIds": ["<uuid>"], "resolveConflicts": true }
 ```
 
 Response:
@@ -2466,12 +2471,13 @@ Response:
 {
   "unarchived": ["<uuid>"],
   "alreadyActive": [],
+  "resolvedConflicts": ["<uuid>"],
   "notFound": [],
   "errors": []
 }
 ```
 
-If an active JSONL already exists for the id, unarchive reports a conflict in `errors` and does not overwrite it. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
+`resolveConflicts` is optional and defaults to `false`. By default, simultaneous active and archived JSONL files produce a conflict in `errors`, and neither copy is moved, removed, or overwritten; an active-only session is returned in `alreadyActive`. With `resolveConflicts: true`, unarchive keeps the active copy, removes the archived copy, and reports the id in both `unarchived` and `resolvedConflicts`. Archive or unarchive in flight for the same id returns `409 session_archiving` before starting the batch.
 
 ACP-over-HTTP uses the same request and response bodies through vendor methods `_qwen/sessions/archive` and `_qwen/sessions/unarchive`. The REST route table maps `POST /sessions/archive` and `POST /sessions/unarchive` to those methods for ACP transports.
 
@@ -3072,19 +3078,23 @@ The active policy is configured in `settings.json` under `policy.permissionStrat
 
 > **F3 (#4175): multi-client permission coordination.** F3 added the four policies above. Pre-F3 daemons hardcoded first-responder; the wire shape stays bit-for-bit unchanged when the configured policy is `first-responder`. New events (`permission_partial_vote`, `permission_forbidden`) are additive — old SDKs see them as `unrecognized_known_event` and gracefully ignore.
 
-> **Permission timeout (default 5 minutes).** A `permission_request`
+> **Permission timeout (disabled by default).** A `permission_request`
 > stays pending until: (a) some client votes here, (b) `POST /session/:id/cancel`
 > fires, (c) the HTTP client driving the prompt disconnects
 > (mid-prompt cancel resolves outstanding permissions as `cancelled`),
 > (d) the session is killed, (e) the daemon shuts down, **or
-> (f) the per-session permission timeout fires** (`DEFAULT_PERMISSION_TIMEOUT_MS`,
-> 5 minutes). On timeout fire the agent's `requestPermission` resolves
+> (f) its configured timeout fires**. On timeout fire the agent's
+> `requestPermission` resolves
 > as `{outcome: 'cancelled'}`, the audit ring records a
 > `permission.timeout` entry, daemon stderr emits a one-line
 > breadcrumb, and the SSE bus fans out the standard
 > `permission_resolved` cancelled frame so subscribers clean up. The
-> timeout is configurable via `BridgeOptions.permissionResponseTimeoutMs`;
-> headless callers running long-form prompts may want to extend it.
+> shared timeout is configurable via
+> `BridgeOptions.permissionResponseTimeoutMs` or
+> `qwen serve --permission-response-timeout-ms`. Its default is `0`, so both
+> ordinary permissions and `ask_user_question` wait indefinitely for a human
+> decision. Voter cancellation, session cancellation, disconnect cleanup, and
+> daemon shutdown still resolve pending interactions as cancelled.
 
 Request:
 

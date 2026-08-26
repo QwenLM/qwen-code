@@ -181,6 +181,17 @@ export interface UserMessageContentRenderInfo {
   inputAnnotations?: readonly DaemonInputAnnotation[];
 }
 
+export interface WebShellPreparedSubmit {
+  prompt: string;
+  inputAnnotations?: readonly DaemonInputAnnotation[];
+}
+
+export interface WebShellSubmitSnapshot {
+  sessionId?: string;
+  prompt: string;
+  inputAnnotations: readonly DaemonInputAnnotation[];
+}
+
 export type UserMessageContentRenderer = (
   info: UserMessageContentRenderInfo,
 ) => ReactNode;

@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type {
   ActiveGoal,
+  ApprovalModeValue,
   GoalSnapshotV2,
   SubagentConfig,
   McpToolProgressData,
@@ -145,7 +146,7 @@ export interface CLISystemMessage {
     status: string;
   }>;
   model?: string;
-  permission_mode?: string;
+  permission_mode?: PermissionMode;
   slash_commands?: string[];
   qwen_code_version?: string;
   output_style?: string;
@@ -278,7 +279,7 @@ export interface CLIPartialAssistantMessage {
   parent_tool_use_id: string | null;
 }
 
-export type PermissionMode = 'default' | 'plan' | 'auto-edit' | 'auto' | 'yolo';
+export type PermissionMode = ApprovalModeValue;
 
 /**
  * Permission suggestion for tool use requests

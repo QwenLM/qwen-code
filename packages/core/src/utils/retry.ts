@@ -5,7 +5,7 @@
  */
 
 import type { GenerateContentResponse } from '@google/genai';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType } from './auth-type.js';
 import {
   isQwenQuotaExceededError,
   isQuotaExhaustedError,

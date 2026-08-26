@@ -184,11 +184,18 @@ describe('WebShellTranscript DOM integration', () => {
     const summaries = Array.from(
       container.querySelectorAll<HTMLButtonElement>('button'),
     ).filter((button) => button.textContent?.includes('Updated task list'));
-    expect(summaries).toHaveLength(2);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].textContent).toContain('2 times');
     act(() => {
-      summaries[1].click();
+      summaries[0].click();
     });
-    const completedSnapshot = summaries[1].parentElement;
+    const completedSnapshot = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((row) => row.textContent?.includes('1/1'))?.parentElement;
+    expect(completedSnapshot).not.toBeNull();
+    act(() => {
+      completedSnapshot?.querySelector<HTMLElement>('[role="button"]')?.click();
+    });
     const detailButton = completedSnapshot?.querySelector<HTMLButtonElement>(
       'button[title="Show task detail"]',
     );
@@ -334,6 +341,12 @@ describe('WebShellTranscript DOM integration', () => {
     const { container } = render(
       <WebShellTranscript blocks={blocks} collapseCompletedTurns={false} />,
     );
+
+    const summary = container.querySelector('button')!;
+    expect(summary.textContent).toContain('Asked 1 question');
+    expect(summary.getAttribute('aria-expanded')).toBe('false');
+
+    act(() => summary.click());
 
     expect(container.textContent).toContain('Ask user 1 question');
     expect(container.textContent).toContain('User answer: Staging');

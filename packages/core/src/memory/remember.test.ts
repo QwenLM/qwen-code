@@ -11,8 +11,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { ForkedAgentResult } from '../utils/forkedAgent.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import type { ForkedAgentResult } from '../agents/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import {
   buildBareRememberPrompt,
   buildManagedRememberPrompt,
@@ -28,7 +28,7 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 
-vi.mock('../utils/forkedAgent.js', () => ({
+vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
