@@ -149,6 +149,7 @@ vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.registerFactory = vi.fn();
+  ToolRegistryMock.prototype.registerPermissionDeferredFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
@@ -8966,8 +8967,9 @@ describe('Server Config (config.ts)', () => {
       expect(wasGrepToolRegistered).toBe(false);
     });
 
-    // ── #9827: permissions.allow must shrink the tool schemas sent to the model ──
-    it('registers only allowlisted tools when permissions.allow is set (#9827)', async () => {
+    // ── #9827 / #10075: permissions.allow keeps unlisted schemas out of the
+    // eager model request, but demotes (not removes) the unlisted tools ──
+    it('registers allowlisted tools eagerly and demotes unlisted tools to deferred (#9827, #10075)', async () => {
       const settingsAllow = [
         'ReadFile',
         'WriteFile',
@@ -8989,17 +8991,25 @@ describe('Server Config (config.ts)', () => {
       const config = new Config(params);
       await config.initialize();
 
-      const registerToolMock = (
+      const { registerFactory, registerPermissionDeferredFactory } = (
         (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
         }
-      ).ToolRegistry.prototype.registerFactory;
+      ).ToolRegistry.prototype;
 
-      const registered = (registerToolMock as Mock).mock.calls.map(
+      const registered = (registerFactory as Mock).mock.calls.map(
         (call) => call[0],
       ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
 
-      // Allowlisted tools are registered
+      // Allowlisted tools are registered eagerly
       expect(registered).toContain(ToolNames.READ_FILE);
       expect(registered).toContain(ToolNames.WRITE_FILE);
       expect(registered).toContain(ToolNames.EDIT);
@@ -9008,9 +9018,11 @@ describe('Server Config (config.ts)', () => {
       expect(registered).toContain(ToolNames.SHELL);
       expect(registered).toContain(ToolNames.WEB_FETCH);
 
-      // Unlisted built-ins are NOT registered, so their schemas are never
-      // sent to the model. The reporter's grammar-breaking tools must all
-      // be absent; non-core built-ins are gated too.
+      // Unlisted built-ins are NOT registered eagerly — their schemas are
+      // never sent in the eager model request (#9827). But since #10075 they
+      // are demoted to deferred rather than dropped: still registered, so
+      // they stay listed in /tools and loadable via ToolSearch instead of
+      // silently disappearing.
       expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
       expect(registered).not.toContain(ToolNames.UPDATE_GOAL);
       expect(registered).not.toContain(ToolNames.GET_GOAL);
@@ -9018,9 +9030,16 @@ describe('Server Config (config.ts)', () => {
       expect(registered).not.toContain(ToolNames.READ_MCP_RESOURCE);
       expect(registered).not.toContain(ToolNames.AGENT);
       expect(registered).not.toContain(ToolNames.TODO_WRITE);
-      expect(registered).not.toContain(ToolNames.SKILL);
-      // monitor stays registered: the "Shell" allow rule covers it so the
-      // shell tool cannot be bypassed by switching to monitor.
+      expect(deferred).toContain(ToolNames.SEND_MESSAGE);
+      expect(deferred).toContain(ToolNames.UPDATE_GOAL);
+      expect(deferred).toContain(ToolNames.GET_GOAL);
+      expect(deferred).toContain(ToolNames.LOOP_WAKEUP);
+      expect(deferred).toContain(ToolNames.READ_MCP_RESOURCE);
+      expect(deferred).toContain(ToolNames.AGENT);
+      expect(deferred).toContain(ToolNames.SKILL);
+      expect(deferred).toContain(ToolNames.TODO_WRITE);
+      // monitor stays registered eagerly: the "Shell" allow rule covers it
+      // so the shell tool cannot be bypassed by switching to monitor.
       expect(registered).toContain(ToolNames.MONITOR);
     });
 
@@ -9066,20 +9085,32 @@ describe('Server Config (config.ts)', () => {
       const config = new Config(params);
       await config.initialize();
 
-      const registerToolMock = (
+      const { registerFactory, registerPermissionDeferredFactory } = (
         (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerFactory: Mock } };
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
         }
-      ).ToolRegistry.prototype.registerFactory;
+      ).ToolRegistry.prototype;
 
-      const registered = (registerToolMock as Mock).mock.calls.map(
+      const registered = (registerFactory as Mock).mock.calls.map(
         (call) => call[0],
       ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
 
       expect(registered).toContain(ToolNames.READ_FILE);
-      // deny wins over allowlist membership
+      // deny wins over allowlist membership: a denied tool is hard-disabled
+      // — not registered eagerly AND not deferred either.
       expect(registered).not.toContain(ToolNames.SHELL);
+      expect(deferred).not.toContain(ToolNames.SHELL);
+      // An unlisted (not denied) tool is deferred, not dropped (#10075).
       expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
+      expect(deferred).toContain(ToolNames.SEND_MESSAGE);
     });
 
     describe('with minified tool class names', () => {
