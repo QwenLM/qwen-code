@@ -83,7 +83,6 @@ import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import { resolveServeToken } from './serve-token.js';
 import { acpChildExtraArgs } from './acp-child-extra-args.js';
-import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -4276,6 +4275,9 @@ async function runQwenServeImpl(
     // closure check doesn't trace create-sub-session's transitive deps.
     const { createSubSessionLauncher } = await import(
       './create-sub-session.js'
+    );
+    const { sessionAttachmentsRoots } = await import(
+      './session-attachments-root.js'
     );
     // Late-binds the bridge (constructed just below) via `() => bridgeRef`. Only
     // wired on the daemon-created bridge — an injected `deps.bridge` (embed/test)
