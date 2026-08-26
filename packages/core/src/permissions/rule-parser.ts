@@ -10,10 +10,7 @@ import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import {
-  normalizeMcpToolName,
-  sanitizeToolNameForProvider,
-} from '../utils/tool-name-utils.js';
+import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
@@ -1411,65 +1408,36 @@ export function matchesDomainPattern(
  *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
  *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
  */
-const PROVIDER_HASH_SUFFIX = /_[0-9a-z]{7}$/;
-
-/**
- * Match a raw MCP prefix against a provider-safe registered name.
- * Unsafe legacy prefixes are accepted only when the registered
- * name's stable hash proves they belong to that exact identity.
- */
-function matchesNormalizedMcpPrefix(
-  rawPrefix: string,
+export function matchesMcpPattern(
+  pattern: string,
   toolName: string,
+  rawToolName?: string,
 ): boolean {
-  if (toolName.startsWith(rawPrefix)) {
-    return true;
-  }
+  // The registered provider-safe name is authoritative for exact modern
+  // rules. Server-level and wildcard rules must instead use the raw MCP
+  // identity when available: provider normalization is intentionally lossy
+  // and cannot be inverted safely.
+  const matchTarget = rawToolName ?? toolName;
 
-  const sanitizedPrefix = sanitizeToolNameForProvider(rawPrefix);
-  if (!toolName.startsWith(sanitizedPrefix)) {
-    return false;
-  }
-
-  const hashSuffix = toolName.match(PROVIDER_HASH_SUFFIX)?.[0];
-  if (!hashSuffix) {
-    return false;
-  }
-
-  const normalizedBody = toolName.slice(0, -hashSuffix.length);
-  if (normalizedBody.length < sanitizedPrefix.length) {
-    return false;
-  }
-
-  const candidate = rawPrefix + normalizedBody.slice(sanitizedPrefix.length);
-  return normalizeMcpToolName(candidate) === toolName;
-}
-
-export function matchesMcpPattern(pattern: string, toolName: string): boolean {
-  if (pattern === toolName) {
-    return true;
-  }
-
-  if (
-    !pattern.endsWith('*') &&
-    pattern.split('__').length >= 3 &&
-    normalizeMcpToolName(pattern) === normalizeMcpToolName(toolName)
-  ) {
+  if (pattern === toolName || pattern === matchTarget) {
     return true;
   }
 
   if (pattern.endsWith('*')) {
-    return matchesNormalizedMcpPrefix(pattern.slice(0, -1), toolName);
+    return matchTarget.startsWith(pattern.slice(0, -1));
   }
 
+  // Server-level rule: "mcp__server" matches only tools whose RAW identity
+  // belongs to that exact server. This deliberately does not sanitize either
+  // side, so foo.bar can never broaden to foo_bar.
   const patternParts = pattern.split('__');
-  const toolParts = toolName.split('__');
+  const targetParts = matchTarget.split('__');
   if (
     patternParts.length === 2 &&
-    toolParts.length >= 3 &&
-    patternParts[0] === toolParts[0]
+    targetParts.length >= 3 &&
+    patternParts[0] === targetParts[0]
   ) {
-    return matchesNormalizedMcpPrefix(`${pattern}__`, toolName);
+    return matchTarget.startsWith(`${pattern}__`);
   }
 
   return false;
@@ -1540,14 +1508,23 @@ export function matchesRule(
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
+    // PermissionFlow appends the authoritative raw MCP identity to the alias
+    // list. It is the one alias whose provider normalization equals the actual
+    // registered name. Use it only as the raw matching target; do not treat it
+    // as a legacy alias, because legacy aliases are separately filtered for
+    // ambiguity by ToolRegistry.
+    const rawMcpToolName = (toolAliases ?? []).find(
+      (alias) => normalizeMcpToolName(alias) === canonicalCtxToolName,
+    );
     const matchesLegacyExactName =
       !rule.toolName.endsWith('*') &&
       rule.toolName.split('__').length >= 3 &&
       (toolAliases ?? []).some(
-        (alias) => rule.toolName === resolveToolName(alias),
+        (alias) =>
+          alias !== rawMcpToolName && rule.toolName === resolveToolName(alias),
       );
     const matchesMcpName =
-      matchesMcpPattern(rule.toolName, canonicalCtxToolName) ||
+      matchesMcpPattern(rule.toolName, canonicalCtxToolName, rawMcpToolName) ||
       matchesLegacyExactName;
     if (!matchesMcpName) {
       return false;

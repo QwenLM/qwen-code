@@ -72,13 +72,32 @@ export async function evaluatePermissionFlow(
   // ── L4: PermissionManager override ──────────────────────────────────
   const pm = config.getPermissionManager?.();
   const toolRegistry = config.getToolRegistry?.();
-  const permissionAliases =
-    toolName.startsWith('mcp__') && invocation.permissionAliases && toolRegistry
-      ? toolRegistry.getUnambiguousMcpPermissionAliases(
+  const mcpInvocation = invocation as AnyToolInvocation & {
+    serverName?: unknown;
+    serverToolName?: unknown;
+  };
+  const rawMcpToolName =
+    toolName.startsWith('mcp__') &&
+    typeof mcpInvocation.serverName === 'string' &&
+    typeof mcpInvocation.serverToolName === 'string'
+      ? `mcp__${mcpInvocation.serverName}__${mcpInvocation.serverToolName}`
+      : undefined;
+  const registryAliasResolver =
+    toolRegistry?.getUnambiguousMcpPermissionAliases;
+  const legacyPermissionAliases =
+    toolName.startsWith('mcp__') &&
+    invocation.permissionAliases &&
+    toolRegistry &&
+    typeof registryAliasResolver === 'function'
+      ? registryAliasResolver.call(
+          toolRegistry,
           toolName,
           invocation.permissionAliases,
         )
       : invocation.permissionAliases;
+  const permissionAliases = rawMcpToolName
+    ? [...new Set([...(legacyPermissionAliases ?? []), rawMcpToolName])]
+    : legacyPermissionAliases;
   const pmCtx = buildPermissionCheckContext(
     toolName,
     toolParams,

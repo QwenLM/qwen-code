@@ -155,6 +155,74 @@ describe('evaluatePermissionFlow', () => {
     );
   });
 
+  it('filters ambiguous MCP aliases through the registry and carries raw identity', async () => {
+    const legacyName = 'mcp__srv__foo_bar';
+    const rawName = 'mcp__srv__foo/bar';
+    const aliasResolver = vi.fn().mockReturnValue([]);
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      permissionAliases: [legacyName],
+    });
+    Object.assign(invocation, { serverName: 'srv', serverToolName: 'foo/bar' });
+
+    await evaluatePermissionFlow(
+      mockConfig({
+        getPermissionManager: vi.fn().mockReturnValue(mockPm),
+        getToolRegistry: vi.fn().mockReturnValue({
+          getUnambiguousMcpPermissionAliases: aliasResolver,
+        }) as unknown as Config['getToolRegistry'],
+      }),
+      invocation,
+      'mcp__srv__foo_bar_0cnn7di',
+      {},
+    );
+
+    expect(aliasResolver).toHaveBeenCalledWith('mcp__srv__foo_bar_0cnn7di', [
+      legacyName,
+    ]);
+    expect(mockPm.hasRelevantRules).toHaveBeenCalledWith(
+      expect.objectContaining({ toolAliases: [rawName] }),
+    );
+  });
+
+  it('falls back safely when a registry mock lacks the alias resolver', async () => {
+    const legacyName = 'mcp__srv__foo_bar';
+    const rawName = 'mcp__srv__foo/bar';
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      permissionAliases: [legacyName],
+    });
+    Object.assign(invocation, { serverName: 'srv', serverToolName: 'foo/bar' });
+
+    await expect(
+      evaluatePermissionFlow(
+        mockConfig({
+          getPermissionManager: vi.fn().mockReturnValue(mockPm),
+          getToolRegistry: vi
+            .fn()
+            .mockReturnValue({}) as unknown as Config['getToolRegistry'],
+        }),
+        invocation,
+        'mcp__srv__foo_bar_0cnn7di',
+        {},
+      ),
+    ).resolves.toBeDefined();
+
+    expect(mockPm.hasRelevantRules).toHaveBeenCalledWith(
+      expect.objectContaining({ toolAliases: [legacyName, rawName] }),
+    );
+  });
+
   it('forces interaction even when PM allows the tool', async () => {
     const mockPm = {
       hasRelevantRules: vi.fn().mockReturnValue(true),

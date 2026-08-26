@@ -12,41 +12,66 @@ import {
 } from '../utils/tool-name-utils.js';
 import { filterUnambiguousMcpPermissionAliases } from '../tools/tool-registry.js';
 
-describe('MCP permission identity collisions (#10199)', () => {
-  it('does not broaden a legacy server rule across a sanitized collision', () => {
-    const rule = parseRule('mcp__foo.bar');
-    const intended = normalizeToolNameForProvider('mcp__foo.bar__evil');
+function matchesRawMcpRule(ruleText: string, rawToolName: string): boolean {
+  const registeredName = normalizeToolNameForProvider(rawToolName);
+  return matchesRule(
+    parseRule(ruleText),
+    registeredName,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    [rawToolName],
+  );
+}
 
-    expect(matchesRule(rule, intended)).toBe(true);
-    expect(matchesRule(rule, 'mcp__foo_bar__evil')).toBe(false);
-    expect(
-      matchesRule(
-        rule,
-        normalizeToolNameForProvider('mcp__foo_bar__evil/tool'),
-      ),
-    ).toBe(false);
+describe('MCP permission identity collisions (#10199)', () => {
+  it('binds server and wildcard rules to the exact raw server identity', () => {
+    const rawToolName = 'mcp__foo.bar__evil';
+
+    expect(matchesRawMcpRule('mcp__foo.bar', rawToolName)).toBe(true);
+    expect(matchesRawMcpRule('mcp__foo.bar__*', rawToolName)).toBe(true);
+    expect(matchesRawMcpRule('mcp__foo_bar', rawToolName)).toBe(false);
+    expect(matchesRawMcpRule('mcp__foo_bar__*', rawToolName)).toBe(false);
+
+    expect(matchesRawMcpRule('mcp__foo.bar', 'mcp__foo_bar__evil')).toBe(false);
+    expect(matchesRawMcpRule('mcp__foo.bar__*', 'mcp__foo_bar__evil')).toBe(
+      false,
+    );
   });
 
-  it('does not broaden a legacy wildcard rule across a sanitized collision', () => {
-    const rule = parseRule('mcp__foo.bar__*');
-    const intended = normalizeToolNameForProvider('mcp__foo.bar__evil');
+  it('keeps raw server rules working when the tool segment is provider-unsafe', () => {
+    const rawToolName = 'mcp__foo.bar__do.it';
 
-    expect(matchesRule(rule, intended)).toBe(true);
-    expect(matchesRule(rule, 'mcp__foo_bar__evil')).toBe(false);
-    expect(
-      matchesRule(
-        rule,
-        normalizeToolNameForProvider('mcp__foo_bar__evil/tool'),
-      ),
-    ).toBe(false);
+    expect(matchesRawMcpRule('mcp__foo.bar', rawToolName)).toBe(true);
+    expect(matchesRawMcpRule('mcp__foo.bar__*', rawToolName)).toBe(true);
+  });
+
+  it('keeps raw server rules working for names that require provider truncation', () => {
+    const rawToolName = `mcp__foo.bar__${'x'.repeat(90)}`;
+
+    expect(normalizeToolNameForProvider(rawToolName)).not.toBe(rawToolName);
+    expect(matchesRawMcpRule('mcp__foo.bar', rawToolName)).toBe(true);
+    expect(matchesRawMcpRule('mcp__foo.bar__*', rawToolName)).toBe(true);
+  });
+
+  it('does not accept a forged public hash suffix as proof of raw identity', () => {
+    const trustedRawName = 'mcp__foo.bar__evil';
+    const forgedRawName = normalizeToolNameForProvider(trustedRawName);
+
+    expect(forgedRawName).not.toBe(trustedRawName);
+    expect(matchesRawMcpRule('mcp__foo.bar', forgedRawName)).toBe(false);
+    expect(matchesRawMcpRule('mcp__foo.bar__*', forgedRawName)).toBe(false);
   });
 
   it('keeps ordinary safe server and intra-segment wildcard rules working', () => {
-    expect(matchesRule(parseRule('mcp__chrome'), 'mcp__chrome__navigate')).toBe(
+    expect(matchesRawMcpRule('mcp__chrome', 'mcp__chrome__navigate')).toBe(
       true,
     );
     expect(
-      matchesRule(parseRule('mcp__chrome__use_*'), 'mcp__chrome__use_browser'),
+      matchesRawMcpRule('mcp__chrome__use_*', 'mcp__chrome__use_browser'),
     ).toBe(true);
   });
 
@@ -64,6 +89,19 @@ describe('MCP permission identity collisions (#10199)', () => {
     ).toEqual([]);
     expect(
       filterUnambiguousMcpPermissionAliases(second, [sharedAlias], tools),
+    ).toEqual([]);
+  });
+
+  it('drops a legacy alias that is another tool registered name', () => {
+    const sharedName = 'mcp__srv__foo_bar';
+    const hashedName = normalizeToolNameForProvider('mcp__srv__foo/bar');
+    const tools = [
+      { name: hashedName, permissionAliases: [sharedName] },
+      { name: sharedName, permissionAliases: [] },
+    ];
+
+    expect(
+      filterUnambiguousMcpPermissionAliases(hashedName, [sharedName], tools),
     ).toEqual([]);
   });
 
@@ -91,5 +129,10 @@ describe('MCP permission identity collisions (#10199)', () => {
         [{ name: registeredName, permissionAliases: [legacyName] }],
       ),
     ).toEqual([legacyName]);
+  });
+
+  it('matches an exact unsafe raw tool rule through authoritative identity', () => {
+    const rawToolName = 'mcp__srv__foo/bar';
+    expect(matchesRawMcpRule(rawToolName, rawToolName)).toBe(true);
   });
 });

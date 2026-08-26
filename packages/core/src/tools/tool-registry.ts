@@ -212,7 +212,7 @@ export function filterUnambiguousMcpPermissionAliases(
 
   const owners = new Map<string, Set<string>>();
   for (const tool of tools) {
-    for (const alias of tool.permissionAliases) {
+    for (const alias of [...tool.permissionAliases, tool.name]) {
       let aliasOwners = owners.get(alias);
       if (!aliasOwners) {
         aliasOwners = new Set<string>();
@@ -224,7 +224,13 @@ export function filterUnambiguousMcpPermissionAliases(
 
   return aliases.filter((alias) => {
     const aliasOwners = owners.get(alias);
-    return aliasOwners?.size === 1 && aliasOwners.has(toolName);
+    const isUniqueOwner = aliasOwners?.size === 1 && aliasOwners.has(toolName);
+    if (!isUniqueOwner && aliasOwners && aliasOwners.size > 0) {
+      debugLogger.debug(
+        `Dropping ambiguous MCP permission alias "${alias}" for "${toolName}"; claimed by: ${[...aliasOwners].join(', ')}`,
+      );
+    }
+    return isUniqueOwner;
   });
 }
 
