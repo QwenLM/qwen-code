@@ -133,11 +133,11 @@ interface WebShellSidebarFooterOptions {
 }
 ```
 
-| Value                                          | Effect                  |
-| ---------------------------------------------- | ----------------------- |
-| `undefined` (default)                          | All items shown         |
-| `false`                                        | Footer hidden entirely  |
-| `{ items: ['settings', 'theme', 'collapse'] }` | Only listed items shown |
+| Value                                          | Effect                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------- |
+| `undefined` (default)                          | All items shown                                                           |
+| `false`                                        | Footer hidden; the mobile drawer keeps only its close control             |
+| `{ items: ['settings', 'theme', 'collapse'] }` | Only listed items shown; the mobile drawer always keeps its close control |
 
 The footer auto-adapts to narrow widths: labels are hidden and version is
 dropped below certain thresholds.
@@ -288,14 +288,18 @@ These `WebShellProps` affect sidebar behavior indirectly:
 
 ## Collapsed and mobile states
 
-| State     | Behavior                                           |
-| --------- | -------------------------------------------------- |
-| Expanded  | Full sidebar with text labels                      |
-| Collapsed | Icon-rail mode (logo, pen icon, action icons only) |
-| Mobile    | Drawer slides from left with backdrop overlay      |
+| State     | Behavior                                                                                       |
+| --------- | ---------------------------------------------------------------------------------------------- |
+| Expanded  | Full sidebar with text labels                                                                  |
+| Collapsed | Icon-rail mode (logo, pen icon, action icons only)                                             |
+| Mobile    | Drawer uses 70% of its container, within width limits, with backdrop and footer close controls |
 
 Collapse state is persisted in `localStorage` under the key
 `qwen-code-web-shell-sidebar-collapsed`.
+
+The resized desktop width is restored only in expanded layouts. Opening or
+closing the mobile drawer does not overwrite that width or the persisted
+desktop collapse preference.
 
 ## Source locations
 

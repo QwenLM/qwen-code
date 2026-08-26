@@ -606,6 +606,7 @@ export type {
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
   DaemonSessionStatsModelMetrics,
+  DaemonSessionStatsSource,
   DaemonSessionStatsToolByName,
   DaemonUsageRange,
   DaemonUsageDashboard,
