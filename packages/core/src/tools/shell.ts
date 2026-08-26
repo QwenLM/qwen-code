@@ -3197,9 +3197,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
           this.config.getSessionId(),
           archiveState,
         );
-        // An already-bound number stays untouched (position and createdAt):
-        // only a genuinely new binding persists and notifies — a re-bind
-        // would move the entry to the tail with a fresh createdAt.
+        // The same PR already bound stays untouched (position and
+        // createdAt): only a genuinely new binding persists and notifies.
+        // A same-number entry pointing at ANOTHER repo is another PR and
+        // is re-bound here (the created one must win that slot).
         const createdPr = {
           number: created.number,
           url: created.url,

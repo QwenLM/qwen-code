@@ -311,13 +311,19 @@ export async function backfillWorkspaceSessionPrs(
         pageMapTrusted = true;
       } else {
         // Fork layout: gh lists the PARENT repo's PRs from a fork
-        // checkout. Confirm the parent relationship before trusting the
-        // page; an unrelated page fails closed.
-        const { parent } = await fetchRepoKeys(
+        // checkout. Trust the page only when gh's OWN resolution names
+        // the workspace repo AND the page is that repo's fork parent —
+        // a resolution diverged elsewhere (`gh repo set-default`) would
+        // otherwise feed a stranger's PRs into bindings; an unrelated
+        // page fails closed.
+        const { resolved, parent } = await fetchRepoKeys(
           runtime.workspaceCwd,
           runtime.env.effectiveEnv,
         );
-        pageMapTrusted = parent === pageRepoKey;
+        pageMapTrusted =
+          workspaceRepoKey !== undefined &&
+          resolved === workspaceRepoKey &&
+          parent === pageRepoKey;
       }
     }
   }
@@ -412,6 +418,7 @@ export async function backfillWorkspaceSessionPrs(
             ? pageStateByNumber
             : EMPTY_STATE_MAP,
           remote,
+          allowedRepoKeys,
         },
         result,
       );
@@ -431,6 +438,7 @@ async function bindCandidateNumbers(
     pageUrlByNumber: ReadonlyMap<number, string>;
     pageStateByNumber: ReadonlyMap<number, 'open' | 'merged' | 'closed'>;
     remote: string | undefined;
+    allowedRepoKeys: ReadonlySet<string>;
   },
   result: SessionPrBackfillWorkspaceResult,
 ): Promise<void> {
@@ -438,12 +446,19 @@ async function bindCandidateNumbers(
     candidate.sessionId,
     candidate.archiveState,
   );
-  // `/review <url>` forms name their PR's URL explicitly and were already
-  // repo-gated against the workspace/page keys — bind the named URL itself
-  // instead of re-resolving the bare number, which could land another
-  // repo's same-numbered PR.
+  // `/review <url>` forms name their PR's URL explicitly — bind the named
+  // URL itself instead of re-resolving the bare number, which could land
+  // another repo's same-numbered PR. Only forms that PASS the repo gate
+  // may supply a URL: the same number can also enter via a bare form, and
+  // a gate-rejected foreign form would otherwise lend a stranger's URL to
+  // the legitimate binding (the Map keeps the LAST entry per number).
   const formUrlByNumber = new Map<number, string>(
-    candidate.reviewedUrlForms.map((form) => [form.number, form.url]),
+    candidate.reviewedUrlForms
+      .filter((form) => {
+        const repoKey = repoKeyFromWebUrl(form.url);
+        return repoKey !== undefined && sources.allowedRepoKeys.has(repoKey);
+      })
+      .map((form) => [form.number, form.url]),
   );
   const bindings: Array<{
     number: number;

@@ -1269,7 +1269,24 @@ export type RuntimeMcpServerRemoveResult =
     }
   | { name: string; skipped: true; reason: 'not_present' };
 
-export interface AcpSessionBridge {
+export interface WorkspaceEventPublisher {
+  /**
+   * Workspace-level event fan-out for mutations that change daemon-wide state.
+   * Best-effort per session; closed buses silently skipped.
+   */
+  publishWorkspaceEvent(event: Omit<BridgeEvent, 'id' | 'v'>): void;
+}
+
+export interface WorkspaceEventBridge extends WorkspaceEventPublisher {
+  /**
+   * Union of every live session's `clientIds`. Used by workspace-level
+   * mutation routes to validate the optional `X-Qwen-Client-Id` header.
+   * Returns a snapshot — callers must not mutate.
+   */
+  knownClientIds(): ReadonlySet<string>;
+}
+
+export interface AcpSessionBridge extends WorkspaceEventBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
 
@@ -1480,6 +1497,19 @@ export interface AcpSessionBridge {
   seedSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
 
   /**
+   * Replace the in-memory PR binding list of a live session with the
+   * authoritative persisted one. The metadata routes call this after the
+   * sidecar upsert succeeds: the sidecar cap evicts by provenance
+   * authority while the bridge merge caps positionally, so once the list
+   * overflows the cap the two stores evict different entries — the live
+   * entry must mirror the persisted list or later events and rename
+   * responses serve the diverged one. Optional like
+   * {@link seedSessionPrs}. Callers own sidecar I/O; the bridge stays
+   * storage-agnostic.
+   */
+  setSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
+
+  /**
    * List the structured artifacts registered for a live session. Throws
    * `SessionNotFoundError` when the id is unknown.
    */
@@ -1573,19 +1603,6 @@ export interface AcpSessionBridge {
    * Returns `undefined` for unknown sessions.
    */
   getHeartbeatState(sessionId: string): BridgeHeartbeatState | undefined;
-
-  /**
-   * Workspace-level event fan-out for mutations that change daemon-wide state.
-   * Best-effort per session; closed buses silently skipped.
-   */
-  publishWorkspaceEvent(event: Omit<BridgeEvent, 'id' | 'v'>): void;
-
-  /**
-   * Union of every live session's `clientIds`. Used by workspace-level
-   * mutation routes to validate the optional `X-Qwen-Client-Id` header.
-   * Returns a snapshot — callers must not mutate.
-   */
-  knownClientIds(): ReadonlySet<string>;
 
   /**
    * Generic workspace-status query delegated through the live ACP channel.

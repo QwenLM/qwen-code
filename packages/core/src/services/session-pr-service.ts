@@ -267,11 +267,25 @@ async function withSidecarLock<T>(
   // must exist. An empty file still reads as "no bindings"
   // (readSessionPrs fails the JSON parse and returns null).
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.appendFile(filePath, '');
+  const materialized = !existsSync(filePath);
+  if (materialized) await fs.appendFile(filePath, '');
   const release = await lockfile.lock(filePath, LOCK_OPTIONS);
   try {
     return await run();
   } finally {
+    // A mutation that writes nothing (every candidate already bound or
+    // unresolved, a declined entry, an absent move source) must not leave
+    // the file this lock materialized behind — sessions that never bind
+    // a PR would otherwise accumulate stray empty sidecars. An empty file
+    // is safe to remove under the lock: every successful writer leaves
+    // content.
+    if (materialized) {
+      try {
+        if ((await fs.stat(filePath)).size === 0) await fs.unlink(filePath);
+      } catch {
+        // Renamed away by a move — nothing to clean up.
+      }
+    }
     try {
       await release();
     } catch {
@@ -373,9 +387,9 @@ export function upsertSessionPr(
 export interface SessionPrUpsertManyResult {
   /** The persisted list after the mutation. */
   prs: SessionPr[];
-  /** Candidate numbers newly appended and present in `prs`. */
+  /** Candidate numbers newly bound and present in `prs`. */
   added: readonly number[];
-  /** Candidate numbers already present — left untouched. */
+  /** Candidate numbers already bound at the same URL. */
   alreadyBound: readonly number[];
   /** Candidate numbers with no url that were not already bound. */
   unresolved: readonly number[];
@@ -384,14 +398,19 @@ export interface SessionPrUpsertManyResult {
 /**
  * Applies a run's candidate bindings in ONE locked read-modify-write.
  * Candidates are given in ascending authority order (later entries outrank
- * earlier ones under the tail cap). A number already present keeps its entry
- * untouched — a re-bind would move it to the tail with a fresh createdAt,
- * falsifying the binding-time order the badge and tooltip render by. A
- * candidate without a url is reported `unresolved` (unless already bound).
- * New candidates append with a fresh createdAt; the capped list is written
- * once, so the write cannot cascade and a failure cannot strand a partial
- * result. The read inside the lock sees bindings concurrent writers land
- * before this mutation.
+ * earlier ones under the tail cap). A number already bound at the SAME url
+ * keeps its position and createdAt — moving it would falsify the
+ * binding-time order the badge and tooltip render by — but a stronger
+ * explicit source upgrades the entry in place. A number bound at a
+ * DIFFERENT url is another PR (the same number in another repository is
+ * another PR): the candidate re-binds it the way {@link upsertSessionPr}
+ * does — replace the entry, fresh createdAt, source-upgrade rule, no
+ * state carry-over across the URL change. A candidate without a url is
+ * reported `unresolved` (unless already bound). New candidates append
+ * with a fresh createdAt; the capped list is written once, so the write
+ * cannot cascade and a failure cannot strand a partial result. The read
+ * inside the lock sees bindings concurrent writers land before this
+ * mutation.
  *
  * When the merged list overflows the cap, eviction is ranked by binding
  * provenance — reviewed PRs first, then pre-provenance entries, then
@@ -411,36 +430,57 @@ export function upsertSessionPrs(
 ): Promise<SessionPrUpsertManyResult> {
   return enqueuePrMutation(filePath, async () => {
     const existing = (await readSessionPrs(filePath)) ?? [];
-    const existingNumbers = new Set(existing.map((entry) => entry.number));
     const next = [...existing];
     const appended = new Set<number>();
     const alreadyBound: number[] = [];
     const unresolved: number[] = [];
+    let changed = false;
     for (const candidate of candidates) {
-      if (existingNumbers.has(candidate.number)) {
+      const knownIndex = next.findIndex(
+        (entry) => entry.number === candidate.number,
+      );
+      const known = knownIndex >= 0 ? next[knownIndex] : undefined;
+      if (candidate.url === undefined) {
+        (known ? alreadyBound : unresolved).push(candidate.number);
+        continue;
+      }
+      if (known && known.url === candidate.url) {
+        if (
+          candidate.source !== undefined &&
+          sourceAuthority(candidate.source) > sourceAuthority(known.source)
+        ) {
+          next[knownIndex] = { ...known, source: candidate.source };
+          changed = true;
+        }
         alreadyBound.push(candidate.number);
         continue;
       }
-      if (candidate.url === undefined) {
-        unresolved.push(candidate.number);
-        continue;
-      }
+      // A NEW entry always carries the candidate's source; a known
+      // entry keeps the stronger one (a re-bind never downgrades
+      // provenance).
+      const source =
+        known === undefined
+          ? candidate.source
+          : candidate.source !== undefined &&
+              sourceAuthority(candidate.source) >= sourceAuthority(known.source)
+            ? candidate.source
+            : known.source;
       const entry: SessionPr = {
         number: candidate.number,
         url: candidate.url,
         createdAt: new Date().toISOString(),
         ...(candidate.state ? { state: candidate.state } : {}),
-        ...(candidate.source ? { source: candidate.source } : {}),
+        ...(source ? { source } : {}),
       };
       if (!isValidSessionPr(entry)) {
         unresolved.push(candidate.number);
         continue;
       }
-      existingNumbers.add(candidate.number);
-      appended.add(candidate.number);
+      if (knownIndex >= 0) next.splice(knownIndex, 1);
       next.push(entry);
+      appended.add(candidate.number);
     }
-    if (appended.size === 0) {
+    if (appended.size === 0 && !changed) {
       return { prs: existing, added: [], alreadyBound, unresolved };
     }
     const prs = capSessionPrListByAuthority(next);
@@ -507,6 +547,11 @@ export function moveSessionPrSidecar(
   destinationPath: string,
   assertCanMutate?: () => void,
 ): Promise<void> {
+  // An absent source must not touch either endpoint: the lock
+  // materializes its target before locking, so enqueueing a no-op move
+  // would leave a stray empty sidecar at the destination — and
+  // archive/restore runs one for EVERY session that never bound a PR.
+  if (!existsSync(sourcePath)) return Promise.resolve();
   // Lock order is path-sorted so an opposite-direction move of the same
   // pair can never deadlock the file locks. The queue entry serializes with
   // same-process mutations of the first endpoint and runs under its lock

@@ -1313,6 +1313,10 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     prs: Array<{ number: number; url: string }>;
   }>;
+  setSessionPrsCalls: Array<{
+    sessionId: string;
+    prs: Array<{ number: number; url: string }>;
+  }>;
   heartbeatCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
@@ -1419,6 +1423,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const seedSessionPrsCalls: FakeBridge['seedSessionPrsCalls'] = [];
+  const setSessionPrsCalls: FakeBridge['setSessionPrsCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
   const heartbeatStateCalls: string[] = [];
   let shutdownCalls = 0;
@@ -2040,6 +2045,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     closeCalls,
     updateMetadataCalls,
     seedSessionPrsCalls,
+    setSessionPrsCalls,
     heartbeatCalls,
     heartbeatStateCalls,
     get shutdownCalls() {
@@ -2548,6 +2554,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     seedSessionPrs(sessionId, prs) {
       seedSessionPrsCalls.push({ sessionId, prs });
+    },
+    setSessionPrs(sessionId, prs) {
+      setSessionPrsCalls.push({ sessionId, prs });
     },
     recordHeartbeat(sessionId, context) {
       heartbeatCalls.push({
@@ -15655,6 +15664,55 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('does not stamp persisted state onto a number re-bound to another repo', async () => {
+      // The same number in another repository is another PR: the sidecar
+      // may hold a terminal state resolved for repo A's #5 while the live
+      // entry already re-bound #5 to repo B. Overlaying the state by bare
+      // number would render repo B's OPEN PR as merged (the sweep treats
+      // 'merged' as terminal and never re-queries, so the poisoning
+      // persists).
+      const id = '550e8400-e29b-41d4-a716-446655440008';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 5,
+        url: 'https://github.com/repo-a/r/pull/5',
+        state: 'merged',
+      });
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 5, url: 'https://github.com/repo-b/r/pull/5' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        { number: 5, url: 'https://github.com/repo-b/r/pull/5' },
+      ]);
+    });
+
     it('survives PR sidecars on the organized listing path', async () => {
       const id = '550e8400-e29b-41d4-a716-446655440005';
       await writeStoredSession({
@@ -26258,6 +26316,14 @@ describe('createServeApp', () => {
             call.prs.map((p) => p.number),
           ),
         ).toEqual([[9000]]);
+        // After the upsert the route reconciles the live entry to the
+        // authoritative persisted list, or the bridge's positional cap
+        // diverges from the sidecar's authority cap past the list limit.
+        expect(
+          bridge.setSessionPrsCalls.map((call) =>
+            call.prs.map((p) => p.number),
+          ),
+        ).toEqual([[9000, 9002]]);
       } finally {
         await fsp.rm(sidecarPath, { force: true });
       }
@@ -26545,6 +26611,13 @@ describe('createServeApp', () => {
           call.prs.map((p) => p.number),
         ),
       ).toEqual([[9000]]);
+      // …and reconciles the live entry to the persisted list AFTER the
+      // upsert (see the primary metadata route).
+      expect(
+        secondaryBridge.setSessionPrsCalls.map((call) =>
+          call.prs.map((p) => p.number),
+        ),
+      ).toEqual([[9000, 9002]]);
     });
 
     it('binds an archived session at the archived sidecar without orphaning an active one', async () => {
@@ -33909,9 +33982,18 @@ describe('Live conversation runtime lifecycle', () => {
         bridge: primaryBridge,
       }),
     ]);
+    // The Live catalog routes prove an exact root with
+    // `path.resolve(selector) === selector`, which only holds in the host's
+    // native path shape — build it the way the WS_BOUND fixtures above do,
+    // so it round-trips through `path.resolve` on every platform.
+    const liveConversationsRoot = path.resolve(
+      path.sep,
+      'work',
+      'live-conversations',
+    );
     const root = {
-      configuredRoot: '/work/live-conversations',
-      canonicalRoot: '/work/live-conversations',
+      configuredRoot: liveConversationsRoot,
+      canonicalRoot: liveConversationsRoot,
       device: 1,
       inode: 2,
       inodeVerifiable: true,

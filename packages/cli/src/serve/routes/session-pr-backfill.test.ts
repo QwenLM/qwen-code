@@ -1096,6 +1096,79 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(result).toMatchObject({ scanned: 2, bound: 0, unresolved: 0 });
   });
 
+  it('fails closed when gh resolution diverged from the workspace repo', async () => {
+    // A prior `gh repo set-default someone/their-fork` can diverge gh's
+    // resolution to an unrelated repo that is a fork of the page's repo;
+    // `gh pr list` then lists the page repo's PRs. Confirming only the
+    // parent relationship would mark the unrelated page trusted and bind
+    // a stranger's same-numbered PR — gh's OWN resolution must name the
+    // workspace repo before the page may feed a binding.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/me/workspace');
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-42', 'worktree-pr-42');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(42, 'fix/42'),
+          url: 'https://github.com/parent/repo/pull/42',
+        },
+      ],
+    });
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/someone/their-fork',
+      parent: 'github.com/parent/repo',
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1, unresolved: 0 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    // Untrusted page: the convention number falls back to the workspace
+    // remote instead of taking the page repo's PR-42 URL.
+    expect(prs?.[0]).toMatchObject({
+      number: 42,
+      url: 'https://github.com/me/workspace/pull/42',
+      source: 'worktree',
+    });
+  });
+
+  it('never lends a gate-rejected form URL to a same-number binding', async () => {
+    // `/review 42` (legitimate bare) plus a foreign-repo URL form with the
+    // SAME number: the foreign form fails the repo gate, so it must not
+    // supply the URL for the number the bare form bound (the map kept the
+    // LAST entry per number, letting the foreign URL win).
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 42');
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/other-org/repoB/pull/42 --comment',
+    );
+    // Variant: two same-number forms, own-repo first, foreign second.
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/review https://github.com/o/r/pull/42');
+    await appendUserText(
+      SESSION_B,
+      '/review https://github.com/other-org/repoB/pull/42',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result.bound).toBe(2);
+    for (const sessionId of [SESSION_A, SESSION_B]) {
+      const prs = await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+      );
+      expect(prs?.[0]).toMatchObject({
+        number: 42,
+        url: 'https://github.com/o/r/pull/42',
+      });
+    }
+  });
+
   it('binds the parent-repo URL form of /review in the fork layout', async () => {
     // Origin is the fork; gh resolves the PARENT repo for queries, and PR
     // URLs in this layout always point at the parent. The URL form must

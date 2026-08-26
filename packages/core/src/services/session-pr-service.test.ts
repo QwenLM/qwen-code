@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -330,10 +331,10 @@ describe('upsertSessionPr state', () => {
 });
 
 describe('upsertSessionPrs', () => {
-  it('leaves already-bound numbers untouched (position and createdAt)', async () => {
+  it('leaves same-URL already-bound numbers untouched (position and createdAt)', async () => {
     await writeSessionPrs(filePath, [entry(100), entry(101)]);
     const result = await upsertSessionPrs(filePath, [
-      { number: 100, url: 'https://github.com/owner/repo/pull/100?v=2' },
+      { number: 100, url: entry(100).url },
       { number: 102, url: entry(102).url },
     ]);
     expect(result.added).toEqual([102]);
@@ -341,6 +342,59 @@ describe('upsertSessionPrs', () => {
     const persisted = await readSessionPrs(filePath);
     expect(persisted?.map((p) => p.number)).toEqual([100, 101, 102]);
     expect(persisted?.[0]).toEqual(entry(100));
+  });
+
+  it('re-binds a number whose persisted entry points at another repository', async () => {
+    // The same number in another repository is another PR: a gh-verified
+    // create whose number collides with another repo's binding must
+    // replace it (fresh createdAt, source upgrade, no state carry-over)
+    // instead of being dropped on the bare number.
+    const foreign: SessionPr = {
+      number: 5,
+      url: 'https://github.com/repo-a/r/pull/5',
+      createdAt: '2026-08-01T00:00:00.000Z',
+      source: 'review',
+    };
+    await writeSessionPrs(filePath, [foreign]);
+    const result = await upsertSessionPrs(filePath, [
+      {
+        number: 5,
+        url: 'https://github.com/repo-b/r/pull/5',
+        state: 'open',
+        source: 'create',
+      },
+    ]);
+    expect(result.added).toEqual([5]);
+    expect(result.alreadyBound).toEqual([]);
+    expect(result.prs).toHaveLength(1);
+    expect(result.prs[0]).toMatchObject({
+      number: 5,
+      url: 'https://github.com/repo-b/r/pull/5',
+      state: 'open',
+      source: 'create',
+    });
+    expect(result.prs[0]?.createdAt).not.toBe(foreign.createdAt);
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
+  });
+
+  it('upgrades the source in place when a same-URL re-offer is stronger', async () => {
+    // Backfill first binds a reviewed number, then discovers the session
+    // exists for it (worktree convention): the re-offer must upgrade the
+    // provenance WITHOUT moving the entry or refreshing its createdAt, so
+    // the binding-time order the badge renders by is never falsified.
+    const reviewed: SessionPr = {
+      ...entry(42),
+      source: 'review',
+    };
+    await writeSessionPrs(filePath, [entry(41), reviewed]);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 42, url: entry(42).url, source: 'worktree' },
+    ]);
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([42]);
+    expect(result.prs.map((p) => p.number)).toEqual([41, 42]);
+    expect(result.prs[1]).toEqual({ ...reviewed, source: 'worktree' });
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
   });
 
   it('caps the merged list once, keeping the newest entries', async () => {
@@ -499,6 +553,16 @@ describe('upsertSessionPrs', () => {
     ]);
     expect(reoffered.alreadyBound).toEqual([7]);
     expect(reoffered.prs[0]?.source).toBe('worktree');
+  });
+
+  it('leaves no stray sidecar when a batch writes nothing', async () => {
+    // The lock materializes its target before locking; a mutation that
+    // ends without a write must clean the file up, or a session that
+    // never bound a PR accumulates an empty sidecar.
+    const result = await upsertSessionPrs(filePath, [{ number: 7 }]);
+    expect(result.unresolved).toEqual([7]);
+    expect(result.added).toEqual([]);
+    expect(existsSync(filePath)).toBe(false);
   });
 
   it('reports url-less candidates as unresolved, counting already-bound ones separately', async () => {
@@ -724,6 +788,11 @@ describe('moveSessionPrSidecar', () => {
   it('does nothing when the source is absent', async () => {
     await moveSessionPrSidecar(sourcePath, destinationPath);
     expect(await readSessionPrs(destinationPath)).toBeNull();
+    // Neither endpoint may appear: a no-op move must not materialize a
+    // stray empty sidecar (every archive/restore of a session that never
+    // bound a PR runs one).
+    expect(existsSync(destinationPath)).toBe(false);
+    expect(existsSync(sourcePath)).toBe(false);
   });
 
   it('waits for a lock held on the destination before moving', async () => {

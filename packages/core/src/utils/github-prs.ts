@@ -419,6 +419,10 @@ export function normalizeRemoteToWebUrl(remote: string): string | undefined {
     // scp-style [user@]host:path — any user, not only `git`.
     const scp = /^(?:[^@\s/]+@)?([^:\s/]+):(.+)$/.exec(input);
     if (!scp) return undefined;
+    // A Windows drive-letter local path (`C:\\src\\origin.git`) matches
+    // the scp shape with the drive as "host"; real hostnames are never a
+    // single character, drive letters always are.
+    if (/^[A-Za-z]$/.test(scp[1])) return undefined;
     input = `https://${scp[1]}/${scp[2]}`;
   }
   let url: URL;

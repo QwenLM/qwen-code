@@ -464,6 +464,15 @@ describe('normalizeRemoteToWebUrl', () => {
     expect(normalizeRemoteToWebUrl('git://github.com/o/r')).toBeUndefined();
     expect(normalizeRemoteToWebUrl('')).toBeUndefined();
   });
+
+  it('rejects Windows drive-letter local-path origins', () => {
+    // `git clone C:\\src\\origin.git` leaves a drive path as the remote;
+    // it matches the scp shape with the drive letter as "host" and would
+    // otherwise fabricate https://c//src/origin. Real hostnames are never
+    // a single character; drive letters always are.
+    expect(normalizeRemoteToWebUrl('C:\\src\\origin.git')).toBeUndefined();
+    expect(normalizeRemoteToWebUrl('D:/repos/origin.git')).toBeUndefined();
+  });
 });
 
 describe('repoKeyFromWebUrl', () => {
