@@ -1320,6 +1320,43 @@ describe('runChannelDaemonWorker', () => {
     expect(bridgeFacade.shellCommand).toBeTypeOf('function');
   });
 
+  it('enables attachment uploads only when capabilities include session_attachments', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['session_attachments'],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+    });
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionAttachments: true }),
+    );
+  });
+
+  it('keeps attachment uploads off for daemons without session_attachments', async () => {
+    const sdk = createSdk();
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionAttachments: false }),
+    );
+  });
+
   it('fails fast for unknown selected channel names', async () => {
     const sdk = createSdk();
 
