@@ -2648,12 +2648,11 @@ const EN: Messages = {
   'thinking.closeTranslation': 'Close',
   'thinking.inputTokens': (v) => `Input tokens: ${v?.count ?? '--'}`,
   'thinking.outputTokens': (v) => `Output tokens: ${v?.count ?? '--'}`,
-  'sessionsOverview.count': (v) => `${v?.count ?? 0} sessions`,
   'sessionsOverview.current': 'Current',
   'sessionsOverview.empty': 'No sessions yet',
   'sessionsOverview.loadFailed': 'Failed to load sessions',
   'sessionsOverview.loading': 'Loading sessions…',
-  'sessionsOverview.openElsewhere': 'Currently open in another window',
+  'sessionsOverview.noData': 'No data',
   'sessionsOverview.openInSplit': 'Open in split',
   'sessionsOverview.openInSplitHint':
     'Show the selected sessions side by side in this window',
@@ -2664,10 +2663,49 @@ const EN: Messages = {
     'Pop-up blocked. Allow pop-ups for this site to open sessions in new tabs.',
   'sessionsOverview.refresh': 'Refresh',
   'sessionsOverview.selectAll': 'Select all',
-  'sessionsOverview.splitCap': (v) =>
-    `Only the first ${v?.max ?? 6} selected sessions will open in the split.`,
+  'sessionsOverview.titleColumn': 'Title',
+  'sessionsOverview.sessionId': 'Session ID',
+  'sessionsOverview.actions': 'Actions',
+  'sessionsOverview.folder': 'Workspace',
+  'sessionsOverview.time': 'Time',
+  'sessionsOverview.worktree': 'Worktree',
+  'sessionsOverview.selectedRows': (v) =>
+    `${v?.count ?? 0} of ${v?.total ?? 0} row(s) selected.`,
+  'sessionsOverview.previousPage': 'Previous',
+  'sessionsOverview.nextPage': 'Next',
+  'sessionsOverview.pageInfo': (v) =>
+    `Page ${v?.page ?? 0} of ${v?.total ?? 0}`,
+  'sessionsOverview.rowsPerPage': 'Rows per page',
+  'sessionsOverview.workspaceFilter': 'Filter by workspace',
+  'sessionsOverview.allWorkspaces': 'All',
+  'sessionsOverview.searchPlaceholder': 'Search sessions…',
+  'sessionsOverview.confirmArchiveTitle': 'Archive session?',
+  'sessionsOverview.confirmArchive': (v) =>
+    `"${v?.name ?? ''}" will be moved to archived sessions.`,
+  'sessionsOverview.confirmArchiveBulkTitle': (v) =>
+    `Archive ${v?.count ?? 0} sessions?`,
+  'sessionsOverview.confirmArchiveBulk': (v) =>
+    `${v?.count ?? 0} selected sessions will be moved to archived sessions.`,
+  'sessionsOverview.confirmDeleteTitle': 'Delete session?',
+  'sessionsOverview.confirmDelete': (v) =>
+    `"${v?.name ?? ''}" and its conversation history will be permanently deleted. This cannot be undone.`,
+  'sessionsOverview.deleteFailed': 'Failed to delete session',
+  'sessionsOverview.archiveFailed': 'Failed to archive session',
+  'sessionsOverview.mutationIncomplete': 'Operation did not complete',
+  'sessionsOverview.actionUnavailable':
+    'This action is unavailable for the selected session or workspace',
+  'sessionsOverview.bulkArchive': 'Archive',
+  'sessionsOverview.bulkArchiveHint': (v) =>
+    `Archive ${v?.count ?? 0} selected sessions`,
+  'sessionsOverview.bulkDelete': 'Delete',
+  'sessionsOverview.bulkDeleteHint': (v) =>
+    `Delete ${v?.count ?? 0} selected sessions`,
+  'sessionsOverview.confirmDeleteBulkTitle': (v) =>
+    `Delete ${v?.count ?? 0} sessions?`,
+  'sessionsOverview.confirmDeleteBulk': (v) =>
+    `${v?.count ?? 0} selected sessions and their conversation history will be permanently deleted. This cannot be undone.`,
   'sessionsOverview.selectSession': (v) => `Select ${v?.name ?? ''}`,
-  'sessionsOverview.status.idle': 'Idle',
+  'sessionsOverview.status.askUserQuestion': 'User input needed',
   'sessionsOverview.status.needsApproval': 'Needs approval',
   'sessionsOverview.status.running': 'Running',
   'sessionsOverview.title': 'Session Overview',
@@ -5558,24 +5596,61 @@ const ZH: Messages = {
   'thinking.outputTokens': (v) => `生成 Token：${v?.count ?? '--'}`,
   'welcome.changeModel': '(/model 切换)',
   'welcome.defaultModel': '未知模型',
-  'sessionsOverview.count': (v) => `${v?.count ?? 0} 个会话`,
   'sessionsOverview.current': '当前',
   'sessionsOverview.empty': '暂无会话',
   'sessionsOverview.loadFailed': '加载会话失败',
   'sessionsOverview.loading': '正在加载会话…',
-  'sessionsOverview.openElsewhere': '已在其他窗口打开',
-  'sessionsOverview.openInSplit': '打开到分屏',
+  'sessionsOverview.noData': '暂无数据',
+  'sessionsOverview.openInSplit': '分屏打开',
   'sessionsOverview.openInSplitHint': '在本窗口内并排显示选中的会话',
-  'sessionsOverview.openInTab': '在新标签页打开',
+  'sessionsOverview.openInTab': '新标签页打开',
   'sessionsOverview.openInTabHint': '在新标签页中以分屏并排打开选中的会话',
   'sessionsOverview.popupBlocked':
     '弹出窗口被拦截。请允许本站弹窗，以便在新标签页中打开会话。',
   'sessionsOverview.refresh': '刷新',
   'sessionsOverview.selectAll': '全选',
-  'sessionsOverview.splitCap': (v) =>
-    `只有前 ${v?.max ?? 6} 个选中的会话会进入分屏。`,
+  'sessionsOverview.titleColumn': '标题',
+  'sessionsOverview.sessionId': '会话 ID',
+  'sessionsOverview.actions': '操作',
+  'sessionsOverview.folder': '工作区',
+  'sessionsOverview.time': '时间',
+  'sessionsOverview.worktree': 'Worktree',
+  'sessionsOverview.selectedRows': (v) =>
+    `${v?.count ?? 0} / ${v?.total ?? 0} 行已选`,
+  'sessionsOverview.previousPage': '上一页',
+  'sessionsOverview.nextPage': '下一页',
+  'sessionsOverview.pageInfo': (v) =>
+    `第 ${v?.page ?? 0} / ${v?.total ?? 0} 页`,
+  'sessionsOverview.rowsPerPage': '每页行数',
+  'sessionsOverview.workspaceFilter': '按工作区筛选',
+  'sessionsOverview.allWorkspaces': '全部',
+  'sessionsOverview.searchPlaceholder': '搜索会话…',
+  'sessionsOverview.confirmArchiveTitle': '归档会话？',
+  'sessionsOverview.confirmArchive': (v) =>
+    `“${v?.name ?? ''}” 将移至已归档会话。`,
+  'sessionsOverview.confirmArchiveBulkTitle': (v) =>
+    `归档 ${v?.count ?? 0} 个会话？`,
+  'sessionsOverview.confirmArchiveBulk': (v) =>
+    `选中的 ${v?.count ?? 0} 个会话将移至已归档会话。`,
+  'sessionsOverview.confirmDeleteTitle': '删除会话？',
+  'sessionsOverview.confirmDelete': (v) =>
+    `"${v?.name ?? ''}" 及其对话记录将被永久删除，此操作无法撤销。`,
+  'sessionsOverview.deleteFailed': '删除会话失败',
+  'sessionsOverview.archiveFailed': '归档会话失败',
+  'sessionsOverview.mutationIncomplete': '操作未完成',
+  'sessionsOverview.actionUnavailable': '所选会话或工作区不支持此操作',
+  'sessionsOverview.bulkArchive': '归档',
+  'sessionsOverview.bulkArchiveHint': (v) =>
+    `归档选中的 ${v?.count ?? 0} 个会话`,
+  'sessionsOverview.bulkDelete': '删除',
+  'sessionsOverview.bulkDeleteHint': (v) =>
+    `删除选中的 ${v?.count ?? 0} 个会话`,
+  'sessionsOverview.confirmDeleteBulkTitle': (v) =>
+    `删除 ${v?.count ?? 0} 个会话？`,
+  'sessionsOverview.confirmDeleteBulk': (v) =>
+    `选中的 ${v?.count ?? 0} 个会话及其对话记录将被永久删除，此操作无法撤销。`,
   'sessionsOverview.selectSession': (v) => `选择 ${v?.name ?? ''}`,
-  'sessionsOverview.status.idle': '空闲',
+  'sessionsOverview.status.askUserQuestion': '需要用户输入',
   'sessionsOverview.status.needsApproval': '待审批',
   'sessionsOverview.status.running': '运行中',
   'sessionsOverview.title': '会话总览',

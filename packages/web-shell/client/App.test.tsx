@@ -415,6 +415,13 @@ const {
         isPending: boolean;
       } | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
+      latestSessionOverviewProps: null as {
+        onCurrentSessionRemoved?: (session: {
+          sessionId: string;
+          workspaceCwd: string;
+        }) => Promise<boolean | void> | boolean | void;
+        manageLiveState?: boolean;
+      } | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
       toolApprovalKeyboardActiveHistory: [] as Array<boolean | null>,
       latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
@@ -1266,7 +1273,23 @@ mockComponent('./components/dialogs/ToolsDialog', 'ToolsDialog');
 mockComponent('./components/tools/ToolsManagerPage', 'ToolsManagerPage');
 mockComponent('./components/skills/SkillsManagerPage', 'SkillsManagerPage');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
-mockComponent('./components/SessionOverviewPanel', 'SessionOverviewPanel');
+vi.doMock('./components/SessionOverviewPanel', async () => {
+  const React = await import('react');
+  return {
+    SessionOverviewPanel: (props: {
+      onCurrentSessionRemoved?: (session: {
+        sessionId: string;
+        workspaceCwd: string;
+      }) => Promise<boolean | void> | boolean | void;
+      manageLiveState?: boolean;
+    }) => {
+      testState.latestSessionOverviewProps = props;
+      return React.createElement('div', {
+        'data-testid': 'session-overview-panel',
+      });
+    },
+  };
+});
 vi.doMock('./components/channels/ChannelsManagerPage', async () => {
   const React = await import('react');
   return {
@@ -5051,6 +5074,7 @@ beforeEach(() => {
   testState.latestMessageListProps = null;
   testState.latestBtwMessageProps = null;
   testState.latestAddWorkspaceDialogProps = null;
+  testState.latestSessionOverviewProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.toolApprovalKeyboardActiveHistory = [];
   testState.latestToolApprovalPlanTodos = [];
@@ -12214,7 +12238,7 @@ describe('App session callbacks', () => {
 
   it('restores the Goal snapshot when the same session learns its workspace', async () => {
     const snapshots: unknown[] = [];
-    mockConnection.workspaceCwd = undefined;
+    mockConnection.workspaceCwd = '';
     mockConnection.goalState = activeGoalSnapshot();
     const { rerender } = renderApp({
       renderFooter: (props) => {
@@ -17635,6 +17659,282 @@ describe('App session callbacks', () => {
     expect(panel?.getAttribute('aria-label')).toBe('Session Overview');
   });
 
+  it('clears the current session without closing the Session Overview', async () => {
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="session-overview-panel"]'),
+    ).not.toBeNull();
+    expect(testState.latestSessionOverviewProps?.manageLiveState).toBe(false);
+  });
+
+  it('clears a legacy current session without a connection workspace cwd', async () => {
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      workspaces: [{ id: 'primary', cwd: '/tmp/project', primary: true }],
+    };
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+  });
+
+  it('does not clear a different session after an overview mutation finishes', async () => {
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    mockConnection.workspaceCwd = '/other/project';
+    rerender();
+    await flush();
+    onSessionIdChange.mockClear();
+
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
+  it('does not clear a session opened while the current session is being cleared', async () => {
+    let resolveClear!: () => void;
+    mockSessionActions.clearSession.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveClear = resolve;
+      }),
+    );
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    let removal: Promise<boolean | void> | boolean | void = undefined;
+    act(() => {
+      removal = testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.(
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/tmp/project',
+        },
+      );
+    });
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    onSessionIdChange.mockClear();
+    await act(async () => {
+      resolveClear();
+      await removal;
+    });
+
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
+  it('reports failure when the current session cannot be cleared', async () => {
+    const onSessionIdChange = vi.fn();
+    mockSessionActions.clearSession.mockRejectedValueOnce(new Error('locked'));
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    onSessionIdChange.mockClear();
+    let cleared: boolean | void;
+    await act(async () => {
+      cleared =
+        await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+          sessionId: 'session-1',
+          workspaceCwd: '/tmp/project',
+        });
+    });
+
+    expect(cleared).toBe(false);
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="session-overview-panel"]'),
+    ).not.toBeNull();
+  });
+
+  it('starts a new session when leaving the Session Overview with Back', async () => {
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('leaves the Session Overview when a legacy workspace resolves during Back', async () => {
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      workspaces: [{ id: 'primary', cwd: '/tmp/project', primary: true }],
+    };
+    let resolveClear!: () => void;
+    mockSessionActions.clearSession.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveClear = resolve;
+      }),
+    );
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+    });
+    mockConnection.workspaceCwd = '/tmp/project';
+    rerender();
+    await flush();
+    await act(async () => {
+      resolveClear();
+      await Promise.resolve();
+    });
+
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('does not clear a session opened while leaving the Session Overview', async () => {
+    let resolveClear!: () => void;
+    mockSessionActions.clearSession.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveClear = resolve;
+      }),
+    );
+    const onSessionIdChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+    });
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="load-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+    onSessionIdChange.mockClear();
+    await act(async () => {
+      resolveClear();
+      await Promise.resolve();
+    });
+
+    expect(onSessionIdChange).not.toHaveBeenCalled();
+  });
+
   it('opens the split view from the sidebar', async () => {
     const { container } = renderApp();
     await flush();
@@ -19208,9 +19508,9 @@ describe('App session callbacks', () => {
     }
   });
 
-  it('auto-closes the Session Overview when the screen shrinks below the breakpoint', async () => {
-    // Drive isLargeScreen through a controllable media query: open the panel on
-    // a large screen, then flip below the breakpoint and confirm it closes.
+  it('keeps the Session Overview open when the screen shrinks below the breakpoint', async () => {
+    // The table handles narrow widths itself, so only split view remains gated
+    // by the large-screen breakpoint.
     let large = true;
     let changeHandler: ((event: { matches: boolean }) => void) | undefined;
     Object.defineProperty(window, 'matchMedia', {
@@ -19250,7 +19550,9 @@ describe('App session callbacks', () => {
       changeHandler?.({ matches: false });
       await Promise.resolve();
     });
-    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="inline-panel"]'),
+    ).not.toBeNull();
   });
 
   it('dismisses the Scheduled Tasks page when an approval becomes pending', async () => {

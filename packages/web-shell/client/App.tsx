@@ -2055,9 +2055,7 @@ export function App({
     setMobileDrawerOpen(false);
     setForceMobileDrawer(false);
   }, []);
-  // The Session Overview panel (mission control for managing many sessions at
-  // once) is only offered on large screens; below that there is no room for it
-  // to be useful.
+  // Split view still needs desktop-scale horizontal room.
   const isLargeScreen = useIsLargeScreen();
   const canDockArtifactPanel = useIsLargeScreen('(min-width: 1001px)');
   const prefersReducedMotion = usePrefersReducedMotion();
@@ -5367,12 +5365,10 @@ export function App({
     }
   }, [mainView, splitSessionIds, externalSplitControlled]);
   // If the viewport shrinks below the large-screen breakpoint, fold away the
-  // Session Overview panel and the split view — both are large-screen-only
-  // surfaces whose entry points are hidden on small screens. The split is only
-  // folded, not discarded: growing back past the breakpoint restores it, so a
-  // transient resize is lossless. When a shrink folds the split, its panes
-  // unmount and take keyboard focus with them; flag the composer to be refocused
-  // once the chat is shown again.
+  // split view. It is only folded, not discarded: growing back past the
+  // breakpoint restores it, so a transient resize is lossless. When a shrink
+  // folds the split, its panes unmount and take keyboard focus with them; flag
+  // the composer to be refocused once the chat is shown again.
   const focusComposerAfterSplitCloseRef = useRef(false);
   // True while the split view is only *temporarily* folded away because the
   // window is narrower than the large-screen breakpoint. Growing back past the
@@ -5390,9 +5386,6 @@ export function App({
         }
       }
       return;
-    }
-    if (activePanel === 'sessions') {
-      setActivePanel(null);
     }
     if (mainView === 'split') {
       notifyControlledSplitClose();
@@ -5420,7 +5413,6 @@ export function App({
     }
   }, [
     isLargeScreen,
-    activePanel,
     mainView,
     notifyControlledSplitClose,
     externalSplitControlled,
@@ -8306,13 +8298,8 @@ export function App({
   const createNewSession = useCallback(
     async (
       workspaceCwd?: string,
-      /**
-       * Leave `mainView` alone. The default is to switch to the chat, because a
-       * user who asks for a new chat wants to see it — but the Goals form has to
-       * stay mounted until its prompt is admitted, or a rejection has nowhere to
-       * render. Only that caller passes this.
-       */
-      opts?: { keepView?: boolean },
+      /** Preserve the current full-page view and/or active panel while clearing. */
+      opts?: { keepView?: boolean; keepPanel?: boolean },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       composerSourceVersionRef.current += 1;
@@ -8326,7 +8313,7 @@ export function App({
       closeMobileDrawer();
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
-      closePanel();
+      if (!opts?.keepPanel) closePanel();
       if (!opts?.keepView) setMainView('chat');
       let focusRequest: number | undefined;
       try {
@@ -12172,7 +12159,7 @@ export function App({
                     closeMobileDrawer();
                     openPanel('sessions');
                   }}
-                  canOpenSessionsOverview={isLargeScreen}
+                  canOpenSessionsOverview
                   onOpenSplitView={() => {
                     closeMobileDrawer();
                     openSplitView();
@@ -12421,7 +12408,39 @@ export function App({
                       type="button"
                       className={styles.panelBack}
                       data-testid="panel-back"
-                      onClick={closePanel}
+                      onClick={() => {
+                        if (activePanel !== 'sessions') {
+                          closePanel();
+                          return;
+                        }
+                        const current = connectionRef.current;
+                        const currentWorkspaceCwd =
+                          current.workspaceCwd ||
+                          lockedWorkspaceCwd ||
+                          workspacesRef.current.find(
+                            (entry) => entry.primary,
+                          )?.cwd;
+                        const openInvocation = sessionOpenInvocationRef.current;
+                        void createNewSession().then((created) => {
+                          const latest = connectionRef.current;
+                          const latestWorkspaceCwd =
+                            latest.workspaceCwd ||
+                            lockedWorkspaceCwd ||
+                            workspacesRef.current.find(
+                              (entry) => entry.primary,
+                            )?.cwd;
+                          if (
+                            created &&
+                            sessionOpenInvocationRef.current ===
+                              openInvocation &&
+                            (latest.sessionId === undefined ||
+                              (latest.sessionId === current.sessionId &&
+                                latestWorkspaceCwd === currentWorkspaceCwd))
+                          ) {
+                            onSessionIdChange?.(undefined);
+                          }
+                        });
+                      }}
                       aria-label={t('common.back')}
                       title={t('common.back')}
                     >
@@ -12565,8 +12584,46 @@ export function App({
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}
                         onOpenSplit={openSplitView}
+                        onCurrentSessionRemoved={async (removed) => {
+                          const current = connectionRef.current;
+                          const currentWorkspaceCwd =
+                            current.workspaceCwd ||
+                            lockedWorkspaceCwd ||
+                            workspacesRef.current.find(
+                              (entry) => entry.primary,
+                            )?.cwd;
+                          if (
+                            current.sessionId !== removed.sessionId ||
+                            (currentWorkspaceCwd &&
+                              currentWorkspaceCwd !== removed.workspaceCwd)
+                          ) {
+                            return;
+                          }
+                          const cleared = await createNewSession(undefined, {
+                            keepView: true,
+                            keepPanel: true,
+                          });
+                          const latest = connectionRef.current;
+                          const latestWorkspaceCwd =
+                            latest.workspaceCwd ||
+                            lockedWorkspaceCwd ||
+                            workspacesRef.current.find(
+                              (entry) => entry.primary,
+                            )?.cwd;
+                          if (
+                            cleared &&
+                            (!latestWorkspaceCwd ||
+                              latestWorkspaceCwd === removed.workspaceCwd) &&
+                            (latest.sessionId === removed.sessionId ||
+                              latest.sessionId === undefined)
+                          ) {
+                            onSessionIdChange?.(undefined);
+                          }
+                          return cleared;
+                        }}
                         includeOtherWorkspaces={!lockedWorkspaceCwd}
                         workspaceCwd={lockedWorkspaceCwd}
+                        manageLiveState={!sidebarOptions.enabled}
                       />
                     )}
                     </ShadowDomBoundary>

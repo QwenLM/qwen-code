@@ -725,8 +725,6 @@
   align-items: stretch;
   gap: 10px;
   padding: 12px 14px;
-  border: 1px solid var(--border);
-  box-shadow: none;
   font-size: 12px;
   line-height: 20px;
 }

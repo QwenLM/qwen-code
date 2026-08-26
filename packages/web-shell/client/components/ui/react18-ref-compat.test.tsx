@@ -13,6 +13,22 @@ import { DropdownMenuSubTrigger, DropdownMenuTrigger } from './dropdown-menu';
 import { Input } from './input';
 import { PopoverAnchor, PopoverContent, PopoverTrigger } from './popover';
 import { SelectTrigger } from './select';
+import {
+  Table,
+  TableBody,
+  TableCaption,
+  TableCell,
+  TableFooter,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from './table';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './tooltip';
 
 const FORWARD_REF_TYPE = Symbol.for('react.forward_ref');
 
@@ -35,6 +51,16 @@ describe('React 18 ref compatibility', () => {
     ['DropdownMenuTrigger', DropdownMenuTrigger],
     ['DropdownMenuSubTrigger', DropdownMenuSubTrigger],
     ['SelectTrigger', SelectTrigger],
+    ['Table', Table],
+    ['TableHeader', TableHeader],
+    ['TableBody', TableBody],
+    ['TableFooter', TableFooter],
+    ['TableRow', TableRow],
+    ['TableHead', TableHead],
+    ['TableCell', TableCell],
+    ['TableCaption', TableCaption],
+    ['TooltipTrigger', TooltipTrigger],
+    ['TooltipContent', TooltipContent],
   ])('%s forwards refs', (_name, Component) => {
     expect(Component).toHaveProperty('$$typeof', FORWARD_REF_TYPE);
   });
@@ -59,6 +85,42 @@ describe('React 18 ref compatibility', () => {
     const root = createRoot(container);
 
     act(() => root.render(<Checkbox ref={ref} />));
+    expect(ref.current).toBeInstanceOf(HTMLButtonElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards a Table ref to its DOM element', () => {
+    const ref = React.createRef<HTMLTableElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => root.render(<Table ref={ref} />));
+    expect(ref.current).toBeInstanceOf(HTMLTableElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards an asChild TooltipTrigger ref to its DOM element', () => {
+    const ref = React.createRef<HTMLButtonElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() =>
+      root.render(
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger ref={ref} asChild>
+              <button type="button">Trigger</button>
+            </TooltipTrigger>
+          </Tooltip>
+        </TooltipProvider>,
+      ),
+    );
     expect(ref.current).toBeInstanceOf(HTMLButtonElement);
 
     act(() => root.unmount());
