@@ -241,6 +241,9 @@ function WebShellTranscriptContent({
                   timeline={todoTimeline}
                   details={todoDetails}
                 >
+                  {/* Embedded read-only transcript API (not the main chat):
+                      keep tool groups unmerged so hosts see the full record,
+                      independent of the main app's always-on compact view. */}
                   <CompactModeContext.Provider value={false}>
                     <div
                       ref={rootRef}
