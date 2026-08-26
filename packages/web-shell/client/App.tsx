@@ -4928,6 +4928,22 @@ export function App({
   }, []);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
+  // The floating drawer mounts already-open. Only a genuine closed->open may
+  // move focus into it: the docked->floating hand-over of an open panel
+  // (viewport resize, split view) mounts the drawer mid-session, where
+  // autofocus would yank focus from whatever the user is typing. The ref
+  // tracks the panel's open state at the last render where the drawer was
+  // NOT mounted and stays frozen while it is, so re-renders never flip the
+  // prop under the drawer's mount-time autofocus wiring.
+  const floatingArtifactPanelVisible =
+    artifactPanelOpen && useFloatingArtifactPanel;
+  const artifactPanelOpenBeforeDrawerMountRef = useRef(artifactPanelOpen);
+  if (!floatingArtifactPanelVisible) {
+    artifactPanelOpenBeforeDrawerMountRef.current = artifactPanelOpen;
+  }
+  const floatingArtifactDrawerAutoFocus =
+    floatingArtifactPanelVisible &&
+    !artifactPanelOpenBeforeDrawerMountRef.current;
   const deferSubagentMount =
     waitForSubagentPanelAnimation &&
     artifactPanelOpen &&
@@ -13832,7 +13848,7 @@ export function App({
             {artifactPanelOpen && useFloatingArtifactPanel && (
               <Drawer
                 open
-                autoFocus
+                autoFocus={floatingArtifactDrawerAutoFocus}
                 direction="right"
                 shouldScaleBackground={false}
                 onOpenChange={(open) => {

@@ -3241,6 +3241,114 @@ describe('artifact panel fullscreen', () => {
     ).toBeNull();
   });
 
+  it('does not steal focus when an open docked panel hands over to the floating drawer', async () => {
+    // The drawer mounts already-open; autofocus belongs to a genuine
+    // closed->open only. A docked->floating hand-over of an open panel
+    // (viewport resize here) mounts the drawer mid-session, and pulling
+    // focus into it would eat the user's keystrokes.
+    const dockQuery = '(min-width: 1001px)';
+    let dockMatches = true;
+    const dockChangeListeners = new Set<
+      (event: { matches: boolean }) => void
+    >();
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches:
+          query === dockQuery ? dockMatches : query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.add(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+        removeEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.delete(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    // Open the panel while it docks.
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      container.querySelector('aside[aria-label="Right panel"]'),
+    ).not.toBeNull();
+
+    // The user is on the composer's submit control when the viewport narrows.
+    const composer = container.querySelector<HTMLElement>(
+      '[data-testid="submit"]',
+    );
+    expect(composer).not.toBeNull();
+    composer!.focus();
+    expect(document.activeElement).toBe(composer);
+
+    // Narrow: the dock unmounts and the drawer takes over mid-session.
+    dockMatches = false;
+    await act(async () => {
+      dockChangeListeners.forEach((handler) => handler({ matches: false }));
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('[class*="artifactPanelDock"]')).toBeNull();
+    expect(
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      ),
+    ).not.toBeNull();
+
+    // The hand-over mounts the drawer already-open; it must not autofocus.
+    expect(document.activeElement).toBe(composer);
+  });
+
+  it('moves focus into the floating drawer on a genuine open', async () => {
+    // No min-width query matches: the panel floats in a drawer instead of
+    // docking, so opening it is a genuine closed->open — the autofocus the
+    // hand-over test above keeps out must still land here.
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: false,
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const drawerAside = document.querySelector(
+      '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+    );
+    expect(drawerAside).not.toBeNull();
+    expect(drawerAside!.contains(document.activeElement)).toBe(true);
+  });
+
   it('keeps the dock animation suppressed across a fullscreen floating interlude', async () => {
     // Docked fullscreen -> narrow (the drawer takes over) -> widen -> shrink
     // via a non-toggle exit: the suppression flag must survive the interlude,
