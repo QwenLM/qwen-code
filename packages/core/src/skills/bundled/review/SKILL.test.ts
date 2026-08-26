@@ -858,48 +858,71 @@ describe('bundled review skill', () => {
     );
   });
 
-  it('keeps every sourced fixConstraint through the dedup merge', () => {
+  it('keeps the fix side — fixWitness and sourced fixConstraint — through the dedup merge', () => {
     // R1-2 (#10168): the merge rules kept the most detailed description, the
     // highest severity, and the source tags — never a fix-side field. Two
     // agents reporting one root cause then lost the constraint only the less
     // detailed copy recorded, before canonicalization ever saw the finding:
     // the presence-keyed posting rule read "absent" on the deduplicated
     // record and posted the unconstrained fix the field exists to prevent.
-    // The requirement has to stand at all three merging sites — Step 4's
-    // paragraph and the two pair-loop bullets that merge on their own
-    // wording — or a pair-merge ships green under the Step 4 pin while
-    // dropping the field the same way.
+    // R3-1: the sibling field dies the same death — the fix-witness sentence
+    // is presence-keyed too, so a witness only the discarded copy recorded
+    // is silently omitted and the fix ships unwitnessed (#9578). The
+    // preservation therefore names BOTH fields at all three merging sites —
+    // Step 4's paragraph and the two pair-loop bullets that merge on their
+    // own wording — or a pair-merge ships green under the Step 4 pin while
+    // dropping the field the same way. The adjudication sentence stays
+    // constraint-specific: two sourced constraints can conflict as claims
+    // about the code, and the rule that settles them re-reads the sources;
+    // this pin only guards that nothing fix-side is silently discarded.
     const body = skillBody();
     expect(body).toContain(
-      '**Deduplication merges the fix side too: keep every sourced `fixConstraint` the merged findings carry.**',
+      '**Deduplication merges the fix side too: keep every `fixWitness` and every sourced `fixConstraint` the merged findings carry.**',
     );
     expect(body).toContain('when two conflict, adjudicate explicitly');
     expect(body).toContain(
-      'a sourced `fixConstraint` on either copy survives the merge',
+      '`fixWitness`/sourced `fixConstraint` on either copy survives the merge',
     );
     expect(body).toContain(
-      'a sourced `fixConstraint` on any copy survives the merge',
+      '`fixWitness`/sourced `fixConstraint` on any copy survives the merge',
     );
   });
 
-  it('carries the fixConstraint onto a Critical relocated into the body', () => {
+  it('carries the fix side onto a Critical relocated into the body', () => {
     // R1-1 (#10168): the carry rule was scoped to inline comment bodies, but
     // a confirmed Critical whose locations all fail anchor resolution moves
     // to `bodyCriticals` — the review body becomes its sole published copy,
-    // and a constraint the entry does not carry reaches no fixer. The
-    // requirement must stand at both sites the routing is spoken: the
+    // and a constraint the entry does not carry reaches no fixer. R3-1: the
+    // fix-witness sentence is presence-keyed the same way and dies the same
+    // death, so the carry covers both fix-side sentences. R3-2: the cover is
+    // scoped to the two moves the orchestrator performs — on an Aone target
+    // `submit` itself relocates an unanchorable Critical through a one-line
+    // entry rebuilt from the claim line alone, a channel neither sentence
+    // rides — and that residue must stay a named acceptance, never the
+    // universal promise ("every PR-facing copy") the channel contradicts.
+    // The requirement must stand at both sites the routing is spoken: the
     // posting rule that performs the move, and the compose-state field that
     // receives it.
     const body = skillBody();
     expect(body).toContain(
-      'a Critical carrying a `fixConstraint` that moves to `bodyCriticals`',
+      'the rule follows the finding through the two moves the orchestrator performs',
     );
     expect(body).toContain(
-      'appends the same constraint sentence to that entry, copied from the artifact',
+      'a Critical carrying either fix-side sentence — the fix-witness or the constraint sentence — that moves to `bodyCriticals`',
     );
     expect(body).toContain(
-      'an entry whose finding carries a `fixConstraint` appends the constraint sentence',
+      'appends the same sentence to that entry, copied from the artifact',
     );
+    expect(body).toContain(
+      'an entry whose finding carries a `fixWitness` or a `fixConstraint` appends the corresponding sentence',
+    );
+    // The disclosed residue: Aone performs no server-side anchor validation,
+    // so submit relocates at submit time through the claim line alone, and
+    // the rule names the loss instead of promising past it.
+    expect(body).toContain(
+      'relocates an unanchorable Critical into the body as a one-line entry rebuilt from the claim line alone',
+    );
+    expect(body).toContain('the loss is a named acceptance, not a silent one');
   });
 
   it('pins the fix-induced disposition and both of its operands', () => {
