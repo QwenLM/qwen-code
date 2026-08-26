@@ -194,6 +194,16 @@ remaining summary stays in `messages_tokens`. The attribute remains complete
 and non-blocking, while `estimated: true` communicates that attribution is
 approximate.
 
+On session resume or fork, the Skill tool re-seeds its loaded-content cache by
+matching restored Skill responses against the synchronously cached skill
+bodies. Reconstruction pairs each response with its Skill function call and
+requested file-skill name, so model-invocable command responses cannot be
+mistaken for a cached file skill. Exact bodies and the known newline-delimited
+hook suffix are restored; truncation and persistence wrappers remain excluded.
+The outgoing session's loaded state is cleared on a session-ID transition
+before reconstruction. This preserves the same attribution rules after a
+process or session boundary without reading files on the request path.
+
 ### Provider-total normalization
 
 At request start, every category is a local estimate and
