@@ -42,20 +42,31 @@ import {
 } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
+import {
+  FINDING_SEVERITIES,
+  FINDING_CONFIDENCES,
+  FINDING_OUTCOMES,
+  FINDING_SOURCES,
+  compressFindingSummary,
+} from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AnchorRequest } from './lib/anchors.js';
 import { isSameFile } from './lib/same-file.js';
 
-// These four lists have a second consumer: the Web Shell review renderer
+// These four lists are DEFINED in core (`core/src/tools/report-findings.ts`,
+// the `report_findings` tool's contract) and re-exported here under this
+// module's historical names. They still have one further deliberate consumer:
+// the Web Shell review renderer
 // (packages/web-shell/client/components/artifacts/CodeReviewArtifactDetail.tsx)
-// keeps its own copy and fails closed on any value it does not know, so a
-// value added here breaks rendering of every saved artifact that carries one.
-// Update the renderer copy in the same change.
+// is a browser bundle that cannot import Node-side packages, keeps its own
+// copy, and fails closed on any value it does not know — so a value added in
+// core breaks rendering of every saved artifact that carries one. Update the
+// renderer copy in the same change.
 /** The severity ladder, most severe first — this array IS the sort order. */
-export const SEVERITIES = ['Critical', 'Suggestion', 'Nice to have'] as const;
+export const SEVERITIES = FINDING_SEVERITIES;
 export type Severity = (typeof SEVERITIES)[number];
 
-export const CONFIDENCES = ['high', 'low'] as const;
+export const CONFIDENCES = FINDING_CONFIDENCES;
 export type Confidence = (typeof CONFIDENCES)[number];
 
 /**
@@ -67,11 +78,11 @@ export type Confidence = (typeof CONFIDENCES)[number];
  * already handled" and takes it off. They are different claims about the code,
  * so they are different words, and the fixer has to pick one.
  */
-export const OUTCOMES = ['fixed', 'skipped', 'no_change_needed'] as const;
+export const OUTCOMES = FINDING_OUTCOMES;
 export type Outcome = (typeof OUTCOMES)[number];
 
 /** Where a finding came from — the tag that decides whether it was verified. */
-export const SOURCES = ['review', 'build', 'test', 'probe', 'lint'] as const;
+export const SOURCES = FINDING_SOURCES;
 export type Source = (typeof SOURCES)[number];
 
 /** One location a finding applies to. A pattern aggregate carries several. */
@@ -160,20 +171,8 @@ export interface FindingsReport {
   outcomesRecorded: boolean;
 }
 
-/** `shortSummary`, when the caller did not supply one. */
-export function compressSummary(summary: string, max = 60): string {
-  // Collapse whitespace first: a summary that wrapped across lines in the source
-  // prose would otherwise carry its newlines into a single-line list cell.
-  const flat = summary.replace(/\s+/g, ' ').trim();
-  if (flat.length <= max) return flat;
-  // Cut on a word boundary when one is reasonably near the limit, so the label
-  // reads as a clause rather than a severed word. `max - 1` leaves room for the
-  // ellipsis, which is one character (U+2026), not three dots.
-  const head = flat.slice(0, max - 1);
-  const space = head.lastIndexOf(' ');
-  const cut = space >= max * 0.6 ? head.slice(0, space) : head;
-  return `${cut.trimEnd()}…`;
-}
+/** `shortSummary`, when the caller did not supply one. Defined in core. */
+export const compressSummary = compressFindingSummary;
 
 function fail(index: number, message: string): never {
   throw new Error(`Finding at index ${index}: ${message}`);
@@ -305,8 +304,23 @@ function parseLocations(
  * are derived or dropped, never demanded.
  */
 export function validateFindings(raw: unknown): Finding[] {
+  // Step 9 cleanup deletes the side files `--input` normally receives, but
+  // not the saved artifact (Step 8, under .qwen/reviews/) nor a surviving
+  // `--out` report — and both wrap the findings array. Accept the wrapper,
+  // so a later outcome path can recover from the state that survives the
+  // cleanup instead of dying on a missing findings-in.json.
+  if (
+    !Array.isArray(raw) &&
+    raw !== null &&
+    typeof raw === 'object' &&
+    Array.isArray((raw as { findings?: unknown }).findings)
+  ) {
+    raw = (raw as { findings: unknown }).findings;
+  }
   if (!Array.isArray(raw)) {
-    throw new Error('Input must be a JSON array of findings.');
+    throw new Error(
+      'Input must be a JSON array of findings, or a saved review artifact/report object carrying one as "findings".',
+    );
   }
   const findings = raw.map((r, i) => {
     if (r === null || typeof r !== 'object' || Array.isArray(r)) {
@@ -809,6 +823,13 @@ export function validateOutcomes(raw: unknown): OutcomeEntry[] {
           `expected one of ${OUTCOMES.map((s) => JSON.stringify(s)).join(', ')}.`,
       );
     }
+    // The report_findings contract refuses a skipped outcome the reader
+    // cannot inspect; the ledger feeding it must not accept one either.
+    if (outcome === 'skipped' && !asString(o, 'note')) {
+      throw new Error(
+        `Outcome for ${JSON.stringify(id)} is "skipped" with no note — the reader is owed the reason for work not done.`,
+      );
+    }
     return {
       id,
       outcome,
@@ -1056,7 +1077,8 @@ export const findingsCommand: CommandModule = {
       .option('input', {
         type: 'string',
         demandOption: true,
-        describe: 'JSON array of findings written by the review',
+        describe:
+          'JSON array of findings written by the review (or a saved review artifact/report object carrying the array as "findings")',
       })
       .option('out', {
         type: 'string',

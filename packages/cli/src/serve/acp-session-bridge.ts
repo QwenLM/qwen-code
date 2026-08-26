@@ -105,6 +105,8 @@ export type {
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
   BridgeShutdownOptions,
+  WorkspaceEventPublisher,
+  WorkspaceEventBridge,
   AcpSessionBridge,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';

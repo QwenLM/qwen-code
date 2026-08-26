@@ -2976,11 +2976,36 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('A vacuous test is a **Suggestion**');
     expect(p).toContain('report **that behaviour** as the Critical');
     expect(p).not.toContain('is a **Critical**: a green-no-matter-what');
+    // The brief's mutation analysis is reading-based — executed verdicts
+    // belong to Agent 7's efficacy probe — so its mutation claims must be
+    // phrased as hypotheses or carry an explicit not-run witness, never the
+    // execution-grade "verified N/N green" (issue #9901). The rule anchors on
+    // ownership, not on a capability claim: the review-agent tool table is
+    // role-neutral and includes the shell, so "you have no runner" would be
+    // false and must never come back.
+    expect(p).toContain('An unrun mutation is a hypothesis');
+    expect(p).toContain('ships N/N green');
+    expect(p).toContain('verified N/N green');
+    expect(p).toContain('witness: not run —');
+    expect(p).toContain('Executed mutation verdicts belong to Agent 7');
+    expect(p).not.toContain('you have no runner');
     // The test-matrix agent applies Agent 5's rules to the behaviour/test pairing
     // it owns, so its severity must move in lockstep — a revert of just this bullet
     // would let the two agents grade the same inert test differently on one PR.
     expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
       'a **Suggestion** on its own, Critical only when',
+    );
+    // And the witness discipline must move in lockstep too — test-matrix is the
+    // same reading-based mutation analysis, so it carries the same bar on
+    // execution-grade phrasing.
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('witness: not run —');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('ships N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain('verified N/N green');
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
+      'phrase an unrun mutation as a reasoned hypothesis',
+    );
+    expect(buildRoleBrief(PLAN, 'test-matrix')).not.toContain(
+      'you have no runner',
     );
   });
 
