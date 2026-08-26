@@ -112,9 +112,18 @@ export async function releaseExitedManagedSessionForContinue(
       'released' in result &&
       result.released === true
     );
-  } catch {
+  } catch (error) {
+    if (isRetryableReleaseError(error)) {
+      throw error;
+    }
     return false;
   }
+}
+
+function isRetryableReleaseError(error: unknown): boolean {
+  return (
+    error instanceof Error && error.message.includes('temporarily unreadable')
+  );
 }
 
 export function isAgentViewWorkerResumeCommandBlocked(

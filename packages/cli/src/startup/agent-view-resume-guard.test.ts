@@ -303,6 +303,19 @@ describe('managed Agent View resume guards', () => {
     ).resolves.toBe(false);
   });
 
+  it('surfaces retryable release failures instead of treating them as live sessions', async () => {
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
+    mockRelease.mockRejectedValueOnce(
+      new Error(
+        'Agent View worker record at /tmp/worker.json is temporarily unreadable. Retry the operation.',
+      ),
+    );
+
+    await expect(
+      releaseExitedManagedSessionForContinue('session-1'),
+    ).rejects.toThrow('temporarily unreadable');
+  });
+
   it('does not start the supervisor to release ownership when the gate is disabled', async () => {
     mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
 
