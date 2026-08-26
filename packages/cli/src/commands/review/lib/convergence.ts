@@ -157,6 +157,15 @@ export interface PrevRound {
    */
   merged?: boolean;
   /**
+   * Its findings were adopted by an ANONYMOUS whole-write — recovery ran
+   * with no identity to vouch them (`pr-context` stamps the record). Not
+   * `foreign` to the disclosure caveat — an unknown identity is not a
+   * foreign author — but the absence-based inferences read the list like a
+   * pure-foreign one: a vanished id may sit in a list no identity vouched,
+   * so the closure mint and the `land-and-defer` gate both withhold.
+   */
+  anonymousAdoption?: boolean;
+  /**
    * The posting floor it ran under, when its marker recorded one. A round
    * that posted under a different floor is not a comparable point on this
    * loop's volume trend — the posture changed, not the loop.
@@ -999,11 +1008,14 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // affects only the WORK LIST, so it qualifies the recurrence reading
   // alone. Provenance is broader: a foreign marker carries the previous
   // round's VOLUME too, and the volume reading cites that number as this
-  // loop's own baseline — gated on clusters, the disclosure never reached
-  // exactly the branch an attacker-supplied count controls.
+  // loop's own baseline — and its MINTED CLOSURES too, which the chain
+  // cites as this loop's own lineage. Gated on clusters, the disclosure
+  // never reached exactly the branches an attacker-supplied count or
+  // closure list controls.
   const citesWorkList = d.clusters.length > 0;
   const citesPrevVolume =
     d.prevPosted !== undefined || d.prevFresh !== undefined;
+  const citesClosures = d.successorChains.length > 0;
   const caveatsEn: string[] = [];
   const caveatsZh: string[] = [];
   // Truncation qualifies BOTH readings, not only the recurrence one: the
@@ -1032,12 +1044,25 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
     );
     caveatsZh.push(`上一轮的工作清单为放进标记而被截断，${what.zh}`);
   }
-  if (d.foreignEvidence && (citesWorkList || citesPrevVolume)) {
-    const what = citesWorkList
-      ? citesPrevVolume
-        ? { en: `those rounds and its counts`, zh: `上述轮次与其计数` }
-        : { en: `those rounds`, zh: `上述轮次` }
-      : { en: `those counts`, zh: `该计数` };
+  if (
+    d.foreignEvidence &&
+    (citesWorkList || citesPrevVolume || citesClosures)
+  ) {
+    const partsEn: string[] = [];
+    const partsZh: string[] = [];
+    if (citesWorkList) {
+      partsEn.push(`those rounds`);
+      partsZh.push(`上述轮次`);
+    }
+    if (citesPrevVolume) {
+      partsEn.push(citesWorkList ? `its counts` : `those counts`);
+      partsZh.push(citesWorkList ? `其计数` : `该计数`);
+    }
+    if (citesClosures) {
+      partsEn.push(`the closure lineage named above`);
+      partsZh.push(`上述闭包血缘`);
+    }
+    const what = { en: partsEn.join(` and `), zh: partsZh.join(`与`) };
     caveatsEn.push(
       d.mergedEvidence
         ? `the previous round was recovered from a marker this account did not post and merged over this account's own entries, so some of ${what.en} may not be this account's own`

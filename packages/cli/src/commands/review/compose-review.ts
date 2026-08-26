@@ -1533,6 +1533,7 @@ export function composeReview(
     anchored: prevFacts.anchored,
     foreign: prevFacts.foreign,
     merged: prevFacts.merged,
+    anonymousAdoption: prevFacts.anonymousAdoption,
     ...(prevFacts.floor === undefined ? {} : { floor: prevFacts.floor }),
     ...(prevFacts.fresh === undefined ? {} : { fresh: prevFacts.fresh }),
   };
@@ -1800,6 +1801,7 @@ export function composeReview(
       // one build above — the marker stamps exactly these closures, so the
       // note and the record cannot disagree.
       closuresThisRound,
+      repostUnidentified,
       ...(postedLedger === null
         ? {}
         : { thisRoundFindings: postedLedger.findings }),
@@ -2772,6 +2774,14 @@ function composeReviewBody(
     closuresThisRound?: readonly LedgerClosure[];
     thisRoundFindings?: readonly LedgerFinding[];
     /**
+     * Whether a re-post channel carried an element the recovered work list
+     * cannot place — an entry bearing no id that list held. The caller's
+     * closure mint fails closed over that state, and the `land-and-defer`
+     * gate below rests on the identical absence inference, so it withholds
+     * on it too — the same honesty leg, one consumer over.
+     */
+    repostUnidentified?: boolean;
+    /**
      * Whether the CODE backstop enforces the floor this round reports. The
      * two readings differ by one thing — the reporting one folds an absent
      * floor to `auto` and the enforcement one does not — so under the
@@ -3717,6 +3727,14 @@ function composeReviewBody(
         // - a PURE-FOREIGN list (foreign, not merged over this account's
         //   own): this account's entries are in no work list at all, so its
         //   own open Criticals cannot be re-posted.
+        // - an ANONYMOUSLY ADOPTED list: the persist seam's record that the
+        //   findings were adopted with no identity to vouch them. The same
+        //   leg the closure mint reads — the list walks like a pure-foreign
+        //   one through every absence inference.
+        // - an UNACCOUNTED re-post: a deferral or reroute entry this round
+        //   posted bears no id the recovered work list held, so a vanished
+        //   Critical may be the claim it re-voices. The caller's mint fails
+        //   closed over the same state.
         //
         // Passed anyway, the body carries "no Critical is open" beside its
         // own disclosure of what it could not read, and the artifact tells a
@@ -3727,7 +3745,11 @@ function composeReviewBody(
           dimensionGapsAreDepthOnly,
         ) &&
         convergence.prev.complete === true &&
-        !(convergence.prev.foreign === true && convergence.prev.merged !== true)
+        !(
+          convergence.prev.foreign === true && convergence.prev.merged !== true
+        ) &&
+        convergence.prev.anonymousAdoption !== true &&
+        convergence.repostUnidentified !== true
           ? { openCriticals }
           : {}),
       })

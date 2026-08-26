@@ -1021,6 +1021,29 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
     ).toContain('R1-1 → R2-1 → R3-1/R3-2');
   });
 
+  it('caps each rendered generation at six ids, naming the overflow', () => {
+    // `MAX_CHAIN_IDS_PER_GENERATION` binds the paragraph and the basis
+    // through the one renderer; no fixture before this one built a
+    // generation wider than two ids, so deleting the slice and its `… (+N)`
+    // suffix shipped green.
+    const r = diagnoseConvergence({
+      round: 3,
+      posted: 1,
+      prev: {
+        findings: [],
+        closed: Array.from({ length: 7 }, (_, i) =>
+          closedAt(2, `R1-${i + 1}`, 'src/a.ts'),
+        ),
+      },
+      drafts: [],
+      closuresThisRound: [closedAt(3, 'R2-1', 'src/a.ts')],
+      thisRoundFindings: [{ ...c('R3-1', 'src/a.ts'), title: 'new claim' }],
+    })!;
+    expect(
+      recommendationsFor(r).find((x) => x.code === 'successor-chain')?.basis,
+    ).toContain('R1-1/R1-2/R1-3/R1-4/R1-5/R1-6 … (+1) → R2-1 → R3-1');
+  });
+
   it('orders chains by measured work, never by ledger-insertion order', () => {
     // Four diverging files; the LAST-inserted one carries the most fresh
     // Criticals. Both consumers slice the list at MAX_RENDERED_CLUSTERS, so
@@ -1064,9 +1087,15 @@ describe('diagnoseConvergence — the successor chain (#9905)', () => {
     expect(text.zh).toContain('`src/d.ts`');
     expect(text.zh).toContain('；另有 1 个');
     expect(text.zh).not.toContain('`src/c.ts`');
-    expect(
-      recommendationsFor(r).find((x) => x.code === 'successor-chain')?.basis,
-    ).toContain('src/d.ts');
+    const basis = recommendationsFor(r).find(
+      (x) => x.code === 'successor-chain',
+    )?.basis;
+    expect(basis).toContain('src/d.ts');
+    // Both consumers slice at MAX_RENDERED_CLUSTERS: with four chains the
+    // basis names the rendered three and elides the rest — the suffix is
+    // the only witness that the recommendations half applies the cap.
+    expect(basis).toContain(', …');
+    expect(basis).not.toContain('src/c.ts');
   });
 });
 
@@ -1552,6 +1581,45 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
     const r = renderConvergenceDiagnosis({ ...base, foreignEvidence: true });
     expect(r.en).toContain('those rounds and its counts');
     expect(r.zh).toContain('上述轮次与其计数');
+  });
+
+  it('qualifies the closure lineage a foreign marker supplies to the chain', () => {
+    // The chain's previous generation is read off `prev.closed` — entries
+    // recovered from the SAME marker the rounds and counts caveat already
+    // qualifies. A round-2 shape fires the chain while the cluster signal
+    // is still gated to round 3 and no previous volume was recorded, so
+    // without a closures leg the disclosure misses exactly the ids a
+    // planted or merged-foreign list chose.
+    const chained: ConvergenceDiagnosis = {
+      round: 2,
+      posted: 1,
+      fresh: 1,
+      clusters: [],
+      successorChains: [
+        {
+          file: 'src/a.ts',
+          generations: [['R0-1'], ['R1-1']],
+          newIds: ['R2-1'],
+        },
+      ],
+      volumeNotShrinking: false,
+      truncatedEvidence: false,
+      foreignEvidence: true,
+      mergedEvidence: false,
+    };
+    const r = renderConvergenceDiagnosis(chained);
+    expect(r.en).toContain('the closure lineage named above');
+    expect(r.en).toContain("may not be this account's own");
+    expect(r.zh).toContain('上述闭包血缘');
+    // The merged list protects this account's own entries under their own
+    // ids, so the caveat says "some of", exactly as for rounds and counts.
+    const merged = renderConvergenceDiagnosis({
+      ...chained,
+      mergedEvidence: true,
+    });
+    expect(merged.en).toContain(
+      'some of the closure lineage named above may not be',
+    );
   });
 
   it('summarises the tail instead of listing every cluster', () => {

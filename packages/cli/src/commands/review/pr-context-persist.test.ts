@@ -420,6 +420,56 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
+  it('an OWN winner carries its closures across the seam untouched', () => {
+    // The strip ternary's KEEP branch: an own marker wins recovery — the
+    // routine case, every ordinary own round recovers its previous marker
+    // as non-foreign — and its `closed` list must cross into the side file
+    // whole. The four sibling seam tests pin the foreign strip, the union
+    // restore, and the two anonymous sheds; none pins this branch, so
+    // hoisting `withoutClosures` out of the ternary's foreign arm strips
+    // every own round's closures before compose ever reads them — the
+    // divergence sentinel disarmed for this account with the suite green.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      const ownMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":4,' +
+        '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"own"}],' +
+        '"closed":[{"r":4,"id":"R3-1","f":"a.ts"}]} -->';
+      const olderMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":3,' +
+        '"findings":[{"id":"R3-1","sev":"S","file":"a.ts","title":"older"}]} -->';
+      const { recovered } = recoverLedger(
+        [
+          {
+            id: 1,
+            user: { login: 'stranger' },
+            submitted_at: '2026-01-01T00:00:00Z',
+            body: olderMarker,
+          },
+          {
+            id: 2,
+            user: { login: 'bot' },
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: ownMarker,
+          },
+        ],
+        'bot',
+      );
+      expect(recovered?.foreign).toBe(false);
+      expect(recovered?.merged).toBe(false);
+      persistRecoveredLedger(side, recovered, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(4);
+      expect(written.closed).toEqual([{ r: 4, id: 'R3-1', f: 'a.ts' }]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('records that the winning marker came from another account', () => {
     // The convergence diagnosis CITES the round numbers carried in this work
     // list, in a body this account posts. Recovery adopts the highest-round

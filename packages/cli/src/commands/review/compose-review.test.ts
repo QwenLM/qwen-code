@@ -13075,6 +13075,30 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     ],
     ['a truncated work list', {}, { dropped: 3 }],
     ['a pure-foreign work list', {}, { foreign: true }],
+    ['an anonymously adopted work list', {}, { anonymousAdoption: true }],
+    [
+      'a re-post the work list cannot place',
+      {
+        // `auto` licences the deferral channel at round 5 — an ABSENT floor
+        // beside a non-empty list caps with `unlicensed-deferral`, and the
+        // cap leg would withhold the ending instead of the leg under test.
+        severityFloor: 'auto' as const,
+        deferredSuggestions: [
+          {
+            file: 'src/a.ts',
+            line: 5,
+            source: 'review',
+            severity: 'Suggestion',
+            title: 'the claim, restated without its id',
+          } as DeferredEntry,
+        ],
+      },
+      {
+        findings: [
+          { id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'the claim' },
+        ],
+      },
+    ],
   ])('withholds land-and-defer over %s', (_label, inputOver, sideOver) => {
     // Each arm starts from the shape that DOES offer the ending and flips
     // exactly one leg, so the assertion measures that leg and not a sibling

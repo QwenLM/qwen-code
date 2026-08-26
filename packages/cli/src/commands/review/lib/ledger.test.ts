@@ -777,6 +777,7 @@ describe('ledger marker — the closure list (#9905)', () => {
     // the route whose own comment names the planted-marker threat — while
     // the ledger's admission test refuses every one of them as a finding.
     // The one honest entry survives.
+    const longFile = 'z'.repeat(LEDGER_MAX_FILE + 1);
     const back = parseLedger(
       '<!-- qwen-review-ledger {"v":1,"round":2,"findings":[],' +
         '"closed":[' +
@@ -786,6 +787,14 @@ describe('ledger marker — the closure list (#9905)', () => {
         '{"r":2,"id":"[x](http://evil.example)","f":"a.ts"},' +
         '{"r":2,"id":"@mention ping","f":"a.ts"},' +
         '{"r":2,"id":"R1-1","f":""},' +
+        // Two fixtures each refused by ONE conjunct alone — the two
+        // conjuncts no earlier fixture isolated: `R1-1x` passes the
+        // id-round arithmetic (round 1 in bounds, below r), so the shape
+        // check is its only refuser; the long `f` passes every other
+        // check, so the length bound is its only refuser. Deleting either
+        // conjunct admitted its fixture with the suite green.
+        '{"r":2,"id":"R1-1x","f":"a.ts"},' +
+        `{"r":2,"id":"R1-3","f":"${longFile}"},` +
         '{"r":2,"id":"R2-1","f":"b.ts"},' +
         '{"r":2,"id":"R1-2","f":"a.ts"}' +
         ']} -->',
