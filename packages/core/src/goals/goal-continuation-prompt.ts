@@ -25,6 +25,12 @@ export interface GoalContinuationPromptInput {
    * one-shot rather than standing.
    */
   objectiveUpdated?: boolean;
+  /**
+   * True on the one continuation a spent token budget still grants. The
+   * runtime stops the Goal after this turn, so the prompt asks for a hand-off
+   * instead of more work.
+   */
+  windDown?: boolean;
   verifierFeedback?: string;
 }
 
@@ -70,6 +76,16 @@ const OBJECTIVE_UPDATED_LINE =
   'The Goal objective changed since your last turn: the objective above replaces the one you were working on. Stop work that only served the previous objective, and carry over only what also serves this one.';
 
 /**
+ * Sent once per spend window, on the continuation the budget gate grants
+ * after the window is spent. The Goal stops when this turn ends, so the
+ * hand-off is the last thing the model delivers autonomously.
+ */
+const WIND_DOWN_LINES = [
+  'The autonomous token budget for this Goal window is spent. This is the final turn before the Goal stops and waits for the user; do not start new work.',
+  'Deliver a concise hand-off: what was accomplished, citing evidence references from get_goal; what remains; and the one concrete next step. Call update_goal only if the objective is already complete or genuinely blocked on the evidence you have. Then end the turn.',
+];
+
+/**
  * Serializes the runtime-supplied Goal facts as JSON with `<`, `>` and `&`
  * escaped, so objective text shaped like a tag cannot close the data block or
  * open one of its own.
@@ -104,6 +120,10 @@ export function renderGoalContinuationPrompt(
     lines.push(OBJECTIVE_UPDATED_LINE);
   }
 
+  if (input.windDown) {
+    lines.push(...WIND_DOWN_LINES);
+  }
+
   if (input.verifierFeedback) {
     lines.push(`Verifier feedback: ${input.verifierFeedback}`);
   }
@@ -116,6 +136,7 @@ export function buildGoalContinuationParts(turn: {
   permit: GoalTurnPermit;
   continuationContext: string;
   objectiveUpdated?: boolean;
+  windDown?: boolean;
   verifierFeedback?: string;
 }): Part[] {
   return [
@@ -125,6 +146,7 @@ export function buildGoalContinuationParts(turn: {
         revision: turn.permit.revision,
         objective: turn.continuationContext,
         objectiveUpdated: turn.objectiveUpdated,
+        windDown: turn.windDown,
         verifierFeedback: turn.verifierFeedback,
       }),
     },

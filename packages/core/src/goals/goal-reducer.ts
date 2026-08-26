@@ -13,6 +13,7 @@ import {
   goalLimitKindForReason,
   isGoalEvidenceProofKind,
   isGoalLimitKind,
+  isGoalTokenBudgetSpent,
   type GoalControlRequest,
   type GoalEvidenceCheckpoint,
   type GoalRecord,
@@ -30,6 +31,14 @@ export interface GoalControlTransition {
   now: number;
   nextGoalId: string;
   cursor: TranscriptCursor;
+  /**
+   * The autonomous spend window the caller is arming, in `tokensUsed` tokens.
+   * A create or replace stamps it as the new Goal's `tokenBudget`; a resume
+   * or edit of a Goal whose ceiling is spent re-arms `tokensUsed + grant`.
+   * Absent means the transition arms nothing -- a created Goal is then
+   * unbounded.
+   */
+  tokenBudgetGrant?: number;
 }
 
 export interface GoalTurnFinishedTransition {
@@ -37,6 +46,8 @@ export interface GoalTurnFinishedTransition {
   lastReason?: string;
   /** Tokens billed to the turn that just finished. */
   tokensUsed?: number;
+  /** Set when the finishing turn was the spend window's wind-down hand-off. */
+  windDownTurnId?: string;
 }
 
 export class GoalConflictError extends Error {
@@ -75,6 +86,7 @@ export function reduceGoalControl(
       normalizeObjective(request.objective, snapshotOf(null)),
       transition.now,
       transition.cursor,
+      transition.tokenBudgetGrant,
     );
   }
 
@@ -92,6 +104,7 @@ export function reduceGoalControl(
       normalizeObjective(request.objective, snapshotOf(current)),
       transition.now,
       transition.cursor,
+      transition.tokenBudgetGrant,
     );
   }
 
@@ -108,6 +121,7 @@ export function reduceGoalControl(
       evidenceCursor: copyCursor(transition.cursor),
       evidenceCheckpoint: undefined,
       checkpointStalls: undefined,
+      ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
       lastReason: undefined,
       limitKind: undefined,
     });
@@ -135,6 +149,22 @@ export function reduceGoalControl(
       snapshotOf(current),
     );
   }
+  if (
+    request.action === 'resume' &&
+    current.status === 'usage_limited' &&
+    current.limitKind === 'token_budget'
+  ) {
+    // A budget stop is a spent authorization, not a fault: resuming IS the
+    // user paying for another window, so re-arm the ceiling ahead of the
+    // meter rather than resetting the meter -- `tokensUsed` stays honest
+    // accounting across the Goal's whole life.
+    return transitionGoal(current, transition.now, {
+      status: 'active',
+      ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
+      lastReason: undefined,
+      limitKind: undefined,
+    });
+  }
   if (request.action !== 'resume') {
     return assertNever(request, snapshotOf(current));
   }
@@ -158,12 +188,14 @@ export function reduceGoalControl(
       // a different one, so carrying it over would spend the new window's
       // allowance on the old window's failures.
       checkpointStalls: undefined,
+      ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
       lastReason: undefined,
       limitKind: undefined,
     });
   }
   return transitionGoal(current, transition.now, {
     status: 'active',
+    ...rearmedTokenBudget(current, transition.tokenBudgetGrant),
   });
 }
 
@@ -183,6 +215,9 @@ export function reduceGoalTurnFinished(
     ...(transition.lastReason === undefined
       ? {}
       : { lastReason: transition.lastReason }),
+    ...(transition.windDownTurnId === undefined
+      ? {}
+      : { windDownTurnId: transition.windDownTurnId }),
   });
 }
 
@@ -343,6 +378,7 @@ function createGoal(
   objective: string,
   now: number,
   cursor: TranscriptCursor,
+  tokenBudget: number | undefined,
 ): GoalRecord {
   return {
     goalId,
@@ -353,6 +389,11 @@ function createGoal(
     turnCount: 0,
     activeTimeMs: 0,
     tokensUsed: 0,
+    // A non-finite grant (a host opting out) arms nothing: `Infinity` would
+    // not survive the JSON journal, so "unbounded" is spelled as no field.
+    ...(tokenBudget !== undefined && Number.isFinite(tokenBudget)
+      ? { tokenBudget }
+      : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -389,16 +430,39 @@ function normalizeObjective(
 /**
  * Whether a stopped Goal was stopped by one of the evidence bounds.
  *
- * `limitKind` is the field of record. The `lastReason` comparison behind it
- * reads Goals persisted before `limitKind` existed, where the sentinel prose
- * was the only marker a transition could key off.
+ * `limitKind` is the field of record, matched by kind rather than presence:
+ * `token_budget` is also a `limitKind`, and a budget-stopped Goal is exactly
+ * the one resume must accept. The `lastReason` comparison behind it reads
+ * Goals persisted before `limitKind` existed, where the sentinel prose was
+ * the only marker a transition could key off.
  */
 function isEvidenceLimited(goal: GoalRecord): boolean {
   return (
-    goal.limitKind !== undefined ||
+    goal.limitKind === 'evidence_catalog' ||
+    goal.limitKind === 'checkpoint_request' ||
     (goal.lastReason !== undefined &&
       goalLimitKindForReason(goal.lastReason) !== undefined)
   );
+}
+
+/**
+ * The budget change an explicit user action (edit, or a resume of a Goal
+ * whose ceiling is spent) arms: a finite grant moves a spent ceiling to
+ * `tokensUsed + grant`, while a non-finite opt-out clears it. An unspent
+ * ceiling is left alone, and a Goal with no ceiling stays unbounded -- budgets
+ * are armed at creation, never retrofitted.
+ */
+function rearmedTokenBudget(
+  current: GoalRecord,
+  grant: number | undefined,
+): Partial<GoalRecord> {
+  if (grant === undefined || !isGoalTokenBudgetSpent(current)) {
+    return {};
+  }
+  // A new window gets its own wind-down: the marker belongs to the old one.
+  return Number.isFinite(grant)
+    ? { tokenBudget: current.tokensUsed + grant, windDownTurnId: undefined }
+    : { tokenBudget: undefined, windDownTurnId: undefined };
 }
 
 function transitionGoal(
@@ -406,12 +470,19 @@ function transitionGoal(
   now: number,
   changes: Partial<GoalRecord>,
 ): GoalRecord {
-  return {
+  const transitioned = {
     ...goal,
     ...changes,
     activeTimeMs: elapsedActiveTime(goal, now),
     updatedAt: now,
   };
+  if ('tokenBudget' in changes && changes.tokenBudget === undefined) {
+    delete transitioned.tokenBudget;
+  }
+  if ('windDownTurnId' in changes && changes.windDownTurnId === undefined) {
+    delete transitioned.windDownTurnId;
+  }
+  return transitioned;
 }
 
 function snapshotOf(goal: GoalRecord | null): GoalSnapshotV2 {
@@ -454,6 +525,8 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'turnCount',
       'activeTimeMs',
       'tokensUsed',
+      'tokenBudget',
+      'windDownTurnId',
       'createdAt',
       'updatedAt',
       'evidenceCheckpoint',
@@ -473,6 +546,11 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isNonNegativeNumber(value['activeTimeMs']) ||
     (value['tokensUsed'] !== undefined &&
       !isNonNegativeNumber(value['tokensUsed'])) ||
+    (value['tokenBudget'] !== undefined &&
+      !isNonNegativeNumber(value['tokenBudget'])) ||
+    (value['windDownTurnId'] !== undefined &&
+      (typeof value['windDownTurnId'] !== 'string' ||
+        !value['windDownTurnId'])) ||
     !isFiniteNumber(value['createdAt']) ||
     !isFiniteNumber(value['updatedAt']) ||
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
@@ -503,6 +581,13 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     activeTimeMs: value['activeTimeMs'],
     // Goals persisted before `tokensUsed` existed carry no spend to restore.
     tokensUsed: value['tokensUsed'] ?? 0,
+    // And no budget: a Goal from before budgets existed stays unbounded.
+    ...(value['tokenBudget'] === undefined
+      ? {}
+      : { tokenBudget: value['tokenBudget'] }),
+    ...(value['windDownTurnId'] === undefined
+      ? {}
+      : { windDownTurnId: value['windDownTurnId'] }),
     createdAt: value['createdAt'],
     updatedAt: value['updatedAt'],
     ...(value['evidenceCheckpoint'] === undefined

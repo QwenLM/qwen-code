@@ -15,6 +15,7 @@ export interface QueuedGoalTurn {
   turnKey: string;
   continuationContext: string;
   objectiveUpdated?: boolean;
+  windDown?: boolean;
   verifierFeedback?: string;
 }
 
@@ -30,7 +31,21 @@ export interface DirectUserAdmission {
   goal?: QueuedGoalTurn;
 }
 
-export type QueuedSubmission = QueuedUserSubmission | QueuedGoalTurn;
+export interface QueuedPeerSubmission {
+  kind: 'peer';
+  modelText: string;
+  displayText: string;
+  /**
+   * The drain already rendered this entry's notification; set when a
+   * failed admission restores it so the retry does not re-render it.
+   */
+  displayed?: boolean;
+}
+
+export type QueuedSubmission =
+  | QueuedUserSubmission
+  | QueuedPeerSubmission
+  | QueuedGoalTurn;
 export type GoalQueueControlMode = 'normal' | 'priority' | 'only';
 
 export interface UseMessageQueueReturn {
@@ -41,12 +56,14 @@ export interface UseMessageQueueReturn {
     deferUntilIdle?: boolean,
     submittedPrompt?: string,
   ) => void;
+  addPeerMessage: (message: string, displayText: string) => void;
   enqueueGoalTurn: (
     input: Parameters<GoalTurnHost['startGoalTurn']>[0],
   ) => void;
   peekNextUserBatchKey: (goalTurnActive?: boolean) => string | undefined;
   hasQueuedUserMessages: () => boolean;
   getPendingSubmissionCount: () => number;
+  getQueuedPeerCount: () => number;
   claimGoalTurn: () => QueuedGoalTurn | undefined;
   claimDirectUserAdmission: () => DirectUserAdmission;
   removeGoalTurns: () => string[];
@@ -58,7 +75,16 @@ export interface UseMessageQueueReturn {
   popAllMessages: (
     onRemoved?: (turnKeys: string[]) => void,
   ) => QueuedUserSubmission | null;
-  restoreMessages: (messages: string[], submittedPrompt?: string) => void;
+  restoreMessages: (
+    messages: string[],
+    submittedPrompt?: string,
+    deferUntilIdle?: boolean,
+  ) => void;
+  restorePeerMessage: (
+    message: string,
+    displayText: string,
+    displayed?: boolean,
+  ) => void;
   drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
 }
 
@@ -67,6 +93,14 @@ interface QueuedMessage {
   text: string;
   submittedPrompt?: string;
   deferUntilIdle: boolean;
+  /**
+   * A delivered cross-session envelope. Drained alone and submitted on a
+   * path that skips user-input preprocessing — the text is peer-authored,
+   * so it must not run through `@path`/slash/shell handling.
+   */
+  peer?: boolean;
+  /** Peer-only: its notification was already rendered before a restore. */
+  displayed?: boolean;
 }
 
 export const GOAL_COMMAND_RE = /^\/goal(?:\s|$)/;
@@ -75,17 +109,18 @@ function aggregateUserMessages(
   messages: readonly QueuedMessage[],
 ): QueuedUserSubmission {
   const text = messages.map((message) => message.text).join('\n\n');
-  const submittedPrompts = messages.map((message) => message.submittedPrompt);
+  // Every member contributes a projection — its own when it has one, its
+  // model text otherwise — so a single projection-less member cannot drop
+  // a peer message's one-liner and surface the raw envelope as the
+  // user's prompt instead.
+  const submittedPrompt = messages
+    .map((message) => message.submittedPrompt ?? message.text)
+    .join('\n\n');
   return {
     kind: 'user',
     modelText: text,
     turnKey: messages[0].key,
-    ...(submittedPrompts.every(
-      (submittedPrompt): submittedPrompt is string =>
-        submittedPrompt !== undefined,
-    )
-      ? { submittedPrompt: submittedPrompts.join('\n\n') }
-      : {}),
+    submittedPrompt,
   };
 }
 
@@ -114,6 +149,29 @@ export function useMessageQueue(): UseMessageQueueReturn {
     [nextMessageKey],
   );
 
+  const addPeerMessage = useCallback(
+    (message: string, displayText: string) => {
+      const text = message.trim();
+      if (!text) return;
+      queueRef.current = [
+        ...queueRef.current,
+        {
+          key: nextMessageKey(),
+          text,
+          // Deferred exactly like the typed-input-deferred path: the
+          // mid-turn steer drain returns raw text only, and a drained
+          // envelope would be steered into the active turn with its
+          // projection lost.
+          deferUntilIdle: true,
+          submittedPrompt: displayText,
+          peer: true,
+        },
+      ];
+      setQueuedMessages(queueRef.current);
+    },
+    [nextMessageKey],
+  );
+
   const enqueueGoalTurn = useCallback(
     (input: Parameters<GoalTurnHost['startGoalTurn']>[0]) => {
       if (
@@ -131,6 +189,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
         ...(input.objectiveUpdated
           ? { objectiveUpdated: input.objectiveUpdated }
           : {}),
+        ...(input.windDown ? { windDown: true } : {}),
         ...(input.verifierFeedback
           ? { verifierFeedback: input.verifierFeedback }
           : {}),
@@ -154,6 +213,11 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
   const getPendingSubmissionCount = useCallback(
     () => queueRef.current.length + goalQueueRef.current.length,
+    [],
+  );
+
+  const getQueuedPeerCount = useCallback(
+    () => queueRef.current.filter(({ peer }) => Boolean(peer)).length,
     [],
   );
 
@@ -205,12 +269,24 @@ export function useMessageQueue(): UseMessageQueueReturn {
         if (goalControlMode === 'only') return null;
       }
 
+      const head = queueRef.current[0];
+      if (head?.peer) {
+        queueRef.current = queueRef.current.slice(1);
+        setQueuedMessages(queueRef.current);
+        return {
+          kind: 'peer',
+          modelText: head.text,
+          displayText: head.submittedPrompt ?? head.text,
+          ...(head.displayed ? { displayed: true } : {}),
+        };
+      }
+
       const plainMessages = queueRef.current.filter(
-        ({ text }) => !isSlashCommand(text),
+        ({ text, peer }) => !isSlashCommand(text) && !peer,
       );
       if (plainMessages.length > 0) {
-        queueRef.current = queueRef.current.filter(({ text }) =>
-          isSlashCommand(text),
+        queueRef.current = queueRef.current.filter(
+          ({ text, peer }) => isSlashCommand(text) || Boolean(peer),
         );
         setQueuedMessages(queueRef.current);
         return aggregateUserMessages(plainMessages);
@@ -242,16 +318,23 @@ export function useMessageQueue(): UseMessageQueueReturn {
     (onRemoved?: (turnKeys: string[]) => void): QueuedUserSubmission | null => {
       const current = queueRef.current;
       if (current.length === 0) return null;
-      queueRef.current = [];
-      setQueuedMessages([]);
-      onRemoved?.(current.map(({ key }) => key));
-      return aggregateUserMessages(current);
+      // Peer entries stay queued: this pop restores user text into the
+      // editable buffer, and a peer-authored envelope re-submitted from
+      // there would run through UserQuery preprocessing (`@path`/slash/
+      // shell) with its attribution lost. They drain on their own path
+      // once the session is idle again.
+      const popped = current.filter(({ peer }) => !peer);
+      if (popped.length === 0) return null;
+      queueRef.current = current.filter(({ peer }) => Boolean(peer));
+      setQueuedMessages(queueRef.current);
+      onRemoved?.(popped.map(({ key }) => key));
+      return aggregateUserMessages(popped);
     },
     [],
   );
 
   const restoreMessages = useCallback(
-    (messages: string[], submittedPrompt?: string) => {
+    (messages: string[], submittedPrompt?: string, deferUntilIdle = false) => {
       const restored = messages
         .map((text) => text.trim())
         .filter(Boolean)
@@ -261,10 +344,30 @@ export function useMessageQueue(): UseMessageQueueReturn {
           ...(messages.length === 1 && submittedPrompt !== undefined
             ? { submittedPrompt }
             : {}),
-          deferUntilIdle: false,
+          deferUntilIdle,
         }));
       if (restored.length === 0) return;
       queueRef.current = [...restored, ...queueRef.current];
+      setQueuedMessages(queueRef.current);
+    },
+    [nextMessageKey],
+  );
+
+  const restorePeerMessage = useCallback(
+    (message: string, displayText: string, displayed = false) => {
+      const text = message.trim();
+      if (!text) return;
+      queueRef.current = [
+        {
+          key: nextMessageKey(),
+          text,
+          deferUntilIdle: true,
+          submittedPrompt: displayText,
+          peer: true,
+          ...(displayed ? { displayed: true } : {}),
+        },
+        ...queueRef.current,
+      ];
       setQueuedMessages(queueRef.current);
     },
     [nextMessageKey],
@@ -293,10 +396,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
     messageQueue: queuedMessages.map(({ text }) => text),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
     addMessage,
+    addPeerMessage,
     enqueueGoalTurn,
     peekNextUserBatchKey,
     hasQueuedUserMessages,
     getPendingSubmissionCount,
+    getQueuedPeerCount,
     claimGoalTurn,
     claimDirectUserAdmission,
     removeGoalTurns,
@@ -305,6 +410,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
     getQueuedMessagesText,
     popAllMessages,
     restoreMessages,
+    restorePeerMessage,
     drainQueue,
   };
 }

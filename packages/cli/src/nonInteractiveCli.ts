@@ -224,6 +224,7 @@ interface HeadlessGoalTurn {
   origin: 'runtime' | 'user';
   continuationContext: string;
   objectiveUpdated?: boolean;
+  windDown?: boolean;
   verifierFeedback?: string;
 }
 
@@ -635,6 +636,7 @@ export async function runNonInteractive(
           ...(input.objectiveUpdated
             ? { objectiveUpdated: input.objectiveUpdated }
             : {}),
+          ...(input.windDown ? { windDown: true } : {}),
           ...(input.verifierFeedback
             ? { verifierFeedback: input.verifierFeedback }
             : {}),
