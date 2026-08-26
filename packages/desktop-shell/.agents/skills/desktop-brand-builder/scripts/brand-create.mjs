@@ -115,8 +115,17 @@ function patchTauriConfig(shellRoot, brand) {
   // A branded build must never poll the official updater feed, and the
   // official feed must never update a branded build. Empty endpoints
   // disable in-app updates unless the brand supplies its own feed.
+  // When endpoints are cleared we must also disable createUpdaterArtifacts
+  // and remove the official pubkey so the Tauri bundler does not attempt
+  // to produce signed updater artifacts that no feed will serve.
   if (config.plugins?.updater) {
     config.plugins.updater.endpoints = brand.updaterEndpoints;
+    if (brand.updaterEndpoints.length === 0) {
+      delete config.plugins.updater.pubkey;
+    }
+  }
+  if (brand.updaterEndpoints.length === 0 && config.bundle) {
+    config.bundle.createUpdaterArtifacts = false;
   }
 
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
@@ -127,7 +136,7 @@ function generateIcons(shellRoot, brand) {
   const result = spawnSync(
     'npx',
     ['--yes', '@tauri-apps/cli', 'icon', brand.logo],
-    { cwd: shellRoot, stdio: 'inherit' },
+    { cwd: shellRoot, stdio: 'inherit', shell: true },
   );
   if (result.status === 0) {
     return 'regenerated via tauri icon';
