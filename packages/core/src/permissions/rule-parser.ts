@@ -174,6 +174,14 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   SaveMemory: 'save_memory',
   SaveMemoryTool: 'save_memory',
 
+  // Managed memory tools
+  manage_memory: 'manage_memory',
+  ManageMemory: 'manage_memory',
+  ManageMemoryTool: 'manage_memory',
+  search_memory: 'search_memory',
+  SearchMemory: 'search_memory',
+  SearchMemoryTool: 'search_memory',
+
   // Ask User Question tool
   ask_user_question: 'ask_user_question',
   AskUserQuestion: 'ask_user_question',

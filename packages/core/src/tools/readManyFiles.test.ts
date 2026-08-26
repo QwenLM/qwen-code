@@ -72,6 +72,7 @@ describe('readManyFiles', () => {
       getFileSystemService: () => new StandardFileSystemService(),
       getContentGeneratorConfig: () => ({ modalities: {} }),
       getModel: () => 'text-only-model',
+      getMemoryRecallMode: () => 'legacy',
     }) as unknown as Config;
 
   // Variant of createMockConfig wired to a live FileReadCache so the

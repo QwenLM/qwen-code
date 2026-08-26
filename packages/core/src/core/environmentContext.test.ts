@@ -66,6 +66,7 @@ describe('getDirectoryContextString', () => {
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
       }),
       getFileService: vi.fn(),
+      getMemoryRecallMode: vi.fn().mockReturnValue('legacy'),
     };
     vi.mocked(getFolderStructure).mockResolvedValue('Mock Folder Structure');
   });
@@ -122,6 +123,7 @@ describe('getEnvironmentContext', () => {
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
       }),
       getFileService: vi.fn(),
+      getMemoryRecallMode: vi.fn().mockReturnValue('legacy'),
     };
 
     vi.mocked(getFolderStructure).mockResolvedValue('Mock Folder Structure');
@@ -149,6 +151,7 @@ describe('getEnvironmentContext', () => {
     );
     expect(getFolderStructure).toHaveBeenCalledWith('/test/dir', {
       fileService: undefined,
+      hideManagedMemory: false,
     });
   });
 
@@ -198,6 +201,7 @@ describe('getInitialChatHistory', () => {
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
       }),
       getFileService: vi.fn(),
+      getMemoryRecallMode: vi.fn().mockReturnValue('legacy'),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getSkillManager: vi.fn().mockReturnValue(null),
     };
@@ -415,6 +419,7 @@ describe('stripStartupContext', () => {
         getDirectories: vi.fn().mockReturnValue(['/test/dir']),
       }),
       getFileService: vi.fn(),
+      getMemoryRecallMode: vi.fn().mockReturnValue('legacy'),
       getSkillManager: vi.fn().mockReturnValue(null),
     };
 
