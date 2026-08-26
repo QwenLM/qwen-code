@@ -15,10 +15,30 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const downloadSkillMock = vi.hoisted(() => vi.fn());
+type RenameFn = typeof import('node:fs/promises').rename;
+const renameOverride = vi.hoisted(() => ({
+  fn: null as RenameFn | null,
+  realRename: null as RenameFn | null,
+}));
 
 vi.mock('./skill-source-download.js', () => ({
   downloadSkill: downloadSkillMock,
 }));
+
+vi.mock('node:fs/promises', async () => {
+  const actual =
+    await vi.importActual<typeof import('node:fs/promises')>(
+      'node:fs/promises',
+    );
+  renameOverride.realRename = actual.rename;
+  return {
+    ...actual,
+    rename: ((...args: Parameters<RenameFn>) => {
+      if (renameOverride.fn) return renameOverride.fn(...args);
+      return actual.rename(...args);
+    }) as RenameFn,
+  };
+});
 
 import {
   deleteManagedSkill,
@@ -344,6 +364,81 @@ describe('managed Skill mutations', () => {
         'name: pptx',
       );
     } finally {
+      await fs.rm(tempHome, { recursive: true, force: true });
+    }
+  });
+
+  it('restores the original skill when the swap rename fails', async () => {
+    const tempHome = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-skill-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(tempHome);
+    const originalContent =
+      '---\nname: pptx\ndescription: Original skill\n---\nOriginal body\n';
+    const { skillFile } = await writeSkill(tempHome, 'skills', 'pptx');
+    // Overwrite with known content so we can assert restoration exactly.
+    await fs.writeFile(skillFile, originalContent, 'utf8');
+
+    const manager = managerFor('pptx');
+    downloadSkillMock.mockResolvedValue({
+      skillContent:
+        '---\nname: pptx\ndescription: New version\n---\nNew body\n',
+      files: [
+        {
+          relativePath: 'SKILL.md',
+          content: Buffer.from('---\nname: pptx\n---\nNew body\n'),
+        },
+      ],
+    });
+
+    // Make the staging → final rename fail with EPERM, but let the
+    // original → backup rename succeed so the rollback path is exercised.
+    const realRename = renameOverride.realRename!;
+    let renameCalled = false;
+    renameOverride.fn = (async (
+      oldPath: Parameters<RenameFn>[0],
+      newPath: Parameters<RenameFn>[1],
+    ) => {
+      const dest = String(newPath);
+      const skillsRoot = path.join(tempHome, 'skills');
+      // The swap rename: staging dir → final skill dir.
+      if (
+        dest === path.join(skillsRoot, 'pptx') &&
+        String(oldPath).includes('.installing-')
+      ) {
+        renameCalled = true;
+        const err = new Error('EPERM') as NodeJS.ErrnoException;
+        err.code = 'EPERM';
+        throw err;
+      }
+      return realRename(oldPath, newPath);
+    }) as RenameFn;
+
+    try {
+      await expect(
+        installManagedSkill(configWith(manager), {
+          skill: {
+            id: 'pptx-id',
+            slug: 'pptx',
+            name: 'PPTX',
+            sourceUrl:
+              'https://github.com/anthropics/skills/blob/main/skills/pptx/SKILL.md',
+          },
+        }),
+      ).rejects.toThrow('EPERM');
+
+      // Sanity: the failing rename was actually hit.
+      expect(renameCalled).toBe(true);
+
+      // Original content must be intact after the rollback.
+      await expect(fs.readFile(skillFile, 'utf8')).resolves.toBe(
+        originalContent,
+      );
+
+      // No leftover .backup-* or .installing-* siblings.
+      const skillsDir = path.join(tempHome, 'skills');
+      const entries = await fs.readdir(skillsDir);
+      expect(entries).toEqual(['pptx']);
+    } finally {
+      renameOverride.fn = null;
       await fs.rm(tempHome, { recursive: true, force: true });
     }
   });

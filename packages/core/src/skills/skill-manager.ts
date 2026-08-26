@@ -1079,6 +1079,19 @@ export class SkillManager {
       // any ordering assumption (`tools/skill.ts`); preserve that contract.
       const loaded = await Promise.all(
         entries.map(async (entry) => {
+          // Skip transient install artifacts (backup / staging dirs left
+          // behind by a crashed reinstall). Without this filter a stale
+          // `.backup-*` sibling with a valid SKILL.md would be loaded as a
+          // duplicate skill, and a "deleted" skill could reappear from its
+          // backup sibling.
+          if (
+            entry.name.includes('.backup-') ||
+            entry.name.includes('.installing-')
+          ) {
+            debugLogger.debug(`Skipping install artifact entry: ${entry.name}`);
+            return null;
+          }
+
           const isDirectory = entry.isDirectory();
           const isSymlink = entry.isSymbolicLink();
 
