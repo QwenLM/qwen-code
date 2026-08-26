@@ -110,7 +110,16 @@ RUNNER_GID="$(id -g)"
 if [ "$RUNNER_UID" != "0" ]; then
   chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
 fi
-chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+# chmod -R follows a symlink given as its starting operand: if a
+# previous pool job replaced $GITHUB_WORKSPACE with a symlink, the
+# recursive chmod would descend into the link target. Skip when the
+# workspace is not a real directory; the heal block below will
+# restore it before the wipe runs.
+if [ -L "$GITHUB_WORKSPACE" ] || [ ! -d "$GITHUB_WORKSPACE" ]; then
+  echo "::warning::skipping chmod on \${GITHUB_WORKSPACE}: not a real directory (will be healed below)"
+else
+  chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+fi
 # Release jobs do not need cross-job workspace reuse: remove every
 # persisted entry, including planted .git config/hooks/attributes,
 # before actions/checkout runs with release credentials. The full
@@ -329,13 +338,17 @@ describe('release workflow', () => {
       };
     };
 
-    // Happy path: a normal workspace inside the runner workspace is wiped.
+    // Happy path: a normal workspace inside the runner workspace is wiped,
+    // including subdirectories (the wipe's core property: recursive removal
+    // of all persisted entries, not just files).
     {
       const { result, base, workspace } = runWipe(
         {},
         {
           preCreateWorkspace: (_base, ws) => {
             writeFileSync(join(ws, 'leftover.txt'), 'stale');
+            mkdirSync(join(ws, 'leftover-dir'));
+            writeFileSync(join(ws, 'leftover-dir', 'nested.txt'), 'stale');
           },
         },
       );
