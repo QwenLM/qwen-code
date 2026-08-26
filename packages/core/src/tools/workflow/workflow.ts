@@ -59,6 +59,7 @@ import {
 } from '../../agents/runtime/workflow-budget.js';
 import {
   WorkflowRunner,
+  WorkflowScriptNotLaunchedError,
   type WorkflowRunHandle,
 } from '../../agents/runtime/workflow-runner.js';
 import * as path from 'node:path';
@@ -354,6 +355,21 @@ class WorkflowToolInvocation extends BaseToolInvocation<
     } catch (error) {
       if (runInBackground && signal.aborted) {
         return backgroundStartCancelledResult();
+      }
+      // A script that never compiled has no run behind it, so reporting it as
+      // a failed workflow would be wrong twice: it invites the model to go
+      // looking for a runId that was never minted, and it reads as "the
+      // orchestration broke" when the actual problem is a typo the model can
+      // fix and re-send.
+      if (error instanceof WorkflowScriptNotLaunchedError) {
+        return {
+          llmContent: [{ text: error.message }],
+          returnDisplay: error.message,
+          error: {
+            message: error.message,
+            type: ToolErrorType.INVALID_TOOL_PARAMS,
+          },
+        };
       }
       throw error;
     }
