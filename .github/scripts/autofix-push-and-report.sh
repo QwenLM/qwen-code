@@ -118,17 +118,52 @@ fi
 # replies — silence in still-open threads was a no-op-only gap.
 resolve_and_reply_threads() {
   CAN_RESOLVE_THREADS='false'
+  # Round-report observability (#10106): a guard refusing round after
+  # round reads, on the PR, exactly like resolution working — 0/90 on
+  # #9729 stayed invisible for days. Each refusing guard records its
+  # name, and the counters feed one host-authored line in the round
+  # report; the ::warning:: lines below reach only the run log.
+  RESOLUTION_GUARD=''
+  RESOLUTION_SELECTED_N=0
+  CONFIRMED_RESOLVED_N=0
   if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
+    # Same id grammar as the resolve loop below: optional rc: prefix,
+    # optional trailing CR, digits only.
+    RESOLUTION_SELECTED_N="$(sed 's/\r$//; s/^rc://' "${WORKDIR}/resolved-comments.txt" | grep -cE '^[0-9]+$' || true)"
     LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
     if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
+      RESOLUTION_GUARD='salvage merge'
       echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
-    elif [[ -z "${VERIFIED_HEAD}" || "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+    elif [[ -z "${VERIFIED_HEAD}" ]]; then
+      RESOLUTION_GUARD='missing verified_head'
+      echo "::warning::skipping review-thread resolution because this round recorded no deterministically verified commit"
+    elif [[ "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+      RESOLUTION_GUARD='verified_head mismatch'
       echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
-    elif LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" &&
-      [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
-      CAN_RESOLVE_THREADS='true'
     else
-      echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
+      # The PR read model is eventually consistent: a headRefOid read
+      # seconds after this round's OWN push routinely still returns the
+      # previous head — on #9729 every pushed round tripped this guard
+      # that way, silently, for days (#10106). Give propagation a
+      # bounded window before declaring drift; the per-mutation guards
+      # below stay single-shot, because once the head was observed
+      # equal a later mismatch means it actually moved.
+      # The delay knob exists for tests; anything but a single digit
+      # (e.g. a GITHUB_ENV plant stalling this PAT-bearing step) falls
+      # back to the default.
+      [[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5
+      for live_head_attempt in 1 2 3 4 5; do
+        LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" || LIVE_PR_HEAD=''
+        if [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
+          CAN_RESOLVE_THREADS='true'
+          break
+        fi
+        [[ "${live_head_attempt}" == 5 ]] || sleep "${LIVE_HEAD_RETRY_DELAY}"
+      done
+      if [[ "${CAN_RESOLVE_THREADS}" != 'true' ]]; then
+        RESOLUTION_GUARD='live-head drift'
+        echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
+      fi
     fi
   fi
   # Resolve the review threads whose findings the agent actually
@@ -170,7 +205,6 @@ resolve_and_reply_threads() {
     fi
   fi
   if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
-    CONFIRMED_RESOLVED_N=0
     read_thread_guard() {
       gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
         query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
@@ -192,12 +226,14 @@ resolve_and_reply_threads() {
       fi
       if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
         [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
+        RESOLUTION_GUARD='live-head drift'
         echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
         break
       elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
         echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
         continue
       elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
+        RESOLUTION_GUARD='thread state unproven'
         echo "::warning::stopping review-thread resolution because the state of comment ${rc_id} could not be proven"
         break
       fi
@@ -220,11 +256,38 @@ resolve_and_reply_threads() {
       elif [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'false' && "${RESOLVE_SUCCEEDED}" == 'false' ]]; then
         echo "::warning::could not resolve the review thread for comment ${rc_id}"
       else
+        RESOLUTION_GUARD='mutation post-check ambiguous'
         echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
         break
       fi
     done < "${WORKDIR}/resolved-comments.txt"
     echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
+  fi
+  # One host-authored line for the round report (#10106): name the
+  # refusing guard and count the threads left behind. All text is fixed
+  # host strings plus counts — nothing agent-controlled.
+  RESOLUTION_NOTE=''
+  if [[ "${RESOLUTION_SELECTED_N}" -gt 0 ]]; then
+    RESOLUTION_LEFT_N=$(( RESOLUTION_SELECTED_N - CONFIRMED_RESOLVED_N ))
+    if [[ -n "${RESOLUTION_GUARD}" ]]; then
+      RESOLUTION_PHASE='skipped'
+      RESOLUTION_PHASE_ZH='被跳过'
+      if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
+        RESOLUTION_PHASE='stopped early'
+        RESOLUTION_PHASE_ZH='提前中止'
+      fi
+      RESOLUTION_NOTE="⚠️ Review-thread resolution ${RESOLUTION_PHASE} — guard: \`${RESOLUTION_GUARD}\`; resolved ${CONFIRMED_RESOLVED_N} of ${RESOLUTION_SELECTED_N} selected thread(s), ${RESOLUTION_LEFT_N} left for a later round. · 评审线程关闭${RESOLUTION_PHASE_ZH}——守卫:\`${RESOLUTION_GUARD}\`;选中 ${RESOLUTION_SELECTED_N} 条,本轮关闭 ${CONFIRMED_RESOLVED_N} 条,其余 ${RESOLUTION_LEFT_N} 条留待后续轮次。"
+    elif [[ "${RESOLUTION_LEFT_N}" -gt 0 ]]; then
+      RESOLUTION_DETAIL='details in the run log'
+      RESOLUTION_DETAIL_ZH='详见运行日志'
+      if [[ "${THREADS_FETCH_OK:-true}" != 'true' ]]; then
+        RESOLUTION_DETAIL='thread fetch incomplete; details in the run log'
+        RESOLUTION_DETAIL_ZH='线程拉取不完整,详见运行日志'
+      fi
+      RESOLUTION_NOTE="🧵 Resolved ${CONFIRMED_RESOLVED_N} of ${RESOLUTION_SELECTED_N} selected review thread(s); ${RESOLUTION_LEFT_N} not resolved by this round (${RESOLUTION_DETAIL}). · 选中评审线程 ${RESOLUTION_SELECTED_N} 条,已关闭 ${CONFIRMED_RESOLVED_N} 条;其余 ${RESOLUTION_LEFT_N} 条本轮未关闭(${RESOLUTION_DETAIL_ZH})。"
+    else
+      RESOLUTION_NOTE="🧵 Resolved all ${RESOLUTION_SELECTED_N} selected review thread(s). · 已关闭全部选中的 ${RESOLUTION_SELECTED_N} 条评审线程。"
+    fi
   fi
   # The mirror of the resolve above: a finding the agent did NOT
   # resolve keeps its thread open, and this answers it IN that thread.
@@ -484,6 +547,10 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
       echo
       echo "⚠️ The branch received new commits while this round ran; they were merged into this push, but this round's verification predates that merge — re-check anything that landed mid-run. · 本轮运行期间分支收到了新的提交；本次推送已将其合并，但本轮验证在合并之前完成——请复查运行期间落地的改动。"
     fi
+    if [[ -n "${RESOLUTION_NOTE}" ]]; then
+      echo
+      echo "${RESOLUTION_NOTE}"
+    fi
     echo
     echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
     echo
@@ -524,6 +591,10 @@ else
     fi
     echo
     echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge). · 与 main 有冲突（无需评审修复，但合并前需 rebase/merge）。' || echo 'no conflict with main. · 与 main 无冲突。')"
+    if [[ -n "${RESOLUTION_NOTE}" ]]; then
+      echo
+      echo "${RESOLUTION_NOTE}"
+    fi
     echo
     echo "---"
     echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"

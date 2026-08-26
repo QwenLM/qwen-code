@@ -17562,6 +17562,7 @@ exit 1
           VERIFIED_HEAD: localHead,
           LIVE_HEAD: localHead,
           PUSH_RACE_MERGED: 'false',
+          LIVE_HEAD_RETRY_DELAY: '0',
           ...env,
         },
         encoding: 'utf8',
@@ -17618,6 +17619,33 @@ exit 1
     expect(matching.resolved).not.toContain('resolve:T_done'); // already resolved
     expect(matching.out).toContain(
       'confirmed 1 selected review thread(s) resolved while the verified head remained live',
+    );
+
+    // #10106 root cause on #9729: the PR read model is eventually
+    // consistent, so a headRefOid read seconds after this round's OWN push
+    // routinely still returns the previous head — every pushed round
+    // declared drift on that one stale read and silently skipped. The
+    // initial equality check waits out propagation instead…
+    const lagThenConverge = runResolve({
+      LIVE_HEAD_SEQUENCE: `stale-pre-push-head,${localHead}`,
+    });
+    expect(lagThenConverge.status).toBe(0);
+    expect(lagThenConverge.resolved).toEqual(['resolve:T_open_1']);
+    expect(lagThenConverge.out).not.toContain(
+      'skipping review-thread resolution',
+    );
+    // …and a head that never converges still skips, after exhausting the
+    // whole window rather than a single read.
+    const neverConverges = runResolve({ LIVE_HEAD: 'stale-pre-push-head' });
+    expect(neverConverges.status).toBe(0);
+    expect(neverConverges.resolved).toEqual([]);
+    expect(neverConverges.out).toContain('skipping review-thread resolution');
+    expect(readFileSync(headReadCount, 'utf8')).toBe('5');
+    // The retry delay is a test knob on a PAT-bearing step: anything but
+    // a single digit (a GITHUB_ENV plant stalling the step to the job
+    // timeout) must fall back to the default.
+    expect(block).toContain(
+      '[[ "${LIVE_HEAD_RETRY_DELAY:-}" =~ ^[0-9]$ ]] || LIVE_HEAD_RETRY_DELAY=5',
     );
 
     const movedBeforeMutation = runResolve({
@@ -17919,6 +17947,111 @@ exit 1
         'confirmed 1 selected review thread(s) resolved',
       );
     }
+
+    // #10106: the ::warning:: lines above reach only the run log — on the
+    // PR, a guard refusing round after round reads exactly like resolution
+    // working (0/90 threads on #9729, silent for days). The block composes
+    // one host-authored RESOLUTION_NOTE naming the refusing guard and
+    // counting the threads left behind, and BOTH report arms (pushed and
+    // no-op) embed it in the round report.
+    expect(
+      pushAndReportScript.match(/echo "\$\{RESOLUTION_NOTE\}"/g) ?? [],
+    ).toHaveLength(2);
+    const noteEnd = lines.findIndex((l) =>
+      l.includes('The mirror of the resolve above'),
+    );
+    expect(noteEnd).toBeGreaterThan(j);
+    const noteBlock = [
+      ...lines.slice(i, noteEnd),
+      'printf "NOTE<%s>" "${RESOLUTION_NOTE}"',
+    ].join('\n');
+    const runNote = (env = {}) => {
+      writeFileSync(resolvedLog, '');
+      writeFileSync(headReadCount, '0');
+      writeFileSync(threadStateFile, '');
+      const result = spawnSync(
+        'bash',
+        ['-c', `set -euo pipefail\n${noteBlock}`],
+        {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            WORKDIR: dir,
+            REPO: 'QwenLM/qwen-code',
+            PR: '7308',
+            RESOLVED_LOG: resolvedLog,
+            HEAD_READ_COUNT: headReadCount,
+            THREAD_STATE_FILE: threadStateFile,
+            THREADS_RAW_STUB: threadsRaw,
+            VERIFIED_HEAD: localHead,
+            LIVE_HEAD: localHead,
+            PUSH_RACE_MERGED: 'false',
+            LIVE_HEAD_RETRY_DELAY: '0',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+      expect(result.status).toBe(0);
+      return /NOTE<([\s\S]*)>$/.exec(result.stdout)?.[1] ?? '';
+    };
+    // Every up-front guard names itself, and a full skip counts all three
+    // selected ids as left behind.
+    for (const [env, guard] of [
+      [{ PUSH_RACE_MERGED: 'true' }, 'salvage merge'],
+      [{ VERIFIED_HEAD: '' }, 'missing verified_head'],
+      [{ VERIFIED_HEAD: 'different-verified-head' }, 'verified_head mismatch'],
+      [{ LIVE_HEAD: 'new-contributor-head' }, 'live-head drift'],
+      [{ LIVE_HEAD_EXIT: '1' }, 'live-head drift'],
+    ]) {
+      const note = runNote(env);
+      expect(note).toContain('Review-thread resolution skipped');
+      expect(note).toContain(`guard: \`${guard}\``);
+      expect(note).toContain(
+        'resolved 0 of 3 selected thread(s), 3 left for a later round',
+      );
+    }
+    // A mid-list abort names its guard too, and carries the partial count.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\nrc:444\n');
+    const stoppedNote = runNote({
+      LIVE_HEAD_SEQUENCE: `${localHead},${localHead},${localHead},new-contributor-head`,
+    });
+    expect(stoppedNote).toContain('Review-thread resolution stopped early');
+    expect(stoppedNote).toContain('guard: `live-head drift`');
+    expect(stoppedNote).toContain(
+      'resolved 1 of 2 selected thread(s), 1 left for a later round',
+    );
+    const unprovenNote = runNote({ UNKNOWN_THREAD_STATE: 'T_open_1' });
+    expect(unprovenNote).toContain('guard: `thread state unproven`');
+    expect(unprovenNote).toContain('resolved 0 of 2');
+    const ambiguousNote = runNote({
+      RESOLVE_APPLIES: 'false',
+      RESOLVE_EXIT: '0',
+    });
+    expect(ambiguousNote).toContain('guard: `mutation post-check ambiguous`');
+    expect(ambiguousNote).toContain('resolved 0 of 2');
+    // Healthy rounds report a positive count and never name a guard.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\n');
+    const healthyNote = runNote();
+    expect(healthyNote).toContain('Resolved all 1 selected review thread(s)');
+    expect(healthyNote).not.toContain('guard:');
+    // Per-thread misses without a stopping guard still show up as a count,
+    // and an incomplete thread fetch is called out as the likely cause.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    const partialNote = runNote();
+    expect(partialNote).toContain(
+      'Resolved 1 of 3 selected review thread(s); 2 not resolved by this round',
+    );
+    expect(partialNote).toContain('details in the run log');
+    expect(partialNote).not.toContain('guard:');
+    const fetchNote = runNote({ THREADS_FETCH_EXIT: '1' });
+    expect(fetchNote).toContain('thread fetch incomplete');
+    // No ids selected → no note: the line appears only when the agent
+    // asked for resolution.
+    writeFileSync(join(dir, 'resolved-comments.txt'), '');
+    expect(runNote()).toBe('');
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+
     // The SKILL keys resolution on the FINDING being fixed, not on "did I edit
     // a file this round" — an earlier commit's fix that still holds resolves
     // too, or a fixed Critical sits open and reads as unaddressed (#7731).
