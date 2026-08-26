@@ -31,7 +31,10 @@ import {
   logApiResponse,
 } from '../../telemetry/loggers.js';
 import { isInternalPromptId } from '../../utils/internalPromptIds.js';
-import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import {
+  subagentIdentityContext,
+  subagentNameContext,
+} from '../../utils/subagentNameContext.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -232,6 +235,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     responseText?: string,
     ttftMs?: number,
   ): void {
+    const identity = subagentIdentityContext.getStore();
     logApiResponse(
       this.config,
       new ApiResponseEvent(
@@ -246,6 +250,13 @@ export class LoggingContentGenerator implements ContentGenerator {
         ttftMs,
       ),
       sessionId,
+      identity
+        ? {
+            id: identity.id,
+            type: identity.type,
+            taskName: identity.taskName,
+          }
+        : undefined,
     );
   }
 
@@ -265,6 +276,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       responseId;
     const errorStatus = getErrorStatus(error);
 
+    const identity = subagentIdentityContext.getStore();
     logApiError(
       this.config,
       new ApiErrorEvent({
@@ -279,6 +291,13 @@ export class LoggingContentGenerator implements ContentGenerator {
         subagentName: subagentNameContext.getStore(),
       }),
       sessionId,
+      identity
+        ? {
+            id: identity.id,
+            type: identity.type,
+            taskName: identity.taskName,
+          }
+        : undefined,
     );
   }
 
