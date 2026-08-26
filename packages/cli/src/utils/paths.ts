@@ -35,6 +35,17 @@ import { createHash } from 'node:crypto';
  * move.
  */
 export function safeTarget(target: string): string {
+  // IDEMPOTENT over its own outputs, checked BEFORE the flatten: `tmpFile`/
+  // `tmpPrefix` apply this function to tokens that other callers derived
+  // with it already, and the capped shape's `~` joiner sits outside the
+  // kept alphabet — a second flatten rewrote it to `_` while `run`'s pins
+  // interpolated the single-flatten spelling raw, so for every deep target
+  // the child wrote `<head>_<digest>-stop.json` and the parent polled
+  // `<head>~<digest>-…` for ever (R18-1). An INPUT that happens to spell
+  // the capped shape passes through unchanged; the collision that permits
+  // is no wider than the flatten's own (`src/foo` and `src_foo` already
+  // share a token by design).
+  if (/^[A-Za-z0-9._-]{55}~[0-9a-f]{8}$/.test(target)) return target;
   const flat = target
     .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
     .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token

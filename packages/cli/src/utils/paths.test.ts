@@ -62,8 +62,25 @@ describe('safeTarget — the length cap', () => {
     const uncapped = safeTarget(head);
     expect(uncapped).toBe(head);
     expect(capped.startsWith(`${uncapped}-`)).toBe(false);
-    // A literal `~` in the INPUT cannot forge the joiner.
-    expect(safeTarget(`${head}~deadbeef`)).toBe(`${head}_deadbeef`);
+    // A literal `~` in the INPUT cannot forge the joiner — unless it spells
+    // the full capped shape, which the idempotence check below accepts on
+    // purpose.
+    expect(safeTarget(`${head}~nothexy!`)).toBe(`${head}_nothexy_`);
+  });
+
+  it('is idempotent over its own outputs — tmpFile applies it a second time', () => {
+    // R18-1: `tmpFile`/`tmpPrefix` re-apply safeTarget to already-derived
+    // tokens, and the second flatten rewrote the capped `~` to `_` while
+    // run.ts's pins interpolated the single-flatten token raw — the child
+    // wrote `<head>_<digest>-stop.json`, the parent polled `<head>~<digest>`
+    // and every deep-path round exited 1 "Review did not complete": the
+    // exact never-matching-poll regression this PR exists to kill.
+    const deep = `${'d'.repeat(230)}/x.ts`;
+    const once = safeTarget(deep);
+    expect(once).toContain('~');
+    expect(safeTarget(once)).toBe(once);
+    // Short tokens were always idempotent; the cap must not change that.
+    expect(safeTarget(safeTarget('src/foo.ts'))).toBe(safeTarget('src/foo.ts'));
   });
 });
 

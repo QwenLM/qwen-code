@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  readFileSync,
   mkdtempSync,
   mkdirSync,
   realpathSync,
@@ -418,6 +419,70 @@ describe('invisibleTrackedPaths — sparse-checkout owns its S bits', () => {
     git('update-index', '--skip-worktree', 'sub/out.ts');
     rmSync(join(repo, 'sub/out.ts'));
     expect(invisibleTrackedPaths(repo)).toEqual(['sub/out.ts']);
+  });
+
+  it('exempts the combined-bit lowercase `s` out-of-cone spelling too', () => {
+    // R18-4: an entry carrying BOTH skip-worktree and assume-unchanged
+    // renders lowercase `s`, so an S-only match missed it and the wedge the
+    // exemption closes re-opened for any de-coned path that ever carried
+    // assume-unchanged. Membership comes from `check-rules`, not the tag.
+    writeFileSync(join(repo, 'in.ts'), 'export const a = 1;\n');
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    writeFileSync(join(repo, 'sub/out.ts'), 'export const b = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    git('update-index', '--assume-unchanged', 'sub/out.ts');
+    git('sparse-checkout', 'set', '--cone', '.');
+    expect(existsSync(join(repo, 'sub/out.ts'))).toBe(false);
+    expect(invisibleTrackedPaths(repo)).toEqual([]);
+  });
+
+  it('an inherited GLOBAL core.sparseCheckout never turns the exemption on', () => {
+    // R18-2 axis (b): the flag read keeps HOME, so a global `true` used to
+    // apply the exemption on a repo that is not sparse — and an absent
+    // manually-bitted path was swallowed. The read is `--worktree` now:
+    // repository state only.
+    writeFileSync(join(repo, 'in.ts'), 'export const a = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    git('config', '--global', 'core.sparseCheckout', 'true');
+    git('update-index', '--skip-worktree', 'in.ts');
+    rmSync(join(repo, 'in.ts'));
+    expect(invisibleTrackedPaths(repo)).toEqual(['in.ts']);
+  });
+
+  it('reads the flag as a canonicalized bool — legacy spellings count', () => {
+    // R18-2 axis (a): `--get` alone echoes the stored spelling, so the
+    // legacy sparse recipe (`core.sparseCheckout on` + info/sparse-checkout
+    // + read-tree) failed a === 'true' comparison and re-wedged. Cone mode
+    // spelled `yes` here exercises the canonicalization end to end.
+    writeFileSync(join(repo, 'in.ts'), 'export const a = 1;\n');
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    writeFileSync(join(repo, 'sub/out.ts'), 'export const b = 1;\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'base');
+    git('sparse-checkout', 'set', '--cone', '.');
+    // Written into .git/config by hand: modern `git config` canonicalizes a
+    // bool-valued core variable on WRITE, so only the raw file can hold the
+    // legacy spelling the manual recipe left behind.
+    // `sparse-checkout set` enables extensions.worktreeConfig and writes
+    // the flag into config.worktree — which is also why the production read
+    // is `--worktree`.
+    const cfg = join(repo, '.git/config.worktree');
+    writeFileSync(
+      cfg,
+      readFileSync(cfg, 'utf8').replace(
+        /sparseCheckout = true/i,
+        'sparseCheckout = yes',
+      ),
+    );
+    expect(readFileSync(cfg, 'utf8')).toMatch(/sparseCheckout = yes/i);
+    // What `--get` echoes for the stored `yes` is version-dependent (2.47
+    // canonicalizes even on read; 2.43 — this repo's CI git, where R18-2
+    // was probed — echoes the raw spelling), which is exactly why the
+    // production read pins `--type=bool`: on every git it answers `true`.
+    expect(existsSync(join(repo, 'sub/out.ts'))).toBe(false);
+    expect(invisibleTrackedPaths(repo)).toEqual([]);
   });
 });
 

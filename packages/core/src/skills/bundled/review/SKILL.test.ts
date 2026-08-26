@@ -1268,6 +1268,17 @@ describe('bundled review skill', () => {
     // what makes "never glob its family" true (pinned structurally above).
     const body = skillBody();
     expect(body).toContain('Remove the plan `--out` you wrote');
+    // R18-5: the file family sits outside every cleanup sweep, so this
+    // instruction is its ONLY remover — and cleanup's #9206 retention (keep
+    // the record directory of a run that stopped without converging) must
+    // ride with it, or every unconverged file review destroys its own
+    // diagnosis evidence on the way out.
+    expect(body).toContain(
+      '**unless the reverse-audit loop stopped without converging**',
+    );
+    expect(body).toContain(
+      '`budget-stop.json` marker inside the `-prompts` directory',
+    );
     expect(body).toContain('must never glob its family');
     expect(body).toContain(
       "deleted concurrent file reviews' live plans mid-round",
