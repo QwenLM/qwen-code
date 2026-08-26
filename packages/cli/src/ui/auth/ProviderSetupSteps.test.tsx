@@ -12,7 +12,10 @@ import type { ModelSpec } from '@qwen-code/qwen-code-core';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
-import type { ProviderSetupFlow } from './useProviderSetupFlow.js';
+import {
+  useProviderSetupFlow,
+  type ProviderSetupFlow,
+} from './useProviderSetupFlow.js';
 
 type UseKeypressMockOptions = { isActive: boolean };
 
@@ -124,6 +127,7 @@ describe('ProviderSetupSteps', () => {
       changeApiKey: noop,
       submitApiKey: noop,
       changeModelIds: noop,
+      clearModelIdsError: vi.fn(),
       submitModelIds: noop,
       moveAdvancedFocusUp: vi.fn(),
       moveAdvancedFocusDown: vi.fn(),
@@ -196,6 +200,7 @@ describe('ProviderSetupSteps', () => {
       changeApiKey: noop,
       submitApiKey: noop,
       changeModelIds: noop,
+      clearModelIdsError: vi.fn(),
       submitModelIds,
       moveAdvancedFocusUp: noop,
       moveAdvancedFocusDown: noop,
@@ -257,6 +262,7 @@ describe('ProviderSetupSteps', () => {
       changeApiKey: noop,
       submitApiKey: noop,
       changeModelIds: noop,
+      clearModelIdsError: vi.fn(),
       submitModelIds,
       moveAdvancedFocusUp: noop,
       moveAdvancedFocusDown: noop,
@@ -383,7 +389,7 @@ describe('ProviderSetupSteps', () => {
     pressKey('return', '\r');
 
     expect(submitModelIds).toHaveBeenCalledWith({
-      modelIds: ['custom-model', 'MiniMax-M3', 'MiniMax-M2.7'],
+      modelIds: ['MiniMax-M3', 'MiniMax-M2.7', 'custom-model'],
     });
     unmount();
   });
@@ -492,7 +498,7 @@ describe('ProviderSetupSteps', () => {
     expect(flow.changeModelIds).not.toHaveBeenCalled();
     pressKey('return', '\r');
     expect(submitModelIds).toHaveBeenCalledWith({
-      modelIds: ['xcustom-model', 'MiniMax-M2.7', 'MiniMax-M3'],
+      modelIds: ['MiniMax-M3', 'xcustom-model', 'MiniMax-M2.7'],
     });
     unmount();
   });
@@ -559,7 +565,7 @@ describe('ProviderSetupSteps', () => {
 
     pressKey('return', '\r');
     expect(submitModelIds).toHaveBeenCalledWith({
-      modelIds: ['custom-model', 'MiniMax-M3', 'MiniMax-M4'],
+      modelIds: ['MiniMax-M3', 'MiniMax-M4', 'custom-model'],
     });
     unmount();
   });
@@ -594,5 +600,83 @@ describe('ProviderSetupSteps', () => {
     unmount();
 
     expect(signal.aborted).toBe(true);
+  });
+
+  it('submits served recommendations ahead of unserved defaults on a partial catalog', async () => {
+    let resolveDiscovery!: (models: ModelSpec[]) => void;
+    discoverProviderModelsMock.mockReturnValue(
+      new Promise<ModelSpec[]>((resolve) => {
+        resolveDiscovery = resolve;
+      }),
+    );
+    const submitModelIds = vi.fn();
+    // Defaults are pre-selected; the catalog serves MiniMax-M3 but not the
+    // built-in MiniMax-M2.7, which the step demotes into the free-form input.
+    const flow = createModelIdsFlow({ submitModelIds });
+    enableDiscovery(flow);
+
+    const { lastFrame, unmount } = renderWithProviders(
+      <ProviderSetupSteps flow={flow} />,
+    );
+
+    await act(async () => {
+      resolveDiscovery([{ id: 'MiniMax-M3', contextWindowSize: 1000000 }]);
+    });
+
+    expect(lastFrame()).toContain('Enter model IDs directly');
+
+    pressKey('return', '\r');
+
+    // The no-edit submit must lead with a catalog-served model: models[0]
+    // becomes modelSelection and is written as model.name on first-time setup.
+    expect(submitModelIds).toHaveBeenCalledWith({
+      modelIds: ['MiniMax-M3', 'MiniMax-M2.7'],
+    });
+    unmount();
+  });
+
+  it('clears the model-ids error on edit after an empty discovery submit', async () => {
+    discoverProviderModelsMock.mockResolvedValue([{ id: 'served-model' }]);
+
+    let flow: ProviderSetupFlow | undefined;
+    const RealFlowHarness = () => {
+      const realFlow = useProviderSetupFlow(async () => {});
+      flow = realFlow;
+      return <ProviderSetupSteps flow={realFlow} />;
+    };
+
+    const { lastFrame, unmount } = renderWithProviders(<RealFlowHarness />);
+
+    await act(async () => {
+      flow?.start({
+        id: 'discovery-provider',
+        label: 'Discovery Provider',
+        description: 'Provider with model discovery',
+        protocol: AuthType.USE_OPENAI,
+        baseUrl: 'https://example.com/v1',
+        envKey: 'DISCOVERY_API_KEY',
+        modelsEditable: true,
+        supportsModelDiscovery: true,
+        modelNamePrefix: 'Discovery',
+      });
+    });
+    await act(async () => {
+      flow?.submitApiKey('sk-discovery');
+    });
+    await act(async () => {});
+
+    expect(lastFrame()).toContain('Enter model IDs directly');
+
+    await act(async () => {
+      pressLatestKey('return', '\r');
+    });
+    expect(lastFrame()).toContain('Model IDs cannot be empty.');
+
+    await act(async () => {
+      pressLatestKey('x', 'x');
+    });
+    expect(lastFrame()).not.toContain('Model IDs cannot be empty.');
+
+    unmount();
   });
 });

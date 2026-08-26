@@ -233,9 +233,12 @@ function mergeModelIds(
   customModelIdsText: string,
   selectedRecommendationKeys: string[],
 ): string[] {
+  // Checked recommendations lead: models[0] becomes the active model on
+  // first-time setup, and checked ids are catalog-served while free-form ids
+  // can include defaults the account's catalog does not serve.
   return uniqueModelIds([
-    ...normalizeModelIds(customModelIdsText),
     ...selectedRecommendationKeys,
+    ...normalizeModelIds(customModelIdsText),
   ]);
 }
 
@@ -342,6 +345,10 @@ function ModelIdsStep({
         flow.changeModelIds(
           mergeModelIds(customText, recommendationKeys).join(', '),
         );
+      } else {
+        // Edits commit only on Enter here, but a stale submit error must
+        // still clear on edit, as changeModelIds does on the synced path.
+        flow.clearModelIdsError();
       }
     },
     [flow, syncChangesToFlow],
