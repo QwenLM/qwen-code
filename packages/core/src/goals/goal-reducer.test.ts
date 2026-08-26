@@ -358,6 +358,53 @@ describe('goal reducer', () => {
     },
   );
 
+  it('resets the checkpoint stall streak when a resume restarts the window', () => {
+    // The streak counts checkpoints against one window. This resume starts a
+    // different one, so carrying the count over would spend the new window's
+    // allowance on the old window's failures -- a Goal resumed at two stalls
+    // would stop again after a single stalled checkpoint.
+    const resumed = reduceGoalControl(
+      goalRecord({
+        status: 'usage_limited',
+        limitKind: 'evidence_catalog',
+        checkpointStalls: 2,
+      }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed).toMatchObject({ status: 'active' });
+    expect(resumed?.checkpointStalls).toBeUndefined();
+  });
+
+  it('keeps the stall streak across a resume that does not restart the window', () => {
+    // A paused Goal resumes into the same evidence window it left, so the
+    // streak it accumulated there is still the truth about that window.
+    const resumed = reduceGoalControl(
+      goalRecord({ status: 'paused', checkpointStalls: 2 }),
+      {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      },
+    );
+
+    expect(resumed).toMatchObject({ status: 'active', checkpointStalls: 2 });
+  });
+
   it.each([
     [GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON, 'evidence_catalog'],
     [GOAL_CHECKPOINT_REQUEST_TOO_LARGE_REASON, 'checkpoint_request'],
@@ -647,6 +694,35 @@ describe('goal reducer', () => {
     expect(parseGoalSnapshotV2(snapshot(goal))).toMatchObject({
       goal: { tokensUsed: 0 },
     });
+  });
+
+  it('restores a persisted checkpoint stall streak and spells zero as no field', () => {
+    const stalled = snapshot(goalRecord({ checkpointStalls: 2 }));
+    expect(parseGoalSnapshotV2(stalled)).toEqual(stalled);
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ checkpointStalls: 0 })))?.goal,
+    ).not.toHaveProperty('checkpointStalls');
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ checkpointStalls: -1 }))),
+    ).toBeUndefined();
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ checkpointStalls: 1.5 }))),
+    ).toBeUndefined();
+  });
+
+  it('resets the checkpoint stall streak on edit', () => {
+    const edited = reduceGoalControl(goalRecord({ checkpointStalls: 2 }), {
+      request: {
+        action: 'edit',
+        objective: 'deliver the rest',
+        expectedGoalId: 'g-1',
+        expectedRevision: 1,
+      },
+      now: 200,
+      nextGoalId: 'g-next',
+      cursor: { recordId: 'r-200' },
+    });
+    expect(edited?.checkpointStalls).toBeUndefined();
   });
 
   it('rejects a snapshot carrying negative spend', () => {
