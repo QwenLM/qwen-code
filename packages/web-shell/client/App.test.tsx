@@ -6226,6 +6226,106 @@ describe('App session workflow', () => {
     expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
   });
 
+  it('keeps the floating inspector drawer when expand is gated by a pending approval', async () => {
+    // openCockpit() silently aborts while an approval overlay is active;
+    // expandWorkflowGraph must not run its drawer-closing side effect
+    // without the action, or the interactive workflow surface disappears
+    // with no cockpit to show for it.
+    const dockQuery = '(min-width: 1001px)';
+    const dockChangeListeners = new Set<
+      (event: { matches: boolean }) => void
+    >();
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query === dockQuery ? false : query.includes('min-width'),
+        media: query,
+        addEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.add(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+        removeEventListener: vi.fn((type: string, handler: unknown) => {
+          if (type === 'change' && query === dockQuery) {
+            dockChangeListeners.delete(
+              handler as (event: { matches: boolean }) => void,
+            );
+          }
+        }),
+      })),
+    });
+    testState.settings = [sessionWorkflowSetting()];
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-workflow',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+    ];
+    const { container, rerender } = renderApp();
+    await flush();
+
+    // Open the inspector while the panel floats in a drawer.
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+    await flush();
+    const floatingDrawer = () =>
+      document.querySelector(
+        '[data-web-shell-portal-root] aside[aria-label="Right panel"]',
+      );
+    expect(floatingDrawer()).not.toBeNull();
+    expect(
+      document.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+
+    // A permission request becomes pending; the drawer stays interactive.
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(
+      document.querySelector('[data-testid="approval-overlay"]'),
+    ).not.toBeNull();
+    expect(floatingDrawer()).not.toBeNull();
+
+    // The expand action is gated: the cockpit must not open, and the drawer
+    // must not close as a side effect of the aborted action.
+    await act(async () => {
+      Array.from(document.querySelectorAll('button'))
+        .find((button) =>
+          button.textContent?.includes('Expand dependency graph'),
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+    expect(floatingDrawer()).not.toBeNull();
+    expect(
+      document.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+  });
+
   it('keeps the tasks dialog plain when Session Workflow is off', async () => {
     testState.messages = [
       {

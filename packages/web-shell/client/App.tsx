@@ -9157,13 +9157,14 @@ export function App({
     sessionActions,
     sessionOwnerGuard,
   ]);
-  const openCockpit = useCallback(() => {
-    if (!sessionWorkflowEnabled || approvalOverlayActive) return;
-    if (!requireActiveSessionForLocalCommand()) return;
+  const openCockpit = useCallback((): boolean => {
+    if (!sessionWorkflowEnabled || approvalOverlayActive) return false;
+    if (!requireActiveSessionForLocalCommand()) return false;
     if (!cockpitViewRequested()) updateCockpitLocation(true);
     setActivePanel(null);
     setTasksDialogMessage(null);
     setMainView('cockpit');
+    return true;
   }, [
     approvalOverlayActive,
     requireActiveSessionForLocalCommand,
@@ -9199,7 +9200,11 @@ export function App({
   const keepWorkflowDrawerClosedForCanvasRef = useRef(false);
   const workflowCanvasEntryHandledRef = useRef(false);
   const expandWorkflowGraph = useCallback(() => {
-    openCockpit();
+    // Only close the floating inspector drawer when the cockpit actually
+    // opened: openCockpit() silently aborts on the approval-overlay and
+    // active-session guards, and closing the drawer anyway would drop the
+    // interactive workflow surface without delivering the expand action.
+    if (!openCockpit()) return;
     if (useFloatingArtifactPanel) {
       keepWorkflowDrawerClosedForCanvasRef.current = true;
       setArtifactPanelOpen(false);
