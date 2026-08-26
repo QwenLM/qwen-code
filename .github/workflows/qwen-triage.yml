@@ -5424,14 +5424,13 @@ jobs:
             if [ -n "${VERIFY_ASSETS_UPLOADER:-}" ]; then
               upload_cmd=("$uploader")
             elif [ "${OSSUTIL_INSTALL_OUTCOME:-}" = 'success' ]; then
-              # Resolve node under the inherited PATH BEFORE any shared
-              # temp dir comes into play: the containerized verify job runs
-              # PR code with $RUNNER_TEMP bind-mounted from this pool, so a
-              # planted fake `node` there must not win interpreter
-              # resolution in this privileged step (PATH hijack). ossutil
-              # gets the same treatment: run a fresh job-private copy of the
-              # sha256-verified binary installed above instead of resolving
-              # it through the PR-writable $RUNNER_TEMP.
+              # Resolve node under the inherited PATH, never through the
+              # shared temp dir, and run ossutil from a fresh job-private
+              # copy of the sha256-verified binary installed above instead
+              # of resolving it through $RUNNER_TEMP (PATH hijack shape).
+              # Not exploitable on today's ephemeral ubuntu-latest runner,
+              # but the shape must not regress if this job ever moves to a
+              # persistent pool.
               local node_bin
               node_bin="$(command -v node || true)"
               upload_cmd=("$node_bin" "$uploader")

@@ -4054,9 +4054,10 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
-  // The behavioural runs above set VERIFY_ASSETS_UPLOADER, so the
-  // production `node "$uploader"` arm never executes there. Pin its full
-  // invocation shape instead: node must resolve under the inherited PATH
+  // The behavioural runs above either stub the uploader via
+  // VERIFY_ASSETS_UPLOADER or (res5) already exercise the production
+  // ossutil arm end-to-end through the real uploader. Pin the full
+  // invocation shape as well: node must resolve under the inherited PATH
   // (never $RUNNER_TEMP — PATH hijack) and all three ossutil flags must be
   // present — the real uploader exits 1 on a valueless --config, which in
   // production silently degrades every /verify report to text-only.
@@ -4076,10 +4077,12 @@ describe('qwen-triage verify hardening round 2', () => {
   });
 
   // The credential lifecycle is security-relevant: dropping the cleanup
-  // (or its always() condition) leaves the OSS key pair in $RUNNER_TEMP on
-  // the persistent ecs-qwen pool between jobs, and a dropped sha256 check
-  // installs whatever the mirror serves. Consumers must also trust the
-  // Actions-computed outcome, never a marker in the PR-writable temp dir.
+  // (or its always() condition) leaves the OSS key pair in $RUNNER_TEMP —
+  // not exploitable on today's ephemeral ubuntu-latest runner, but the
+  // shape must not regress if the job ever returns to a persistent pool.
+  // A dropped sha256 check installs whatever the mirror serves. Consumers
+  // must also trust the Actions-computed outcome, never a marker in the
+  // PR-writable temp dir.
   it('pins the ossutil install/configure/cleanup credential lifecycle', () => {
     const install = stepIn('publish-verify', 'Install ossutil');
     expect(install).toContain("id: 'install-ossutil'");
