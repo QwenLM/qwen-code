@@ -1202,18 +1202,24 @@ describe('AgentCore.prepareTools', () => {
     debugSpy: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsSpy: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFilteredSpy: ReturnType<typeof vi.fn>;
+    isPermissionDeferredSpy: ReturnType<typeof vi.fn>;
+    isDeferredAndHiddenSpy: ReturnType<typeof vi.fn>;
   } {
     const debugSpy = vi.fn();
     const getFunctionDeclarationsSpy = vi.fn().mockReturnValue(fnDeclarations);
     const getFunctionDeclarationsFilteredSpy = vi.fn((names: string[]) =>
       fnDeclarations.filter((d) => d.name && names.includes(d.name)),
     );
+    const isPermissionDeferredSpy = vi.fn().mockReturnValue(false);
+    const isDeferredAndHiddenSpy = vi.fn().mockReturnValue(false);
     const config = {
       getDebugLogger: vi.fn().mockReturnValue({ debug: debugSpy }),
       getToolRegistry: vi.fn().mockReturnValue({
         warmAll: vi.fn().mockResolvedValue(undefined),
         getFunctionDeclarations: getFunctionDeclarationsSpy,
         getFunctionDeclarationsFiltered: getFunctionDeclarationsFilteredSpy,
+        isPermissionDeferred: isPermissionDeferredSpy,
+        isDeferredAndHidden: isDeferredAndHiddenSpy,
       }),
       getMaxSubagentDepth: vi.fn().mockReturnValue(maxSubagentDepth),
       getToolOutputBatchBudget: vi.fn().mockReturnValue(toolOutputBatchBudget),
@@ -1233,6 +1239,8 @@ describe('AgentCore.prepareTools', () => {
       debugSpy,
       getFunctionDeclarationsSpy,
       getFunctionDeclarationsFilteredSpy,
+      isPermissionDeferredSpy,
+      isDeferredAndHiddenSpy,
     };
   }
 
@@ -1303,6 +1311,28 @@ describe('AgentCore.prepareTools', () => {
     expect(getFunctionDeclarationsSpy).not.toHaveBeenCalled();
   });
 
+  it.each([{ tools: ['*'] }, { tools: ['visible', 'hidden_by_allowlist'] }])(
+    'keeps hidden permission-deferred tools out of subagent declarations: $tools',
+    async (toolConfig) => {
+      const fnDecls: FunctionDeclaration[] = [
+        { name: 'visible' } as FunctionDeclaration,
+        { name: 'hidden_by_allowlist' } as FunctionDeclaration,
+      ];
+      const { core, isPermissionDeferredSpy, isDeferredAndHiddenSpy } =
+        buildAgentForTools(toolConfig, fnDecls);
+      isPermissionDeferredSpy.mockImplementation(
+        (name) => name === 'hidden_by_allowlist',
+      );
+      isDeferredAndHiddenSpy.mockImplementation(
+        (name) => name === 'hidden_by_allowlist',
+      );
+
+      const tools = await core.prepareTools();
+
+      expect(tools.map((tool) => tool.name)).toEqual(['visible']);
+    },
+  );
+
   it('excludes plan lifecycle tools from wildcard/default subagent tools', async () => {
     const fnDecls: FunctionDeclaration[] = [
       { name: 'core_tool', description: 'core' } as FunctionDeclaration,
@@ -1365,17 +1395,29 @@ describe('AgentCore.prepareTools', () => {
       name: 'inline_safe',
       description: 'safe inline tool',
     } as FunctionDeclaration;
-    const { core, debugSpy } = buildAgentForTools(
-      {
-        tools: [
-          { name: ToolNames.SEND_MESSAGE } as FunctionDeclaration,
-          { name: ToolNames.TASK_UPDATE } as FunctionDeclaration,
-          { name: ToolNames.ENTER_PLAN_MODE } as FunctionDeclaration,
-          { name: ToolNames.EXIT_PLAN_MODE } as FunctionDeclaration,
-          inlineSafe,
-        ],
-      },
-      [],
+    const inlinePermissionDeferred = {
+      name: 'hidden_by_allowlist',
+      description: 'hidden',
+    } as FunctionDeclaration;
+    const { core, debugSpy, isPermissionDeferredSpy, isDeferredAndHiddenSpy } =
+      buildAgentForTools(
+        {
+          tools: [
+            { name: ToolNames.SEND_MESSAGE } as FunctionDeclaration,
+            { name: ToolNames.TASK_UPDATE } as FunctionDeclaration,
+            { name: ToolNames.ENTER_PLAN_MODE } as FunctionDeclaration,
+            { name: ToolNames.EXIT_PLAN_MODE } as FunctionDeclaration,
+            inlinePermissionDeferred,
+            inlineSafe,
+          ],
+        },
+        [],
+      );
+    isPermissionDeferredSpy.mockImplementation(
+      (name) => name === 'hidden_by_allowlist',
+    );
+    isDeferredAndHiddenSpy.mockImplementation(
+      (name) => name === 'hidden_by_allowlist',
     );
 
     const tools = await core.prepareTools();
@@ -1392,6 +1434,9 @@ describe('AgentCore.prepareTools', () => {
     );
     expect(debugSpy).toHaveBeenCalledWith(
       `[prepareTools] Filtered inline declaration "${ToolNames.EXIT_PLAN_MODE}" from subagent tool list`,
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      '[prepareTools] Filtered inline declaration "hidden_by_allowlist" from subagent tool list',
     );
   });
 

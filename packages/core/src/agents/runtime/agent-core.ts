@@ -669,6 +669,10 @@ export class AgentCore {
       if (name === ToolNames.AGENT) return !nestingAllowed;
       return excludedFromSubagents.has(name);
     };
+    const isHiddenByPermissionAllowList = (name: string | undefined): boolean =>
+      !!name &&
+      toolRegistry.isPermissionDeferred?.(name) === true &&
+      toolRegistry.isDeferredAndHidden?.(name) === true;
 
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
@@ -683,14 +687,16 @@ export class AgentCore {
         hasWildcard ||
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
-        // Subagents inherit the full tool surface — including deferred tools
-        // (MCP, low-frequency built-ins). Subagents are one-shot and don't
-        // have the same "save tokens" lifecycle as the main chat, so hiding
-        // schemas would silently break existing `tools: ['*']` configs.
+        // Subagents inherit ordinary deferred tools (MCP, low-frequency
+        // built-ins). Permission-allowlist-deferred schemas remain hidden
+        // until ToolSearch reveals them, preserving the registry allowlist.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
-            .filter((t) => !isExcluded(t.name)),
+            .filter(
+              (t) =>
+                !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+            ),
         );
       } else {
         // Explicit tool list: apply the full subagent exclusion set (not just
@@ -698,7 +704,7 @@ export class AgentCore {
         // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
         // explicitly-configured subagents that happen to list them.
         const allowedNames = asStrings.filter((name) => {
-          if (isExcluded(name)) {
+          if (isExcluded(name) || isHiddenByPermissionAllowList(name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -719,7 +725,7 @@ export class AgentCore {
       // workflow/cron/team tools into a subagent).
       toolsList.push(
         ...onlyInlineDecls.filter((d) => {
-          if (isExcluded(d.name)) {
+          if (isExcluded(d.name) || isHiddenByPermissionAllowList(d.name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -732,11 +738,14 @@ export class AgentCore {
       );
     } else {
       // Inherit all available tools by default when not specified — see the
-      // wildcard branch above for why deferred tools are included.
+      // wildcard branch above for the two deferred-tool classes.
       toolsList.push(
         ...toolRegistry
           .getFunctionDeclarations({ includeDeferred: true })
-          .filter((t) => !isExcluded(t.name)),
+          .filter(
+            (t) =>
+              !isExcluded(t.name) && !isHiddenByPermissionAllowList(t.name),
+          ),
       );
     }
 
