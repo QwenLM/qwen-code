@@ -1140,9 +1140,7 @@ export function registerWorkspaceExtensionRoutes(
           res,
           async (extensionManager, _signal, context, operationId) => {
             const prepared = await context!.prepare(async (signal) => {
-              const installMetadata = await parseInstallSource(sourceValue, {
-                networkPolicy: 'public',
-              });
+              const installMetadata = await parseInstallSource(sourceValue);
 
               if (
                 installMetadata.type !== 'git' &&
@@ -1948,9 +1946,7 @@ export function registerWorkspaceExtensionRoutes(
       gitCredential?.persistence === 'one_time' ? {} : { source: sourceValue },
       async (extensionManager, _signal, context) => {
         const prepared = await context!.prepare(async (signal) => {
-          const metadata = await parseInstallSource(sourceValue, {
-            networkPolicy: 'public',
-          });
+          const metadata = await parseInstallSource(sourceValue);
           if (
             metadata.type !== 'git' &&
             metadata.type !== 'github-release' &&
