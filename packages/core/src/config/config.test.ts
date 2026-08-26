@@ -7046,6 +7046,44 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory moves inactive membership evidence without a runtime claim', async () => {
+    const config = new Config(baseParams);
+    const sessionId = config.getSessionId();
+    const newDir = path.resolve('/path/to/other');
+    const oldStorage = new Storage(config.getTargetDir());
+    const newStorage = new Storage(newDir);
+    const oldRuntimeStatusPath = oldStorage.getRuntimeStatusPath(sessionId);
+    const newRuntimeStatusPath = newStorage.getRuntimeStatusPath(sessionId);
+    const readRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'readRuntimeStatus')
+      .mockResolvedValue({
+        schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: 0,
+        sessionId,
+        workDir: config.getTargetDir(),
+        hostname: os.hostname(),
+        startedAt: Date.now() / 1000,
+        qwenVersion: null,
+      });
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+    vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
+      const checked = pathToCheck.toString();
+      return checked === newDir || checked === oldRuntimeStatusPath;
+    });
+
+    await config.relocateWorkingDirectory(newDir);
+
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldRuntimeStatusPath,
+      newRuntimeStatusPath,
+    );
+
+    readRuntimeStatusSpy.mockRestore();
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
   it('relocateWorkingDirectory should refresh runtime status after moving session artifacts', async () => {
     const config = new Config(baseParams);
     config.markRuntimeStatusEnabled();
@@ -7248,6 +7286,17 @@ describe('Server Config (config.ts)', () => {
     const newStorage = new Storage(newDir);
     const foreignCanonicalPath = oldStorage.getRuntimeStatusPath(newSessionId);
     const destinationPath = newStorage.getRuntimeStatusPath(newSessionId);
+    const readRuntimeStatusSpy = vi
+      .spyOn(runtimeStatus, 'readRuntimeStatus')
+      .mockResolvedValue({
+        schemaVersion: runtimeStatus.RUNTIME_STATUS_SCHEMA_VERSION,
+        pid: 123,
+        sessionId: newSessionId,
+        workDir: config.getTargetDir(),
+        hostname: 'foreign-host.example',
+        startedAt: Date.now() / 1000,
+        qwenVersion: null,
+      });
     claimSpy.mockResolvedValueOnce(destinationPath);
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {});
     const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
@@ -7267,6 +7316,7 @@ describe('Server Config (config.ts)', () => {
       workDir: newDir,
       qwenVersion: null,
     });
+    readRuntimeStatusSpy.mockRestore();
     releaseSpy.mockRestore();
     claimSpy.mockRestore();
     chdirSpy.mockRestore();

@@ -224,6 +224,8 @@ import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { isTempDirPath, sanitizeCwd } from '../utils/paths.js';
 import {
   claimRuntimeStatus,
+  isRuntimeStatusActive,
+  readRuntimeStatus,
   releaseRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
@@ -5406,10 +5408,10 @@ export class Config {
     return this.targetDir;
   }
 
-  private getCurrentSessionArtifactMoves(
+  private async getCurrentSessionArtifactMoves(
     oldStorage: Storage,
     newStorage: Storage,
-  ): Array<{ from: string; to: string }> {
+  ): Promise<Array<{ from: string; to: string }>> {
     const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
     const newChatsDir = path.join(newStorage.getProjectDir(), 'chats');
     const fileNames = [
@@ -5419,6 +5421,17 @@ export class Config {
     ];
     if (this.runtimeStatusClaimPath) {
       fileNames.push(path.basename(this.runtimeStatusClaimPath));
+    } else {
+      const canonicalPath = oldStorage.getRuntimeStatusPath(this.sessionId);
+      if (fs.existsSync(canonicalPath)) {
+        const status = await readRuntimeStatus(canonicalPath);
+        if (
+          status?.sessionId === this.sessionId &&
+          !isRuntimeStatusActive(status)
+        ) {
+          fileNames.push(path.basename(canonicalPath));
+        }
+      }
     }
     return fileNames.map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
@@ -5451,12 +5464,12 @@ export class Config {
     }
   }
 
-  private moveCurrentSessionArtifacts(
+  private async moveCurrentSessionArtifacts(
     oldStorage: Storage,
     newStorage: Storage,
-  ): void {
+  ): Promise<void> {
     const moved: Array<{ from: string; to: string }> = [];
-    for (const { from, to } of this.getCurrentSessionArtifactMoves(
+    for (const { from, to } of await this.getCurrentSessionArtifactMoves(
       oldStorage,
       newStorage,
     )) {
@@ -5503,7 +5516,7 @@ export class Config {
     }
     await this.flushRuntimeStatusWrites();
     try {
-      this.moveCurrentSessionArtifacts(oldStorage, newStorage);
+      await this.moveCurrentSessionArtifacts(oldStorage, newStorage);
       if (this.runtimeStatusEnabled && this.runtimeStatusClaimPath) {
         this.runtimeStatusClaimPath = path.join(
           newStorage.getProjectDir(),
