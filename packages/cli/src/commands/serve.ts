@@ -611,9 +611,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('permission-response-timeout-ms', {
         type: 'number',
         description:
-          'Wall-clock timeout for a single human permission / ' +
-          'ask_user_question response in daemon (ACP) mode (ms). ' +
-          '0 = disabled (wait forever). Default: 300000 (5 min).',
+          'Wall-clock timeout for a human permission / ask_user_question ' +
+          'response in daemon (ACP) mode (ms). ' +
+          '0 or unset = disabled (wait indefinitely). Default: 0.',
       })
       .option('external-tool-guard-mode', {
         choices: ['off', 'required'] as const,

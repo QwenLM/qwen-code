@@ -1112,3 +1112,150 @@ describe('the churn streak', () => {
     expect(parseLedger(handCrafted({ churnRounds: 5 }))?.churnRounds).toBe(5);
   });
 });
+
+describe('the flat streak', () => {
+  // Mirror of the churn block above for the floor trigger's streak (#9903):
+  // the two fields share the serializer rung and the trust shape, and two
+  // mutations of the diff's own lines — nesting the write inside the
+  // volume-shed block, and deleting the parse-side clamp — survive the whole
+  // suite unless pinned here. The values used are HONEST ones (round 3
+  // carries at most 1): the read clamps to the honest maximum, because the
+  // signal that advances the streak gates on round >= 3.
+  const base = { v: 1 as const, round: 3, findings: [] };
+  const handCrafted = (over: Record<string, unknown>) =>
+    `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 5,
+      findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      ...over,
+    })} -->`;
+
+  const withVolume = (findings: LedgerFinding[], over: Partial<Ledger> = {}) =>
+    serializeLedger({
+      ...base,
+      ...over,
+      findings,
+      posted: 12,
+      prevPosted: 9,
+    });
+
+  const atTheVolumeBoundary = (over: Partial<Ledger> = {}) => {
+    const findings: LedgerFinding[] = [];
+    for (let i = 0; i < LEDGER_MAX_FINDINGS; i++) {
+      const next: LedgerFinding = {
+        id: `R3-${i + 1}`,
+        sev: 'S',
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      };
+      if (withVolume([...findings, next], over).includes('"prevPosted"')) {
+        findings.push(next);
+      } else {
+        break;
+      }
+    }
+    const grow = (n: number): LedgerFinding[] => {
+      const fs = findings.slice();
+      const last = fs[fs.length - 1];
+      fs[fs.length - 1] = { ...last, file: last.file + 'x'.repeat(n) };
+      return fs;
+    };
+    const room = LEDGER_MAX_FILE - findings[findings.length - 1].file.length;
+    let pad = 0;
+    while (pad < room && withVolume(grow(pad), over).includes('"prevPosted"')) {
+      pad++;
+    }
+    return { over: grow(pad), under: grow(pad - 1) };
+  };
+
+  it('keeps the streak through the FIRST byte squeeze', () => {
+    // The pull request whose first-time-finding rate never falls is exactly
+    // the one whose marker sits at the byte cap; shedding the latched streak
+    // there would silently release the floor between rounds 4 and 6.
+    const { over, under } = atTheVolumeBoundary({ flatRounds: 1 });
+    expect(withVolume(under, { flatRounds: 1 })).toContain('"prevPosted":9');
+    const written = withVolume(over, { flatRounds: 1 });
+    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    expect(written).not.toContain('"prevPosted"');
+    expect(written).toContain('"flatRounds":1');
+    expect(parseLedger(written)?.flatRounds).toBe(1);
+    expect(parseLedger(written)?.findings).toHaveLength(over.length);
+  });
+
+  it('keeps the streak past the rung where the VOLUME itself goes', () => {
+    // The discriminating rung: a streak wrongly nested inside the volume
+    // block survives the first squeeze but sheds with `posted` itself — the
+    // correct placement keeps it, on exactly the over-cap markers.
+    const fat = (n: number): LedgerFinding[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      }));
+    let n = 1;
+    let written = '';
+    for (; n <= LEDGER_MAX_FINDINGS; n++) {
+      written = serializeLedger({
+        ...base,
+        findings: fat(n),
+        posted: 12,
+        prevPosted: 9,
+        flatRounds: 1,
+      });
+      if (!written.includes('"posted"')) break;
+    }
+    expect(written).not.toContain('"posted"');
+    expect(written).toContain('"flatRounds":1');
+    expect(parseLedger(written)?.flatRounds).toBe(1);
+  });
+
+  it('omits a zero streak rather than spending bytes on it', () => {
+    const written = serializeLedger({ ...base, flatRounds: 0 });
+    expect(written).not.toContain('flatRounds');
+    expect(parseLedger(written)?.flatRounds).toBeUndefined();
+  });
+
+  it.each([
+    ['a float', 2.5],
+    ['a negative', -1],
+    ['a string', '7'],
+    ['null', null],
+    ['a NaN', Number.NaN],
+  ])('refuses %s as a streak without losing the ledger', (_label, bad) => {
+    const l = parseLedger(handCrafted({ flatRounds: bad }))!;
+    expect(l.findings).toHaveLength(1);
+    expect(l.flatRounds).toBeUndefined();
+  });
+
+  it('clamps the streak to the round cap on write AND on read', () => {
+    const over = LEDGER_MAX_ROUND + 1;
+    const written = serializeLedger({ ...base, flatRounds: over });
+    expect(written).toContain(`"flatRounds":${LEDGER_MAX_ROUND}`);
+    expect(written).not.toContain(String(over));
+    // The read side clamps TIGHTER — to the honest maximum: at the round
+    // cap no honest run has measured more than cap - 2 firing rounds.
+    expect(
+      parseLedger(handCrafted({ round: LEDGER_MAX_ROUND, flatRounds: over }))
+        ?.flatRounds,
+    ).toBe(LEDGER_MAX_ROUND - 2);
+  });
+
+  it('clamps a recovered streak to the honest maximum, not merely the round', () => {
+    // The signal that advances the streak gates on round >= 3, so rounds
+    // 1–2 are unmeasurable and at round N no honest marker carries more
+    // than N - 2. The round-clamp alone admitted `{round: 2, flatRounds: 2}`
+    // — a streak the serializer never emits, which the model-side routing
+    // reads raw off the side file.
+    const forged = `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      flatRounds: 9999,
+    })} -->`;
+    expect(parseLedger(forged)?.flatRounds).toBeUndefined();
+    expect(parseLedger(handCrafted({ flatRounds: 9999 }))?.flatRounds).toBe(3);
+    // A streak AT the honest maximum rides untouched (round 5 → 3).
+    expect(parseLedger(handCrafted({ flatRounds: 3 }))?.flatRounds).toBe(3);
+  });
+});

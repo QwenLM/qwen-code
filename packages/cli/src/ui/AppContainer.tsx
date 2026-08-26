@@ -41,6 +41,7 @@ import {
   IdeClient,
   ideContextStore,
   createDebugLogger,
+  describeHoldCause,
   getErrorMessage,
   getAllGeminiMdFilenames,
   ShellExecutionService,
@@ -78,6 +79,7 @@ import {
   buildResumedHistoryItems,
   expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
+import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
@@ -251,6 +253,8 @@ import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
+import { usePeerMessaging } from '../peerMessaging/PeerMessagingContext.js';
+import { MAX_ACCEPTED_BACKLOG } from '../peerMessaging/peer-messaging.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
@@ -360,6 +364,8 @@ export function useQueuedSubmissionDrain({
   popNextSubmission,
   enqueueGoalTurn,
   restoreMessages,
+  restorePeerMessage,
+  addHistoryItem,
   submitQuery,
   submissionInFlightRef,
   submissionSettledRevision,
@@ -374,6 +380,8 @@ export function useQueuedSubmissionDrain({
   popNextSubmission: UseMessageQueueReturn['popNextSubmission'];
   enqueueGoalTurn: UseMessageQueueReturn['enqueueGoalTurn'];
   restoreMessages: UseMessageQueueReturn['restoreMessages'];
+  restorePeerMessage: UseMessageQueueReturn['restorePeerMessage'];
+  addHistoryItem: (item: HistoryItemWithoutId, timestamp: number) => number;
   submitQuery: ReturnType<typeof useGeminiStream>['submitQuery'];
   submissionInFlightRef: RefObject<boolean>;
   submissionSettledRevision: number;
@@ -396,6 +404,7 @@ export function useQueuedSubmissionDrain({
     goalQueueRevision: number;
     streamingState: StreamingState;
     isProcessing: boolean;
+    submissionSettledRevision: number;
   } | null>(null);
   const [queueDrainNonce, setQueueDrainNonce] = useState(0);
   useEffect(() => {
@@ -408,7 +417,11 @@ export function useQueuedSubmissionDrain({
         pendingSubmissionCount <= admissionFailure.pendingSubmissionCount &&
         goalQueueRevision === admissionFailure.goalQueueRevision &&
         streamingState === admissionFailure.streamingState &&
-        isProcessing === admissionFailure.isProcessing
+        isProcessing === admissionFailure.isProcessing &&
+        // A settle ends the turn the failed submission could not join;
+        // without this an idle session parks the restored entry forever
+        // while its sender holds a live 'delivered' receipt.
+        submissionSettledRevision === admissionFailure.submissionSettledRevision
       ) {
         return;
       } else {
@@ -452,40 +465,90 @@ export function useQueuedSubmissionDrain({
         goalQueueRevision,
         streamingState,
         isProcessing,
+        submissionSettledRevision,
       };
     };
-    const request =
-      submission.kind === 'goal'
-        ? submitQuery(
-            submission.continuationContext,
-            SendMessageType.Goal,
-            undefined,
-            {
-              goal: submission,
-              onAdmissionFailed: () => {
-                enqueueGoalTurn(submission);
-                markAdmissionFailed();
-              },
-            },
-          )
-        : submitQuery(
-            submission.modelText,
-            SendMessageType.UserQuery,
-            undefined,
-            {
-              userAdmission: { turnKey: submission.turnKey },
-              ...(submission.submittedPrompt === undefined
-                ? {}
-                : { submittedPrompt: submission.submittedPrompt }),
-              onAdmissionFailed: () => {
-                restoreMessages(
-                  [submission.modelText],
-                  submission.submittedPrompt,
-                );
-                markAdmissionFailed();
-              },
-            },
-          );
+    let request: Promise<void>;
+    if (submission.kind === 'goal') {
+      request = submitQuery(
+        submission.continuationContext,
+        SendMessageType.Goal,
+        undefined,
+        {
+          goal: submission,
+          onAdmissionFailed: () => {
+            enqueueGoalTurn(submission);
+            markAdmissionFailed();
+          },
+        },
+      );
+    } else if (submission.kind === 'peer') {
+      // Peer envelopes skip user-input preprocessing (slash/shell/@):
+      // the text is peer-authored, so submit them on the Teammate send
+      // type, whose early return exists for exactly this hazard. That
+      // path suppresses the user bubble, so render the one-line
+      // projection in its place — once: a failed admission restores the
+      // entry and retries, and re-rendering would stack an identical
+      // notification per retry while the model receives one message.
+      if (!submission.displayed) {
+        addHistoryItem(
+          { type: MessageType.NOTIFICATION, text: submission.displayText },
+          Date.now(),
+        );
+      }
+      request = submitQuery(
+        submission.modelText,
+        SendMessageType.Teammate,
+        undefined,
+        {
+          // Every other Teammate submitter passes the projection: the
+          // record stores it, and /resume falls back to the raw parts
+          // (the full envelope) without it.
+          notificationDisplayText: submission.displayText,
+          onAdmissionFailed: () => {
+            restorePeerMessage(
+              submission.modelText,
+              submission.displayText,
+              true,
+            );
+            markAdmissionFailed();
+          },
+          onDeliveryFailed: () => {
+            restorePeerMessage(
+              submission.modelText,
+              submission.displayText,
+              true,
+            );
+            markAdmissionFailed();
+          },
+        },
+      );
+    } else {
+      request = submitQuery(
+        submission.modelText,
+        SendMessageType.UserQuery,
+        undefined,
+        {
+          userAdmission: { turnKey: submission.turnKey },
+          ...(submission.submittedPrompt === undefined
+            ? {}
+            : { submittedPrompt: submission.submittedPrompt }),
+          onAdmissionFailed: () => {
+            // Deferred until idle, the same recovery the direct /btw
+            // path uses: admission failed because a turn is active,
+            // and the mid-turn steer drain returns raw text only, which
+            // would steer an undeferred restore into that turn with its
+            // projection lost.
+            restoreMessages(
+              [submission.modelText],
+              submission.submittedPrompt,
+              true,
+            );
+            markAdmissionFailed();
+          },
+        },
+      );
+    }
     void Promise.resolve(request)
       .catch((error) => {
         debugLogger.warn('Queued submission failed during admission', error);
@@ -508,6 +571,8 @@ export function useQueuedSubmissionDrain({
     popNextSubmission,
     queueDrainNonce,
     restoreMessages,
+    restorePeerMessage,
+    addHistoryItem,
     streamingState,
     submissionInFlightRef,
     submissionSettledRevision,
@@ -2338,6 +2403,7 @@ export const AppContainer = (props: AppContainerProps) => {
     peekNextUserBatchKey,
     hasQueuedUserMessages,
     getPendingSubmissionCount,
+    getQueuedPeerCount,
     claimGoalTurn,
     claimDirectUserAdmission,
     removeGoalTurns,
@@ -2345,6 +2411,8 @@ export const AppContainer = (props: AppContainerProps) => {
     popAllMessages,
     restoreMessages,
     drainQueue,
+    addPeerMessage,
+    restorePeerMessage,
   } = useMessageQueue();
 
   midTurnDrainRef.current = drainQueue;
@@ -2416,6 +2484,82 @@ export const AppContainer = (props: AppContainerProps) => {
       return true;
     });
   }, [addMessage, remoteInput]);
+
+  // Cross-session messaging: accepted peer messages enter the same queue as
+  // typed input but drain on their own path — the queue marks them peer,
+  // and the drain submits them with a send type that skips user-input
+  // preprocessing, because the text is peer-authored: a `@path` inside it
+  // would otherwise read files into the context with no user interaction.
+  // First argument is the model-bound text and must stay the full
+  // envelope — it carries the attribution and the authority notice; the
+  // one-line form rides along as the display projection, never as the
+  // model's copy.
+  const peerMessaging = usePeerMessaging();
+  useEffect(() => {
+    if (!peerMessaging) return;
+    peerMessaging.setSubmitFn((modelText: string, displayText: string) => {
+      // Refuse once the queue's pending backlog reaches the cap: peer
+      // frames arrive at socket speed but drain at one per turn, and the
+      // queue must not grow unboundedly for a busy session.
+      if (getPendingSubmissionCount() >= MAX_ACCEPTED_BACKLOG) return false;
+      addPeerMessage(modelText, displayText);
+      return true;
+    });
+    // close() settles whatever is still queued with a corrective receipt;
+    // it needs the current depth to tell consumed entries from queued ones.
+    peerMessaging.setQueuedPeerCount(getQueuedPeerCount);
+  }, [
+    addPeerMessage,
+    getPendingSubmissionCount,
+    getQueuedPeerCount,
+    peerMessaging,
+  ]);
+
+  // Surface parked messages. The model never sees a held message, so
+  // without a notice the only symptom is a peer that seems to be ignored.
+  // Only ids that are newly held are announced: the gate emits on every
+  // change to the set, so announcing every emission would print "held a
+  // message" again when /peers released one of three — indistinguishable
+  // from a new arrival. Announcements are additionally gated on the set
+  // *growing*: once the hold buffer is full, every further frame evicts
+  // the oldest while arriving with a fresh id, and announcing those would
+  // grow the history (and re-render) once per frame — the leak the hold
+  // buffer's ceiling exists to prevent, one layer up.
+  const announcedHoldsRef = useRef<ReadonlySet<string>>(new Set());
+  const announcedCountRef = useRef(0);
+  useEffect(() => {
+    if (!peerMessaging) return;
+    return peerMessaging.onHeldChange((held) => {
+      const announced = announcedHoldsRef.current;
+      const fresh = held.filter((entry) => !announced.has(entry.frame.msgId));
+      // Track the gate's set exactly, so ids it dropped are forgotten
+      // rather than accumulating for the life of the session.
+      announcedHoldsRef.current = new Set(
+        held.map((entry) => entry.frame.msgId),
+      );
+      const grew = held.length > announcedCountRef.current;
+      announcedCountRef.current = held.length;
+      const newest = fresh.at(-1);
+      if (!newest || !grew) return;
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text:
+            `Held a message from another session (${describeHoldCause(newest.cause)}). ` +
+            `${held.length} waiting — /peers to review.`,
+        },
+        Date.now(),
+      );
+    });
+  }, [historyManager, peerMessaging]);
+
+  // A held message may only be waiting on a mode mismatch, so re-run the
+  // gate whenever the approval mode changes rather than making the user
+  // approve something the new mode would have accepted outright.
+  const approvalModeForPeers = config.getApprovalMode();
+  useEffect(() => {
+    peerMessaging?.reevaluate('approval-mode-changed');
+  }, [approvalModeForPeers, peerMessaging]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
@@ -3766,8 +3910,10 @@ export const AppContainer = (props: AppContainerProps) => {
 
           // Strip suppressOnRestore flags and filter out collapse-summary items
           // so rewound items remain visible without stale summary text
-          const truncatedUi = expandCollapsedHistory(
-            originalHistory.filter((h) => h.id < userItem.id),
+          const truncatedUi = recoalesceFindingsHistoryItems(
+            expandCollapsedHistory(
+              originalHistory.filter((h) => h.id < userItem.id),
+            ),
           );
           clearPendingStateRef.current();
           loadHistoryWithLatchReconciliation(truncatedUi);
@@ -4456,6 +4602,8 @@ export const AppContainer = (props: AppContainerProps) => {
     popNextSubmission,
     enqueueGoalTurn,
     restoreMessages,
+    restorePeerMessage,
+    addHistoryItem: historyManager.addItem,
     submitQuery,
     submissionInFlightRef,
     submissionSettledRevision,

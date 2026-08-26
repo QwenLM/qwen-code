@@ -17,7 +17,8 @@ import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
 // Config
-import { ApprovalMode, type Config } from '../config/config.js';
+import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
@@ -107,6 +108,7 @@ import type {
   MemoryRecallDiscardReason,
 } from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import type { UiTelemetryReplaySnapshot } from '../telemetry/uiTelemetry.js';
 
 // Forked agent cache
 import {
@@ -375,6 +377,23 @@ export function getMainSessionBaseSystemPrompt(
 export class GeminiClient {
   private chat?: GeminiChat;
   private initializedSessionId: string | undefined;
+  /**
+   * Open session-swap telemetry transaction, if any. See
+   * {@link beginTelemetrySwap} for the lifetime contract. Holds the undo for
+   * the replay the current swap's `initialize()` performed, armed by
+   * {@link armTelemetrySwapUndo} inside the replay branches.
+   */
+  private telemetrySwap?: {
+    /**
+     * The session the process was on when the transaction opened — the one
+     * a failed swap rolls back to. Captured at open time because
+     * `initializedSessionId` is unreliable by arm time: an earlier failed
+     * swap's abort clears it, and the next swap would then snapshot no
+     * outgoing bucket at all (#9844 review).
+     */
+    outgoingHint: string;
+    undo?: { sessionId: string; snapshot: UiTelemetryReplaySnapshot };
+  };
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
@@ -491,6 +510,7 @@ export class GeminiClient {
     const resumedSessionData = this.config.getResumedSessionData();
     const restoreRuntime = this.config.getSessionRestoreRuntime?.();
     if (restoreRuntime) {
+      this.armTelemetrySwapUndo(sessionId);
       uiTelemetryService.resetSession(sessionId);
       for (const event of restoreRuntime.uiTelemetryEvents) {
         uiTelemetryService.addEvent(event, sessionId);
@@ -515,6 +535,7 @@ export class GeminiClient {
         );
       }
     } else if (resumedSessionData) {
+      this.armTelemetrySwapUndo(sessionId);
       const resumeTokenCounts = replayUiTelemetryFromConversation(
         resumedSessionData.conversation,
         this.config.getSessionId(),
@@ -601,6 +622,156 @@ export class GeminiClient {
 
   isInitialized(): boolean {
     return this.chat !== undefined;
+  }
+
+  /**
+   * Opens a session-swap telemetry transaction for the `/resume` / `/branch`
+   * hooks (#9833).
+   *
+   * Lifetime contract: one call per swap attempt, closed by exactly one
+   * {@link commitTelemetrySwap} (the UI swap committed — the replayed history
+   * now belongs to the session the user is on) or
+   * {@link abortTelemetrySwap} (the swap failed and core rolled back — put
+   * the usage aggregate back). The undo is armed lazily by
+   * {@link armTelemetrySwapUndo} inside `initialize()`'s replay branches, so
+   * it is scoped to the ONE replay this swap performs:
+   *
+   * - A replay outside any transaction (process-startup `Config.initialize()`,
+   *   ACP) arms nothing — there is no owning swap to settle it, and a
+   *   process-lived undo would let a much later failed swap restore a
+   *   process-start snapshot and wipe everything accrued since.
+   * - `initialize()` only replays when its private `initializedSessionId`
+   *   differs from the config session id. The hooks cannot see that fact, so
+   *   the snapshot is taken here, inside the replay decision, never keyed on
+   *   a caller's guess.
+   *
+   * Serialization: returns false WITHOUT opening when a transaction is
+   * already open. Callers MUST abort the swap attempt on a false return
+   * (the hooks surface "a session switch is already in progress"). Two
+   * concurrent swaps cannot share this single slot: the second open would
+   * no-op while both replays mutate the same aggregate, so the first swap's
+   * stale settlement would either no-op or restore its snapshot over the
+   * second swap's committed state — the double-count / split-brain this
+   * transaction exists to close. Nothing else serializes the swaps: the
+   * session picker fires them fire-and-forget and no input gate covers
+   * them, so this slot is the latch.
+   */
+  beginTelemetrySwap(): boolean {
+    if (this.telemetrySwap) {
+      if (debugLogger.isEnabled()) {
+        debugLogger.debug(
+          '[TELEMETRY_SWAP_BEGIN] rejected: a swap is already in progress',
+        );
+      }
+      return false;
+    }
+    // The hooks call this BEFORE config.startNewSession, so the config
+    // session id still names the session the process is on — capture it as
+    // the outgoing session now; initializedSessionId may already be stale
+    // or cleared by the time the undo arms.
+    this.telemetrySwap = { outgoingHint: this.config.getSessionId() };
+    return true;
+  }
+
+  /**
+   * The swap committed: drop the armed undo without restoring. The replayed
+   * history legitimately belongs to the session the user is now on, and a
+   * later failed swap must restore ITS OWN pre-swap snapshot, never this one.
+   * Safe to call with no transaction open (no-op).
+   */
+  commitTelemetrySwap(): void {
+    const undo = this.telemetrySwap?.undo;
+    this.telemetrySwap = undefined;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_COMMIT] undo=${undo ? 'dropped' : 'none'} ` +
+          `incoming=${undo?.sessionId ?? 'n/a'}`,
+      );
+    }
+  }
+
+  /**
+   * The swap failed and core rolled back: restore the usage aggregate (and
+   * the two affected session buckets) to the state captured before this
+   * swap's replay. Overwrites rather than subtracts, so it stays correct
+   * when the rollback's own re-`initialize()` (the `/branch` and `/resume`
+   * paths) has already replayed something else on top.
+   *
+   * Also forgets `initializedSessionId` when it still names the abandoned
+   * INCOMING session: undoing the replay without forgetting it would make a
+   * retry early-return and never replay, permanently under-counting the
+   * session. The clear is an identity check, not the assumption that the
+   * undo always names the incoming session — when the swap's forward
+   * `initialize()` never ran (e.g. `/branch` fails between
+   * `startNewSession(fork)` and `initialize()`), the rollback's own
+   * re-initialize arms the undo with the PARENT's id and sets
+   * `initializedSessionId` to it. That session is live and correctly
+   * initialized; clearing it would make the next `initialize()` of the
+   * session the user is already on skip the early return and re-replay its
+   * stored telemetry on top of the live aggregate — a permanent
+   * double-count. The undo belongs to the outgoing session's own
+   * re-initialize exactly when `undo.sessionId` matches the begin-time
+   * `outgoingHint` (#9844 review).
+   *
+   * Safe to call with no transaction open or nothing armed (no-op). Returns
+   * whether an undo was applied.
+   */
+  abortTelemetrySwap(): boolean {
+    const swap = this.telemetrySwap;
+    this.telemetrySwap = undefined;
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_ABORT] undo=${swap?.undo ? 'applied' : 'none'} ` +
+          `incoming=${swap?.undo?.sessionId ?? 'n/a'} ` +
+          `outgoing=${swap?.undo?.snapshot.outgoingSessionId ?? 'n/a'}`,
+      );
+    }
+    if (!swap?.undo) return false;
+    uiTelemetryService.restoreFromReplaySnapshot(swap.undo.snapshot);
+    if (
+      swap.undo.sessionId !== swap.outgoingHint &&
+      this.initializedSessionId === swap.undo.sessionId
+    ) {
+      this.initializedSessionId = undefined;
+    }
+    return true;
+  }
+
+  /**
+   * Arms the undo for the replay the current `initialize()` call is about to
+   * perform. Called only by the replay branches; a fresh-start `initialize()`
+   * replays nothing, and an undo armed there would outlive the transaction.
+   *
+   * `??=` on the undo: within one swap only the FIRST replay's pre-state is
+   * the correct restore point — on the `/branch` rollback the re-initialize
+   * of the parent runs while the failed swap's undo is still outstanding.
+   * No-ops when no transaction is open (replay outside a swap).
+   *
+   * The snapshot also covers the session the process is currently on — the
+   * one a failed swap rolls back to. That is the transaction's
+   * `outgoingHint`, captured at open time, NOT `initializedSessionId`: an
+   * earlier failed swap's abort clears `initializedSessionId`, so keying on
+   * it would snapshot no outgoing bucket and the rollback's re-initialize
+   * would wipe the live session's never-persisted state. The `/branch`
+   * rollback re-initializes that session, and the re-initialize's
+   * `resetSession` wipes its live bucket — only what the transcript persists
+   * comes back (skill invocations never do), so the undo must put the
+   * captured bucket back.
+   */
+  private armTelemetrySwapUndo(sessionId: string): void {
+    if (!this.telemetrySwap || this.telemetrySwap.undo) return;
+    const outgoing =
+      this.telemetrySwap.outgoingHint ?? this.initializedSessionId;
+    this.telemetrySwap.undo = {
+      sessionId,
+      snapshot: uiTelemetryService.snapshotForReplay(sessionId, outgoing),
+    };
+    if (debugLogger.isEnabled()) {
+      debugLogger.debug(
+        `[TELEMETRY_SWAP_ARM] incoming=${sessionId} ` +
+          `outgoing=${outgoing ?? 'n/a'}`,
+      );
+    }
   }
 
   getHistory(curated: boolean = false): Content[] {
@@ -930,6 +1101,98 @@ export class GeminiClient {
       result,
       everyDocAlreadyDelivered ? 'already_delivered' : discardReason,
     );
+  }
+
+  /** @internal */
+  beginManagedAutoMemoryRecall(query: string, signal: AbortSignal): void {
+    if (
+      !this.config.isManagedMemoryAvailable() ||
+      !this.config.getManagedAutoMemoryEnabled()
+    ) {
+      return;
+    }
+
+    // A previous recall may still be pending (slow side-query, new user turn
+    // arrived before it settled). Abort it before installing the new handle so
+    // the orphan doesn't keep running indefinitely.
+    this.cancelPendingMemoryPrefetch('new_query');
+    const controller = new AbortController();
+    // Bridge the caller's signal into the prefetch controller so a user abort
+    // on the parent turn also terminates the recall side-query.
+    let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
+    const onParentAbort = () => {
+      prefetchAbortReason = 'abort';
+      controller.abort();
+      this.cancelPendingMemoryPrefetch('abort');
+    };
+    if (signal.aborted) {
+      prefetchAbortReason = 'abort';
+      controller.abort();
+    } else {
+      signal.addEventListener('abort', onParentAbort, { once: true });
+    }
+    const fastResultRef: MemoryFastResultBox = { current: null };
+    const promise = this.config
+      .getMemoryManager()
+      .recall(this.config.getProjectRoot(), query, {
+        config: this.config,
+        excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+        recentTools: [...this.recentCompletedToolNames],
+        abortSignal: controller.signal,
+        onFastResult: (result) => {
+          fastResultRef.current = result;
+          fastResultRef.onArrive?.();
+        },
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') {
+          debugLogger.debug('Managed auto-memory recall prefetch aborted.');
+        } else {
+          debugLogger.warn(
+            'Managed auto-memory recall prefetch failed.',
+            error,
+          );
+        }
+        return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+      });
+    const handle: MemoryPrefetchHandle = {
+      promise,
+      settledAt: null,
+      result: null,
+      consumed: false,
+      terminalLogged: false,
+      firedAt: Date.now(),
+      controller,
+      fastResultRef,
+      fastDelivered: false,
+      fastDeliveredPaths: new Set<string>(),
+    };
+    void promise.then((result) => {
+      handle.result = result;
+    });
+    void promise.finally(() => {
+      handle.settledAt = Date.now();
+      signal.removeEventListener('abort', onParentAbort);
+    });
+    this.pendingMemoryPrefetch = handle;
+    if (prefetchAbortReason) {
+      this.cancelPendingMemoryPrefetch(prefetchAbortReason);
+    }
+  }
+
+  /** @internal */
+  consumeManagedAutoMemoryRecall(
+    deliveryPoint: 'initial' | 'tool_result',
+  ): Promise<RelevantAutoMemoryPromptResult | null> {
+    return this.tryConsumeMemoryPrefetch(
+      deliveryPoint,
+      deliveryPoint === 'initial' ? INITIAL_MEMORY_RECALL_WAIT_MS : 0,
+    );
+  }
+
+  /** @internal */
+  finishManagedAutoMemoryRecall(): void {
+    this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
   }
 
   private cancelPendingMemoryPrefetch(
@@ -2299,6 +2562,7 @@ export class GeminiClient {
       const m = mcResult.meta;
       const changed = m.tokensSaved > 0;
       if (changed) {
+        // setHistory conservatively clears loaded-skill tracking.
         this.getChat().setHistory(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
       }
@@ -2597,6 +2861,8 @@ export class GeminiClient {
           this.getChat().addHistory(entry);
         }
       }
+      // Loaded-skill tracking was conservatively cleared by the strip
+      // above; restored bodies simply re-inject on their next invoke.
       strippedRetryEntries = [];
     };
 
@@ -2919,94 +3185,10 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        if (
-          this.config.isManagedMemoryAvailable() &&
-          this.config.getManagedAutoMemoryEnabled()
-        ) {
-          // A previous recall may still be pending (slow side-query, new user
-          // turn arrived before it settled). Abort it before installing the
-          // new handle so the orphan doesn't keep running indefinitely.
-          this.cancelPendingMemoryPrefetch('new_query');
-          const controller = new AbortController();
-          // Bridge the caller's signal into the prefetch controller so a user
-          // abort (Ctrl-C / Esc) on the parent turn also terminates the
-          // recall side-query. `{ once: true }` lets the listener clean itself
-          // up after firing; we still call removeEventListener on the promise's
-          // finally to cover the normal-completion case so a long-lived parent
-          // signal doesn't accumulate listeners across many turns.
-          let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
-          const onParentAbort = () => {
-            prefetchAbortReason = 'abort';
-            controller.abort();
-            this.cancelPendingMemoryPrefetch('abort');
-          };
-          if (signal.aborted) {
-            prefetchAbortReason = 'abort';
-            controller.abort();
-          } else {
-            signal.addEventListener('abort', onParentAbort, { once: true });
-          }
-          const fastResultRef: MemoryFastResultBox = { current: null };
-          const promise = this.config
-            .getMemoryManager()
-            .recall(
-              this.config.getProjectRoot(),
-              preHookUserPromptText ?? partToString(request),
-              {
-                config: this.config,
-                excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-                recentTools: [...this.recentCompletedToolNames],
-                abortSignal: controller.signal,
-                onFastResult: (result) => {
-                  fastResultRef.current = result;
-                  fastResultRef.onArrive?.();
-                },
-              },
-            )
-            .catch((error: unknown) => {
-              // Abort sources are now numerous (caller signal, new UserQuery,
-              // cleanup paths, safety-net timeout). Keep a debug trace so
-              // operators can diagnose missing-memory scenarios without
-              // raising noise on the common abort path.
-              if (
-                error instanceof DOMException &&
-                error.name === 'AbortError'
-              ) {
-                debugLogger.debug(
-                  'Managed auto-memory recall prefetch aborted.',
-                );
-              } else {
-                debugLogger.warn(
-                  'Managed auto-memory recall prefetch failed.',
-                  error,
-                );
-              }
-              return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-            });
-          const handle: MemoryPrefetchHandle = {
-            promise,
-            settledAt: null,
-            result: null,
-            consumed: false,
-            terminalLogged: false,
-            firedAt: Date.now(),
-            controller,
-            fastResultRef,
-            fastDelivered: false,
-            fastDeliveredPaths: new Set<string>(),
-          };
-          void promise.then((result) => {
-            handle.result = result;
-          });
-          void promise.finally(() => {
-            handle.settledAt = Date.now();
-            signal.removeEventListener('abort', onParentAbort);
-          });
-          this.pendingMemoryPrefetch = handle;
-          if (prefetchAbortReason) {
-            this.cancelPendingMemoryPrefetch(prefetchAbortReason);
-          }
-        }
+        this.beginManagedAutoMemoryRecall(
+          preHookUserPromptText ?? partToString(request),
+          signal,
+        );
 
         // Track prompt count for commit attribution. Only the user typing a
         // fresh prompt should bump the counter — `ToolResult` (tool-call
@@ -3333,12 +3515,10 @@ export class GeminiClient {
           }
         }
 
-        const userQueryMemory = await this.tryConsumeMemoryPrefetch(
-          'initial',
+        const userQueryMemory =
           messageType === SendMessageType.UserQuery
-            ? INITIAL_MEMORY_RECALL_WAIT_MS
-            : 0,
-        );
+            ? await this.consumeManagedAutoMemoryRecall('initial')
+            : await this.tryConsumeMemoryPrefetch('initial');
         if (userQueryMemory?.prompt) {
           // Unshift to the front of systemReminders: on a UserQuery turn
           // requestToSend leads with user text, so positioning memory at
@@ -3386,7 +3566,7 @@ export class GeminiClient {
 
       if (messageType === SendMessageType.ToolResult) {
         const toolResultMemory =
-          await this.tryConsumeMemoryPrefetch('tool_result');
+          await this.consumeManagedAutoMemoryRecall('tool_result');
         if (toolResultMemory?.prompt) {
           // Append (not prepend): on a ToolResult turn, requestToSend leads
           // with functionResponse parts that must immediately follow the
@@ -4198,7 +4378,7 @@ export class GeminiClient {
       // pending, preserve the handle so the next ToolResult turn can
       // consume it (the fire-and-forget design).
       if (!hasToolCalls) {
-        this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+        this.finishManagedAutoMemoryRecall();
       }
       for (const goalEvent of takePendingGoalEvents()) {
         yield goalEvent;

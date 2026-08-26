@@ -203,6 +203,13 @@ export async function persistPermissionOutcome(
   payload?: ToolConfirmationPayload,
 ): Promise<void> {
   if (
+    confirmationDetails.type !== 'exec' &&
+    confirmationDetails.type !== 'mcp' &&
+    confirmationDetails.type !== 'info'
+  ) {
+    return;
+  }
+  if (
     outcome !== ToolConfirmationOutcome.ProceedAlways &&
     outcome !== ToolConfirmationOutcome.ProceedAlwaysProject &&
     outcome !== ToolConfirmationOutcome.ProceedAlwaysUser
