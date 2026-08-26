@@ -253,9 +253,8 @@
   "scripts": {
     "prepackage": "node ./scripts/prepackage.js",
     "build": "npm run build:dev",
-    "build:dev": "npm run check:no-webui && npm run check-types && npm run lint && node esbuild.js",
-    "build:prod": "npm run check:no-webui && node esbuild.js --production",
-    "check:no-webui": "node scripts/check-no-webui-dependency.js",
+    "build:dev": "npm run check-types && npm run lint && node esbuild.js",
+    "build:prod": "node esbuild.js --production",
     "generate:notices": "node ./scripts/generate-notices.js",
     "prepare": "npm run generate:notices",
     "check-types": "tsc --noEmit",

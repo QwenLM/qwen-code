@@ -453,6 +453,26 @@ export default tseslint.config(
     },
   },
 
+  // The VS Code companion renders through @qwen-code/web-shell; the legacy
+  // @qwen-code/webui surface must not re-enter the extension bundle.
+  {
+    files: ['packages/vscode-ide-companion/src/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@qwen-code/webui', '@qwen-code/webui/*'],
+              message:
+                'vscode-ide-companion must render through @qwen-code/web-shell; do not re-introduce @qwen-code/webui.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // ==================== no-console allowlist ====================
   // The following files/packages are allowed to use console.*
 
