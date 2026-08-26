@@ -2009,6 +2009,7 @@ export class Session implements SessionContext {
     this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
+    this.#registerCurrentSessionScheduledTaskCreator();
     this.config
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
@@ -2986,6 +2987,60 @@ export class Session implements SessionContext {
     });
   }
 
+  #registerCurrentSessionScheduledTaskCreator(): void {
+    if (process.env[QWEN_CODE_SERVE_ENV] !== '1') {
+      return;
+    }
+    this.config.setCurrentSessionScheduledTaskCreator(async (req) => {
+      let resp: Record<string, unknown>;
+      try {
+        resp = await this.client.extMethod(
+          SERVE_CONTROL_EXT_METHODS.createCurrentSessionScheduledTask,
+          {
+            callerSessionId: this.sessionId,
+            promptId: getInvocationContext()?.promptId ?? req.promptId,
+            cron: req.cron,
+            prompt: req.prompt,
+            recurring: req.recurring,
+          },
+        );
+      } catch (error) {
+        const code =
+          error && typeof error === 'object' && 'code' in error
+            ? (error as { code?: unknown }).code
+            : undefined;
+        if (code === -32601) {
+          throw new Error(
+            'current_session_scheduling_unavailable: The daemon does not support current-session scheduling.',
+          );
+        }
+        const data =
+          isRecord(error) && isRecord(error['data'])
+            ? error['data']
+            : undefined;
+        const errorKind = data?.['errorKind'];
+        if (typeof errorKind === 'string') {
+          const hint = data?.['hint'];
+          throw new Error(
+            `${errorKind}: ${typeof hint === 'string' && hint.length > 0 ? hint : 'Current-session scheduled task creation was rejected.'}`,
+          );
+        }
+        throw error;
+      }
+      if (
+        typeof resp['id'] !== 'string' ||
+        resp['id'].length === 0 ||
+        typeof resp['cron'] !== 'string' ||
+        resp['cron'].length === 0
+      ) {
+        throw new Error(
+          'cron_create: bridge returned an invalid scheduled-task result',
+        );
+      }
+      return { id: resp['id'], cron: resp['cron'] };
+    });
+  }
+
   async enableLiveScreenContext(): Promise<void> {
     const registry = this.config.getToolRegistry();
     const existing = registry.getTool(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
@@ -3467,6 +3522,7 @@ export class Session implements SessionContext {
     this.unsubscribeChatRecordingFailure?.();
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
+    this.config.setCurrentSessionScheduledTaskCreator(undefined);
     this.config
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback(undefined);
