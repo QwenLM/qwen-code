@@ -77,6 +77,24 @@ function errno(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(code), { code });
 }
 
+function mockGroupKills(
+  aliveGroups: Set<number>,
+  onSignal: (group: number, signal?: NodeJS.Signals | number) => void,
+) {
+  return vi.spyOn(process, 'kill').mockImplementation(((
+    pid: number,
+    signal?: NodeJS.Signals | number,
+  ) => {
+    const group = -pid;
+    if (signal === 0) {
+      if (!aliveGroups.has(group)) throw errno('ESRCH');
+      return true;
+    }
+    onSignal(group, signal);
+    return true;
+  }) as typeof process.kill);
+}
+
 describe('ProcessRegistry', () => {
   it('counts unattached reservations, which is what admission must key on', () => {
     const registry = new ProcessRegistry();
@@ -214,21 +232,12 @@ describe('ProcessRegistry', () => {
     const child = fakeChild(1234);
     const tracked = registry.reserve().attach(child, { ownsProcessTree: true });
     const aliveGroups = new Set([1234, 1236]);
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((
-      pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      const group = -pid;
-      if (signal === 0) {
-        if (!aliveGroups.has(group)) throw errno('ESRCH');
-        return true;
-      }
+    const killSpy = mockGroupKills(aliveGroups, (group, signal) => {
       if (signal === 'SIGKILL') {
         aliveGroups.delete(group);
         if (group === 1234) child.emit('exit', null, 'SIGKILL');
       }
-      return true;
-    }) as typeof process.kill);
+    });
 
     const terminating = tracked.terminate().catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(0);
@@ -258,22 +267,13 @@ describe('ProcessRegistry', () => {
     const child = fakeChild(1234);
     const tracked = registry.reserve().attach(child, { ownsProcessTree: true });
     const aliveGroups = new Set([1234, 1236]);
-    vi.spyOn(process, 'kill').mockImplementation(((
-      pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      const group = -pid;
-      if (signal === 0) {
-        if (!aliveGroups.has(group)) throw errno('ESRCH');
-        return true;
-      }
+    mockGroupKills(aliveGroups, (group, signal) => {
       if (signal === 'SIGTERM' && group === 1234) {
         aliveGroups.delete(1234);
         child.emit('exit', 0, null);
       }
       if (signal === 'SIGKILL') aliveGroups.delete(group);
-      return true;
-    }) as typeof process.kill);
+    });
     let settled = false;
     const terminating = tracked.terminate().then(() => {
       settled = true;
@@ -325,22 +325,13 @@ describe('ProcessRegistry', () => {
     const child = fakeChild(1234);
     const tracked = registry.reserve().attach(child, { ownsProcessTree: true });
     const aliveGroups = new Set([1234, 1236]);
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((
-      pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      const group = -pid;
-      if (signal === 0) {
-        if (!aliveGroups.has(group)) throw errno('ESRCH');
-        return true;
-      }
+    const killSpy = mockGroupKills(aliveGroups, (group, signal) => {
       if (signal === 'SIGTERM' && group === 1234) {
         aliveGroups.delete(group);
         child.emit('exit', 0, null);
       }
       if (signal === 'SIGKILL') aliveGroups.delete(group);
-      return true;
-    }) as typeof process.kill);
+    });
 
     const terminating = tracked.terminate();
     await vi.advanceTimersByTimeAsync(5_000);
@@ -427,21 +418,12 @@ describe('ProcessRegistry', () => {
     const child = fakeChild(1234);
     const tracked = registry.reserve().attach(child, { ownsProcessTree: true });
     const aliveGroups = new Set([1234, 1236]);
-    vi.spyOn(process, 'kill').mockImplementation(((
-      pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      const group = -pid;
-      if (signal === 0) {
-        if (!aliveGroups.has(group)) throw errno('ESRCH');
-        return true;
-      }
+    mockGroupKills(aliveGroups, (group, signal) => {
       if (signal === 'SIGKILL' && group === 1234) {
         aliveGroups.delete(group);
         child.emit('exit', null, 'SIGKILL');
       }
-      return true;
-    }) as typeof process.kill);
+    });
 
     const terminating = tracked.terminate().catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(5_000);
@@ -587,18 +569,9 @@ describe('ProcessRegistry', () => {
     const child = fakeChild(1234);
     const tracked = registry.reserve().attach(child, { ownsProcessTree: true });
     const aliveGroups = new Set([1234, 1236]);
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((
-      pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      const group = -pid;
-      if (signal === 0) {
-        if (!aliveGroups.has(group)) throw errno('ESRCH');
-        return true;
-      }
+    const killSpy = mockGroupKills(aliveGroups, (group, signal) => {
       if (signal === 'SIGKILL') aliveGroups.delete(group);
-      return true;
-    }) as typeof process.kill);
+    });
 
     const terminating = tracked.terminate();
     await vi.advanceTimersByTimeAsync(0);
@@ -717,21 +690,12 @@ describe('ProcessRegistry', () => {
     setSyncProcessTable(['1234 1 1234', '1236 1234 1236'].join('\n'));
     const child = fakeChild(1234);
     const aliveGroups = new Set([1234, 1236]);
-    const killSpy = vi.spyOn(process, 'kill').mockImplementation(((
-      pid: number,
-      signal?: NodeJS.Signals | number,
-    ) => {
-      const group = -pid;
-      if (signal === 0) {
-        if (!aliveGroups.has(group)) throw errno('ESRCH');
-        return true;
-      }
+    const killSpy = mockGroupKills(aliveGroups, (group, signal) => {
       if (signal === 'SIGKILL') {
         aliveGroups.delete(group);
         if (group === 1234) child.emit('exit', null, 'SIGKILL');
       }
-      return true;
-    }) as typeof process.kill);
+    });
     const tracked = new ProcessRegistry()
       .reserve()
       .attach(child, { ownsProcessTree: true });
