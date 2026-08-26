@@ -983,8 +983,11 @@ jobs:
           # WATCHER_PID/SALVAGE_DIR are set once the supersede watcher exists.
           # The trap must reap the watcher on EVERY exit path (fail() included):
           # a background watcher outliving this step on the reused self-hosted
-          # runner could later kill a NEXT job's review of the same PR.
-          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"; [ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null; [ -z "${SALVAGE_DIR:-}" ] || rm -rf "${SALVAGE_DIR}"' EXIT
+          # runner could later kill a NEXT job's review of the same PR. The
+          # kill tolerates an already-reaped watcher (salvage arming exits it
+          # on the spot): under errexit a failed kill would abort the trap
+          # before the SALVAGE_DIR cleanup and turn a clean cede into exit 1.
+          trap 'rm -f "$LOG_PATH"; [ -z "$PROXY_BIN" ] || rm -rf "$PROXY_BIN"; [ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true; [ -z "${SALVAGE_DIR:-}" ] || rm -rf "${SALVAGE_DIR}"' EXIT
 
           if [ -z "${GH_TOKEN:-}" ]; then
             fail "CI_BOT_PAT secret is required for Qwen PR review."
@@ -1356,14 +1359,18 @@ jobs:
           case "$SALVAGE_ELAPSED_PERCENT" in
             ''|*[!0-9]*) SALVAGE_ELAPSED_PERCENT=50 ;;
           esac
+          # Force decimal: a leading-zero value is octal to $(( )) — `08`
+          # would kill the watcher's first salvage arithmetic ("value too
+          # great for base") and `050` silently apply a 40% threshold.
+          SALVAGE_ELAPSED_PERCENT=$((10#$SALVAGE_ELAPSED_PERCENT))
           if [ "$SALVAGE_ELAPSED_PERCENT" -gt 100 ]; then
             SALVAGE_ELAPSED_PERCENT=100
           fi
           # KEEP vs CEDE for a superseded in-flight review, extracted for the
           # workflow tests. KEEP (salvage) when compose already completed —
           # posting is minutes out regardless of elapsed time — or when the
-          # run spent at least SALVAGE_ELAPSED_PERCENT of its size-aware
-          # budget. The default 50% approximates the issue's "80% of typical
+          # current attempt spent at least SALVAGE_ELAPSED_PERCENT of its
+          # size-aware budget. The default 50% approximates the issue's "80% of typical
           # wall time": measured reviews land around 55-70% of their budget
           # tier, so half the budget is ~80% of a typical run — e.g. the
           # 4h06m run cancelled minutes from posting on PR #9729 (360-minute
@@ -1573,6 +1580,10 @@ jobs:
           RETRY_MIN_SECONDS=600
           MAX_ATTEMPTS=2
           START_TS="$(date +%s)"
+          # Salvage eligibility measures the CURRENT attempt (the retry loop
+          # rewrites this before each attempt): a retry restarts the review
+          # from zero, so run-level elapsed would overstate a fresh attempt.
+          printf '%s' "$START_TS" > "${SALVAGE_DIR}/attempt-start"
 
           # Supersede watcher (#10110): only automatic lifecycle reviews — the
           # runs cancel-in-progress used to cancel on synchronize. It polls
@@ -1592,10 +1603,12 @@ jobs:
           # leaked through a hard step kill cannot act on a later job.
           SALVAGE_POLL_SECONDS=60
           supersede_watcher() {
-            local live_head compose_seen elapsed
+            local live_head compose_seen elapsed attempt_start run_elapsed
             while sleep "$SALVAGE_POLL_SECONDS"; do
-              elapsed=$(( $(date +%s) - START_TS ))
-              if [ "$elapsed" -gt "$(( BUDGET_SECONDS + 1800 ))" ]; then
+              # Self-bound stays per RUN: the watcher must stop acting past
+              # the whole budget even though eligibility is per attempt.
+              run_elapsed=$(( $(date +%s) - START_TS ))
+              if [ "$run_elapsed" -gt "$(( BUDGET_SECONDS + 1800 ))" ]; then
                 return 0
               fi
               if [ ! -f "${SALVAGE_DIR}/compose-seen" ] && [ -e "$COMPOSED_ARTIFACT" ]; then
@@ -1609,7 +1622,21 @@ jobs:
               if [ -f "${SALVAGE_DIR}/compose-seen" ]; then
                 compose_seen=true
               fi
-              if salvage_eligible "$elapsed" "$BUDGET_SECONDS" "$compose_seen" "$SALVAGE_ELAPSED_PERCENT"; then
+              # Attempt-relative elapsed: the threshold rationale ("a
+              # 90-minute-in run restarts cheaply") measures the work being
+              # discarded — the current attempt's, not the run's. The case
+              # falls back to the run start on a mid-rewrite read.
+              attempt_start="$(cat "${SALVAGE_DIR}/attempt-start" 2>/dev/null || true)"
+              case "$attempt_start" in
+                ''|*[!0-9]*) attempt_start="$START_TS" ;;
+              esac
+              elapsed=$(( $(date +%s) - attempt_start ))
+              # A docs-only run can never post a salvaged outcome — the
+              # medium relay skips any moved head and the salvage-note step
+              # excludes docs-only — so KEEP would burn the rest of the
+              # budget and silently discard the result: cede regardless.
+              if [ "$DOCS_ONLY_MEDIUM" != "true" ] \
+                && salvage_eligible "$elapsed" "$BUDGET_SECONDS" "$compose_seen" "$SALVAGE_ELAPSED_PERCENT"; then
                 printf '%s' "$live_head" > "${SALVAGE_DIR}/moved-to"
                 printf '%s' "$EXPECTED_HEAD_SHA" > "$QWEN_CI_REVIEW_SALVAGE_OK_FILE"
                 echo "qwen-review-salvage: head moved to ${live_head} ${elapsed}s in (compose_seen=${compose_seen}) — finishing and posting against reviewed head ${EXPECTED_HEAD_SHA} (#10110)"
@@ -1631,6 +1658,21 @@ jobs:
 
           attempt=1
           while :; do
+            # Re-check BEFORE the attempt: the watcher's cede is one-shot,
+            # and during the retry backoff its pkill matched nothing (qwen
+            # not running) — without this the next attempt re-reviews the
+            # dead head for the whole remaining budget while the queued
+            # replacement waits (#10110).
+            if [ -f "${SUPERSEDE_FILE:-}" ]; then
+              echo "Superseded early: PR #${PR_NUMBER:-} moved from ${EXPECTED_HEAD_SHA:-} to $(cat "$SUPERSEDE_FILE" 2>/dev/null || echo unknown) before the salvage threshold; ceding to the replacement run (#10110)." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            # Salvage state is per ATTEMPT — a retry re-runs the review from
+            # scratch, so attempt 1's compose sighting (the watcher latches
+            # it) and elapsed fraction must not make the fresh attempt
+            # salvage-eligible from its first second.
+            rm -f "${SALVAGE_DIR}/compose-seen"
+            date +%s > "${SALVAGE_DIR}/attempt-start"
             attempt_timeout=$(( BUDGET_SECONDS - ($(date +%s) - START_TS) ))
             if [ "$attempt_timeout" -lt 30 ]; then
               fail "${REASON:-Qwen review ran out of time budget before it could complete.}" 1 "$KIND"

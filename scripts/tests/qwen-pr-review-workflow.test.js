@@ -104,7 +104,18 @@ function runScenario(
         'exec "$@"',
       ].join('\n') + '\n',
     );
-    write('sleep', '#!/bin/bash\nexit 0\n');
+    // The retry backoff is the ONLY sleep in the extracted loop, so an
+    // opt-in env turns it into "the watcher cedes while qwen is down".
+    write(
+      'sleep',
+      [
+        '#!/bin/bash',
+        'if [ -n "${SUPERSEDE_DURING_BACKOFF:-}" ]; then',
+        '  printf "head-b" > "$SUPERSEDE_DURING_BACKOFF"',
+        'fi',
+        'exit 0',
+      ].join('\n') + '\n',
+    );
     write(
       'qwen',
       [
@@ -139,6 +150,9 @@ function runScenario(
         // Killed mid-write: the last line reaches stdout WITHOUT its newline,
         // so whatever the step prints next lands on the same line.
         '  timeout_partial_line) printf \'{"type":"assistant","content":"90-    core.info(`##[add-matcher]x`);"}\\n{"type":"assistant","content":"91- trunc\' ;;',
+        '  supersede_mid_attempt) r success false "[API Error: 503 upstream overloaded]"; printf "head-b" > "$SUPERSEDE_FILE" ;;',
+        '  supersede_during_backoff) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else r success false "attempt 2 must not run"; fi ;;',
+        '  compose_latch_reset) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; : > "$SALVAGE_DIR/compose-seen"; else { [ -f "$SALVAGE_DIR/compose-seen" ] && echo present || echo absent; } >> "$OBS"; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
         '  errresult) r error true "connection dropped mid-review" ;;',
         '  hardexit) exit 3 ;;',
         'esac',
@@ -151,6 +165,9 @@ function runScenario(
       `LOG_PATH="${logPath ?? join(dir, 'log')}"`,
       `GITHUB_OUTPUT="${join(dir, 'gho')}"; GITHUB_STEP_SUMMARY="${join(dir, 'gss')}"`,
       ': > "$GITHUB_OUTPUT"; : > "$GITHUB_STEP_SUMMARY"',
+      // The retry loop keeps per-attempt salvage state here; exported so
+      // the stub qwen can simulate the watcher's compose latch.
+      `SALVAGE_DIR="${join(dir, 'salvage')}"; mkdir -p "$SALVAGE_DIR"; export SALVAGE_DIR`,
       'fail(){ echo "FAIL kind=[${3:-}] reason=[$1]"; exit "${2:-1}"; }',
       retryLoopSource(),
       'echo "OK outcome=$OUTCOME"',
@@ -3886,14 +3903,21 @@ describe('review supersede salvage (#10110)', () => {
   it('checks supersede and salvage-cede before classifying the attempt outcome', () => {
     // A watcher kill surfaces as a non-zero qwen status; classified first it
     // would read as fatal (job red, fallback machinery engaged) or retryable
-    // (a from-scratch re-review of a superseded head).
+    // (a from-scratch re-review of a superseded head). The supersede check
+    // also runs at the TOP of the loop: a cede landing during the retry
+    // backoff (pkill matched nothing — qwen not running) must stop the next
+    // attempt before it re-reviews the dead head.
+    const check = 'if [ -f "${SUPERSEDE_FILE:-}" ]; then';
     const call = run.indexOf('run_review_once "$attempt_timeout" "$PROMPT"');
-    const supersede = run.indexOf('if [ -f "${SUPERSEDE_FILE:-}" ]; then');
+    const preAttempt = run.indexOf(check);
+    const supersede = run.indexOf(check, call);
     const cede = run.indexOf(
       'if [ "$OUTCOME" != "success" ] && [ -f "${QWEN_CI_REVIEW_SALVAGE_OK_FILE:-}" ]; then',
     );
     const success = run.indexOf('if [ "$OUTCOME" = "success" ]; then');
     expect(call).toBeGreaterThan(-1);
+    expect(preAttempt).toBeGreaterThan(-1);
+    expect(preAttempt).toBeLessThan(call);
     expect(supersede).toBeGreaterThan(call);
     expect(cede).toBeGreaterThan(supersede);
     expect(success).toBeGreaterThan(cede);
@@ -3931,12 +3955,128 @@ describe('review supersede salvage (#10110)', () => {
     expect(eligible(1, 21600, 'false', 0)).toBe(true);
   });
 
+  // Extract the watcher itself and drive it to its one-shot decision with
+  // stub gh/pkill/sleep — wiring the salvage_eligible result to the two
+  // signal writes the rest of the system consumes (the marker and the
+  // supersede file). String pins alone let a flipped dispatch or a
+  // wrong-head marker ship green.
+  function watcherSource() {
+    return run.match(/supersede_watcher\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  }
+
+  function runWatcher({
+    liveHead = 'head-b',
+    expectedHead = 'head-a',
+    budget = 21600,
+    runElapsed = 60,
+    attemptElapsed = runElapsed,
+    composeSeen = false,
+    docsOnly = false,
+    pct = 50,
+  } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'review-watcher-'));
+    try {
+      const now = Math.floor(Date.now() / 1000);
+      writeFileSync(join(dir, 'attempt-start'), String(now - attemptElapsed));
+      if (composeSeen) {
+        writeFileSync(join(dir, 'compose-seen'), '');
+      }
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const pkillLog = join(dir, 'pkills');
+      const write = (name, body) => {
+        const p = join(bin, name);
+        writeFileSync(p, body);
+        chmodSync(p, 0o755);
+      };
+      write('sleep', '#!/bin/bash\nexit 0\n');
+      write('gh', `#!/bin/bash\necho "${liveHead}"\n`);
+      write('pkill', `#!/bin/bash\necho "$*" >> "${pkillLog}"\n`);
+      const eligible =
+        run.match(/salvage_eligible\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+      const harness = [
+        'set -euo pipefail',
+        eligible,
+        watcherSource(),
+        `START_TS=${now - runElapsed}; BUDGET_SECONDS=${budget}; SALVAGE_ELAPSED_PERCENT=${pct}`,
+        `EXPECTED_HEAD_SHA=${expectedHead}; DOCS_ONLY_MEDIUM=${docsOnly ? 'true' : 'false'}`,
+        'PR_NUMBER=1; REPO=o/r; REVIEW_URL=https://example.test/pr/1; SALVAGE_POLL_SECONDS=0',
+        `SALVAGE_DIR="${dir}"; SUPERSEDE_FILE="${dir}/superseded"`,
+        `QWEN_CI_REVIEW_SALVAGE_OK_FILE="${dir}/salvage-ok"; COMPOSED_ARTIFACT="${dir}/composed.json"`,
+        'supersede_watcher',
+      ].join('\n');
+      execFileSync('bash', ['-c', harness], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      });
+      const readOr = (name) =>
+        existsSync(join(dir, name))
+          ? readFileSync(join(dir, name), 'utf8')
+          : null;
+      return {
+        marker: readOr('salvage-ok'),
+        movedTo: readOr('moved-to'),
+        superseded: readOr('superseded'),
+        pkilled: existsSync(pkillLog),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('wires the watcher decision to the marker and supersede file (replayed watcher)', () => {
+    // Below threshold: CEDE — the supersede file carries the LIVE head, no
+    // marker is armed, and the qwen tree is killed.
+    const cede = runWatcher({});
+    expect(cede.superseded).toBe('head-b');
+    expect(cede.marker).toBeNull();
+    expect(cede.pkilled).toBe(true);
+
+    // Past threshold: KEEP — the marker carries the REVIEWED head (the
+    // wrapper guard compares it against the expected head), not the live
+    // one; moved-to records where the PR went; nothing is killed.
+    const keep = runWatcher({ runElapsed: 12000, attemptElapsed: 12000 });
+    expect(keep.marker).toBe('head-a');
+    expect(keep.movedTo).toBe('head-b');
+    expect(keep.superseded).toBeNull();
+    expect(keep.pkilled).toBe(false);
+
+    // Compose seen: KEEP however early — posting is minutes out.
+    const composed = runWatcher({ composeSeen: true });
+    expect(composed.marker).toBe('head-a');
+    expect(composed.superseded).toBeNull();
+  });
+
+  it('cedes a moved head on a fresh retry attempt (replayed watcher)', () => {
+    // Attempt 1 burned 12000s of the 21600s budget (past 50%) and died
+    // retryable; attempt 2 is seconds old when the head moves. Run-level
+    // elapsed would KEEP — exactly the state the threshold policy says to
+    // CEDE; attempt-relative elapsed cedes.
+    const r = runWatcher({ runElapsed: 12000, attemptElapsed: 30 });
+    expect(r.superseded).toBe('head-b');
+    expect(r.marker).toBeNull();
+  });
+
+  it('never arms salvage for a docs-only run (replayed watcher)', () => {
+    // The medium relay skips any moved head and the salvage-note step
+    // excludes docs-only, so an armed KEEP could never post: cede even
+    // past the threshold.
+    const r = runWatcher({
+      runElapsed: 12000,
+      attemptElapsed: 12000,
+      docsOnly: true,
+    });
+    expect(r.superseded).toBe('head-b');
+    expect(r.marker).toBeNull();
+  });
+
   it('ends a superseded attempt clean without retrying (replayed loop)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
     try {
       const supersedeFile = join(dir, 'superseded');
-      writeFileSync(supersedeFile, 'head-b');
-      const r = runScenario('success', {
+      // The watcher cedes mid-attempt (its pkill kills the qwen tree);
+      // the attempt's post-run check sees the file and cedes clean.
+      const r = runScenario('supersede_mid_attempt', {
         extraEnv: { SUPERSEDE_FILE: supersedeFile },
       });
       expect(r.attempts).toBe(1);
@@ -3982,6 +4122,45 @@ describe('review supersede salvage (#10110)', () => {
     }
   });
 
+  it('cedes before an attempt when the watcher yielded during the backoff (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const supersedeFile = join(dir, 'superseded');
+      // Attempt 1 dies retryable; the stubbed backoff sleep stands in for
+      // the window where the watcher cedes against an empty process table
+      // (pkill matches nothing — qwen is not running). The top-of-loop
+      // re-check must stop attempt 2 re-reviewing the dead head.
+      const r = runScenario('supersede_during_backoff', {
+        extraEnv: {
+          SUPERSEDE_FILE: supersedeFile,
+          SUPERSEDE_DURING_BACKOFF: supersedeFile,
+        },
+      });
+      expect(r.attempts).toBe(1);
+      expect(r.raw).toContain('Superseded early:');
+      expect(r.raw).not.toContain('FAIL ');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resets the compose latch between attempts (replayed loop)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const obs = join(dir, 'latch-observed');
+      // Attempt 1 reaches compose (the stub simulates the watcher latching
+      // it) and dies retryable; attempt 2 must start without the stale
+      // latch, or it reads salvage-eligible from its first second.
+      const r = runScenario('compose_latch_reset', {
+        extraEnv: { OBS: obs },
+      });
+      expect(r.attempts).toBe(2);
+      expect(readFileSync(obs, 'utf8').trim()).toBe('absent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('pins the compose-artifact path to the CLI that writes it', () => {
     // The watcher's strongest KEEP signal is the composed-verdict artifact;
     // its name comes from composedNameFor in the review CLI. If either side
@@ -4007,7 +4186,37 @@ describe('review supersede salvage (#10110)', () => {
     // watcher outliving the step on a reused self-hosted runner could kill
     // a later job's review of the same PR.
     expect(run).toContain('BUDGET_SECONDS + 1800');
-    expect(run).toContain('[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}"');
+    expect(run).toContain(
+      '[ -z "${WATCHER_PID:-}" ] || kill "${WATCHER_PID}" 2>/dev/null || true',
+    );
+  });
+
+  it('reaps an already-exited watcher without failing the clean cede', () => {
+    // Salvage arming exits the watcher on the spot; the cede path's
+    // deliberate `exit 0` then runs the trap AFTER bash reaped the
+    // subshell. The kill must not turn that clean exit into exit 1 under
+    // the step's errexit, nor skip the SALVAGE_DIR cleanup.
+    const trapLine = run.split('\n').find((l) => l.startsWith("trap '"));
+    expect(trapLine).toContain("' EXIT");
+    const dir = mkdtempSync(join(tmpdir(), 'review-salvage-'));
+    try {
+      const harness = [
+        'set -euo pipefail',
+        `LOG_PATH="${join(dir, 'log')}"; : > "$LOG_PATH"`,
+        'PROXY_BIN=""',
+        `SALVAGE_DIR="${join(dir, 'salvage')}"; mkdir -p "$SALVAGE_DIR"`,
+        '( : ) &',
+        'WATCHER_PID=$!',
+        'wait "$WATCHER_PID"',
+        trapLine,
+        'exit 0',
+      ].join('\n');
+      const r = spawnSync('bash', ['-c', harness], { encoding: 'utf8' });
+      expect(r.status).toBe(0);
+      expect(existsSync(join(dir, 'salvage'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('wires the salvage outputs into the historical-head note step', () => {
@@ -4037,6 +4246,42 @@ describe('review supersede salvage (#10110)', () => {
       '${{ vars.QWEN_REVIEW_SALVAGE_ELAPSED_PERCENT }}',
     );
     expect(run).toContain('SALVAGE_ELAPSED_PERCENT=50');
+  });
+
+  it('sanitizes the salvage percent to a clamped decimal (replayed parse)', () => {
+    // The parse sits OUTSIDE the retry-loop extraction window, so pin its
+    // behavior by executing it: the digit guard, the 100 clamp, and the
+    // decimal coercion a leading-zero value needs before $(( )) reads it.
+    const start = run.indexOf(
+      'SALVAGE_ELAPSED_PERCENT="${SALVAGE_ELAPSED_PERCENT_VAR:-}"',
+    );
+    const clamp = run.indexOf(
+      'if [ "$SALVAGE_ELAPSED_PERCENT" -gt 100 ]',
+      start,
+    );
+    const end = run.indexOf('\nfi', clamp) + '\nfi'.length;
+    expect(start).toBeGreaterThan(-1);
+    expect(clamp).toBeGreaterThan(start);
+    expect(end).toBeGreaterThan(clamp);
+    const block = run.slice(start, end);
+    const parsePct = (value) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -euo pipefail\n${block}\nprintf '%s' "$SALVAGE_ELAPSED_PERCENT"`,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, SALVAGE_ELAPSED_PERCENT_VAR: value },
+        },
+      );
+    expect(parsePct('30')).toBe('30');
+    expect(parsePct('')).toBe('50');
+    expect(parsePct('abc')).toBe('50');
+    expect(parsePct('150')).toBe('100');
+    expect(parsePct('08')).toBe('8');
+    expect(parsePct('050')).toBe('50');
   });
 
   it('skips a queued run whose event head went stale before review-pr spends setup', () => {
