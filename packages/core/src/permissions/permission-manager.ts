@@ -1255,6 +1255,13 @@ export class PermissionManager {
         );
         return;
       }
+      // Deduplicate on raw string — mirrors addPersistentRule and the
+      // dangerous-stash branch above. Reload cycles (e.g. /unskill +
+      // re-invoke) re-run applySkillAllowedTools; without this guard the
+      // skill's allowedTools list would accumulate on every cycle.
+      if (this.sessionRules.allow.some((r) => r.raw === rule.raw)) {
+        return;
+      }
       this.sessionRules.allow.push(rule);
     }
   }

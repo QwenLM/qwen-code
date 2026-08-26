@@ -1409,9 +1409,7 @@ describe('UiTelemetryService', () => {
       service.addEvent(makeApiEvent('model-a', 77), SESSION_B);
       expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
       // ...but the aggregate still counts it.
-      expect(service.getMetrics().models['model-a']?.api.totalRequests).toBe(
-        2,
-      );
+      expect(service.getMetrics().models['model-a']?.api.totalRequests).toBe(2);
     });
 
     it('keeps the bySource null prototype across restore', () => {
