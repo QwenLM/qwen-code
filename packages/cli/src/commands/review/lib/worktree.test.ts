@@ -1883,7 +1883,24 @@ describe('worktreeCreateFailureDetail', () => {
 
 const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
+// Every case in this block builds a layout under `.qwen/tmp` and asks a
+// question that only has an answer where containment can exist. On Windows
+// `mountRootFor` refuses every absolute path (a drive letter is a colon), so
+// the gate never speaks — and the fixtures cannot even be built there: a
+// planted name carrying a drive letter mid-path is rejected by NTFS. Gated as
+// a BLOCK, because gating case by case is how the same lane surfaced four
+// times in this pull request.
 describe('untrustedGitfile', () => {
+  // Real git runs here, so the host's own config must not reach it — the same
+  // isolation every other real-git describe in this file installs. Without it
+  // a host carrying `commit.gpgsign=true` and no usable key fails the fixture
+  // commit and the whole block goes red for a reason unrelated to the gate.
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+  });
+  afterEach(() => gitIsolation.dispose());
+
   const made: string[] = [];
   const tmp = () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-gitfile-')));
@@ -1917,7 +1934,7 @@ describe('untrustedGitfile', () => {
     return { repo, tree, mount: () => join(repo, '.qwen', 'tmp') };
   };
 
-  it('ADMITS an intact pipeline gitfile', () => {
+  itWhereContainmentExists('ADMITS an intact pipeline gitfile', () => {
     // The admit path, which nothing exercised: every refusal case would also
     // refuse under a mutation that breaks the resolution, so only asserting
     // the admit tells a working gate from one that refuses everything.
@@ -1925,56 +1942,65 @@ describe('untrustedGitfile', () => {
     expect(untrustedGitfile(tree, mount)).toBeNull();
   });
 
-  it('refuses a pointer git resolves INTO the mount, however it is spelled', () => {
-    // Spelled with a non-breaking space, which JS `trim()` strips and git's
-    // `read_gitfile` does not — the divergence that let the first cut resolve
-    // the REAL entry, outside the mount, and admit a tree git resolves to a
-    // planted one inside it. The gate asks git now, so the spelling stops
-    // mattering: whatever git answers is what gets located.
-    const { repo, tree, mount } = pipelineTree();
-    const planted = join(repo, '.qwen', 'tmp', '.evil-git');
-    const real = readFileSync(join(tree, '.git'), 'utf8')
-      .trim()
-      .replace('gitdir: ', '');
-    cpSync(real, planted, { recursive: true });
-    writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-    writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
-    writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
-    expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
-  });
+  itWhereContainmentExists(
+    'refuses a pointer git resolves INTO the mount, however it is spelled',
+    () => {
+      // Spelled with a non-breaking space, which JS `trim()` strips and git's
+      // `read_gitfile` does not — the divergence that let the first cut resolve
+      // the REAL entry, outside the mount, and admit a tree git resolves to a
+      // planted one inside it. The gate asks git now, so the spelling stops
+      // mattering: whatever git answers is what gets located.
+      const { repo, tree, mount } = pipelineTree();
+      const planted = join(repo, '.qwen', 'tmp', '.evil-git');
+      const real = readFileSync(join(tree, '.git'), 'utf8')
+        .trim()
+        .replace('gitdir: ', '');
+      cpSync(real, planted, { recursive: true });
+      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
+      writeFileSync(join(tree, '.git'), `gitdir: ${planted}\n`);
+      expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
+    },
+  );
 
-  it('refuses a `.git` that is not the pipeline gitfile at all', () => {
-    // `rm .git && git init .` inside the mount: a repository of the writer's
-    // own, which skips every gate written for the gitfile shape.
-    const { tree, mount } = pipelineTree();
-    rmSync(join(tree, '.git'), { force: true });
-    execFileSync('git', ['init', '-q'], { cwd: tree });
-    expect(untrustedGitfile(tree, mount)).toContain('not the gitfile');
-  });
+  itWhereContainmentExists(
+    'refuses a `.git` that is not the pipeline gitfile at all',
+    () => {
+      // `rm .git && git init .` inside the mount: a repository of the writer's
+      // own, which skips every gate written for the gitfile shape.
+      const { tree, mount } = pipelineTree();
+      rmSync(join(tree, '.git'), { force: true });
+      execFileSync('git', ['init', '-q'], { cwd: tree });
+      expect(untrustedGitfile(tree, mount)).toContain('not the gitfile');
+    },
+  );
 
-  it('follows GIT through a spelling only git and JS read differently', () => {
-    // The divergence that made parsing here unsafe: JS `trim()` strips U+00A0,
-    // git's `read_gitfile` trims only C-locale space. Spelled with a leading
-    // NBSP, the pointer resolves — in Node — to the REAL entry outside the
-    // mount and would be admitted, while git reads the NBSP as part of a
-    // RELATIVE path and lands on the planted entry inside the mount, which is
-    // what the checkout would then run through.
-    const { repo, tree, mount } = pipelineTree();
-    const real = readFileSync(join(tree, '.git'), 'utf8')
-      .trim()
-      .replace('gitdir: ', '');
-    // The planted entry sits where git will look: under the tree, at a name
-    // beginning with the NBSP.
-    const planted = join(tree, `\u00a0${real}`);
-    mkdirSync(dirname(planted), { recursive: true });
-    cpSync(real, planted, { recursive: true });
-    writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
-    writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
-    writeFileSync(join(tree, '.git'), `gitdir: \u00a0${real}\n`);
+  itWhereContainmentExists(
+    'follows GIT through a spelling only git and JS read differently',
+    () => {
+      // The divergence that made parsing here unsafe: JS `trim()` strips U+00A0,
+      // git's `read_gitfile` trims only C-locale space. Spelled with a leading
+      // NBSP, the pointer resolves — in Node — to the REAL entry outside the
+      // mount and would be admitted, while git reads the NBSP as part of a
+      // RELATIVE path and lands on the planted entry inside the mount, which is
+      // what the checkout would then run through.
+      const { repo, tree, mount } = pipelineTree();
+      const real = readFileSync(join(tree, '.git'), 'utf8')
+        .trim()
+        .replace('gitdir: ', '');
+      // The planted entry sits where git will look: under the tree, at a name
+      // beginning with the NBSP.
+      const planted = join(tree, `\u00a0${real}`);
+      mkdirSync(dirname(planted), { recursive: true });
+      cpSync(real, planted, { recursive: true });
+      writeFileSync(join(planted, 'commondir'), `${join(repo, '.git')}\n`);
+      writeFileSync(join(planted, 'gitdir'), `gitdir: ${join(tree, '.git')}\n`);
+      writeFileSync(join(tree, '.git'), `gitdir: \u00a0${real}\n`);
 
-    // Node would resolve the real entry here; git resolves the planted one.
-    expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
-  });
+      // Node would resolve the real entry here; git resolves the planted one.
+      expect(untrustedGitfile(tree, mount)).toContain('review temp dir');
+    },
+  );
 
   itWhereContainmentExists(
     "takes git's answer unedited, trailing NBSP and all",
@@ -2014,6 +2040,27 @@ describe('untrustedGitfile', () => {
       const sub = join(tree, 'packages', 'cli');
       mkdirSync(sub, { recursive: true });
       expect(untrustedRepositoryFrom(sub, mount)).toBeNull();
+    },
+  );
+
+  itWhereContainmentExists(
+    'works where `realpathSync` carries no `.native`',
+    () => {
+      // A suite that mocks `node:fs.realpathSync` as a bare `vi.fn` gives it
+      // no `.native`, and reaching through it threw a TypeError into the
+      // fail-closed catch — refusing every worktree creation in any checkout
+      // sitting under `.qwen/tmp`. Deleting the property here asks that shape
+      // directly, because the suite that HAS the mock never reaches this gate
+      // from an unmounted checkout.
+      const { tree, mount } = pipelineTree();
+      const holder = realpathSync as unknown as { native?: unknown };
+      const saved = holder.native;
+      delete holder.native;
+      try {
+        expect(untrustedGitfile(tree, mount)).toBeNull();
+      } finally {
+        holder.native = saved;
+      }
     },
   );
 

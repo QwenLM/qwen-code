@@ -288,8 +288,15 @@ export function adminEntryInsideReviewTmp(
     // different case resolves INSIDE the mount and compares OUTSIDE it. The
     // native call asks the operating system for the stored name, so both sides
     // arrive spelled the way the filesystem actually holds them.
-    real = realpathSync.native(resolve(gitDir));
-    realRoot = realpathSync.native(root);
+    // `.native` when it is there, plain otherwise. The native call is what
+    // makes the comparison below case-correct (see above), but a suite that
+    // mocks `node:fs.realpathSync` as a bare `vi.fn` has no `.native` on it,
+    // and reaching through it threw a TypeError straight into the fail-closed
+    // catch — refusing every worktree creation in any checkout that happens to
+    // sit under `.qwen/tmp`.
+    const canonical = realpathSync.native ?? realpathSync;
+    real = canonical(resolve(gitDir));
+    realRoot = canonical(root);
   } catch {
     // Unresolvable is not a licence to proceed: the caller's other gates
     // report it, and answering "not inside" here would be a guess.
