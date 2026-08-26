@@ -257,6 +257,41 @@ attribute. Their requests are not the user-facing conversation whose
 provider usage attributes remain unchanged on those spans. Main-agent,
 subagent, and non-internal standalone LLM requests emit the attribute.
 
+## Artifact boundary and offline analysis
+
+The session JSONL and an exported trace are separate diagnostic artifacts. Chat
+recording is enabled by default and the local JSONL persists accepted
+conversation content, tool calls and results, usage metadata, the context-window
+size, and compression checkpoints. It can also be disabled, and collecting it
+would disclose raw conversation content that a centralized operator may not
+have permission to access. The target offline workflow for this attribute is
+therefore analysis of a sanitized exported trace without collecting or joining
+the user's local transcript.
+
+The JSONL is also a conversation and resumption record rather than a complete
+physical-attempt snapshot. It does not preserve the effective assembled system
+instruction, the actual tool declarations revealed for an attempt, the exact
+memory/configuration and loaded-skill attribution, or every failed retry
+attempt. The concrete query supported here is: for one physical LLM attempt,
+did context pressure, latency, an error, cache behavior, or compaction correlate
+primarily with system instructions, built-in or MCP tools, memory, loaded
+skills, or messages? The trace answers that query without exposing the
+underlying text or requiring a cross-artifact join. The non-reconstructable
+inputs needed by that query are the effective `system_prompt_tokens`,
+`builtin_tools_tokens`, `mcp_tools_tokens`, `memory_files_tokens`, and
+`skills_tokens` values for that exact attempt.
+
+Some accepted-turn values, especially message usage and the window size, can be
+reconstructed from the local JSONL. Version 1 nevertheless keeps all six
+categories so each trace snapshot is self-contained and so the
+provider-total invariant does not depend on another artifact with different
+retention, permissions, and attempt coverage.
+
+This attribute adds no second opt-in or sampling switch. When tracing is
+initialized, every non-internal physical attempt follows the emission rules
+above, including retries and subagents. Existing trace and exporter policy
+remains the control plane for whether spans are recorded or exported.
+
 ## Failure, privacy, and performance rules
 
 - Context telemetry is best effort. Snapshot or serialization failure omits
@@ -275,9 +310,14 @@ subagent, and non-internal standalone LLM requests emit the attribute.
   committed in-memory caches.
 - Snapshot construction performs a bounded number of linear passes over the
   logical request. It must not add a nested scan per tool, skill, or message.
-- The schema has fixed cardinality and a bounded serialized size. JSON is
-  compact and is never truncated into invalid JSON. Serialization omits the
-  complete attribute if it exceeds a fixed 1024-character safety limit.
+- The schema has a fixed key set and a bounded serialized size. JSON is compact
+  and is never truncated into invalid JSON. Serialization omits the complete
+  attribute if it exceeds a fixed 1024-character safety limit.
+- The size bound limits per-span payload, not fleet-wide ingestion or value
+  cardinality. Total volume scales with physical attempts, including retries
+  and subagents, and the aggregate JSON values are expected to be nearly
+  unique. Backends should parse selected keys rather than index the complete
+  string.
 
 ## Compatibility and query contract
 
@@ -301,10 +341,14 @@ MCP share = json(breakdown.mcp_tools_tokens)
           / gen_ai.usage.input_tokens
 ```
 
-JSON parsing is less index-friendly than separate scalar attributes. That is
-the accepted tradeoff for adding only one field. A category should be promoted
-to a scalar attribute only after a concrete high-volume query demonstrates the
-need; version 1 does not pre-allocate such aliases.
+JSON parsing is less index-friendly than separate scalar attributes, and the
+near-unique complete string is unsuitable as an indexed dimension. That is the
+accepted tradeoff for adding only one field. Version 1 has not been validated
+against production fleet volume or a live backend query. Rollout validation
+must measure exported bytes per attempt and representative JSON-extraction
+query cost. If either is unacceptable, a follow-up can use the existing trace
+sampling control or define a narrower versioned contract; version 1 does not
+pre-allocate scalar aliases.
 
 ## Implementation plan
 
