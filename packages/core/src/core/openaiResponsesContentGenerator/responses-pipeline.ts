@@ -477,6 +477,8 @@ export class ResponsesPipeline {
     }
 
     if (this.config.extra_body) {
+      const thinkingOptOut =
+        request.config?.thinkingConfig?.includeThoughts === false;
       const requestRecord = apiRequest as unknown as Record<string, unknown>;
       for (const [key, value] of Object.entries(this.config.extra_body)) {
         // `enable_thinking` is a DashScope/Qwen-specific knob with no meaning
@@ -484,6 +486,16 @@ export class ResponsesPipeline {
         // into `reasoning.effort` when present, so forwarding it verbatim
         // would only add an undefined field to the wire body.
         if (key === 'enable_thinking') continue;
+        // An explicit per-send `thinkingConfig.includeThoughts:false` is
+        // authoritative for the whole build, not just buildReasoning(): the
+        // opt-out is precisely what leaves `reasoning`/`include` off the
+        // request literal, so without this the fill-only merge below would
+        // hand a configured extra_body the empty slot and put thinking back
+        // on the wire the caller just turned off. `include` goes with it: the
+        // encrypted-reasoning include exists only to round-trip reasoning.
+        if (thinkingOptOut && (key === 'reasoning' || key === 'include')) {
+          continue;
+        }
         // apiRequest is built from an object literal, so optional fields
         // like `tools`/`instructions` are already present as keys even when
         // their value is undefined -- check the value, not just key presence,

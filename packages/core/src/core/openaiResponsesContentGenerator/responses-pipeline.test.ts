@@ -2507,6 +2507,79 @@ describe('ResponsesPipeline', () => {
       expect(body['enable_thinking']).toBeUndefined();
     });
 
+    // The opt-out has to survive the whole build, not just buildReasoning():
+    // leaving `reasoning`/`include` off the request literal is exactly what
+    // makes the fill-only extra_body merge below eligible to put them back,
+    // so a configured extra_body silently re-enabled thinking on the wire.
+    it('does not let extra_body reintroduce reasoning or include when the request opts out', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(
+          makeGeneratorConfig({
+            reasoning: { effort: 'high' },
+            extra_body: {
+              reasoning: { effort: 'low' },
+              include: ['reasoning.encrypted_content'],
+            },
+          }),
+          makeCliConfig(),
+        ),
+        requestWith({ thinkingConfig: { includeThoughts: false } }),
+      );
+      expect(body['reasoning']).toBeUndefined();
+      expect(body['include']).toBeUndefined();
+    });
+
+    it('control: extra_body still fills reasoning and include when the request does not opt out', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(
+          makeGeneratorConfig({
+            extra_body: {
+              reasoning: { effort: 'low' },
+              include: ['reasoning.encrypted_content'],
+            },
+          }),
+          makeCliConfig(),
+        ),
+        requestWith({ thinkingConfig: { thinkingBudget: 1024 } }),
+      );
+      expect(body['reasoning']).toEqual({ effort: 'low' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('control: a generated reasoning still outranks extra_body when the request does not opt out', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(
+          makeGeneratorConfig({
+            reasoning: { effort: 'high' },
+            extra_body: {
+              reasoning: { effort: 'low' },
+              include: ['ignored'],
+            },
+          }),
+          makeCliConfig(),
+        ),
+        requestWith({ thinkingConfig: { thinkingBudget: 1024 } }),
+      );
+      expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto' });
+      expect(body['include']).toEqual(['reasoning.encrypted_content']);
+    });
+
+    it('control: a request opt-out leaves unrelated extra_body keys alone', async () => {
+      const body = await sentBody(
+        new ResponsesPipeline(
+          makeGeneratorConfig({
+            reasoning: { effort: 'high' },
+            extra_body: { service_tier: 'priority' },
+          }),
+          makeCliConfig(),
+        ),
+        requestWith({ thinkingConfig: { includeThoughts: false } }),
+      );
+      expect(body['reasoning']).toBeUndefined();
+      expect(body['include']).toBeUndefined();
+      expect(body['service_tier']).toBe('priority');
+    });
+
     it('control: a thinkingConfig without includeThoughts leaves configured reasoning intact', async () => {
       const body = await sentBody(
         new ResponsesPipeline(
