@@ -1899,10 +1899,10 @@ export const useGeminiStream = (
     [addItem, applyVisionBridgeIfNeeded, config, settings],
   );
 
-  // Gate nested tool-result media against the active media-routed override.
-  // The send-time marker exact-routes every send owned by the stamped prompt —
-  // including tool-result continuations — but the capability probe only
-  // validated the modality that ESTABLISHED the route. A continuation whose
+  // Gate nested tool-result media against the active override. The send-time
+  // marker exact-routes every send owned by the stamped prompt — including
+  // tool-result continuations — but the capability probe only validated the
+  // modality that ESTABLISHED the route. A continuation whose
   // functionResponse.parts nest media of an unvalidated modality would be
   // exact-routed to the override and silently placeholder-substituted by the
   // route's slimming (the model answers about media it never received). Detect
@@ -1916,20 +1916,30 @@ export const useGeminiStream = (
     async (
       query: PartListUnion,
       timestamp: number,
-    ): Promise<{ parts: PartListUnion; preOverrideParts?: PartListUnion }> => {
+    ): Promise<{
+      parts: PartListUnion;
+      preOverrideParts?: PartListUnion;
+      mediaRouted?: boolean;
+    }> => {
       const nested = detectNestedFunctionResponseMedia(query);
-      if (!nested.hasImage && !nested.hasAudio) return { parts: query };
-      // Only a media-routed override exact-routes this continuation; without
-      // one the send goes to the session model where normal bridging/slimming
-      // applies. The NUL marker is NOT a bypass: full-turn vision selectors
-      // are NUL-terminated by construction and installed without a capability
-      // probe, so strip the marker and fail-close-resolve the underlying
-      // selector exactly like the bridge capability checks above.
+      if (!nested.hasImage && !nested.hasAudio && !nested.hasUntyped) {
+        return { parts: query };
+      }
+      // Gate ANY active override, not only a media-routed one (mirrors the
+      // headless twin, R46-3): a bare inline/skill override also owns the
+      // continuation sends, and its bare selector resolves the request
+      // modalities from the SESSION config — so core's slimming silently
+      // placeholder-substitutes the nested media whenever the session model
+      // cannot view it (and an unclamped supported blob skips the byte
+      // ceiling), the exact defect this gate exists to prevent. Without ANY
+      // override the send goes to the session model where normal
+      // bridging/slimming applies. The NUL marker is NOT a bypass: full-turn
+      // vision selectors are NUL-terminated by construction and installed
+      // without a capability probe, so strip the marker and fail-close-
+      // resolve the underlying selector exactly like the bridge capability
+      // checks above.
       const activeOverride = modelOverrideRef.current;
-      if (
-        activeOverride === undefined ||
-        mediaRoutedOverrideRef.current !== activeOverride
-      ) {
+      if (activeOverride === undefined) {
         return { parts: query };
       }
       const routeSelector = activeOverride.endsWith('\0')
@@ -1957,6 +1967,26 @@ export const useGeminiStream = (
       }
       let result: PartListUnion = query;
       let substituted = false;
+      if (nested.hasUntyped) {
+        // Fail closed unconditionally: core's slimming resolves a missing
+        // MIME to DEFAULT_MIME, which matches no modality, so the media
+        // would be placeholder-substituted on EVERY route — even one that
+        // supports both modalities — and the model would answer about media
+        // it never received.
+        result = replaceNestedFunctionResponseMedia(
+          result,
+          'untyped',
+          '[Media content returned by a tool was not sent: it carries no MIME type, so it cannot be routed to the model.]',
+        );
+        substituted = true;
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'Media returned by a tool was not sent: it carries no MIME type, so it cannot be routed to the model.',
+          },
+          timestamp,
+        );
+      }
       if (nested.hasImage && !supportsImage) {
         result = replaceNestedFunctionResponseMedia(
           result,
@@ -1987,6 +2017,24 @@ export const useGeminiStream = (
           timestamp,
         );
       }
+      // Media that SURVIVED the gate under a not-yet-routed override (bare
+      // inline/skill selectors): establish the route exactly like the
+      // top-level bridges do. Without this the continuation would send the
+      // bare selector, core would resolve the request modalities from the
+      // session config, and its slimming would placeholder-substitute the
+      // very media this gate just validated against the override's own
+      // capabilities. With the route established the send-time marker
+      // exact-routes this payload (it carries routed media) and stamps the
+      // owning prompt, so the remaining tool continuations keep the exact
+      // route too — the same invariant a first-turn media route establishes.
+      const mediaSurvived =
+        (nested.hasImage && supportsImage) ||
+        (nested.hasAudio && supportsAudio);
+      const establishingRoute =
+        mediaSurvived && mediaRoutedOverrideRef.current !== activeOverride;
+      if (establishingRoute) {
+        mediaRoutedOverrideRef.current = activeOverride;
+      }
       return {
         // Clamp whatever nested media survives the gate: this is the one
         // routing path that would otherwise skip
@@ -2002,6 +2050,7 @@ export const useGeminiStream = (
         // marker forever (the exact anti-pattern the top-level audio/image
         // fail-closed branches capture preOverrideParts to prevent).
         ...(substituted ? { preOverrideParts: query } : {}),
+        ...(establishingRoute ? { mediaRouted: true } : {}),
       };
     },
     [addItem, config],
@@ -2254,6 +2303,9 @@ export const useGeminiStream = (
         );
         localQueryToSendToGemini = gated.parts;
         preOverrideParts = gated.preOverrideParts;
+        // When the gate established the route for surviving nested media,
+        // stamp the owning prompt exactly like the bridge's mediaRouted.
+        mediaRouted = gated.mediaRouted === true;
       }
 
       if (localQueryToSendToGemini === null) {
@@ -4498,7 +4550,8 @@ export const useGeminiStream = (
                             gated.preOverrideParts !== undefined
                               ? query
                               : preOverrideParts,
-                          mediaRouted,
+                          mediaRouted:
+                            mediaRouted || gated.mediaRouted === true,
                         };
                       },
                     )
@@ -4511,6 +4564,7 @@ export const useGeminiStream = (
                         queryToSend: gated.parts,
                         shouldProceed: true,
                         preOverrideParts: gated.preOverrideParts,
+                        mediaRouted: gated.mediaRouted,
                       };
                     })()
                 : await prepareQueryForGemini(
@@ -4801,17 +4855,21 @@ export const useGeminiStream = (
         // landed push first). Applies to both the hook-path steer attached to
         // this send and a client-driven drain resolved during it.
         const undoAcceptedSteerHandBackIfNeeded = () => {
+          // Snapshot BOTH branches' preconditions before writing anything:
+          // each re-arm writes lastPromptRef, and when a hook-path steer AND
+          // a client-driven drain both settled accepted without model content
+          // in one send, evaluating the second branch's identity precondition
+          // AFTER the first branch's write fails it — silently dropping one
+          // of the two pushed-but-unseen steers (R49-4).
+          //
           // Hook-path steer: attached to THIS send from its start, so the
           // send's own tracker proves whether the model saw it. Only a
           // no-content failure may undo the hand-back.
-          if (
+          const hookRearmApplies =
             !sendContentTracker.sawModelContent &&
             steerHandedBack &&
             steerUndoStored !== undefined &&
-            lastPromptRef.current === steerUndoAcceptedPayload
-          ) {
-            lastPromptRef.current = steerUndoStored;
-          }
+            lastPromptRef.current === steerUndoAcceptedPayload;
           const clientSteerUndo = lastClientSteerUndoRef.current;
           // Client-driven drain: it resolves at a turn boundary, when the
           // enclosing send's tracker is ALREADY true — so it must NOT share
@@ -4822,13 +4880,26 @@ export const useGeminiStream = (
           // payload here would arm BOTH channels and deliver the steer twice
           // (R47-1). Only an accepted drain whose own content window is still
           // empty may be re-armed.
-          if (
-            clientSteerUndo &&
+          const clientRearmApplies =
+            clientSteerUndo !== null &&
             clientSteerUndo.ownerTracker === sendContentTracker &&
             clientSteerUndo.settledVia === 'accept' &&
             !clientSteerUndo.drainTracker.sawModelContent &&
-            lastPromptRef.current === clientSteerUndo.previous
-          ) {
+            lastPromptRef.current === clientSteerUndo.previous;
+          if (hookRearmApplies && steerUndoStored !== undefined) {
+            if (clientRearmApplies && clientSteerUndo) {
+              // Both steers were pushed but never seen: keep BOTH payloads so
+              // the retry's strip pops both landed pushes and re-delivers
+              // each exactly once. The hook-path composite leads, mirroring
+              // the original push order.
+              lastPromptRef.current = [
+                ...normalizePartList(steerUndoStored),
+                ...normalizePartList(clientSteerUndo.stored),
+              ];
+            } else {
+              lastPromptRef.current = steerUndoStored;
+            }
+          } else if (clientRearmApplies && clientSteerUndo) {
             lastPromptRef.current = clientSteerUndo.stored;
           }
         };
@@ -4926,7 +4997,8 @@ export const useGeminiStream = (
             hasAudioParts(finalQueryToSend) ||
             hasImageParts(finalQueryToSend) ||
             nestedRoutedMedia.hasImage ||
-            nestedRoutedMedia.hasAudio;
+            nestedRoutedMedia.hasAudio ||
+            nestedRoutedMedia.hasUntyped;
           const sendOptions = {
             type: submitType,
             notificationDisplayText: metadata?.notificationDisplayText,
@@ -4955,6 +5027,17 @@ export const useGeminiStream = (
                       sawModelContent: false,
                     };
                     activeDrainTrackerRef.current = drainTracker;
+                    // A drain that routed media to the active override must
+                    // stamp the enclosing prompt so the steered turn's
+                    // media-free tool continuations keep the exact route —
+                    // mirroring the hook-path drain, which stamps via
+                    // metadata.steerMediaRouted in submitQuery. Without the
+                    // stamp they send the bare selector, which re-enables
+                    // the fallback chain and can split the turn across
+                    // models while the routed media stays on its route.
+                    if (steerInput.mediaRouted) {
+                      mediaRoutedPromptIdRef.current = prompt_id;
+                    }
                     handleResolvedSteer(
                       steerInput,
                       drainTracker,
@@ -5195,6 +5278,17 @@ export const useGeminiStream = (
           cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
+            // Same recovery channel as any other non-abort failure (R49-2):
+            // settle accepts a drained steer as soon as its history push
+            // lands, so a 401 thrown by the first response after the push
+            // strands an accepted-but-never-seen steer unless the undo runs
+            // and the error flag arms Ctrl+Y. Without the flag, retryLastPrompt
+            // reports "No failed request to retry." and restore() is a no-op
+            // (the input already settled accepted).
+            if (submitType !== SendMessageType.Goal) {
+              lastPromptErroredRef.current = true;
+              undoAcceptedSteerHandBackIfNeeded();
+            }
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
             if (submitType !== SendMessageType.Goal) {

@@ -1925,7 +1925,9 @@ export async function runNonInteractive(
         overrideSelector: string | undefined,
       ): Promise<Part[]> => {
         const nested = detectNestedFunctionResponseMedia(parts);
-        if (!nested.hasImage && !nested.hasAudio) return parts;
+        if (!nested.hasImage && !nested.hasAudio && !nested.hasUntyped) {
+          return parts;
+        }
         if (!overrideSelector) return parts;
         const routeSelector = overrideSelector.endsWith('\0')
           ? overrideSelector.slice(0, -1)
@@ -1961,6 +1963,22 @@ export async function runNonInteractive(
           }
         }
         let result: PartListUnion = parts;
+        if (nested.hasUntyped) {
+          // Fail closed unconditionally: core's slimming resolves a missing
+          // MIME to DEFAULT_MIME, which matches no modality, so the media
+          // would be placeholder-substituted on EVERY route — even one that
+          // supports both modalities — and the model would answer about
+          // media it never received.
+          result = replaceNestedFunctionResponseMedia(
+            result,
+            'untyped',
+            '[Media content returned by a tool was not sent: it carries no MIME type, so it cannot be routed to the model.]',
+          );
+          emitBridgeNotice(
+            'tool_result_media',
+            'Media returned by a tool was not sent: it carries no MIME type, so it cannot be routed to the model.',
+          );
+        }
         if (nested.hasImage && !supportsImage) {
           result = replaceNestedFunctionResponseMedia(
             result,

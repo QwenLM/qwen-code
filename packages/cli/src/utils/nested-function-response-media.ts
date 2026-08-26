@@ -46,22 +46,38 @@ function nestedPartMime(inner: Part): string | undefined {
  * Detect inline media nested inside `functionResponse.parts`. The top-level
  * `hasImageParts`/`hasAudioParts` helpers only see top-level `inlineData`, so
  * a tool-result continuation's media is invisible to them.
+ *
+ * MIME-less media carriers are reported as `hasUntyped` and fail closed
+ * unconditionally: core's route slimming resolves a missing MIME to
+ * `DEFAULT_MIME` (`application/octet-stream`), which matches NO modality, so
+ * such a part is placeholder-substituted on EVERY route — even an
+ * all-capable one. The gates must police it themselves (visibly) instead of
+ * letting the model answer about media it never received. Core's
+ * `convertToFunctionResponse` nests tool-supplied parts verbatim without
+ * normalizing `mimeType`, so untyped custom/extension adapters reach this
+ * code path.
  */
 export function detectNestedFunctionResponseMedia(parts: PartListUnion): {
   hasImage: boolean;
   hasAudio: boolean;
+  hasUntyped: boolean;
 } {
   const list = Array.isArray(parts) ? parts : [parts];
   let hasImage = false;
   let hasAudio = false;
+  let hasUntyped = false;
   for (const part of list) {
     if (typeof part === 'string') continue;
     const nested = (part.functionResponse as { parts?: unknown } | undefined)
       ?.parts;
     if (!Array.isArray(nested)) continue;
     for (const inner of nested as Part[]) {
+      if (!nestedPartCarriesMedia(inner)) {
+        continue;
+      }
       const mime = nestedPartMime(inner);
-      if (mime === undefined || !nestedPartCarriesMedia(inner)) {
+      if (mime === undefined) {
+        hasUntyped = true;
         continue;
       }
       // Case-insensitive, mirroring the audio bridge's own `isAudioPart`
@@ -72,7 +88,7 @@ export function detectNestedFunctionResponseMedia(parts: PartListUnion): {
       else if (lower.startsWith('audio/')) hasAudio = true;
     }
   }
-  return { hasImage, hasAudio };
+  return { hasImage, hasAudio, hasUntyped };
 }
 
 export function stringifyStructuredToolOutput(value: unknown): string {
@@ -91,7 +107,7 @@ export function stringifyStructuredToolOutput(value: unknown): string {
  */
 export function replaceNestedFunctionResponseMedia(
   parts: PartListUnion,
-  match: 'image' | 'audio',
+  match: 'image' | 'audio' | 'untyped',
   note: string,
 ): Part[] {
   const prefix = match === 'image' ? 'image/' : 'audio/';
@@ -107,12 +123,17 @@ export function replaceNestedFunctionResponseMedia(
     const retained: Part[] = [];
     for (const inner of nested as Part[]) {
       const mime = nestedPartMime(inner);
-      // Same predicate as `detectNestedFunctionResponseMedia` — both carriers
-      // (`inlineData` and `fileData`) and case-insensitive MIME matching.
+      // Same predicates as `detectNestedFunctionResponseMedia` — both
+      // carriers (`inlineData` and `fileData`), case-insensitive MIME
+      // matching, and MIME-less carriers for the `untyped` axis (core's
+      // slimming placeholder-substitutes them on every route, so the gates
+      // fail them closed visibly).
       const isMatch =
-        mime !== undefined &&
-        mime.toLowerCase().startsWith(prefix) &&
-        nestedPartCarriesMedia(inner);
+        match === 'untyped'
+          ? mime === undefined && nestedPartCarriesMedia(inner)
+          : mime !== undefined &&
+            mime.toLowerCase().startsWith(prefix) &&
+            nestedPartCarriesMedia(inner);
       if (isMatch) {
         touched = true;
       } else {
