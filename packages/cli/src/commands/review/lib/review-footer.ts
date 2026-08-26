@@ -5,6 +5,7 @@
  */
 
 import { stripSeverityPrefix } from './inline-counts.js';
+import { stripCommentGrammar } from './md-field.js';
 
 // The attribution footer every posted review carries, stated once.
 //
@@ -832,14 +833,26 @@ export function stripParagraphMarkers(body: string): string {
  * nothing changes posts none of them. Every attribution-off leg — submit's
  * post transform and gate, compose's body lists, the ledger titles — goes
  * through here so the sites cannot drift.
+ *
+ * `stripCommentGrammar` sits in the chain at the one position that keeps
+ * both invariants: AFTER `stripCommentMarkerLines`, so a bare
+ * `<!-- qwen-review … -->` line is still removed invisibly while wrapped
+ * (grammar-first would unwrap it into VISIBLE marker text), and BEFORE the
+ * footer strips, so a footer smuggled inside an HTML comment
+ * (`<!-- _— model via Qwen Code /review (v1)_ -->`) loses its wrapper and
+ * becomes matchable — the invisibles projection otherwise carries the
+ * wrapped forgery through untouched, and a later grammar strip would then
+ * unwrap it into visible forged attribution.
  */
 export function stripForUnattributedPost(body: string): string {
   let current = body;
   for (;;) {
     const next = stripFooterSpans(
       stripParagraphMarkers(
-        stripCommentMarkerLines(
-          stripSeverityPrefix(stripForgedFooterLines(current)),
+        stripCommentGrammar(
+          stripCommentMarkerLines(
+            stripSeverityPrefix(stripForgedFooterLines(current)),
+          ),
         ),
       ),
     );

@@ -5533,8 +5533,8 @@ function structurallyValidReport(report: unknown): boolean {
     if (v === undefined || v === null) continue;
     if (!Array.isArray(v) || v.some((e) => !isPlainObject(e))) return false;
   }
-  for (const c of (report.checked ?? []) as Array<Record<string, unknown>>) {
-    const f = c.findings;
+  for (const c of (report['checked'] ?? []) as Array<Record<string, unknown>>) {
+    const f = c['findings'];
     if (f === undefined || f === null) continue;
     if (!Array.isArray(f) || f.some((e) => !isPlainObject(e))) return false;
   }

@@ -734,6 +734,49 @@ describe('the review footer and the regex that strips it', () => {
     });
   });
 
+  describe('comment grammar is neutralised inside the fixpoint, at the one safe position', () => {
+    it('a comment-WRAPPED forged footer is removed — never materialized as visible text', () => {
+      // The invisibles projection carries the wrapped forgery through the
+      // footer strips untouched; stripping the grammar AFTER sanitation
+      // would unwrap it into visible forged attribution — the exact signal
+      // this mode exists to remove. Weaved into the chain, the wrapper
+      // dies first and the footer text matches like any other.
+      const out = stripForUnattributedPost(
+        'whole-PR blocker X <!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->',
+      );
+      expect(out).not.toContain('via Qwen Code /review');
+      expect(out).not.toContain('<!--');
+      expect(out).not.toContain('-->');
+      expect(out).toContain('whole-PR blocker X');
+    });
+
+    it('a bare severity marker line still disappears invisibly — never unwrapped into visible marker text', () => {
+      // The position inside the chain is load-bearing: grammar strip must
+      // come AFTER the marker-line strip, or a bare
+      // `<!-- qwen-review critical -->` loses its delimiters first and the
+      // line strip no longer matches — posting `qwen-review critical` as
+      // visible text, the same exposure class from the other side.
+      const out = stripForUnattributedPost(
+        'a finding\n<!-- qwen-review critical -->\nmore',
+      );
+      expect(out).not.toContain('qwen-review');
+      expect(out).toContain('a finding');
+      expect(out).toContain('more');
+    });
+
+    it('an arbitrary HTML comment unwraps to plain inert text — nothing hidden posts', () => {
+      // Deliberate, uniform rule rather than shape-enumeration: the posted
+      // body is a machine-read channel, so no hidden comments at all. The
+      // text between the delimiters survives as plain prose.
+      const out = stripForUnattributedPost(
+        'claim <!-- qwen-review-deferred --> stands',
+      );
+      expect(out).not.toContain('<!--');
+      expect(out).not.toContain('-->');
+      expect(out).toContain('qwen-review-deferred');
+    });
+  });
+
   describe('the structural scan follows GitHub, not a stricter fiction', () => {
     it('a deeper quote inside an open fence is fence content, not a reset', () => {
       // A `>`-prefixed line inside a fenced code block is literal code on
