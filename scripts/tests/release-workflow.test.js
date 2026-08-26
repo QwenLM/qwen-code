@@ -20,6 +20,11 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
+// `realpath -m` (the script's canonicalization line) is a GNU coreutils
+// extension. Probe the host before asserting GNU-specific path behavior.
+const hasGnuRealpath =
+  spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const releaseYaml = parse(workflow);
 const cuaReleaseWorkflow = readFileSync(
@@ -293,7 +298,9 @@ describe('release workflow', () => {
     }
   });
 
-  it('executes the workspace wipe against guard branches', () => {
+  it.skipIf(!hasGnuRealpath || process.getuid?.() === 0)(
+    'executes the workspace wipe against guard branches',
+    () => {
     const wipeEnd = canonicalWipe.indexOf('rm -f -- "${HOME:?}/.npmrc"');
     expect(wipeEnd).toBeGreaterThan(0);
     const wipeScript = canonicalWipe.slice(0, wipeEnd);
@@ -342,14 +349,18 @@ describe('release workflow', () => {
     }
 
     // Symlink heal: a workspace replaced with a symlink inside the runner
-    // workspace is removed and recreated, then wiped.
+    // workspace is removed and recreated, then wiped. The decoy target
+    // is a real file so the test can verify `rm -f` removed only the
+    // link itself and did not follow/delete the target.
     {
       const { result, base, workspace } = runWipe(
         {},
         {
           preCreateWorkspace: (b, ws) => {
             rmSync(ws, { recursive: true, force: true });
-            symlinkSync(join(b, 'decoy'), ws);
+            const decoyTarget = join(b, 'decoy-target');
+            writeFileSync(decoyTarget, 'must-survive');
+            symlinkSync(decoyTarget, ws);
           },
         },
       );
@@ -360,6 +371,11 @@ describe('release workflow', () => {
         );
         const stat = lstatSync(workspace);
         expect(stat.isDirectory()).toBe(true);
+        // The decoy target must survive: rm -f on the raw path removes
+        // the link itself and never follows it.
+        expect(readFileSync(join(base, 'decoy-target'), 'utf8')).toBe(
+          'must-survive',
+        );
       } finally {
         rmSync(base, { recursive: true, force: true });
       }
@@ -403,7 +419,9 @@ describe('release workflow', () => {
       try {
         const env = {
           ...process.env,
-          GITHUB_WORKSPACE: join(base, 'sub', '..', 'workspace'),
+          // String concatenation preserves the literal '..' segment —
+          // path.join would normalize it away before the script sees it.
+          GITHUB_WORKSPACE: `${base}/sub/../workspace`,
           RUNNER_WORKSPACE: base,
           HOME: join(base, 'home'),
           XDG_CONFIG_HOME: join(base, 'home', '.config'),
