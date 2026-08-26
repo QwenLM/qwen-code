@@ -149,6 +149,7 @@ vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.registerFactory = vi.fn();
+  ToolRegistryMock.prototype.registerPermissionDeferredFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
@@ -3281,6 +3282,24 @@ describe('Server Config (config.ts)', () => {
     expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps project-derived features disabled for a provisional workspace', () => {
+    const config = new Config({
+      ...baseParams,
+      provisionalWorkspace: true,
+      lsp: { enabled: true },
+      workflowsEnabled: true,
+      enableTeamMemory: true,
+      enableTeamMemorySync: true,
+      enableAutoSkill: true,
+    });
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(config.isWorkflowsEnabled()).toBe(false);
+    expect(config.getTeamMemoryEnabled()).toBe(false);
+    expect(config.getTeamMemorySyncEnabled()).toBe(false);
+    expect(config.getAutoSkillEnabled()).toBe(false);
+  });
+
   it('should report unavailable LSP status when client lacks a status snapshot API', () => {
     const config = new Config({
       ...baseParams,
@@ -4345,6 +4364,34 @@ describe('Server Config (config.ts)', () => {
       expect(warmAll).toHaveBeenLastCalledWith({ strict: false });
     });
 
+    it('defers cwd-sensitive initialization for a provisional workspace', async () => {
+      const config = new Config({
+        ...baseParams,
+        provisionalWorkspace: true,
+      });
+      const geminiClient = vi.mocked(GeminiClient).mock.results.at(-1)
+        ?.value as { initialize: Mock } | undefined;
+
+      await config.initialize();
+
+      expect(config.isProvisionalWorkspace()).toBe(true);
+      expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
+      expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+      expect(ToolRegistry.prototype.warmAll).not.toHaveBeenCalled();
+      expect(geminiClient?.initialize).not.toHaveBeenCalled();
+
+      await Promise.all([
+        config.activateProvisionalWorkspace(),
+        config.activateProvisionalWorkspace(),
+      ]);
+
+      expect(geminiClient?.initialize).toHaveBeenCalledOnce();
+      expect(ToolRegistry.prototype.warmAll).toHaveBeenCalledOnce();
+      expect(ToolRegistry.prototype.warmAll).toHaveBeenCalledWith({
+        strict: true,
+      });
+    });
+
     it('registers loop_wakeup when cron is enabled', async () => {
       const config = new Config({ ...baseParams, cronEnabled: true });
       await config.initialize();
@@ -4822,6 +4869,20 @@ describe('Server Config (config.ts)', () => {
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers report_findings even in headless sessions — review run depends on it', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.REPORT_FINDINGS);
     });
 
     describe('isArtifactEnabled', () => {
@@ -6209,7 +6270,7 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
-  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async () => {
+  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async (ctx) => {
     const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
     const tempDir = await mkdtemp(path.join(os.tmpdir(), 'auto-memory-cache-'));
     const projectRoot = path.join(tempDir, 'project');
@@ -6226,6 +6287,32 @@ describe('Server Config (config.ts)', () => {
     await mkdir(path.dirname(userIndexPath), { recursive: true });
     await writeFile(managedIndexPath, '# managed memory\n', 'utf-8');
     await writeFile(userIndexPath, '# user memory\n', 'utf-8');
+
+    // FileReadCache keys entries by dev:ino. On volumes where distinct
+    // files report the same inode, the two index records collide under one
+    // key and the second record overwrites the first's fingerprint, so the
+    // managed index would be checked against the user index's stats. The
+    // seeding this test pins only makes sense where inode identity is real;
+    // skip where the volume cannot provide it.
+    const [managedStats, userStats] = await Promise.all([
+      stat(managedIndexPath),
+      stat(userIndexPath),
+    ]);
+    if (
+      Number(managedStats.ino) === 0 ||
+      Number(userStats.ino) === 0 ||
+      (managedStats.dev === userStats.dev && managedStats.ino === userStats.ino)
+    ) {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+      ctx.skip();
+      return;
+    }
 
     try {
       const config = new Config({
@@ -6959,6 +7046,7 @@ describe('Server Config (config.ts)', () => {
       .mockImplementation(async () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         settled.push('patch');
+        return true;
       });
 
     await config.relocateWorkingDirectory(newDir);
@@ -7013,7 +7101,7 @@ describe('Server Config (config.ts)', () => {
     );
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
 
     await config.relocateWorkingDirectory(newDir);
 
@@ -7060,7 +7148,7 @@ describe('Server Config (config.ts)', () => {
     });
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
 
     await config.relocateWorkingDirectory(newDir);
 
@@ -7091,7 +7179,7 @@ describe('Server Config (config.ts)', () => {
       .mockRejectedValue(new Error('read-only project fs'));
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
 
     const newSessionId = config.startNewSession('replacement-session');
 
@@ -7117,8 +7205,8 @@ describe('Server Config (config.ts)', () => {
       .spyOn(sessionRegistry, 'patchSessionRecord')
       .mockImplementation(
         () =>
-          new Promise<void>((resolve) => {
-            finishPatch = resolve;
+          new Promise<boolean>((resolve) => {
+            finishPatch = () => resolve(true);
           }),
       );
     const unregisterSessionSpy = vi
@@ -7147,6 +7235,80 @@ describe('Server Config (config.ts)', () => {
 
     patchSessionRecordSpy.mockRestore();
     unregisterSessionSpy.mockRestore();
+  });
+
+  it('serializes the peer inbox address with session transitions', async () => {
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+
+    let finishIpcPatch!: () => void;
+    const calls: Array<Record<string, unknown>> = [];
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockImplementation(async (patch) => {
+        calls.push(patch);
+        if ('ipcPath' in patch) {
+          await new Promise<void>((resolve) => {
+            finishIpcPatch = resolve;
+          });
+        }
+        return true;
+      });
+
+    const advertise = config.updateSessionRegistryIpcPath('/tmp/peer.sock');
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    const newSessionId = config.startNewSession('replacement-session');
+
+    await Promise.resolve();
+    expect(calls).toEqual([{ ipcPath: '/tmp/peer.sock' }]);
+
+    finishIpcPatch();
+    await advertise;
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual({
+      sessionId: newSessionId,
+      cwd: config.getTargetDir(),
+    });
+
+    patchSessionRecordSpy.mockRestore();
+  });
+
+  it('retries the peer inbox advertise when the registry patch skips', async () => {
+    // The advertise is one-shot: no later /clear or /cd re-asserts
+    // ipcPath, so a patch skipped on transient fd pressure must retry
+    // itself or the inbox stays undiscoverable until restart.
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    await config.updateSessionRegistryIpcPath('/tmp/peer.sock');
+
+    expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
+    expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+      ipcPath: '/tmp/peer.sock',
+    });
+    patchSessionRecordSpy.mockRestore();
+  });
+
+  it('gives up on the peer inbox advertise after a bounded retry', async () => {
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(false);
+
+    await expect(
+      config.updateSessionRegistryIpcPath('/tmp/peer.sock'),
+    ).resolves.toBeUndefined();
+
+    expect(patchSessionRecordSpy).toHaveBeenCalledTimes(3);
+    patchSessionRecordSpy.mockRestore();
   });
 
   it('does not unregister when initial registration was refused', async () => {
@@ -7183,7 +7345,7 @@ describe('Server Config (config.ts)', () => {
     );
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
 
     await config.relocateWorkingDirectory(newDir);
 
@@ -8311,6 +8473,244 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it.each([
+      { label: 'an alias', entry: 'ListFiles' },
+      { label: 'the canonical name', entry: ToolNames.LS },
+      { label: 'a path specifier', entry: `${ToolNames.LS}(/src)` },
+      { label: 'the Read meta-category', entry: 'Read' },
+    ])(
+      'registers list_directory when covered by permissions.allow via $label (#9827)',
+      async ({ entry }) => {
+        const settingsAllow = [entry];
+        const config = new Config({
+          ...baseParams,
+          coreTools: undefined,
+          permissions: {
+            allow: settingsAllow,
+            registryAllowList: settingsAllow,
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.LS);
+      },
+    );
+
+    it('does not register list_directory when an active permissions.allow does not cover it (#9827)', async () => {
+      // `edit` does not cover list_directory (it is not the Read
+      // meta-category), so the opt-in gate must stay closed even though the
+      // allowlist is active.
+      const settingsAllow = [ToolNames.EDIT];
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('registers list_directory when covered only by an ask rule under an active allowlist (#9827)', async () => {
+      // Probe scenario: allow:['edit'] activates the allowlist, and
+      // ask:['ListFiles'] is the ONLY coverage for list_directory.
+      // `PermissionManager.isToolEnabled('list_directory')` returns true
+      // (membership counts ask rules — see isCoveredByAllowOrAskRule), so
+      // the opt-in gate must offer the tool to registerLazy too; otherwise
+      // the schema is never sent, the ask rule can never fire, and arriving
+      // calls fail TOOL_NOT_REGISTERED.
+      const settingsAllow = [ToolNames.EDIT];
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: settingsAllow,
+          registryAllowList: settingsAllow,
+          ask: ['ListFiles'],
+        },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it('does not register list_directory for an ask rule when the allowlist is inactive (#9827)', async () => {
+      // Ask coverage only gates registration while the registry allowlist
+      // is active; without it list_directory stays opt-in, so an ask rule
+      // alone must not change the default-disabled behaviour.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { ask: ['ListFiles'] },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('registers list_directory when covered only by a merged (non-settings) allow rule under an active allowlist (#9827)', async () => {
+      // CLI-shaped wiring: settings `permissions.allow: ['Edit']` activates
+      // the allowlist, while `--allowed-tools ListFiles` (or the SDK
+      // `allowedTools` param) lands only in the merged allow set
+      // (`getPermissionsAllow()`), never in `getRegistryAllowList()`.
+      // `PermissionManager.isToolEnabled('list_directory')` returns true
+      // because it counts the merged set, so the opt-in gate must offer the
+      // tool to registerLazy too — otherwise it silently vanishes from
+      // `/tools` and the model request while arriving calls fail
+      // TOOL_NOT_REGISTERED.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [ToolNames.EDIT, 'ListFiles'],
+          registryAllowList: [ToolNames.EDIT],
+        },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it('does not register list_directory when only the merged allow set covers it but no settings allow rule activates the allowlist (#9827)', async () => {
+      // `--allowed-tools ListFiles` alone reaches `getPermissionsAllow()`
+      // but not `getRegistryAllowList()`; only settings
+      // `permissions.allow` rules can ACTIVATE the allowlist, so without
+      // one the opt-in gate must stay closed and the default-disabled
+      // behaviour holds.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: { allow: ['ListFiles'], registryAllowList: [] },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('does not register list_directory when the settings allow list holds only empty entries (#9827)', async () => {
+      // `permissions.allow: ['']` is schema-valid but degenerate.
+      // `PermissionManager.initialize` computes activation through
+      // `parseRules`, which filters empty entries before parsing, so the
+      // allowlist stays inactive; the opt-in gate must agree — otherwise
+      // the ask branch would register list_directory while the permission
+      // system reports the allowlist inactive.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [''],
+          registryAllowList: [''],
+          ask: ['ListFiles'],
+        },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('does not crash when permissions arrays hold non-string entries (#9827)', async () => {
+      // Settings load performs no element-type validation (the schema
+      // declares only `type: 'array'`), and `PermissionManager.initialize`'s
+      // `parseRules` tolerates falsy entries like `[null]` in the same
+      // settings file. The opt-in gate scans the same arrays during
+      // `createToolRegistry`, so it must skip non-string entries the same
+      // way instead of throwing a `TypeError` and crashing startup.
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [null, ToolNames.EDIT] as unknown as string[],
+          registryAllowList: [null, ToolNames.EDIT] as unknown as string[],
+          ask: [undefined, 'ListFiles'] as unknown as string[],
+        },
+      });
+      await expect(config.initialize()).resolves.not.toThrow();
+      // The valid entries still take effect: the settings rule activates
+      // the allowlist and the ask rule (after the non-string entry is
+      // skipped) covers list_directory.
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it('keeps the gate closed when the settings allow list holds only non-string entries (#9827)', async () => {
+      // `[null]` alone carries no valid rule: `parseRules` filters it out,
+      // so `PermissionManager.initialize` reports the allowlist inactive —
+      // the opt-in gate must agree (and must not throw on the entry).
+      const config = new Config({
+        ...baseParams,
+        coreTools: undefined,
+        permissions: {
+          allow: [null] as unknown as string[],
+          registryAllowList: [null] as unknown as string[],
+          ask: ['ListFiles'],
+        },
+      });
+      await expect(config.initialize()).resolves.not.toThrow();
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
@@ -8645,6 +9045,152 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0] === ToolNames.GREP,
       );
       expect(wasGrepToolRegistered).toBe(false);
+    });
+
+    // ── #9827 / #10075: permissions.allow keeps unlisted schemas out of the
+    // eager model request, but demotes (not removes) the unlisted tools ──
+    it('registers allowlisted tools eagerly and demotes unlisted tools to deferred (#9827, #10075)', async () => {
+      const settingsAllow = [
+        'ReadFile',
+        'WriteFile',
+        'Edit',
+        'Grep',
+        'Glob',
+        'ListFiles',
+        'Shell',
+        'WebFetch',
+      ];
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        // Mirrors the CLI wiring: merged allow list + the settings-sourced
+        // subset that activates the registry allowlist.
+        permissions: { allow: settingsAllow, registryAllowList: settingsAllow },
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const { registerFactory, registerPermissionDeferredFactory } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+
+      const registered = (registerFactory as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
+
+      // Allowlisted tools are registered eagerly
+      expect(registered).toContain(ToolNames.READ_FILE);
+      expect(registered).toContain(ToolNames.WRITE_FILE);
+      expect(registered).toContain(ToolNames.EDIT);
+      expect(registered).toContain(ToolNames.GREP);
+      expect(registered).toContain(ToolNames.GLOB);
+      expect(registered).toContain(ToolNames.SHELL);
+      expect(registered).toContain(ToolNames.WEB_FETCH);
+
+      // Unlisted built-ins are NOT registered eagerly — their schemas are
+      // never sent in the eager model request (#9827). But since #10075 they
+      // are demoted to deferred rather than dropped: still registered, so
+      // they stay listed in /tools and loadable via ToolSearch instead of
+      // silently disappearing.
+      expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
+      expect(registered).not.toContain(ToolNames.UPDATE_GOAL);
+      expect(registered).not.toContain(ToolNames.GET_GOAL);
+      expect(registered).not.toContain(ToolNames.LOOP_WAKEUP);
+      expect(registered).not.toContain(ToolNames.READ_MCP_RESOURCE);
+      expect(registered).not.toContain(ToolNames.AGENT);
+      expect(registered).not.toContain(ToolNames.TODO_WRITE);
+      expect(deferred).toContain(ToolNames.SEND_MESSAGE);
+      expect(deferred).toContain(ToolNames.UPDATE_GOAL);
+      expect(deferred).toContain(ToolNames.GET_GOAL);
+      expect(deferred).toContain(ToolNames.LOOP_WAKEUP);
+      expect(deferred).toContain(ToolNames.READ_MCP_RESOURCE);
+      expect(deferred).toContain(ToolNames.AGENT);
+      expect(deferred).toContain(ToolNames.SKILL);
+      expect(deferred).toContain(ToolNames.TODO_WRITE);
+      // monitor stays registered eagerly: the "Shell" allow rule covers it
+      // so the shell tool cannot be bypassed by switching to monitor.
+      expect(registered).toContain(ToolNames.MONITOR);
+    });
+
+    it('registers the full built-in set when no permissionsAllow is set (#9827 regression guard)', async () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registered = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+
+      // Without an allowlist nothing is gated at registry level
+      expect(registered).toContain(ToolNames.SEND_MESSAGE);
+      expect(registered).toContain(ToolNames.UPDATE_GOAL);
+      expect(registered).toContain(ToolNames.AGENT);
+      expect(registered).toContain(ToolNames.TODO_WRITE);
+      expect(registered).toContain(ToolNames.READ_FILE);
+    });
+
+    it('permissions.allow keeps the --exclude-tools (deny) path working (#9827)', async () => {
+      const settingsAllow = ['ReadFile', 'Shell'];
+      const params: ConfigParameters = {
+        ...baseParams,
+        useRipgrep: false,
+        coreTools: undefined,
+        permissions: {
+          allow: settingsAllow,
+          registryAllowList: settingsAllow,
+          deny: ['Shell'],
+        },
+      };
+      const config = new Config(params);
+      await config.initialize();
+
+      const { registerFactory, registerPermissionDeferredFactory } = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: {
+            prototype: {
+              registerFactory: Mock;
+              registerPermissionDeferredFactory: Mock;
+            };
+          };
+        }
+      ).ToolRegistry.prototype;
+
+      const registered = (registerFactory as Mock).mock.calls.map(
+        (call) => call[0],
+      ) as string[];
+      const deferred = (
+        registerPermissionDeferredFactory as Mock
+      ).mock.calls.map((call) => call[0]) as string[];
+
+      expect(registered).toContain(ToolNames.READ_FILE);
+      // deny wins over allowlist membership: a denied tool is hard-disabled
+      // — not registered eagerly AND not deferred either.
+      expect(registered).not.toContain(ToolNames.SHELL);
+      expect(deferred).not.toContain(ToolNames.SHELL);
+      // An unlisted (not denied) tool is deferred, not dropped (#10075).
+      expect(registered).not.toContain(ToolNames.SEND_MESSAGE);
+      expect(deferred).toContain(ToolNames.SEND_MESSAGE);
     });
 
     describe('with minified tool class names', () => {

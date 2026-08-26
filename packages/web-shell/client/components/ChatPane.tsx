@@ -140,6 +140,8 @@ function OptionalMonitorDetailsProvider({
 export interface PaneHeaderActionsInfo {
   sessionId: string;
   workspaceCwd?: string;
+  /** The pane's own session actions; lets an action drive session data. */
+  sessionActions?: DaemonSessionActions;
 }
 
 export type PaneHeaderActionsRenderer = (
@@ -1113,6 +1115,7 @@ export function ChatPane({
       ? renderHeaderActions({
           sessionId: connection.sessionId,
           workspaceCwd: paneWorkspaceCwd || undefined,
+          sessionActions: actions,
         })
       : null;
 

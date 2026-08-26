@@ -697,8 +697,10 @@ describe('runNonInteractive', () => {
       mockGeminiClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
     expect(parts[0]?.text).toContain(
-      'Runtime continuation context: existing goal',
+      `<goal_runtime_data>\n{"goalId":"${options.goalPermit.goalId}","revision":${options.goalPermit.revision},"objective":"existing goal"}\n</goal_runtime_data>`,
     );
+    expect(parts[0]?.text).toContain('contains no new real user input');
+    expect(parts[0]?.text).toContain('not evidence that the user supplied it');
     expect(options).toMatchObject({
       type: SendMessageType.Goal,
       goalOrigin: 'runtime',
@@ -742,6 +744,33 @@ describe('runNonInteractive', () => {
     const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain(
       'Verifier feedback: Need independent evidence',
+    );
+  });
+
+  it('renders the wind-down hand-off on a budget-spent Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({ ...input, windDown: true }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-wind-down',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'The autonomous token budget for this Goal window is spent.',
     );
   });
 

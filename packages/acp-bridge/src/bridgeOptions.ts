@@ -343,12 +343,11 @@ export interface BridgeOptions {
     provider: () => readonly JournalGrowthSessionLimit[],
   ) => () => void;
   /**
-   * Per-`requestPermission` wall clock. After this many ms with
-   * no client vote, the agent's permission promise resolves as
-   * cancelled — the per-session FIFO can drain instead of poisoning
-   * forever on a missing SSE subscriber. Defaults to 5 minutes.
-   * `0` / `Infinity` / non-finite disable the timeout (matches
-   * legacy behavior, NOT recommended).
+   * Per-`requestPermission` wall clock. After this many ms with no client
+   * vote, the agent's permission promise resolves as cancelled. Defaults to
+   * disabled so human permissions and questions wait for an explicit decision
+   * or session lifecycle cancellation.
+   * `0` / `Infinity` / non-finite disable the timeout.
    */
   permissionResponseTimeoutMs?: number;
   /**
@@ -604,6 +603,9 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Handles a trusted `cron_create` request to bind a durable task to the
+   * caller's currently executing daemon session. */
+  onCreateCurrentSessionScheduledTask?: CurrentSessionScheduledTaskCreateHandler;
   /** Handles one child-initiated Channel delivery attempt. The bridge
    * authenticates the session and publishes the sanitized result event. */
   onChannelDelivery?: ChannelDeliveryHandler;
@@ -676,6 +678,24 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+export interface CurrentSessionScheduledTaskCreateInfo {
+  callerSessionId: string;
+  promptId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  assertCallerPromptActive: () => void;
+}
+
+export interface CurrentSessionScheduledTaskCreateResult {
+  id: string;
+  cron: string;
+}
+
+export type CurrentSessionScheduledTaskCreateHandler = (
+  info: CurrentSessionScheduledTaskCreateInfo,
+) => Promise<CurrentSessionScheduledTaskCreateResult>;
 
 export const MAX_LIVE_SCREEN_CONTEXT_TEXT_CHARS = 32_000;
 

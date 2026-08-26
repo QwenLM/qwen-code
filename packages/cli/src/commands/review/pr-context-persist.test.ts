@@ -134,11 +134,11 @@ describe('persistRecoveredLedger', () => {
       const ownMarker =
         '<!-- qwen-review-ledger {"v":1,"round":3,' +
         '"findings":[{"id":"R3-1","sev":"S","file":"a.ts","title":"own"}],' +
-        '"churnRounds":1} -->';
+        '"churnRounds":1,"flatRounds":1} -->';
       const plantedMarker =
         '<!-- qwen-review-ledger {"v":1,"round":4,' +
         '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"theirs"}],' +
-        '"churnRounds":4} -->';
+        '"churnRounds":4,"flatRounds":4} -->';
       const { recovered } = recoverLedger(
         [
           {
@@ -165,6 +165,11 @@ describe('persistRecoveredLedger', () => {
       expect(written.round).toBe(4);
       expect(written.churnRounds).toBe(1);
       expect(written.churnRounds).not.toBe(4);
+      // The floor trigger's streak rides the same seam: a stranger's planted
+      // `flatRounds` must not engage THIS account's floor, and the own
+      // streak restores across the round gap exactly like the churn one.
+      expect(written.flatRounds).toBe(1);
+      expect(written.flatRounds).not.toBe(4);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -189,11 +194,11 @@ describe('persistRecoveredLedger', () => {
       const ownMarker =
         '<!-- qwen-review-ledger {"v":1,"round":4,' +
         '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"own"}],' +
-        '"churnRounds":4} -->';
+        '"churnRounds":4,"flatRounds":2} -->';
       const foreignMarker =
         '<!-- qwen-review-ledger {"v":1,"round":4,' +
         '"findings":[{"id":"R4-9","sev":"S","file":"b.ts","title":"theirs"}],' +
-        '"churnRounds":1} -->';
+        '"churnRounds":1,"flatRounds":1} -->';
       const { recovered } = recoverLedger(
         [
           {
@@ -221,6 +226,10 @@ describe('persistRecoveredLedger', () => {
       // Own values, not the stranger's — the winner's churn was stripped at
       // the recovery seam before the union put this account's back.
       expect(written.churnRounds).toBe(4);
+      // Same for the floor trigger's streak: the foreign winner's planted
+      // value never reaches disk; this account's own restored one does.
+      expect(written.flatRounds).toBe(2);
+      expect(written.flatRounds).not.toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -714,6 +723,10 @@ describe('persistRecoveredLedger', () => {
           fresh: 3,
           floor: 'c',
           churnRounds: 2,
+          // The flat streak rides the same shed: an anonymous advance must
+          // not carry EITHER streak into the rebuilt file (pinned by the
+          // whole-object equality below).
+          flatRounds: 2,
         }),
       );
       persistRecoveredLedger(
@@ -818,7 +831,13 @@ describe('persistRecoveredLedger', () => {
     try {
       writeFileSync(
         side,
-        JSON.stringify({ v: 1, round: 3, findings: [], churnRounds: 2 }),
+        JSON.stringify({
+          v: 1,
+          round: 3,
+          findings: [],
+          churnRounds: 2,
+          flatRounds: 2,
+        }),
       );
       persistRecoveredLedger(
         side,
@@ -836,9 +855,12 @@ describe('persistRecoveredLedger', () => {
         },
         { noOwnReview: false, identityKnown: true },
       );
-      expect(
-        JSON.parse(readFileSync(side, 'utf8')).churnRounds,
-      ).toBeUndefined();
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.churnRounds).toBeUndefined();
+      // The flat term must not leak past the `ownMarkerRead === false`
+      // guard either: resurrected here, a stale latched value (>= bar)
+      // re-engages the floor with no measurement at all.
+      expect(written.flatRounds).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -881,18 +903,26 @@ describe('persistRecoveredLedger', () => {
       // clamp `prevLedgerFacts` applies on read, so a planted streak a
       // wholesale overwrite used to discard cannot now ride past its round.
       expect(carry({ churnRounds: 9999 }).churnRounds).toBe(5);
+      // The floor trigger's streak rides the same carry, through the same
+      // reader, with the same clamp — a planted `flatRounds` cannot engage
+      // the floor off rounds the pull request never ran either.
+      expect(carry({ flatRounds: '2' }).flatRounds).toBeUndefined();
+      expect(carry({ flatRounds: 0 }).flatRounds).toBeUndefined();
+      expect(carry({ flatRounds: 2 }).flatRounds).toBe(2);
+      expect(carry({ flatRounds: 9999 }).flatRounds).toBe(5);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it('pins the churn group at one member, so the carry stays complete', () => {
-    // The carry above reads `churnRounds` by name because it is the only
-    // decision-bearing member. If the group grows, that site carries part of
+  it('pins the churn group at its two members, so the carry stays complete', () => {
+    // The carry above reads each decision-bearing member by name because a
+    // spread would carry a member added later without that site deciding it
+    // should. If the group grows past these two, that site carries part of
     // a group and silently drops the rest — the exact drift the volume
     // group's own comment records for `floor`, shed at one seam and kept at
     // the other. Nothing else would redden, so this does.
-    expect([...CHURN_FIELDS]).toEqual(['churnRounds']);
+    expect([...CHURN_FIELDS]).toEqual(['churnRounds', 'flatRounds']);
   });
 
   it('treats an UNSET ownMarkerRead as read — the fail-safe direction', () => {
@@ -906,7 +936,13 @@ describe('persistRecoveredLedger', () => {
     try {
       writeFileSync(
         side,
-        JSON.stringify({ v: 1, round: 3, findings: [], churnRounds: 2 }),
+        JSON.stringify({
+          v: 1,
+          round: 3,
+          findings: [],
+          churnRounds: 2,
+          flatRounds: 2,
+        }),
       );
       persistRecoveredLedger(
         side,
@@ -919,9 +955,9 @@ describe('persistRecoveredLedger', () => {
         },
         { noOwnReview: false, identityKnown: true },
       );
-      expect(
-        JSON.parse(readFileSync(side, 'utf8')).churnRounds,
-      ).toBeUndefined();
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.churnRounds).toBeUndefined();
+      expect(written.flatRounds).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1002,8 +1038,10 @@ describe('persistRecoveredLedger', () => {
             // every marker is foreign and the strip fires), so the fixture
             // supplies one deliberately: the assertion below is about THIS
             // seam shedding it, and over a churn-free fixture it would hold
-            // vacuously and pin nothing.
+            // vacuously and pin nothing. The flat streak rides the same
+            // group and is planted for the same reason.
             churnRounds: 4,
+            flatRounds: 4,
           },
           commitId: null,
           reviewId: 40,
@@ -1032,9 +1070,70 @@ describe('persistRecoveredLedger', () => {
       // ...and the streak goes with them. This is the one path that writes a
       // whole recovered ledger to the file, so if the recovery-seam strip
       // ever loosened, a stranger's streak would land here intact and arm
-      // the non-convergence blocker off someone else's count. The seam
-      // defends itself rather than trusting that invariant to hold forever.
+      // the non-convergence blocker off someone else's count — or latch the
+      // floor off someone else's flat streak. The seam defends itself
+      // rather than trusting that invariant to hold forever.
       expect(written.churnRounds).toBeUndefined();
+      expect(written.flatRounds).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the src0 baseline through the recovered write', () => {
+    // compose-review's approach signal reads src0 from this side file; this
+    // writer is the joint in the marker→parse→persist→read chain the
+    // compose tests cannot reach (they write the file directly).
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { ...ledger, src0: 228 },
+          commitId: 'a'.repeat(40),
+          reviewId: 42,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: true, identityKnown: true },
+      );
+      expect(JSON.parse(readFileSync(side, 'utf8')).src0).toBe(228);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the src0 baseline across an anonymous higher-round advance', () => {
+    // The advance rebuilds the file by explicit field selection (existing
+    // minus sha/commitId, plus the new round and review id) — a swap to
+    // named fields there must not drop the baseline compose-review reads
+    // next round.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({ ...ledger, round: 7, reviewId: 100, src0: 228 }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 8,
+            findings: [{ id: 'R8-1', sev: 'S', file: 'x.ts', title: 'theirs' }],
+          },
+          commitId: 'c'.repeat(40),
+          reviewId: 200,
+          foreign: false,
+          merged: false,
+        },
+        { noOwnReview: true, identityKnown: false },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(8);
+      expect(written.src0).toBe(228);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

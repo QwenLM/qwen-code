@@ -50,6 +50,7 @@ import type {
   SessionNotification,
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
+import { RequestError } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
@@ -453,6 +454,14 @@ describe('Session', () => {
     refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+    beginManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    consumeManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
+    recordCompletedToolCall: ReturnType<typeof vi.fn>;
+  };
+  let mockMemoryManager: {
+    scheduleExtract: ReturnType<typeof vi.fn>;
+    scheduleDream: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
     abortAll: ReturnType<typeof vi.fn>;
@@ -482,6 +491,7 @@ describe('Session', () => {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
+    registerPermissionDeferredFactory: ReturnType<typeof vi.fn>;
     revealDeferredTool: ReturnType<typeof vi.fn>;
     pinDeferredToolReveal: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
@@ -660,6 +670,14 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      beginManagedAutoMemoryRecall: vi.fn(),
+      consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      finishManagedAutoMemoryRecall: vi.fn(),
+      recordCompletedToolCall: vi.fn(),
+    };
+    mockMemoryManager = {
+      scheduleExtract: vi.fn().mockResolvedValue(undefined),
+      scheduleDream: vi.fn().mockResolvedValue(undefined),
     };
     mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
@@ -762,6 +780,7 @@ describe('Session', () => {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       registerTool: vi.fn(),
+      registerPermissionDeferredFactory: vi.fn(),
       revealDeferredTool: vi.fn(),
       pinDeferredToolReveal: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
@@ -787,6 +806,8 @@ describe('Session', () => {
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getSessionSourceType: vi.fn().mockReturnValue(undefined),
+      isProvisionalWorkspace: vi.fn().mockReturnValue(false),
       setLiveAppendSystemPrompt: vi.fn(),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
       // The restore-ask_user_question prompt path is gated on this flag;
@@ -838,6 +859,8 @@ describe('Session', () => {
       // `skipLoopDetection ?? true`): heuristics off unless a test opts in.
       getSkipLoopDetection: vi.fn().mockReturnValue(true),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getGoalRuntime: vi.fn().mockReturnValue(mockGoalRuntime),
       getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
       getGoalRuntimePrepared: vi.fn().mockResolvedValue(mockGoalRuntime),
@@ -859,6 +882,8 @@ describe('Session', () => {
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
+      setCurrentSessionScheduledTaskCreator: vi.fn(),
+      getCurrentSessionScheduledTaskCreator: vi.fn(),
       getExtensions: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
@@ -919,6 +944,7 @@ describe('Session', () => {
     mockClient = undefined as unknown as AgentSideConnection;
     mockSettings = undefined as unknown as LoadedSettings;
     mockGeminiClient = undefined as unknown as typeof mockGeminiClient;
+    mockMemoryManager = undefined as unknown as typeof mockMemoryManager;
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
@@ -1089,6 +1115,30 @@ describe('Session', () => {
       );
       expect(session.collectActiveWorkHolds()).toEqual([]);
       expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('blocks standalone relocation for reported work and running monitors', () => {
+      createReportingSession();
+      expect(session.hasStandaloneRelocationBlockers()).toBe(false);
+
+      mockBackgroundTaskRegistry.listUnfinalizedBackgroundAgentIds.mockReturnValue(
+        ['agent-running'],
+      );
+      expect(session.hasStandaloneRelocationBlockers()).toBe(true);
+
+      mockBackgroundTaskRegistry.listUnfinalizedBackgroundAgentIds.mockReturnValue(
+        [],
+      );
+      mockMonitorRegistry.getAll.mockReturnValue([
+        { id: 'monitor-running', status: 'running' },
+      ]);
+      expect(session.hasStandaloneRelocationBlockers()).toBe(true);
+
+      mockMonitorRegistry.getAll.mockReturnValue([
+        { id: 'monitor-complete', status: 'completed' },
+      ]);
+      expect(session.hasStandaloneRelocationBlockers()).toBe(false);
       session.dispose();
     });
 
@@ -2088,6 +2138,253 @@ describe('Session', () => {
     expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
   });
 
+  it('holds standalone turns until exact directory binding is committed and released', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    vi.mocked(mockConfig.assertCanStartTurn).mockClear();
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    const assertIdentity = vi.fn().mockResolvedValue(undefined);
+
+    await expect(session.assertCanStartTurn()).rejects.toMatchObject({
+      data: { errorKind: 'working_directory_missing' },
+    });
+    expect(mockConfig.assertCanStartTurn).not.toHaveBeenCalled();
+
+    session.installPendingManagedConversationBinding(
+      expectation,
+      assertIdentity,
+    );
+    await session.commitManagedConversationBinding(expectation);
+    await expect(session.assertCanStartTurn()).rejects.toMatchObject({
+      data: { errorKind: 'working_directory_missing' },
+    });
+    expect(mockConfig.assertCanStartTurn).not.toHaveBeenCalled();
+
+    await session.releaseManagedConversationBinding(expectation);
+    await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+    expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce();
+    expect(assertIdentity).toHaveBeenCalledTimes(5);
+  });
+
+  it('rechecks standalone directory identity after writer admission', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    const identityChanged = new RequestError(
+      -32004,
+      'The standalone working directory identity is compromised.',
+      { errorKind: 'working_directory_compromised' },
+    );
+    const assertIdentity = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(identityChanged);
+    session.installPendingManagedConversationBinding(
+      expectation,
+      assertIdentity,
+    );
+    await session.commitManagedConversationBinding(expectation);
+    await session.releaseManagedConversationBinding(expectation);
+
+    await expect(session.assertCanStartTurn()).rejects.toBe(identityChanged);
+    expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce();
+    expect(assertIdentity).toHaveBeenCalledTimes(5);
+  });
+
+  it('activates a provisional standalone workspace once before commit', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.isProvisionalWorkspace).mockReturnValue(true);
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    const assertIdentity = vi.fn().mockResolvedValue(undefined);
+    const activate = vi.fn().mockResolvedValue(undefined);
+    const onRelease = vi.fn();
+    session.installManagedConversationActivation(activate, onRelease);
+    session.installPendingManagedConversationBinding(
+      expectation,
+      assertIdentity,
+    );
+
+    await Promise.all([
+      session.commitManagedConversationBinding(expectation),
+      session.commitManagedConversationBinding(expectation),
+    ]);
+    await session.releaseManagedConversationBinding(expectation);
+
+    expect(activate).toHaveBeenCalledOnce();
+    expect(onRelease).toHaveBeenCalledOnce();
+    expect(assertIdentity).toHaveBeenCalledTimes(5);
+    await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
+    await session.releaseManagedConversationBinding(expectation);
+    expect(onRelease).toHaveBeenCalledOnce();
+  });
+
+  it('drains automatic work that was queued before standalone release', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    session.installPendingManagedConversationBinding(
+      expectation,
+      vi.fn().mockResolvedValue(undefined),
+    );
+    await session.commitManagedConversationBinding(expectation);
+
+    await expect(
+      session.enqueueBackgroundNotification({
+        displayText: 'Agent completed.',
+        modelText: '<task-notification />',
+        taskId: 'queued-before-release',
+        status: 'completed',
+        kind: 'agent',
+      }),
+    ).resolves.toEqual({ accepted: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+
+    await session.releaseManagedConversationBinding(expectation);
+
+    await vi.waitFor(() =>
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce(),
+    );
+  });
+
+  it('preserves a queued Goal turn until standalone release', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    session.installPendingManagedConversationBinding(
+      expectation,
+      vi.fn().mockResolvedValue(undefined),
+    );
+    await session.commitManagedConversationBinding(expectation);
+    const permit: core.GoalTurnPermit = {
+      goalId: 'goal-1',
+      revision: 1,
+      turnId: 'turn-before-release',
+    };
+    mockGoalRuntime.getSnapshot.mockReturnValue({
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'finish after release',
+        status: 'active',
+        evidenceCursor: { recordId: 'cursor-1' },
+        turnCount: 0,
+        activeTimeMs: 0,
+        tokensUsed: 0,
+        createdAt: 1234,
+        updatedAt: 1234,
+      },
+    });
+    mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+      turnKey === 'goal-runtime:turn-before-release' ? permit : undefined,
+    );
+    mockChat.sendMessageStream = vi.fn().mockResolvedValue(createEmptyStream());
+
+    await boundGoalHost!.startGoalTurn({
+      permit,
+      continuationContext: 'finish after release',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+    expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalled();
+
+    await session.releaseManagedConversationBinding(expectation);
+
+    await vi.waitFor(() =>
+      expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit),
+    );
+    expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+  });
+
   it('attributes a delayed title notification to the persisted record session', () => {
     const callback = mockChatRecordingService.setTitleRecordedCallback.mock
       .calls[0]?.[0] as
@@ -2105,6 +2402,152 @@ describe('Session', () => {
         titleSource: 'auto',
       },
     );
+  });
+
+  describe('managed auto-memory', () => {
+    it('recalls before the initial send and schedules background work after a successful turn', async () => {
+      const memoryPrompt = '<system-reminder>remember this</system-reminder>';
+      const finalHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ];
+      mockGeminiClient.consumeManagedAutoMemoryRecall.mockResolvedValueOnce({
+        prompt: memoryPrompt,
+        selectedDocs: [],
+        strategy: 'heuristic',
+      });
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(finalHistory);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(
+        mockGeminiClient.beginManagedAutoMemoryRecall,
+      ).toHaveBeenCalledWith('hello', expect.any(AbortSignal));
+      expect(textParts(firstSentMessage())).toEqual([memoryPrompt, 'hello']);
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        sessionId: 'test-session-id',
+        history: finalHistory,
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
+        projectRoot: '/repo',
+        sessionId: 'test-session-id',
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledOnce();
+      expect(
+        mockGeminiClient.finishManagedAutoMemoryRecall,
+      ).toHaveBeenCalledOnce();
+    });
+
+    it('delivers refined recall after tool responses and records the completed tool', async () => {
+      const memoryPrompt = '<system-reminder>refined memory</system-reminder>';
+      mockGeminiClient.consumeManagedAutoMemoryRecall
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({
+          prompt: memoryPrompt,
+          selectedDocs: [],
+          strategy: 'model',
+        });
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'file contents',
+        returnDisplay: 'file contents',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        build: vi.fn().mockReturnValue({
+          params: { path: '/tmp/test.txt' },
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          execute,
+        }),
+      });
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'read_file',
+                    args: { path: '/tmp/test.txt' },
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'read file' }],
+      });
+
+      const followUpRequest = vi.mocked(mockChat.sendMessageStream).mock
+        .calls[1]?.[1] as { message: Part[] };
+      const followUp = followUpRequest.message;
+      expect(followUp[0]?.functionResponse).toBeDefined();
+      expect(textParts(followUp)).toEqual([memoryPrompt]);
+      expect(
+        mockGeminiClient.consumeManagedAutoMemoryRecall,
+      ).toHaveBeenNthCalledWith(2, 'tool_result');
+      expect(mockGeminiClient.recordCompletedToolCall).toHaveBeenCalledWith(
+        'read_file',
+        { path: '/tmp/test.txt' },
+      );
+    });
+
+    it('does not run managed memory for retries or failed turns', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'retry' }],
+        retry: true,
+      } as PromptRequest);
+
+      expect(
+        mockGeminiClient.beginManagedAutoMemoryRecall,
+      ).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('provider failed'));
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'new request' }],
+        }),
+      ).rejects.toThrow('provider failed');
+
+      expect(
+        mockGeminiClient.beginManagedAutoMemoryRecall,
+      ).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+      expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      expect(
+        mockGeminiClient.finishManagedAutoMemoryRecall,
+      ).toHaveBeenCalledOnce();
+    });
   });
 
   it('rejects writer loss before mutating an existing ACP turn', async () => {
@@ -4809,6 +5252,36 @@ describe('Session', () => {
       });
     });
 
+    it('does not persist a shared model default for a standalone session', async () => {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+
+      await session.setModel(
+        {
+          sessionId: 'test-session-id',
+          modelId: `qwen3-coder-flash(${AuthType.USE_OPENAI})`,
+        },
+        { persistDefault: true },
+      );
+
+      expect(mockConfig.switchModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'qwen3-coder-flash',
+        undefined,
+      );
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: 'qwen3-coder-flash',
+        authType: AuthType.USE_OPENAI,
+      });
+    });
+
     it('propagates errors from config.switchModel', async () => {
       const configError = new Error('Invalid model');
       switchModelSpy.mockRejectedValueOnce(configError);
@@ -4858,6 +5331,7 @@ describe('Session', () => {
         expect.any(AbortSignal),
         'acp',
         mockSettings,
+        undefined,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -4882,6 +5356,60 @@ describe('Session', () => {
       });
     });
 
+    it('applies the immutable standalone command policy after binding release', async () => {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+      getAvailableCommandsSpy.mockResolvedValue([]);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const expectation = {
+        canonicalSessionId: 'test-session-id',
+        root: { canonicalPath: '/managed', device: 1, inode: 2 },
+        child: {
+          name: 'child',
+          canonicalPath: '/managed/child',
+          device: 1,
+          inode: 3,
+        },
+      };
+      session.installPendingManagedConversationBinding(
+        expectation,
+        vi.fn().mockResolvedValue(undefined),
+      );
+      await session.commitManagedConversationBinding(expectation);
+      await session.releaseManagedConversationBinding(expectation);
+
+      await vi.waitFor(() =>
+        expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.any(AbortSignal),
+          'acp',
+          mockSettings,
+          {
+            allowSessionReset: false,
+            allowWorkspaceSettingsWrite: false,
+            persistModelSelection: false,
+            blockedBuiltinCommandNames: [
+              'cd',
+              'clear',
+              'directory',
+              'diff',
+              'dream',
+              'export',
+              'learn',
+              'curator',
+              'workflows',
+            ],
+          },
+        ),
+      );
+    });
+
     it('forwards command descriptions from getAvailableCommands()', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
@@ -4902,6 +5430,7 @@ describe('Session', () => {
         expect.any(AbortSignal),
         'acp',
         mockSettings,
+        undefined,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -5580,6 +6109,51 @@ describe('Session', () => {
         }),
       );
       expect(notifyConfigChanged).not.toHaveBeenCalled();
+    });
+
+    it('does not publish refreshed skills while standalone activation is held', async () => {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const expectation = {
+        canonicalSessionId: 'test-session-id',
+        root: { canonicalPath: '/managed', device: 1, inode: 2 },
+        child: {
+          name: 'child',
+          canonicalPath: '/managed/child',
+          device: 1,
+          inode: 3,
+        },
+      };
+      session.installPendingManagedConversationBinding(
+        expectation,
+        vi.fn().mockResolvedValue(undefined),
+      );
+      await session.commitManagedConversationBinding(expectation);
+      getAvailableCommandsSpy.mockClear();
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+
+      await session.refreshSkillsFromSettings({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+
+      expect(getAvailableCommandsSpy).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+
+      await session.releaseManagedConversationBinding(expectation);
+
+      await vi.waitFor(() =>
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1),
+      );
+      expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1);
     });
 
     it('notifies SkillManager when the command update fails', async () => {
@@ -8082,17 +8656,19 @@ describe('Session', () => {
       // rule, must keep it out of the declarations too — advertising a tool
       // whose every call ends in EXECUTION_DENIED is the pollution the
       // daemon-only gate exists to remove.
-      const isToolEnabled = vi.fn().mockResolvedValue(false);
+      const getToolRegistrationStatus = vi.fn().mockResolvedValue('disabled');
       mockConfig.getPermissionManager = vi
         .fn()
-        .mockReturnValue({ isToolEnabled });
+        .mockReturnValue({ getToolRegistrationStatus });
       mockConfig.getSubSessionSpawner = vi
         .fn()
         .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
 
       await registerCreateSubSessionTool(mockConfig);
 
-      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(getToolRegistrationStatus).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
       expect(mockToolRegistry.registerTool).not.toHaveBeenCalledWith(
         expect.objectContaining({ name: 'create_sub_session' }),
       );
@@ -8102,23 +8678,45 @@ describe('Session', () => {
       // The PM-present path must consult the manager and then register: a
       // gate that skips whenever a manager exists would drop the tool from
       // every daemon session that runs with permission management on.
-      const isToolEnabled = vi.fn().mockResolvedValue(true);
+      const getToolRegistrationStatus = vi.fn().mockResolvedValue('registered');
       mockConfig.getPermissionManager = vi
         .fn()
-        .mockReturnValue({ isToolEnabled });
+        .mockReturnValue({ getToolRegistrationStatus });
       mockConfig.getSubSessionSpawner = vi
         .fn()
         .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
 
       await registerCreateSubSessionTool(mockConfig);
 
-      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(getToolRegistrationStatus).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
       expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
         expect.objectContaining({ name: 'create_sub_session' }),
       );
       expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
         'create_sub_session',
       );
+    });
+
+    it('keeps permission-deferred create_sub_session behind ToolSearch', async () => {
+      const getToolRegistrationStatus = vi.fn().mockResolvedValue('deferred');
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue({ getToolRegistrationStatus });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(
+        mockToolRegistry.registerPermissionDeferredFactory,
+      ).toHaveBeenCalledWith('create_sub_session', expect.any(Function));
+      expect(mockToolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(mockToolRegistry.revealDeferredTool).not.toHaveBeenCalled();
+      expect(mockToolRegistry.pinDeferredToolReveal).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setTools).toHaveBeenCalledTimes(1);
     });
 
     it('wires the sub-session spawner only on daemon-backed sessions', () => {
@@ -8131,6 +8729,7 @@ describe('Session', () => {
 
       delete process.env['QWEN_CODE_SERVE'];
       vi.mocked(mockConfig.setSubSessionSpawner).mockClear();
+      vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator).mockClear();
       const standalone = new Session(
         'standalone-acp-session',
         mockConfig,
@@ -8139,6 +8738,89 @@ describe('Session', () => {
       );
       expect(standalone).toBeDefined();
       expect(mockConfig.setSubSessionSpawner).not.toHaveBeenCalled();
+      expect(
+        mockConfig.setCurrentSessionScheduledTaskCreator,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('uses the trusted daemon prompt id for a current-session task', async () => {
+      vi.mocked(mockClient.extMethod).mockResolvedValueOnce({
+        id: 'cron-1',
+        cron: '5 9 * * *',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+      expect(create).toBeTypeOf('function');
+
+      await expect(
+        core.runWithInvocationContext(
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-prompt-id',
+          },
+          () =>
+            create?.({
+              cron: '5 9 * * *',
+              prompt: 'continue',
+              recurring: true,
+              promptId: 'test-session-id########1',
+            }),
+        ),
+      ).resolves.toEqual({ id: 'cron-1', cron: '5 9 * * *' });
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        'qwen/control/scheduled-task/create-current',
+        {
+          callerSessionId: 'test-session-id',
+          promptId: 'daemon-prompt-id',
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+        },
+      );
+    });
+
+    it('reports an explicit unavailable error for an older daemon bridge', async () => {
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32601,
+        message: 'Method not found',
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+
+      await expect(
+        create?.({
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toThrow(/current_session_scheduling_unavailable/);
+    });
+
+    it('surfaces structured daemon rejections to the current-session tool', async () => {
+      vi.mocked(mockClient.extMethod).mockRejectedValueOnce({
+        code: -32602,
+        message: 'Invalid params',
+        data: {
+          errorKind: 'session_busy',
+          status: 409,
+          hint: 'The caller session has a pending interaction',
+        },
+      });
+      const create = vi.mocked(mockConfig.setCurrentSessionScheduledTaskCreator)
+        .mock.calls[0]?.[0];
+
+      await expect(
+        create?.({
+          cron: '5 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+          promptId: 'prompt-1',
+        }),
+      ).rejects.toThrow(
+        'session_busy: The caller session has a pending interaction',
+      );
     });
 
     it('drops oldest background notifications when the queue reaches its cap', () => {
@@ -9238,7 +9920,8 @@ describe('Session', () => {
         status: 'skipped',
         convertedCount: 0,
         omittedCount: 0,
-        modelId: 'qwen3.7-plus',
+        modelId: 'idealab:qwen3.7-plus',
+        modelEndpoint: 'idealab.alibaba-inc.com',
         egressOccurred: true,
       });
       mockChat.sendMessageStream = vi
@@ -9262,6 +9945,28 @@ describe('Session', () => {
       expect(
         textParts(sent).some((t: string) => t.includes('look at this')),
       ).toBe(true);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: {
+            type: 'text',
+            text: 'Vision bridge cancelled. Your image and prompt/context were sent to qwen3.7-plus (idealab.alibaba-inc.com).',
+          },
+          _meta: {
+            source: 'vision_bridge_notice',
+            qwenDiscreteMessage: true,
+            visionBridgeNotice: {
+              status: 'skipped',
+              convertedCount: 0,
+              omittedCount: 0,
+              modelName: 'qwen3.7-plus',
+              modelEndpoint: 'idealab.alibaba-inc.com',
+              egressOccurred: true,
+            },
+          },
+        },
+      });
     });
 
     it('preserves oversized inline images for the vision bridge', async () => {
@@ -12393,6 +13098,37 @@ describe('Session', () => {
         });
       });
 
+      it('marks estimated compression counts in the ACP notice (#9309)', async () => {
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 26600,
+          newTokenCount: 14500,
+          originalTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: false,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text:
+                'IMPORTANT: This conversation approached the input token limit for qwen3-code-plus. ' +
+                'A compressed context will be sent for future messages (compressed from: ~26600 to 14500 tokens).',
+            },
+          },
+        });
+      });
+
       it('continues sending when automatic compression fails', async () => {
         mockGeminiClient.tryCompressChat.mockRejectedValueOnce(
           new Error('compression rate limited'),
@@ -13298,6 +14034,170 @@ describe('Session', () => {
         );
       });
 
+      it.each(['inline image', 'image @ path'] as const)(
+        'lets the vision bridge own the timeout for a mid-turn %s',
+        async (source) => {
+          const tempDir =
+            source === 'image @ path'
+              ? await fs.realpath(
+                  await fs.mkdtemp(
+                    path.join(os.tmpdir(), 'qwen-acp-mid-turn-image-'),
+                  ),
+                )
+              : undefined;
+          const imagePath = tempDir
+            ? path.join(tempDir, 'image.png')
+            : undefined;
+          if (tempDir && imagePath) {
+            await fs.writeFile(imagePath, 'image');
+            mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+            mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+              isPathWithinWorkspace: (pathSpec: string) =>
+                path
+                  .resolve(tempDir, pathSpec)
+                  .startsWith(`${tempDir}${path.sep}`),
+            });
+          }
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn().mockResolvedValue({
+                llmContent: 'file contents',
+                returnDisplay: 'file contents',
+              }),
+            }),
+          };
+          const timeoutController = new AbortController();
+          const timeoutSpy = vi
+            .spyOn(AbortSignal, 'timeout')
+            .mockReturnValue(timeoutController.signal);
+          const bridgeResult = {
+            applied: true,
+            status: 'ok' as const,
+            parts: [{ text: '[transcribed image]' }],
+            transcript: '[transcribed image]',
+            convertedCount: 1,
+            omittedCount: 0,
+            modelId: 'vision-bridge',
+          };
+          let bridgeSignal: AbortSignal | undefined;
+          let resolutionSignal: AbortSignal | undefined;
+          let bridgeStarted!: () => void;
+          let resolveBridge!: (result: typeof bridgeResult) => void;
+          const bridgeStartedPromise = new Promise<void>((resolve) => {
+            bridgeStarted = resolve;
+          });
+          const readManyFilesSpy = imagePath
+            ? vi
+                .spyOn(core, 'readManyFiles')
+                .mockImplementation(async (_config, readOptions) => {
+                  resolutionSignal = readOptions.signal;
+                  return {
+                    contentParts: {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'iVBORw0KGgo=',
+                      },
+                    },
+                  } as Awaited<ReturnType<typeof core.readManyFiles>>;
+                })
+            : undefined;
+
+          try {
+            mockToolRegistry.getTool.mockReturnValue(tool);
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.YOLO);
+            mockConfig.getEffectiveInputModalities = vi
+              .fn()
+              .mockReturnValue({});
+            mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+              id: 'vision-bridge',
+              baseUrl: 'https://vision.example.com/v1',
+            });
+            mockClient.extMethod = vi.fn().mockResolvedValue({
+              items: [
+                {
+                  content: imagePath
+                    ? [
+                        {
+                          type: 'text',
+                          text: `please inspect @${imagePath}`,
+                        },
+                      ]
+                    : [
+                        { type: 'text', text: 'please inspect this image' },
+                        {
+                          type: 'image',
+                          mimeType: 'image/png',
+                          data: 'iVBORw0KGgo=',
+                        },
+                      ],
+                  displayText: 'please inspect this image',
+                },
+              ],
+            });
+            runVisionBridgeSpy.mockImplementation(
+              ({ signal }: { signal: AbortSignal }) =>
+                new Promise((resolve) => {
+                  bridgeSignal = signal;
+                  resolveBridge = resolve;
+                  bridgeStarted();
+                }),
+            );
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(
+                createStreamWithChunks([
+                  {
+                    type: core.StreamEventType.CHUNK,
+                    value: {
+                      functionCalls: [
+                        {
+                          id: 'call-1',
+                          name: 'read_file',
+                          args: { path: '/tmp/test.txt' },
+                        },
+                      ],
+                    },
+                  },
+                ]),
+              )
+              .mockResolvedValueOnce(createEmptyStream());
+
+            const prompt = session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'read file' }],
+            });
+            await bridgeStartedPromise;
+            timeoutController.abort(new Error('mid-turn resolution timed out'));
+
+            const bridgeWasAborted = bridgeSignal?.aborted;
+            resolveBridge(bridgeResult);
+            await prompt;
+
+            expect(bridgeWasAborted).toBe(false);
+            if (resolutionSignal) expect(resolutionSignal.aborted).toBe(true);
+            const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+              .calls[1];
+            expect(
+              textParts(secondCall?.[1].message as Part[]).some((text) =>
+                text.includes('[transcribed image]'),
+              ),
+            ).toBe(true);
+          } finally {
+            timeoutSpy.mockRestore();
+            readManyFilesSpy?.mockRestore();
+            if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
+          }
+        },
+      );
+
       it('records inline-media-only mid-turn messages with a placeholder display text', async () => {
         // An inline image with no text and no references must not record an
         // empty displayText: resume and replay would otherwise fall back to
@@ -13971,18 +14871,6 @@ describe('Session', () => {
 
       it('stops draining mid-turn messages when structured resolution is aborted', async () => {
         let promptSignalAborted = false;
-        const clampSpy = vi
-          .spyOn(core, 'clampInlineMediaPart')
-          .mockImplementation(() => {
-            const pendingPrompt = (
-              session as unknown as { pendingPrompt: AbortController | null }
-            ).pendingPrompt;
-            pendingPrompt?.abort();
-            promptSignalAborted = pendingPrompt?.signal.aborted ?? false;
-            const abortError = new Error('aborted');
-            abortError.name = 'AbortError';
-            throw abortError;
-          });
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',
           returnDisplay: 'file contents',
@@ -14001,6 +14889,24 @@ describe('Session', () => {
 
         mockToolRegistry.getTool.mockReturnValue(tool);
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-bridge',
+          baseUrl: 'https://vision.example.com/v1',
+        });
+        runVisionBridgeSpy.mockImplementation(async () => {
+          const pendingPrompt = (
+            session as unknown as { pendingPrompt: AbortController | null }
+          ).pendingPrompt;
+          pendingPrompt?.abort();
+          promptSignalAborted = pendingPrompt?.signal.aborted ?? false;
+          return {
+            applied: false,
+            status: 'skipped',
+            convertedCount: 0,
+            omittedCount: 0,
+          };
+        });
         mockClient.extMethod = vi.fn().mockResolvedValue({
           items: [
             {
@@ -14040,48 +14946,44 @@ describe('Session', () => {
           ]),
         );
 
-        try {
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'read file' }],
-          });
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
 
-          const retainedMidTurnPart = {
-            text: '\n[User message received during tool execution]: already queued',
-          };
-          const abortedMidTurnPart = {
-            text: '\n[User message received during tool execution]: inspect this image',
-          };
-          const skippedMidTurnPart = {
-            text: '\n[User message received during tool execution]: should not be processed',
-          };
-          const preservedMessage = vi.mocked(mockChat.addHistory).mock
-            .calls[0]?.[0] as Content | undefined;
+        const retainedMidTurnPart = {
+          text: '\n[User message received during tool execution]: already queued',
+        };
+        const abortedMidTurnPart = {
+          text: '\n[User message received during tool execution]: inspect this image',
+        };
+        const skippedMidTurnPart = {
+          text: '\n[User message received during tool execution]: should not be processed',
+        };
+        const preservedMessage = vi.mocked(mockChat.addHistory).mock
+          .calls[0]?.[0] as Content | undefined;
 
-          expect(promptSignalAborted).toBe(true);
-          expect(clampSpy).toHaveBeenCalledTimes(1);
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-          expect(preservedMessage?.parts).toEqual(
-            expect.arrayContaining([retainedMidTurnPart]),
-          );
-          expect(preservedMessage?.parts).not.toEqual(
-            expect.arrayContaining([abortedMidTurnPart]),
-          );
-          expect(preservedMessage?.parts).not.toEqual(
-            expect.arrayContaining([skippedMidTurnPart]),
-          );
-          expect(
-            mockChatRecordingService.recordMidTurnUserMessage,
-          ).toHaveBeenCalledWith([retainedMidTurnPart], 'already queued');
-          expect(
-            mockChatRecordingService.recordMidTurnUserMessage,
-          ).not.toHaveBeenCalledWith(
-            [skippedMidTurnPart],
-            'should not be processed',
-          );
-        } finally {
-          clampSpy.mockRestore();
-        }
+        expect(promptSignalAborted).toBe(true);
+        expect(runVisionBridgeSpy).toHaveBeenCalledTimes(1);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(preservedMessage?.parts).toEqual(
+          expect.arrayContaining([retainedMidTurnPart]),
+        );
+        expect(preservedMessage?.parts).not.toEqual(
+          expect.arrayContaining([abortedMidTurnPart]),
+        );
+        expect(preservedMessage?.parts).not.toEqual(
+          expect.arrayContaining([skippedMidTurnPart]),
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith([retainedMidTurnPart], 'already queued');
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).not.toHaveBeenCalledWith(
+          [skippedMidTurnPart],
+          'should not be processed',
+        );
       });
 
       it('logs unrecognized mid-turn drain response fields', async () => {
@@ -15653,6 +16555,69 @@ describe('Session', () => {
           ['continued final'],
         ]);
         expect(capture.writeToSpan).toHaveBeenCalledWith(agentTelemetry.span);
+      });
+
+      it('does not extract a fresh channel turn stopped by loop protection in a Stop continuation', async () => {
+        const messageBus = {
+          request: vi.fn().mockResolvedValue({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Continue after Stop hook',
+            },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(1);
+        mockConfig.isMaxToolCallsPerTurnExplicit = vi
+          .fn()
+          .mockReturnValue(true);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'stop-loop-1',
+                      name: 'read_file',
+                      args: { path: 'a' },
+                    },
+                    {
+                      id: 'stop-loop-2',
+                      name: 'read_file',
+                      args: { path: 'b' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'channel task' }],
+            _meta: { [CHANNEL_PROMPT_META_KEY]: true },
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(logLoopDetectedSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            loop_type: core.LoopType.TURN_TOOL_CALL_CAP,
+          }),
+          {},
+        );
+        expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+        expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
       });
 
       it('keeps continuation retry text in the delivered prompt final', async () => {
@@ -18212,6 +19177,70 @@ describe('Session', () => {
         );
       });
 
+      it('returns a structured standalone-policy error for a blocked slash command', async () => {
+        session.dispose();
+        vi.mocked(mockConfig.getSessionSourceType).mockReturnValue(
+          'standalone',
+        );
+        vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+        session = new Session(
+          'test-session-id',
+          mockConfig,
+          mockClient,
+          mockSettings,
+        );
+        const expectation = {
+          canonicalSessionId: 'test-session-id',
+          root: { canonicalPath: '/managed', device: 1, inode: 2 },
+          child: {
+            name: 'child',
+            canonicalPath: '/managed/child',
+            device: 1,
+            inode: 3,
+          },
+        };
+        session.installPendingManagedConversationBinding(
+          expectation,
+          vi.fn().mockResolvedValue(undefined),
+        );
+        await session.commitManagedConversationBinding(expectation);
+        await session.releaseManagedConversationBinding(expectation);
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'unsupported',
+          reason: 'The command "/export" is not available here.',
+          originalType: 'unsupported_action',
+        });
+        mockChat.sendMessageStream = vi.fn();
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: '/export' }],
+          }),
+        ).rejects.toMatchObject({
+          data: { errorKind: 'unsupported_action' },
+        });
+
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).toHaveBeenCalledWith(
+          '/export',
+          expect.anything(),
+          mockConfig,
+          mockSettings,
+          expect.anything(),
+          expect.objectContaining({
+            allowSessionReset: false,
+            allowWorkspaceSettingsWrite: false,
+            persistModelSelection: false,
+            blockedBuiltinCommandNames: expect.arrayContaining(['export']),
+          }),
+        );
+      });
+
       it('does not record /advisor in the ACP transcript', async () => {
         const finishedSpy = vi
           .spyOn(core, 'logConversationFinishedEvent')
@@ -19036,6 +20065,7 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          windDown: true,
           verifierFeedback: 'Need independent evidence',
         });
 
@@ -19053,7 +20083,22 @@ describe('Session', () => {
               }),
               expect.objectContaining({
                 text: expect.stringContaining(
-                  'Runtime continuation context: check weather',
+                  '<goal_runtime_data>\n{"goalId":"goal-1","revision":1,"objective":"check weather"}\n</goal_runtime_data>',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'contains no new real user input',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'not evidence that the user supplied it',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'The autonomous token budget for this Goal window is spent.',
                 ),
               }),
               expect.objectContaining({
@@ -21621,14 +22666,33 @@ describe('Session', () => {
       const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
       const executeSpy = vi.fn();
       const internals = session as unknown as {
-        midTurnRecoveredMessages: Array<{
-          kind: 'text';
-          message: string;
-        }>;
+        midTurnRecoveredMessages: Array<
+          | { kind: 'text'; message: string }
+          | {
+              kind: 'structured';
+              content: Array<{
+                type: 'image';
+                mimeType: string;
+                data: string;
+              }>;
+              displayText: string;
+            }
+        >;
       };
       internals.midTurnRecoveredMessages.push({
         kind: 'text',
         message: 'recovered before cancellation',
+      });
+      internals.midTurnRecoveredMessages.push({
+        kind: 'structured',
+        content: [
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+        displayText: 'recovered image before cancellation',
       });
       const invocation = {
         params: { command: rawCommand },
@@ -21700,6 +22764,10 @@ describe('Session', () => {
           {
             text: '\n[User message received during tool execution]: recovered before cancellation',
           },
+          {
+            text: '\n[User message received during tool execution]: recovered image before cancellation',
+          },
+          { text: '[Attachment could not be processed]' },
         ],
       });
       expect(
@@ -21711,6 +22779,17 @@ describe('Session', () => {
           },
         ],
         'recovered before cancellation',
+      );
+      expect(
+        mockChatRecordingService.recordMidTurnUserMessage,
+      ).toHaveBeenCalledWith(
+        [
+          {
+            text: '\n[User message received during tool execution]: recovered image before cancellation',
+          },
+          { text: '[Attachment could not be processed]' },
+        ],
+        'recovered image before cancellation',
       );
     });
 
@@ -23614,6 +24693,10 @@ describe('Session', () => {
 
           expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
           expect(result.stopReason).toBe('end_turn');
+          expect(
+            mockGeminiClient.beginManagedAutoMemoryRecall,
+          ).not.toHaveBeenCalled();
+          expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
         });
 
         it('wraps additionalContext in the reserved tag before sending', async () => {
@@ -23654,6 +24737,9 @@ describe('Session', () => {
             core.isUserPromptSubmitContextPartText(textParts(sent).at(-1)!),
           ).toBe(true);
           expect(textParts(sent).at(-1)).toContain('extra hook context');
+          expect(
+            mockGeminiClient.beginManagedAutoMemoryRecall,
+          ).toHaveBeenCalledWith('hello', expect.any(AbortSignal));
         });
       });
 
@@ -25730,6 +26816,119 @@ describe('Session', () => {
         isOutputMarkdown: true,
       };
     }
+
+    function recreateStandaloneSession() {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+    }
+
+    it('blocks standalone worktree actions before building the tool', async () => {
+      recreateStandaloneSession();
+      const builds: Array<ReturnType<typeof vi.fn>> = [];
+      mockToolRegistry.getTool.mockImplementation((name: string) => {
+        const build = vi.fn();
+        builds.push(build);
+        return {
+          name,
+          kind:
+            name === core.ToolNames.AGENT ? core.Kind.Think : core.Kind.Edit,
+          displayName: name,
+          description: name,
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        };
+      });
+
+      const calls: FunctionCall[] = [
+        {
+          id: 'agent_isolation',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'explore', isolation: 'worktree' },
+        },
+        {
+          id: 'agent_working_dir',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'explore', working_dir: '/tmp/other' },
+        },
+        {
+          id: 'enter_worktree',
+          name: core.ToolNames.ENTER_WORKTREE,
+          args: { name: 'other' },
+        },
+        {
+          id: 'exit_worktree',
+          name: core.ToolNames.EXIT_WORKTREE,
+          args: { name: 'other' },
+        },
+      ];
+
+      for (const call of calls) {
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(new AbortController().signal, `prompt-${call.id}`, [
+          call,
+        ]);
+
+        expect(result.parts[0].functionResponse?.response).toEqual({
+          error:
+            'Standalone sessions cannot change or override their working directory.',
+        });
+      }
+      expect(builds).toHaveLength(4);
+      for (const build of builds) {
+        expect(build).not.toHaveBeenCalled();
+      }
+    });
+
+    it('allows a standalone fork Agent without a cwd override', async () => {
+      recreateStandaloneSession();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'fork completed',
+        returnDisplay: 'fork completed',
+      });
+      const build = vi.fn().mockReturnValue({
+        params: { subagent_type: 'fork' },
+        eventEmitter: new EventEmitter(),
+        execute,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue('Agent'),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-fork-agent', [
+        {
+          id: 'fork_agent',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'fork', prompt: 'inspect' },
+        },
+      ]);
+
+      expect(build).toHaveBeenCalled();
+      expect(execute).toHaveBeenCalledOnce();
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        output: 'fork completed',
+      });
+    });
 
     it('records a missing tool name as a pre-execution failure', async () => {
       const logToolCallSpy = vi

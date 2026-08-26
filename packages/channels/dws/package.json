@@ -1,0 +1,33 @@
+{
+  "name": "@qwen-code/channel-dws",
+  "version": "0.22.2",
+  "description": "DingTalk Workspace channel adapter for Qwen Code",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/channels/dws"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run"
+  },
+  "dependencies": {
+    "@qwen-code/channel-base": "0.22.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

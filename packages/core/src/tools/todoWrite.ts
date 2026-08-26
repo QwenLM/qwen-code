@@ -275,6 +275,26 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
     this.operationType = operationType;
   }
 
+  private refreshActiveTodoReminder(todos: TodoItem[]): void {
+    const promptId = promptIdContext.getStore();
+    if (!promptId) return;
+
+    const unfinishedTodos = todos.filter((todo) => todo.status !== 'completed');
+    const serializedTodos = escapeSystemReminderTags(
+      unfinishedTodos
+        .map((todo) => `- [${todo.status}] ${todo.content}`)
+        .join('\n'),
+    );
+    const todoContext = serializedTodos.slice(0, MAX_ACTIVE_TODO_CONTEXT_CHARS);
+
+    this.config.setActiveTodoReminder(
+      promptId,
+      unfinishedTodos.length > 0
+        ? `<system-reminder>\nThe current task still has unfinished todo items:\n${todoContext}${serializedTodos.length > todoContext.length ? '\n[truncated]' : ''}\nKeep the todo list current and continue the task. Do not treat a successful intermediate tool call as task completion.\n</system-reminder>`
+        : undefined,
+    );
+  }
+
   getDescription(): string {
     return this.operationType === 'create' ? 'Create todos' : 'Update todos';
   }
@@ -355,6 +375,31 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
           finalTodos.every((todo) =>
             approvedWorkflowRevision.todoIds.includes(todo.id),
           ));
+
+      if (isDeepStrictEqual(oldTodos, finalTodos)) {
+        debugLogger.debug(
+          '[TodoWriteTool] No-op: todos unchanged, skipping write/hooks',
+        );
+
+        this.refreshActiveTodoReminder(finalTodos);
+
+        const todoResultDisplay = {
+          type: 'todo_list' as const,
+          ...(previousPlan.planId ? { planId: previousPlan.planId } : {}),
+          todos: finalTodos,
+          changes: { created: [], completed: [] },
+          unchanged: true,
+        };
+
+        return {
+          llmContent: `Todo list is already up to date. No changes were needed.
+
+<system-reminder>
+Your todo list was not modified because it is already current. Continue with your existing tasks.
+</system-reminder>`,
+          returnDisplay: todoResultDisplay,
+        };
+      }
 
       // 2. Detect changes
       const changes = detectTodoChanges(oldTodos, finalTodos);
@@ -448,27 +493,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       if (!continuesApprovedWorkflow) {
         this.config.clearSessionWorkflowPlanRevision?.();
       }
-      const unfinishedTodos = finalTodos.filter(
-        (todo) => todo.status !== 'completed',
-      );
-      const promptId = promptIdContext.getStore();
-      if (promptId) {
-        const serializedTodos = escapeSystemReminderTags(
-          unfinishedTodos
-            .map((todo) => `- [${todo.status}] ${todo.content}`)
-            .join('\n'),
-        );
-        const todoContext = serializedTodos.slice(
-          0,
-          MAX_ACTIVE_TODO_CONTEXT_CHARS,
-        );
-        this.config.setActiveTodoReminder(
-          promptId,
-          unfinishedTodos.length > 0
-            ? `<system-reminder>\nThe current task still has unfinished todo items:\n${todoContext}${serializedTodos.length > todoContext.length ? '\n[truncated]' : ''}\nKeep the todo list current and continue the task. Do not treat a successful intermediate tool call as task completion.\n</system-reminder>`
-            : undefined,
-        );
-      }
+      this.refreshActiveTodoReminder(finalTodos);
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted

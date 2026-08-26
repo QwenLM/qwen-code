@@ -393,13 +393,23 @@ export function createTranscriptToolCallResultUpdate(
       },
     }),
   };
-  if (
-    options.resultDisplay !== undefined &&
-    !isTruncatedSessionDiffDisplay(options.resultDisplay)
-  ) {
-    update['rawOutput'] = options.resultDisplay;
-  }
+  const rawOutput = getReplayRawOutput(options.resultDisplay);
+  if (rawOutput !== undefined) update['rawOutput'] = rawOutput;
   return update as unknown as SessionUpdate;
+}
+
+function getReplayRawOutput(resultDisplay: unknown): unknown {
+  if (!isTruncatedSessionDiffDisplay(resultDisplay)) return resultDisplay;
+  if (
+    resultDisplay['fileDiffTruncated'] === true ||
+    typeof resultDisplay['fileDiff'] !== 'string'
+  ) {
+    return undefined;
+  }
+  return {
+    fileName: resultDisplay['fileName'],
+    fileDiff: resultDisplay['fileDiff'],
+  };
 }
 
 export function createTranscriptPlanUpdate(
@@ -1471,7 +1481,9 @@ function extractDiffContent(resultDisplay: unknown): ToolCallContent | null {
   };
 }
 
-function isTruncatedSessionDiffDisplay(value: unknown): boolean {
+function isTruncatedSessionDiffDisplay(
+  value: unknown,
+): value is Readonly<Record<string, unknown>> {
   return (
     isObjectRecord(value) &&
     value['truncatedForSession'] === true &&

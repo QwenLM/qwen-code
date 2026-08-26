@@ -15,6 +15,7 @@ import {
   type GoalTurnHost,
 } from './goal-runtime.js';
 import {
+  type GetGoalToolParams,
   GetGoalTool,
   UpdateGoalTool,
   type GoalToolConfig,
@@ -144,6 +145,7 @@ describe('GetGoalTool', () => {
           turnCount: 27,
           activeTimeMs: 1_763_705,
           tokensUsed: 4_500,
+          tokenBudget: 30_000_000,
           createdAt: 1,
           updatedAt: 2,
           lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
@@ -175,6 +177,7 @@ describe('GetGoalTool', () => {
         turnCount: 27,
         activeTimeMs: 1_763_705,
         tokensUsed: 4_500,
+        tokenBudget: 30_000_000,
         lastReason: GOAL_EVIDENCE_CATALOG_EXHAUSTED_REASON,
       },
     });
@@ -350,6 +353,7 @@ describe('GetGoalTool', () => {
     expect(getSnapshotForPermit).toHaveBeenCalledWith(permit);
     expect(JSON.parse(String(result.llmContent))).toEqual({
       active: true,
+      view: 'summary',
       snapshot,
       evidenceCatalog: {
         entries: [
@@ -368,9 +372,201 @@ describe('GetGoalTool', () => {
     expect(String(result.llmContent)).not.toContain('must not leak');
     expect(result.returnDisplay).toBe('Active goal · revision 3');
   });
+
+  it('exposes the view parameter and nothing else', () => {
+    const tool = new GetGoalTool(makeConfig({ getGoalForWorker: vi.fn() }));
+    expect(tool.schema.parametersJsonSchema).toEqual({
+      type: 'object',
+      properties: {
+        view: {
+          type: 'string',
+          enum: ['summary', 'full'],
+          description: expect.stringContaining('summary (default)'),
+        },
+      },
+      additionalProperties: false,
+    });
+  });
+
+  // A long-running Goal after a few checkpoints: 32 claims of the maximum
+  // length, a catalog at its entry cap, and a lineage at its cap.
+  const LONG_CLAIM = 'C'.repeat(2_000);
+  const LONG_PREVIEW_ASCII = 'p'.repeat(240);
+  const LONG_PREVIEW_CJK = '证'.repeat(80); // 240 bytes
+  const checkpointedGoal = () => ({
+    goalId: 'goal-1',
+    revision: 3,
+    objective: 'Ship Goal v3',
+    status: 'active' as const,
+    evidenceCursor: { recordId: 'checkpoint-9' },
+    turnCount: 40,
+    activeTimeMs: 120,
+    tokensUsed: 0,
+    createdAt: 10,
+    updatedAt: 20,
+    evidenceCheckpoint: {
+      checkpointId: 'checkpoint-9',
+      createdAt: 15,
+      claims: Array.from({ length: 32 }, (_, index) => ({
+        id: `checkpoint-9:${index + 1}`,
+        proofKind: 'external_fact' as const,
+        claim: `SECRET_CLAIM_TEXT ${LONG_CLAIM}`,
+        sourceRefs: Array.from(
+          { length: 4 },
+          (_, ref) => `src-${index}-${ref}`,
+        ),
+      })),
+    },
+  });
+  const checkpointedCatalog = () => ({
+    entries: [
+      ...Array.from({ length: 32 }, (_, index) => ({
+        uuid: `checkpoint-9:${index + 1}`,
+        provenance: 'goal_checkpoint' as const,
+        turnId: 'checkpoint:checkpoint-9',
+        preview: `claim ${index + 1} ${LONG_PREVIEW_ASCII}`.slice(0, 240),
+        proofKind: 'external_fact' as const,
+      })),
+      ...Array.from({ length: 60 }, (_, index) => ({
+        uuid: `earlier-${index}`,
+        provenance: 'tool_result' as const,
+        turnId: `earlier-turn-${index % 12}`,
+        preview: index % 2 === 0 ? LONG_PREVIEW_ASCII : LONG_PREVIEW_CJK,
+        proofKind: 'external_fact' as const,
+      })),
+      {
+        uuid: 'earlier-short',
+        provenance: 'tool_result' as const,
+        turnId: 'earlier-turn-0',
+        preview: '12 tests passed',
+        proofKind: 'external_fact' as const,
+      },
+      ...Array.from({ length: 8 }, (_, index) => ({
+        uuid: `current-${index}`,
+        provenance: 'assistant_output' as const,
+        turnId: permit.turnId,
+        preview: LONG_PREVIEW_ASCII,
+        proofKind: 'delivered_output' as const,
+      })),
+    ],
+    lineageTurnIds: [
+      ...Array.from({ length: 15 }, (_, index) => `earlier-turn-${index}`),
+      permit.turnId,
+    ],
+    truncated: false,
+  });
+  const checkpointedTool = () =>
+    new GetGoalTool(
+      makeConfig({
+        getGoalForWorker: vi.fn().mockResolvedValue({
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'Ship Goal v3',
+          evidenceCursor: { recordId: 'checkpoint-9' },
+          evidenceCatalog: checkpointedCatalog(),
+        }),
+        getSnapshotForPermit: vi.fn(() => ({
+          v: 2 as const,
+          activity: 'running' as const,
+          goal: checkpointedGoal(),
+        })),
+      }),
+    );
+  const read = async (params: GetGoalToolParams) => {
+    const invocation = goalTurnContext.run(permit, () =>
+      checkpointedTool().build(params),
+    );
+    const result = await invocation.execute(new AbortController().signal);
+    return String(result.llmContent);
+  };
+
+  it('collapses checkpoint claims and shortens earlier previews in the summary view', async () => {
+    const content = await read({});
+    const payload = JSON.parse(content);
+
+    // The claims' text is the duplicate: each claim is already a catalog entry.
+    expect(content).not.toContain('SECRET_CLAIM_TEXT');
+    expect(payload.snapshot.goal.evidenceCheckpoint).toEqual({
+      checkpointId: 'checkpoint-9',
+      createdAt: 15,
+      claimCount: 32,
+    });
+    expect(payload.view).toBe('summary');
+
+    const entries: Array<{
+      uuid: string;
+      turnId: string;
+      provenance: string;
+      preview: string;
+    }> = payload.evidenceCatalog.entries;
+    // Every uuid survives: the summary changes what is shown, not what is
+    // citable.
+    expect(entries.map((entry) => entry.uuid)).toEqual(
+      checkpointedCatalog().entries.map((entry) => entry.uuid),
+    );
+    for (const entry of entries) {
+      const bytes = Buffer.byteLength(entry.preview, 'utf8');
+      if (
+        entry.provenance === 'goal_checkpoint' ||
+        entry.turnId === permit.turnId
+      ) {
+        expect(bytes).toBe(240);
+      } else {
+        expect(bytes).toBeLessThanOrEqual(80);
+      }
+    }
+    // Multi-byte previews are cut on a code point, not mid-character.
+    expect(entries.find((entry) => entry.uuid === 'earlier-1')?.preview).toBe(
+      '证'.repeat(26),
+    );
+    // An earlier-turn preview already within the cap passes through
+    // byte-identical and is not counted as shortened.
+    expect(
+      entries.find((entry) => entry.uuid === 'earlier-short')?.preview,
+    ).toBe('12 tests passed');
+    expect(payload.evidenceCatalog.shortenedPreviews).toBe(60);
+    expect(payload.evidenceCatalog.lineageTurnIds).toHaveLength(16);
+  });
+
+  it('returns the whole checkpoint and catalog in the full view', async () => {
+    const payload = JSON.parse(await read({ view: 'full' }));
+
+    expect(payload.view).toBe('full');
+    expect(payload.snapshot.goal).toEqual(checkpointedGoal());
+    expect(payload.evidenceCatalog).toEqual(checkpointedCatalog());
+    expect(payload.evidenceCatalog).not.toHaveProperty('shortenedPreviews');
+  });
+
+  it('keeps a steady-state summary read under a fixed byte ceiling', async () => {
+    const summaryBytes = Buffer.byteLength(await read({}), 'utf8');
+    const fullBytes = Buffer.byteLength(await read({ view: 'full' }), 'utf8');
+
+    // The full read of this fixture is what a long Goal paid on every
+    // get_goal before: the 2,000-character claims alone are ~64 KB.
+    expect(fullBytes).toBeGreaterThan(100_000);
+    expect(summaryBytes).toBeLessThanOrEqual(36_000);
+    expect(fullBytes / summaryBytes).toBeGreaterThanOrEqual(3);
+  });
 });
 
 describe('UpdateGoalTool', () => {
+  const activeSnapshot = () => ({
+    v: 2 as const,
+    activity: 'running' as const,
+    goal: {
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: 'Deliver the result',
+      status: 'active' as const,
+      evidenceCursor: { recordId: 'goal-created' },
+      turnCount: 3,
+      activeTimeMs: 100,
+      tokensUsed: 0,
+      createdAt: 1,
+      updatedAt: 2,
+    },
+  });
+
   it('exposes the exact evidence and non-terminal response contract', () => {
     const tool = new UpdateGoalTool(makeConfig({}));
     const schema = tool.schema.parametersJsonSchema as {
@@ -421,6 +617,16 @@ describe('UpdateGoalTool', () => {
     );
     expect(schema.properties.blockerKind.description).toContain(
       'exact same reason text',
+    );
+    expect(
+      (schema.properties.blockerKind as { enum?: string[] }).enum,
+    ).toContain('infeasible');
+    expect(schema.properties.blockerKind.description).toContain(
+      'cannot be satisfied as written',
+    );
+    expect(tool.description).toContain('a tool result, not your own text');
+    expect(tool.description).toContain(
+      'not for difficulty, uncertainty, information you could still obtain',
     );
   });
 
@@ -493,8 +699,11 @@ describe('UpdateGoalTool', () => {
     expect(recordTerminalProposal).not.toHaveBeenCalled();
   });
 
-  it('rejects completion that omits current delivered output', async () => {
-    const recordTerminalProposal = vi.fn();
+  it("cites this turn's delivered output for a completion that omitted it", async () => {
+    const recordTerminalProposal = vi.fn(() => ({
+      recorded: true,
+      readyForVerification: true,
+    }));
     const getGoalForWorker = vi.fn().mockResolvedValue({
       goalId: permit.goalId,
       revision: permit.revision,
@@ -553,15 +762,151 @@ describe('UpdateGoalTool', () => {
 
     const result = await invocation.execute(new AbortController().signal);
 
-    expect(JSON.parse(String(result.llmContent))).toEqual({
-      proposalRecorded: false,
-      readyForVerification: false,
-      goalLifecycleChanged: false,
-      uncitedCurrentDeliveredOutput: ['letter-x'],
-      error:
-        'The completion proposal omitted delivered output from the current Goal turn. Call get_goal after delivering the final output, then retry update_goal with the returned evidenceCatalog UUIDs.',
+    // Refusing here could not converge: complying emits assistant text, which
+    // is delivered_output stamped with this same turn, so the required set
+    // grew by one per retry until a human stopped the Goal.
+    expect(recordTerminalProposal).toHaveBeenCalledWith(
+      permit,
+      expect.objectContaining({
+        status: 'complete',
+        evidenceRefs: ['tool-result-1', 'letter-x'],
+      }),
+    );
+    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+      proposalRecorded: true,
+      readyForVerification: true,
+      autoCitedCurrentDeliveredOutput: ['letter-x'],
     });
-    expect(recordTerminalProposal).not.toHaveBeenCalled();
+  });
+
+  it('does not duplicate output the completion already cited', async () => {
+    // validateGoalEvidenceReferences rejects a duplicated ref outright, so the
+    // fold has to be a union rather than an append.
+    const recordTerminalProposal = vi.fn(() => ({
+      recorded: true,
+      readyForVerification: true,
+    }));
+    const tool = new UpdateGoalTool(
+      makeConfig({
+        getGoalForWorker: vi.fn().mockResolvedValue({
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'Deliver the result',
+          evidenceCursor: { recordId: 'goal-created' },
+          evidenceCatalog: {
+            entries: [
+              {
+                uuid: 'letter-x',
+                provenance: 'assistant_output',
+                turnId: permit.turnId,
+                preview: 'X',
+                proofKind: 'delivered_output',
+              },
+              {
+                uuid: 'letter-y',
+                provenance: 'assistant_output',
+                turnId: permit.turnId,
+                preview: 'Y',
+                proofKind: 'delivered_output',
+              },
+              {
+                uuid: 'current-external-fact',
+                provenance: 'tool_result',
+                turnId: permit.turnId,
+                preview: 'permission denied',
+                proofKind: 'external_fact',
+              },
+              {
+                uuid: 'prior-delivered-output',
+                provenance: 'assistant_output',
+                turnId: 'prior-turn',
+                preview: 'Earlier output',
+                proofKind: 'delivered_output',
+              },
+            ],
+            lineageTurnIds: ['prior-turn', permit.turnId],
+          },
+        }),
+        getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+        recordTerminalProposal,
+      }),
+    );
+    const invocation = goalTurnContext.run(permit, () =>
+      tool.build({
+        status: 'complete',
+        reason: 'Delivered',
+        evidenceRefs: ['letter-x'],
+      }),
+    );
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(recordTerminalProposal).toHaveBeenCalledWith(
+      permit,
+      expect.objectContaining({ evidenceRefs: ['letter-x', 'letter-y'] }),
+    );
+    expect(recordTerminalProposal).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+      autoCitedCurrentDeliveredOutput: ['letter-y'],
+    });
+  });
+
+  it('leaves a blocked proposal to cite whatever it chose', async () => {
+    // The gate only ever guarded completion: a blocker is judged on the
+    // blocker, not on what the turn happened to deliver.
+    const recordTerminalProposal = vi.fn(() => ({
+      recorded: true,
+      readyForVerification: false,
+    }));
+    const tool = new UpdateGoalTool(
+      makeConfig({
+        getGoalForWorker: vi.fn().mockResolvedValue({
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'Deliver the result',
+          evidenceCursor: { recordId: 'goal-created' },
+          evidenceCatalog: {
+            entries: [
+              {
+                uuid: 'tool-result-1',
+                provenance: 'tool_result',
+                turnId: permit.turnId,
+                preview: 'permission denied',
+                proofKind: 'external_fact',
+              },
+              {
+                uuid: 'letter-x',
+                provenance: 'assistant_output',
+                turnId: permit.turnId,
+                preview: 'X',
+                proofKind: 'delivered_output',
+              },
+            ],
+            lineageTurnIds: [permit.turnId],
+          },
+        }),
+        getSnapshotForPermit: vi.fn(() => activeSnapshot()),
+        recordTerminalProposal,
+      }),
+    );
+    const invocation = goalTurnContext.run(permit, () =>
+      tool.build({
+        status: 'blocked',
+        reason: 'The credential store is unreadable',
+        evidenceRefs: ['tool-result-1'],
+        blockerKind: 'external',
+      }),
+    );
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(recordTerminalProposal).toHaveBeenCalledWith(
+      permit,
+      expect.objectContaining({ evidenceRefs: ['tool-result-1'] }),
+    );
+    expect(JSON.parse(String(result.llmContent))).not.toHaveProperty(
+      'autoCitedCurrentDeliveredOutput',
+    );
   });
 
   it('queues truncated completion for boundary classification', async () => {

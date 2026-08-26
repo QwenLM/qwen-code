@@ -366,6 +366,7 @@
     position: fixed;
     top: 0;
     left: 0;
+    right: 0;
     bottom: 0;
     z-index: 50;
     pointer-events: none;
@@ -1213,4 +1214,24 @@
 
 .queuedHint {
   display: none;
+}
+
+.tokenUsageHeaderButton {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.tokenUsageHeaderButton:hover,
+.tokenUsageHeaderButton:focus-visible {
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
 }
