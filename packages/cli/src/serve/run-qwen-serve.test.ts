@@ -1364,10 +1364,18 @@ describe('formatChannelWorkerDaemonUrl', () => {
         );
         // URL keeps IPv6 literals bracketed; net.connect wants them bare.
         const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
+        const dial = await dialLoopback(dialHost, addr.port);
+        // EADDRNOTAVAIL means the certified loopback is not assigned on this
+        // host (IPv6-less runners bind `::` yet carry no `::1`) — the arm is
+        // unmeasurable here, same as a failed bind. A wrong mapping still
+        // reddens where the family exists: that dial fails ECONNREFUSED.
+        if (!dial.ok && dial.code === 'EADDRNOTAVAIL') {
+          continue;
+        }
         expect({
           bind: listenOptions,
           certified: certified.host,
-          dial: await dialLoopback(dialHost, addr.port),
+          dial,
         }).toEqual({
           bind: listenOptions,
           certified: certified.host,
