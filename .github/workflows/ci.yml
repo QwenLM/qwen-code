@@ -1025,25 +1025,25 @@ jobs:
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
 
+      - name: 'Configure self-hosted Windows test environment'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/configure-windows-runner'
+
       # The runner profile directory is exposed through an 8.3 short alias
       # (C:\Users\RUNNER~1), so %TEMP% yields short-name paths while
       # fs.realpath resolves the long form of the same directory — tests that
       # compare path strings then fail (~200 cases). Point TEMP/TMP at a
-      # sibling of the workspace, which has no short alias, for every later
-      # step. Runs before setup-node / npm install so they use it too.
+      # sibling of the workspace after self-hosted tuning so this value wins,
+      # and before setup-node / npm install so every later step uses it.
       - name: 'Point temp at a short-alias-free directory'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         shell: 'powershell'
         run: |-
           $temp = Join-Path $env:RUNNER_WORKSPACE 'qwen-code-temp'
           New-Item -ItemType Directory -Force -Path $temp | Out-Null
-          "TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TEMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "TEMP set to $temp"
-
-      - name: 'Configure self-hosted Windows test environment'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
-        uses: './.github/actions/configure-windows-runner'
 
       # Same stale-checkout guard as the Ubuntu gate: this job now runs on ECS,
       # so fail loud if the checkout lacks the merge-queue head rather than
@@ -1074,6 +1074,11 @@ jobs:
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
+
+      - name: 'Verify temp paths carry no short alias'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          node -e "const fs=require('node:fs');for(const key of ['TEMP','TMP']){const value=process.env[key];const real=fs.realpathSync(value);if(real!==value){console.error(key+' carries a short alias: '+value+' -> '+real);process.exitCode=1}}"
 
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"

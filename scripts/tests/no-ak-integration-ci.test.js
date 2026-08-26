@@ -381,6 +381,23 @@ describe('no-AK integration CI wiring', () => {
     expect(configure).toContain(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    const redirectTemp = getWorkflowStep(
+      windowsJob,
+      'Point temp at a short-alias-free directory',
+    );
+    for (const key of ['TEMP', 'TMP']) {
+      expect(redirectTemp).toContain(
+        `"${key}=$temp" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append`,
+      );
+    }
+    const verifyTemp = getWorkflowStep(
+      windowsJob,
+      'Verify temp paths carry no short alias',
+    );
+    expect(verifyTemp).toContain("for(const key of ['TEMP','TMP'])");
+    expect(verifyTemp).toContain('fs.realpathSync(value)');
+    expect(verifyTemp).toContain('if(real!==value)');
+    expect(verifyTemp).toContain('process.exitCode=1');
     const configureAction = readFileSync(
       path.join(ROOT, CONFIGURE_ACTION_PATH),
       'utf8',
@@ -406,6 +423,17 @@ describe('no-AK integration CI wiring', () => {
     const configureUseIndex = windowsJob.indexOf(
       "uses: './.github/actions/configure-windows-runner'",
     );
+    const redirectTempIndex = windowsJob.indexOf(
+      "name: 'Point temp at a short-alias-free directory'",
+    );
+    const hostedNodeIndex = windowsJob.indexOf('actions/setup-node@');
+    const selfHostedNodeIndex = windowsJob.indexOf(
+      "uses: './.github/actions/self-hosted-node'",
+    );
+    const verifyTempIndex = windowsJob.indexOf(
+      "name: 'Verify temp paths carry no short alias'",
+    );
+    const installIndex = windowsJob.indexOf("name: 'Install dependencies'");
     const guardUseIndex = windowsJob.indexOf(
       "uses: './.github/actions/verify-checkout-head'",
     );
@@ -413,6 +441,12 @@ describe('no-AK integration CI wiring', () => {
     expect(autocrlfIndex).toBeGreaterThanOrEqual(0);
     expect(autocrlfIndex).toBeLessThan(windowsCheckoutIndex);
     expect(configureUseIndex).toBeGreaterThan(windowsCheckoutIndex);
+    expect(redirectTempIndex).toBeGreaterThan(configureUseIndex);
+    expect(redirectTempIndex).toBeLessThan(hostedNodeIndex);
+    expect(redirectTempIndex).toBeLessThan(selfHostedNodeIndex);
+    expect(verifyTempIndex).toBeGreaterThan(hostedNodeIndex);
+    expect(verifyTempIndex).toBeGreaterThan(selfHostedNodeIndex);
+    expect(verifyTempIndex).toBeLessThan(installIndex);
     expect(guardUseIndex).toBeGreaterThan(windowsCheckoutIndex);
     expect(configureUseIndex).toBeLessThan(guardUseIndex);
     for (const line of [
