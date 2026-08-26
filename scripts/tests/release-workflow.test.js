@@ -130,6 +130,42 @@ describe('release workflow', () => {
     expect(steps[preflightIndex].run).toContain('docker info');
   });
 
+  it('bounds shared-pool jobs and skips redundant remote npm caches', () => {
+    expect(
+      Object.fromEntries(
+        [
+          'prepare',
+          'quality',
+          'integration_none',
+          'integration_docker',
+          'notify_failure',
+        ].map((id) => [id, releaseYaml.jobs[id]['timeout-minutes']]),
+      ),
+    ).toEqual({
+      prepare: 30,
+      quality: 120,
+      integration_none: 120,
+      integration_docker: 120,
+      notify_failure: 10,
+    });
+
+    for (const id of [
+      'prepare',
+      'quality',
+      'integration_none',
+      'integration_docker',
+      'publish',
+    ]) {
+      const setupNode = releaseYaml.jobs[id].steps.find((step) =>
+        String(step.uses ?? '').includes('actions/setup-node'),
+      );
+      expect(setupNode?.with.cache, id).toBe(
+        "${{ runner.environment != 'self-hosted' && 'npm' || '' }}",
+      );
+      expect(setupNode?.with['package-manager-cache'], id).toBe(false);
+    }
+  });
+
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
     // This gate is the sole protection keeping a nightly/preview/dry-run
     // release from moving the ECS fleet; the triggered update workflow
