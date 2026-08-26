@@ -37,7 +37,14 @@ concurrency:
 jobs:
   e2e-test-linux:
     name: 'E2E Test (Linux) - ${{ matrix.sandbox }} - shard ${{ matrix.shard }}'
-    runs-on: 'ubuntu-latest'
+    # Persistent ECS pool with hosted fallback: every trigger here is a
+    # trusted context (push to in-repo branches, the nightly schedule, and
+    # manual dispatch — no pull_request trigger), and the six-shard matrix
+    # at ~16 minutes each was one of the largest remaining hosted consumers.
+    # The pool ships docker (measured by qwen-autofix's sandboxed jobs; see
+    # the runtime preflight below, per #9556).
+    # Kill-switch: MAINTAINER_ECS_RUNNER_DISABLED.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Skip on fork PRs: forks have no access to repository secrets
     # (OPENAI_*, DOCKERHUB_*), so the matrix would fail unconditionally
     # and show misleading red status. Same-repo PRs run normally.
@@ -61,6 +68,35 @@ jobs:
         node-version:
           - '22.x'
     steps:
+      # Fail-fast capability preflight (#9556): the docker leg needs a live
+      # daemon, and without this check a missing one surfaces only after
+      # npm ci + build. Runs on hosted and pool runners alike — both are
+      # expected to answer.
+      - name: 'Check container runtime'
+        if: |-
+          ${{ matrix.sandbox == 'sandbox:docker' }}
+        run: |-
+          set -uo pipefail
+          if ! docker info > /dev/null 2>&1; then
+            echo "::error::docker daemon is not reachable on ${RUNNER_NAME:-this runner}; the sandbox:docker leg cannot run here."
+            exit 1
+          fi
+
+      # Pre-checkout heal, mirroring ci.yml: the docker leg's containers can
+      # leave root-owned files in the reused pool workspace, and the next
+      # checkout's clean would die on EACCES. Hosted runners are ephemeral
+      # and never take this branch.
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -146,6 +182,18 @@ jobs:
           else
             npm run test:integration:sandbox:none -- --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts' --shard='${{ matrix.shard }}'
           fi
+
+      # The sandbox build retags the same image name every run, so on a
+      # persistent runner the superseded layers go dangling and would
+      # accumulate. Dangling-only prune with an age floor: never touches
+      # tagged images other jobs on this machine may still use, and keeps
+      # the last day of layers as build cache for the next run. Hosted
+      # runners are ephemeral and skip this.
+      - name: 'Prune dangling docker images'
+        if: |-
+          ${{ always() && matrix.sandbox == 'sandbox:docker' && runner.environment == 'self-hosted' }}
+        run: |-
+          docker image prune --force --filter 'until=24h' > /dev/null 2>&1 || true
 
   e2e-test-macos:
     name: 'E2E Test - macOS - shard ${{ matrix.shard }}'

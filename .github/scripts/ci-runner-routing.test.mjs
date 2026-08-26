@@ -72,6 +72,7 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name != 'pull_request'/,
       String(eventName !== 'pull_request'),
     ],
+    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
       String(sameRepo),
@@ -418,6 +419,95 @@ describe('serve-ab.yml runner routing', () => {
       tail[4],
       '{ git --git-dir="$WS/.git" config --local --name-only --list 2>/dev/null || true; } | { grep -ivE \'^(core\\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\\.|branch\\.|extensions\\.|gc\\.|pack\\.|fetch\\.|index\\.|safe\\.|submodule\\.[^.]+\\.(url|active|branch))\' || true; } | while IFS= read -r key; do git --git-dir="$WS/.git" config --local --unset-all "$key" 2>/dev/null || true; done',
       "the kept .git config must be scrubbed to the qwen-triage.yml config-sanitize allowlist, anchored to $WS/.git so a healed symlinked root never scrubs the link's target",
+    );
+  });
+});
+
+describe('e2e.yml e2e-test-linux runner routing', () => {
+  // Every trigger is a trusted context (push to in-repo branches, schedule,
+  // dispatch — no pull_request), so the lane routes to the persistent pool
+  // whenever routing is enabled, with the kill-switch as the only fallback.
+  const e2eDoc = parse(readFileSync(join(workflowsDir, 'e2e.yml'), 'utf8'));
+  // evalRunsOn unwraps the winning fromJSON label to the array it names.
+  const ECS_LABELS = ['self-hosted', 'linux', 'x64', 'ecs-qwen'];
+  const HOSTED_LABELS = ['ubuntu-latest'];
+  const job = e2eDoc.jobs['e2e-test-linux'];
+  const runsOn = String(job['runs-on']);
+
+  it('reaches the persistent pool on every trusted trigger', () => {
+    for (const eventName of ['push', 'schedule', 'workflow_dispatch']) {
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName,
+          sameRepo: false,
+          assoc: '',
+        }),
+        ECS_LABELS,
+        `e2e-test-linux must run from the pool on ${eventName}`,
+      );
+    }
+  });
+
+  it('obeys the kill-switch', () => {
+    assert.deepEqual(
+      evalRunsOn(runsOn, {
+        ecsDisabled: true,
+        eventName: 'push',
+        sameRepo: true,
+        assoc: 'OWNER',
+      }),
+      HOSTED_LABELS,
+      'kill-switch must force the lane back to hosted',
+    );
+  });
+
+  it('keeps the workflow free of pull_request triggers', () => {
+    // The simple repo+kill-switch expression above is only safe because no
+    // lane of this workflow ever runs PR-authored workflow code. Adding a
+    // pull_request trigger must force a deliberate routing rework.
+    const triggers = Object.keys(e2eDoc.on ?? e2eDoc[true] ?? {});
+    assert.ok(triggers.length > 0, 'could not read the trigger map');
+    for (const trigger of triggers) {
+      assert.ok(
+        !trigger.startsWith('pull_request'),
+        `e2e.yml gained a ${trigger} trigger; the pool routing needs the fork-trust clause before this can land`,
+      );
+    }
+  });
+
+  it('carries the pool hygiene and capability steps in order', () => {
+    const names = job.steps.map((s) => s.name);
+    const preflight = names.indexOf('Check container runtime');
+    const heal = names.indexOf('Restore workspace ownership');
+    const checkout = job.steps.findIndex((s) =>
+      String(s.uses || '').startsWith('actions/checkout'),
+    );
+    const prune = names.indexOf('Prune dangling docker images');
+    // Fail-fast daemon probe (#9556) before any expensive step, only on the
+    // docker leg.
+    assert.ok(preflight !== -1, 'the docker preflight must exist');
+    assert.match(job.steps[preflight].if, /sandbox:docker/);
+    assert.match(job.steps[preflight].run, /docker info/);
+    // Ownership heal before checkout, self-hosted only.
+    assert.ok(heal !== -1, 'the ownership heal must exist');
+    assert.equal(
+      job.steps[heal].if,
+      "${{ runner.environment == 'self-hosted' }}",
+    );
+    assert.match(job.steps[heal].run, /chown -R .* "\$GITHUB_WORKSPACE"/);
+    assert.ok(heal < checkout, 'the heal must precede the checkout');
+    // Dangling-only prune at the end: always(), docker leg, pool only —
+    // and never a form that could remove tagged images other jobs use.
+    assert.ok(prune !== -1, 'the dangling prune must exist');
+    assert.match(job.steps[prune].if, /always\(\)/);
+    assert.match(job.steps[prune].if, /sandbox:docker/);
+    assert.match(job.steps[prune].if, /runner\.environment == 'self-hosted'/);
+    assert.match(job.steps[prune].run, /docker image prune --force/);
+    assert.doesNotMatch(job.steps[prune].run, /--all|-a\b/);
+    assert.ok(
+      prune === job.steps.length - 1,
+      'the prune must run after the test step',
     );
   });
 });
