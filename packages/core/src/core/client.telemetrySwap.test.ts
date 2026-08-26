@@ -89,6 +89,7 @@ function makeEnv() {
   const config: any = {
     getSessionId: () => sessionId,
     getResumedSessionData: () => resumedData,
+    getToolRegistry: () => ({ getTool: () => undefined }),
     swap(id: string, data?: ResumedSessionData) {
       sessionId = id;
       resumedData = data;
