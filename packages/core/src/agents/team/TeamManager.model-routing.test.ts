@@ -20,6 +20,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { TeamManager } from './TeamManager.js';
 import { InProcessBackend } from '../backends/InProcessBackend.js';
+import { AgentStatus } from '../runtime/agent-types.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { Config } from '../../config/config.js';
 import type { TeamFile } from './types.js';
@@ -41,50 +42,18 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
 });
 
 // Mock AgentCore to avoid real model calls while keeping the real
-// InProcessBackend + AgentInteractive wiring. Mirrors the mock in
-// InProcessBackend.test.ts, including the observable-state accessors
-// AgentInteractive delegates to.
-const runReasoningLoopMock = vi.hoisted(() => vi.fn());
-vi.mock('../runtime/agent-core.js', () => ({
-  AgentCore: vi.fn().mockImplementation(() => {
-    const messages: Array<Record<string, unknown>> = [];
-    const pendingApprovals = new Map<string, unknown>();
-    const liveOutputs = new Map<string, unknown>();
-    const shellPids = new Map<string, number>();
-    const emitter = {
-      on: vi.fn(),
-      off: vi.fn(),
-      emit: vi.fn(),
-    };
-    return {
-      subagentId: 'mock-id',
-      name: 'mock-agent',
-      eventEmitter: emitter,
-      stats: {
-        start: vi.fn(),
-        getSummary: vi.fn().mockReturnValue({}),
-      },
-      createChat: vi.fn().mockResolvedValue({}),
-      prepareTools: vi.fn().mockReturnValue([]),
-      runReasoningLoop: runReasoningLoopMock,
-      getEventEmitter: vi.fn().mockReturnValue(emitter),
-      getExecutionSummary: vi.fn().mockReturnValue({}),
-      getMessages: () => messages,
-      getPendingApprovals: () => pendingApprovals,
-      getLiveOutputs: () => liveOutputs,
-      getShellPids: () => shellPids,
-      pushMessage: (role: string, content: string) => {
-        messages.push({ role, content, timestamp: Date.now() });
-      },
-      setPendingApproval: (callId: string, details: unknown) =>
-        pendingApprovals.set(callId, details),
-      deletePendingApproval: (callId: string) =>
-        pendingApprovals.delete(callId),
-      clearPendingApprovals: () => pendingApprovals.clear(),
-    };
-  }),
-}));
+// InProcessBackend + AgentInteractive wiring. The factory and helpers
+// are shared with InProcessBackend.test.ts so both suites assert
+// against the same mocked AgentCore surface.
+vi.mock('../runtime/agent-core.js', async () =>
+  (await import('../runtime/agent-core-test-mock.js')).agentCoreMockModule(),
+);
 import { AgentCore } from '../runtime/agent-core.js';
+import {
+  runReasoningLoopMock,
+  destructureAgentCoreCall,
+  createMockToolRegistry,
+} from '../runtime/agent-core-test-mock.js';
 
 // Mock Storage so team files land in a per-test temp dir (same pattern
 // as coordination-harness.test.ts).
@@ -111,43 +80,10 @@ function setMockGlobalDir(dir: string): void {
   ).__setMockGlobalDir(dir);
 }
 
-// Positional AgentCore constructor parameters, destructured by name so a
-// new parameter cannot silently shift assertions onto the wrong slot.
-function destructureAgentCoreCall(call: unknown[]) {
-  return {
-    name: call[0] as string,
-    runtimeContext: call[1],
-    promptConfig: call[2],
-    modelConfig: call[3] as { model?: string },
-    runConfig: call[4],
-    toolConfig: call[5],
-    eventEmitter: call[6],
-    hooks: call[7],
-    runtimeView: call[8] as
-      | {
-          contentGenerator: unknown;
-          contentGeneratorConfig: { authType?: string; model?: string };
-        }
-      | undefined,
-  };
-}
-
 // ─── Leader Config mock ──────────────────────────────────────
 
 const LEADER_MODEL = 'leader-model';
 const LEADER_AUTH_TYPE = 'openai';
-
-function createMockToolRegistry() {
-  return {
-    getFunctionDeclarations: vi.fn().mockReturnValue([]),
-    getAllTools: vi.fn().mockReturnValue([]),
-    getAllToolNames: vi.fn().mockReturnValue([]),
-    registerTool: vi.fn(),
-    copyDiscoveredToolsFrom: vi.fn(),
-    stop: vi.fn().mockResolvedValue(undefined),
-    tools: new Map(),
-  };
-}
 
 /**
  * Leader-session Config mock: provider route is
@@ -400,5 +336,78 @@ describe('TeamManager teammate model routing (#10071)', () => {
     expect(backend.getAgentContentGenerator(agentId)).toBe(
       leaderConfig.getContentGenerator(),
     );
+  });
+
+  it('keeps the leader route when the leader overrides the model at spawn time', async () => {
+    // The definition selects a custom route, but the leader picks the
+    // model explicitly at spawn time: the definition does not vouch
+    // for the route of a model it did not select, so the `!config.model`
+    // guard must skip authOverrides entirely.
+    await writeAgentDefinition(projectDir, 'overridden-worker.md', {
+      name: 'overridden-worker',
+      description: 'A worker whose route must yield to a spawn override',
+      model: 'anthropic:claude-worker',
+    });
+
+    await teamManager.spawnTeammate({
+      name: 'w5',
+      agentType: 'overridden-worker',
+      model: 'leader-picked-model',
+      cwd: projectDir,
+    });
+
+    const agentId = formatAgentId('w5', TEAM_NAME);
+
+    // No dedicated generator may be built on the definition's route...
+    expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    // ...the teammate runs on the leader's generator...
+    expect(backend.getAgentContentGenerator(agentId)).toBe(
+      leaderConfig.getContentGenerator(),
+    );
+
+    // ...and every surface agrees on the spawn-time model.
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const { modelConfig, runtimeView } = destructureAgentCoreCall(
+      MockAgentCore.mock.calls.at(-1)!,
+    );
+    expect(modelConfig.model).toBe('leader-picked-model');
+    expect(runtimeView).toBeUndefined();
+    const member = teamManager.getTeamFile().members[0]!;
+    expect(member.model).toBe('leader-picked-model');
+  });
+
+  it('fails loudly when the dedicated route generator cannot be created', async () => {
+    // The definition selects a route but the generator for it cannot be
+    // created (e.g. missing API key). InProcessBackend swallows that
+    // failure and falls back to the leader's generator; the spawn path
+    // must detect the missing dedicated generator and fail into the
+    // rollback instead of letting the teammate join misrouted (#10071).
+    await writeAgentDefinition(projectDir, 'unroutable-worker.md', {
+      name: 'unroutable-worker',
+      description: 'A worker whose route cannot be created',
+      model: 'anthropic:claude-worker',
+    });
+
+    mockCreateContentGenerator.mockRejectedValueOnce(
+      new Error('The API key for Anthropic is not set'),
+    );
+
+    await expect(
+      teamManager.spawnTeammate({
+        name: 'w6',
+        agentType: 'unroutable-worker',
+        cwd: projectDir,
+      }),
+    ).rejects.toThrow(/could not create a dedicated ContentGenerator/);
+
+    // Rollback must run: no member persisted, and the spawned agent was
+    // stopped (the backend keeps the handle until its exit watcher drops
+    // it, so assert the terminal state rather than absence).
+    expect(teamManager.getTeamFile().members).toHaveLength(0);
+    const agentId = formatAgentId('w6', TEAM_NAME);
+    const stopped = backend.getAgent(agentId);
+    if (stopped) {
+      expect(stopped.getStatus()).toBe(AgentStatus.CANCELLED);
+    }
   });
 });
