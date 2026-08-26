@@ -107,6 +107,28 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('keeps the language-pitfall and wrapper/proxy checks as dedicated high-effort angles', () => {
+    // #9788: both rode inside Agent 1a's line-by-line brief as bullets, and
+    // the walk's rhythm diluted them — a checklist pattern-match and a
+    // structural routing expectation are different attention modes from
+    // judging each line in its context. Folding them back restores the
+    // dilution the split exists to remove.
+    const body = skillBody();
+    // The angles exist as roles of their own, listed among the selectors a
+    // relaunch rebuilds.
+    expect(body).toContain('`1d`');
+    expect(body).toContain('`1e`');
+    // 1e is high-only AND conditional on the plan's own signal — the gate
+    // fails safe (an absent field rosters it), which the skill states.
+    expect(body).toContain(
+      `rostered only when the plan's \`wrapperSignal\` is true`,
+    );
+    // And 1a no longer carries either clause folded into its row.
+    expect(body).not.toContain(
+      `the language's own pitfalls, and wrapper/proxy routing`,
+    );
+  });
+
   it('keeps anchor validation inside the CLI, not in the orchestrator', () => {
     // The whole point of routing the anchor through `--since`: a hand-run
     // check is one a run can skip, and the skill forbids hand-computed diffs
@@ -1104,6 +1126,29 @@ describe('bundled review skill', () => {
     // section: one copy in the corpus, in the core.
     expect(corpus.match(/- `modelId` — for the footer\./g)).toHaveLength(1);
     expect(core).toContain('- `modelId` — for the footer.');
+  });
+
+  it('pins the minimal arm report_findings override on the unverified level', () => {
+    // Step 6 mandates `report_findings` at the run's RESOLVED effort with
+    // entries copied from the findings artifact, and Step 3M forbids the
+    // artifact. Without its own override — the one Step 3C has — the arm
+    // either skips the call for lack of an artifact or reports at the
+    // resolved effort (high on a PR target): clients render the unverified
+    // marker only for `level: "low"`, so either shape defeats the
+    // labeled-unverified property the parser force-offs and the posting
+    // declines reserve for this arm.
+    const body = coreBody();
+    const start = body.indexOf('## Step 3M');
+    const end = body.indexOf('## Step 4');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = body.slice(start, end);
+    expect(section).toContain('`report_findings`');
+    expect(section).toContain('`level: "low"`');
+    expect(section).toContain('the composed finding list');
+    expect(section).toContain(
+      'would render these unverified findings indistinguishably from a verified high-effort review',
+    );
   });
 
   it('keeps template tokens out of the raw-loaded reference files', () => {

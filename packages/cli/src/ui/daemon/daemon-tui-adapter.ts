@@ -11,7 +11,12 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   createDebugLogger,
+  FINDING_CONFIDENCES,
+  FINDING_OUTCOMES,
+  FINDING_SEVERITIES,
+  FINDING_SOURCES,
   isVisionBridgeNoticeDisplay,
+  REPORT_FINDINGS_LEVELS,
 } from '@qwen-code/qwen-code-core';
 import {
   ToolCallStatus,
@@ -19,6 +24,7 @@ import {
   type HistoryItemWithoutId,
   type IndividualToolCallDisplay,
 } from '../types.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
 
 export interface DaemonTuiEvent {
   id?: number;
@@ -262,6 +268,54 @@ function createSanitizedDaemonError(error: unknown): Error {
   return new Error(`Daemon RPC failed: ${message}`);
 }
 
+function isEnumValue(value: unknown, allowed: readonly string[]): boolean {
+  return typeof value === 'string' && allowed.includes(value);
+}
+
+// The trust boundary for findings_list: past this check the payload reaches
+// FindingsDisplay, which reads `findings` and its fields unconditionally.
+// Anything short of the full typed shape — a discriminator-only payload, a
+// missing array, a bad enum — falls back to the plain-text rendering instead
+// of crashing the TUI.
+function isFindingsListDisplay(value: unknown): boolean {
+  if (!isRecord(value) || !Array.isArray(value['findings'])) {
+    return false;
+  }
+  if (
+    value['level'] !== undefined &&
+    !isEnumValue(value['level'], REPORT_FINDINGS_LEVELS)
+  ) {
+    return false;
+  }
+  if (
+    value['omittedFindings'] !== undefined &&
+    typeof value['omittedFindings'] !== 'number'
+  ) {
+    return false;
+  }
+  return (value['findings'] as unknown[]).every(
+    (entry) =>
+      isRecord(entry) &&
+      typeof entry['file'] === 'string' &&
+      typeof entry['summary'] === 'string' &&
+      typeof entry['shortSummary'] === 'string' &&
+      typeof entry['failureScenario'] === 'string' &&
+      isEnumValue(entry['severity'], FINDING_SEVERITIES) &&
+      (entry['confidence'] === undefined ||
+        isEnumValue(entry['confidence'], FINDING_CONFIDENCES)) &&
+      (entry['source'] === undefined ||
+        isEnumValue(entry['source'], FINDING_SOURCES)) &&
+      (entry['outcome'] === undefined ||
+        isEnumValue(entry['outcome'], FINDING_OUTCOMES)) &&
+      (entry['line'] === undefined || typeof entry['line'] === 'number') &&
+      (entry['id'] === undefined || typeof entry['id'] === 'string') &&
+      (entry['category'] === undefined ||
+        typeof entry['category'] === 'string') &&
+      (entry['outcomeNote'] === undefined ||
+        typeof entry['outcomeNote'] === 'string'),
+  );
+}
+
 function formatToolResultDisplay(
   value: unknown,
 ): IndividualToolCallDisplay['resultDisplay'] {
@@ -283,7 +337,17 @@ function formatToolResultDisplay(
   ) {
     return sanitizeDisplayText(value['fallbackText']);
   }
-  if (
+  if (isRecord(value) && value['type'] === 'findings_list') {
+    // Discriminator-first rejection: a findings_list record that fails the
+    // full shape check falls back to the text rendering below no matter
+    // what other keys it carries, so `ansiOutput`/`fileDiff` cannot smuggle
+    // it past the guard and into FindingsDisplay.
+    if (isFindingsListDisplay(value)) {
+      return sanitizeDaemonValue(
+        value,
+      ) as IndividualToolCallDisplay['resultDisplay'];
+    }
+  } else if (
     isRecord(value) &&
     (typeof value['fileDiff'] === 'string' ||
       'ansiOutput' in value ||
@@ -389,6 +453,20 @@ function toolUpdateToHistoryItem(
       const oldest = state.toolCallOrder.shift();
       if (oldest !== undefined) {
         state.toolCallsById.delete(oldest);
+      }
+    }
+    // A delivered findings list REPLACES the session's earlier one: the
+    // projection keeps a single logical report, so the previous list's
+    // entry takes the replacement marker instead of rendering beside it.
+    if (isFindingsListDisplay(tool.resultDisplay)) {
+      for (const [id, entry] of state.toolCallsById) {
+        if (id === toolCallId) continue;
+        if (isFindingsListDisplay(entry.resultDisplay)) {
+          state.toolCallsById.set(id, {
+            ...entry,
+            resultDisplay: SUPERSEDED_FINDINGS_MESSAGE,
+          });
+        }
       }
     }
   }

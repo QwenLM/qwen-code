@@ -99,6 +99,7 @@ import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   isContextFilesAnnouncement,
 } from './utils/commandUtils.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from './utils/findings-coalescing.js';
 import { ICON } from './constants.js';
 import type { RestoreOption } from './components/RewindSelector.js';
 import { Box, measureElement } from 'ink';
@@ -6026,6 +6027,70 @@ describe('AppContainer State Management', () => {
         { truncatedCount: 2 },
         harness.snapshots.slice(0, 2),
       );
+    });
+
+    it('restores a superseded findings list when rewinding past its replacing call', async () => {
+      // The outcome re-report superseded the initial list at commit time;
+      // rewinding past the re-report must bring the initial checklist
+      // back instead of leaving the stale replacement marker.
+      const firstDisplay = {
+        type: 'findings_list',
+        findings: [
+          {
+            id: 'R1-1',
+            severity: 'Critical',
+            file: 'src/foo.ts',
+            summary: 's',
+            shortSummary: 's',
+            failureScenario: 'f',
+          },
+        ],
+      };
+      const findingsGroup = (
+        id: number,
+        callId: string,
+        resultDisplay: unknown,
+        carried?: unknown,
+      ): HistoryItem =>
+        ({
+          id,
+          type: 'tool_group',
+          tools: [
+            {
+              callId,
+              name: 'report_findings',
+              description: 'Report findings',
+              status: ToolCallStatus.Success,
+              confirmationDetails: undefined,
+              resultDisplay,
+              supersededFindingsDisplay: carried,
+            },
+          ],
+        }) as unknown as HistoryItem;
+      const history: HistoryItem[] = [
+        rewindUserItem(1, 'first prompt', 'prompt-1'),
+        findingsGroup(2, 'call-1', SUPERSEDED_FINDINGS_MESSAGE, firstDisplay),
+        rewindUserItem(3, 'second prompt', 'prompt-2'),
+        findingsGroup(4, 'call-2', {
+          ...firstDisplay,
+          findings: [{ ...firstDisplay.findings[0], outcome: 'fixed' }],
+        }),
+      ];
+      const harness = renderRewindHarness({ history });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.loadHistory).toHaveBeenCalledTimes(1);
+      const loaded = harness.loadHistory.mock.calls[0][0] as HistoryItem[];
+      expect(loaded).toHaveLength(2);
+      const surviving = loaded[1] as unknown as {
+        tools: Array<{
+          resultDisplay: unknown;
+          supersededFindingsDisplay?: unknown;
+        }>;
+      };
+      expect(surviving.tools[0].resultDisplay).toEqual(firstDisplay);
+      expect(surviving.tools[0].supersededFindingsDisplay).toBeUndefined();
     });
 
     it('re-arms the latch when rewinding past the context-file announcement', async () => {
