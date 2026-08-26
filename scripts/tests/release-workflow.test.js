@@ -250,6 +250,11 @@ describe('release workflow', () => {
         HOME: home,
         XDG_CONFIG_HOME: join(home, '.config'),
       };
+      // An ambient GIT_CONFIG_GLOBAL would redirect `git config --global`
+      // (setHook and the post-scrub assertion) away from the synthetic HOME
+      // and defeat the hermetic scrub; the sibling scrub harness in
+      // qwen-autofix-workflow.test.js deletes it for the same reason.
+      delete env['GIT_CONFIG_GLOBAL'];
       const scrubStart = canonicalWipe.indexOf('rm -f -- "${HOME:?}/.npmrc"');
       expect(scrubStart).toBeGreaterThan(0);
       const scrubHome = () =>
@@ -578,7 +583,7 @@ describe('release lane runner routing', () => {
   // switch + both the ecs-qwen and ubuntu-latest branches. Same pinning
   // shape as qwen-autofix-workflow.test.js's heavy-job runs-on tripwire.
   const ecsRunsOn =
-    "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}";
+    '${{ (github.repository == \'QwenLM/qwen-code\' && vars.MAINTAINER_ECS_RUNNER_DISABLED != \'true\') && fromJSON(\'["self-hosted", "linux", "x64", "ecs-qwen"]\') || fromJSON(\'["ubuntu-latest"]\') }}';
 
   it('pins every routed release job to the conditional ECS runs-on', () => {
     const conditionalJobs = [
@@ -594,9 +599,7 @@ describe('release lane runner routing', () => {
       // clause, or typoing the expression must fail here — an unpinned
       // revert would silently re-pin releases to hosted capacity (the
       // stall this migration exists to fix) or defeat the kill switch.
-      expect(job['runs-on'], `runs-on drifted on job: ${name}`).toBe(
-        ecsRunsOn,
-      );
+      expect(job['runs-on'], `runs-on drifted on job: ${name}`).toBe(ecsRunsOn);
     }
   });
 
