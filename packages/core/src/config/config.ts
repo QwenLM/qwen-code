@@ -106,7 +106,10 @@ import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import type { SkillLevel } from '../skills/types.js';
-import { PermissionManager } from '../permissions/permission-manager.js';
+import {
+  PermissionManager,
+  type ToolRegistrationStatus,
+} from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,
   createDenialState,
@@ -8667,11 +8670,13 @@ export class Config {
     ) {
       return;
     }
-    let enabled = true;
+    let status: ToolRegistrationStatus = 'registered';
     try {
-      enabled = this.permissionManager
-        ? await this.permissionManager.isToolEnabled(ToolNames.IMAGE_GEN)
-        : true;
+      status = this.permissionManager
+        ? await this.permissionManager.getToolRegistrationStatus(
+            ToolNames.IMAGE_GEN,
+          )
+        : 'registered';
     } catch (error) {
       this.debugLogger.warn(
         `Failed to check permissions for tool "${ToolNames.IMAGE_GEN}", skipping registration:`,
@@ -8679,12 +8684,17 @@ export class Config {
       );
       return;
     }
-    if (!enabled) return;
+    if (status === 'disabled') return;
 
-    registry.registerFactory(ToolNames.IMAGE_GEN, async () => {
+    const factory: ToolFactory = async () => {
       const { ImageGenTool } = await import('../tools/image-gen.js');
       return new ImageGenTool(this);
-    });
+    };
+    if (status === 'deferred') {
+      registry.registerPermissionDeferredFactory(ToolNames.IMAGE_GEN, factory);
+    } else {
+      registry.registerFactory(ToolNames.IMAGE_GEN, factory);
+    }
   }
 
   async createToolRegistry(
@@ -8703,13 +8713,17 @@ export class Config {
       toolName: ToolName,
       factory: ToolFactory,
     ): Promise<void> => {
-      // PermissionManager handles both the coreTools allowlist (registry-level)
-      // and deny rules (runtime-level) in a single check.
-      let pmEnabled = true;
+      // PermissionManager handles the coreTools allowlist, deny rules, and
+      // the `permissions.allow` registry allowlist in a single check. A tool
+      // the active allowlist does not cover comes back `deferred`, not
+      // `disabled`: it is still registered — listed in `/tools` and loadable
+      // via ToolSearch — but its schema stays out of the eager model request
+      // (#9827) without the tool silently disappearing (#10075).
+      let status: ToolRegistrationStatus = 'registered';
       try {
-        pmEnabled = this.permissionManager
-          ? await this.permissionManager.isToolEnabled(toolName)
-          : true; // Should never reach here after initialize(), but safe default.
+        status = this.permissionManager
+          ? await this.permissionManager.getToolRegistrationStatus(toolName)
+          : 'registered'; // Should never reach here after initialize(), but safe default.
       } catch (error) {
         this.debugLogger.warn(
           `Failed to check permissions for tool "${toolName}", skipping registration:`,
@@ -8718,7 +8732,9 @@ export class Config {
         return;
       }
 
-      if (pmEnabled) {
+      if (status === 'deferred') {
+        registry.registerPermissionDeferredFactory(toolName, factory);
+      } else if (status === 'registered') {
         registry.registerFactory(toolName, factory);
       }
     };
