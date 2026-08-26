@@ -13052,6 +13052,170 @@ describe('Session', () => {
         );
       });
 
+      it.each(['inline image', 'image @ path'] as const)(
+        'lets the vision bridge own the timeout for a mid-turn %s',
+        async (source) => {
+          const tempDir =
+            source === 'image @ path'
+              ? await fs.realpath(
+                  await fs.mkdtemp(
+                    path.join(os.tmpdir(), 'qwen-acp-mid-turn-image-'),
+                  ),
+                )
+              : undefined;
+          const imagePath = tempDir
+            ? path.join(tempDir, 'image.png')
+            : undefined;
+          if (tempDir && imagePath) {
+            await fs.writeFile(imagePath, 'image');
+            mockConfig.getProjectRoot = vi.fn().mockReturnValue(tempDir);
+            mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+              isPathWithinWorkspace: (pathSpec: string) =>
+                path
+                  .resolve(tempDir, pathSpec)
+                  .startsWith(`${tempDir}${path.sep}`),
+            });
+          }
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute: vi.fn().mockResolvedValue({
+                llmContent: 'file contents',
+                returnDisplay: 'file contents',
+              }),
+            }),
+          };
+          const timeoutController = new AbortController();
+          const timeoutSpy = vi
+            .spyOn(AbortSignal, 'timeout')
+            .mockReturnValue(timeoutController.signal);
+          const bridgeResult = {
+            applied: true,
+            status: 'ok' as const,
+            parts: [{ text: '[transcribed image]' }],
+            transcript: '[transcribed image]',
+            convertedCount: 1,
+            omittedCount: 0,
+            modelId: 'vision-bridge',
+          };
+          let bridgeSignal: AbortSignal | undefined;
+          let resolutionSignal: AbortSignal | undefined;
+          let bridgeStarted!: () => void;
+          let resolveBridge!: (result: typeof bridgeResult) => void;
+          const bridgeStartedPromise = new Promise<void>((resolve) => {
+            bridgeStarted = resolve;
+          });
+          const readManyFilesSpy = imagePath
+            ? vi
+                .spyOn(core, 'readManyFiles')
+                .mockImplementation(async (_config, readOptions) => {
+                  resolutionSignal = readOptions.signal;
+                  return {
+                    contentParts: {
+                      inlineData: {
+                        mimeType: 'image/png',
+                        data: 'iVBORw0KGgo=',
+                      },
+                    },
+                  } as Awaited<ReturnType<typeof core.readManyFiles>>;
+                })
+            : undefined;
+
+          try {
+            mockToolRegistry.getTool.mockReturnValue(tool);
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.YOLO);
+            mockConfig.getEffectiveInputModalities = vi
+              .fn()
+              .mockReturnValue({});
+            mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+              id: 'vision-bridge',
+              baseUrl: 'https://vision.example.com/v1',
+            });
+            mockClient.extMethod = vi.fn().mockResolvedValue({
+              items: [
+                {
+                  content: imagePath
+                    ? [
+                        {
+                          type: 'text',
+                          text: `please inspect @${imagePath}`,
+                        },
+                      ]
+                    : [
+                        { type: 'text', text: 'please inspect this image' },
+                        {
+                          type: 'image',
+                          mimeType: 'image/png',
+                          data: 'iVBORw0KGgo=',
+                        },
+                      ],
+                  displayText: 'please inspect this image',
+                },
+              ],
+            });
+            runVisionBridgeSpy.mockImplementation(
+              ({ signal }: { signal: AbortSignal }) =>
+                new Promise((resolve) => {
+                  bridgeSignal = signal;
+                  resolveBridge = resolve;
+                  bridgeStarted();
+                }),
+            );
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(
+                createStreamWithChunks([
+                  {
+                    type: core.StreamEventType.CHUNK,
+                    value: {
+                      functionCalls: [
+                        {
+                          id: 'call-1',
+                          name: 'read_file',
+                          args: { path: '/tmp/test.txt' },
+                        },
+                      ],
+                    },
+                  },
+                ]),
+              )
+              .mockResolvedValueOnce(createEmptyStream());
+
+            const prompt = session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'read file' }],
+            });
+            await bridgeStartedPromise;
+            timeoutController.abort(new Error('mid-turn resolution timed out'));
+
+            const bridgeWasAborted = bridgeSignal?.aborted;
+            resolveBridge(bridgeResult);
+            await prompt;
+
+            expect(bridgeWasAborted).toBe(false);
+            if (resolutionSignal) expect(resolutionSignal.aborted).toBe(true);
+            const secondCall = vi.mocked(mockChat.sendMessageStream).mock
+              .calls[1];
+            expect(
+              textParts(secondCall?.[1].message as Part[]).some((text) =>
+                text.includes('[transcribed image]'),
+              ),
+            ).toBe(true);
+          } finally {
+            timeoutSpy.mockRestore();
+            readManyFilesSpy?.mockRestore();
+            if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
+          }
+        },
+      );
+
       it('records inline-media-only mid-turn messages with a placeholder display text', async () => {
         // An inline image with no text and no references must not record an
         // empty displayText: resume and replay would otherwise fall back to
@@ -13725,18 +13889,6 @@ describe('Session', () => {
 
       it('stops draining mid-turn messages when structured resolution is aborted', async () => {
         let promptSignalAborted = false;
-        const clampSpy = vi
-          .spyOn(core, 'clampInlineMediaPart')
-          .mockImplementation(() => {
-            const pendingPrompt = (
-              session as unknown as { pendingPrompt: AbortController | null }
-            ).pendingPrompt;
-            pendingPrompt?.abort();
-            promptSignalAborted = pendingPrompt?.signal.aborted ?? false;
-            const abortError = new Error('aborted');
-            abortError.name = 'AbortError';
-            throw abortError;
-          });
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: 'file contents',
           returnDisplay: 'file contents',
@@ -13755,6 +13907,24 @@ describe('Session', () => {
 
         mockToolRegistry.getTool.mockReturnValue(tool);
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-bridge',
+          baseUrl: 'https://vision.example.com/v1',
+        });
+        runVisionBridgeSpy.mockImplementation(async () => {
+          const pendingPrompt = (
+            session as unknown as { pendingPrompt: AbortController | null }
+          ).pendingPrompt;
+          pendingPrompt?.abort();
+          promptSignalAborted = pendingPrompt?.signal.aborted ?? false;
+          return {
+            applied: false,
+            status: 'skipped',
+            convertedCount: 0,
+            omittedCount: 0,
+          };
+        });
         mockClient.extMethod = vi.fn().mockResolvedValue({
           items: [
             {
@@ -13794,48 +13964,44 @@ describe('Session', () => {
           ]),
         );
 
-        try {
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'read file' }],
-          });
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
 
-          const retainedMidTurnPart = {
-            text: '\n[User message received during tool execution]: already queued',
-          };
-          const abortedMidTurnPart = {
-            text: '\n[User message received during tool execution]: inspect this image',
-          };
-          const skippedMidTurnPart = {
-            text: '\n[User message received during tool execution]: should not be processed',
-          };
-          const preservedMessage = vi.mocked(mockChat.addHistory).mock
-            .calls[0]?.[0] as Content | undefined;
+        const retainedMidTurnPart = {
+          text: '\n[User message received during tool execution]: already queued',
+        };
+        const abortedMidTurnPart = {
+          text: '\n[User message received during tool execution]: inspect this image',
+        };
+        const skippedMidTurnPart = {
+          text: '\n[User message received during tool execution]: should not be processed',
+        };
+        const preservedMessage = vi.mocked(mockChat.addHistory).mock
+          .calls[0]?.[0] as Content | undefined;
 
-          expect(promptSignalAborted).toBe(true);
-          expect(clampSpy).toHaveBeenCalledTimes(1);
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
-          expect(preservedMessage?.parts).toEqual(
-            expect.arrayContaining([retainedMidTurnPart]),
-          );
-          expect(preservedMessage?.parts).not.toEqual(
-            expect.arrayContaining([abortedMidTurnPart]),
-          );
-          expect(preservedMessage?.parts).not.toEqual(
-            expect.arrayContaining([skippedMidTurnPart]),
-          );
-          expect(
-            mockChatRecordingService.recordMidTurnUserMessage,
-          ).toHaveBeenCalledWith([retainedMidTurnPart], 'already queued');
-          expect(
-            mockChatRecordingService.recordMidTurnUserMessage,
-          ).not.toHaveBeenCalledWith(
-            [skippedMidTurnPart],
-            'should not be processed',
-          );
-        } finally {
-          clampSpy.mockRestore();
-        }
+        expect(promptSignalAborted).toBe(true);
+        expect(runVisionBridgeSpy).toHaveBeenCalledTimes(1);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(preservedMessage?.parts).toEqual(
+          expect.arrayContaining([retainedMidTurnPart]),
+        );
+        expect(preservedMessage?.parts).not.toEqual(
+          expect.arrayContaining([abortedMidTurnPart]),
+        );
+        expect(preservedMessage?.parts).not.toEqual(
+          expect.arrayContaining([skippedMidTurnPart]),
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith([retainedMidTurnPart], 'already queued');
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).not.toHaveBeenCalledWith(
+          [skippedMidTurnPart],
+          'should not be processed',
+        );
       });
 
       it('logs unrecognized mid-turn drain response fields', async () => {
@@ -21448,14 +21614,33 @@ describe('Session', () => {
       const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
       const executeSpy = vi.fn();
       const internals = session as unknown as {
-        midTurnRecoveredMessages: Array<{
-          kind: 'text';
-          message: string;
-        }>;
+        midTurnRecoveredMessages: Array<
+          | { kind: 'text'; message: string }
+          | {
+              kind: 'structured';
+              content: Array<{
+                type: 'image';
+                mimeType: string;
+                data: string;
+              }>;
+              displayText: string;
+            }
+        >;
       };
       internals.midTurnRecoveredMessages.push({
         kind: 'text',
         message: 'recovered before cancellation',
+      });
+      internals.midTurnRecoveredMessages.push({
+        kind: 'structured',
+        content: [
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+        displayText: 'recovered image before cancellation',
       });
       const invocation = {
         params: { command: rawCommand },
@@ -21527,6 +21712,10 @@ describe('Session', () => {
           {
             text: '\n[User message received during tool execution]: recovered before cancellation',
           },
+          {
+            text: '\n[User message received during tool execution]: recovered image before cancellation',
+          },
+          { text: '[Attachment could not be processed]' },
         ],
       });
       expect(
@@ -21538,6 +21727,17 @@ describe('Session', () => {
           },
         ],
         'recovered before cancellation',
+      );
+      expect(
+        mockChatRecordingService.recordMidTurnUserMessage,
+      ).toHaveBeenCalledWith(
+        [
+          {
+            text: '\n[User message received during tool execution]: recovered image before cancellation',
+          },
+          { text: '[Attachment could not be processed]' },
+        ],
+        'recovered image before cancellation',
       );
     });
 
