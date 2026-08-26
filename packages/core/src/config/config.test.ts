@@ -3201,6 +3201,24 @@ describe('Server Config (config.ts)', () => {
     expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps project-derived features disabled for a provisional workspace', () => {
+    const config = new Config({
+      ...baseParams,
+      provisionalWorkspace: true,
+      lsp: { enabled: true },
+      workflowsEnabled: true,
+      enableTeamMemory: true,
+      enableTeamMemorySync: true,
+      enableAutoSkill: true,
+    });
+
+    expect(config.isLspEnabled()).toBe(false);
+    expect(config.isWorkflowsEnabled()).toBe(false);
+    expect(config.getTeamMemoryEnabled()).toBe(false);
+    expect(config.getTeamMemorySyncEnabled()).toBe(false);
+    expect(config.getAutoSkillEnabled()).toBe(false);
+  });
+
   it('should report unavailable LSP status when client lacks a status snapshot API', () => {
     const config = new Config({
       ...baseParams,
@@ -4263,6 +4281,34 @@ describe('Server Config (config.ts)', () => {
         lenientToolWarmup: true,
       });
       expect(warmAll).toHaveBeenLastCalledWith({ strict: false });
+    });
+
+    it('defers cwd-sensitive initialization for a provisional workspace', async () => {
+      const config = new Config({
+        ...baseParams,
+        provisionalWorkspace: true,
+      });
+      const geminiClient = vi.mocked(GeminiClient).mock.results.at(-1)
+        ?.value as { initialize: Mock } | undefined;
+
+      await config.initialize();
+
+      expect(config.isProvisionalWorkspace()).toBe(true);
+      expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
+      expect(maybeRunAutoSkillCurator).not.toHaveBeenCalled();
+      expect(ToolRegistry.prototype.warmAll).not.toHaveBeenCalled();
+      expect(geminiClient?.initialize).not.toHaveBeenCalled();
+
+      await Promise.all([
+        config.activateProvisionalWorkspace(),
+        config.activateProvisionalWorkspace(),
+      ]);
+
+      expect(geminiClient?.initialize).toHaveBeenCalledOnce();
+      expect(ToolRegistry.prototype.warmAll).toHaveBeenCalledOnce();
+      expect(ToolRegistry.prototype.warmAll).toHaveBeenCalledWith({
+        strict: true,
+      });
     });
 
     it('registers loop_wakeup when cron is enabled', async () => {

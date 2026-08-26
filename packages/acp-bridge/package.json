@@ -59,6 +59,10 @@
       "types": "./dist/sessionAttachments.d.ts",
       "import": "./dist/sessionAttachments.js"
     },
+    "./sessionSource": {
+      "types": "./dist/session-source.d.ts",
+      "import": "./dist/session-source.js"
+    },
     "./daemonEventTypes": {
       "types": "./dist/daemonEventTypes.d.ts",
       "import": "./dist/daemonEventTypes.js"

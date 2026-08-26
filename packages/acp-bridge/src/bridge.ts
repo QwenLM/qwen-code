@@ -112,6 +112,7 @@ import {
   InvalidRewindTargetError,
   PromptDeadlineExceededError,
   BridgeChannelQuarantinedError,
+  StandaloneSessionSpawnError,
 } from './bridgeErrors.js';
 import type { BridgeChannelUnavailableReason } from './bridgeErrors.js';
 import {
@@ -123,8 +124,11 @@ import {
   translateAndCheckAbsoluteWorkspacePath,
 } from './workspacePaths.js';
 import {
+  DAEMON_OWNED_STANDALONE_CREATION_KEY,
+  isReservedStandaloneSessionSourceType,
   parseSessionSource,
   SESSION_SOURCE_META_KEY,
+  STANDALONE_SESSION_SOURCE_TYPE,
 } from './session-source.js';
 import {
   PERSIST_REASONING_EFFORT_META_KEY,
@@ -177,6 +181,7 @@ import {
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
   BridgeSession,
+  BridgeSpawnRequest,
   BridgeRestoreSessionRequest,
   BridgeSessionState,
   BridgeRestoredSession,
@@ -192,6 +197,7 @@ import type {
   MidTurnQueueEntry,
   PendingPromptEntry,
   BridgeDaemonStatusSnapshot,
+  BridgeConversationDirectoryExpectation,
   ChangeSessionCwdRequest,
   ChangeSessionCwdResult,
   BridgeAutoMemoryTopic,
@@ -235,7 +241,11 @@ import type {
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
 import { writeStderrLine } from './internal/stderrLine.js';
-import { BridgeClient, KNOWN_APPROVAL_MODES } from './bridgeClient.js';
+import {
+  BridgeClient,
+  KNOWN_APPROVAL_MODES,
+  type BridgeClientDeferredArtifactBatch,
+} from './bridgeClient.js';
 import { GenerationStreamQueue } from './generation-stream.js';
 import {
   CANCEL_VOTE_SENTINEL,
@@ -311,15 +321,43 @@ function safeTransportFailureCode(error: unknown): string | undefined {
 function sessionSourceRequestMeta(
   sourceType: string | undefined,
   sourceId: string | undefined,
+  daemonOwnedStandaloneCreation = false,
 ): Record<string, unknown> {
   return sourceType
     ? {
         [SESSION_SOURCE_META_KEY]: {
           sourceType,
           ...(sourceId !== undefined ? { sourceId } : {}),
+          ...(daemonOwnedStandaloneCreation
+            ? { [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true }
+            : {}),
         },
       }
     : {};
+}
+
+function sameConversationDirectoryExpectation(
+  left: BridgeConversationDirectoryExpectation,
+  right: BridgeConversationDirectoryExpectation,
+): boolean {
+  return (
+    left.canonicalSessionId === right.canonicalSessionId &&
+    left.root.canonicalPath === right.root.canonicalPath &&
+    left.root.device === right.root.device &&
+    left.root.inode === right.root.inode &&
+    left.child.name === right.child.name &&
+    left.child.canonicalPath === right.child.canonicalPath &&
+    left.child.device === right.child.device &&
+    left.child.inode === right.child.inode
+  );
+}
+
+function standaloneWorkingDirectoryMissingError(): RequestError {
+  return new RequestError(
+    -32004,
+    'The standalone working directory is missing.',
+    { errorKind: 'working_directory_missing' },
+  );
 }
 
 /**
@@ -994,6 +1032,10 @@ interface SessionEntry {
   /** Immutable creator attribution, persisted in the transcript when present. */
   sourceType?: string;
   sourceId?: string;
+  managedConversationBinding?: {
+    expectation: BridgeConversationDirectoryExpectation;
+    released: boolean;
+  };
   /** Worktree isolation metadata, when created with worktree param. */
   worktree?: { slug: string; path: string; branch: string };
   /** Branch metadata, when created with branch param. */
@@ -1006,6 +1048,17 @@ interface SessionEntry {
   events: EventBus;
   /** Per-session structured artifact registry. */
   artifacts: SessionArtifactStore;
+  artifactWorkspaceCwd: string;
+  artifactWorkspaceReady: boolean;
+  prepareArtifactWorkspace?: () => Promise<void>;
+  artifactWorkspacePreparation?: Promise<void>;
+  deferredArtifactBatches: BridgeClientDeferredArtifactBatch[];
+  deferredArtifactInputCount: number;
+  pendingArtifactRestore?: {
+    snapshot?: RebuiltSessionArtifactSnapshot;
+    replayUpdates: SessionUpdate[];
+    warnings: string[];
+  };
   /** Session-owned temporary attachment referenced by prompts and SSE events. */
   attachments: SessionAttachmentStore;
   /** Sticky in-memory health state for the session's transcript recorder. */
@@ -4068,6 +4121,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // A Goal turn drains the mid-turn queue but owns no prompt slot, so
           // nothing else would settle what its last drain missed.
           settleMidTurnQueueAfterGoalTurn,
+          opts.onCreateCurrentSessionScheduledTask,
         );
         const rawConnection = new ClientSideConnection(
           () =>
@@ -4500,6 +4554,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     worktree?: { slug: string; path: string; branch: string },
     branch?: { name: string; baseBranch: string },
     requestedSessionId?: string,
+    daemonOwnedStandaloneCreation = false,
+    onNewSessionDispatch?: () => void,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -4569,7 +4625,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               ...(requestedSessionId || sourceType
                 ? {
                     _meta: {
-                      ...sessionSourceRequestMeta(sourceType, sourceId),
+                      ...sessionSourceRequestMeta(
+                        sourceType,
+                        sourceId,
+                        daemonOwnedStandaloneCreation,
+                      ),
                       ...(requestedSessionId
                         ? {
                             [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
@@ -4579,19 +4639,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   }
                 : {}),
             });
+            const newSessionRequest = worktree
+              ? {
+                  ...request,
+                  _meta: {
+                    ...(isRecord(request._meta) ? request._meta : {}),
+                    [WORKTREE_MCP_DEFER_META_KEY]: true,
+                  },
+                }
+              : request;
+            onNewSessionDispatch?.();
             const response = await withTimeout(
               Promise.race([
-                ci.connection.newSession(
-                  worktree
-                    ? {
-                        ...request,
-                        _meta: {
-                          ...(isRecord(request._meta) ? request._meta : {}),
-                          [WORKTREE_MCP_DEFER_META_KEY]: true,
-                        },
-                      }
-                    : request,
-                ),
+                ci.connection.newSession(newSessionRequest),
                 channelUnavailableReject(ci.channel, 'during newSession'),
               ]),
               initTimeoutMs,
@@ -4752,6 +4812,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   sourceType: entry.sourceType,
                   ...(entry.sourceId !== undefined
                     ? { sourceId: entry.sourceId }
+                    : {}),
+                  ...(daemonOwnedStandaloneCreation
+                    ? { [DAEMON_OWNED_STANDALONE_CREATION_KEY]: true }
                     : {}),
                 },
               ),
@@ -4930,14 +4993,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           transportClosed,
         ]);
         publishModelSwitched(entry, modelId, originatorClientId);
-        broadcastWorkspaceEvent({
-          type: 'settings_changed',
-          data: {
-            key: 'model.name',
-            value: getCanonicalModelId(result, modelId),
-          },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
+        if (!isReservedStandaloneSessionSourceType(entry.sourceType)) {
+          broadcastWorkspaceEvent({
+            type: 'settings_changed',
+            data: {
+              key: 'model.name',
+              value: getCanonicalModelId(result, modelId),
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
         succeeded = true;
       } catch (err) {
         // Surface the failure to ALL attached clients, not just the
@@ -6036,6 +6101,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         workspaceCwd,
         persistence: createSessionArtifactPersistence(ci.connection, sessionId),
       }),
+      artifactWorkspaceCwd: workspaceCwd,
+      artifactWorkspaceReady: !isReservedStandaloneSessionSourceType(
+        options.sourceType,
+      ),
+      deferredArtifactBatches: [],
+      deferredArtifactInputCount: 0,
       attachments: new SessionAttachmentStore(
         opts.sessionAttachmentsRoot,
         sessionId,
@@ -6071,6 +6142,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       activeWorkCloseInFlight: false,
       retryAllowed: false,
     };
+    if (isReservedStandaloneSessionSourceType(options.sourceType)) {
+      entry.prepareArtifactWorkspace = () =>
+        prepareStandaloneArtifactWorkspace(entry);
+    }
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
     // A legitimate owner supersedes any abandoned-restore fence on this id.
@@ -6095,6 +6170,43 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.client.drainEarlyEvents(entry.sessionId, entry);
     }
     return entry;
+  };
+
+  const prepareStandaloneArtifactWorkspace = async (
+    entry: SessionEntry,
+  ): Promise<void> => {
+    if (!entry.artifactWorkspaceReady) {
+      throw standaloneWorkingDirectoryMissingError();
+    }
+    if (entry.artifactWorkspacePreparation) {
+      return entry.artifactWorkspacePreparation;
+    }
+    const owner = channelInfoForEntry(entry);
+    if (!owner) throw standaloneWorkingDirectoryMissingError();
+    const preparation = (async () => {
+      const pending = entry.pendingArtifactRestore;
+      if (pending) {
+        delete entry.pendingArtifactRestore;
+        try {
+          await owner.client.ingestSessionUpdateArtifactsReady(
+            entry,
+            pending.replayUpdates,
+          );
+        } catch (error) {
+          entry.pendingArtifactRestore = pending;
+          throw error;
+        }
+      }
+      await owner.client.drainDeferredSessionArtifacts(entry);
+    })();
+    entry.artifactWorkspacePreparation = preparation;
+    try {
+      await preparation;
+    } finally {
+      if (entry.artifactWorkspacePreparation === preparation) {
+        entry.artifactWorkspacePreparation = undefined;
+      }
+    }
   };
 
   const publishArtifactChanges = (
@@ -6677,10 +6789,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     options: {
       skipFreshSessionAdmission?: boolean;
       suppressRestorePrompt?: boolean;
+      daemonOwnedStandaloneRestore?: boolean;
     } = {},
   ): Promise<BridgeRestoredSession> {
     if (shuttingDown) {
       throw new Error('AcpSessionBridge is shutting down');
+    }
+    const daemonOwnedStandaloneRestore =
+      options.daemonOwnedStandaloneRestore === true;
+    if (
+      isReservedStandaloneSessionSourceType(req.sourceType) &&
+      !daemonOwnedStandaloneRestore
+    ) {
+      throw new InvalidSessionMetadataError(
+        'sourceType',
+        '`standalone` is reserved for daemon-owned session restore',
+      );
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
     if (
@@ -7184,7 +7308,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // same reason.
                 mcpServers: [],
                 _meta: {
-                  ...sessionSourceRequestMeta(req.sourceType, req.sourceId),
+                  ...sessionSourceRequestMeta(
+                    req.sourceType,
+                    req.sourceId,
+                    daemonOwnedStandaloneRestore,
+                  ),
                   // Decline decisions known before the child RPC: keep the
                   // child's replay finalize-skip aligned with the re-hang.
                   ...(opts.restoreAskUserQuestion === true &&
@@ -7216,7 +7344,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               cwd: workspaceKey,
               mcpServers: [],
               _meta: {
-                ...sessionSourceRequestMeta(req.sourceType, req.sourceId),
+                ...sessionSourceRequestMeta(
+                  req.sourceType,
+                  req.sourceId,
+                  daemonOwnedStandaloneRestore,
+                ),
                 ...(opts.restoreAskUserQuestion === true &&
                 (req.clientId === undefined ||
                   options.suppressRestorePrompt === true)
@@ -7442,9 +7574,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry.restoreHistoryAnchorRecordId = replayAnchorRecordId;
       }
       seedSnapshotCaches(entry, publicState);
-      const artifactRestoreWarnings = await entry.artifacts.restore(
-        restoredArtifactSnapshot,
+      const deferArtifactWorkspace = isReservedStandaloneSessionSourceType(
+        entry.sourceType,
       );
+      const artifactRestoreWarnings: string[] = [];
+      if (deferArtifactWorkspace) {
+        artifactRestoreWarnings.push(
+          ...(await entry.artifacts.restore(restoredArtifactSnapshot, {
+            workspaceAccess: 'metadata-only',
+          })),
+        );
+        const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
+          isArtifactRestoreFailureWarning(warning),
+        );
+        entry.pendingArtifactRestore = {
+          ...(restoredArtifactSnapshot !== undefined
+            ? { snapshot: restoredArtifactSnapshot }
+            : {}),
+          replayUpdates:
+            restoredArtifactSnapshot === undefined || artifactRestoreFailed
+              ? replayUpdates
+              : [],
+          warnings: artifactRestoreWarnings,
+        };
+      } else {
+        artifactRestoreWarnings.push(
+          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
+        );
+      }
       for (const warning of artifactRestoreWarnings) {
         writeStderrLine(
           `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
@@ -7458,7 +7615,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates, {
           ingestArtifacts:
-            restoredArtifactSnapshot === undefined || artifactRestoreFailed,
+            !deferArtifactWorkspace &&
+            (restoredArtifactSnapshot === undefined || artifactRestoreFailed),
         });
         if (
           historyPageSize !== undefined &&
@@ -7507,7 +7665,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
         ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
         state: publicState,
-        ...(artifactRestoreWarnings.length > 0
+        ...(deferArtifactWorkspace || artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
         hasActivePrompt:
@@ -7922,6 +8080,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     settleUndrainedMidTurnMessages(entry, undrained);
   };
 
+  const trustedStandaloneSpawnRequests = new WeakMap<
+    BridgeSpawnRequest,
+    { dispatched: boolean }
+  >();
   const bridgeApi: AcpSessionBridge = {
     setLiveScreenContextCaptureHandler(handler) {
       liveScreenContextCaptureHandler = handler;
@@ -8105,6 +8267,42 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return restoreSession('resume', req);
     },
 
+    async spawnStandaloneSession(req) {
+      const spawnRequest: BridgeSpawnRequest = {
+        workspaceCwd: req.workspaceCwd,
+        sessionId: req.sessionId,
+        sessionScope: 'thread',
+        sourceType: STANDALONE_SESSION_SOURCE_TYPE,
+        ...(req.parentSessionId !== undefined
+          ? { parentSessionId: req.parentSessionId }
+          : {}),
+        ...(req.modelServiceId !== undefined
+          ? { modelServiceId: req.modelServiceId }
+          : {}),
+        ...(req.approvalMode !== undefined
+          ? { approvalMode: req.approvalMode }
+          : {}),
+      };
+      const state = { dispatched: false };
+      trustedStandaloneSpawnRequests.set(spawnRequest, state);
+      try {
+        return await bridgeApi.spawnOrAttach(spawnRequest);
+      } catch (error) {
+        throw new StandaloneSessionSpawnError(state.dispatched, error);
+      }
+    },
+
+    async restoreStandaloneSession(action, req) {
+      return restoreSession(
+        action,
+        {
+          ...req,
+          sourceType: STANDALONE_SESSION_SOURCE_TYPE,
+        },
+        { daemonOwnedStandaloneRestore: true },
+      );
+    },
+
     async spawnOrAttach(req) {
       if (shuttingDown) {
         // `runQwenServe.close()` calls `bridge.shutdown()` BEFORE
@@ -8124,6 +8322,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // case-insensitive FS, a symlinked aliased path, …) — that
       // still needs the realpath to compare correctly.
       const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
+      const trustedStandaloneSpawn = trustedStandaloneSpawnRequests.get(req);
+      trustedStandaloneSpawnRequests.delete(req);
+      const daemonOwnedStandaloneCreation =
+        trustedStandaloneSpawn !== undefined;
 
       // Resolve the effective scope for THIS call. A per-request
       // `req.sessionScope` overrides the daemon-wide default; omitting
@@ -8144,6 +8346,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const source = parseSessionSource(req.sourceType, req.sourceId);
       if ('error' in source) {
         throw new InvalidSessionMetadataError('sourceType', source.error);
+      }
+      if (
+        isReservedStandaloneSessionSourceType(source.sourceType) &&
+        !daemonOwnedStandaloneCreation
+      ) {
+        throw new InvalidSessionMetadataError(
+          'sourceType',
+          '`standalone` is reserved for daemon-owned session creation',
+        );
       }
       if (
         req.approvalMode !== undefined &&
@@ -8408,6 +8619,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         req.worktree,
         req.branch,
         req.sessionId,
+        daemonOwnedStandaloneCreation,
+        trustedStandaloneSpawn
+          ? () => {
+              trustedStandaloneSpawn.dispatched = true;
+            }
+          : undefined,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -8458,6 +8675,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             'session_closing',
           ),
         );
+      }
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        entry.managedConversationBinding?.released !== true
+      ) {
+        return Promise.reject(standaloneWorkingDirectoryMissingError());
       }
       if (!Array.isArray(req.prompt)) {
         return Promise.reject(
@@ -8702,6 +8925,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               throw pendingAbort.signal.reason;
             }
             throw new DOMException('Prompt aborted', 'AbortError');
+          }
+          if (
+            isReservedStandaloneSessionSourceType(entry.sourceType) &&
+            entry.managedConversationBinding?.released !== true
+          ) {
+            throw standaloneWorkingDirectoryMissingError();
           }
           pendingEntry.startedAt = Date.now();
           // If this prompt was queued behind another, promote it to
@@ -9303,6 +9532,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return entry.events.epoch;
     },
 
+    getSessionCurrentCwd(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.effectiveCwd;
+    },
+
     getSessionReplaySnapshot(sessionId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -9444,9 +9679,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (isClosingOrAuthorizingClose(entry)) {
         throw new SessionNotFoundError(sessionId, 'The session is closing');
       }
+      if (isReservedStandaloneSessionSourceType(entry.sourceType)) {
+        throw new InvalidSessionMetadataError(
+          'sourceType',
+          'Standalone sessions cannot be branched through the generic session API',
+        );
+      }
       const source = parseSessionSource(req.sourceType, req.sourceId);
       if ('error' in source) {
         throw new InvalidSessionMetadataError('sourceType', source.error);
+      }
+      if (isReservedStandaloneSessionSourceType(source.sourceType)) {
+        throw new InvalidSessionMetadataError(
+          'sourceType',
+          '`standalone` is reserved for daemon-owned session creation',
+        );
       }
       const isSideTask = source.sourceType === 'side_task';
       const restoreBranch = isSideTask || req.atRecordId === undefined;
@@ -9740,6 +9987,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        (req.managedRelocation !== 'live-conversation' ||
+          req.conversationDirectoryExpectation === undefined)
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
 
       const originatorClientId = resolveTrustedClientId(
         entry,
@@ -9763,6 +10017,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(req.managedRelocation
               ? { managedRelocation: req.managedRelocation }
               : {}),
+            ...(req.conversationDirectoryExpectation
+              ? {
+                  conversationDirectoryExpectation:
+                    req.conversationDirectoryExpectation,
+                }
+              : {}),
           }),
           getTransportClosedReject(entry),
         ]);
@@ -9780,10 +10040,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             `changeSessionCwd: unexpected response shape from agent: ${JSON.stringify(raw)}`,
           );
         }
+        if (
+          isReservedStandaloneSessionSourceType(entry.sourceType) &&
+          (req.conversationDirectoryExpectation === undefined ||
+            extResult.newCwd !==
+              req.conversationDirectoryExpectation.child.canonicalPath)
+        ) {
+          throw standaloneWorkingDirectoryMissingError();
+        }
 
         // State update inside the queue lambda — always executes when
         // the extMethod settles, regardless of caller timeout.
         entry.effectiveCwd = extResult.newCwd;
+        if (
+          isReservedStandaloneSessionSourceType(entry.sourceType) &&
+          req.conversationDirectoryExpectation !== undefined
+        ) {
+          entry.artifactWorkspaceReady = false;
+          entry.managedConversationBinding = {
+            expectation: req.conversationDirectoryExpectation,
+            released: false,
+          };
+        }
         if (extResult.previousCwd !== extResult.newCwd) {
           entry.events.publish({
             type: 'session_cwd_changed',
@@ -9826,6 +10104,126 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
 
       return { sessionId, ...result };
+    },
+
+    async commitManagedConversationBinding(sessionId, expectation) {
+      let entry = byId.get(sessionId);
+      if (!entry) throw standaloneWorkingDirectoryMissingError();
+      await entry.cwdChangeQueue;
+      if (byId.get(sessionId) !== entry) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
+      const binding = entry.managedConversationBinding;
+      if (
+        !isReservedStandaloneSessionSourceType(entry.sourceType) ||
+        !binding ||
+        !sameConversationDirectoryExpectation(binding.expectation, expectation)
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
+      const response = (await withTimeout(
+        Promise.race([
+          entry.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingCommit,
+            {
+              sessionId,
+              conversationDirectoryExpectation: expectation,
+            },
+          ),
+          getTransportClosedReject(entry),
+        ]),
+        initTimeoutMs,
+        'commitManagedConversationBinding',
+      )) as { committed?: unknown };
+      if (response?.committed !== true) {
+        throw new Error(
+          'commitManagedConversationBinding returned an invalid acknowledgement',
+        );
+      }
+      entry = byId.get(sessionId);
+      if (
+        !entry ||
+        entry.managedConversationBinding !== binding ||
+        !sameConversationDirectoryExpectation(binding.expectation, expectation)
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
+      if (entry.artifactWorkspaceCwd !== expectation.child.canonicalPath) {
+        const artifacts = new SessionArtifactStore({
+          sessionId,
+          workspaceCwd: expectation.child.canonicalPath,
+          persistence: createSessionArtifactPersistence(
+            entry.connection,
+            sessionId,
+          ),
+        });
+        const pending = entry.pendingArtifactRestore;
+        if (pending) {
+          const warnings = await artifacts.restore(pending.snapshot, {
+            workspaceAccess: 'metadata-only',
+          });
+          for (const warning of warnings) {
+            if (!pending.warnings.includes(warning)) {
+              pending.warnings.push(warning);
+              writeStderrLine(
+                `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
+                  warning,
+                )}`,
+              );
+            }
+          }
+        }
+        entry.artifacts = artifacts;
+        entry.artifactWorkspaceCwd = expectation.child.canonicalPath;
+      } else {
+        entry.artifacts.resetWorkspaceResolutionCache();
+      }
+    },
+
+    async releaseManagedConversationBinding(sessionId, expectation) {
+      let entry = byId.get(sessionId);
+      if (!entry) throw standaloneWorkingDirectoryMissingError();
+      await entry.cwdChangeQueue;
+      if (byId.get(sessionId) !== entry) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
+      const binding = entry.managedConversationBinding;
+      if (
+        !isReservedStandaloneSessionSourceType(entry.sourceType) ||
+        !binding ||
+        !sameConversationDirectoryExpectation(binding.expectation, expectation)
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
+      const response = (await withTimeout(
+        Promise.race([
+          entry.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionManagedConversationBindingRelease,
+            {
+              sessionId,
+              conversationDirectoryExpectation: expectation,
+            },
+          ),
+          getTransportClosedReject(entry),
+        ]),
+        initTimeoutMs,
+        'releaseManagedConversationBinding',
+      )) as { released?: unknown };
+      if (response?.released !== true) {
+        throw new Error(
+          'releaseManagedConversationBinding returned an invalid acknowledgement',
+        );
+      }
+      entry = byId.get(sessionId);
+      if (
+        !entry ||
+        entry.managedConversationBinding !== binding ||
+        !sameConversationDirectoryExpectation(binding.expectation, expectation)
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
+      binding.released = true;
+      entry.artifactWorkspaceReady = true;
     },
 
     setSessionWorktree(sessionId, worktree) {
@@ -10003,14 +10401,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async getSessionArtifacts(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        entry.managedConversationBinding?.released !== true
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
       resolveTrustedClientId(entry, context?.clientId);
+      await entry.prepareArtifactWorkspace?.();
       return entry.artifacts.list();
     },
 
     async addSessionArtifact(sessionId, artifact, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        entry.managedConversationBinding?.released !== true
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
       const clientId = resolveTrustedClientId(entry, context?.clientId);
+      await entry.prepareArtifactWorkspace?.();
       const input = makeClientArtifactInput(artifact, clientId);
       const result: SessionArtifactMutationResult =
         await entry.artifacts.upsertMany([input], {
@@ -10025,7 +10437,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async removeSessionArtifact(sessionId, artifactId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        isReservedStandaloneSessionSourceType(entry.sourceType) &&
+        entry.managedConversationBinding?.released !== true
+      ) {
+        throw standaloneWorkingDirectoryMissingError();
+      }
       const clientId = resolveTrustedClientId(entry, context?.clientId);
+      await entry.prepareArtifactWorkspace?.();
       const result = await entry.artifacts.remove(artifactId, { clientId });
       publishArtifactChanges(entry, result.changes, clientId);
       const warnings = [...(result.warnings ?? [])];
@@ -10796,14 +11215,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // drift is corrected by `reconcileAfterRoundtrip`, which reads the
           // agent's authoritative selector and re-publishes if it differs.
           publishModelSwitched(entry, req.modelId, originatorClientId);
-          broadcastWorkspaceEvent({
-            type: 'settings_changed',
-            data: {
-              key: 'model.name',
-              value: getCanonicalModelId(result, req.modelId),
-            },
-            ...(originatorClientId ? { originatorClientId } : {}),
-          });
+          if (!isReservedStandaloneSessionSourceType(entry.sourceType)) {
+            broadcastWorkspaceEvent({
+              type: 'settings_changed',
+              data: {
+                key: 'model.name',
+                value: getCanonicalModelId(result, req.modelId),
+              },
+              ...(originatorClientId ? { originatorClientId } : {}),
+            });
+          }
           succeeded = true;
           return result;
         } finally {
@@ -10985,6 +11406,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // file. Persist is OFF by default — see the interface doc.
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      if (
+        opts.persist &&
+        isReservedStandaloneSessionSourceType(entry.sourceType)
+      ) {
+        throw new InvalidSessionMetadataError(
+          'persist',
+          'Standalone approval mode changes are session-scoped',
+        );
+      }
       const info = channelInfoForEntry(entry);
       if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
       const originatorClientId = resolveTrustedClientId(
