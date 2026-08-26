@@ -4760,26 +4760,6 @@ export const useGeminiStream = (
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
         );
-        // Never-executed scheduler synthetics — the plan-mode-entry sibling
-        // skip, pre-validation cancellations, and permission /
-        // tool-not-found / validation rejections (executionStatus
-        // 'not_started') — carry no result evidence. Unwind the
-        // request-side reservations the loop guards made when the call
-        // streamed in BEFORE submission: client.ts's recording feed
-        // excludes only the duplicate-provider synthetic class
-        // (isDuplicateProviderToolCallResponse), so the fabricated constant
-        // error would otherwise pair with the streamed request in
-        // requestByCallId and record as a "changed" result — resetting the
-        // frozen-board streaks and disarming every result-aware halt for a
-        // genuinely stuck task_list poller (issue #9450). Mirrors the
-        // daemon twin, whose result-recording filter excludes exactly the
-        // not_started class (Session.queueToolResultRecord), and the
-        // non-interactive runner's never-executed unwinds.
-        if (toolCall.response.executionStatus === 'not_started') {
-          geminiClient
-            ?.getLoopDetectionService()
-            ?.noteSuppressedToolCallByCallId(toolCall.request.callId);
-        }
       }
 
       if (geminiTools.length === 0 && pendingDuplicateResponses.length === 0) {

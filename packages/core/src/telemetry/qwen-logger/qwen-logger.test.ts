@@ -27,7 +27,6 @@ import {
   SkillLaunchEvent,
   ProtocolTagSanitizedEvent,
   RipgrepRuntimeRecoveryEvent,
-  SubagentExecutionEvent,
   type ToolCallEvent,
 } from '../types.js';
 import type { RumEvent, RumPayload } from './event-types.js';
@@ -1069,64 +1068,6 @@ describe('QwenLogger', () => {
       const rumEvent = enqueueSpy.mock.calls[0][0];
       expect(rumEvent.properties).not.toHaveProperty('function_args');
       expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
-    });
-  });
-
-  describe('logSubagentExecutionEvent', () => {
-    it('carries loop_type into the subagent_execution journal record', () => {
-      // Pins the final hop of the #9450 attribution chain: if the
-      // conditional loop_type spread is dropped or the key is misnamed,
-      // journal records again log loop stops as unattributable.
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const event = new SubagentExecutionEvent('general-purpose', 'failed', {
-        terminate_reason: 'LOOP_DETECTED',
-        loop_type: 'consecutive_identical_tool_calls',
-      });
-
-      logger.logSubagentExecutionEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'tool',
-          name: 'subagent_execution',
-          properties: {
-            subagent_name: 'general-purpose',
-            status: 'failed',
-            terminate_reason: 'LOOP_DETECTED',
-            loop_type: 'consecutive_identical_tool_calls',
-          },
-        }),
-      );
-    });
-
-    it('omits loop_type when the run ended without a loop attribution', () => {
-      const logger = QwenLogger.getInstance(mockConfig)!;
-      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
-
-      const event = new SubagentExecutionEvent('general-purpose', 'completed', {
-        terminate_reason: 'COMPLETED',
-      });
-
-      logger.logSubagentExecutionEvent(event);
-
-      expect(enqueueSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event_type: 'action',
-          type: 'tool',
-          name: 'subagent_execution',
-          properties: {
-            subagent_name: 'general-purpose',
-            status: 'completed',
-            terminate_reason: 'COMPLETED',
-          },
-        }),
-      );
-      expect(enqueueSpy.mock.calls[0][0].properties).not.toHaveProperty(
-        'loop_type',
-      );
     });
   });
 });

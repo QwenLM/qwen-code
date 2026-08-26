@@ -20,18 +20,6 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
-import { BATCH_BUDGET_FIT_PREFIX } from '../tools/tool-response-finalizer.js';
-import {
-  extractAnchoredStubDigest,
-  extractDigestCarryingShapeDigest,
-  extractStubDigestAt,
-  FULL_OUTPUT_DIGEST_LABEL,
-  OUTPUT_TOO_LARGE_PREFIX,
-  PERSISTED_OUTPUT_OPEN_TAG,
-  PERSISTED_PREVIEW_MARKER,
-  TOOL_OUTPUT_TRUNCATED_PREFIX,
-  TRUNCATED_PART_MARKER,
-} from '../tools/truncation.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
 // implementation lives in a leaf module so replay detection in
@@ -106,16 +94,6 @@ const MIN_PERIODIC_REGION_LENGTH = 1000;
 // the argument-only behavior, and other team tools (`send_message`,
 // `task_update`) have different mutation/delivery semantics and stay out.
 const STATEFUL_READ_TOOLS: ReadonlySet<string> = new Set(['task_list']);
-
-/**
- * Whether a tool is a stateful read tool (see STATEFUL_READ_TOOLS).
- * Exported so the daemon's turn-loop guard (ACP Session) applies the same
- * result-aware treatment as this service — the two runtimes must not drift
- * (issue #9450 requirement #6).
- */
-export function isStatefulReadTool(toolName: string): boolean {
-  return STATEFUL_READ_TOOLS.has(toolName);
-}
 
 // Bound for the callId → request map used to pair tool results with their
 // requests (recordToolResultByCallId). Parallel tool batches are far smaller;
@@ -208,221 +186,6 @@ export function shouldHaltOnTurnToolCallCap(
   return isExplicitCap || totalCalls > hardCap || stuck;
 }
 
-// Producer shapes of the oversized-result stubs (see utils/truncation.ts
-// and the batch-budget finalizer). Recognition is anchored on these
-// prefixes: task results such as task_list embed peer-authored text
-// verbatim, and that text can quote stub markers (this PR puts a
-// `Full output sha256: <hex>` line into every oversized output, and agents
-// quote stubs into board state). Honoring a marker found MID-string would
-// let quoted content collapse or vary the whole-board fingerprint —
-// re-shipping the #9450 false halt via content. Every shape here embeds a
-// per-call unique artifact path in its envelope, which is exactly why it
-// must be reduced to its digest; content that merely contains (or even
-// starts with) the digest label carries no per-call path and is
-// fingerprinted as ordinary content instead.
-const STUB_PRODUCER_PREFIXES: readonly string[] = [
-  PERSISTED_OUTPUT_OPEN_TAG,
-  OUTPUT_TOO_LARGE_PREFIX,
-  TOOL_OUTPUT_TRUNCATED_PREFIX,
-  // The batch-budget finalizer's fitText header.
-  BATCH_BUDGET_FIT_PREFIX,
-];
-
-/**
- * Canonicalizes a value no producer shape recognizes (see
- * stripPersistenceEnvelope): its own sha256 under the `<persisted-stub>`
- * sentinel, never the verbatim text — the batch-budget fit of the same
- * content carries exactly this sha256 as its header digest (fitText), so
- * both sides of the budget boundary collide.
- */
-function canonicalizeContent(value: string): string {
-  return `<persisted-stub>sha256:${createHash('sha256')
-    .update(value)
-    .digest('hex')}`;
-}
-
-/**
- * Reduces an oversized-result stub to its semantic payload for
- * fingerprinting. Oversized tool results are rewritten into truncation
- * stubs: a `<persisted-output>` envelope embedding the unique
- * `<toolResultsDir>/<callId>.txt` path, an unwrapped `Output too large
- * (...)` envelope whose session-dependent note can also vary between
- * calls, the `truncateAndSaveToFile` shape embedding a random temp-file
- * name, or a batch-budget fit whose header embeds a per-call artifact
- * path. Hashing the envelope would make every fingerprint unique per call
- * — silently disabling every result-aware guard for exactly the largest
- * results. The producers embed a sha256 of the full pre-truncation output
- * (FULL_OUTPUT_DIGEST_LABEL); prefer it over any visible content, because
- * previews and head+tail payloads only cover the first/last chars — a
- * board mutating in the dropped band must still fingerprint differently
- * each poll (and a frozen board identically) no matter which stub shape
- * carries it. The digest-first rule also covers stubs nested inside a
- * further batch-budget fit, where the outer digest fingerprints the inner
- * stub as a whole. Stubs without a digest line fall back to the shape's
- * visible payload after its stable marker. The markers are the shared
- * constants from utils/truncation.ts and the batch-budget finalizer so the
- * parser cannot drift from the producer. The `<persisted-stub>` sentinel
- * keeps a stub fingerprint from ever colliding with a small literal output
- * that matches the payload.
- *
- * Stub recognition is gated on the producer prefixes (see
- * STUB_PRODUCER_PREFIXES), and the guard parses stubs with the SAME grammar
- * the producers write: the shared recognizers from tools/truncation.ts
- * (extractAnchoredStubDigest / extractDigestCarryingShapeDigest /
- * extractStubDigestAt) instead of a hand-mirrored copy. Digests are read
- * only at the positions the producers write them — a batch-budget fit's
- * header line right after its prefix, a label-leading shape's leading
- * position — so a quoted stub header inside payload content can never
- * hijack the fingerprint, and arbitrary result text that merely contains
- * the label is canonicalized like ordinary content instead of being
- * collapsed to a quoted window (issue #9450).
- *
- * Non-stub text is canonicalized to its own sha256 digest marker instead of
- * being carried verbatim: the batch-budget fit rewrites an over-budget
- * batch's results into fit headers embedding the sha256 of the full pre-fit
- * text (fitText), while an under-budget batch keeps the raw text. Those two
- * representations of identical content must collide or a frozen board whose
- * batch oscillates around the budget boundary would count every poll as
- * "changed" and fail open past every result-aware guard (issue #9450).
- * Hashing the full text preserves every distinction a changed board makes
- * (including inside the band a fit would drop), and the `<persisted-stub>`
- * sentinel keeps a canonicalized result from ever colliding with a literal
- * small output that happens to match the raw text of another shape. The
- * same collision rule applies to values that themselves start with a stub
- * prefix but carry no producer digest (fit-prefix-leading board content):
- * returning them verbatim would fingerprint them differently from their
- * over-budget fit (whose digest is the sha256 of the full pre-fit text),
- * so the cap's stuck signal could never arm for a frozen board oscillating
- * around the boundary.
- */
-function stripPersistenceEnvelope(value: string): string {
-  const isProducerStub = STUB_PRODUCER_PREFIXES.some((prefix) =>
-    value.startsWith(prefix),
-  );
-  // Digest-carrying shapes that start with the digest label itself, so no
-  // producer prefix recognizes them: the batch-budget finalizer's
-  // degenerate band that returns exactly the `Full output sha256: <64-hex>`
-  // line when the per-slot allocation holds the digest line but not the
-  // full fit header, and truncateAndSaveToFile's save-failure fallback
-  // (label + head/tail payload + save-failure note). Both carry the full
-  // pre-truncation digest and must reduce to it exactly like the prefixed
-  // stubs, or an over-budget representation of a board never collides with
-  // its under-budget (or successfully-spilled) representation: a frozen
-  // board oscillating across the budget boundary would fingerprint
-  // differently per poll despite byte-identical content, the
-  // consecutive-identical streak would never accumulate, and the cap's
-  // stuck signal would never arm (issue #9450). Recognition is shape-exact
-  // and reads the digest at the fixed leading position — the producer-side
-  // recognizer itself (extractDigestCarryingShapeDigest), so a quoted stub
-  // header (label + quoted hex + further payload) keeps fingerprinting as
-  // ordinary content on BOTH sides of the budget boundary instead of the
-  // fit carrying the quoted hex while the guard hashes the content.
-  if (!isProducerStub) {
-    const shapeDigest = extractDigestCarryingShapeDigest(value);
-    if (shapeDigest !== null) {
-      return `<persisted-stub>sha256:${shapeDigest}`;
-    }
-    return canonicalizeContent(value);
-  }
-
-  // A batch-budget fit carries its digest at the fixed header position —
-  // the line right after the prefix. Read only there (fitText carries a
-  // nested digest through exactly that position): scanning the whole
-  // payload would adopt a quoted stub header from the fit's content, so the
-  // fingerprint would follow the quoted hex while content changes below it
-  // stay invisible. Without a header digest the value is canonicalized:
-  // fitText computes the same sha256 of the same text when it has no
-  // digest to carry, so the under-budget value and its over-budget fit
-  // collide even when the value itself starts with the fit prefix
-  // (issue #9450).
-  if (value.startsWith(BATCH_BUDGET_FIT_PREFIX)) {
-    const headerLabelStart = BATCH_BUDGET_FIT_PREFIX.length + 1;
-    const fitDigest =
-      value[BATCH_BUDGET_FIT_PREFIX.length] === '\n' &&
-      value.startsWith(FULL_OUTPUT_DIGEST_LABEL, headerLabelStart)
-        ? extractStubDigestAt(
-            value,
-            headerLabelStart + FULL_OUTPUT_DIGEST_LABEL.length,
-          )
-        : null;
-    if (fitDigest !== null) {
-      return `<persisted-stub>sha256:${fitDigest}`;
-    }
-    return canonicalizeContent(value);
-  }
-
-  const digest = extractAnchoredStubDigest(value);
-  if (digest !== null) {
-    return `<persisted-stub>sha256:${digest}`;
-  }
-
-  const isPreviewStub =
-    value.startsWith(PERSISTED_OUTPUT_OPEN_TAG) ||
-    value.startsWith(OUTPUT_TOO_LARGE_PREFIX);
-  if (isPreviewStub) {
-    const marker = `${PERSISTED_PREVIEW_MARKER}\n`;
-    const index = value.indexOf(marker);
-    if (index >= 0) {
-      return `<persisted-stub>${value.slice(index + marker.length)}`;
-    }
-    return value;
-  }
-  if (value.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) {
-    const marker = `\n${TRUNCATED_PART_MARKER}`;
-    const index = value.indexOf(marker);
-    if (index >= 0) {
-      return `<persisted-stub>${value.slice(index + marker.length)}`;
-    }
-    // Truncation prefix with neither a digest line nor the truncated-part
-    // marker: no producer payload to fall back to — canonicalize for the
-    // same boundary-collision reason as the fit-prefix arm above.
-    return canonicalizeContent(value);
-  }
-  return value;
-}
-
-/**
- * Reconstructs the model-visible result text from tool response parts.
- * Only the fingerprint of this text is retained by the guards, never the
- * text itself. Returns null when the parts carry no functionResponse
- * content. Shared by this service and the daemon's turn-loop guard (ACP
- * Session) so both runtimes fingerprint results identically and cannot
- * drift (issue #9450 requirement #6).
- */
-export function extractToolResultText(
-  responseParts: readonly Part[],
-): string | null {
-  const chunks: string[] = [];
-  for (const part of responseParts) {
-    const functionResponse = part.functionResponse;
-    if (!functionResponse) continue;
-    // Oversized results arrive as persistence stubs whose envelope embeds
-    // a per-call unique file path; fingerprint the semantic payload only
-    // (see stripPersistenceEnvelope) so identical underlying results stay
-    // identical no matter where they were persisted.
-    chunks.push(
-      JSON.stringify(functionResponse.response ?? {}, (_key, value) =>
-        typeof value === 'string' ? stripPersistenceEnvelope(value) : value,
-      ),
-    );
-  }
-  return chunks.length > 0 ? chunks.join('\n') : null;
-}
-
-/**
- * sha256 fingerprint of a tool result's model-visible text (see
- * extractToolResultText), or null when the parts carry no functionResponse
- * content. Shared with the daemon's turn-loop guard for the same
- * cannot-drift reason as extractToolResultText.
- */
-export function fingerprintToolResult(
-  responseParts: readonly Part[],
-): string | null {
-  const resultText = extractToolResultText(responseParts);
-  if (resultText === null) return null;
-  return createHash('sha256').update(resultText).digest('hex');
-}
-
 /**
  * Service for detecting and preventing infinite loops in AI responses.
  * Monitors tool call repetitions and content sentence repetitions.
@@ -501,111 +264,32 @@ export class LoopDetectionService {
   private capKeyCounts = new Map<string, number>();
   private capMaxKeyRepeat = 0;
 
-  // Stateful-read contribution to the cap's stuck signal: the running max of
-  // the CURRENT consecutive-identical-result streaks (see
-  // statefulRepeatState). Unlike capMaxKeyRepeat this disarms when a result
-  // changes — a frozen-then-thawed board must release the cap exactly as it
-  // releases the result-time global-duplicate count, so the adaptive cap
-  // cannot latch a stale peak from a frozen phase and halt productive
-  // polling just past the soft cap. Kept separate from capMaxKeyRepeat
-  // (which stays a high-water mark for deterministic tools, where a 6x
-  // repeat is never productive even if the model later varies its calls).
-  private statefulCapKeyRepeat = 0;
-
   // Result-aware tracking for stateful read tools (see STATEFUL_READ_TOOLS).
   // Keyed by the (tool, args) repeat key. `resultsObserved` /
   // `unchangedStreak` count results within the CURRENT consecutive-identical
   // streak (restarted when the streak breaks); `lastFingerprint` survives
   // streak breaks so a state change is still visible across interleaved
   // calls (used by the action-stagnation reset).
-  // `suppressedRequests` counts the suppressed calls (replays, rejections —
-  // see noteSuppressedToolCallByCallId) within the CURRENT streak. A
-  // suppressed call can never produce an exonerating result, so the
-  // consecutive-identical gate's expected-result computation subtracts it:
-  // without that, the request-side count of a mixed stream (suppressed +
-  // executed calls) would permanently outrun the recorded results and the
-  // exoneration gate would be unsatisfiable. The suppressed call's
-  // consecutive-count increment is KEPT (not unwound), so a pure stream of
-  // identical suppressed calls still reaches the threshold — its entry
-  // carries zero result evidence, the expected-result count reduces to
-  // zero, and the gate halts (the fail-safe shape). That is what catches a
-  // subagent persistently re-emitting an unavailable task_list.
-  // `consecutiveIdenticalResults` is the stuck-repetition evidence for the
-  // global-duplicate detector and the adaptive cap (replacing the
-  // request-time global-duplicate counting and the cap's stuck-repetition
-  // counting for these tools): it counts results that repeat the key's
-  // IMMEDIATELY PRECEDING result (interleaved calls still accumulate) and
-  // restarts at 1 whenever a result differs from its predecessor — the same
-  // call returning changed state is productive and must not accumulate
-  // toward either halt. Counting turn-wide (key, fingerprint) totals
-  // instead would halt a board oscillating between two byte-identical
-  // states even though every result there differs from its predecessor.
   private statefulRepeatState = new Map<
     string,
     {
       resultsObserved: number;
       unchangedStreak: number;
-      consecutiveIdenticalResults: number;
-      suppressedRequests: number;
       lastFingerprint: string | undefined;
     }
   >();
 
-  // Stateful keys that recorded a result since the last Finished round-trip
-  // boundary. At each Finished, keys NOT in this set AND not in the
-  // requested set below produced no result AND no request for a whole
-  // round-trip: the model moved on to other work, so their streak evidence
-  // is abandoned and must stop feeding the cap's stuck signal — otherwise a
-  // key abandoned after a frozen phase keeps its peak for the whole prompt
-  // and the adaptive cap halts a productive turn just past the soft cap
-  // (issue #9450). Keys that keep polling appear in every round's results
-  // (or requests) and are never decayed.
-  private statefulResultKeysSinceLastFinished = new Set<string>();
-
-  // Stateful keys that streamed a request since the last Finished boundary.
-  // Decay must skip these too: production records results AFTER the Finished
-  // of the stream that emitted their calls, so at the boundary of a poll
-  // round the poll's own result has not landed yet, and a gap round (a
-  // text-only turn, an interleaved other tool) consumes the previous
-  // result's mark at ITS boundary — keying decay on result marks alone
-  // wipes a still-polled key's streak at the next poll's boundary. That
-  // disarmed the cap's stuck signal for a frozen board polled every other
-  // round (fail open) and reset resultsObserved mid-streak while
-  // toolCallRepetitionCount stood, making the consecutive guard's
-  // exoneration gate permanently unsatisfiable (fail closed) (issue #9450).
-  // Maintained in the always-on path (checkAlwaysOnSafeties) so it works
-  // under skipLoopDetection too.
-  private statefulRequestedKeysSinceLastFinished = new Set<string>();
+  // Turn-wide counts of (repeat key, result fingerprint) pairs for stateful
+  // read tools, recorded post-execution. Replaces the request-time
+  // global-duplicate counting and the cap's stuck-repetition counting for
+  // these tools: the same call returning changed state is productive and
+  // must not accumulate toward either halt.
+  private statefulPairCounts = new Map<string, number>();
 
   // callId → request pairing so results can be matched to their calls when
   // the runtime only has the response (populated on ToolCallRequest events,
   // consumed by recordToolResultByCallId).
   private requestByCallId = new Map<string, { name: string; args: object }>();
-
-  // Repeat keys known to belong to a stateful read tool, so the
-  // alternating-pattern carve-out can tell which window participants are
-  // stateful (repeat keys are hashes and do not carry the tool name).
-  private statefulRepeatKeys = new Set<string>();
-
-  // Rolling per-key result fingerprints for the alternating-pattern
-  // carve-out (see checkAlternatingPattern), capped at one window's worth
-  // of occurrences per key so a full ABAB window is judged on the results
-  // its own requests produced.
-  private statefulAlternationHistory = new Map<string, string[]>();
-
-  // Per-key count of stateful requests streamed through the guards whose
-  // results have NOT landed yet (incremented in checkAlwaysOnSafeties,
-  // decremented in recordToolResult and noteSuppressedToolCallByCallId).
-  // With parallel tool batches ALL requests of a round reach the guards
-  // before that round's results land, so a guard judged on args alone would
-  // skip the exonerating result check for occurrences still in flight and
-  // false-halt a productive poller; both the always-on consecutive-identical
-  // gate and the alternating-pattern carve-out subtract these from their
-  // expected results (issue #9450). Maintained in the always-on path so the
-  // accounting works under the skipLoopDetection default too. Reduces to
-  // the sequential arithmetic when results land before the next request is
-  // fed.
-  private statefulInFlight = new Map<string, number>();
 
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
@@ -667,32 +351,10 @@ export class LoopDetectionService {
     if (this.disabledForSession) return false;
     if (!this.isStatefulReadTool(toolCall.name)) return false;
 
-    const fingerprint = fingerprintToolResult(responseParts);
-    if (fingerprint === null) return false;
+    const resultText = LoopDetectionService.extractResultText(responseParts);
+    if (resultText === null) return false;
+    const fingerprint = createHash('sha256').update(resultText).digest('hex');
     const key = this.getToolCallKey(toolCall);
-
-    // Round-trip boundary bookkeeping: this key produced a result in the current
-    // round, so the Finished-boundary decay must not treat it as abandoned
-    // (see statefulResultKeysSinceLastFinished).
-    this.statefulResultKeysSinceLastFinished.add(key);
-
-    // One in-flight request for this key has landed: unreserve it for the
-    // in-flight accounting (see statefulInFlight). Floored at zero because
-    // results can be recorded for calls that never streamed through the
-    // guards (direct recordToolResult callers).
-    const inFlight = this.statefulInFlight.get(key) ?? 0;
-    if (inFlight > 0) {
-      this.statefulInFlight.set(key, inFlight - 1);
-    }
-
-    // Rolling result history for the alternating-pattern carve-out (see
-    // checkAlternatingPattern), capped at one window's occurrences per key.
-    const history = this.statefulAlternationHistory.get(key) ?? [];
-    history.push(fingerprint);
-    if (history.length > ALTERNATING_PATTERN_CYCLES) {
-      history.shift();
-    }
-    this.statefulAlternationHistory.set(key, history);
 
     // Consecutive-streak evidence for the always-on guard. The state entry
     // can predate the streak (lastFingerprint survives streak breaks), so
@@ -702,8 +364,6 @@ export class LoopDetectionService {
       state = {
         resultsObserved: 0,
         unchangedStreak: 0,
-        consecutiveIdenticalResults: 0,
-        suppressedRequests: 0,
         lastFingerprint: undefined,
       };
       this.statefulRepeatState.set(key, state);
@@ -731,29 +391,21 @@ export class LoopDetectionService {
       this.sameNameStreak = 1;
     }
 
-    // Consecutive identical-result counting (see statefulRepeatState): a
-    // result that differs from the key's predecessor restarts the count, so
-    // an oscillating board never accumulates toward either halt.
-    const consecutiveIdentical = fingerprintChanged
-      ? 1
-      : state.consecutiveIdenticalResults + 1;
-    state.consecutiveIdenticalResults = consecutiveIdentical;
-
-    // Cap stuck signal from result evidence (see statefulCapKeyRepeat). A
-    // raised peak must NOT latch: when a result changes, recompute the peak
-    // from the keys' CURRENT streaks so a thawed board disarms the adaptive
-    // cap exactly as it disarms the result-time global-duplicate count.
-    if (consecutiveIdentical > this.statefulCapKeyRepeat) {
-      this.statefulCapKeyRepeat = consecutiveIdentical;
-    } else if (fingerprintChanged) {
-      this.recomputeStatefulCapPeak();
+    // Turn-wide (repeat key, fingerprint) counting: replaces the
+    // request-time global-duplicate and cap stuck-repetition counting for
+    // stateful tools.
+    const pairKey = `${key}|${fingerprint}`;
+    const pairCount = (this.statefulPairCounts.get(pairKey) ?? 0) + 1;
+    this.statefulPairCounts.set(pairKey, pairCount);
+    if (pairCount > this.capMaxKeyRepeat) {
+      this.capMaxKeyRepeat = pairCount;
     }
 
     // The global-duplicate detector is gated (skipLoopDetection) exactly as
     // its request-time counterpart in addAndCheckHeuristicLoops.
     if (
       !this.config.getSkipLoopDetection() &&
-      consecutiveIdentical >= GLOBAL_DUPLICATE_THRESHOLD
+      pairCount >= GLOBAL_DUPLICATE_THRESHOLD
     ) {
       this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
       logLoopDetected(
@@ -788,152 +440,25 @@ export class LoopDetectionService {
     );
   }
 
-  /**
-   * Notes that a call which streamed through the guards was suppressed
-   * WITHOUT executing (a cross-round replay of an already-handled provider
-   * call id, or an authorization rejection), so its synthetic response carries
-   * no result evidence and must not be recorded via recordToolResult /
-   * recordToolResultByCallId. The request-time reservations the guards made
-   * when the call streamed in must unwind: the callId pairing is dropped (no
-   * real result will land for it), the per-key in-flight reservation is
-   * released (otherwise the consecutive-identical gate and the
-   * alternating-pattern carve-out over-subtract in-flight counts and judge
-   * on too little evidence), and the
-   * key is marked as having produced activity since the last Finished
-   * boundary — the model DID re-issue the poll; suppression is the runtime's
-   * machinery, not abandonment, so the decay must not wipe a live
-   * frozen-board streak on the next boundary (the daemon twin skips decay
-   * for batches that execute nothing instead — recordDaemonToolCalls in the
-   * ACP Session). Without this, a replay-suppressed round is
-   * indistinguishable from abandonment and disarms the result-aware halts.
-   * The request-side repetition increment the suppressed call made when it
-   * streamed in is KEPT (not unwound): a persistent stream of identical
-   * suppressed calls — a subagent re-emitting an unavailable task_list, a
-   * provider re-emitting the same handled id — is exactly the stuck
-   * pattern the always-on consecutive-identical guard exists to stop, and
-   * no result will ever land for it. Unwinding the increment let such a
-   * stream oscillate the count 0↔1 forever: the threshold unreachable, the
-   * missing-evidence fail-safe unreachable (no result ever records, so no
-   * state entry exists), and the cap's stuck signal unreachable
-   * (trackCapKeyRepeat skips stateful tools) — the loop ran to the hard
-   * backstop instead of halting on the 5th identical request (issue #9450).
-   * The exoneration gate stays satisfiable for MIXED streams (suppressed +
-   * executed calls with changing results) because checkToolCallLoop
-   * subtracts the streak's suppressedRequests from the expected result
-   * count. Unknown callIds (never streamed through the guards) are
-   * ignored.
-   *
-   * `replaySuppression` marks the CROSS-ROUND REPLAY class (a suppressed
-   * re-emission of an already-handled provider call id — the duplicate
-   * synthetics), as opposed to the never-executed class (authorization
-   * rejections, scheduler not_started synthetics). Replay-only rounds must
-   * carry the live stateful streak marks across the next Finished boundary:
-   * the daemon twin's batch recorder receives an all-replay batch as zero
-   * executable calls and skips its boundary decay entirely
-   * (recordDaemonToolCalls), so the last executed round's result marks
-   * survive to the NEXT non-empty batch's decay. Without the carry, core
-   * consumes those marks at the replay round's own Finished boundary and
-   * wipes a live frozen-board streak at the next one when the replayed
-   * tool is NOT stateful (a non-stateful replay marks nothing here — and
-   * its callId never resolves in the pairing, which tracks only stateful
-   * requests), so a frozen task_list board polled around non-stateful
-   * replay rounds never accumulates its stuck signal in core while the
-   * daemon halts it just past the soft cap (requirement #6 parity). The
-   * carry re-adds the keys with live streak evidence for exactly one more
-   * boundary; the never-executed class must NOT carry: the daemon treats
-   * those calls as ordinary (non-empty) batches whose boundary decay runs.
-   * Suppression awareness, not activity awareness: post-abandonment rounds
-   * have no suppressions at all, so decay still releases abandoned peaks
-   * (the literal "skip decay on stateful-inactive rounds" formulation
-   * would latch the peak forever and break the abandonment release).
-   */
-  noteSuppressedToolCallByCallId(
-    callId: string,
-    options?: { replaySuppression?: boolean },
-  ): void {
-    // Runs BEFORE the callId pairing lookup: the pairing only tracks
-    // STATEFUL requests (see checkAlwaysOnSafeties), but the carry is
-    // needed most when the suppressed replay is a NON-stateful tool — its
-    // callId never resolves here, yet its replay-only round must still
-    // protect the live frozen-board streaks (see the doc above).
-    if (options?.replaySuppression) {
-      this.carryStatefulStreakMarksAcrossSuppression();
-    }
-    const request = this.requestByCallId.get(callId);
-    if (!request) return;
-    this.requestByCallId.delete(callId);
-    if (!this.isStatefulReadTool(request.name)) return;
-    const key = this.getToolCallKey(request);
-    // Floored at zero because the heuristic tier (the only writer besides
-    // this unwind) may be off under skipLoopDetection; a stale decrement is
-    // inert then — nothing reads the count until a Retry/reset clears it.
-    const inFlight = this.statefulInFlight.get(key) ?? 0;
-    if (inFlight > 0) {
-      this.statefulInFlight.set(key, inFlight - 1);
-    }
-    // The consecutive-identical increment the suppressed call made when it
-    // streamed in is KEPT (see the doc above): count it into the streak's
-    // suppressedRequests instead so the exoneration gate can subtract it
-    // while the threshold still sees the request-side evidence. Only while
-    // the streak still belongs to the suppressed key: a later different
-    // call restarts the count for its own key. The entry is created
-    // lazily here (no recorded result yet) so suppressions landing BEFORE
-    // the streak's first result still balance the gate — for a PURE
-    // suppressed stream the entry then carries zero result evidence, the
-    // expected-result count reduces to zero, and the gate halts exactly
-    // like the missing-evidence fail-safe it replaces.
-    if (this.lastToolCallKey === key) {
-      let state = this.statefulRepeatState.get(key);
-      if (!state) {
-        state = {
-          resultsObserved: 0,
-          unchangedStreak: 0,
-          consecutiveIdenticalResults: 0,
-          suppressedRequests: 0,
-          lastFingerprint: undefined,
-        };
-        this.statefulRepeatState.set(key, state);
-      }
-      state.suppressedRequests++;
-    }
-    // Drop the window occurrence the alternating-pattern tier pushed when
-    // the call streamed in; it carries no result, and leaving it in would
-    // overstate the key's occurrences so the carve-out expects one more
-    // recorded result than can ever exist (judging the window on too
-    // little evidence). Remove the most recent occurrence: the suppressed
-    // call is the latest push of this key unless an identical call streamed
-    // after it, in which case removing either occurrence is equivalent.
-    const windowIndex = this.recentToolCallKeys.lastIndexOf(key);
-    if (windowIndex >= 0) {
-      this.recentToolCallKeys.splice(windowIndex, 1);
-    }
-    this.statefulResultKeysSinceLastFinished.add(key);
-  }
-
-  /**
-   * One extra Finished boundary of decay coverage for the live stateful
-   * streak marks, applied when a replay suppression lands (see
-   * noteSuppressedToolCallByCallId): re-adds every key that still carries
-   * streak evidence to statefulResultKeysSinceLastFinished so the next
-   * boundary's decay skips it, mirroring the daemon's empty-batch decay
-   * skip. Keys already marked are re-added idempotently; keys whose
-   * evidence already decayed stay gone (the carry never resurrects an
-   * abandoned streak — only postpones an imminent decay by one boundary).
-   */
-  private carryStatefulStreakMarksAcrossSuppression(): void {
-    for (const [key, state] of this.statefulRepeatState) {
-      if (
-        state.consecutiveIdenticalResults > 0 ||
-        state.resultsObserved > 0 ||
-        state.unchangedStreak > 0
-      ) {
-        this.statefulResultKeysSinceLastFinished.add(key);
-      }
-    }
-  }
-
   private isStatefulReadTool(toolName: string): boolean {
-    return isStatefulReadTool(toolName);
+    return STATEFUL_READ_TOOLS.has(toolName);
+  }
+
+  /**
+   * Reconstructs the model-visible result text from tool response parts.
+   * Only the fingerprint of this text is retained, never the text itself.
+   * Returns null when the parts carry no functionResponse content.
+   */
+  private static extractResultText(
+    responseParts: readonly Part[],
+  ): string | null {
+    const chunks: string[] = [];
+    for (const part of responseParts) {
+      const functionResponse = part.functionResponse;
+      if (!functionResponse) continue;
+      chunks.push(JSON.stringify(functionResponse.response ?? {}));
+    }
+    return chunks.length > 0 ? chunks.join('\n') : null;
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
@@ -980,15 +505,7 @@ export class LoopDetectionService {
         // Stateful read tools are counted post-execution in
         // recordToolResult, keyed on (call, result fingerprint) instead of
         // args alone (issue #9450).
-        const stateful = this.isStatefulReadTool(event.value.name);
-        if (stateful) {
-          this.statefulRepeatKeys.add(toolCallKey);
-          // The per-key in-flight reservation for this request is made in
-          // the always-on path (checkAlwaysOnSafeties), which production
-          // and addAndCheck always run first — incrementing here too would
-          // double-count (see statefulInFlight).
-        }
-        const globalDup = stateful
+        const globalDup = this.isStatefulReadTool(event.value.name)
           ? false
           : this.checkGlobalDuplicate(toolCallKey);
         const alternating = this.checkAlternatingPattern(toolCallKey);
@@ -1009,9 +526,6 @@ export class LoopDetectionService {
         // streak reset).
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
-        this.statefulAlternationHistory.clear();
-        this.statefulRepeatKeys.clear();
-        this.statefulInFlight.clear();
         // A replay (non-continuation) retry also re-streams the failed
         // attempt's content and reasoning through the chunk detectors: the
         // transport-replay gate admits thought-only cuts (#7832), and with
@@ -1038,17 +552,6 @@ export class LoopDetectionService {
         // replay-retry resets.
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
-        // The failed model's streamed requests never execute and never
-        // receive results (Turn discards them without a suppression note),
-        // so the stateful reservations they made can never unwind on their
-        // own: release them here like the replay-retry branch above, or the
-        // stale in-flight counts collapse the alternating-pattern carve-out
-        // (expectedResults drops to zero, the exoneration check is skipped)
-        // and the guard halts the fallback model's productive poller on
-        // arguments alone (issue #9450).
-        this.statefulAlternationHistory.clear();
-        this.statefulRepeatKeys.clear();
-        this.statefulInFlight.clear();
         this.resetContentTracking();
         this.thoughtHistory = [];
         break;
@@ -1105,12 +608,6 @@ export class LoopDetectionService {
     // round-trip rather than resetting to zero.
     if (event.type === GeminiEventType.Finished) {
       this.turnToolCallTotalCommitted = this.turnToolCallTotal;
-      // Results are recorded between round-trips (after the Finished event
-      // of the stream that emitted their calls), so at this boundary the
-      // results recorded since the previous Finished are exactly the prior
-      // round's executed results — the safe point to decay stateful keys
-      // absent from them (see decayAbandonedStatefulStreaks).
-      this.decayAbandonedStatefulStreaks();
       return false;
     }
 
@@ -1127,61 +624,15 @@ export class LoopDetectionService {
       this.resetToolCallCount();
       this.capKeyCounts.clear();
       this.capMaxKeyRepeat = 0;
-      this.statefulCapKeyRepeat = 0;
       // A retry replays the failed attempt's tool calls; drop the stateful
       // result evidence too so the replayed attempt is judged on its own
-      // results (the consecutive counts re-accumulate as results land,
-      // consistent with the capKeyCounts/globalToolCallCounts clears).
+      // results (pair counts re-accumulate as results land, consistent with
+      // the capKeyCounts/globalToolCallCounts clears).
+      this.statefulPairCounts.clear();
       for (const state of this.statefulRepeatState.values()) {
         state.resultsObserved = 0;
         state.unchangedStreak = 0;
-        state.consecutiveIdenticalResults = 0;
-        state.suppressedRequests = 0;
       }
-      this.statefulResultKeysSinceLastFinished.clear();
-      this.statefulRequestedKeysSinceLastFinished.clear();
-      this.statefulAlternationHistory.clear();
-      this.statefulRepeatKeys.clear();
-      this.statefulInFlight.clear();
-      return false;
-    }
-
-    // A model fallback restarts the attempt from scratch exactly like a
-    // replay retry (Turn clears pendingToolCalls on the fallback event),
-    // except the failed model's streamed tool calls are DISCARDED, not
-    // re-streamed: they never execute, no results land for them, and no
-    // suppression note unwinds their request-side state. Mirror the Retry
-    // resets so the failed attempt's evidence cannot poison the fallback
-    // attempt: roll the per-turn cap back to the last committed round-trip
-    // (the failed attempt's calls counted there but never produce results),
-    // drop the consecutive-identical streak (its in-flight requests can
-    // never be exonerated, so keeping it would false-halt the fallback
-    // model's resumed polling at the threshold), clear the cap's repeat
-    // trackers and the stateful result evidence (the fresh attempt is
-    // judged on its own results), release the stateful reservations the
-    // discarded requests made (they can never unwind on their own), and
-    // drop the still-unanswered callId pairings — results recorded between
-    // round-trips already consumed the prior rounds' entries, so whatever
-    // remains belongs to the discarded attempt and would otherwise
-    // accumulate toward the FIFO eviction cap (issue #9450).
-    if (event.type === GeminiEventType.ModelFallback) {
-      this.turnToolCallTotal = this.turnToolCallTotalCommitted;
-      this.resetToolCallCount();
-      this.capKeyCounts.clear();
-      this.capMaxKeyRepeat = 0;
-      this.statefulCapKeyRepeat = 0;
-      for (const state of this.statefulRepeatState.values()) {
-        state.resultsObserved = 0;
-        state.unchangedStreak = 0;
-        state.consecutiveIdenticalResults = 0;
-        state.suppressedRequests = 0;
-      }
-      this.statefulResultKeysSinceLastFinished.clear();
-      this.statefulRequestedKeysSinceLastFinished.clear();
-      this.statefulAlternationHistory.clear();
-      this.statefulRepeatKeys.clear();
-      this.statefulInFlight.clear();
-      this.requestByCallId.clear();
       return false;
     }
 
@@ -1201,21 +652,6 @@ export class LoopDetectionService {
     // can be large (e.g. write_file content), so avoid recomputing per guard.
     const key = this.getToolCallKey(event.value);
     const stateful = this.isStatefulReadTool(event.value.name);
-    if (stateful) {
-      this.statefulRepeatKeys.add(key);
-      // The Finished-boundary decay must not treat this key as abandoned
-      // at this stream's own boundary: its result is recorded AFTER the
-      // Finished event (see statefulRequestedKeysSinceLastFinished).
-      this.statefulRequestedKeysSinceLastFinished.add(key);
-      // This request is now in flight: its result has not landed yet, so
-      // the consecutive-identical gate's exoneration check and the
-      // alternating-pattern carve-out must not expect it (see
-      // statefulInFlight). recordToolResult / noteSuppressedToolCallByCallId
-      // decrement when it lands or is suppressed. Kept here (always-on) so
-      // the accounting also works under the skipLoopDetection default,
-      // where the heuristic tier never runs (issue #9450).
-      this.statefulInFlight.set(key, (this.statefulInFlight.get(key) ?? 0) + 1);
-    }
 
     // Pair requests with their later results (recordToolResultByCallId).
     // Only stateful read tools participate: recordToolResult rejects every
@@ -1283,7 +719,6 @@ export class LoopDetectionService {
         if (state) {
           state.resultsObserved = 0;
           state.unchangedStreak = 0;
-          state.suppressedRequests = 0;
         }
       }
       this.lastToolCallKey = key;
@@ -1293,45 +728,21 @@ export class LoopDetectionService {
       if (this.isStatefulReadTool(toolCall.name)) {
         // Result-aware guard (issue #9450): identical arguments to a stateful
         // read do not imply an identical result, so only halt when the
-        // executed results corroborate the loop. With sequential rounds the
-        // prior N-1 results of the Nth identical request have been recorded;
-        // with parallel batches ALL of a round's identical requests stream
-        // through this guard before ANY of that round's results lands
-        // (dedupeToolCallsById collapses only same-callId duplicates, so
-        // distinct-callId twins both execute), and the still-in-flight
-        // requests cannot have recorded results yet. Subtract them from the
-        // expected count (floored at the recorded evidence) so the gate is
-        // judged on the results that CAN have landed; a changed recorded
-        // result still restarts the streak. Suppressed calls in the streak
-        // (replays, rejections) are subtracted too: they can never produce
-        // an exonerating result, and leaving their request-side increments
-        // in the expected count would keep the gate permanently one result
-        // short for mixed suppressed + executed streams. Missing result
-        // evidence (results never recorded for this streak) fails safe and
-        // keeps the pre-#9450 behavior, so the DashScope protection (#5019)
-        // is never loosened by a wiring gap — that fail-safe is also what
-        // halts a pure stream of rejected/suppressed identical calls (no
-        // state entry ever exists for it), e.g. a subagent persistently
-        // re-emitting an unavailable task_list.
+        // executed results corroborate the loop. By the Nth identical request
+        // the prior N-1 results have been recorded; if they were ALL observed
+        // and unchanged, the repetition is genuinely unproductive. If some
+        // result changed, the model's re-poll was productive — restart the
+        // streak instead of halting. Missing result evidence (results never
+        // recorded for this streak) fails safe and keeps the pre-#9450
+        // behavior, so the DashScope protection (#5019) is never loosened by
+        // a wiring gap.
         const state = this.statefulRepeatState.get(key);
-        const inFlight = Math.min(
-          this.statefulInFlight.get(key) ?? 0,
-          this.toolCallRepetitionCount,
-        );
-        const suppressedInStreak = Math.min(
-          state?.suppressedRequests ?? 0,
-          this.toolCallRepetitionCount,
-        );
-        const expectedResults = Math.max(
-          this.toolCallRepetitionCount - inFlight - suppressedInStreak,
-          state?.resultsObserved ?? 0,
-        );
+        const expectedResults = this.toolCallRepetitionCount - 1;
         if (state && state.resultsObserved >= expectedResults) {
           if (state.unchangedStreak < expectedResults - 1) {
             this.toolCallRepetitionCount = 1;
             state.resultsObserved = 0;
             state.unchangedStreak = 0;
-            state.suppressedRequests = 0;
             return false;
           }
         }
@@ -2026,109 +1437,6 @@ export class LoopDetectionService {
   }
 
   /**
-   * Recomputes the cap's stateful stuck signal (statefulCapKeyRepeat) from
-   * the keys' CURRENT consecutive-identical-result streaks, dropping any
-   * latched peak that no longer reflects live evidence.
-   */
-  private recomputeStatefulCapPeak(): void {
-    let peak = 0;
-    for (const state of this.statefulRepeatState.values()) {
-      if (state.consecutiveIdenticalResults > peak) {
-        peak = state.consecutiveIdenticalResults;
-      }
-    }
-    this.statefulCapKeyRepeat = peak;
-  }
-
-  /**
-   * Round-trip boundary decay for the cap's stateful stuck signal. A key
-   * that produced no result for a whole round-trip was abandoned: the model
-   * moved on to other work, so its frozen-phase streak must stop feeding the
-   * stuck signal. Without this the key map is add-only and the peak latches
-   * for the whole prompt — the adaptive cap would then halt a productive
-   * turn just past the soft cap on the abandoned key's stale peak (issue
-   * #9450). Keys polled in every round-trip appear in the result set and
-   * keep their streaks, so a continuously frozen board still arms the cap.
-   * Keys that merely streamed a request since the last boundary are skipped
-   * too (statefulRequestedKeysSinceLastFinished): production records results
-   * AFTER the Finished of the stream that emitted their calls, and any gap
-   * round (a text-only turn, an interleaved other tool) consumes the
-   * previous result's mark at its own boundary — decaying a key that is
-   * still being polled would wipe its streak at the next poll's boundary,
-   * disarming the stuck signal for an every-other-round frozen poller and
-   * resetting resultsObserved mid-streak while toolCallRepetitionCount
-   * stands (issue #9450). When a key's evidence is zeroed, the always-on
-   * consecutive streak is dropped too if it still belongs to that key:
-   * the exoneration gate counts resultsObserved against
-   * toolCallRepetitionCount, and zeroing the evidence while the count
-   * stands leaves the gate permanently unsatisfiable — resumed polling
-   * would halt CONSECUTIVE_IDENTICAL_TOOL_CALLS regardless of its results
-   * (the #9450 false positive re-entering via the decay layer). A resumed
-   * streak starts fresh and is judged on its own results; decay never runs
-   * for a key with requests still in flight (the requested-set skip above),
-   * so this cannot drop a streak the in-flight accounting is still
-   * deferring. Exception — a suppressedRequests-ONLY entry (no result
-   * evidence) keeps its standing streak AND its suppressedRequests: the
-   * gate subtracts the never-answerable requests, so a pure suppressed
-   * stream crossing round-trip boundaries still halts at the threshold,
-   * and resumed EXECUTED polling on the same key stays exonerable —
-   * zeroing suppressedRequests while the request-side count stands would
-   * leave expectedResults permanently one above resultsObserved and
-   * false-halt a changing-board poller (issue #9450). lastFingerprint
-   * survives the decay: when polling resumes, the first fresh result is
-   * still judged against the last observed one (changed → productive,
-   * unchanged → the count re-accumulates toward the halt).
-   */
-  private decayAbandonedStatefulStreaks(): void {
-    let decayed = false;
-    for (const [key, state] of this.statefulRepeatState) {
-      if (this.statefulResultKeysSinceLastFinished.has(key)) continue;
-      if (this.statefulRequestedKeysSinceLastFinished.has(key)) continue;
-      const hadResultEvidence =
-        state.consecutiveIdenticalResults > 0 ||
-        state.resultsObserved > 0 ||
-        state.unchangedStreak > 0;
-      if (hadResultEvidence || state.suppressedRequests > 0) {
-        state.consecutiveIdenticalResults = 0;
-        state.resultsObserved = 0;
-        state.unchangedStreak = 0;
-        if (hadResultEvidence && this.lastToolCallKey === key) {
-          // Dropping the exoneration gate's result evidence while the
-          // consecutive count stands would leave the gate permanently
-          // unsatisfiable, so drop the streak with it — and the suppression
-          // count with the streak: it belongs to the dropped streak, and a
-          // later streak must not subtract requests it never made.
-          state.suppressedRequests = 0;
-          this.lastToolCallKey = null;
-          this.toolCallRepetitionCount = 0;
-        } else if (this.lastToolCallKey !== key) {
-          // The streak no longer belongs to this key (or was reset): the
-          // suppression count is read only while its streak stands, so it
-          // decays with the rest of the evidence.
-          state.suppressedRequests = 0;
-        }
-        // Else: suppressed-only evidence (no result evidence) with the
-        // streak still standing — a stream of identical suppressed calls
-        // crossing round-trip boundaries. Keep the streak AND its
-        // suppressedRequests: the exoneration gate subtracts the
-        // never-answerable requests, so the threshold still halts a pure
-        // suppressed stream, and if EXECUTED polling resumes on the same
-        // key the gate stays satisfiable (zeroing suppressedRequests while
-        // the request-side count stands would leave expectedResults
-        // permanently one above resultsObserved and false-halt a
-        // changing-board poller — the #9450 false positive re-entering via
-        // the decay layer).
-        decayed = true;
-      }
-    }
-    this.statefulResultKeysSinceLastFinished.clear();
-    this.statefulRequestedKeysSinceLastFinished.clear();
-    if (decayed) {
-      this.recomputeStatefulCapPeak();
-    }
-  }
-
-  /**
    * Records a (tool,args) occurrence for the adaptive cap and updates the
    * running max repeat count. Always-on (called from checkAlwaysOnSafeties
    * with the already-hashed key).
@@ -2159,10 +1467,7 @@ export class LoopDetectionService {
     if (
       !shouldHaltOnTurnToolCallCap(
         this.turnToolCallTotal,
-        // Request-time evidence (deterministic tools) and result-time
-        // evidence (stateful reads) feed the same stuck signal; the
-        // stateful half disarms when results change (statefulCapKeyRepeat).
-        Math.max(this.capMaxKeyRepeat, this.statefulCapKeyRepeat),
+        this.capMaxKeyRepeat,
         this.config.getMaxToolCallsPerTurn(),
         this.config.isMaxToolCallsPerTurnExplicit(),
       )
@@ -2205,8 +1510,7 @@ export class LoopDetectionService {
    * Alternating-pattern detection: catches ABABAB… patterns where the model
    * flips between two distinct tool calls. Tracked via a sliding window of
    * tool-call keys; when the window fills with alternating A/B values the
-   * turn is halted — except for stateful read participants whose observed
-   * results keep changing (issue #9450), see the carve-out below.
+   * turn is halted.
    */
   private checkAlternatingPattern(toolCallKey: string): boolean {
     const maxLen = 2 * ALTERNATING_PATTERN_CYCLES;
@@ -2227,42 +1531,6 @@ export class LoopDetectionService {
     for (let i = 0; i < maxLen; i++) {
       const expected = i % 2 === 0 ? a : b;
       if (this.recentToolCallKeys[i] !== expected) {
-        return false;
-      }
-    }
-
-    // Result-aware carve-out for stateful read tools (issue #9450):
-    // identical arguments do not imply an identical result, so an ABAB
-    // poller is only stuck when its observed results corroborate it. For
-    // every stateful participant require the results produced by the
-    // window's own prior requests, minus the requests still in flight (fed
-    // to this tier but not yet answered — with parallel tool batches BOTH
-    // requests of a round reach the guard before that round's results land,
-    // so more than just the window-tail request can be in flight); if ANY
-    // recorded result changed, the alternation is making observable
-    // progress and the window restarts. Missing result evidence (results
-    // never recorded) fails safe and keeps the argument-only halt, so a
-    // wiring gap never loosens the guard. The per-key in-flight count
-    // reduces to the sequential arithmetic (tail request in flight) when
-    // each result lands before the next request is fed.
-    for (const altKey of [a, b]) {
-      if (!this.statefulRepeatKeys.has(altKey)) continue;
-      const occurrences = this.recentToolCallKeys.filter(
-        (windowKey) => windowKey === altKey,
-      ).length;
-      const inFlight = Math.min(
-        this.statefulInFlight.get(altKey) ?? 0,
-        occurrences,
-      );
-      const expectedResults = occurrences - inFlight;
-      if (expectedResults <= 0) continue;
-      const history = this.statefulAlternationHistory.get(altKey);
-      if (!history || history.length < expectedResults) {
-        continue;
-      }
-      const recent = history.slice(-expectedResults);
-      if (recent.some((fp) => fp !== recent[0])) {
-        this.recentToolCallKeys = [];
         return false;
       }
     }
@@ -2301,13 +1569,8 @@ export class LoopDetectionService {
     this.turnToolCallTotalCommitted = 0;
     this.capKeyCounts.clear();
     this.capMaxKeyRepeat = 0;
-    this.statefulCapKeyRepeat = 0;
     this.statefulRepeatState.clear();
-    this.statefulResultKeysSinceLastFinished.clear();
-    this.statefulRequestedKeysSinceLastFinished.clear();
-    this.statefulRepeatKeys.clear();
-    this.statefulAlternationHistory.clear();
-    this.statefulInFlight.clear();
+    this.statefulPairCounts.clear();
     this.requestByCallId.clear();
   }
 

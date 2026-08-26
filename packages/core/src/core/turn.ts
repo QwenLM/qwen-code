@@ -220,37 +220,12 @@ function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
   };
 }
 
-// Stable prefix of the synthetic duplicate response's error text (see
-// duplicateProviderToolCallMessage). Shared by the producer and the
-// isDuplicateProviderToolCallResponse discriminator so the two cannot
-// drift apart.
-const DUPLICATE_PROVIDER_TOOL_CALL_MESSAGE_PREFIX =
-  'Duplicate provider tool call id "';
-
 function duplicateProviderToolCallMessage(providerCallId: string): string {
   return (
-    `${DUPLICATE_PROVIDER_TOOL_CALL_MESSAGE_PREFIX}${providerCallId}" was already handled. ` +
+    `Duplicate provider tool call id "${providerCallId}" was already handled. ` +
     `The duplicate tool call was ignored and not executed again. If you ` +
     `intended to run this tool again, re-issue the call with a new unique ` +
     `tool-call id (or explicitly different arguments).`
-  );
-}
-
-/**
- * Whether a response part is the synthetic error fabricated for a
- * suppressed duplicate provider tool call (see
- * createDuplicateProviderToolCallResponse). Such a part never executed, so
- * it carries no result evidence for the result-aware loop guards and must
- * be excluded from their recording feeds (issue #9450) — the daemon twin
- * filters the same class via executionStatus/providerDuplicate metadata,
- * which main-session parts do not carry, leaving the message text as the
- * only discriminator here.
- */
-export function isDuplicateProviderToolCallResponse(part: Part): boolean {
-  const error = part.functionResponse?.response?.['error'];
-  return (
-    typeof error === 'string' &&
-    error.startsWith(DUPLICATE_PROVIDER_TOOL_CALL_MESSAGE_PREFIX)
   );
 }
 

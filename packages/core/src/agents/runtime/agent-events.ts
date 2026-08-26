@@ -206,10 +206,8 @@ export interface AgentFinishEvent {
   terminateReason: string;
   /**
    * Which loop detector fired when terminateReason is LOOP_DETECTED
-   * (issue #9450), so stops are attributable instead of collapsing into
-   * one generic label. Read by AgentTool's FINISH handler, which appends
-   * it to the failed task card's terminateReason; the journaled sink is
-   * SubagentExecutionEvent.loop_type (see agent-headless.ts).
+   * (issue #9450), so stops are attributable in journals/telemetry instead
+   * of collapsing into one generic label.
    */
   loopType?: string;
   timestamp: number;

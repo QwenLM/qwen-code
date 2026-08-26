@@ -1576,12 +1576,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.updateDisplay(
         {
           status: event.terminateReason === 'GOAL' ? 'completed' : 'failed',
-          // Surface which loop detector stopped the subagent (issue #9450)
-          // so the failed task card is attributable instead of collapsing
-          // every loop stop into the generic LOOP_DETECTED label.
-          terminateReason: event.loopType
-            ? `${event.terminateReason} (${event.loopType})`
-            : event.terminateReason,
+          terminateReason: event.terminateReason,
         },
         updateOutput,
       );
@@ -2197,12 +2192,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Get the results
       const subagentRawText = subagent.getFinalText();
       const terminateMode = subagent.getTerminateMode();
-      // Which loop detector fired when the subagent stopped on a loop
-      // (issue #9450). The FINISH event handler augmented terminateReason
-      // with it, but the display update below merge-overwrites that —
-      // re-apply the same augmentation here or the committed task card
-      // (execute() returns this.currentDisplay) shows bare LOOP_DETECTED.
-      const loopType = subagent.getLoopType();
       const finalText = appendStopHookBlockingCapWarning(
         toModelVisibleSubagentResult(subagentRawText, terminateMode),
         stopHookWarning,
@@ -2242,9 +2231,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.updateDisplay(
           {
             status: success ? 'completed' : 'failed',
-            terminateReason: loopType
-              ? `${terminateMode} (${loopType})`
-              : terminateMode,
+            terminateReason: terminateMode,
             result: finalText,
             executionSummary,
           },

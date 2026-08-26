@@ -256,9 +256,7 @@ describe('runNonInteractive', () => {
     consumePendingMemoryTaskPromises: Mock;
     recordCompletedToolCall: Mock;
     addHistory: Mock;
-    getLoopDetectionService: Mock;
   };
-  let mockNoteSuppressedToolCallByCallId: Mock;
   let mockGetDebugResponses: Mock;
   let goalRuntime: GoalRuntime;
 
@@ -319,7 +317,6 @@ describe('runNonInteractive', () => {
       abortAll: vi.fn(),
     };
 
-    mockNoteSuppressedToolCallByCallId = vi.fn();
     mockGeminiClient = {
       sendMessageStream: vi.fn(),
       consumePendingMemoryTaskPromises: vi.fn().mockReturnValue([]),
@@ -334,9 +331,6 @@ describe('runNonInteractive', () => {
       })),
       getChat: vi.fn(() => ({})),
       getHistoryToolCallFingerprints: vi.fn(() => new Map<string, string>()),
-      getLoopDetectionService: vi.fn(() => ({
-        noteSuppressedToolCallByCallId: mockNoteSuppressedToolCallByCallId,
-      })),
     };
 
     let currentModel = 'test-model';
@@ -2818,22 +2812,6 @@ describe('runNonInteractive', () => {
           .filter((metadata) => metadata.callId !== 'enter-plan')
           .map((metadata) => metadata.executionStatus),
       ).toEqual(['not_started', 'not_started', 'not_started']);
-      // The skipped siblings are marked executed (they get a fabricated
-      // response in the next turn), but they never ran: the loop guards'
-      // request-side reservations must unwind so the constant fabricated
-      // error fingerprint is never recorded as result evidence (issue
-      // #9450 — the daemon excludes this class via its not_started
-      // filter; the CLI has to unwind it explicitly).
-      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledTimes(3);
-      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledWith(
-        'write-before-entry',
-      );
-      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledWith(
-        'read-after-entry-1',
-      );
-      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledWith(
-        'read-after-entry-2',
-      );
     });
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
@@ -6965,78 +6943,6 @@ describe('runNonInteractive', () => {
       )?.message?.content?.[0]?.content;
       expect(leadingContent).toMatch(/Skipped:/);
       expect(leadingContent).not.toMatch(/Re-issue this call/);
-    });
-
-    it('marks suppressed sibling calls as never-executed for the loop guards (issue #9450)', async () => {
-      // The fabricated skipped-output responses carry the original callId
-      // but never executed. client.ts's recording feed excludes only the
-      // duplicate-message synthetic class, so the constant fabricated
-      // fingerprint would be recorded as a "changed" result every round,
-      // exonerating a stuck frozen-board poller. The CLI must unwind the
-      // request-side reservations via noteSuppressedToolCallByCallId —
-      // mirroring the daemon's not_started filter and agent-core's
-      // neverExecutedCallIds exclusion (requirement #6).
-      (mockConfig.getJsonSchema as Mock).mockReturnValue({
-        type: 'object',
-        properties: { summary: { type: 'string' } },
-      });
-      (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
-      setupMetricsMock();
-
-      (mockConfig.getBackgroundTaskRegistry as Mock).mockReturnValue({
-        setNotificationCallback: vi.fn(),
-        setRegisterCallback: vi.fn(),
-        getAll: vi.fn().mockReturnValue([]),
-        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
-        abortAll: vi.fn(),
-      });
-
-      // A task_list poll suppressed by the same-turn structured_output:
-      // exactly the call class the result-aware loop guards track.
-      const suppressedCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
-        value: {
-          callId: 'tool-suppressed-poll',
-          name: 'task_list',
-          args: { status: 'in_progress' },
-          isClientInitiated: false,
-          prompt_id: 'prompt-id-suppressed',
-        },
-      };
-      const structuredCall: ServerGeminiStreamEvent = {
-        type: GeminiEventType.ToolCallRequest,
-        value: {
-          callId: 'tool-structured-main',
-          name: 'structured_output',
-          args: { summary: 'done' },
-          isClientInitiated: false,
-          prompt_id: 'prompt-id-suppressed',
-        },
-      };
-
-      mockCoreExecuteToolCall.mockResolvedValue({
-        responseParts: [{ text: 'ok' }],
-      });
-
-      mockGeminiClient.sendMessageStream.mockReturnValueOnce(
-        createStreamFromEvents([suppressedCall, structuredCall]),
-      );
-
-      await runNonInteractive(
-        mockConfig,
-        mockSettings,
-        'Emit structured output',
-        'prompt-id-suppressed',
-      );
-
-      // Only structured_output executed; the suppressed poll must be
-      // marked never-executed so its fabricated skipped-output response
-      // is excluded from the loop guards' result evidence.
-      expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
-      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledTimes(1);
-      expect(mockNoteSuppressedToolCallByCallId).toHaveBeenCalledWith(
-        'tool-suppressed-poll',
-      );
     });
 
     it('tries multiple structured_output calls in the same turn until one succeeds', async () => {

@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from './tools.js';
@@ -17,9 +16,6 @@ import {
   type ToolResultBoundaryStage,
 } from './tool-result-boundary-diagnostics.js';
 import {
-  extractPersistedStubDigest,
-  extractStubDigestAt,
-  FULL_OUTPUT_DIGEST_LABEL,
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
 } from './truncation.js';
@@ -167,19 +163,6 @@ function allocateTextBudget(lengths: number[], budget: number): number[] {
     const share = Math.floor(remaining / active.length);
     const fixed = active.filter((index) => lengths[index] <= share);
     if (fixed.length === 0) {
-      if (share === 0) {
-        // Budget smaller than the active-slot count: a zero-char slot fits
-        // to '' regardless of content, and hashing that constant would
-        // fingerprint every over-budget result identically — a CHANGING
-        // board would false-halt on the result-aware guards (issue #9450).
-        // Keep every active slot at >= 1 char (digest chars, content-
-        // dependent from the first char) even when that overshoots a
-        // sub-slot-count budget by less than one char per slot.
-        for (const index of active) {
-          allocations[index] = 1;
-        }
-        break;
-      }
       for (const index of active) {
         allocations[index] = share;
       }
@@ -224,14 +207,6 @@ function sliceEndWithoutBrokenSurrogate(text: string, length: number): string {
   return text.slice(start);
 }
 
-/**
- * First line of the header fitText prepends to every batch-budget fit.
- * Exported so consumers that parse stubs (the loop guards in
- * services/loopDetectionService.ts) recognize the shape with the
- * producer's constant instead of a hand-mirrored literal that can drift.
- */
-export const BATCH_BUDGET_FIT_PREFIX = 'Tool output truncated.';
-
 function fitText(
   text: string,
   maxChars: number,
@@ -240,78 +215,16 @@ function fitText(
   if (text.length <= maxChars) return text;
   if (maxChars <= 0) return '';
 
-  // sha256 of the full pre-fit text (FULL_OUTPUT_DIGEST_LABEL). The header
-  // embeds a per-call artifact path, so hashing the fitted output would
-  // fingerprint every call uniquely and silently disable the result-aware
-  // loop guards for exactly these oversized batch-budget results (issue
-  // #9450). The digest sits right after the constant prefix; when even the
-  // header does not fit the allocation, the degenerate slice below takes
-  // the digest line itself so the fitted text stays content-dependent.
-  //
-  // Idempotence across nesting: the scheduler persists oversized results
-  // BEFORE the batch budget runs, so the text fitted here can itself be an
-  // already-persisted stub whose envelope embeds the per-call unique
-  // `<toolResultsDir>/<callId>.txt` path. Hashing THAT envelope would
-  // fingerprint every poll of an unchanged board uniquely and disable the
-  // result-aware guards again (the guards' digest-first reduction would take
-  // this header's outer digest), so carry the inner stub's own digest
-  // instead — and likewise the digest of a prior batch-budget fit, whose
-  // header is per-call unique via its artifact note. The prior-fit digest is
-  // read at its FIXED header position (the line right after the prefix),
-  // never by scanning the payload: a quoted stub header inside the fit's
-  // content would otherwise be adopted as the digest, fingerprinting the fit
-  // to the quoted hex while content changes below it stay invisible — and
-  // diverging from the guard, which only recognizes producer-written
-  // positions (issue #9450).
-  const headerLabelStart = BATCH_BUDGET_FIT_PREFIX.length + 1;
-  const digest =
-    extractPersistedStubDigest(text) ??
-    (text.startsWith(BATCH_BUDGET_FIT_PREFIX) &&
-    text[BATCH_BUDGET_FIT_PREFIX.length] === '\n' &&
-    text.startsWith(FULL_OUTPUT_DIGEST_LABEL, headerLabelStart)
-      ? extractStubDigestAt(
-          text,
-          headerLabelStart + FULL_OUTPUT_DIGEST_LABEL.length,
-        )
-      : null) ??
-    createHash('sha256').update(text).digest('hex');
-  const digestLine = `${FULL_OUTPUT_DIGEST_LABEL}${digest}`;
-  const artifactNote =
+  const header =
     persistedOutputFiles && persistedOutputFiles.length > 0
       ? persistedOutputFiles.length === 1
-        ? `Persisted tool-output artifact: ${persistedOutputFiles[0]}`
-        : `Persisted tool-output artifacts:\n${persistedOutputFiles
+        ? `Tool output truncated. Persisted tool-output artifact: ${persistedOutputFiles[0]}`
+        : `Tool output truncated. Persisted tool-output artifacts:\n${persistedOutputFiles
             .map((file) => `- ${file}`)
             .join('\n')}`
-      : undefined;
-  const minimalHeader = `${BATCH_BUDGET_FIT_PREFIX}\n${digestLine}`;
-  const header = artifactNote
-    ? `${minimalHeader}\n${artifactNote}`
-    : minimalHeader;
+      : 'Tool output truncated.';
   if (header.length >= maxChars) {
-    // Degenerate allocation: the header does not fit whole. As long as the
-    // allocation holds prefix + digest line, slicing the header keeps the
-    // full digest (content-dependent). Below that, return the FULL digest
-    // line even though it overshoots the allocation (bounded by the line's
-    // own FULL_OUTPUT_DIGEST_LABEL.length + 64 chars — the same deliberate
-    // overshoot spirit allocateTextBudget applies with its >= 1-char
-    // allocations). A slice of the digest line instead would be a digest
-    // FRAGMENT, and the loop guards' stripPersistenceEnvelope reduces only
-    // the exact full digest line (or the save-failure note) to its digest:
-    // a fragment fingerprints as ordinary content, so byte-identical
-    // content would fingerprint differently for every sub-line allocation
-    // (75 vs 76 chars, or crossing the line length as batch composition
-    // changes) and never collide with the raw / full-fit / spilled
-    // representations of the same board — consecutiveIdentical evidence
-    // could never accumulate for a frozen oversized board under a small
-    // configured toolOutputBatchBudget, disarming the cap's result-aware
-    // stuck signal exactly in the small-budget regime (issue #9450). The
-    // full line makes every degenerate fit reduce to the same digest as
-    // every other representation of the same content.
-    if (maxChars >= minimalHeader.length) {
-      return sliceStartWithoutBrokenSurrogate(header, maxChars);
-    }
-    return digestLine;
+    return sliceStartWithoutBrokenSurrogate(header, maxChars);
   }
 
   const separator = '\n\n';

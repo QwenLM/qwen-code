@@ -484,17 +484,6 @@ export class AgentHeadless {
   }
 
   /**
-   * Which loop detector fired when terminateMode is LOOP_DETECTED (issue
-   * #9450), or null otherwise. Lets consumers that read the terminal state
-   * AFTER execute() returns (the agent tool's post-await display update)
-   * attribute the stop the same way the FINISH event handler does, since
-   * the event alone is overwritten by that update.
-   */
-  getLoopType(): string | null {
-    return this.loopType;
-  }
-
-  /**
    * Sets a callback that the reasoning loop calls between tool rounds
    * to drain external messages (e.g. from SendMessage tool).
    */

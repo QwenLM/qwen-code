@@ -2019,22 +2019,6 @@ export async function runNonInteractive(
         const finalizePlanModeEntrySiblingSkip = (
           requestInfo: ToolCallRequestInfo,
         ): void => {
-          // Never executed: the fabricated skip response below carries no
-          // result evidence, so unwind the request-side reservations the
-          // loop guards made when the call streamed in — the same unwind
-          // the never-executed skipped-output synthesis runs below. The
-          // fabricated error is not of the duplicate-provider synthetic
-          // class (client.ts's recording feed excludes ONLY that class),
-          // and this path marks the request executed, so without the
-          // unwind the feed pairs the constant fabricated fingerprint
-          // with the streamed request and records it as a "changed"
-          // result every occurrence — resetting the frozen-board streaks
-          // and disarming the result-aware halts (issue #9450). Mirrors
-          // the daemon twin, whose not_started filter excludes exactly
-          // this class from its result recording.
-          geminiClient
-            .getLoopDetectionService()
-            .noteSuppressedToolCallByCallId(requestInfo.callId);
           const error = new Error(PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE);
           const responseParts: Part[] = [
             {
@@ -2196,18 +2180,6 @@ export async function runNonInteractive(
             structuredSubmission !== undefined,
           );
           for (const call of unexecutedCalls) {
-            // Never executed: the fabricated skipped-output response
-            // carries no result evidence, so unwind the request-side
-            // reservations the loop guards made when the call streamed in —
-            // mirroring the daemon's not_started filter and agent-core's
-            // neverExecutedCallIds exclusion. Without this the constant
-            // fabricated fingerprint passes client.ts's recording feed
-            // (isDuplicateProviderToolCallResponse is false for it) and
-            // counts as a "changed" result every round, exonerating a
-            // stuck frozen-board poller (issue #9450 requirement #6).
-            geminiClient
-              .getLoopDetectionService()
-              .noteSuppressedToolCallByCallId(call.callId);
             const responseParts: Part[] = [
               {
                 functionResponse: {

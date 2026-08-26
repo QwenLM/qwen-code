@@ -975,13 +975,6 @@ export class AgentCore {
         } as AgentRoundEvent);
 
         const functionCalls: FunctionCall[] = [];
-        // callIds already streamed to the loop guard this attempt. Mirrors
-        // dedupeToolCallsById (which collapses execution to one call per
-        // id): a provider can emit the same call id twice in one response,
-        // and counting both emissions would leave the request counters one
-        // ahead of the executed result evidence (one recordToolResult per
-        // executed call), fail-safe-halting a productive stateful poller.
-        const loopGuardStreamedCallIds = new Set<string>();
         let roundText = '';
         let roundThoughtText = '';
         let lastUsage: GenerateContentResponseUsageMetadata | undefined =
@@ -1019,7 +1012,6 @@ export class AgentCore {
               stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
             }
             functionCalls.length = 0;
-            loopGuardStreamedCallIds.clear();
             roundText = '';
             roundThoughtText = '';
             lastUsage = undefined;
@@ -1101,17 +1093,6 @@ export class AgentCore {
 
             for (const fc of chunkFunctionCalls) {
               const toolName = String(fc.name);
-              // Provider-duplicate emissions of an already-streamed call id
-              // execute once (dedupeToolCallsById collapses them), so feed
-              // the loop guard once — request counts and result evidence
-              // must stay the same population. Id-less calls are never
-              // deduped, mirroring dedupeToolCallsById.
-              if (fc.id) {
-                if (loopGuardStreamedCallIds.has(fc.id)) {
-                  continue;
-                }
-                loopGuardStreamedCallIds.add(fc.id);
-              }
               if (
                 checkSubagentLoop({
                   type: GeminiEventType.ToolCallRequest,
@@ -1196,7 +1177,6 @@ export class AgentCore {
             wasOutputTruncated,
             handledToolCallFingerprints,
             duplicateProviderToolCallResponseIds,
-            loopDetector,
           );
           if (toolCallResult.repeatedDuplicateProviderToolCall) {
             terminateMode = AgentTerminateMode.LOOP_DETECTED;
@@ -1645,27 +1625,18 @@ export class AgentCore {
     wasOutputTruncated = false,
     handledToolCallFingerprints = new Map<string, string>(),
     duplicateProviderToolCallResponseIds = new Set<string>(),
-    loopDetector?: LoopDetectionService,
   ): Promise<{
     messages: Content[];
     repeatedDuplicateProviderToolCall: boolean;
     /** Executed calls with their model-visible results, in call order.
      * Consumed by the loop detector for result-aware stateful-read guards
-     * (issue #9450). Never-executed synthetic responses (duplicate-replay
-     * and authorization rejections) are excluded — they carry no result
-     * evidence and would reset the guards' streaks as "changed" results. */
+     * (issue #9450). */
     results: Array<{
       toolName: string;
       args: Record<string, unknown>;
       responseParts: Part[];
     }>;
   }> {
-    // callIds whose responses are synthetic and were NEVER executed: replay
-    // suppressions and authorization rejections (plus abort synthetics).
-    // Their results must not feed the result-aware loop guards (issue #9450)
-    // — the daemon twin excludes the same class (Session's result-recording
-    // filter on providerDuplicate / executionStatus 'not_started').
-    const neverExecutedCallIds = new Set<string>();
     const responseByCallId = new Map<
       string,
       {
@@ -1769,17 +1740,6 @@ export class AgentCore {
           responseParts: [functionResponsePart],
           durationMs: 0,
         });
-        // Never executed: keep the synthetic error out of the loop guards'
-        // result evidence and unwind the request-time reservations it made
-        // when streamed (issue #9450). The request-side repetition
-        // increment is KEPT (see noteSuppressedToolCallByCallId): a
-        // subagent persistently re-emitting an unavailable task_list is a
-        // pure stream of rejected calls — no result ever lands to exonerate
-        // it, so the always-on consecutive-identical guard must still halt
-        // it on the 5th identical request instead of oscillating the count
-        // back down forever.
-        neverExecutedCallIds.add(callId);
-        loopDetector?.noteSuppressedToolCallByCallId(callId);
         continue;
       }
 
@@ -1827,20 +1787,6 @@ export class AgentCore {
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
             durationMs: 0,
-          });
-          // Never executed (cross-round replay of an already-handled call
-          // id): the fabricated duplicate response carries no result
-          // evidence. Exclude it from the loop guards and unwind the
-          // request-time reservations the replayed request made when
-          // streamed — the daemon twin excludes this class via its
-          // providerDuplicate / not_started filter (issue #9450). The
-          // replaySuppression mark carries the live streak evidence across
-          // the next Finished boundary, mirroring the daemon's all-replay
-          // (empty) batch decay skip — a replay of a NON-stateful tool
-          // marks nothing on its own (issue #9450 requirement #6).
-          neverExecutedCallIds.add(callId);
-          loopDetector?.noteSuppressedToolCallByCallId(callId, {
-            replaySuppression: true,
           });
           continue;
         }
@@ -2260,10 +2206,6 @@ export class AgentCore {
             responseParts,
             durationMs: 0,
           });
-          // Never executed (cancelled before emission): same exclusion as
-          // the other synthetic responses (issue #9450).
-          neverExecutedCallIds.add(req.callId);
-          loopDetector?.noteSuppressedToolCallByCallId(req.callId);
         }
       };
       abortController.signal.addEventListener('abort', onAbort, { once: true });
@@ -2337,12 +2279,8 @@ export class AgentCore {
       timestamp: Date.now(),
     });
 
-    // Pair each EXECUTED call with its model-visible (finalized) result so
+    // Pair each executed call with its model-visible (finalized) result so
     // the reasoning loop can feed the loop detector's result-aware guards.
-    // Never-executed synthetic responses are skipped: recording one would
-    // pair a fabricated error with the replayed/rejected call's request and
-    // reset the guards' streaks as a "changed" result, disarming every
-    // result-aware halt (issue #9450).
     const finalizedByCallId = new Map(
       finalizedResponses.map((response) => [response.callId, response]),
     );
@@ -2353,7 +2291,6 @@ export class AgentCore {
     }> = [];
     for (const fc of uniqueFunctionCalls) {
       const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
-      if (neverExecutedCallIds.has(callId)) continue;
       const finalized = finalizedByCallId.get(callId);
       if (!finalized) continue;
       results.push({

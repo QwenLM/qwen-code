@@ -157,9 +157,7 @@ import {
   ConversationFinishedEvent,
   GLOBAL_DUPLICATE_THRESHOLD,
   canonicalToolName,
-  fingerprintToolResult,
   getToolCallRepeatKey,
-  isStatefulReadTool,
   shouldHaltOnTurnToolCallCap,
   logLoopDetected,
   logRepeatedToolFailureGuard,
@@ -643,34 +641,6 @@ export type DaemonToolLoopState = {
   toolCallKeyCounts: Map<string, number>;
   /** Highest repeat count of any single (tool, args) pair this turn. */
   maxToolCallKeyRepeat: number;
-  /**
-   * Result-aware evidence for stateful read tools (issue #9450), keyed by
-   * repeat key — mirrors core's LoopDetectionService.statefulRepeatState.
-   * `consecutiveIdenticalResults` counts executed results that repeat the
-   * key's immediately preceding result and restarts at 1 on a changed
-   * result; `lastFingerprint` is the preceding result's fingerprint.
-   */
-  statefulResultStreaks: Map<
-    string,
-    {
-      consecutiveIdenticalResults: number;
-      lastFingerprint: string | undefined;
-    }
-  >;
-  /**
-   * Running max of the CURRENT stateful result streaks — the cap's stuck
-   * signal for stateful reads (mirrors core's statefulCapKeyRepeat).
-   * Disarmed when a result changes, so a thawed board releases the cap.
-   */
-  statefulMaxResultRepeat: number;
-  /**
-   * Stateful keys that recorded a result since the previous batch (mirrors
-   * core's statefulResultKeysSinceLastFinished). At each batch boundary,
-   * keys absent from this set are abandoned and their streaks stop feeding
-   * statefulMaxResultRepeat (issue #9450). Optional: lazily initialized so
-   * pre-existing hand-built states stay compatible.
-   */
-  statefulResultKeysSinceLastBatch?: Set<string>;
   loopDetected: boolean;
   loopType?: LoopType;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
@@ -699,9 +669,6 @@ function createDaemonToolLoopState(
     invalidToolParamErrors: new Map(),
     toolCallKeyCounts: new Map(),
     maxToolCallKeyRepeat: 0,
-    statefulResultStreaks: new Map(),
-    statefulMaxResultRepeat: 0,
-    statefulResultKeysSinceLastBatch: new Set(),
     loopDetected: false,
     repeatedToolFailureMode,
     repeatedToolFailureState: createRepeatedToolFailureGuardState(),
@@ -842,83 +809,6 @@ function isLoopDetectedTurnError(error: unknown): boolean {
   );
 }
 
-/**
- * Batch-boundary decay for the cap's stateful stuck signal — the daemon
- * twin of core's LoopDetectionService.decayAbandonedStatefulStreaks; the
- * two runtimes must not drift (issue #9450 requirement #6). A stateful key
- * that produced no result since the previous batch was abandoned: the model
- * moved on to other work, so its frozen-phase streak must stop feeding
- * statefulMaxResultRepeat. Without this the streak map is add-only and the
- * peak latches for the whole turn — under the CLI default
- * skipLoopDetection=true the cap's stuck signal is the ONLY live halt path
- * for a frozen daemon poller, and the latched peak would halt a productive
- * turn just past the soft cap. Keys polled in every batch appear in the set
- * and keep their streaks, so a continuously frozen board still arms the cap.
- * Keys requested in the CURRENT batch (`requestedKeys`) are skipped too —
- * the mirror of core's skip for keys requested since the last Finished
- * boundary (loopDetectionService.decayAbandonedStatefulStreaks): a poll
- * batch's own results are recorded after this boundary runs, and any gap
- * batch (other tools between polls) consumes the previous result's mark at
- * its own boundary, so decaying a key that is still being polled would
- * wipe its streak at the next poll's boundary and disarm the stuck signal
- * for an every-other-batch frozen poller (issue #9450 requirement #6).
- */
-function decayAbandonedDaemonStreaks(
-  loopState: DaemonToolLoopState,
-  requestedKeys?: ReadonlySet<string>,
-): void {
-  const sinceLastBatch = (loopState.statefulResultKeysSinceLastBatch ??=
-    new Set<string>());
-  let decayed = false;
-  for (const [key, state] of loopState.statefulResultStreaks) {
-    if (sinceLastBatch.has(key)) continue;
-    if (requestedKeys?.has(key)) continue;
-    if (state.consecutiveIdenticalResults > 0) {
-      state.consecutiveIdenticalResults = 0;
-      decayed = true;
-    }
-  }
-  sinceLastBatch.clear();
-  if (!decayed) return;
-  let peak = 0;
-  for (const state of loopState.statefulResultStreaks.values()) {
-    if (state.consecutiveIdenticalResults > peak) {
-      peak = state.consecutiveIdenticalResults;
-    }
-  }
-  loopState.statefulMaxResultRepeat = peak;
-}
-
-/**
- * Daemon twin of core's carryStatefulStreakMarksAcrossSuppression (see
- * loopDetectionService.noteSuppressedToolCallByCallId); the two runtimes
- * must not drift (issue #9450 requirement #6). Called on ANY replay
- * suppression — not only a stateful one: the carry is needed most when
- * the suppressed replay is a NON-stateful tool (the provider re-emitting
- * an already-handled read_file call id, say). A MIXED batch of that
- * replay plus an executable call skips the empty-batch decay skip, and
- * requestedStatefulKeys holds executable calls only, so without the carry
- * the polled task_list key sits in NEITHER skip set once the previous
- * result's mark is consumed — decayAbandonedDaemonStreaks wipes the live
- * frozen-board streak and recomputes statefulMaxResultRepeat toward zero,
- * keeping the stuck signal below GLOBAL_DUPLICATE_THRESHOLD indefinitely
- * while core carries the identical interleaving and halts just past the
- * soft cap. Decayed streaks carry consecutiveIdenticalResults === 0, so
- * the carry never resurrects an abandoned streak — it only postpones an
- * imminent decay by one boundary, exactly as the core twin.
- */
-function carryStatefulStreakMarksAcrossDaemonSuppression(
-  loopState: DaemonToolLoopState,
-): void {
-  const sinceLastBatch = (loopState.statefulResultKeysSinceLastBatch ??=
-    new Set<string>());
-  for (const [key, state] of loopState.statefulResultStreaks) {
-    if (state.consecutiveIdenticalResults > 0) {
-      sinceLastBatch.add(key);
-    }
-  }
-}
-
 function recordDaemonToolCalls(
   config: Config,
   promptId: string,
@@ -927,48 +817,8 @@ function recordDaemonToolCalls(
 ): boolean {
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
-  // A batch that executes nothing — every call suppressed as a replay of an
-  // already-handled provider call id (pushDuplicateBatch) — records zero
-  // results BY DESIGN (the result-recording filter excludes
-  // providerDuplicate / not_started records). Running the abandonment decay
-  // for it would mistake that for the model moving on: the next batch's
-  // decay would find the live frozen-board key absent and wipe its streak,
-  // letting replays interleaved at ≤5-poll intervals keep
-  // statefulMaxResultRepeat below the stuck threshold indefinitely —
-  // disarming the cap's stuck signal while the replay batches also add 0 to
-  // totalToolCalls and push the hard backstop away (issue #9450). Skip it:
-  // the still-populated statefulResultKeysSinceLastBatch set carries the
-  // last EXECUTED round's keys through the empty batch, so abandonment
-  // decay still runs (and clears) on the next non-empty batch. The cap
-  // check cannot newly fire on an empty batch: totalToolCalls is unchanged
-  // and skipping the decay can only keep the repeat peak higher, which a
-  // prior non-halting check at the same total already tolerated.
-  if (calls.length === 0) return false;
-  // Stateful keys requested in THIS batch: the boundary decay must skip
-  // them (see decayAbandonedDaemonStreaks) — their results have not landed
-  // yet, exactly as core's Finished-boundary decay skips keys requested
-  // since the last boundary.
-  const requestedStatefulKeys = new Set<string>();
-  for (const call of calls) {
-    const name = call.name ?? '';
-    if (isStatefulReadTool(name)) {
-      requestedStatefulKeys.add(getToolCallRepeatKey(name, call.args ?? {}));
-    }
-  }
-  // Batch boundary: the previous batch's results have all been recorded by
-  // now (results are recorded during execution, before the next batch is
-  // streamed), so this is the safe point to decay stateful keys absent from
-  // them — the daemon twin of core's Finished-boundary decay (issue #9450).
-  decayAbandonedDaemonStreaks(loopState, requestedStatefulKeys);
   loopState.totalToolCalls += calls.length;
   for (const call of calls) {
-    // Stateful read tools are counted post-execution in
-    // recordDaemonToolResult, keyed on (call, result fingerprint) instead
-    // of args alone (issue #9450) — identical arguments to task_list do
-    // not imply an identical result while peers keep mutating the board.
-    // Mirrors core's checkAlwaysOnSafeties exemption; the two runtimes
-    // must not drift (requirement #6).
-    if (isStatefulReadTool(call.name ?? '')) continue;
     const key = getToolCallRepeatKey(call.name ?? '', call.args ?? {});
     const count = (loopState.toolCallKeyCounts.get(key) ?? 0) + 1;
     loopState.toolCallKeyCounts.set(key, count);
@@ -995,14 +845,7 @@ function recordDaemonToolCalls(
   if (
     shouldHaltOnTurnToolCallCap(
       loopState.totalToolCalls,
-      // Request-time evidence (deterministic tools) and result-time
-      // evidence (stateful reads) feed the same stuck signal, exactly as
-      // core's checkTurnToolCallCap. The stateful half disarms when
-      // results change (recordDaemonToolResult).
-      Math.max(
-        loopState.maxToolCallKeyRepeat,
-        loopState.statefulMaxResultRepeat,
-      ),
+      loopState.maxToolCallKeyRepeat,
       config.getMaxToolCallsPerTurn(),
       config.isMaxToolCallsPerTurnExplicit(),
     )
@@ -1025,9 +868,7 @@ function recordDaemonToolCalls(
   // always-on regardless. "Off by default" depends on the CLI layer: core's
   // Config defaults skipLoopDetection to false and loadCliConfig applies
   // `?? true` (cli config.ts), so a Config constructed without that layer
-  // would ship this halt on. Stateful read tools are counted
-  // post-execution in recordDaemonToolResult instead (their repetition is
-  // only meaningful when the results are unchanged too).
+  // would ship this halt on.
   if (
     !config.getSkipLoopDetection() &&
     loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD
@@ -1037,87 +878,6 @@ function recordDaemonToolCalls(
       promptId,
       LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
-      loopState,
-    );
-  }
-  return false;
-}
-
-/**
- * Result-aware mirror of core's LoopDetectionService.recordToolResult for
- * the daemon/ACP runtime (issue #9450 requirement #6). Records the executed
- * result of a stateful read tool so identical arguments whose results keep
- * changing are treated as productive polling, not a loop. Feeds both the
- * adaptive cap's stuck signal (statefulMaxResultRepeat, which disarms on a
- * changed result) and the result-time global-duplicate count (gated on
- * skipLoopDetection, exactly as in core). Call once per executed call.
- */
-function recordDaemonToolResult(
-  config: Config,
-  promptId: string,
-  loopState: DaemonToolLoopState | undefined,
-  toolCall: { name: string; args: object },
-  responseParts: readonly Part[],
-): boolean {
-  if (!loopState || loopState.loopDetected)
-    return loopState?.loopDetected ?? false;
-  if (!isStatefulReadTool(toolCall.name)) return false;
-
-  const fingerprint = fingerprintToolResult(responseParts);
-  if (fingerprint === null) return false;
-  const key = getToolCallRepeatKey(toolCall.name, toolCall.args);
-
-  // Batch bookkeeping: this key produced a result in the current batch, so
-  // the next batch boundary must not decay it (see
-  // decayAbandonedDaemonStreaks).
-  (loopState.statefulResultKeysSinceLastBatch ??= new Set<string>()).add(key);
-
-  let state = loopState.statefulResultStreaks.get(key);
-  if (!state) {
-    state = { consecutiveIdenticalResults: 0, lastFingerprint: undefined };
-    loopState.statefulResultStreaks.set(key, state);
-  }
-  const firstResult = state.lastFingerprint === undefined;
-  const fingerprintChanged =
-    !firstResult && state.lastFingerprint !== fingerprint;
-
-  // Consecutive identical-result counting (mirrors core): a result that
-  // differs from the key's predecessor restarts the count, so an
-  // oscillating board never accumulates toward either halt.
-  const consecutiveIdentical = fingerprintChanged
-    ? 1
-    : state.consecutiveIdenticalResults + 1;
-  state.consecutiveIdenticalResults = consecutiveIdentical;
-  state.lastFingerprint = fingerprint;
-
-  // Cap stuck signal from result evidence. A raised peak must NOT latch:
-  // when a result changes, recompute the peak from the keys' CURRENT
-  // streaks so a thawed board disarms the adaptive cap exactly as it
-  // disarms the result-time global-duplicate count. Mirrors core's
-  // statefulCapKeyRepeat.
-  if (consecutiveIdentical > loopState.statefulMaxResultRepeat) {
-    loopState.statefulMaxResultRepeat = consecutiveIdentical;
-  } else if (fingerprintChanged) {
-    let peak = consecutiveIdentical;
-    for (const other of loopState.statefulResultStreaks.values()) {
-      if (other.consecutiveIdenticalResults > peak) {
-        peak = other.consecutiveIdenticalResults;
-      }
-    }
-    loopState.statefulMaxResultRepeat = peak;
-  }
-
-  // The result-time global-duplicate detector is gated on skipLoopDetection
-  // exactly as its core counterpart in recordToolResult.
-  if (
-    !config.getSkipLoopDetection() &&
-    consecutiveIdentical >= GLOBAL_DUPLICATE_THRESHOLD
-  ) {
-    return recordDaemonLoopDetected(
-      config,
-      promptId,
-      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-      `Stopping ACP turn after the same ${toolCall.name} result repeated ${consecutiveIdentical} times.`,
       loopState,
     );
   }
@@ -9485,29 +9245,6 @@ export class Session implements SessionContext {
         ordinal: dedupedFunctionCalls.indexOf(fc),
         sequence: toolResultRecordSequence++,
       });
-      // Result-aware loop guards (issue #9450): feed EXECUTED stateful-read
-      // results to the daemon guard so identical task_list arguments whose
-      // results keep changing stay productive. Skipped/duplicate records
-      // (executionStatus 'not_started', providerDuplicate) never executed,
-      // so they carry no result evidence. A detection sets
-      // loopState.loopDetected; the batch loops and runTool entry checks
-      // below observe it and stop the turn.
-      if (
-        toolLoopState &&
-        !record.providerDuplicate &&
-        record.metadata.executionStatus !== 'not_started'
-      ) {
-        recordDaemonToolResult(
-          this.config,
-          promptId,
-          toolLoopState,
-          {
-            name: record.toolName,
-            args: (fc.args ?? {}) as object,
-          },
-          record.responseParts,
-        );
-      }
     };
     const finalizeRunToolResult = async (
       result: RunToolResult,
@@ -9702,38 +9439,6 @@ export class Session implements SessionContext {
         this.duplicateProviderToolCallResponseIds,
       );
 
-      // A suppressed replay keeps the live stateful streaks alive across
-      // the batch boundary: mirror core's suppression handling (core marks
-      // statefulResultKeysSinceLastFinished in noteSuppressedToolCallByCallId).
-      // The carry re-adds EVERY key that still carries streak evidence on
-      // ANY replay suppression — needed most when the suppressed replay is
-      // a NON-stateful tool: a MIXED batch of that replay alongside an
-      // executable call would otherwise skip the empty-batch early return,
-      // find the polled task_list key in neither skip set
-      // (requestedStatefulKeys is built from executable calls only), and
-      // decayAbandonedDaemonStreaks would wipe the live frozen-board
-      // streak — keeping statefulMaxResultRepeat below the stuck threshold
-      // indefinitely and drifting from core (issue #9450 requirement #6).
-      // The replayed stateful key itself is marked unconditionally too,
-      // mirroring core's end-of-function mark: a suppression landing
-      // before the streak's first result must still protect its key. These
-      // marks protect the replay batch's OWN boundary
-      // (recordDaemonToolCalls runs after batch construction and consumes
-      // them there); emitDuplicateBatch re-adds during the execution
-      // phase for the NEXT boundary, mirroring core's timing — core's
-      // mark lands when the fabricated response is submitted with the
-      // next round's ToolResult, after the replay stream's Finished
-      // boundary (issue #9450 requirement #6).
-      if (toolLoopState) {
-        carryStatefulStreakMarksAcrossDaemonSuppression(toolLoopState);
-        if (isStatefulReadTool(request.name)) {
-          (toolLoopState.statefulResultKeysSinceLastBatch ??=
-            new Set<string>()).add(
-            getToolCallRepeatKey(request.name, request.args),
-          );
-        }
-      }
-
       const response = createDuplicateProviderToolCallResponse(request);
       debugLogger.debug(
         `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +
@@ -9744,28 +9449,6 @@ export class Session implements SessionContext {
 
     const emitDuplicateBatch = async (batch: DuplicateBatch): Promise<void> => {
       const { request, response } = batch;
-      // Next-boundary protection for the suppressed replay: the marks
-      // pushDuplicateBatch added were consumed by THIS batch's own
-      // boundary decay (recordDaemonToolCalls ran after construction), so
-      // without fresh marks a gap batch following a mixed replay batch
-      // would find the live streak keys in neither skip set and decay the
-      // live frozen-board streak — one boundary earlier than core's twin,
-      // whose suppression mark lands with the fabricated response AFTER
-      // the replay round's Finished boundary. The carry mirrors core's on
-      // ANY replay suppression (a NON-stateful replay's own key marks
-      // nothing — its suppression must still protect the live streaks;
-      // see carryStatefulStreakMarksAcrossDaemonSuppression). Runs in the
-      // execution phase (the boundary has already run), so the marks
-      // survive to the next batch's decay (issue #9450 requirement #6).
-      if (toolLoopState) {
-        carryStatefulStreakMarksAcrossDaemonSuppression(toolLoopState);
-        if (isStatefulReadTool(request.name)) {
-          (toolLoopState.statefulResultKeysSinceLastBatch ??=
-            new Set<string>()).add(
-            getToolCallRepeatKey(request.name, request.args),
-          );
-        }
-      }
       try {
         if (request.name === ToolNames.TODO_WRITE) {
           const provenance = ToolCallEmitter.resolveToolProvenance(
@@ -10031,13 +9714,7 @@ export class Session implements SessionContext {
         executing.add(p);
         if (executing.size >= maxConcurrency) {
           await Promise.race(executing);
-          // toolLoopState.loopDetected also covers result-time detections
-          // (recordDaemonToolResult) that the settled result object does
-          // not carry.
-          if (
-            results.some((result) => result?.loopDetected) ||
-            toolLoopState?.loopDetected
-          ) {
+          if (results.some((result) => result?.loopDetected)) {
             await Promise.all(executing);
             await fillLoopSkippedFrom(idx + 1);
             return results;
@@ -10049,10 +9726,7 @@ export class Session implements SessionContext {
             );
           if (invalidToolErrorNearThreshold && executing.size > 0) {
             await Promise.all(executing);
-            if (
-              results.some((result) => result?.loopDetected) ||
-              toolLoopState?.loopDetected
-            ) {
+            if (results.some((result) => result?.loopDetected)) {
               await fillLoopSkippedFrom(idx + 1);
               return results;
             }
@@ -10123,9 +9797,6 @@ export class Session implements SessionContext {
             shouldStop ||= r.stopAfterPermissionCancel;
             shouldStopForLoop ||= r.loopDetected === true;
           }
-          // Result-time detections (recordDaemonToolResult) land on the
-          // shared loop state, not on an individual result object.
-          shouldStopForLoop ||= toolLoopState?.loopDetected === true;
           if (shouldStopForLoop) {
             await appendSkippedAfter(
               parts,
@@ -10166,10 +9837,7 @@ export class Session implements SessionContext {
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
-            // toolLoopState.loopDetected also covers result-time detections
-            // (recordDaemonToolResult) fired while this call's result was
-            // queued — the result object itself does not carry them.
-            if (r.loopDetected || toolLoopState?.loopDetected) {
+            if (r.loopDetected) {
               await appendSkippedAfter(
                 parts,
                 fc,
@@ -10197,9 +9865,6 @@ export class Session implements SessionContext {
       return await finalizeRunToolResult({
         parts,
         stopAfterPermissionCancel: false,
-        // A result-time detection on the LAST executed call leaves no later
-        // call to observe it; surface it so the turn loop still stops.
-        ...(toolLoopState?.loopDetected ? { loopDetected: true } : {}),
         memoryWriteCandidates,
       });
     } finally {

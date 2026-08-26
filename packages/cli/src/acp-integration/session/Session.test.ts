@@ -9695,14 +9695,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
 
@@ -9766,14 +9758,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
 
@@ -9840,14 +9824,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
 
@@ -10074,14 +10050,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         const calls = Array.from({ length: 5 }, (_, index) => ({
@@ -10145,14 +10113,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // Six identical (tool, args) calls below the cap. Core's always-on
@@ -10222,14 +10182,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         const calls = Array.from({ length: 6 }, (_, index) => ({
@@ -10309,14 +10261,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // The prompt loop calls runToolCalls once per model response against
@@ -10412,14 +10356,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // Six identical (tool, args) calls in one batch — three execute, and
@@ -10520,14 +10456,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // One diverse call plus six identical ones push the turn past the
@@ -10623,14 +10551,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         const calls = [
@@ -10719,14 +10639,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // 29 prior calls + a batch of 2 diverse calls crosses the backstop
@@ -10833,14 +10745,6 @@ describe('Session', () => {
             invalidToolParamErrors: new Map<string, number>(),
             toolCallKeyCounts: new Map<string, number>(),
             maxToolCallKeyRepeat: 0,
-            statefulResultStreaks: new Map<
-              string,
-              {
-                consecutiveIdenticalResults: number;
-                lastFingerprint: string | undefined;
-              }
-            >(),
-            statefulMaxResultRepeat: 0,
             loopDetected: false,
           };
           const result = await (
@@ -10933,14 +10837,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
 
@@ -11028,14 +10924,6 @@ describe('Session', () => {
             invalidToolParamErrors: new Map<string, number>(),
             toolCallKeyCounts: new Map<string, number>(),
             maxToolCallKeyRepeat: 0,
-            statefulResultStreaks: new Map<
-              string,
-              {
-                consecutiveIdenticalResults: number;
-                lastFingerprint: string | undefined;
-              }
-            >(),
-            statefulMaxResultRepeat: 0,
             loopDetected: false,
           };
 
@@ -11168,815 +11056,6 @@ describe('Session', () => {
         expect(
           secondFollowUp.message[0].functionResponse?.response?.['error'],
         ).toContain('Duplicate provider tool call id "shell_1"');
-      });
-
-      describe('result-aware daemon guard for stateful reads (issue #9450)', () => {
-        const TASK_LIST_ARGS = {
-          status: 'in_progress',
-          owner: 'peer-a',
-          blockedBy: '',
-        };
-
-        const freshLoopState = () => ({
-          totalToolCalls: 0,
-          invalidToolParamErrors: new Map<string, number>(),
-          toolCallKeyCounts: new Map<string, number>(),
-          maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
-          loopDetected: false,
-          loopType: undefined as core.LoopType | undefined,
-        });
-
-        // A task_list mock whose executed result changes (or freezes) per
-        // call, mirroring a task board peers keep mutating.
-        const installTaskListTool = (boards: () => string) => {
-          const execute = vi.fn().mockImplementation(async () => ({
-            llmContent: boards(),
-            returnDisplay: 'ok',
-          }));
-          mockToolRegistry.getTool.mockImplementation((name: string) =>
-            name === 'task_list'
-              ? {
-                  name: 'task_list',
-                  kind: core.Kind.Read,
-                  displayName: 'TaskList',
-                  description: 'TaskList',
-                  build: vi.fn().mockImplementation((args) => ({
-                    params: args,
-                    getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-                    getDescription: vi.fn().mockReturnValue('task_list'),
-                    toolLocations: vi.fn().mockReturnValue([]),
-                    execute,
-                  })),
-                  canUpdateOutput: false,
-                  isOutputMarkdown: false,
-                }
-              : undefined,
-          );
-          return execute;
-        };
-
-        // Like installTaskListTool, but every non-task_list tool also
-        // resolves to an executable mock so diverse productive calls run
-        // instead of tripping the missing-tool guard.
-        const installTaskListAndGenericTools = (boards: () => string) => {
-          mockToolRegistry.getTool.mockImplementation((name: string) => {
-            const execute =
-              name === 'task_list'
-                ? vi.fn().mockImplementation(async () => ({
-                    llmContent: boards(),
-                    returnDisplay: 'ok',
-                  }))
-                : vi.fn().mockResolvedValue({
-                    llmContent: 'ok',
-                    returnDisplay: 'ok',
-                  });
-            return {
-              name,
-              kind: core.Kind.Read,
-              displayName: name,
-              description: name,
-              build: vi.fn().mockImplementation((args) => ({
-                params: args,
-                getDefaultPermission: vi.fn().mockResolvedValue('allow'),
-                getDescription: vi.fn().mockReturnValue(name),
-                toolLocations: vi.fn().mockReturnValue([]),
-                execute,
-              })),
-              canUpdateOutput: false,
-              isOutputMarkdown: false,
-            };
-          });
-        };
-
-        const runTaskListPoll = (
-          loopState: ReturnType<typeof freshLoopState>,
-          round: number,
-        ) =>
-          (
-            session as unknown as {
-              runToolCalls: (
-                abortSignal: AbortSignal,
-                promptId: string,
-                calls: unknown[],
-                loopState: ReturnType<typeof freshLoopState>,
-              ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
-            }
-          ).runToolCalls(
-            new AbortController().signal,
-            `prompt-task-list-${round}`,
-            [
-              {
-                id: `task_list_${round}`,
-                name: 'task_list',
-                args: TASK_LIST_ARGS,
-              },
-            ],
-            loopState,
-          );
-
-        it('does not halt a daemon task_list poller while the board keeps changing (skipLoopDetection=false)', async () => {
-          // The exact #9450 shape on the daemon runtime: identical args,
-          // every executed result differing. Pre-fix the request-time
-          // global-duplicate mirror halted at the 6th identical-args poll.
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
-          let boardVersion = 0;
-          const execute = installTaskListTool(
-            () => `board state v${++boardVersion}`,
-          );
-          const loopState = freshLoopState();
-
-          for (let round = 0; round < 8; round++) {
-            const result = await runTaskListPoll(loopState, round);
-            expect(result.loopDetected ?? false).toBe(false);
-          }
-          expect(execute).toHaveBeenCalledTimes(8);
-          expect(loopState.maxToolCallKeyRepeat).toBe(0);
-          expect(loopState.loopDetected).toBe(false);
-        });
-
-        it('still halts a daemon task_list poller on a frozen board (skipLoopDetection=false)', async () => {
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
-          installTaskListTool(() => 'frozen board');
-          const loopState = freshLoopState();
-
-          let haltedAt = -1;
-          for (let round = 0; round < 8 && haltedAt < 0; round++) {
-            const result = await runTaskListPoll(loopState, round);
-            if (result.loopDetected) haltedAt = round;
-          }
-          // The 6th identical result trips the result-time global-duplicate
-          // mirror (GLOBAL_DUPLICATE_THRESHOLD = 6); the 6th request is not
-          // executed because the batch is skipped whole.
-          expect(haltedAt).toBeGreaterThanOrEqual(0);
-          expect(loopState.loopType).toBe(
-            core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
-          );
-        });
-
-        it('keeps a frozen-then-thawed daemon poller alive past the adaptive cap', async () => {
-          // CLI defaults: skipLoopDetection=true, adaptive soft cap. A frozen
-          // phase builds the result-time stuck signal; once the board thaws
-          // the signal must disarm so productive polling continues past the
-          // soft cap (the cap-ratchet regression on the daemon mirror).
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
-          const boards: string[] = [];
-          for (let i = 0; i < 6; i++) boards.push('frozen board');
-          let thawed = false;
-          const execute = installTaskListTool(() => {
-            if (boards.length > 0) return boards.shift()!;
-            thawed = true;
-            return `thawed board v${execute.mock.calls.length}`;
-          });
-          const loopState = freshLoopState();
-
-          let fired = false;
-          for (let round = 0; round < 40 && !fired; round++) {
-            const result = await runTaskListPoll(loopState, round);
-            fired = result.loopDetected ?? false;
-          }
-          expect(fired).toBe(false);
-          expect(thawed).toBe(true);
-          expect(loopState.loopDetected).toBe(false);
-        });
-
-        it('releases the daemon cap when a frozen task_list poller is abandoned for productive work', async () => {
-          // CLI defaults: skipLoopDetection=true, adaptive soft cap — the
-          // cap's stateful stuck signal is the ONLY live halt path. The
-          // streak map must not latch a stale peak from an abandoned key:
-          // interleaved frozen polls peak the signal, then the model stops
-          // polling and does diverse productive work. Pre-fix the add-only
-          // streak map kept the peak for the whole turn, so the productive
-          // turn was halted as TURN_TOOL_CALL_CAP just past the soft cap
-          // (issue #9450; core twin in loopDetectionService).
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
-          installTaskListAndGenericTools(() => 'frozen board');
-          const loopState = freshLoopState();
-
-          // 8 interleaved frozen task_list polls: the stuck signal peaks at
-          // 8 without halting (still under the soft cap).
-          for (let round = 0; round < 8; round++) {
-            const result = await runTaskListPoll(loopState, round);
-            expect(result.loopDetected ?? false).toBe(false);
-          }
-          expect(loopState.statefulMaxResultRepeat).toBe(8);
-
-          // Abandon polling; do diverse productive work past the soft cap
-          // of 20. The abandoned key's peak must decay at the batch
-          // boundaries, so no TURN_TOOL_CALL_CAP halt fires.
-          const runDiverseBatch = (round: number) =>
-            (
-              session as unknown as {
-                runToolCalls: (
-                  abortSignal: AbortSignal,
-                  promptId: string,
-                  calls: unknown[],
-                  loopState: ReturnType<typeof freshLoopState>,
-                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
-              }
-            ).runToolCalls(
-              new AbortController().signal,
-              `prompt-diverse-${round}`,
-              [
-                {
-                  id: `diverse_${round}`,
-                  name: 'generic_tool',
-                  args: { step: round },
-                },
-              ],
-              loopState,
-            );
-
-          let fired = false;
-          for (let round = 0; round < 20 && !fired; round++) {
-            const result = await runDiverseBatch(round);
-            fired = result.loopDetected ?? false;
-          }
-          expect(fired).toBe(false);
-          expect(loopState.loopDetected).toBe(false);
-          expect(loopState.totalToolCalls).toBeGreaterThan(20);
-        });
-
-        it('still halts a frozen daemon poller when replay-only rounds are interleaved in the streak (issue #9450)', async () => {
-          // CLI defaults: skipLoopDetection=true, adaptive soft cap — the
-          // cap's stateful stuck signal is the ONLY live halt path. A
-          // replay-suppressed round (every call pushed as a duplicate batch)
-          // executes nothing and records zero results BY DESIGN; the
-          // batch-boundary decay must not mistake it for abandonment and
-          // wipe the live frozen-board streak. Pre-fix, replays interleaved
-          // at <=5-poll intervals kept statefulMaxResultRepeat below the
-          // stuck threshold indefinitely while the replay batches added 0
-          // to totalToolCalls — the detected stuck loop ran to the hard
-          // backstop instead of halting just past the soft cap.
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
-          const execute = installTaskListTool(() => 'frozen board');
-          // Each replay round replays a DISTINCT already-handled id with the
-          // same (name, args) fingerprint, so its batch is suppressed whole
-          // without tripping the repeated-duplicate breaker (which fires on
-          // a second replay of the SAME id — a different, also-correct halt).
-          const fingerprint = core.getToolCallFingerprint(
-            'task_list',
-            TASK_LIST_ARGS,
-          );
-          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
-            new Map(
-              Array.from({ length: 15 }, (_, index) => [
-                `replayed_task_list_${index}`,
-                fingerprint,
-              ]),
-            ),
-          );
-          const loopState = freshLoopState();
-
-          let replayOrdinal = 0;
-          const runReplayRound = (round: number) =>
-            (
-              session as unknown as {
-                runToolCalls: (
-                  abortSignal: AbortSignal,
-                  promptId: string,
-                  calls: unknown[],
-                  loopState: ReturnType<typeof freshLoopState>,
-                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
-              }
-            ).runToolCalls(
-              new AbortController().signal,
-              `prompt-replay-${round}`,
-              [
-                {
-                  id: `replayed_task_list_${replayOrdinal++}`,
-                  name: 'task_list',
-                  args: TASK_LIST_ARGS,
-                },
-              ],
-              loopState,
-            );
-
-          let fired = false;
-          for (let round = 0; round < 60 && !fired; round++) {
-            if (round > 0 && round % 5 === 4) {
-              // Every fifth round is a replay-only round: zero executable
-              // calls, zero recorded results (four executed polls between
-              // replays, matching the finding's <=5-poll interleave).
-              const replayResult = await runReplayRound(round);
-              expect(replayResult.loopDetected ?? false).toBe(false);
-              expect(
-                (replayResult.parts[0]?.functionResponse?.response?.[
-                  'error'
-                ] as string) ?? '',
-              ).toContain('Duplicate provider tool call id');
-              continue;
-            }
-            const result = await runTaskListPoll(loopState, round);
-            fired = result.loopDetected ?? false;
-          }
-
-          // The streak survives the replay rounds and arms the cap's stuck
-          // signal: the halt lands at totalToolCalls 21 (soft cap 20 + 1),
-          // before the 21st poll executes.
-          expect(fired).toBe(true);
-          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
-          expect(loopState.totalToolCalls).toBe(21);
-          expect(execute).toHaveBeenCalledTimes(20);
-        });
-
-        it('still halts a frozen daemon poller when MIXED batches interleave a suppressed replay with an executable call (issue #9450)', async () => {
-          // Mixed-batch variant of the replay-interleave regression: one
-          // executed poll per cycle, then two MIXED rounds that each
-          // suppress a task_list replay alongside an EXECUTABLE generic
-          // call. Pre-fix the batch was non-empty (no
-          // calls.length === 0 early return), requestedStatefulKeys held
-          // only the executable call, and once the previous result's mark
-          // was consumed the replayed key sat in neither skip set —
-          // decayAbandonedDaemonStreaks wiped the frozen-board streak and
-          // recomputed statefulMaxResultRepeat to 0, so the stuck signal
-          // never reached GLOBAL_DUPLICATE_THRESHOLD and the detected
-          // stuck loop ran to the hard backstop (core survives this shape
-          // via noteSuppressedToolCallByCallId's mark; requirement #6).
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
-          installTaskListAndGenericTools(() => 'frozen board');
-          const fingerprint = core.getToolCallFingerprint(
-            'task_list',
-            TASK_LIST_ARGS,
-          );
-          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
-            new Map(
-              Array.from({ length: 15 }, (_, index) => [
-                `replayed_task_list_${index}`,
-                fingerprint,
-              ]),
-            ),
-          );
-          const loopState = freshLoopState();
-
-          let replayOrdinal = 0;
-          const runMixedRound = (round: number) =>
-            (
-              session as unknown as {
-                runToolCalls: (
-                  abortSignal: AbortSignal,
-                  promptId: string,
-                  calls: unknown[],
-                  loopState: ReturnType<typeof freshLoopState>,
-                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
-              }
-            ).runToolCalls(
-              new AbortController().signal,
-              `prompt-mixed-${round}`,
-              [
-                {
-                  id: `replayed_task_list_${replayOrdinal++}`,
-                  name: 'task_list',
-                  args: TASK_LIST_ARGS,
-                },
-                {
-                  id: `generic_${round}`,
-                  name: 'generic_tool',
-                  args: { step: round },
-                },
-              ],
-              loopState,
-            );
-
-          let fired = false;
-          for (let round = 0; round < 60 && !fired; round++) {
-            if (round % 3 !== 0) {
-              // Two MIXED rounds per cycle (each one suppressed replay +
-              // one executable generic call): the first mixed boundary
-              // consumes the previous poll's result mark, so pre-fix the
-              // SECOND mixed boundary wiped the streak every cycle
-              // (peakSeries 1,1,0,…) and the stuck signal never armed.
-              const mixedResult = await runMixedRound(round);
-              fired = mixedResult.loopDetected ?? false;
-              continue;
-            }
-            const result = await runTaskListPoll(loopState, round);
-            fired = result.loopDetected ?? false;
-          }
-
-          // The suppression mark carries the replayed key through the
-          // mixed-batch boundaries, so the streak arms the stuck signal
-          // exactly as in the replay-only control: the halt lands at
-          // totalToolCalls 21 (soft cap 20 + 1).
-          expect(fired).toBe(true);
-          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
-          expect(loopState.totalToolCalls).toBe(21);
-        });
-
-        it('still halts a frozen daemon poller when MIXED batches interleave a NON-stateful suppressed replay with an executable call (issue #9450)', async () => {
-          // Mixed-batch variant whose suppressed replay is NON-stateful
-          // (the provider re-emits an already-handled generic_tool call
-          // id): the replayed key itself carries no stateful mark, so the
-          // live frozen task_list streak survives the mixed boundaries
-          // only via the suppression carry — the daemon twin of core's
-          // carryStatefulStreakMarksAcrossSuppression, which re-adds the
-          // live streak keys on ANY replay suppression. Pre-fix the
-          // daemon's marks were gated on the replay itself being
-          // stateful, so once the previous poll's result mark was
-          // consumed the polled task_list key sat in NEITHER skip set
-          // (requestedStatefulKeys holds executable calls only) and
-          // decayAbandonedDaemonStreaks wiped the streak at the second
-          // mixed boundary of every cycle — statefulMaxResultRepeat
-          // oscillated 1,1,0,… below GLOBAL_DUPLICATE_THRESHOLD and the
-          // stuck signal never armed, while core carries the identical
-          // interleaving and halts just past the soft cap (issue #9450
-          // requirement #6).
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
-          installTaskListAndGenericTools(() => 'frozen board');
-          // Each replay round replays a DISTINCT already-handled id with
-          // the same (name, args) fingerprint, so its batch is suppressed
-          // without tripping the repeated-duplicate breaker.
-          const fingerprint = core.getToolCallFingerprint('generic_tool', {
-            step: 0,
-          });
-          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
-            new Map(
-              Array.from({ length: 40 }, (_, index) => [
-                `replayed_generic_${index}`,
-                fingerprint,
-              ]),
-            ),
-          );
-          const loopState = freshLoopState();
-
-          let replayOrdinal = 0;
-          const runMixedRound = (round: number) =>
-            (
-              session as unknown as {
-                runToolCalls: (
-                  abortSignal: AbortSignal,
-                  promptId: string,
-                  calls: unknown[],
-                  loopState: ReturnType<typeof freshLoopState>,
-                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
-              }
-            ).runToolCalls(
-              new AbortController().signal,
-              `prompt-mixed-nonstateful-${round}`,
-              [
-                {
-                  id: `replayed_generic_${replayOrdinal++}`,
-                  name: 'generic_tool',
-                  args: { step: 0 },
-                },
-                {
-                  id: `generic_${round}`,
-                  name: 'generic_tool',
-                  args: { step: round },
-                },
-              ],
-              loopState,
-            );
-
-          let fired = false;
-          for (let round = 0; round < 60 && !fired; round++) {
-            if (round % 3 !== 0) {
-              // Two MIXED rounds per cycle (each one suppressed
-              // NON-stateful replay + one executable generic call): the
-              // first mixed boundary consumes the previous poll's result
-              // mark, so pre-fix the SECOND mixed boundary wiped the
-              // streak every cycle and the stuck signal never armed.
-              const mixedResult = await runMixedRound(round);
-              fired = mixedResult.loopDetected ?? false;
-              continue;
-            }
-            const result = await runTaskListPoll(loopState, round);
-            fired = result.loopDetected ?? false;
-          }
-
-          // The carry protects the polled task_list key through every
-          // mixed boundary, so the streak arms the stuck signal exactly
-          // as in the stateful-replay control: the halt lands at
-          // totalToolCalls 21 (soft cap 20 + 1).
-          expect(fired).toBe(true);
-          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
-          expect(loopState.totalToolCalls).toBe(21);
-        });
-
-        it('still halts a frozen daemon poller when a MIXED replay batch is followed by a gap batch (issue #9450)', async () => {
-          // Mixed replay batch, then a GAP batch (other work, no
-          // task_list), then the next poll — the shape the consecutive
-          // mixed-batch control above cannot see. Pre-fix the suppression
-          // mark was added during batch construction and consumed by the
-          // replay batch's OWN boundary decay (which the previous poll's
-          // result mark already protected), leaving the NEXT boundary —
-          // the gap batch's — exposed: decayAbandonedDaemonStreaks wiped
-          // the live frozen-board streak there, one boundary earlier than
-          // core's twin, whose noteSuppressedToolCallByCallId mark lands
-          // with the fabricated response AFTER the replay round's
-          // Finished boundary. The streak restarted every cycle and never
-          // reached the stuck threshold, so the turn ran past the soft
-          // cap toward the hard backstop instead of halting (issue #9450
-          // requirement #6).
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
-          installTaskListAndGenericTools(() => 'frozen board');
-          const fingerprint = core.getToolCallFingerprint(
-            'task_list',
-            TASK_LIST_ARGS,
-          );
-          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
-            new Map(
-              Array.from({ length: 25 }, (_, index) => [
-                `replayed_task_list_${index}`,
-                fingerprint,
-              ]),
-            ),
-          );
-          const loopState = freshLoopState();
-
-          let replayOrdinal = 0;
-          const runRound = (round: number) => {
-            const calls =
-              round % 3 === 0
-                ? [
-                    {
-                      id: `task_list_${round}`,
-                      name: 'task_list',
-                      args: TASK_LIST_ARGS,
-                    },
-                  ]
-                : round % 3 === 1
-                  ? [
-                      {
-                        id: `replayed_task_list_${replayOrdinal++}`,
-                        name: 'task_list',
-                        args: TASK_LIST_ARGS,
-                      },
-                      {
-                        id: `generic_${round}`,
-                        name: 'generic_tool',
-                        args: { step: round },
-                      },
-                    ]
-                  : [
-                      {
-                        id: `generic_${round}`,
-                        name: 'generic_tool',
-                        args: { step: round },
-                      },
-                    ];
-            return (
-              session as unknown as {
-                runToolCalls: (
-                  abortSignal: AbortSignal,
-                  promptId: string,
-                  calls: unknown[],
-                  loopState: ReturnType<typeof freshLoopState>,
-                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
-              }
-            ).runToolCalls(
-              new AbortController().signal,
-              `prompt-mixed-gap-${round}`,
-              calls,
-              loopState,
-            );
-          };
-
-          let fired = false;
-          for (let round = 0; round < 60 && !fired; round++) {
-            const result = await runRound(round);
-            fired = result.loopDetected ?? false;
-          }
-
-          // The emit-phase mark gives the replayed key next-boundary
-          // protection, so the streak survives the mixed→gap cycles and
-          // arms the stuck signal: the halt lands at totalToolCalls 21
-          // (soft cap 20 + 1), far below the hard backstop (200).
-          expect(fired).toBe(true);
-          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
-          expect(loopState.totalToolCalls).toBe(21);
-        });
-
-        it('still halts a frozen daemon poller when NON-STATEFUL replay-only rounds are interleaved (issue #9450 requirement #6)', async () => {
-          // Non-stateful twin of the replay-only regression: the replayed
-          // id belongs to a NON-stateful tool (generic_tool), so no
-          // suppression mark exists for it anywhere — the empty-batch
-          // early return in recordDaemonToolCalls is the ONLY mechanism
-          // carrying the last executed round's result marks across the
-          // replay batch to the gap batch's decay. task_list is the only
-          // stateful tool, so every other replayed tool takes this path;
-          // without the skip the daemon would wipe the frozen streak and
-          // run to the hard backstop while the exact same event sequence
-          // halts core just past the soft cap (requirement #6 parity —
-          // core's twin carries via noteSuppressedToolCallByCallId's
-          // replaySuppression mark).
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
-          installTaskListAndGenericTools(() => 'frozen board');
-          const fingerprint = core.getToolCallFingerprint('generic_tool', {
-            step: 0,
-          });
-          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
-            new Map(
-              Array.from({ length: 30 }, (_, index) => [
-                `replayed_generic_${index}`,
-                fingerprint,
-              ]),
-            ),
-          );
-          const loopState = freshLoopState();
-
-          let replayOrdinal = 0;
-          const runRound = (round: number) => {
-            const calls =
-              round % 3 === 0
-                ? [
-                    {
-                      id: `task_list_${round}`,
-                      name: 'task_list',
-                      args: TASK_LIST_ARGS,
-                    },
-                  ]
-                : round % 3 === 1
-                  ? [
-                      {
-                        id: `replayed_generic_${replayOrdinal++}`,
-                        name: 'generic_tool',
-                        args: { step: 0 },
-                      },
-                    ]
-                  : [
-                      {
-                        id: `generic_${round}`,
-                        name: 'generic_tool',
-                        args: { step: round },
-                      },
-                    ];
-            return (
-              session as unknown as {
-                runToolCalls: (
-                  abortSignal: AbortSignal,
-                  promptId: string,
-                  calls: unknown[],
-                  loopState: ReturnType<typeof freshLoopState>,
-                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
-              }
-            ).runToolCalls(
-              new AbortController().signal,
-              `prompt-nonstateful-replay-${round}`,
-              calls,
-              loopState,
-            );
-          };
-
-          let fired = false;
-          for (let round = 0; round < 90 && !fired; round++) {
-            const result = await runRound(round);
-            if (round % 3 === 1) {
-              // The replay-only batch is suppressed whole and executes
-              // nothing (its repeat keys never count toward the stuck
-              // signal — only executable calls do).
-              expect(result.loopDetected ?? false).toBe(false);
-              expect(
-                (result.parts[0]?.functionResponse?.response?.[
-                  'error'
-                ] as string) ?? '',
-              ).toContain('Duplicate provider tool call id');
-              continue;
-            }
-            fired = result.loopDetected ?? false;
-          }
-
-          // The empty-batch decay skip carries the poll's result mark
-          // through the replay batch, so the streak survives the gap
-          // batch's boundary and arms the stuck signal: the halt lands at
-          // totalToolCalls 21 (soft cap 20 + 1; replay batches add 0),
-          // far below the hard backstop (200).
-          expect(fired).toBe(true);
-          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
-          expect(loopState.totalToolCalls).toBe(21);
-        });
-
-        it('still halts a frozen daemon poller interleaved every other batch with other work (issue #9450)', async () => {
-          // CLI defaults: skipLoopDetection=true, adaptive soft cap — the
-          // cap's stateful stuck signal is the ONLY live halt path. A
-          // frozen board polled every OTHER batch between varied work:
-          // pre-fix the poll batch's boundary found the key absent from
-          // the result set (the gap batch recorded no task_list result and
-          // consumed the previous mark at its own boundary), decayed the
-          // streak back to zero, and the stuck signal never armed — the
-          // turn ran to the hard backstop. The re-requested skip (mirror
-          // of core's requested-keys skip in
-          // decayAbandonedStatefulStreaks) keeps the streak alive across
-          // gap batches; the runtimes must not drift (requirement #6).
-          mockConfig.getApprovalMode = vi
-            .fn()
-            .mockReturnValue(ApprovalMode.YOLO);
-          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
-          mockConfig.isMaxToolCallsPerTurnExplicit = vi
-            .fn()
-            .mockReturnValue(false);
-          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
-          installTaskListAndGenericTools(() => 'frozen board');
-          const loopState = freshLoopState();
-
-          const runDiverseBatch = (round: number) =>
-            (
-              session as unknown as {
-                runToolCalls: (
-                  abortSignal: AbortSignal,
-                  promptId: string,
-                  calls: unknown[],
-                  loopState: ReturnType<typeof freshLoopState>,
-                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
-              }
-            ).runToolCalls(
-              new AbortController().signal,
-              `prompt-diverse-${round}`,
-              [
-                {
-                  id: `diverse_${round}`,
-                  name: 'generic_tool',
-                  args: { step: round },
-                },
-              ],
-              loopState,
-            );
-
-          let fired = false;
-          for (let round = 0; round < 40 && !fired; round++) {
-            const poll = await runTaskListPoll(loopState, round);
-            fired = poll.loopDetected ?? false;
-            if (fired) break;
-            const gap = await runDiverseBatch(round);
-            fired = gap.loopDetected ?? false;
-          }
-          // The streak survives the gap batches and arms the stuck signal:
-          // the halt lands just past the soft cap (20), far below the hard
-          // backstop (200).
-          expect(fired).toBe(true);
-          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
-          expect(loopState.totalToolCalls).toBeLessThanOrEqual(24);
-        });
       });
     });
 
@@ -12514,14 +11593,6 @@ describe('Session', () => {
                 invalidToolParamErrors: Map<string, number>;
                 toolCallKeyCounts: Map<string, number>;
                 maxToolCallKeyRepeat: number;
-                statefulResultStreaks: Map<
-                  string,
-                  {
-                    consecutiveIdenticalResults: number;
-                    lastFingerprint: string | undefined;
-                  }
-                >;
-                statefulMaxResultRepeat: number;
                 loopDetected: boolean;
               },
             ) => Promise<unknown>;
@@ -12535,14 +11606,6 @@ describe('Session', () => {
             invalidToolParamErrors: new Map(),
             toolCallKeyCounts: new Map<string, number>(),
             maxToolCallKeyRepeat: 0,
-            statefulResultStreaks: new Map<
-              string,
-              {
-                consecutiveIdenticalResults: number;
-                lastFingerprint: string | undefined;
-              }
-            >(),
-            statefulMaxResultRepeat: 0,
             loopDetected: false,
           },
         );
@@ -28734,14 +27797,6 @@ describe('Session', () => {
         invalidToolParamErrors: new Map<string, number>(),
         toolCallKeyCounts: new Map<string, number>(),
         maxToolCallKeyRepeat: 0,
-        statefulResultStreaks: new Map<
-          string,
-          {
-            consecutiveIdenticalResults: number;
-            lastFingerprint: string | undefined;
-          }
-        >(),
-        statefulMaxResultRepeat: 0,
         loopDetected: false,
         repeatedToolFailureMode: 'off',
         repeatedToolFailureState: createRepeatedToolFailureGuardState(),
@@ -29483,14 +28538,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
           repeatedToolFailureMode: 'off',
           repeatedToolFailureState: createRepeatedToolFailureGuardState(),
@@ -29590,14 +28637,6 @@ describe('Session', () => {
           invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
-          statefulResultStreaks: new Map<
-            string,
-            {
-              consecutiveIdenticalResults: number;
-              lastFingerprint: string | undefined;
-            }
-          >(),
-          statefulMaxResultRepeat: 0,
           loopDetected: false,
           repeatedToolFailureMode: 'off',
           repeatedToolFailureState: createRepeatedToolFailureGuardState(),
@@ -30712,14 +29751,6 @@ describe('Session', () => {
         invalidToolParamErrors: new Map<string, number>(),
         toolCallKeyCounts: new Map<string, number>(),
         maxToolCallKeyRepeat: 0,
-        statefulResultStreaks: new Map<
-          string,
-          {
-            consecutiveIdenticalResults: number;
-            lastFingerprint: string | undefined;
-          }
-        >(),
-        statefulMaxResultRepeat: 0,
         loopDetected: false,
         repeatedToolFailureMode: 'off',
         repeatedToolFailureState: createRepeatedToolFailureGuardState(),

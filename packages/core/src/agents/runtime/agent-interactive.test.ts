@@ -16,8 +16,6 @@ import type {
 } from './agent-events.js';
 import { ContextState } from './agent-headless.js';
 import type { AgentInteractiveConfig } from './agent-types.js';
-import { AgentTerminateMode } from './agent-types.js';
-import { LoopType } from '../../telemetry/types.js';
 import { AgentStatus } from './agent-types.js';
 import {
   getCurrentAgentDepth,
@@ -35,12 +33,7 @@ function createMockCore(
   overrides: {
     chatValue?: unknown;
     nullChat?: boolean;
-    loopResult?: {
-      text: string;
-      terminateMode: AgentTerminateMode | null;
-      loopType?: LoopType | null;
-      turnsUsed: number;
-    };
+    loopResult?: { text: string; terminateMode: null; turnsUsed: number };
   } = {},
 ) {
   const emitter = new AgentEventEmitter();
@@ -312,47 +305,6 @@ describe('AgentInteractive', () => {
 
     await agent.shutdown();
     expect(agent.getStatus()).toBe('completed');
-  });
-
-  it('surfaces the exact loop detector in the stop message and lastRoundError (#9450)', async () => {
-    const { core } = createMockCore({
-      loopResult: {
-        text: '',
-        terminateMode: AgentTerminateMode.LOOP_DETECTED,
-        loopType: LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
-        turnsUsed: 3,
-      },
-    });
-    const config = createConfig({ initialTask: 'poll tasks' });
-    const agent = new AgentInteractive(config, core);
-
-    await agent.start(context);
-    await vi.waitFor(() => {
-      // A round that terminates on a detected loop settles as failed
-      // (lastRoundError is set), not idle.
-      expect(agent.getStatus()).toBe('failed');
-    });
-
-    // The user-visible stop message names the detector instead of the
-    // generic loop label.
-    const infoTexts = agent
-      .getMessages()
-      .filter((m) => m.role === 'info')
-      .map((m) => String(m.content));
-    expect(
-      infoTexts.some((text) =>
-        text.includes(
-          `duplicate tool-call loop detected (${LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS})`,
-        ),
-      ),
-    ).toBe(true);
-
-    // Arena-facing attribution keeps the detector too.
-    expect(agent.getLastRoundError()).toBe(
-      `Terminated: ${AgentTerminateMode.LOOP_DETECTED} (${LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS})`,
-    );
-
-    await agent.shutdown();
   });
 
   it('should process enqueued messages', async () => {

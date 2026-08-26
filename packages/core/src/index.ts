@@ -327,8 +327,6 @@ export {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   GLOBAL_DUPLICATE_THRESHOLD,
   getToolCallRepeatKey,
-  isStatefulReadTool,
-  fingerprintToolResult,
   shouldHaltOnTurnToolCallCap,
 } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';

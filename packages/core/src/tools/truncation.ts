@@ -17,7 +17,7 @@ import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
 
 const debugLogger = createDebugLogger('TRUNCATION');
 
-export const PREVIEW_SIZE_CHARS = 2000;
+const PREVIEW_SIZE_CHARS = 2000;
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
 export const MAX_SESSION_BYTES = 500 * 1024 * 1024; // 500MB
 
@@ -29,146 +29,6 @@ export const MAX_SESSION_BYTES = 500 * 1024 * 1024; // 500MB
  */
 export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated';
-
-/**
- * Format markers of the oversized-result stubs this module emits. Exported
- * so consumers that parse stubs (the loop guards in
- * services/loopDetectionService.ts) share the producer's constants instead
- * of hand-mirroring literals that can silently drift.
- */
-export const PERSISTED_OUTPUT_OPEN_TAG = '<persisted-output>';
-export const OUTPUT_TOO_LARGE_PREFIX = 'Output too large (';
-export const PERSISTED_PREVIEW_MARKER = `Preview (up to ${PREVIEW_SIZE_CHARS} chars):`;
-export const TRUNCATED_PART_MARKER = 'Truncated part of the output:\n';
-
-/**
- * Label of the line `buildStub` embeds carrying a sha256 of the FULL
- * pre-truncation output. The preview only covers the first
- * PREVIEW_SIZE_CHARS chars, so consumers that fingerprint results (the loop
- * guards) preserve this digest to stay sensitive to mutations that land
- * beyond the preview window (a task board whose changes sit past char 2000
- * would otherwise fingerprint identically on every poll).
- */
-export const FULL_OUTPUT_DIGEST_LABEL = 'Full output sha256: ';
-
-/**
- * Trailing note `truncateAndSaveToFile` appends on its save-failure
- * fallback shape (digest label + head/tail payload, no spilled file).
- * Exported so consumers that recognize stub shapes (the loop guards, the
- * batch-budget finalizer's nesting gate) parse the producer's constant
- * instead of a hand-mirrored literal that can drift.
- */
-export const TRUNCATION_SAVE_FAILURE_NOTE =
-  '[Note: Could not save full output to file]';
-
-/**
- * Extracts a full 64-hex stub digest occupying a FIXED position: the digest
- * must span exactly `digestStart` .. `digestStart + 64` and end its line
- * (terminator undefined, '\n' or '\r'). Returns null otherwise. Shared
- * primitive for the positions the producers are known to write the digest
- * at, so the producer-side carry-through and the loop guards' recognition
- * parse one grammar and cannot drift (issue #9450).
- */
-export function extractStubDigestAt(
-  value: string,
-  digestStart: number,
-): string | null {
-  const digest = value.slice(digestStart, digestStart + 64);
-  const terminator = value[digestStart + 64];
-  if (
-    /^[0-9a-f]{64}$/.test(digest) &&
-    (terminator === undefined || terminator === '\n' || terminator === '\r')
-  ) {
-    return digest;
-  }
-  return null;
-}
-
-/**
- * Extracts the sha256 digest a stub producer embedded for the FULL
- * pre-truncation output, anchored to a producer line: the label must start
- * its line and be followed by exactly 64 hex chars ending the line. A
- * mid-string mention of the label (e.g. board content quoting a stub) never
- * matches. Returns null when no anchored digest is present. Exported so the
- * batch-budget finalizer can carry a nested stub's digest through a fit
- * (see fitText there) instead of hashing the per-call unique envelope, and
- * so the loop guards share this exact recognizer instead of hand-mirroring
- * it — the recognition must not drift from the producer constants above
- * (issue #9450).
- */
-export function extractAnchoredStubDigest(value: string): string | null {
-  let searchFrom = 0;
-  for (;;) {
-    const index = value.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
-    if (index < 0) return null;
-    const lineAnchored = index === 0 || value[index - 1] === '\n';
-    if (lineAnchored) {
-      const digest = extractStubDigestAt(
-        value,
-        index + FULL_OUTPUT_DIGEST_LABEL.length,
-      );
-      if (digest !== null) return digest;
-    }
-    searchFrom = index + 1;
-  }
-}
-
-/**
- * Returns the digest of a digest-carrying shape that starts with the digest
- * label itself: the batch-budget finalizer's degenerate digest-line-only
- * fits (exactly `Full output sha256: <64-hex>`) and the save-failure
- * fallback of `truncateAndSaveToFile` (label + head/tail payload +
- * save-failure note). Recognition is SHAPE-EXACT and the digest is read at
- * the fixed position right after the label — the same grammar the loop
- * guards apply (stripPersistenceEnvelope): content merely STARTING with the
- * label (a task board or tool result quoting a stub header) carries no
- * producer digest and must keep fingerprinting as ordinary content, or the
- * two sides of the batch-budget boundary fingerprint the same content
- * differently (issue #9450). Returns null for any other text.
- */
-export function extractDigestCarryingShapeDigest(text: string): string | null {
-  if (!text.startsWith(FULL_OUTPUT_DIGEST_LABEL)) return null;
-  const isDigestCarryingShape =
-    text.length === FULL_OUTPUT_DIGEST_LABEL.length + 64 ||
-    text.endsWith(TRUNCATION_SAVE_FAILURE_NOTE);
-  if (!isDigestCarryingShape) return null;
-  return extractStubDigestAt(text, FULL_OUTPUT_DIGEST_LABEL.length);
-}
-
-/**
- * Returns the embedded full-output digest when `text` itself is an
- * oversized-result stub produced by this module: a `<persisted-output>`
- * envelope, an unwrapped `Output too large (...)` stub, a
- * `truncateAndSaveToFile` wrapper, or a digest-carrying shape that starts
- * with the digest label itself — the save-failure fallback of
- * `truncateAndSaveToFile` (label + head/tail payload + save-failure note)
- * and the batch-budget finalizer's degenerate digest-line-only fits.
- * Returns null for any other text: the label-leading shapes are recognized
- * shape-exactly (see extractDigestCarryingShapeDigest), so content that
- * merely STARTS with the label — a board quoting a stub header — is not
- * treated as a stub and keeps fingerprinting as ordinary content
- * (issue #9450). Used by the
- * batch-budget finalizer's fitText to make stub reduction idempotent across
- * nesting: the scheduler persists oversized results BEFORE the batch budget
- * runs, so a fit wrapping an already-persisted stub must carry the stub's
- * inner digest into its header instead of hashing the stub envelope, which
- * embeds a per-call unique `<toolResultsDir>/<callId>.txt` path (or, for
- * the label-starting shapes, drops the digest that is the only part of the
- * shape that survives a further fit) and would fingerprint every poll of an
- * unchanged board uniquely (issue #9450).
- */
-export function extractPersistedStubDigest(text: string): string | null {
-  const isProducerStub =
-    text.startsWith(PERSISTED_OUTPUT_OPEN_TAG) ||
-    text.startsWith(OUTPUT_TOO_LARGE_PREFIX) ||
-    text.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX);
-  if (isProducerStub) return extractAnchoredStubDigest(text);
-  // Label-leading shapes are recognized shape-exactly: a quoted stub header
-  // (label + quoted hex + further payload) is content, not a stub, and
-  // adopting its quoted digest would fingerprint the fit to the quoted hex
-  // instead of the content (issue #9450).
-  return extractDigestCarryingShapeDigest(text);
-}
 
 /**
  * Tolerance factor applied by the scheduler's combined (second) pass:
@@ -322,18 +182,13 @@ export async function truncateAndSaveToFile(
   // Sanitize fileName to prevent path traversal.
   const safeFileName = `${path.basename(fileName)}.output`;
   const outputFile = path.join(projectTempDir, safeFileName);
-  // sha256 of the FULL pre-truncation output (see FULL_OUTPUT_DIGEST_LABEL):
-  // the head+tail below drops the middle band, so consumers that fingerprint
-  // results (the loop guards) need the digest to stay sensitive to mutations
-  // landing in that band (issue #9450).
-  const fullDigest = crypto.createHash('sha256').update(content).digest('hex');
   const wrappedMessage = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
 The full output has been saved to: ${outputFile}
 To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
 The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
-${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
 
-${TRUNCATED_PART_MARKER}${truncatedContent}`;
+Truncated part of the output:
+${truncatedContent}`;
 
   // Token-aware fallback: if the wrapped (truncated + instructions) output is
   // not actually smaller than the original, truncating wastes effort and
@@ -360,10 +215,9 @@ ${TRUNCATED_PART_MARKER}${truncatedContent}`;
       `Failed to save truncated output to ${outputFile}:`,
       error,
     );
-    // Keep the digest even on the unsaved path: the fingerprinting
-    // consumers must not regress to the head+tail-only payload here.
     return {
-      content: `${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}\n${truncatedContent}\n${TRUNCATION_SAVE_FAILURE_NOTE}`,
+      content:
+        truncatedContent + `\n[Note: Could not save full output to file]`,
     };
   }
 }
@@ -524,7 +378,7 @@ export async function truncateLlmContent(
 export function isAlreadyTruncated(content: string): boolean {
   return (
     content.includes('... [CONTENT TRUNCATED] ...') ||
-    content.startsWith(PERSISTED_OUTPUT_OPEN_TAG)
+    content.startsWith('<persisted-output>')
   );
 }
 
@@ -651,41 +505,28 @@ export async function persistAndTruncateToolResult(
   }
 }
 
-/**
- * Builds the model-visible stub that replaces an oversized tool result.
- * Embeds a sha256 of the full `content` (see FULL_OUTPUT_DIGEST_LABEL) so
- * result fingerprinting stays faithful to mutations the head-only preview
- * cuts off. `filePathOrNote` is either the absolute path of the persisted
- * full output (wrapped `<persisted-output>` envelope) or a short note
- * explaining why it was not persisted (unwrapped stub). Exported so tests
- * build stubs with the real producer instead of hand-mirroring its format.
- */
-export function buildStub(
+function buildStub(
   content: string,
   byteSize: number,
   filePathOrNote: string,
 ): string {
   const preview = generatePreview(content);
   const sizeKb = Math.round(byteSize / 1024);
-  const digest = crypto.createHash('sha256').update(content).digest('hex');
-  const digestLine = `${FULL_OUTPUT_DIGEST_LABEL}${digest}`;
   const isFilePath = path.isAbsolute(filePathOrNote);
 
   if (isFilePath) {
-    return `${PERSISTED_OUTPUT_OPEN_TAG}
-${OUTPUT_TOO_LARGE_PREFIX}${sizeKb} KB). Full output saved to: ${filePathOrNote}
+    return `<persisted-output>
+Output too large (${sizeKb} KB). Full output saved to: ${filePathOrNote}
 Note: this file may be cleaned up after 24 hours.
 To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
-${digestLine}
 
-${PERSISTED_PREVIEW_MARKER}
+Preview (up to ${PREVIEW_SIZE_CHARS} chars):
 ${preview}
 </persisted-output>`;
   }
 
-  return `${OUTPUT_TOO_LARGE_PREFIX}${sizeKb} KB). ${filePathOrNote}
-${digestLine}
+  return `Output too large (${sizeKb} KB). ${filePathOrNote}
 
-${PERSISTED_PREVIEW_MARKER}
+Preview (up to ${PREVIEW_SIZE_CHARS} chars):
 ${preview}`;
 }
