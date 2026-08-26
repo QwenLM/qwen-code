@@ -161,10 +161,17 @@ jobs:
           # pre-checkout doctrine: the script file does not exist on disk
           # before checkout). No-op on a fresh hosted runner.
           rm -f -- "${HOME:?}/.npmrc"
+          git_exec_key_pattern='^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.(ext\.)?allow$)'
           for global_file in "${HOME}/.gitconfig" "${XDG_CONFIG_HOME:-${HOME}/.config}/git/config"; do
+            [ -e "$global_file" ] || continue
             { GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list 2>/dev/null || true; } \
-              | { grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\.external$|diff\..+\.(command|textconv)$|merge\..+\.driver$|filter\.|alias\.|pager\.|difftool\.|mergetool\.|interactive\.difffilter$|sequence\.editor$|gpg\.(.+\.)?program$|init\.templatedir$|remote\..+\.(uploadpack|receivepack)$|submodule\..+\.update$|url\..+\.(insteadof|pushinsteadof)$|http\.(.+\.)?(sslverify|sslcainfo)$|include\.|includeif\.|protocol\.(ext\.)?allow$)' || true; } \
+              | { grep -iE "$git_exec_key_pattern" || true; } \
               | while IFS= read -r key; do GIT_CONFIG_GLOBAL="${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+            remaining_keys="$(GIT_CONFIG_GLOBAL="${global_file}" git config --global --name-only --list)" || { echo "::error::could not verify the global git config scrub in ${global_file}"; exit 1; }
+            if printf '%s\n' "$remaining_keys" | grep -qiE "$git_exec_key_pattern"; then
+              echo "::error::git exec keys survived the pre-checkout scrub in ${global_file}"
+              exit 1
+            fi
           done
 
       - name: 'Checkout'

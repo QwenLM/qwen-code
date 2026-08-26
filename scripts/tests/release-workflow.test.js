@@ -5,7 +5,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -186,10 +192,17 @@ find "$WS" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 # pre-checkout doctrine: the script file does not exist on disk
 # before checkout). No-op on a fresh hosted runner.
 rm -f -- "\${HOME:?}/.npmrc"
+git_exec_key_pattern='^(core\\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\\.external$|diff\\..+\\.(command|textconv)$|merge\\..+\\.driver$|filter\\.|alias\\.|pager\\.|difftool\\.|mergetool\\.|interactive\\.difffilter$|sequence\\.editor$|gpg\\.(.+\\.)?program$|init\\.templatedir$|remote\\..+\\.(uploadpack|receivepack)$|submodule\\..+\\.update$|url\\..+\\.(insteadof|pushinsteadof)$|http\\.(.+\\.)?(sslverify|sslcainfo)$|include\\.|includeif\\.|protocol\\.(ext\\.)?allow$)'
 for global_file in "\${HOME}/.gitconfig" "\${XDG_CONFIG_HOME:-\${HOME}/.config}/git/config"; do
+  [ -e "$global_file" ] || continue
   { GIT_CONFIG_GLOBAL="\${global_file}" git config --global --name-only --list 2>/dev/null || true; } \\
-    | { grep -iE '^(core\\.(hookspath|fsmonitor|pager|editor|sshcommand|askpass|alternaterefscommand|gitproxy)$|diff\\.external$|diff\\..+\\.(command|textconv)$|merge\\..+\\.driver$|filter\\.|alias\\.|pager\\.|difftool\\.|mergetool\\.|interactive\\.difffilter$|sequence\\.editor$|gpg\\.(.+\\.)?program$|init\\.templatedir$|remote\\..+\\.(uploadpack|receivepack)$|submodule\\..+\\.update$|url\\..+\\.(insteadof|pushinsteadof)$|http\\.(.+\\.)?(sslverify|sslcainfo)$|include\\.|includeif\\.|protocol\\.(ext\\.)?allow$)' || true; } \\
+    | { grep -iE "$git_exec_key_pattern" || true; } \\
     | while IFS= read -r key; do GIT_CONFIG_GLOBAL="\${global_file}" git config --global --unset-all "$key" 2>/dev/null || true; done
+  remaining_keys="$(GIT_CONFIG_GLOBAL="\${global_file}" git config --global --name-only --list)" || { echo "::error::could not verify the global git config scrub in \${global_file}"; exit 1; }
+  if printf '%s\\n' "$remaining_keys" | grep -qiE "$git_exec_key_pattern"; then
+    echo "::error::git exec keys survived the pre-checkout scrub in \${global_file}"
+    exit 1
+  fi
 done`;
 
 describe('release workflow', () => {
@@ -224,6 +237,51 @@ describe('release workflow', () => {
       // ladder uniformly from all five copies keeps every substring and
       // equality-across-copies pin green while reopening the incident.
       expect(job.steps[restoreIndex]?.run, id).toBe(canonicalWipe);
+    }
+  });
+
+  it('fails closed when a global git exec key cannot be removed', () => {
+    const base = mkdtempSync(join(tmpdir(), 'release-wipe-'));
+    const home = join(base, 'home');
+    mkdirSync(home);
+    try {
+      const env = {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: join(home, '.config'),
+      };
+      const scrubStart = canonicalWipe.indexOf('rm -f -- "${HOME:?}/.npmrc"');
+      expect(scrubStart).toBeGreaterThan(0);
+      const scrubHome = () =>
+        spawnSync(
+          'bash',
+          ['-e', '-o', 'pipefail', '-c', canonicalWipe.slice(scrubStart)],
+          { encoding: 'utf8', env },
+        );
+      const setHook = () =>
+        spawnSync(
+          'git',
+          ['config', '--global', 'core.hooksPath', join(base, 'hooks')],
+          { env },
+        );
+
+      expect(setHook().status).toBe(0);
+      expect(scrubHome().status).toBe(0);
+      expect(
+        spawnSync('git', ['config', '--global', '--get', 'core.hooksPath'], {
+          env,
+        }).status,
+      ).not.toBe(0);
+
+      expect(setHook().status).toBe(0);
+      writeFileSync(join(home, '.gitconfig.lock'), '');
+      const result = scrubHome();
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}${result.stderr}`).toContain(
+        'git exec keys survived the pre-checkout scrub',
+      );
+    } finally {
+      rmSync(base, { recursive: true, force: true });
     }
   });
 
