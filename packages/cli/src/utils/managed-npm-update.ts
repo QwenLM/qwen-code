@@ -16,6 +16,15 @@ import semver from 'semver';
 import { getNpmCliPath } from './installationInfo.js';
 
 const PACKAGE_NAME = '@qwen-code/qwen-code';
+// Per-platform prebuilt runtimes (Bun + OpenTUI) declared as
+// optionalDependencies by the main package; see scripts/npm-bin.js.
+const PLATFORM_RUNTIME_PACKAGES = [
+  'qwen-code-darwin-arm64',
+  'qwen-code-darwin-x64',
+  'qwen-code-linux-arm64',
+  'qwen-code-linux-x64',
+  'qwen-code-win-x64',
+];
 const debugLogger = createDebugLogger('MANAGED_NPM_UPDATE');
 const execFileAsync = promisify(execFile);
 
@@ -280,6 +289,23 @@ export async function installManagedNpmUpdate(
         else reject(new Error(`npm install exited with code ${code}`));
       });
     });
+    // The staged payload only ever runs under Node (cli-entry.js spawns
+    // process.execPath), so the platform runtime packages inherited from the
+    // manifest are dead weight that would persist under the managed versions
+    // directory forever. Drop them before activation; --omit=optional is not
+    // the tool because sharp/node-pty/clipboard/audio-capture ARE needed by
+    // the node-run payload.
+    for (const platformPackage of PLATFORM_RUNTIME_PACKAGES) {
+      fs.rmSync(
+        path.join(
+          update.stagingDir,
+          'node_modules',
+          '@qwen-code',
+          platformPackage,
+        ),
+        { recursive: true, force: true },
+      );
+    }
     await activateManagedNpmUpdate(update, version, bootstrapPath);
   } catch (error) {
     await cleanupManagedNpmUpdate(update);

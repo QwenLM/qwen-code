@@ -441,6 +441,7 @@ describe('package scripts', () => {
     const publishJob = getWorkflowJob(workflow, 'publish');
 
     for (const stepName of [
+      'Publish platform runtime packages',
       'Publish @qwen-code/audio-capture',
       'Publish @qwen-code/qwen-code',
       'Publish @qwen-code/channel-base',
@@ -470,6 +471,14 @@ describe('package scripts', () => {
     );
     expect(channelStep).toContain('(\n');
     expect(channelStep).toContain(')');
+    // Same contract for the platform runtime loop: `exit 0` must skip only
+    // the current package.
+    const platformStep = getWorkflowStep(
+      publishJob,
+      'Publish platform runtime packages',
+    );
+    expect(platformStep).toContain('(\n');
+    expect(platformStep).toContain(')');
     // A fully-skipped publish must be visible, not silently green.
     expect(channelStep).toContain(
       'Every channel package was already published; nothing shipped',

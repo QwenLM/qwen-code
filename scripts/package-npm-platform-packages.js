@@ -27,63 +27,45 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-const PLATFORMS = [
-  {
-    archive: 'qwen-code-darwin-arm64.tar.gz',
-    name: '@qwen-code/qwen-code-darwin-arm64',
-    os: ['darwin'],
-    cpu: ['arm64'],
-  },
-  {
-    archive: 'qwen-code-darwin-x64.tar.gz',
-    name: '@qwen-code/qwen-code-darwin-x64',
-    os: ['darwin'],
-    cpu: ['x64'],
-  },
-  {
-    archive: 'qwen-code-linux-arm64.tar.gz',
-    name: '@qwen-code/qwen-code-linux-arm64',
-    os: ['linux'],
-    cpu: ['arm64'],
-  },
-  {
-    archive: 'qwen-code-linux-x64.tar.gz',
-    name: '@qwen-code/qwen-code-linux-x64',
-    os: ['linux'],
-    cpu: ['x64'],
-  },
-  {
-    archive: 'qwen-code-win-x64.zip',
-    name: '@qwen-code/qwen-code-win-x64',
-    os: ['win32'],
-    cpu: ['x64'],
-  },
-];
+import { RELEASE_TARGETS } from './build-standalone-release.js';
+import { fail, parseArgs } from './release-script-utils.js';
+
+// RELEASE_TARGETS (build-standalone-release.js) is the authority on which
+// platforms ship; derive the npm platform packages from it so a target
+// rename/add cannot drift between the archive builder and this repackager.
+const OS_NAMES = { darwin: 'darwin', linux: 'linux', win: 'win32' };
+const PLATFORMS = RELEASE_TARGETS.map((target) => {
+  const [osPart, cpu] = target.qwenTarget.split('-');
+  return {
+    archive:
+      `qwen-code-${target.qwenTarget}.` +
+      (target.qwenTarget === 'win-x64' ? 'zip' : 'tar.gz'),
+    name: `@qwen-code/qwen-code-${target.qwenTarget}`,
+    os: [OS_NAMES[osPart]],
+    cpu: [cpu],
+  };
+});
 
 const ROOT_DIR = path.resolve(import.meta.dirname, '..');
 
-function parseArgs(argv) {
-  const options = {
-    version: null,
-    standaloneDir: path.join(ROOT_DIR, 'dist', 'standalone'),
-    outDir: path.join(ROOT_DIR, 'dist', 'npm-platform'),
+function parseOptions(argv) {
+  const args = parseArgs(argv, {
+    '--version': { key: 'version' },
+    '--standalone-dir': { key: 'standaloneDir' },
+    '--out-dir': { key: 'outDir' },
+  });
+  if (!args.version) {
+    fail('--version is required (must match the release version)');
+  }
+  return {
+    version: args.version,
+    standaloneDir: path.resolve(
+      args.standaloneDir ?? path.join(ROOT_DIR, 'dist', 'standalone'),
+    ),
+    outDir: path.resolve(
+      args.outDir ?? path.join(ROOT_DIR, 'dist', 'npm-platform'),
+    ),
   };
-  for (let i = 0; i < argv.length; i++) {
-    const arg = argv[i];
-    if (arg === '--version') {
-      options.version = argv[++i];
-    } else if (arg === '--standalone-dir') {
-      options.standaloneDir = path.resolve(argv[++i]);
-    } else if (arg === '--out-dir') {
-      options.outDir = path.resolve(argv[++i]);
-    } else {
-      throw new Error(`unknown argument: ${arg}`);
-    }
-  }
-  if (!options.version) {
-    throw new Error('--version is required (must match the release version)');
-  }
-  return options;
 }
 
 function extractArchive(archivePath, destDir) {
@@ -140,6 +122,14 @@ function packagePlatform(platform, options) {
   // not a valid npm manifest for this package; replace it with the platform
   // package manifest.
   fs.rmSync(path.join(packageDir, 'package.json'));
+  // The archive doubles as a standalone-installer payload. Strip everything
+  // isStandaloneInstallDir() probes (manifest.json, the bin/qwen shim, the
+  // node/ compat mirror) so the CLI never mistakes an npm platform package
+  // for a standalone install; node/ and bin/ are also dead weight on the npm
+  // channel — the launcher runs lib/cli-entry.js under the bundled Bun.
+  fs.rmSync(path.join(packageDir, 'manifest.json'), { force: true });
+  fs.rmSync(path.join(packageDir, 'bin'), { recursive: true, force: true });
+  fs.rmSync(path.join(packageDir, 'node'), { recursive: true, force: true });
   const manifest = {
     name: platform.name,
     version: options.version,
@@ -166,14 +156,24 @@ function packagePlatform(platform, options) {
   const isWindows = platform.os.includes('win32');
   assertFile(packageDir, 'lib', 'cli-entry.js');
   assertFile(packageDir, 'bun', ...(isWindows ? ['bun.exe'] : ['bin', 'bun']));
-  assertFile(packageDir, 'bin', isWindows ? 'qwen.cmd' : 'qwen');
+  for (const stripped of [
+    path.join(packageDir, 'manifest.json'),
+    path.join(packageDir, 'bin'),
+    path.join(packageDir, 'node'),
+  ]) {
+    if (fs.existsSync(stripped)) {
+      throw new Error(
+        `platform package still carries a standalone fingerprint: ${stripped}`,
+      );
+    }
+  }
 
   console.log(`packaged ${platform.name}@${options.version} -> ${packageDir}`);
   return manifest;
 }
 
 function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const options = parseOptions(process.argv.slice(2));
   fs.mkdirSync(options.outDir, { recursive: true });
 
   const manifests = PLATFORMS.map((platform) =>

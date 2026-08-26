@@ -13,13 +13,14 @@
  * the native renderer libraries — arrives through the matching per-platform
  * optional dependency (@qwen-code/qwen-code-<os>-<arch>) that npm installs
  * alongside this package. This launcher resolves that package for the current
- * platform and runs its bundled CLI entry under its bundled Bun, replicating
- * the standalone bin/qwen wrapper (which sets QWEN_CODE_LAUNCHER_PATH for the
- * in-CLI updater).
+ * platform and runs its bundled CLI entry under its bundled Bun.
  *
- * The node entry (cli-entry.js) still ships in this package for environments
- * where the platform package is unavailable (offline install, --omit=optional,
- * mirrors that drop unknown packages).
+ * Whenever the platform package is unavailable — unsupported platform,
+ * --omit=optional install, registry/mirror that lacks it, or a damaged
+ * extraction — the launcher falls back to the node entry (cli-entry.js) that
+ * ships in this same package, so `qwen` keeps working (including the exit-44
+ * post-update relaunch that re-enters through this bin) exactly as it did
+ * before the platform packages existed.
  */
 
 import { spawn } from 'node:child_process';
@@ -52,36 +53,80 @@ function resolvePlatformPackageDir(name) {
   return dirname(require.resolve(`${name}/package.json`));
 }
 
+function launchChild(command, commandArgs, label) {
+  const child = spawn(command, commandArgs, { stdio: 'inherit' });
+
+  // Ctrl+C and SIGTERM reach this launcher and the CLI child alike (both share
+  // the foreground process group). The child owns the exit decision — the
+  // TUI's double-Ctrl+C guard runs there — so this launcher never exits
+  // first: it waits for the child to close and mirrors its status. Signals
+  // sent to the launcher alone are forwarded. On Windows the console already
+  // delivers CTRL_C_EVENT to every attached process, and child.kill('SIGINT')
+  // maps to TerminateProcess — an ungraceful kill that would defeat the CLI's
+  // double-Ctrl+C guard — so SIGINT is not forwarded there.
+  const forwardedSignals =
+    process.platform === 'win32'
+      ? ['SIGTERM']
+      : ['SIGHUP', 'SIGINT', 'SIGQUIT', 'SIGTERM'];
+  const forwarders = forwardedSignals.map((signal) => {
+    const handler = () => {
+      child.kill(signal);
+    };
+    process.on(signal, handler);
+    return [signal, handler];
+  });
+
+  child.on('error', (error) => {
+    fail(`failed to launch ${label}: ${error.message}`);
+  });
+  child.on('close', (code, signal) => {
+    if (signal) {
+      // Drop the forwarders first: registering a listener replaced the
+      // default terminating action, so a re-raise that re-enters them would
+      // be swallowed and this launcher would hang on a dead child.
+      for (const [name, handler] of forwarders) {
+        process.removeListener(name, handler);
+      }
+      process.kill(process.pid, signal);
+    } else {
+      process.exit(code ?? 1);
+    }
+  });
+}
+
 function main() {
   const args = process.argv.slice(2);
   const isWindows = process.platform === 'win32';
 
+  // npm-bin.js and cli-entry.js both sit at the package root; argv[1] can be
+  // a .bin symlink elsewhere, so locate the fallback via this module.
+  const fallbackEntry = join(
+    dirname(fileURLToPath(import.meta.url)),
+    'cli-entry.js',
+  );
+  const runNodeFallback = (reason) => {
+    process.stderr.write(`qwen: ${reason} Falling back to node.\n`);
+    launchChild(process.execPath, [fallbackEntry, ...args], fallbackEntry);
+  };
+
   const packageName = platformPackageName();
   if (!packageName) {
-    fail(
-      `no prebuilt runtime exists for ${process.platform}-${process.arch}. ` +
-        'Install the standalone archive instead: ' +
-        'https://github.com/QwenLM/qwen-code/releases',
+    runNodeFallback(
+      `no prebuilt runtime exists for ${process.platform}-${process.arch}.`,
     );
+    return;
   }
 
   let packageDir;
   try {
     packageDir = resolvePlatformPackageDir(packageName);
   } catch {
-    // npm-bin.js and cli-entry.js both sit at the package root; argv[1] can
-    // be a .bin symlink elsewhere, so locate the fallback via this module.
-    const fallbackEntry = join(
-      dirname(fileURLToPath(import.meta.url)),
-      'cli-entry.js',
-    );
-    fail(
+    runNodeFallback(
       `the ${packageName} runtime package was not installed. ` +
         'This usually happens with --omit=optional installs or a ' +
-        'registry/mirror that lacks the platform package. Reinstall without ' +
-        '--omit=optional, or run the node-based fallback directly:\n' +
-        `  node ${fallbackEntry}`,
+        'registry/mirror that lacks the platform package.',
     );
+    return;
   }
 
   const runtime = isWindows
@@ -89,41 +134,14 @@ function main() {
     : join(packageDir, 'bun', 'bin', 'bun');
   const cliEntry = join(packageDir, 'lib', 'cli-entry.js');
   if (!existsSync(runtime) || !existsSync(cliEntry)) {
-    fail(`the ${packageName} runtime package is damaged (missing Bun or CLI).`);
+    runNodeFallback(
+      `the ${packageName} runtime package is damaged (missing Bun or CLI). ` +
+        'Reinstalling the package usually fixes this.',
+    );
+    return;
   }
 
-  // Mirrors the standalone bin/qwen wrapper: the in-CLI updater relaunches
-  // through QWEN_CODE_LAUNCHER_PATH after a managed update.
-  const launcherPath = isWindows
-    ? join(packageDir, 'bin', 'qwen.cmd')
-    : join(packageDir, 'bin', 'qwen');
-
-  const child = spawn(runtime, [cliEntry, ...args], {
-    stdio: 'inherit',
-    env: { ...process.env, QWEN_CODE_LAUNCHER_PATH: launcherPath },
-  });
-
-  // Ctrl+C and SIGTERM reach this launcher and the CLI child alike (both share
-  // the foreground process group). The child owns the exit decision — the
-  // TUI's double-Ctrl+C guard runs there — so this launcher never exits
-  // first: it waits for the child to close and mirrors its status. Signals
-  // sent to the launcher alone are forwarded.
-  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-    process.on(signal, () => {
-      child.kill(signal);
-    });
-  }
-
-  child.on('error', (error) => {
-    fail(`failed to launch ${packageName}: ${error.message}`);
-  });
-  child.on('close', (code, signal) => {
-    if (signal) {
-      process.kill(process.pid, signal);
-    } else {
-      process.exit(code ?? 1);
-    }
-  });
+  launchChild(runtime, [cliEntry, ...args], packageName);
 }
 
 main();

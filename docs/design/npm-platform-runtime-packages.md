@@ -48,20 +48,25 @@ opencode's npm package copies the platform binary into the main package via
   interrupted — the launcher resolves whatever is on disk at run time.
 - The launcher is a plain Node script, so npm's cross-platform bin shims work
   unmodified (no `.cmd` quoting games).
-- The cost is one extra Node process start (~50ms) before Bun takes over;
-  acceptable for a CLI.
+- The cost is one extra Node process start (~50ms) plus a lightweight waiter
+  resident for the whole session (~65 MB RSS on Node 22) to mirror exit status
+  and forward signals — inherent to the spawn-and-wait design (Node cannot
+  execve-replace itself), accepted in preference to postinstall.
 
 ### Fallbacks
 
-- **Unsupported platform** (e.g. linux-x64 musl variants, win-arm64): the
-  launcher fails with a pointer to the standalone archives.
-- **Platform package missing** (`--omit=optional`, mirror gaps): the launcher
-  fails with a verified `node <package-root>/cli-entry.js` invocation — the
-  legacy node/ink path, which still ships in the tarball.
+Whenever the platform package is unavailable, the launcher prints a one-line
+notice and runs `cli-entry.js` under node (the legacy node/ink path, which
+still ships in the tarball) instead of failing — so `qwen` keeps working on
+the node path exactly as before the platform packages existed:
+
+- **Unsupported platform** (e.g. linux-x64 musl variants, win-arm64): no
+  prebuilt runtime exists; the launcher falls back to node.
+- **Platform package missing** (`--omit=optional`, mirror gaps) or **damaged**
+  (partial extraction): the launcher falls back to node.
 - **Main package without any platform package** (e.g. CI installing the JS
   bundle for `qwen -p` usage): install succeeds because the dependency is
-  optional; callers get the fallback error with the node path when they run
-  the bin.
+  optional; the bin transparently runs the node path.
 
 ## Release flow
 

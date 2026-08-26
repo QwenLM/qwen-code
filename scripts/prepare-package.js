@@ -313,8 +313,8 @@ function writeDistPackageJson(rootDir, distDir) {
     main: 'cli.js',
     bin: {
       // Resolves the per-platform optional dependency (bundled Bun runtime)
-      // and execs the CLI under it; falls back with a clear error pointing
-      // at cli-entry.js when the platform package is unavailable.
+      // and runs the CLI under it; when the platform package is unavailable
+      // it falls back to cli-entry.js under node.
       qwen: 'npm-bin.js',
     },
     files: [
@@ -350,7 +350,8 @@ function writeDistPackageJson(rootDir, distDir) {
       // published by scripts/package-npm-platform-packages.js. os/cpu fields
       // in each platform package make npm install exactly one per host; the
       // npm-bin.js bin launcher resolves it at runtime. Version-locked to the
-      // main package version like every other optional dep in this manifest.
+      // main package version (the same treatment @qwen-code/audio-capture
+      // gets; the node-pty/clipboard groups pin their own upstream versions).
       '@qwen-code/qwen-code-darwin-arm64': rootPackageJson.version,
       '@qwen-code/qwen-code-darwin-x64': rootPackageJson.version,
       '@qwen-code/qwen-code-linux-arm64': rootPackageJson.version,

@@ -774,6 +774,24 @@ describe('package asset scripts', () => {
       '@qwen-code/audio-capture': rootPackageJson.version,
     });
 
+    // The platform runtime channel: bin points at the launcher, the launcher
+    // ships in the tarball, and the five platform packages are version-locked
+    // to the main package (npm picks one via their os/cpu fields).
+    expect(distPackageJson.bin).toEqual({ qwen: 'npm-bin.js' });
+    expect(distPackageJson.files).toContain('npm-bin.js');
+    expect(existsSync(path.join(rootDir, 'dist', 'npm-bin.js'))).toBe(true);
+    for (const platformPackage of [
+      '@qwen-code/qwen-code-darwin-arm64',
+      '@qwen-code/qwen-code-darwin-x64',
+      '@qwen-code/qwen-code-linux-arm64',
+      '@qwen-code/qwen-code-linux-x64',
+      '@qwen-code/qwen-code-win-x64',
+    ]) {
+      expect(distPackageJson.optionalDependencies[platformPackage]).toBe(
+        rootPackageJson.version,
+      );
+    }
+
     expect(distPackageJson.optionalDependencies.sharp).toBe('0.35.4');
     expect(
       existsSync(
