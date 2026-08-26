@@ -233,7 +233,9 @@ export class PermissionManager {
     // ("Bash(ls -l)") – we normalise to canonical tool names and ignore specifiers
     // because the registry check is at the tool level, not the invocation level.
     // An explicitly configured empty list is still an active allowlist: it
-    // disables every core tool. `undefined` alone means no restriction.
+    // disables every registered tool — core and non-core (MCP, Skill,
+    // Agent, synthetic system tools) alike (see `isToolEnabled`).
+    // `undefined` alone means no restriction.
     const rawCoreTools = this.config.getCoreTools?.();
     if (rawCoreTools !== undefined) {
       this.coreToolsAllowList = new Set(
@@ -657,8 +659,11 @@ export class PermissionManager {
    *   `structured_output` (registered only when `--json-schema` is set).
    *   Excluding `structured_output` from `--core-tools` would leave a
    *   `--json-schema` run with no terminal contract, so the synthetic
-   *   tool stays available regardless of the allowlist (deny rules still
-   *   apply).
+   *   tool stays available regardless of a NON-EMPTY allowlist (deny
+   *   rules still apply). An explicitly EMPTY allowlist (`tools.core: []`)
+   *   is the deliberate "no tools at all" configuration and disables even
+   *   these synthetic tools, so a `--json-schema` run under it cannot
+   *   complete (#10065).
    */
   private static readonly CORE_TOOLS = new Set([
     'read_file',
@@ -711,6 +716,11 @@ export class PermissionManager {
    * Determine whether a tool should be present in the tool registry.
    *
    * A tool is disabled (returns false) when:
+   * - the coreTools allowlist is explicitly empty (`tools.core: []`) — the
+   *   deliberate "no tools at all" configuration disables EVERY tool,
+   *   non-core tools included (#10065), or
+   * - a non-empty coreTools allowlist is active and the tool is a core
+   *   tool not in the list, or
    * - the `permissions.allow` registry allowlist is active and the tool is
    *   not covered by any allow or ask rule (see
    *   `isPermissionsAllowListActive`; ask rules keep their tool registered
@@ -724,9 +734,10 @@ export class PermissionManager {
    * the tool in the registry — the allowlist is tool-level, not
    * invocation-level.
    *
-   * Non-core tools (MCP, Skill, Agent, etc.) skip the coreTools allowlist
-   * check because they are dynamically discovered or essential for system
-   * operation, but they ARE subject to the `permissions.allow` registry
+   * Non-core tools (MCP, Skill, Agent, etc.) skip a NON-EMPTY coreTools
+   * allowlist check because they are dynamically discovered or essential
+   * for system operation (an explicitly empty allowlist still disables
+   * them, see above), but they ARE subject to the `permissions.allow` registry
    * allowlist (except MCP tools, `structured_output`, and the
    * `computer_use__*` family, see below) — that is the documented migration
    * semantic of the legacy `tools.core` whitelist ("unlisted tools are
@@ -832,6 +843,22 @@ export class PermissionManager {
    */
   isPermissionsAllowListActive(): boolean {
     return this.permissionsAllowListActive;
+  }
+
+  /**
+   * Whether the coreTools allowlist is explicitly empty (`tools.core: []`
+   * in settings or a bare/valueless `--core-tools` resolved to a list).
+   * When true, `isToolEnabled()` rejects EVERY tool — core and non-core
+   * alike — so user-facing remediation advice must name this knob instead
+   * of promising re-enablement through other gates (e.g. adding a
+   * `permissions.allow` rule can never satisfy an empty coreTools
+   * allowlist, #10065). `undefined` coreTools (no restriction) and
+   * non-empty allowlists both return false.
+   */
+  isCoreToolsAllowListEmpty(): boolean {
+    return (
+      this.coreToolsAllowList !== null && this.coreToolsAllowList.size === 0
+    );
   }
 
   /**

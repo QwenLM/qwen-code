@@ -3039,6 +3039,34 @@ describe('Approval mode tool exclusion logic', () => {
     expect(config.getCoreTools()).toEqual([]);
   });
 
+  it('should treat a bare --core-tools flag with no values as absent', async () => {
+    // yargs yields `[]` for the bare flag. Treating that argv-sourced
+    // empty list as "disable every tool" would silently tool-free the
+    // session on a forgotten flag value; only `tools.core: []` in
+    // settings should carry the empty-allowlist semantic (#10065).
+    process.argv = ['node', 'script.js', '--core-tools', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toBeUndefined();
+  });
+
+  it('should fall back to settings tools.core when --core-tools has no values', async () => {
+    process.argv = ['node', 'script.js', '--core-tools', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: ['read_file'],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toEqual(['read_file']);
+  });
+
   it('should exclude only shell tools in non-interactive mode with auto-edit approval mode', async () => {
     process.argv = [
       'node',

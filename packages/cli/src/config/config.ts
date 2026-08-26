@@ -2153,10 +2153,18 @@ export async function loadCliConfig(
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
+    // A bare `--core-tools` flag with no values yields `[]` from yargs.
+    // Treat an argv-sourced empty list as ABSENT, not as "disable every
+    // tool": only an explicit `tools.core: []` in settings (or a valued
+    // flag) should carry the empty-allowlist semantic, so a forgotten
+    // flag value — or a script expanding an unset variable into the flag
+    // — cannot silently flip a session to tool-free (#10065).
     coreTools:
       bareMode || safeMode
         ? undefined
-        : argv.coreTools || settings.tools?.core || undefined,
+        : argv.coreTools?.length
+          ? argv.coreTools
+          : settings.tools?.core,
     allowedTools:
       bareMode || safeMode
         ? argv.allowedTools || undefined

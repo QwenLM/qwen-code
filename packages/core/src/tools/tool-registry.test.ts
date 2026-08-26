@@ -161,6 +161,57 @@ describe('ToolRegistry', () => {
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
     });
 
+    it('skips registration when tools.core is an explicitly empty allowlist (#10065)', () => {
+      // Built-ins are gated at `registerLazy` and command-discovered tools
+      // at the async discovery gate, but MCP-discovered tools flow only
+      // through `registerTool` (both the legacy `McpClient.discover()`
+      // path and the pooled `SessionMcpView.applyTools` path end here).
+      // Without this guard `tools.core: []` would keep them registered —
+      // advertised to the model, then every invocation rejected at the
+      // runtime gate.
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getCoreTools: () => [],
+        getRegistryAllowList: () => [],
+        getProjectRoot: () => '/test/dir',
+        getCwd: () => '/test/dir',
+        getApprovalMode: () => 'default',
+      });
+      pm.initialize();
+      expect(pm.isCoreToolsAllowListEmpty()).toBe(true);
+      vi.spyOn(config, 'getPermissionManager').mockReturnValue(pm);
+
+      const tool = new MockTool({ name: 'mcp__srv__foo' });
+      toolRegistry.registerTool(tool);
+
+      expect(toolRegistry.getTool('mcp__srv__foo')).toBeUndefined();
+    });
+
+    it('still registers tools when the coreTools allowlist is unset (#10065)', () => {
+      // `undefined` coreTools means "no restriction" — the empty-allowlist
+      // guard must not fire for it.
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getCoreTools: () => undefined,
+        getRegistryAllowList: () => [],
+        getProjectRoot: () => '/test/dir',
+        getCwd: () => '/test/dir',
+        getApprovalMode: () => 'default',
+      });
+      pm.initialize();
+      expect(pm.isCoreToolsAllowListEmpty()).toBe(false);
+      vi.spyOn(config, 'getPermissionManager').mockReturnValue(pm);
+
+      const tool = new MockTool({ name: 'mcp__srv__foo' });
+      toolRegistry.registerTool(tool);
+
+      expect(toolRegistry.getTool('mcp__srv__foo')).toBe(tool);
+    });
+
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
       // The synthetic `structured_output` tool registers via
       // `registerFactory` (lazy). Without this guard, an MCP server

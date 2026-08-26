@@ -259,9 +259,15 @@ synthetic tool is registered when the CLI parses its arguments, so:
 
 ## Permission gating
 
-`structured_output` deliberately bypasses the `--core-tools` allowlist:
-the tool only exists when `--json-schema` is set, so excluding it
-would leave the run with no terminal contract.
+`structured_output` deliberately bypasses a NON-EMPTY `--core-tools`
+allowlist: the tool only exists when `--json-schema` is set, so
+excluding it would leave the run with no terminal contract.
+
+An explicitly EMPTY allowlist (`tools.core: []`) is the deliberate
+"no tools at all" configuration: it disables `structured_output` too,
+so a `--json-schema` run under `tools.core: []` cannot complete — the
+model has no terminal contract to end the run. Remove the setting or
+list the tools you need if you want structured output to finish.
 
 Explicit `permissions.deny` rules and `--exclude-tools` settings DO
 take effect — both use the same deny mechanism and both prevent

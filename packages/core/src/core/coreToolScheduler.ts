@@ -2474,6 +2474,21 @@ export class CoreToolScheduler {
             if (matchingRule) {
               permissionErrorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined. Matching deny rule: "${matchingRule}".`;
             } else if (
+              // An explicitly empty coreTools allowlist (`tools.core: []`)
+              // rejects EVERY tool, so the generic "permission was
+              // declined" text (nothing was ever asked or declined) and
+              // the `permissions.allow` remediation below are both wrong:
+              // adding an allow rule can never satisfy the empty gate.
+              // Name the responsible knob instead (#10065). The optional
+              // call keeps scoped PermissionManager shims from throwing
+              // until they grow the method; this branch sits ahead of the
+              // allowlist-advice branch because the empty gate rejects
+              // covered and uncovered tools alike.
+              typeof pm.isCoreToolsAllowListEmpty === 'function' &&
+              pm.isCoreToolsAllowListEmpty()
+            ) {
+              permissionErrorMessage = `"${reqInfo.name}" is disabled because the core tools allowlist (settings tools.core / --core-tools) is explicitly empty. Remove the setting or list the tool there to re-enable it.`;
+            } else if (
               pm.isPermissionsAllowListActive() &&
               // Only attribute the miss to `permissions.allow` when the tool
               // is genuinely uncovered. While the allowlist is active a

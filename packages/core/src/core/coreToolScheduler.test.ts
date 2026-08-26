@@ -3770,6 +3770,114 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('attributes the rejection to the empty tools.core allowlist instead of promising a permissions.allow fix (#10065)', async () => {
+    // With an active `permissions.allow` allowlist AND `tools.core: []`,
+    // an UNCOVERED tool used to get the "add a permissions.allow rule"
+    // advice — which can never succeed because the empty coreTools gate
+    // rejects the tool even after it becomes covered. The message must
+    // name `tools.core` instead (#10065).
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [ToolNames.EDIT, new MockTool({ name: ToolNames.EDIT, execute })],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isCoreToolsAllowListEmpty: vi.fn().mockReturnValue(true),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'empty-core-tools-uncovered',
+          name: ToolNames.EDIT,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-empty-core-tools-uncovered',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toContain('tools.core');
+      expect(message).toContain('"edit"');
+      expect(message).not.toContain('permissions.allow');
+      expect(message).not.toContain('permission was declined');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('names tools.core for a covered tool rejected by the empty allowlist instead of the generic declined message (#10065)', async () => {
+    // Covered by an allow rule but still rejected by `tools.core: []`:
+    // the generic "permission was declined" text is factually wrong
+    // (nothing was ever asked or declined), so the attribution must
+    // name the empty allowlist (#10065).
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'sent',
+      returnDisplay: 'sent',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [ToolNames.EDIT, new MockTool({ name: ToolNames.EDIT, execute })],
+    ]);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(false),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      isCoreToolsAllowListEmpty: vi.fn().mockReturnValue(true),
+      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
+      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(true),
+    };
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        permissionManager,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'empty-core-tools-covered',
+          name: ToolNames.EDIT,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-empty-core-tools-covered',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    expect(onAllToolCallsComplete).toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      const message = completedCall.response.error?.message ?? '';
+      expect(message).toContain('tools.core');
+      expect(message).not.toContain('permission was declined');
+    }
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it('keeps the legacy declined message when the tool is disabled without an active allowlist (#9827)', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'sent',
