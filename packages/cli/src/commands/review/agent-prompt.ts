@@ -3283,15 +3283,18 @@ function runAgentPrompt(args: AgentPromptArgs): void {
           `"${role}" does not take it.`,
       );
     }
-    // `--round` labels a repeat launch of a findings role. Only those roles run
-    // more than once per review, so only they take it — a round label on a
-    // single-run role would fork its record key away from the one the roster
-    // requires, and the delivery check would read "brief never reached an
-    // agent" on a run that did everything right.
+    // `--round` labels a repeat launch of a role that runs more than once —
+    // declared on the brief (`multiRound`), not keyed on `acceptsFindings`:
+    // the fix auditor takes findings yet runs exactly once per review, and a
+    // round label on a single-run role forks its record key away from the
+    // one the roster requires (the delivery check would read "brief never
+    // reached an agent" on a run that did everything right), and lets a real
+    // round number ride an audit-input key into the resume-time findings
+    // enumeration, where round-bearing entries outrank the genuine lists.
     if (hasRound) {
-      if (!BRIEFS[role]?.acceptsFindings) {
+      if (!BRIEFS[role]?.multiRound) {
         const roundRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
-          (r) => BRIEFS[r].acceptsFindings,
+          (r) => BRIEFS[r].multiRound,
         );
         bad(
           `--round labels one round of a findings role (${roundRoles.join(', ')}); ` +
@@ -3360,7 +3363,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
     // believing the round label — the thing that keys this round's record —
     // was applied.
     const roundRoles = (Object.keys(BRIEFS) as RoleId[]).filter(
-      (r) => BRIEFS[r].acceptsFindings,
+      (r) => BRIEFS[r].multiRound,
     );
     bad(
       `--round labels one round of a findings role; it needs ` +

@@ -89,13 +89,17 @@ describe('fix-delta', () => {
     expect(snap.root).toBe(repo);
     expect(snap.tree).toMatch(/^[0-9a-f]{40,64}$/);
 
-    // The fix: a modification, a new untracked test file, a deletion.
+    // The fix: a modification, a new untracked test file, a deletion, and a
+    // new file whose non-ASCII name renders QUOTED in git's patch output —
+    // the summary takes its names from git's structured listing, so the file
+    // is counted and named, not dropped by an anchored header regex.
     writeFileSync(
       join(repo, 'a.ts'),
       'export const x = 2;\nexport const bound = LIMIT;\n',
     );
     writeFileSync(join(repo, 'a.test.ts'), 'test("bound", () => {});\n');
     rmSync(join(repo, 'gone.ts'));
+    writeFileSync(join(repo, '文.ts'), 'export const v = 1;\n');
     runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
     const hunks = readFileSync(hunksFile(), 'utf8');
     expect(hunks).toContain('+export const bound = LIMIT;');
@@ -105,8 +109,55 @@ describe('fix-delta', () => {
     expect(hunks).toContain('diff --git a/gone.ts b/gone.ts');
     expect(hunks).toContain('deleted file mode');
     expect(stderr().at(-1)).toMatch(
-      /^fix-delta: 3 file\(s\) changed since the snapshot — a\.test\.ts, a\.ts, gone\.ts$/,
+      /^fix-delta: 4 file\(s\) changed since the snapshot — a\.test\.ts, a\.ts, gone\.ts, 文\.ts$/,
     );
+  });
+
+  it('names the submodule blind spot instead of claiming nothing was applied', () => {
+    // A fix that lands inside a submodule without being committed there moves
+    // no gitlink — the superproject tree, which is all a snapshot records, is
+    // byte-identical. The command must name that blind spot, not print
+    // "nothing was applied" and steer the orchestrator at a correct ledger.
+    const subSrc = realpathSync(
+      mkdtempSync(join(tmpdir(), 'qwen-fix-delta-subsrc-')),
+    );
+    const run = (cwd: string, ...args: string[]) =>
+      execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+    try {
+      run(subSrc, 'init', '-q', '-b', 'main');
+      run(subSrc, 'config', 'user.email', 't@t.t');
+      run(subSrc, 'config', 'user.name', 't');
+      writeFileSync(join(subSrc, 'f.txt'), 'before\n');
+      run(subSrc, 'add', '-A');
+      run(subSrc, 'commit', '-qm', 'init');
+      git(
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        subSrc,
+        'sub',
+      );
+      run(join(repo, 'sub'), 'config', 'user.email', 't@t.t');
+      run(join(repo, 'sub'), 'config', 'user.name', 't');
+      git('add', '-A');
+      git('commit', '-qm', 'add submodule');
+
+      runFixDelta({ snapshot: true, since: undefined, out: snapshotFile() });
+      // The fix lands inside the submodule, uncommitted there.
+      writeFileSync(join(repo, 'sub', 'f.txt'), 'after — the fix\n');
+      runFixDelta({ snapshot: false, since: snapshotFile(), out: hunksFile() });
+
+      expect(readFileSync(hunksFile(), 'utf8')).toBe('');
+      const last = stderr().at(-1) ?? '';
+      expect(last).toContain('submodule');
+      expect(last).toContain('sub');
+      expect(last).not.toContain('nothing was applied');
+      expect(last).not.toContain('the tree is unchanged since the snapshot');
+    } finally {
+      rmSync(subSrc, { recursive: true, force: true });
+    }
   });
 
   it("leaves the user's index and stash exactly as they were", () => {

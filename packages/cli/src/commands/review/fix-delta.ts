@@ -90,10 +90,17 @@ export function snapshotWorkingTree(root: string): string {
   }
 }
 
-/** The diff from a snapshot tree to the working tree now, review side files excluded. */
-export function diffSinceSnapshot(root: string, snapshotTree: string): string {
-  const now = snapshotWorkingTree(root);
-  if (now === snapshotTree) return '';
+/** The pathspec half of every tree comparison: review side files excluded. */
+function excludePathspec(): string[] {
+  return ['.', ...FIX_DELTA_EXCLUDES.map((p) => `:(glob,exclude)**/${p}/**`)];
+}
+
+/** The patch between two trees of this repository, review side files excluded. */
+function patchBetweenTrees(
+  root: string,
+  fromTree: string,
+  toTree: string,
+): string {
   return gitRaw(
     '-C',
     root,
@@ -103,12 +110,79 @@ export function diffSinceSnapshot(root: string, snapshotTree: string): string {
     '-M',
     '--no-color',
     '--no-ext-diff',
-    snapshotTree,
-    now,
+    fromTree,
+    toTree,
     '--',
-    '.',
-    ...FIX_DELTA_EXCLUDES.map((p) => `:(glob,exclude)**/${p}/**`),
+    ...excludePathspec(),
   ).toString('utf8');
+}
+
+/**
+ * The files that differ between two trees, taken from git's own listing.
+ * Re-parsing the rendered patch instead miscounts and mangles: with default
+ * `core.quotePath` a non-ASCII path renders quoted (`"a/src/\346…"`) and
+ * drops out of an anchored header regex, and a path containing a space
+ * matches but yields a garbled name. `-z` prints raw NUL-separated names —
+ * one per file, a rename counted once, under its new name.
+ */
+function filesBetweenTrees(
+  root: string,
+  fromTree: string,
+  toTree: string,
+): string[] {
+  const raw = gitRaw(
+    '-C',
+    root,
+    'diff-tree',
+    '-r',
+    '--name-only',
+    '-z',
+    '-M',
+    fromTree,
+    toTree,
+    '--',
+    ...excludePathspec(),
+  ).toString('utf8');
+  return raw.split('\0').filter((name) => name !== '');
+}
+
+/** The diff from a snapshot tree to the working tree now, review side files excluded. */
+export function diffSinceSnapshot(root: string, snapshotTree: string): string {
+  const now = snapshotWorkingTree(root);
+  if (now === snapshotTree) return '';
+  return patchBetweenTrees(root, snapshotTree, now);
+}
+
+/**
+ * Submodules holding edits a superproject tree cannot record. A submodule
+ * enters the tree as its gitlink alone: an edit inside it that is not
+ * committed there moves no gitlink, so both snapshots stay byte-identical
+ * while the fix is on disk. Porcelain-v2 names them — a changed submodule
+ * entry carries a 4-char state token after the XY pair, `S` plus a
+ * new-commits flag, a modified-content flag and an untracked-content flag,
+ * `.` where none (probed shapes: `SC..`, `S.M.`, `SCMU`) — and the last two
+ * flags are the invisible content. A new-commits flag alone is visible (the
+ * gitlink moved) and not reported.
+ */
+function dirtySubmodulePaths(root: string): string[] {
+  const status = git(
+    '-C',
+    root,
+    'status',
+    '--porcelain=v2',
+    '--ignore-submodules=none',
+  );
+  const dirty: string[] = [];
+  for (const line of status.split('\n')) {
+    const m =
+      /^1 \S\S S[CMU?.]([CMU?.])([CMU?.]) 160000 160000 160000 [0-9a-f]+ [0-9a-f]+ (.+)$/.exec(
+        line,
+      );
+    if (m && (m[1] !== '.' || m[2] !== '.')) {
+      dirty.push(m[3]);
+    }
+  }
+  return dirty;
 }
 
 export interface FixDeltaArgs {
@@ -169,18 +243,34 @@ export function runFixDelta(args: FixDeltaArgs): void {
     );
   }
 
-  const diff = diffSinceSnapshot(root, snapshot.tree);
+  const now = snapshotWorkingTree(root);
+  const diff =
+    now === snapshot.tree ? '' : patchBetweenTrees(root, snapshot.tree, now);
   writeFileSync(resolve(args.out), diff);
   if (diff.trim() === '') {
-    writeStderrLine(
-      'fix-delta: the tree is unchanged since the snapshot — nothing was applied ' +
-        '(or the snapshot was taken after the edits).',
-    );
+    // The superproject tree is unchanged — but a fix inside a submodule is
+    // invisible to this model (the gitlink never moves), and "nothing was
+    // applied" would be a lie over there. Name the blind spot instead.
+    const dirty = dirtySubmodulePaths(root);
+    if (dirty.length > 0) {
+      writeStderrLine(
+        `fix-delta: ${dirty.length === 1 ? 'submodule' : 'submodules'} ` +
+          `${dirty.join(', ')} ${dirty.length === 1 ? 'holds' : 'hold'} ` +
+          'uncommitted edits this command cannot see — a snapshot records only ' +
+          'the superproject tree, and a submodule enters it as its gitlink ' +
+          'alone, so edits inside a submodule are outside this model until ' +
+          'they are committed there. The hunks file stays empty; the audit ' +
+          'cannot see the edit.',
+      );
+    } else {
+      writeStderrLine(
+        'fix-delta: the tree is unchanged since the snapshot — nothing was applied ' +
+          '(or the snapshot was taken after the edits).',
+      );
+    }
     return;
   }
-  const files = [...diff.matchAll(/^diff --git a\/(.*?) b\/(.*)$/gm)].map(
-    (m) => m[2],
-  );
+  const files = filesBetweenTrees(root, snapshot.tree, now);
   const shown = files.slice(0, 8).join(', ');
   writeStderrLine(
     `fix-delta: ${files.length} file(s) changed since the snapshot — ${shown}` +

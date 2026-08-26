@@ -7426,6 +7426,11 @@ describe('the fix audit (--role fix-audit) — Step 6B, not a re-review', () => 
       { role: 'fix-audit', findings: '/f', hunks: '/h', chunk: 13 },
       /does not take --chunk/,
     ],
+    [
+      '--round on the fix auditor',
+      { role: 'fix-audit', findings: '/f', hunks: '/h', round: 2 },
+      /runs once and does not take/,
+    ],
   ])(
     'rules on the flag combination at the boundary: %s',
     (_name, args, message) => {

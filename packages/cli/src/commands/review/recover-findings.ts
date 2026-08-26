@@ -305,6 +305,14 @@ export function recoverFindings(
     } catch {
       continue;
     }
+    // The fix auditor's INPUT rides this same digest-named channel, and a
+    // certified fix-audit transcript corroborates its own pointer (its one
+    // input read clears the findings floor), so the file would pass every
+    // fence below and — newest by mtime at resume time — be handed on as the
+    // interrupted run's cumulative state: only the `fixed` subset plus raw
+    // hunks, every other finding dropped. It is an input, not a findings
+    // list; only verify/reverse-audit lists are cumulative state.
+    if (key.startsWith('fix-audit--')) continue;
     const path = join(recordDir, name);
     // lstat, never stat: a symlink is not the file it points at. `statSync`
     // would fence on the TARGET's mtime — attacker-chosen — and the read

@@ -801,13 +801,21 @@ describe('bundled review skill', () => {
       at('**Then re-issue the `report_findings` call, outcomes on it.**'),
     );
     // The audit's inputs are the rebuilt artifact and the applied hunks —
-    // never the reviewed diff, never findings-in.json.
-    expect(step).toContain(
-      '--findings .qwen/tmp/qwen-review-{target}-findings.json',
-    );
-    expect(step).toContain(
-      '--hunks .qwen/tmp/qwen-review-{target}-fix-hunks.diff',
-    );
+    // never the reviewed diff, never findings-in.json. Producer and consumer
+    // sides derive from the SAME strings: a rename of any producer `--out`
+    // path must touch the same constant the consumer needle reads, or writer
+    // and reader silently disagree — an audit that dies `Fix audit: not
+    // run`, or worse, one that diffs against a stale leftover an interrupted
+    // earlier run left at the old consumer path.
+    const snapshotPath = '.qwen/tmp/qwen-review-{target}-fix-snapshot.json';
+    const hunksPath = '.qwen/tmp/qwen-review-{target}-fix-hunks.diff';
+    const artifactPath = '.qwen/tmp/qwen-review-{target}-findings.json';
+    expect(step).toContain(`--out ${snapshotPath}`);
+    expect(step).toContain(`--since ${snapshotPath}`);
+    expect(step).toContain(`--out ${hunksPath}`);
+    expect(step).toContain(`--hunks ${hunksPath}`);
+    expect(step).toContain(`--out ${artifactPath}`);
+    expect(step).toContain(`--findings ${artifactPath}`);
     expect(step).toContain('never the reviewed diff');
     // The four constraints that keep it from being the forbidden re-review,
     // and the disclosure-not-finding rule that closes the back door.
@@ -822,9 +830,25 @@ describe('bundled review skill', () => {
     // The rule it sits beside survives, and says why the audit is not it.
     expect(step).toContain('**Do not re-run Steps 1–6**');
     expect(step).toContain('precisely so that it is not one');
-    // Scope: fixed outcomes only, and the interactive path gets the same audit.
+    // Scope: fixed outcomes only. The interactive path gets the same
+    // outcomes discipline but NOT the audit — it runs after Step 9 cleanup
+    // swept the plan report `agent-prompt --plan` requires, and the
+    // paragraph must say so (with the disclosure line) rather than promise
+    // an audit that dies on the missing plan.
     expect(step).toContain('only when the ledger holds no `fixed` outcome');
-    expect(step).toContain('it gets the same audit');
+    expect(step).toContain(
+      'Fix audit: not run — plan report swept by Step 9 cleanup',
+    );
+    expect(step).not.toContain('it gets the same audit');
+    // The note-propagation mechanism: the ledger re-run that carries an
+    // unpinned assumption into the artifact as `outcomeNote`, and the
+    // re-issue clause that carries it to the client. Without both halves
+    // the assumption reaches only the terminal summary, and the `fixed`
+    // findings close with the disclosure silently gone.
+    expect(step).toContain(
+      'run the `review findings --outcomes` command above again',
+    );
+    expect(step).toContain('for every `fixed` the fix audit annotated');
     // The subagent type mandate reaches this launch too.
     expect(step).toContain('`subagent_type: "review-agent"`');
   });

@@ -328,6 +328,64 @@ describe('recover-findings', () => {
     expect(r.findingsFiles).toEqual([{ key, path: list, round: 2 }]);
   });
 
+  it('does not hand the fix-audit input on as a cumulative findings list', () => {
+    // The fix auditor's INPUT rides the same digest-named channel as the
+    // cumulative lists, and its transcript clears the certification bar
+    // trivially (its one input read is the findings-pointer read). Without
+    // a role filter the enumeration corroborates and relays it — newest by
+    // mtime — as the interrupted run's state, dropping every non-`fixed`
+    // finding from the resume.
+    const recordDir = promptRecordDir(plan);
+    // A certified verify round with a genuine cumulative list …
+    const verifyKey = 'verify--round-2--abc123def456';
+    const verifyList = join(
+      recordDir,
+      `${encodeURIComponent(verifyKey)}.findings.md`,
+    );
+    writeFileSync(verifyList, '- R1-1 …');
+    const verifyBrief = briefPath(plan, verifyKey);
+    writeFileSync(verifyBrief, `The ${verifyKey} brief.`);
+    const verifyPrompt =
+      `You are ${verifyKey}.\n` +
+      `read_file(file_path="${verifyList}")\n` +
+      `read_file(file_path="${verifyBrief}")`;
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(verifyKey)}.txt`),
+      verifyPrompt,
+    );
+    transcript('S0', 'v2', verifyPrompt, {
+      opens: [verifyBrief, verifyList],
+      finalText: 'Verdicts: R1-1 confirmed.',
+    });
+    // … and a certified fix-audit launch whose one input sits beside it.
+    const auditKey = 'fix-audit--a1b2c3d4e5f6';
+    const auditInput = join(
+      recordDir,
+      `${encodeURIComponent(auditKey)}.findings.md`,
+    );
+    writeFileSync(auditInput, '# Fix audit input …');
+    const auditBrief = briefPath(plan, auditKey);
+    writeFileSync(auditBrief, `The ${auditKey} brief.`);
+    const auditPrompt =
+      `You are ${auditKey}.\n` +
+      `read_file(file_path="${auditInput}")\n` +
+      `read_file(file_path="${auditBrief}")`;
+    writeFileSync(
+      join(recordDir, `${encodeURIComponent(auditKey)}.txt`),
+      auditPrompt,
+    );
+    transcript('S0', 'fa0', auditPrompt, {
+      opens: [auditBrief, auditInput],
+      finalText: 'No unpinned assumptions — audited 2 hunk(s) in a.ts.',
+    });
+
+    const r = recoverFindings({ plan, out: out() }, ENV);
+    expect(r.recoveredKeys).toEqual([auditKey, verifyKey]);
+    expect(r.findingsFiles).toEqual([
+      { key: verifyKey, path: verifyList, round: 2 },
+    ]);
+  });
+
   it('reports the latest certified reverse-audit round', () => {
     for (const round of [1, 2]) {
       const key = `reverse-audit--round-${round}--abc123def456`;

@@ -174,6 +174,19 @@ export interface Brief {
    */
   acceptsFindings?: boolean;
   /**
+   * Does this role run more than once per review, so a `--round` label keys
+   * its repeat launches?
+   *
+   * Declarative for the same reason `acceptsFindings` is: `--round` admits
+   * every `acceptsFindings` role today, and the fix auditor takes findings
+   * yet runs exactly once — a round label on it forks its record key away
+   * from the one the roster requires, and lets a round number ride an
+   * audit-input key into the resume-time findings enumeration, where
+   * round-bearing entries outrank the genuine lists. The guard reads which
+   * roles it admits here, not a hardcoded pair.
+   */
+  multiRound?: boolean;
+  /**
    * This role's brief never carries the soft tool-call ceiling
    * (`agentToolBudget`).
    *
@@ -669,6 +682,7 @@ Report a **Critical** for each violation, and give **both** locations that toget
     reviewsCode: true,
     output: 'verdicts',
     acceptsFindings: true,
+    multiRound: true,
     label: 'Verification agent',
     publicLabel: 'verification',
     publicLabelZh: '验证',
@@ -808,6 +822,7 @@ The asymmetry cuts both ways: confirming also requires the trace, and a finding 
     reviewsCode: true,
     acceptsChunk: true,
     acceptsFindings: true,
+    multiRound: true,
     label: 'Reverse audit agent',
     publicLabel: 'reverse audit',
     publicLabelZh: '反向审计',
