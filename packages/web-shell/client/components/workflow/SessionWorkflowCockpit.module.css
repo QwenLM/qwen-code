@@ -13,13 +13,14 @@
   overflow: hidden;
 }
 
-.cockpit button,
-.emptyCockpit button {
-  color: inherit;
-  font: inherit;
-}
-
-.cockpit button:focus-visible,
+/* No descendant button reset here: preflight.css already normalizes every
+   button at zero specificity, and a blanket button reset at this selector's
+   specificity (0,1,1) would silently outrank the single-class styles it
+   envelops — this file's .backButton and PlanExecutionView's nested rows
+   declare their own complete typography. The focus ring is scoped to the
+   cockpit's own buttons so it can't stack over PlanExecutionView's
+   deliberate node focus styles. */
+.backButton:focus-visible,
 .emptyCockpit button:focus-visible {
   outline: 2px solid var(--agent-blue-500);
   outline-offset: 2px;
