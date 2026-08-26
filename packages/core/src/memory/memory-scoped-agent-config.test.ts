@@ -57,6 +57,19 @@ describe('createMemoryScopedAgentConfig', () => {
     return pm;
   }
 
+  it('allows scoped agents to access managed-memory files directly', () => {
+    const config = createMemoryScopedAgentConfig(
+      {
+        allowsDirectAutoMemoryRead: () => false,
+        allowsDirectAutoMemoryWrite: () => false,
+      } as Config,
+      projectRoot,
+    );
+
+    expect(config.allowsDirectAutoMemoryRead()).toBe(true);
+    expect(config.allowsDirectAutoMemoryWrite()).toBe(true);
+  });
+
   it('restricts reads to memory paths only when requested', async () => {
     const unrestricted = permissionManager(
       createMemoryScopedAgentConfig({} as Config, projectRoot),
@@ -112,6 +125,36 @@ describe('createMemoryScopedAgentConfig', () => {
         filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
       }),
     ).resolves.toBe('deny');
+  });
+
+  it('can keep writes user-memory-only for the user dream agent', async () => {
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: true,
+        userMemoryOnly: true,
+      }),
+    );
+    const projectFile = path.join(
+      getAutoMemoryRoot(projectRoot),
+      'project',
+      'a.md',
+    );
+    const userFile = path.join(getUserAutoMemoryRoot(), 'user', 'a.md');
+
+    await expect(
+      pm.evaluate({ toolName: ToolNames.WRITE_FILE, filePath: userFile }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({ toolName: ToolNames.WRITE_FILE, filePath: projectFile }),
+    ).resolves.toBe('deny');
+    expect(
+      pm.findMatchingDenyRule({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: projectFile,
+      }),
+    ).toBe(
+      `ManagedAutoMemory(write_file: only within ${getUserAutoMemoryRoot()})`,
+    );
   });
 
   it('protects project pinned memory and aliases while leaving ordinary memory writable', async () => {

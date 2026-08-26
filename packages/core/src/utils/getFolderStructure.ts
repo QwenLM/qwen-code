@@ -33,6 +33,7 @@ interface FolderStructureOptions {
   fileService?: FileDiscoveryService;
   /** File filtering ignore options. */
   fileFilteringOptions?: FileFilteringOptions;
+  hideManagedMemory?: boolean;
 }
 // Define a type for the merged options where fileIncludePattern remains optional
 type MergedFolderStructureOptions = Required<
@@ -191,7 +192,12 @@ async function readFullStructure(
               options.fileService.shouldQwenIgnoreFile(subFolderPath));
         }
 
-        if (options.ignoredFolders.has(subFolderName) || isIgnored) {
+        if (
+          options.ignoredFolders.has(subFolderName) ||
+          isIgnored ||
+          (options.hideManagedMemory &&
+            isManagedMemoryFolder(rootPath, subFolderPath))
+        ) {
           const ignoredSubFolder: FullFolderInfo = {
             name: subFolderName,
             path: subFolderPath,
@@ -227,6 +233,14 @@ async function readFullStructure(
   }
 
   return rootNode;
+}
+
+function isManagedMemoryFolder(rootPath: string, folderPath: string): boolean {
+  const relativePath = path.relative(rootPath, folderPath);
+  return (
+    relativePath === path.join('.qwen', 'memory') ||
+    relativePath === path.join('.qwen', 'team-memory')
+  );
 }
 
 /**
@@ -322,6 +336,7 @@ export async function getFolderStructure(
     fileService: options?.fileService,
     fileFilteringOptions:
       options?.fileFilteringOptions ?? DEFAULT_FILE_FILTERING_OPTIONS,
+    hideManagedMemory: options?.hideManagedMemory ?? false,
   };
 
   try {

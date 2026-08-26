@@ -37,6 +37,7 @@ import { GeminiChat } from './geminiChat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import {
   createHookOutput,
   PermissionMode,
@@ -351,6 +352,7 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     ...actual,
     uiTelemetryService: mockUiTelemetryService,
     logMemoryRecallDelivery: mockLogMemoryRecallDelivery,
+    logMemoryRecallModeTransition: vi.fn(),
     startInteractionSpan: mockInteractionTelemetry.startInteractionSpan,
     endInteractionSpan: mockInteractionTelemetry.endInteractionSpan,
     getActiveInteractionSpan: mockInteractionTelemetry.getActiveInteractionSpan,
@@ -385,6 +387,7 @@ vi.mock('../telemetry/loggers.js', () => ({
   logApiRequest: vi.fn(),
   logLoopDetected: vi.fn(),
   logLoopDetectionDisabled: vi.fn(),
+  logMemoryRecallConsumed: vi.fn(),
 }));
 
 import * as telemetryIndex from '../telemetry/index.js';
@@ -471,10 +474,18 @@ describe('Gemini Client (client.ts)', () => {
     rewind: ReturnType<typeof vi.fn>;
   };
   let mockMemoryManager: {
+    scheduleMetadataMigration: ReturnType<typeof vi.fn>;
     scheduleExtract: ReturnType<typeof vi.fn>;
     scheduleDream: ReturnType<typeof vi.fn>;
     recall: ReturnType<typeof vi.fn>;
+    getBodyPresentVersionsInHistory: ReturnType<typeof vi.fn>;
+    getBodyCoverageInHistory: ReturnType<typeof vi.fn>;
     scheduleSkillReview: ReturnType<typeof vi.fn>;
+    resetMemoryBodyStateForSession: ReturnType<typeof vi.fn>;
+    resetExhaustedBodyRefsForCurrentTurn: ReturnType<typeof vi.fn>;
+    restoreMemoryBodiesPresentInHistory: ReturnType<typeof vi.fn>;
+    markMemoryBodiesEvictedFromHistory: ReturnType<typeof vi.fn>;
+    markAllMemoryBodiesEvictedFromHistory: ReturnType<typeof vi.fn>;
   };
   beforeEach(async () => {
     vi.resetAllMocks();
@@ -507,6 +518,10 @@ describe('Gemini Client (client.ts)', () => {
     );
 
     mockMemoryManager = {
+      scheduleMetadataMigration: vi.fn().mockResolvedValue({
+        status: 'skipped',
+        skippedReason: 'complete',
+      }),
       scheduleExtract: vi.fn().mockResolvedValue({
         touchedTopics: [],
         cursor: { updatedAt: new Date(0).toISOString() },
@@ -520,10 +535,17 @@ describe('Gemini Client (client.ts)', () => {
         selectedDocs: [],
         strategy: 'none',
       }),
+      getBodyPresentVersionsInHistory: vi.fn().mockReturnValue(new Map()),
+      getBodyCoverageInHistory: vi.fn().mockReturnValue(new Map()),
       scheduleSkillReview: vi.fn().mockReturnValue({
         status: 'skipped',
         skippedReason: 'below_threshold',
       }),
+      resetMemoryBodyStateForSession: vi.fn(),
+      resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      restoreMemoryBodiesPresentInHistory: vi.fn(),
+      markMemoryBodiesEvictedFromHistory: vi.fn(),
+      markAllMemoryBodiesEvictedFromHistory: vi.fn(),
     };
 
     mockGenerateContentFn = vi.fn().mockResolvedValue({
@@ -653,6 +675,11 @@ describe('Gemini Client (client.ts)', () => {
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+      prepareMemoryRecallTransition: vi.fn().mockResolvedValue(undefined),
+      confirmMemoryRecallTransition: vi.fn().mockResolvedValue(true),
+      commitMemoryRecallTransition: vi.fn(),
+      rollbackMemoryRecallTransition: vi.fn(),
       getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getAutoSkillEnabled: vi.fn().mockReturnValue(false),
       getAutoSkillConfirmEnabled: vi.fn().mockReturnValue(true),
@@ -1236,6 +1263,50 @@ describe('Gemini Client (client.ts)', () => {
           deferredReminderCount: 1,
         }),
       );
+    });
+
+    it('restores resident memory bodies from resumed history', async () => {
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [
+          {
+            role: 'user',
+            parts: [{ text: 'resumed query' }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'memory-fetch',
+                  name: ToolNames.SEARCH_MEMORY,
+                  response: {
+                    output: JSON.stringify({
+                      mode: 'fetch',
+                      results: [
+                        {
+                          ref: 'project:reference.md',
+                          version: 42,
+                          content: 'complete body',
+                          range: { start: 0, end: 13, total: 13 },
+                        },
+                      ],
+                    }),
+                  },
+                },
+              },
+            ],
+          },
+        ],
+        [],
+      ]);
+
+      await client.startChat([{ role: 'user', parts: [{ text: 'resume' }] }]);
+
+      expect(
+        mockMemoryManager.restoreMemoryBodiesPresentInHistory,
+      ).toHaveBeenCalledWith([
+        { memoryRef: 'project:reference.md', mtimeMs: 42 },
+      ]);
     });
 
     it('does not record context apply stage without SessionStart context', async () => {
@@ -2974,6 +3045,14 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(client['recentCompletedToolNames']).toEqual([]);
     });
+
+    it('clears session memory body state', async () => {
+      await client.resetChat();
+
+      expect(
+        mockMemoryManager.resetMemoryBodyStateForSession,
+      ).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('history mutation invalidates FileReadCache', () => {
@@ -3000,6 +3079,7 @@ describe('Gemini Client (client.ts)', () => {
           .fn()
           .mockReturnValueOnce(before)
           .mockReturnValueOnce(after),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         truncateHistory: vi.fn(),
       } as unknown as GeminiChat;
     }
@@ -3062,6 +3142,7 @@ describe('Gemini Client (client.ts)', () => {
       // Case 1: history actually shrank → forceFullIdeContext + cache clear.
       client['chat'] = {
         getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValueOnce(1),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         stripOrphanedUserEntriesFromHistory: strip,
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
@@ -3077,6 +3158,7 @@ describe('Gemini Client (client.ts)', () => {
       const strip2 = vi.fn();
       client['chat'] = {
         getHistoryLength: vi.fn().mockReturnValue(2),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
         stripOrphanedUserEntriesFromHistory: strip2,
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
@@ -4362,6 +4444,7 @@ describe('Gemini Client (client.ts)', () => {
 
     it('returns early on NOOP without touching FileReadCache', async () => {
       const { clear } = mockFileReadCacheStub();
+      mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mockClear();
       const compressFast = vi.fn().mockReturnValue({
         info: {
           originalTokenCount: 100,
@@ -4379,11 +4462,15 @@ describe('Gemini Client (client.ts)', () => {
       expect(result.compressionStatus).toBe(CompressionStatus.NOOP);
       expect(compressFast).toHaveBeenCalledOnce();
       expect(clear).not.toHaveBeenCalled();
+      expect(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
+      ).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(false);
     });
 
     it('calls clear() when unresolvedEvictedReads > 0 on COMPRESSED', async () => {
       const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mockClear();
       const compressFast = vi.fn().mockReturnValue({
         info: {
           originalTokenCount: 1000,
@@ -4412,6 +4499,12 @@ describe('Gemini Client (client.ts)', () => {
       expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
       expect(clear).toHaveBeenCalledOnce();
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+      expect(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockMemoryManager.markMemoryBodiesEvictedFromHistory,
+      ).toHaveBeenCalledWith([]);
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
@@ -4541,6 +4634,8 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('flips forceFullIdeContext on a successful compression', async () => {
+      mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mockClear();
+      client['lastDeliveredMemoryTreeRevision'] = 'before-compression';
       client['chat'] = {
         tryCompress: vi.fn().mockResolvedValue({
           originalTokenCount: 1000,
@@ -4556,6 +4651,13 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(client['forceFullIdeContext']).toBe(true);
       expect(client.getChat().isLastPromptTokenCountEstimated()).toBe(true);
+      expect(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockMemoryManager.markAllMemoryBodiesEvictedFromHistory,
+      ).toHaveBeenCalledOnce();
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
     });
 
     it('re-prepends startup context and seeds the new chat after compression', async () => {
@@ -4967,6 +5069,8 @@ describe('Gemini Client (client.ts)', () => {
         newTokenCount: 0,
         compressionStatus: CompressionStatus.NOOP,
       });
+      client['lastDeliveredMemoryTreeRevision'] = 'before-auto-compression';
+      mockMemoryManager.markAllMemoryBodiesEvictedFromHistory.mockClear();
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield {
@@ -4985,6 +5089,7 @@ describe('Gemini Client (client.ts)', () => {
         setHistory: vi.fn(),
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
+      mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn.mockClear();
 
       const stream = client.sendMessageStream(
         [{ text: 'hi' }],
@@ -4997,6 +5102,13 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(client['forceFullIdeContext']).toBe(true);
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+      expect(
+        mockMemoryManager.markAllMemoryBodiesEvictedFromHistory,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
+      ).toHaveBeenCalledTimes(2);
     });
 
     it('re-prepends the startup prelude after an auto-compaction ChatCompressed event', async () => {
@@ -5031,6 +5143,7 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue(compactedHistory),
         setHistory,
       } as unknown as GeminiChat;
+      client['lastDeliveredMemoryTreeRevision'] = 'before-auto-compaction';
 
       const stream = client.sendMessageStream(
         [{ text: 'hi' }],
@@ -5053,6 +5166,7 @@ describe('Gemini Client (client.ts)', () => {
         },
         ...compactedHistory,
       ]);
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
     });
   });
 
@@ -5387,13 +5501,30 @@ hello
     // exactly-once guarantees it must not break.
     const fastDoc = (filePath: string, body: string) => ({
       type: 'user' as const,
+      scope: 'user' as const,
       filePath,
       relativePath: filePath.split('/').at(-1)!,
       filename: filePath.split('/').at(-1)!,
+      category: 'uncategorized' as const,
       title: 'User Memory',
       description: 'User preferences',
+      keywords: ['preference'],
+      usageScenarios: ['When user preferences are relevant'],
       body,
       mtimeMs: 1,
+    });
+
+    const fastTreeSnapshot = (revision: string) => ({
+      revision,
+      tree: { categories: [] },
+      routerPrompt: `## Complete memory tree\n\nRouter ${revision}`,
+      sourceStatus: {
+        requestedScopes: ['project' as const],
+        searchedScopes: ['project' as const],
+        unavailableScopes: [],
+        complete: true,
+        incompleteScopes: [],
+      },
     });
 
     const toolCallStream = () =>
@@ -5410,6 +5541,91 @@ hello
           },
         };
       })();
+
+    it('delivers the complete tree once and again only after its revision changes', async () => {
+      let revision = 'revision-1';
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          treeSnapshot: fastTreeSnapshot(revision),
+          focusedPrompt: '## Memory focus for this turn\n\nCurrent focus',
+          prompt: '## Memory focus for this turn\n\nCurrent focus',
+          selectedDocs: [fastDoc('/m/focus.md', '- focus')],
+          strategy: 'heuristic',
+        });
+        return new Promise(() => {});
+      });
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      for (const id of ['first', 'second']) {
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: id }],
+            new AbortController().signal,
+            `prompt-tree-${id}`,
+          ),
+        );
+      }
+
+      const firstText = JSON.stringify(mockTurnRunFn.mock.calls.at(-2)?.[1]);
+      const secondText = JSON.stringify(mockTurnRunFn.mock.calls.at(-1)?.[1]);
+      expect(firstText).toContain('Router revision-1');
+      expect(secondText).not.toContain('Router revision-1');
+      expect(secondText).toContain('Current focus');
+
+      revision = 'revision-2';
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'third' }],
+          new AbortController().signal,
+          'prompt-tree-third',
+        ),
+      );
+      expect(JSON.stringify(mockTurnRunFn.mock.calls.at(-1)?.[1])).toContain(
+        'Router revision-2',
+      );
+    });
+
+    it('does not commit a tree revision when the model stream fails before delivery', async () => {
+      mockMemoryManager.recall.mockImplementation((_root, _query, options) => {
+        options.onFastResult?.({
+          treeSnapshot: fastTreeSnapshot('failed-revision'),
+          focusedPrompt: '',
+          prompt: '',
+          selectedDocs: [],
+          strategy: 'none',
+        });
+        return new Promise(() => {});
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield* [];
+          throw new Error('request failed before first event');
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [{ text: 'fail' }],
+            new AbortController().signal,
+            'prompt-tree-fail',
+          ),
+        ),
+      ).rejects.toThrow('request failed before first event');
+      expect(client['lastDeliveredMemoryTreeRevision']).toBeUndefined();
+    });
 
     it('delivers the deterministic fast result on a tool-free turn when the selector is still in flight', async () => {
       vi.useFakeTimers();
@@ -5732,14 +5948,58 @@ hello
 
       const toolRequest = mockTurnRunFn.mock.calls.at(-1)?.[1] as unknown[];
       const toolText = JSON.stringify(toolRequest);
-      // The genuinely new document still reaches the model, rendered from its
-      // own body by the rebuilt prompt.
-      expect(toolText).toContain('brand new');
+      // The genuinely new document still reaches the model as a focused
+      // metadata path. Its body remains available through search_memory.
+      expect(toolText).toContain('[user:new.md]');
+      expect(toolText).not.toContain('brand new');
       // The overlapping document was already in front of the model from the
       // fast delivery; sending it again would duplicate context. Passing the
       // selector result through unchanged would leave both markers intact.
       expect(toolText).not.toContain('OVERLAP_MARKER');
+      expect(toolText).not.toContain('[user:overlap.md]');
       expect(toolText).not.toContain('- overlapping');
+    });
+
+    it('deduplicates focused refs without shrinking the complete tree snapshot', async () => {
+      const overlapping = fastDoc('/m/overlap.md', '- overlapping');
+      const newDoc = fastDoc('/m/new.md', '- brand new');
+      const treeSnapshot = fastTreeSnapshot('full-snapshot');
+      const result = {
+        treeSnapshot,
+        focusedPrompt: 'stale focused prompt',
+        prompt: 'stale focused prompt',
+        selectedDocs: [overlapping, newDoc],
+        strategy: 'model' as const,
+      };
+      const handle = {
+        promise: Promise.resolve(result),
+        settledAt: Date.now(),
+        result,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: true,
+        fastDeliveredRefs: new Set(['user:overlap.md']),
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+      client['pendingMemoryPrefetch'] = handle;
+
+      const delivery = await (
+        client as unknown as {
+          tryConsumeMemoryPrefetch: (deliveryPoint: 'tool_result') => Promise<{
+            treeSnapshot?: typeof treeSnapshot;
+            selectedDocs: Array<ReturnType<typeof fastDoc>>;
+            prompt: string;
+          } | null>;
+        }
+      ).tryConsumeMemoryPrefetch('tool_result');
+
+      expect(delivery?.treeSnapshot).toBe(treeSnapshot);
+      expect(delivery?.selectedDocs).toEqual([newDoc]);
+      expect(delivery?.prompt).toContain('Router full-snapshot');
+      expect(delivery?.prompt).toContain('[user:new.md]');
+      expect(delivery?.prompt).not.toContain('[user:overlap.md]');
     });
 
     it('logs already-delivered discards with the selector count', async () => {
@@ -6040,20 +6300,25 @@ hello
 
     it('should prepend relevant managed auto-memory prompt when recall returns content', async () => {
       mockMemoryManager.recall.mockResolvedValue({
-        prompt: '## Relevant memory\n\nUser prefers terse responses.',
+        prompt:
+          '## Memory overview\n\n└── communication_preference (本轮显示 1 / 共 1 条，可见关键词：无)\n    └── [user:user.md] User Memory：无：User preferences',
         selectedDocs: [
           {
+            scope: 'user',
             type: 'user',
             filePath: '/test/project/root/.qwen/memory/user.md',
             relativePath: 'user.md',
             filename: 'user.md',
             title: 'User Memory',
             description: 'User preferences',
+            category: 'communication_preference',
+            keywords: [],
+            usageScenarios: ['User preferences'],
             body: '- User prefers terse responses.',
             mtimeMs: 1,
           },
         ],
-        strategy: 'model',
+        strategy: 'semantic',
       });
 
       const mockStream = (async function* () {
@@ -6082,37 +6347,41 @@ hello
         'Please answer tersely',
         expect.objectContaining({
           config: mockConfig,
-          excludedFilePaths: expect.any(Set),
           recentTools: ['mcp__ata__article-list-query'],
         }),
       );
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         expect.arrayContaining([
-          '## Relevant memory\n\nUser prefers terse responses.',
+          expect.stringContaining('## Memory overview'),
           'Please answer tersely',
         ]),
         expect.any(AbortSignal),
       );
     });
 
-    it('should track surfaced managed memory paths across user queries', async () => {
+    it('should not exclude memories that were only surfaced as metadata', async () => {
       mockMemoryManager.recall
         .mockResolvedValueOnce({
-          prompt: '## Relevant memory\n\nUser prefers terse responses.',
+          prompt:
+            '## Memory overview\n\n└── communication_preference (本轮显示 1 / 共 1 条，可见关键词：无)\n    └── [user:user.md] User Memory：无：User preferences',
           selectedDocs: [
             {
+              scope: 'user',
               type: 'user',
               filePath: '/test/project/root/.qwen/memory/user.md',
               relativePath: 'user.md',
               filename: 'user.md',
               title: 'User Memory',
               description: 'User preferences',
+              category: 'communication_preference',
+              keywords: [],
+              usageScenarios: ['User preferences'],
               body: '- User prefers terse responses.',
               mtimeMs: 1,
             },
           ],
-          strategy: 'model',
+          strategy: 'semantic',
         })
         .mockResolvedValueOnce({
           prompt: '',
@@ -6153,10 +6422,8 @@ hello
         2,
         '/test/project/root',
         'Keep it short again',
-        expect.objectContaining({
-          excludedFilePaths: new Set([
-            '/test/project/root/.qwen/memory/user.md',
-          ]),
+        expect.not.objectContaining({
+          excludedFilePaths: expect.anything(),
         }),
       );
     });
@@ -7195,7 +7462,7 @@ hello
         terminalLogged: false,
         fastResultRef: { current: null },
         fastDelivered: false,
-        fastDeliveredPaths: new Set<string>(),
+        fastDeliveredRefs: new Set<string>(),
         firedAt: Date.now(),
         controller,
       };
@@ -7220,14 +7487,19 @@ hello
     it('should not consume a prefetch replaced during the bounded wait', async () => {
       vi.useFakeTimers();
       type RecallResult = {
+        focusedPrompt: string;
         prompt: string;
         selectedDocs: Array<{
           type: 'user';
+          scope: 'user';
           filePath: string;
           relativePath: string;
           filename: string;
           title: string;
           description: string;
+          category: 'uncategorized';
+          keywords: string[];
+          usageScenarios: string[];
           body: string;
           mtimeMs: number;
         }>;
@@ -7244,7 +7516,7 @@ hello
         terminalLogged: false,
         fastResultRef: { current: null },
         fastDelivered: false,
-        fastDeliveredPaths: new Set<string>(),
+        fastDeliveredRefs: new Set<string>(),
         firedAt: Date.now(),
         controller: new AbortController(),
       };
@@ -7268,6 +7540,7 @@ hello
       setTimeout(() => {
         handle.settledAt = Date.now();
         settleRecall!({
+          focusedPrompt: '## Relevant memory\n\nReplaced result.',
           prompt: '## Relevant memory\n\nReplaced result.',
           selectedDocs: [],
           strategy: 'model',
@@ -7332,7 +7605,7 @@ hello
         terminalLogged: false,
         fastResultRef: { current: null },
         fastDelivered: false,
-        fastDeliveredPaths: new Set<string>(),
+        fastDeliveredRefs: new Set<string>(),
         firedAt: Date.now(),
         controller: new AbortController(),
       };
@@ -7954,7 +8227,7 @@ hello
         terminalLogged: false,
         fastResultRef: { current: null },
         fastDelivered: false,
-        fastDeliveredPaths: new Set<string>(),
+        fastDeliveredRefs: new Set<string>(),
         firedAt: Date.now(),
         controller: new AbortController(),
       };
@@ -8611,6 +8884,19 @@ hello
         history: recordedHistory,
         config: mockConfig,
       });
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
+        projectRoot: '/test/project/root',
+        scope: 'project',
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledWith({
+        projectRoot: '/test/project/root',
+        scope: 'user',
+        config: mockConfig,
+      });
       expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
         projectRoot: '/test/project/root',
         sessionId: 'test-session-id',
@@ -8620,6 +8906,495 @@ hello
         type: GeminiEventType.HookSystemMessage,
         value: 'Managed auto-memory updated: user.md',
       });
+    });
+
+    it('does not wait for metadata migration before completing the user turn', async () => {
+      let finishMigration!: (value: {
+        status: 'skipped';
+        skippedReason: 'complete';
+      }) => void;
+      const migration = new Promise<{
+        status: 'skipped';
+        skippedReason: 'complete';
+      }>((resolve) => {
+        finishMigration = resolve;
+      });
+      mockMemoryManager.scheduleMetadataMigration.mockReturnValue(migration);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'Done' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      await expect(
+        fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Continue' }],
+            new AbortController().signal,
+            'prompt-id-background-migration',
+          ),
+        ),
+      ).resolves.toEqual([{ type: GeminiEventType.Content, value: 'Done' }]);
+
+      expect(mockMemoryManager.scheduleMetadataMigration).toHaveBeenCalledTimes(
+        2,
+      );
+      finishMigration({ status: 'skipped', skippedReason: 'complete' });
+    });
+
+    it('activates a prepared memory protocol before starting UserQuery recall', async () => {
+      let mode: 'legacy' | 'structured' = 'legacy';
+      const setHistory = vi.fn();
+      vi.mocked(mockConfig.getMemoryRecallMode).mockImplementation(() => mode);
+      vi.mocked(mockConfig.prepareMemoryRecallTransition).mockResolvedValue({
+        from: 'legacy',
+        to: 'structured',
+        revision: 'ready-revision',
+        autoMemoryPrompt: '# structured memory',
+        previousRevision: 'legacy-revision',
+        previousAutoMemoryPrompt: '# legacy memory',
+      });
+      vi.mocked(mockConfig.commitMemoryRecallTransition).mockImplementation(
+        () => {
+          mode = 'structured';
+        },
+      );
+      const mockStream = (async function* () {
+        yield { type: GeminiEventType.Content, value: 'Done' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        setHistory,
+        setSystemInstruction: vi.fn(),
+        setTools: vi.fn(),
+      } as unknown as GeminiChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Use the migrated memory' }],
+          new AbortController().signal,
+          'prompt-id-mode-transition',
+        ),
+      );
+
+      expect(mockConfig.commitMemoryRecallTransition).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.recall).toHaveBeenCalledOnce();
+      expect(
+        vi.mocked(mockConfig.commitMemoryRecallTransition).mock
+          .invocationCallOrder[0],
+      ).toBeLessThan(
+        mockMemoryManager.recall.mock.invocationCallOrder[0] ?? Infinity,
+      );
+      expect(mode).toBe('structured');
+      expect(setHistory).not.toHaveBeenCalled();
+    });
+
+    it('atomically installs the structured prompt and tool protocol', async () => {
+      let mode: 'legacy' | 'structured' = 'legacy';
+      const setSystemInstruction = vi.fn();
+      const setTools = vi.fn();
+      vi.mocked(mockConfig.getMemoryRecallMode).mockImplementation(() => mode);
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockImplementation(() =>
+        mode === 'legacy'
+          ? '# auto memory\nLEGACY_MEMORY_INDEX'
+          : '# auto memory\nSTRUCTURED_COMPLETE_TREE',
+      );
+      vi.mocked(
+        mockConfig.getToolRegistry().getFunctionDeclarations,
+      ).mockImplementation(() =>
+        mode === 'legacy'
+          ? [{ name: 'read_file' }]
+          : [{ name: 'read_file' }, { name: 'search_memory' }],
+      );
+      vi.mocked(mockConfig.prepareMemoryRecallTransition).mockResolvedValue({
+        from: 'legacy',
+        to: 'structured',
+        revision: 'ready-revision',
+        autoMemoryPrompt: '# auto memory\nSTRUCTURED_COMPLETE_TREE',
+        previousRevision: 'legacy-revision',
+        previousAutoMemoryPrompt: '# auto memory\nLEGACY_MEMORY_INDEX',
+      });
+      vi.mocked(mockConfig.commitMemoryRecallTransition).mockImplementation(
+        () => {
+          mode = 'structured';
+        },
+      );
+      client['chat'] = {
+        setSystemInstruction,
+        setTools,
+      } as unknown as GeminiChat;
+
+      await (
+        client as unknown as {
+          activatePreparedMemoryRecallTransition: () => Promise<void>;
+        }
+      ).activatePreparedMemoryRecallTransition();
+
+      const installedPrompt = setSystemInstruction.mock.calls.at(-1)?.[0] as
+        | string
+        | undefined;
+      const installedTools = JSON.stringify(setTools.mock.calls.at(-1)?.[0]);
+      expect(installedPrompt).toContain('STRUCTURED_COMPLETE_TREE');
+      expect(installedPrompt).not.toContain('LEGACY_MEMORY_INDEX');
+      expect(installedTools).toContain('search_memory');
+      expect(mode).toBe('structured');
+    });
+
+    it('restores the complete legacy prompt and tool protocol after refresh failure', async () => {
+      let mode: 'legacy' | 'structured' = 'legacy';
+      const installedPrompts: string[] = [];
+      const installedTools: string[] = [];
+      vi.mocked(mockConfig.getMemoryRecallMode).mockImplementation(() => mode);
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockImplementation(() =>
+        mode === 'legacy'
+          ? '# auto memory\nLEGACY_MEMORY_INDEX'
+          : '# auto memory\nSTRUCTURED_COMPLETE_TREE',
+      );
+      vi.mocked(
+        mockConfig.getToolRegistry().getFunctionDeclarations,
+      ).mockImplementation(() =>
+        mode === 'legacy'
+          ? [{ name: 'read_file' }]
+          : [{ name: 'read_file' }, { name: 'search_memory' }],
+      );
+      const transition = {
+        from: 'legacy' as const,
+        to: 'structured' as const,
+        revision: 'ready-revision',
+        autoMemoryPrompt: '# auto memory\nSTRUCTURED_COMPLETE_TREE',
+        previousRevision: 'legacy-revision',
+        previousAutoMemoryPrompt: '# auto memory\nLEGACY_MEMORY_INDEX',
+      };
+      vi.mocked(mockConfig.prepareMemoryRecallTransition).mockResolvedValue(
+        transition,
+      );
+      vi.mocked(mockConfig.commitMemoryRecallTransition).mockImplementation(
+        () => {
+          mode = 'structured';
+        },
+      );
+      vi.mocked(mockConfig.rollbackMemoryRecallTransition).mockImplementation(
+        () => {
+          mode = 'legacy';
+        },
+      );
+      client['chat'] = {
+        setSystemInstruction: vi.fn((prompt: string) => {
+          installedPrompts.push(prompt);
+        }),
+        setTools: vi
+          .fn((tools: unknown) => {
+            installedTools.push(JSON.stringify(tools));
+          })
+          .mockImplementationOnce((tools: unknown) => {
+            installedTools.push(JSON.stringify(tools));
+            throw new Error('structured tool refresh failed');
+          }),
+      } as unknown as GeminiChat;
+
+      await (
+        client as unknown as {
+          activatePreparedMemoryRecallTransition: () => Promise<void>;
+        }
+      ).activatePreparedMemoryRecallTransition();
+
+      expect(installedPrompts).toHaveLength(2);
+      expect(installedPrompts[0]).toContain('STRUCTURED_COMPLETE_TREE');
+      expect(installedPrompts[1]).toContain('LEGACY_MEMORY_INDEX');
+      expect(installedPrompts[1]).not.toContain('STRUCTURED_COMPLETE_TREE');
+      expect(installedTools[0]).toContain('search_memory');
+      expect(installedTools[1]).not.toContain('search_memory');
+      expect(mode).toBe('legacy');
+    });
+
+    it('does not continue when the previous memory protocol cannot be restored', async () => {
+      let mode: 'legacy' | 'structured' = 'legacy';
+      const transition = {
+        from: 'legacy' as const,
+        to: 'structured' as const,
+        revision: 'ready-revision',
+        autoMemoryPrompt: '# structured memory',
+        previousRevision: 'legacy-revision',
+        previousAutoMemoryPrompt: '# legacy memory',
+      };
+      vi.mocked(mockConfig.getMemoryRecallMode).mockImplementation(() => mode);
+      vi.mocked(mockConfig.prepareMemoryRecallTransition).mockResolvedValue(
+        transition,
+      );
+      vi.mocked(mockConfig.commitMemoryRecallTransition).mockImplementation(
+        () => {
+          mode = 'structured';
+        },
+      );
+      vi.mocked(mockConfig.rollbackMemoryRecallTransition).mockImplementation(
+        () => {
+          mode = 'legacy';
+        },
+      );
+      vi.spyOn(
+        client as unknown as { setTools: () => Promise<void> },
+        'setTools',
+      ).mockRejectedValue(new Error('tool refresh failed'));
+      client['chat'] = {
+        setSystemInstruction: vi.fn(),
+      } as unknown as GeminiChat;
+
+      await expect(
+        (
+          client as unknown as {
+            activatePreparedMemoryRecallTransition: () => Promise<void>;
+          }
+        ).activatePreparedMemoryRecallTransition(),
+      ).rejects.toThrow('previous protocol could not be restored');
+
+      expect(mockConfig.rollbackMemoryRecallTransition).toHaveBeenCalledWith(
+        transition,
+      );
+      expect(mode).toBe('legacy');
+    });
+
+    it('waits for the old recall to exit before committing a memory protocol transition', async () => {
+      let settleRecall: (() => void) | undefined;
+      const oldRecall = new Promise<RelevantAutoMemoryPromptResult>(
+        (resolve) => {
+          settleRecall = () =>
+            resolve({
+              focusedPrompt: '',
+              prompt: '',
+              selectedDocs: [],
+              strategy: 'none',
+            });
+        },
+      );
+      client['pendingMemoryPrefetch'] = {
+        promise: oldRecall,
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredRefs: new Set<string>(),
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+      vi.mocked(mockConfig.prepareMemoryRecallTransition).mockResolvedValue({
+        from: 'legacy',
+        to: 'structured',
+        revision: 'ready-revision',
+        autoMemoryPrompt: '# structured memory',
+        previousRevision: 'legacy-revision',
+        previousAutoMemoryPrompt: '# legacy memory',
+      });
+      const activation = (
+        client as unknown as {
+          activatePreparedMemoryRecallTransition: () => Promise<void>;
+        }
+      ).activatePreparedMemoryRecallTransition();
+
+      await Promise.resolve();
+      expect(mockConfig.prepareMemoryRecallTransition).toHaveBeenCalledOnce();
+      expect(mockConfig.commitMemoryRecallTransition).not.toHaveBeenCalled();
+
+      settleRecall!();
+      await activation;
+
+      expect(mockConfig.confirmMemoryRecallTransition).toHaveBeenCalledOnce();
+      expect(mockConfig.commitMemoryRecallTransition).toHaveBeenCalledOnce();
+    });
+
+    it('does not commit a prepared transition when the corpus changes before activation', async () => {
+      vi.mocked(mockConfig.prepareMemoryRecallTransition).mockResolvedValue({
+        from: 'legacy',
+        to: 'structured',
+        revision: 'ready-revision',
+        autoMemoryPrompt: '# structured memory',
+        previousRevision: 'legacy-revision',
+        previousAutoMemoryPrompt: '# legacy memory',
+      });
+      vi.mocked(mockConfig.confirmMemoryRecallTransition).mockResolvedValue(
+        false,
+      );
+
+      await (
+        client as unknown as {
+          activatePreparedMemoryRecallTransition: () => Promise<void>;
+        }
+      ).activatePreparedMemoryRecallTransition();
+
+      expect(mockConfig.confirmMemoryRecallTransition).toHaveBeenCalledOnce();
+      expect(mockConfig.commitMemoryRecallTransition).not.toHaveBeenCalled();
+    });
+
+    it('preserves the active protocol when the readiness check fails', async () => {
+      vi.mocked(mockConfig.prepareMemoryRecallTransition).mockRejectedValue(
+        new Error('memory scan failed'),
+      );
+
+      await expect(
+        (
+          client as unknown as {
+            activatePreparedMemoryRecallTransition: () => Promise<void>;
+          }
+        ).activatePreparedMemoryRecallTransition(),
+      ).resolves.toBeUndefined();
+
+      expect(mockConfig.commitMemoryRecallTransition).not.toHaveBeenCalled();
+      expect(mockConfig.rollbackMemoryRecallTransition).not.toHaveBeenCalled();
+    });
+
+    it('keeps the old protocol when an aborted recall does not exit promptly', async () => {
+      vi.useFakeTimers();
+      client['pendingMemoryPrefetch'] = {
+        promise: new Promise(() => {}),
+        settledAt: null,
+        result: null,
+        consumed: false,
+        terminalLogged: false,
+        fastResultRef: { current: null },
+        fastDelivered: false,
+        fastDeliveredRefs: new Set<string>(),
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+      vi.mocked(mockConfig.prepareMemoryRecallTransition).mockResolvedValue({
+        from: 'legacy',
+        to: 'structured',
+        revision: 'ready-revision',
+        autoMemoryPrompt: '# structured memory',
+        previousRevision: 'legacy-revision',
+        previousAutoMemoryPrompt: '# legacy memory',
+      });
+
+      const activation = (
+        client as unknown as {
+          activatePreparedMemoryRecallTransition: () => Promise<void>;
+        }
+      ).activatePreparedMemoryRecallTransition();
+      await vi.advanceTimersByTimeAsync(100);
+      await activation;
+
+      expect(mockConfig.confirmMemoryRecallTransition).not.toHaveBeenCalled();
+      expect(mockConfig.commitMemoryRecallTransition).not.toHaveBeenCalled();
+    });
+
+    it('rolls back the complete memory protocol when live tool refresh fails', async () => {
+      let mode: 'legacy' | 'structured' = 'legacy';
+      const transition = {
+        from: 'legacy' as const,
+        to: 'structured' as const,
+        revision: 'ready-revision',
+        autoMemoryPrompt: '# structured memory',
+        previousRevision: 'legacy-revision',
+        previousAutoMemoryPrompt: '# legacy memory',
+      };
+      vi.mocked(mockConfig.getMemoryRecallMode).mockImplementation(() => mode);
+      vi.mocked(mockConfig.prepareMemoryRecallTransition).mockResolvedValue(
+        transition,
+      );
+      vi.mocked(mockConfig.commitMemoryRecallTransition).mockImplementation(
+        () => {
+          mode = 'structured';
+        },
+      );
+      vi.mocked(mockConfig.rollbackMemoryRecallTransition).mockImplementation(
+        () => {
+          mode = 'legacy';
+        },
+      );
+      vi.spyOn(
+        client as unknown as { setTools: () => Promise<void> },
+        'setTools',
+      )
+        .mockRejectedValueOnce(new Error('tool refresh failed'))
+        .mockResolvedValueOnce(undefined);
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'Done' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        setSystemInstruction: vi.fn(),
+      } as unknown as GeminiChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Keep the active protocol consistent' }],
+          new AbortController().signal,
+          'prompt-id-mode-rollback',
+        ),
+      );
+
+      expect(mockConfig.rollbackMemoryRecallTransition).toHaveBeenCalledWith(
+        transition,
+      );
+      expect(mode).toBe('legacy');
+      expect(mockMemoryManager.recall).toHaveBeenCalledOnce();
+    });
+
+    it('does not activate a migration completed during a stream until the next UserQuery', async () => {
+      let mode: 'legacy' | 'structured' = 'legacy';
+      const transition = {
+        from: 'legacy' as const,
+        to: 'structured' as const,
+        revision: 'ready-revision',
+        autoMemoryPrompt: '# structured memory',
+        previousRevision: 'legacy-revision',
+        previousAutoMemoryPrompt: '# legacy memory',
+      };
+      vi.mocked(mockConfig.getMemoryRecallMode).mockImplementation(() => mode);
+      vi.mocked(mockConfig.prepareMemoryRecallTransition)
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce(transition)
+        .mockResolvedValueOnce(transition);
+      vi.mocked(mockConfig.commitMemoryRecallTransition).mockImplementation(
+        () => {
+          mode = 'structured';
+        },
+      );
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'Done' };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryShallow: vi.fn().mockReturnValue([]),
+        setSystemInstruction: vi.fn(),
+        setTools: vi.fn(),
+      } as unknown as GeminiChat;
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'First turn' }],
+          new AbortController().signal,
+          'prompt-id-before-migration-ready',
+        ),
+      );
+      expect(mode).toBe('legacy');
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Second turn' }],
+          new AbortController().signal,
+          'prompt-id-after-migration-ready',
+        ),
+      );
+
+      expect(mode).toBe('structured');
+      expect(mockConfig.commitMemoryRecallTransition).toHaveBeenCalledOnce();
+      expect(mockMemoryManager.recall).toHaveBeenCalledTimes(2);
     });
 
     it('should inject the current date on every UserQuery turn', async () => {
@@ -14523,8 +15298,12 @@ Other open files:
       const scheduleDreamSpy = vi
         .fn()
         .mockResolvedValue({ status: 'skipped', skippedReason: 'locked' });
+      const scheduleMigrationSpy = vi
+        .fn()
+        .mockResolvedValue({ status: 'skipped', skippedReason: 'complete' });
 
       const mgr = {
+        scheduleMetadataMigration: scheduleMigrationSpy,
         scheduleExtract: scheduleExtractSpy,
         scheduleDream: scheduleDreamSpy,
         recall: vi.fn(),
@@ -14547,15 +15326,18 @@ Other open files:
 
       // Before shutdown: a completed UserQuery turn schedules extract + dream.
       runBgTasks(SendMessageType.UserQuery);
+      expect(scheduleMigrationSpy).toHaveBeenCalledTimes(2);
       expect(scheduleExtractSpy).toHaveBeenCalledTimes(1);
       expect(scheduleDreamSpy).toHaveBeenCalledTimes(1);
 
       scheduleExtractSpy.mockClear();
       scheduleDreamSpy.mockClear();
+      scheduleMigrationSpy.mockClear();
 
       // After shutdown: the gate short-circuits before any scheduling.
       client.requestShutdown();
       runBgTasks(SendMessageType.UserQuery);
+      expect(scheduleMigrationSpy).not.toHaveBeenCalled();
       expect(scheduleExtractSpy).not.toHaveBeenCalled();
       expect(scheduleDreamSpy).not.toHaveBeenCalled();
     });
@@ -14566,6 +15348,7 @@ Other open files:
      */
     it('is idempotent when called multiple times', () => {
       const mgr = {
+        scheduleMetadataMigration: vi.fn(),
         scheduleExtract: vi.fn(),
         scheduleDream: vi.fn(),
         recall: vi.fn(),

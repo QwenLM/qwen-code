@@ -17,7 +17,7 @@ import {
   isSubpath,
   unescapePath,
 } from '../utils/paths.js';
-import { getMemoryBaseDir } from '../memory/paths.js';
+import { getMemoryBaseDir, isManagedMemoryPath } from '../memory/paths.js';
 import { type Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
@@ -220,6 +220,12 @@ class GlobToolInvocation extends BaseToolInvocation<
     const entries: GlobPath[] = [];
     let hitLimit = false;
     for await (const entry of stream) {
+      if (
+        this.config.getMemoryRecallMode?.() === 'structured' &&
+        isManagedMemoryPath(entry.fullpath(), this.config.getTargetDir())
+      ) {
+        continue;
+      }
       if (!isAllowedByFileFilters(entry)) {
         continue;
       }

@@ -228,12 +228,16 @@ function loadFixture(): EvalFixture {
  */
 function toScannedDocs(docs: EvalDoc[]): ScannedAutoMemoryDocument[] {
   return docs.map((doc) => ({
+    scope: 'project',
     type: doc.type,
     filePath: `/memory/${doc.id}.md`,
     relativePath: `${doc.id}.md`,
     filename: `${doc.id}.md`,
     title: doc.title,
     description: doc.description,
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     body: doc.body,
     mtimeMs: 1,
   }));

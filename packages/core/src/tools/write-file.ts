@@ -8,7 +8,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
+import {
+  isAnyAutoMemPath,
+  isManagedMemoryPath,
+  isTeamAutoMemPath,
+} from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
@@ -145,6 +149,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     const filePath = path.resolve(this.params.file_path);
     if (isTeamAutoMemPath(filePath, projectRoot)) {
       return 'ask';
+    }
+    if (
+      isManagedMemoryPath(filePath, projectRoot) &&
+      this.config.allowsDirectAutoMemoryWrite?.() !== true
+    ) {
+      return 'deny';
     }
     if (isAnyAutoMemPath(filePath, projectRoot)) {
       return 'allow';
@@ -284,6 +294,23 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
+
+    if (
+      isManagedMemoryPath(file_path, this.config.getProjectRoot()) &&
+      !isTeamAutoMemPath(file_path, this.config.getProjectRoot()) &&
+      this.config.allowsDirectAutoMemoryWrite?.() !== true
+    ) {
+      const message =
+        'Direct writes to managed auto-memory files are disabled. Use manage_memory instead.';
+      return {
+        llmContent: message,
+        returnDisplay: 'Direct auto-memory file writes are disabled.',
+        error: {
+          message,
+          type: ToolErrorType.EXECUTION_DENIED,
+        },
+      };
+    }
 
     let fileExists = await isFilefileExists(file_path);
     let originalContent = '';

@@ -24,6 +24,11 @@ import {
   createMemoryScopedAgentConfig,
   isAllowedMemoryPath,
 } from './memory-scoped-agent-config.js';
+import {
+  scanAutoMemoryTopicDocuments,
+  scanUserAutoMemoryTopicDocuments,
+} from './scan.js';
+import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_REMEMBER');
 
@@ -72,6 +77,10 @@ async function buildCleanMemorySystemPrompt(
     readAutoMemoryIndex(projectRoot),
     readUserAutoMemoryIndex().catch(() => null),
   ]);
+  const [projectDocs, userDocs] = await Promise.all([
+    scanAutoMemoryTopicDocuments(projectRoot),
+    scanUserAutoMemoryTopicDocuments().catch(() => []),
+  ]);
 
   return buildManagedAutoMemoryPrompt(
     getAutoMemoryRoot(projectRoot),
@@ -83,7 +92,13 @@ async function buildCleanMemorySystemPrompt(
     /* teamSection */ undefined,
     // The remember agent needs the full protocol (type definitions, scope routing,
     // exclusion rules) to write correct memories — do not remove.
-    { forceFullProtocol: true },
+    {
+      forceFullProtocol: true,
+      keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(
+        [...userDocs, ...projectDocs],
+        { scopes: ['user', 'project'] },
+      ),
+    },
   );
 }
 
@@ -227,6 +242,11 @@ export async function runManagedRememberByAgent(params: {
         })
       : Promise.resolve(),
   ]);
+  if (touchedScopes.includes('user')) {
+    await params.config
+      .getMemoryManager()
+      .recordUserMutation(params.projectRoot, params.config);
+  }
 
   return {
     summary:

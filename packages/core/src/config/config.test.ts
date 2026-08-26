@@ -111,6 +111,7 @@ import {
 import * as jsonl from '../utils/jsonl-utils.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
 import { ToolErrorType } from '../tools/tool-error.js';
+import { scanMemoryMetadataCorpusStatus } from '../memory/metadata-migration.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -143,6 +144,31 @@ vi.mock('node:fs', async (importOriginal) => {
     default: mocked, // Required for ESM default imports (import fs from 'node:fs')
   };
 });
+
+vi.mock('../memory/metadata-migration.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../memory/metadata-migration.js')>()),
+  scanMemoryMetadataCorpusStatus: vi.fn().mockResolvedValue({
+    ready: false,
+    revision: 'legacy-revision',
+    files: 1,
+    legacyFiles: 1,
+    legacyByScope: { project: 1, user: 0, team: 0 },
+  }),
+}));
+
+vi.mock('../memory/scan.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../memory/scan.js')>()),
+  scanAutoMemorySnapshot: vi.fn().mockResolvedValue({
+    docs: [],
+    sourceStatus: {
+      requestedScopes: ['project', 'user'],
+      searchedScopes: ['project', 'user'],
+      unavailableScopes: [],
+      complete: true,
+      incompleteScopes: [],
+    },
+  }),
+}));
 
 // Mock dependencies that might be called during Config construction or createServerConfig
 vi.mock('../tools/tool-registry', () => {
@@ -207,7 +233,10 @@ vi.mock('../memory/indexer.js', async (importActual) => ({
   // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
   // gate distinguishes via instanceof) and override only the rebuild.
   ...(await importActual<typeof import('../memory/indexer.js')>()),
+  rebuildAutoMemoryIndexAtRoot: vi.fn().mockResolvedValue(null),
+  rebuildManagedAutoMemoryIndex: vi.fn().mockResolvedValue(null),
   rebuildTeamAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  rebuildUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../memory/team-memory-sync.js', () => ({
   syncTeamMemory: vi
@@ -532,6 +561,13 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    vi.mocked(scanMemoryMetadataCorpusStatus).mockResolvedValue({
+      ready: false,
+      revision: 'legacy-revision',
+      files: 1,
+      legacyFiles: 1,
+      legacyByScope: { project: 1, user: 0, team: 0 },
+    });
     mockAutoMemoryInode = 1;
     for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
       delete process.env[envName];
@@ -8693,6 +8729,26 @@ describe('Server Config (config.ts)', () => {
         ToolNames.GET_GOAL,
         ToolNames.UPDATE_GOAL,
       ]);
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.SEARCH_MEMORY);
+    });
+
+    it('should register structured memory tools in the normal tool registry', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(registeredNames).toContain(ToolNames.SEARCH_MEMORY);
+      expect(registeredNames).toContain(ToolNames.MANAGE_MEMORY);
     });
 
     it('registers structured_output in bare mode when jsonSchema is set', async () => {

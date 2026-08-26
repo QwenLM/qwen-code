@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import type { ClearContextOnIdleSettings } from '../../config/config.js';
 
 import {
+  collectResidentMemoryBodies,
   evaluateTimeBasedTrigger,
   isClearedMediaPlaceholder,
   microcompactHistory,
@@ -39,6 +40,42 @@ function makeToolResult(name: string, output: string): Content {
     role: 'user',
     parts: [{ functionResponse: { name, response: { output } } }],
   };
+}
+
+function makeMemoryResult(
+  ref: string,
+  content: string,
+  mtimeMs = 1,
+  range = { start: 0, end: content.length, total: content.length },
+): Content {
+  return makeToolResult(
+    'search_memory',
+    JSON.stringify({
+      mode: 'fetch',
+      results: [{ ref, version: mtimeMs, content, range }],
+    }),
+  );
+}
+
+function makeMemorySearchResult(
+  ref: string,
+  content: string,
+  range = { start: 0, end: content.length, total: content.length + 1 },
+): Content {
+  return makeToolResult(
+    'search_memory',
+    JSON.stringify({
+      mode: 'search',
+      results: [
+        {
+          ref,
+          version: 1,
+          content,
+          range,
+        },
+      ],
+    }),
+  );
 }
 
 function makeFileToolCall(id: string, filePath: string): Content {
@@ -2098,6 +2135,146 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
 
     // No trigger → no meta at all (and therefore no eviction data).
     expect(result.meta).toBeUndefined();
+  });
+});
+
+describe('microcompactHistory memory body eviction', () => {
+  const settings: ClearContextOnIdleSettings = {
+    toolResultsThresholdMinutes: 60,
+    toolResultsNumToKeep: 1,
+  };
+
+  it('reports a memory ref when its last body result is cleared', () => {
+    const history = [
+      makeMemoryResult('project:old.md', 'old body'),
+      makeMemoryResult('project:new.md', 'new body'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), settings, {
+      force: true,
+    });
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:old.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('keeps a ref resident when another body result remains in history', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'old window'),
+      makeMemoryResult('project:same.md', 'new window'),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), settings, {
+      force: true,
+    });
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([]);
+  });
+
+  it('distinguishes old and current versions of the same ref', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'old version', 1),
+      makeMemoryResult('project:same.md', 'current version', 2),
+    ];
+
+    const result = microcompactHistory(history, Date.now(), settings, {
+      force: true,
+    });
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('counts a pending body result as still resident', () => {
+    const old = makeMemoryResult('project:same.md', 'x'.repeat(100), 1);
+    const pending = makeMemoryResult('project:same.md', 'current body', 1);
+
+    const result = microcompactHistory(
+      [old, makeMemoryResult('project:other.md', 'recent body', 1)],
+      Date.now(),
+      {
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 1,
+        toolResultsTotalCharsThreshold: 10,
+      },
+      { sizeOnly: true, pendingContent: pending },
+    );
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([]);
+  });
+
+  it('does not treat a search window as a resident full body', () => {
+    const result = microcompactHistory(
+      [
+        makeMemoryResult('project:same.md', 'full body'),
+        makeMemorySearchResult('project:same.md', 'search window'),
+      ],
+      Date.now(),
+      settings,
+      { force: true },
+    );
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('requires resident fetch windows to cover the complete body', () => {
+    const result = microcompactHistory(
+      [
+        makeMemoryResult('project:same.md', 'first', 1, {
+          start: 0,
+          end: 5,
+          total: 10,
+        }),
+        makeMemoryResult('project:other.md', 'recent'),
+      ],
+      Date.now(),
+      settings,
+      { force: true },
+    );
+
+    expect(result.meta?.evictedMemoryBodies).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('combines contiguous fetch windows into a resident body', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'first', 1, {
+        start: 0,
+        end: 5,
+        total: 10,
+      }),
+      makeMemoryResult('project:same.md', 'second', 1, {
+        start: 5,
+        end: 10,
+        total: 10,
+      }),
+    ];
+
+    expect(collectResidentMemoryBodies(history)).toEqual([
+      { memoryRef: 'project:same.md', mtimeMs: 1 },
+    ]);
+  });
+
+  it('does not combine fetch windows with a gap', () => {
+    const history = [
+      makeMemoryResult('project:same.md', 'first', 1, {
+        start: 0,
+        end: 4,
+        total: 10,
+      }),
+      makeMemoryResult('project:same.md', 'second', 1, {
+        start: 5,
+        end: 10,
+        total: 10,
+      }),
+    ];
+
+    expect(collectResidentMemoryBodies(history)).toEqual([]);
   });
 });
 

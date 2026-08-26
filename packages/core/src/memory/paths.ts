@@ -22,6 +22,9 @@ export const AUTO_MEMORY_PINNED_DIRNAME = 'pinned';
 export const AUTO_MEMORY_METADATA_FILENAME = 'meta.json';
 export const AUTO_MEMORY_EXTRACT_CURSOR_FILENAME = 'extract-cursor.json';
 export const AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME = 'consolidation.lock';
+export const USER_AUTO_MEMORY_METADATA_FILENAME = 'user-memory-meta.json';
+export const USER_AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME =
+  'user-memory-consolidation.lock';
 
 /**
  * Top-level directory name (under getMemoryBaseDir()) for the user-level
@@ -262,6 +265,17 @@ export function getUserAutoMemoryIndexPath(): string {
   return path.join(getUserAutoMemoryRoot(), AUTO_MEMORY_INDEX_FILENAME);
 }
 
+export function getUserAutoMemoryMetadataPath(): string {
+  return path.join(getMemoryBaseDir(), USER_AUTO_MEMORY_METADATA_FILENAME);
+}
+
+export function getUserAutoMemoryConsolidationLockPath(): string {
+  return path.join(
+    getMemoryBaseDir(),
+    USER_AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME,
+  );
+}
+
 export function getUserAutoMemoryTopicPath(type: AutoMemoryType): string {
   return path.join(getUserAutoMemoryRoot(), getAutoMemoryTopicFilename(type));
 }
@@ -333,6 +347,7 @@ export function isManagedMemoryPath(
   const resolvedPath = path.normalize(realpathNearestExisting(absolutePath));
   const roots = [
     getAutoMemoryRoot(projectRoot),
+    path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME),
     getUserAutoMemoryRoot(),
     getTeamAutoMemoryRoot(projectRoot),
   ];

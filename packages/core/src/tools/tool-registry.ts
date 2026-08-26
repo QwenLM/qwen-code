@@ -815,6 +815,12 @@ export class ToolRegistry {
     return Array.from(this.tools.values())
       .filter(
         (tool) =>
+          (tool.name !== 'search_memory' && tool.name !== 'manage_memory') ||
+          (this.config.getMemoryRecallMode?.() ?? 'structured') ===
+            'structured',
+      )
+      .filter(
+        (tool) =>
           includeDeferred ||
           !this.isEffectivelyDeferred(tool) ||
           tool.alwaysLoad ||

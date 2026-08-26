@@ -41,6 +41,7 @@ export interface MemoryScopedAgentConfigOptions {
   allowShell?: boolean;
   bypassBaseAskForScopedPaths?: boolean;
   includeUserMemory?: boolean;
+  userMemoryOnly?: boolean;
   protectPinnedMemory?: boolean;
   restrictReadsToMemoryPaths?: boolean;
 }
@@ -91,7 +92,10 @@ function mergePermissionDecision(
 export function isAllowedMemoryPath(
   filePath: string | undefined,
   projectRoot: string,
-  options: Pick<MemoryScopedAgentConfigOptions, 'includeUserMemory'> = {},
+  options: Pick<
+    MemoryScopedAgentConfigOptions,
+    'includeUserMemory' | 'userMemoryOnly'
+  > = {},
 ): boolean {
   if (!filePath) return false;
   return isAllowedResolvedMemoryPath(
@@ -104,17 +108,21 @@ export function isAllowedMemoryPath(
 function isAllowedResolvedMemoryPath(
   resolvedPath: string | undefined,
   projectRoot: string,
-  options: Pick<MemoryScopedAgentConfigOptions, 'includeUserMemory'> = {},
+  options: Pick<
+    MemoryScopedAgentConfigOptions,
+    'includeUserMemory' | 'userMemoryOnly'
+  > = {},
 ): boolean {
   if (!resolvedPath) return false;
   const includeUserMemory = options.includeUserMemory ?? true;
+  const userMemoryOnly = options.userMemoryOnly ?? false;
   const projectMemoryRoot = resolveTrustedMemoryRoot(
     getAutoMemoryRoot(projectRoot),
     getAutoMemoryTrustedAnchor(projectRoot),
   );
   const userMemoryRoot = realpathOrResolved(getUserAutoMemoryRoot());
   const isAllowed = (candidate: string): boolean =>
-    isWithinRoot(candidate, projectMemoryRoot) ||
+    (!userMemoryOnly && isWithinRoot(candidate, projectMemoryRoot)) ||
     (includeUserMemory && isWithinRoot(candidate, userMemoryRoot));
   return isAllowed(resolvedPath);
 }
@@ -268,6 +276,7 @@ async function evaluateScopedDecision(
       if (!opts.restrictReadsToMemoryPaths) return 'default';
       return isAllowedMemoryPath(ctx.filePath, projectRoot, {
         includeUserMemory: opts.includeUserMemory,
+        userMemoryOnly: opts.userMemoryOnly,
       })
         ? 'allow'
         : 'deny';
@@ -286,6 +295,7 @@ async function evaluateScopedDecision(
       if (isPinned) return 'deny';
       return isAllowedResolvedMemoryPath(resolvedCandidate, projectRoot, {
         includeUserMemory: opts.includeUserMemory,
+        userMemoryOnly: opts.userMemoryOnly,
       })
         ? 'allow'
         : 'deny';
@@ -301,9 +311,11 @@ function getScopedDenyRule(
   opts: Required<MemoryScopedAgentConfigOptions>,
   pinnedRoots: readonly PinnedMemoryRoot[],
 ): string | undefined {
-  const allowedRoots = opts.includeUserMemory
-    ? `${getUserAutoMemoryRoot()} or ${getAutoMemoryRoot(projectRoot)}`
-    : getAutoMemoryRoot(projectRoot);
+  const allowedRoots = opts.userMemoryOnly
+    ? getUserAutoMemoryRoot()
+    : opts.includeUserMemory
+      ? `${getUserAutoMemoryRoot()} or ${getAutoMemoryRoot(projectRoot)}`
+      : getAutoMemoryRoot(projectRoot);
   switch (ctx.toolName) {
     case ToolNames.SHELL:
       return opts.allowShell
@@ -328,7 +340,10 @@ function getScopedDenyRule(
       const isAllowed = isAllowedResolvedMemoryPath(
         resolvedCandidate,
         projectRoot,
-        { includeUserMemory: opts.includeUserMemory },
+        {
+          includeUserMemory: opts.includeUserMemory,
+          userMemoryOnly: opts.userMemoryOnly,
+        },
       );
       if (
         isAllowed &&
@@ -357,6 +372,7 @@ export function createMemoryScopedAgentConfig(
     allowShell: options.allowShell ?? false,
     bypassBaseAskForScopedPaths: options.bypassBaseAskForScopedPaths ?? false,
     includeUserMemory: options.includeUserMemory ?? true,
+    userMemoryOnly: options.userMemoryOnly ?? false,
     protectPinnedMemory: options.protectPinnedMemory ?? false,
     restrictReadsToMemoryPaths: options.restrictReadsToMemoryPaths ?? false,
   };
@@ -443,5 +459,7 @@ export function createMemoryScopedAgentConfig(
   const scopedConfig = Object.create(config) as Config;
   scopedConfig.getPermissionManager = () =>
     scopedPm as unknown as PermissionManager;
+  scopedConfig.allowsDirectAutoMemoryRead = () => true;
+  scopedConfig.allowsDirectAutoMemoryWrite = () => true;
   return scopedConfig;
 }

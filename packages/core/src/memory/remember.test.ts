@@ -37,6 +37,8 @@ vi.mock('./indexer.js', () => ({
   rebuildUserAutoMemoryIndex: vi.fn(),
 }));
 
+const recordUserMutation = vi.fn();
+
 function createConfig(
   projectRoot: string,
   managed = true,
@@ -48,6 +50,7 @@ function createConfig(
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
+    getMemoryManager: vi.fn().mockReturnValue({ recordUserMutation }),
     ...overrides,
   } as unknown as Config;
 }
@@ -66,6 +69,7 @@ describe('remember memory helper', () => {
     vi.mocked(runForkedAgent).mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockReset();
     vi.mocked(rebuildUserAutoMemoryIndex).mockReset();
+    recordUserMutation.mockReset();
     vi.mocked(rebuildManagedAutoMemoryIndex).mockResolvedValue('');
     vi.mocked(rebuildUserAutoMemoryIndex).mockResolvedValue('');
   });
@@ -403,6 +407,10 @@ describe('remember memory helper', () => {
     expect(result.touchedScopes).toEqual(['project', 'user']);
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
     expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledTimes(1);
+    expect(recordUserMutation).toHaveBeenCalledWith(
+      projectRoot,
+      expect.any(Object),
+    );
   });
 
   it('classifies symlinked project memory paths by realpath', async () => {
@@ -534,6 +542,9 @@ describe('remember memory helper', () => {
     expect(params.systemPrompt).toContain('## What NOT to save in memory');
     expect(params.systemPrompt).toContain('## When to access memories');
     expect(params.systemPrompt).toContain('## Before recommending from memory');
+    expect(params.systemPrompt).toContain('category:');
+    expect(params.systemPrompt).toContain('keywords:');
+    expect(params.systemPrompt).toContain('usage_scenarios:');
     // Condensed-only markers must NOT appear
     expect(params.systemPrompt).not.toContain('## Memory types');
     expect(params.systemPrompt).not.toContain('## Do not save');

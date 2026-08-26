@@ -144,6 +144,43 @@ describe('team auto-memory paths', () => {
     }
   });
 
+  it.skipIf(process.platform !== 'darwin')(
+    'recognizes /private/tmp aliases for managed memory paths',
+    () => {
+      const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      clearAutoMemoryRootCache();
+      const tmpProjectRoot = fs.mkdtempSync(
+        path.join('/tmp', 'qwen-memory-path-'),
+      );
+      try {
+        const memoryFile = path.join(
+          tmpProjectRoot,
+          '.qwen',
+          'memory',
+          'user',
+          'preference.md',
+        );
+        const privateTmpMemoryFile = path.join('/private', memoryFile);
+
+        fs.mkdirSync(path.dirname(memoryFile), { recursive: true });
+        fs.writeFileSync(memoryFile, 'remembered preference');
+
+        expect(isManagedMemoryPath(privateTmpMemoryFile, tmpProjectRoot)).toBe(
+          true,
+        );
+      } finally {
+        fs.rmSync(tmpProjectRoot, { recursive: true, force: true });
+        if (previousLocal === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+        }
+        clearAutoMemoryRootCache();
+      }
+    },
+  );
+
   it('recognizes a first-ever write before the team-memory dir exists', () => {
     const root = getTeamAutoMemoryRoot(projectRoot);
     // Normal first-write state: nothing under .qwen has been created yet, so

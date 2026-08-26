@@ -736,6 +736,11 @@ export class MemoryPressureMonitor extends EventEmitter {
           );
           if (result.meta) {
             chat.setHistory(result.history);
+            this.coreConfig
+              .getMemoryManager()
+              .markMemoryBodiesEvictedFromHistory(
+                result.meta.evictedMemoryBodies ?? [],
+              );
             // Explicitly clear fileReadCache here instead of relying on
             // the subsequent clear_file_cache step. This removes the
             // implicit coupling between step ordering.

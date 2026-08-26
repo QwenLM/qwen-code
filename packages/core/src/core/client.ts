@@ -24,10 +24,12 @@ import { cleanupOldToolResults } from '../utils/toolResultCleanup.js';
 import { Storage } from '../config/storage.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import {
+  collectResidentMemoryBodies,
   microcompactHistory,
   type MicrocompactMeta,
   type MicrocompactOptions,
 } from '../services/microcompaction/microcompact.js';
+import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import {
   goalRequiresExactPermit,
@@ -84,7 +86,10 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
-import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
+import {
+  renderAutoMemoryFocusedSubtree,
+  toAutoMemoryRef,
+} from '../memory/tree.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -102,6 +107,8 @@ import {
   addUserPromptAttributes,
   AgentOutputMessageCapture,
   MemoryRecallDeliveryEvent,
+  MemoryRecallModeTransitionEvent,
+  logMemoryRecallModeTransition,
 } from '../telemetry/index.js';
 import type {
   MemoryRecallDeliveryPoint,
@@ -175,6 +182,7 @@ import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
 const INITIAL_MEMORY_RECALL_WAIT_MS = 100;
+const MEMORY_RECALL_ABORT_WAIT_MS = 100;
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -238,9 +246,15 @@ export interface SteerInput {
 }
 
 const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
+  focusedPrompt: '',
   prompt: '',
   selectedDocs: [],
   strategy: 'none',
+};
+
+type MemoryDeliveryResult = RelevantAutoMemoryPromptResult & {
+  deliveredTreeRevision?: string;
+  deliveryEvent?: MemoryRecallDeliveryEvent;
 };
 
 function wrapIdeContext(contextText: string): string {
@@ -339,8 +353,8 @@ type MemoryPrefetchHandle = {
   fastResultRef: MemoryFastResultBox;
   /** True after the fast result was injected — prevents double-inject and double-log. */
   fastDelivered: boolean;
-  /** Paths injected by the fast phase, excluded from the later refined delivery. */
-  fastDeliveredPaths: Set<string>;
+  /** Refs injected by the fast phase, excluded from the later refined delivery. */
+  fastDeliveredRefs: Set<string>;
 };
 
 /** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
@@ -414,6 +428,7 @@ export class GeminiClient {
   private forceFullIdeContext = true;
   private recentCompletedToolNames: string[] = [];
   private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
+  private lastDeliveredMemoryTreeRevision: string | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
   private announcedDeferredToolNames = new Set<string>();
@@ -478,7 +493,7 @@ export class GeminiClient {
   private lastInjectedDate: string | undefined;
 
   /**
-   * Promises for pending background memory tasks (dream / extract).
+   * Promises for pending background memory tasks (dream / extract / skill review).
    * Each promise resolves with a count of memory files touched (0 = nothing written).
    * Consumed by the CLI via `consumePendingMemoryTaskPromises()`.
    */
@@ -916,6 +931,11 @@ export class GeminiClient {
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
     this.config.getFileReadCache().clear();
+    this.config
+      .getMemoryManager()
+      .restoreMemoryBodiesPresentInHistory(
+        collectResidentMemoryBodies(this.getHistoryShallow()),
+      );
     // The stripped user turn may have carried the IDE context (open files,
     // workspace state) that `lastSentIdeContext` advanced past. Without
     // forcing a resend, the next request would either skip IDE context
@@ -993,6 +1013,11 @@ export class GeminiClient {
     // exist in the new history.
     debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
     this.config.getFileReadCache().clear();
+    this.config
+      .getMemoryManager()
+      .restoreMemoryBodiesPresentInHistory(
+        collectResidentMemoryBodies(history),
+      );
     this.forceFullIdeContext = true;
   }
 
@@ -1013,6 +1038,11 @@ export class GeminiClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
+      this.config
+        .getMemoryManager()
+        .restoreMemoryBodiesPresentInHistory(
+          collectResidentMemoryBodies(this.getHistoryShallow()),
+        );
     }
     this.forceFullIdeContext = true;
   }
@@ -1053,6 +1083,7 @@ export class GeminiClient {
   requestShutdown(): void {
     this.shutdownRequested = true;
     this.cancelPendingMemoryPrefetch('shutdown');
+    this.config.getMemoryManager().cancelMigrations?.();
   }
 
   /**
@@ -1070,18 +1101,37 @@ export class GeminiClient {
     deliveryPoint: MemoryRecallDeliveryPoint,
     result: RelevantAutoMemoryPromptResult,
     discardReason?: MemoryRecallDiscardReason,
-  ): void {
-    if (handle.terminalLogged) return;
+    defer = false,
+  ): MemoryRecallDeliveryEvent | undefined {
+    if (handle.terminalLogged) return undefined;
     handle.terminalLogged = true;
+    const event = new MemoryRecallDeliveryEvent({
+      phase: 'refined',
+      delivery_point: deliveryPoint,
+      discard_reason: discardReason,
+      strategy: result.strategy,
+      docs_selected: result.selectedDocs.length,
+      latency_ms: Date.now() - handle.firedAt,
+      router_delivered:
+        'deliveredTreeRevision' in result &&
+        result.deliveredTreeRevision !== undefined,
+    });
+    if (!defer) logMemoryRecallDelivery(this.config, event);
+    return event;
+  }
+
+  private discardPreparedMemoryRecallDelivery(
+    event: MemoryRecallDeliveryEvent,
+  ): void {
     logMemoryRecallDelivery(
       this.config,
       new MemoryRecallDeliveryEvent({
-        phase: 'refined',
-        delivery_point: deliveryPoint,
-        discard_reason: discardReason,
-        strategy: result.strategy,
-        docs_selected: result.selectedDocs.length,
-        latency_ms: Date.now() - handle.firedAt,
+        phase: event.phase,
+        delivery_point: 'discarded',
+        discard_reason: 'no_safe_delivery_point',
+        strategy: event.strategy,
+        docs_selected: event.docs_selected,
+        latency_ms: event.latency_ms,
       }),
     );
   }
@@ -1097,12 +1147,12 @@ export class GeminiClient {
     // cancellation reason would inflate the "memory never reached the model"
     // bucket with turns that did get it, so apply the same rule the
     // ToolResult consume point uses. A partial overlap still reports the
-    // cancellation reason: the documents outside `fastDeliveredPaths`
+    // cancellation reason: the documents outside `fastDeliveredRefs`
     // genuinely had no delivery point.
     const everyDocAlreadyDelivered =
       result.selectedDocs.length > 0 &&
       result.selectedDocs.every((doc) =>
-        handle.fastDeliveredPaths.has(doc.filePath),
+        handle.fastDeliveredRefs.has(toAutoMemoryRef(doc)),
       );
     this.logMemoryPrefetchDelivery(
       handle,
@@ -1145,7 +1195,9 @@ export class GeminiClient {
       .getMemoryManager()
       .recall(this.config.getProjectRoot(), query, {
         config: this.config,
-        excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+        ...(this.config.getMemoryRecallMode?.() === 'legacy'
+          ? { excludedFilePaths: this.surfacedRelevantAutoMemoryPaths }
+          : {}),
         recentTools: [...this.recentCompletedToolNames],
         abortSignal: controller.signal,
         onFastResult: (result) => {
@@ -1174,7 +1226,7 @@ export class GeminiClient {
       controller,
       fastResultRef,
       fastDelivered: false,
-      fastDeliveredPaths: new Set<string>(),
+      fastDeliveredRefs: new Set<string>(),
     };
     void promise.then((result) => {
       handle.result = result;
@@ -1192,7 +1244,7 @@ export class GeminiClient {
   /** @internal */
   consumeManagedAutoMemoryRecall(
     deliveryPoint: 'initial' | 'tool_result',
-  ): Promise<RelevantAutoMemoryPromptResult | null> {
+  ): Promise<MemoryDeliveryResult | null> {
     return this.tryConsumeMemoryPrefetch(
       deliveryPoint,
       deliveryPoint === 'initial' ? INITIAL_MEMORY_RECALL_WAIT_MS : 0,
@@ -1228,7 +1280,7 @@ export class GeminiClient {
   private async tryConsumeMemoryPrefetch(
     deliveryPoint: Exclude<MemoryRecallDeliveryPoint, 'discarded'>,
     waitMs = 0,
-  ): Promise<RelevantAutoMemoryPromptResult | null> {
+  ): Promise<MemoryDeliveryResult | null> {
     const handle = this.pendingMemoryPrefetch;
     if (!handle || handle.consumed) {
       return null;
@@ -1300,25 +1352,29 @@ export class GeminiClient {
         return null;
       }
       const fast = handle.fastResultRef.current;
-      if (!fast?.prompt) {
+      if (!fast) {
         return null;
       }
+      const delivery = this.prepareMemoryDelivery(fast);
+      if (!delivery.prompt) return null;
       handle.fastDelivered = true;
       for (const doc of fast.selectedDocs) {
-        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
-        handle.fastDeliveredPaths.add(doc.filePath);
+        if (this.config.getMemoryRecallMode?.() === 'legacy') {
+          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        }
+        handle.fastDeliveredRefs.add(toAutoMemoryRef(doc));
       }
-      logMemoryRecallDelivery(
-        this.config,
-        new MemoryRecallDeliveryEvent({
+      return {
+        ...delivery,
+        deliveryEvent: new MemoryRecallDeliveryEvent({
           phase: 'fast',
           delivery_point: 'initial',
           strategy: fast.strategy,
           docs_selected: fast.selectedDocs.length,
           latency_ms: Date.now() - handle.firedAt,
+          router_delivered: delivery.deliveredTreeRevision !== undefined,
         }),
-      );
-      return fast;
+      };
     }
 
     handle.consumed = true;
@@ -1328,25 +1384,46 @@ export class GeminiClient {
     // results come from the same scan, so the selector never saw the fast
     // documents as excluded and can legitimately re-select them.
     const remainingDocs = result.selectedDocs.filter(
-      (doc) => !handle.fastDeliveredPaths.has(doc.filePath),
+      (doc) => !handle.fastDeliveredRefs.has(toAutoMemoryRef(doc)),
     );
-    const deduped =
-      remainingDocs.length === result.selectedDocs.length
-        ? result
-        : {
-            ...result,
-            selectedDocs: remainingDocs,
-            prompt:
-              remainingDocs.length > 0
-                ? buildRelevantAutoMemoryPrompt(remainingDocs)
-                : '',
-          };
+    const focusedPrompt = result.treeSnapshot
+      ? renderAutoMemoryFocusedSubtree(remainingDocs, {
+          bodyPresentVersions: this.config
+            .getMemoryManager()
+            .getBodyPresentVersionsInHistory(),
+        }).prompt
+      : remainingDocs.length === result.selectedDocs.length
+        ? result.focusedPrompt || result.prompt
+        : this.config.getMemoryRecallMode?.() === 'legacy'
+          ? buildLegacyRelevantAutoMemoryPrompt(remainingDocs)
+          : renderAutoMemoryFocusedSubtree(remainingDocs, {
+              bodyPresentVersions: this.config
+                .getMemoryManager()
+                .getBodyPresentVersionsInHistory(),
+            }).prompt;
+    const deduped = this.prepareMemoryDelivery({
+      ...result,
+      selectedDocs: remainingDocs,
+      focusedPrompt,
+      prompt: focusedPrompt,
+    });
 
     if (deduped.prompt) {
-      for (const doc of deduped.selectedDocs) {
-        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+      if (this.config.getMemoryRecallMode?.() === 'legacy') {
+        for (const doc of deduped.selectedDocs) {
+          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        }
       }
-      this.logMemoryPrefetchDelivery(handle, deliveryPoint, deduped);
+      return {
+        ...deduped,
+        deliveryEvent: this.logMemoryPrefetchDelivery(
+          handle,
+          deliveryPoint,
+          deduped,
+          undefined,
+          true,
+        ),
+      };
     } else {
       this.logMemoryPrefetchDelivery(
         handle,
@@ -1358,6 +1435,142 @@ export class GeminiClient {
       );
     }
     return deduped;
+  }
+
+  private prepareMemoryDelivery(
+    result: RelevantAutoMemoryPromptResult,
+  ): MemoryDeliveryResult {
+    const treeSnapshot = result.treeSnapshot;
+    const includeTree =
+      treeSnapshot !== undefined &&
+      treeSnapshot.revision !== this.lastDeliveredMemoryTreeRevision;
+    return {
+      ...result,
+      prompt: [
+        includeTree ? treeSnapshot?.routerPrompt : '',
+        result.focusedPrompt || result.prompt,
+      ]
+        .filter(Boolean)
+        .join('\n\n'),
+      ...(includeTree && treeSnapshot
+        ? { deliveredTreeRevision: treeSnapshot.revision }
+        : {}),
+    };
+  }
+
+  private async activatePreparedMemoryRecallTransition(): Promise<void> {
+    const startedAt = Date.now();
+    const prepare = this.config.prepareMemoryRecallTransition;
+    if (typeof prepare !== 'function') return;
+    let transition: Awaited<ReturnType<typeof prepare>>;
+    try {
+      transition = await prepare.call(this.config);
+    } catch (error) {
+      debugLogger.warn(
+        'Memory recall mode readiness check failed; preserving the active protocol.',
+        error,
+      );
+      return;
+    }
+    if (!transition) return;
+    logMemoryRecallModeTransition(
+      this.config,
+      new MemoryRecallModeTransitionEvent({
+        from_mode: transition.from,
+        to_mode: transition.to,
+        status: 'ready',
+        duration_ms: Date.now() - startedAt,
+      }),
+    );
+    const pendingRecall = this.pendingMemoryPrefetch;
+    this.cancelPendingMemoryPrefetch('new_query');
+    if (pendingRecall) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const exited = await Promise.race([
+        pendingRecall.promise.then(
+          () => true,
+          () => true,
+        ),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), MEMORY_RECALL_ABORT_WAIT_MS);
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      if (!exited) {
+        logMemoryRecallModeTransition(
+          this.config,
+          new MemoryRecallModeTransitionEvent({
+            from_mode: transition.from,
+            to_mode: transition.to,
+            status: 'recall_exit_timeout',
+            duration_ms: Date.now() - startedAt,
+          }),
+        );
+        return;
+      }
+    }
+    if (!(await this.config.confirmMemoryRecallTransition(transition))) {
+      logMemoryRecallModeTransition(
+        this.config,
+        new MemoryRecallModeTransitionEvent({
+          from_mode: transition.from,
+          to_mode: transition.to,
+          status: 'stale',
+          duration_ms: Date.now() - startedAt,
+        }),
+      );
+      return;
+    }
+    this.config.commitMemoryRecallTransition(transition);
+    this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
+    this.surfacedRelevantAutoMemoryPaths.clear();
+    this.lastDeliveredMemoryTreeRevision = undefined;
+    try {
+      await this.refreshSystemInstruction();
+      await this.setTools({ skipHistoryReveal: true });
+      logMemoryRecallModeTransition(
+        this.config,
+        new MemoryRecallModeTransitionEvent({
+          from_mode: transition.from,
+          to_mode: transition.to,
+          status: 'committed',
+          duration_ms: Date.now() - startedAt,
+        }),
+      );
+    } catch (error) {
+      this.config.rollbackMemoryRecallTransition(transition);
+      try {
+        await this.refreshSystemInstruction();
+        await this.setTools({ skipHistoryReveal: true });
+      } catch (rollbackError) {
+        logMemoryRecallModeTransition(
+          this.config,
+          new MemoryRecallModeTransitionEvent({
+            from_mode: transition.from,
+            to_mode: transition.to,
+            status: 'rollback',
+            duration_ms: Date.now() - startedAt,
+          }),
+        );
+        throw new Error(
+          'Memory recall mode transition failed and the previous protocol could not be restored.',
+          { cause: rollbackError },
+        );
+      }
+      logMemoryRecallModeTransition(
+        this.config,
+        new MemoryRecallModeTransitionEvent({
+          from_mode: transition.from,
+          to_mode: transition.to,
+          status: 'rollback',
+          duration_ms: Date.now() - startedAt,
+        }),
+      );
+      debugLogger.warn(
+        'Memory recall mode transition failed; rolled back.',
+        error,
+      );
+    }
   }
 
   async resetChat(): Promise<void> {
@@ -1387,6 +1600,7 @@ export class GeminiClient {
     // Clean up old tool result overflow files on /clear
     void cleanupOldToolResults(Storage.getGlobalTempDir(), 24 * 60 * 60 * 1000);
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
+    this.config.getMemoryManager().resetMemoryBodyStateForSession();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
     this.cancelPendingMemoryPrefetch('reset');
@@ -2005,6 +2219,7 @@ export class GeminiClient {
       ? SessionStartSource.Resume
       : SessionStartSource.Startup,
   ): Promise<GeminiChat> {
+    this.lastDeliveredMemoryTreeRevision = undefined;
     this.forceFullIdeContext = true;
     this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
@@ -2064,6 +2279,11 @@ export class GeminiClient {
         'initial_chat_history',
         () => getInitialChatHistory(this.config, extraHistory),
       );
+      this.config
+        .getMemoryManager()
+        .restoreMemoryBodiesPresentInHistory(
+          collectResidentMemoryBodies(history),
+        );
       profiler.timeSync('skill_reminder_seed', () => {
         this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
       });
@@ -2435,6 +2655,21 @@ export class GeminiClient {
       return;
     }
 
+    for (const scope of ['project', 'user'] as const) {
+      void mgr
+        .scheduleMetadataMigration({
+          projectRoot,
+          scope,
+          config: this.config,
+        })
+        .catch((error: unknown) => {
+          debugLogger.warn(
+            `Failed to schedule ${scope} memory metadata migration.`,
+            error,
+          );
+        });
+    }
+
     const extractPromise = mgr
       .scheduleExtract({
         projectRoot,
@@ -2574,6 +2809,9 @@ export class GeminiClient {
         // setHistory conservatively clears loaded-skill tracking.
         this.getChat().setHistory(mcResult.history);
         await this.disarmFileReadCacheAfterEviction(m, 'microcompaction');
+        this.config
+          .getMemoryManager()
+          .markMemoryBodiesEvictedFromHistory(m.evictedMemoryBodies ?? []);
       }
       if (m.triggerReason === 'size') {
         const pendingNote =
@@ -3181,6 +3419,8 @@ export class GeminiClient {
     // prefetch as a safety net.
     let normalCompletion = false;
     let hasToolCalls = false;
+    let memoryTreeRevisionToCommit: string | undefined;
+    let memoryRecallDeliveryToCommit: MemoryRecallDeliveryEvent | undefined;
     // Declared outside the try so the finally block can close it out on
     // uncaught-exception exits too; created (when the hook is registered)
     // right before the turn's streaming loop below.
@@ -3194,6 +3434,10 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
+        if (messageType === SendMessageType.UserQuery) {
+          await this.activatePreparedMemoryRecallTransition();
+        }
+        this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
         this.beginManagedAutoMemoryRecall(
           preHookUserPromptText ?? partToString(request),
           signal,
@@ -3535,6 +3779,8 @@ export class GeminiClient {
           // the user prompt. Contrast the ToolResult path below, which
           // must append to avoid splitting functionCall / functionResponse.
           systemReminders.unshift(userQueryMemory.prompt);
+          memoryTreeRevisionToCommit = userQueryMemory.deliveredTreeRevision;
+          memoryRecallDeliveryToCommit = userQueryMemory.deliveryEvent;
         }
 
         requestToSend = [...systemReminders, ...requestToSend];
@@ -3586,6 +3832,8 @@ export class GeminiClient {
           // intact under native Gemini; the OpenAI converter then emits the
           // text as a separate user message after the tool messages.
           requestToSend = [...requestToSend, toolResultMemory.prompt];
+          memoryTreeRevisionToCommit = toolResultMemory.deliveredTreeRevision;
+          memoryRecallDeliveryToCommit = toolResultMemory.deliveryEvent;
         }
         const activeTodoReminder =
           this.config.takeActiveTodoReminder(prompt_id);
@@ -3667,6 +3915,14 @@ export class GeminiClient {
       let steerInputSettled = false;
       try {
         for await (const event of resultStream) {
+          if (memoryTreeRevisionToCommit) {
+            this.lastDeliveredMemoryTreeRevision = memoryTreeRevisionToCommit;
+            memoryTreeRevisionToCommit = undefined;
+          }
+          if (memoryRecallDeliveryToCommit) {
+            logMemoryRecallDelivery(this.config, memoryRecallDeliveryToCommit);
+            memoryRecallDeliveryToCommit = undefined;
+          }
           if (!steerInputSettled) {
             // Settle the attached steer input as soon as the first stream
             // event arrives — the user-content push has landed by now.
@@ -3778,6 +4034,13 @@ export class GeminiClient {
           // the previous merged IDE context.
           if (event.type === GeminiEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
+            this.lastDeliveredMemoryTreeRevision = undefined;
+            this.config
+              .getMemoryManager()
+              .resetExhaustedBodyRefsForCurrentTurn();
+            this.config
+              .getMemoryManager()
+              .markAllMemoryBodiesEvictedFromHistory();
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
             // rest of the session (manual /compress gets this via startChat).
@@ -3851,6 +4114,12 @@ export class GeminiClient {
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             return turn;
           }
+        }
+        if (memoryRecallDeliveryToCommit) {
+          this.discardPreparedMemoryRecallDelivery(
+            memoryRecallDeliveryToCommit,
+          );
+          memoryRecallDeliveryToCommit = undefined;
         }
       } finally {
         // Fires on every exit from the loop above: normal completion, any of
@@ -4395,6 +4664,10 @@ export class GeminiClient {
       normalCompletion = true;
       return turn;
     } catch (error) {
+      if (memoryRecallDeliveryToCommit) {
+        this.discardPreparedMemoryRecallDelivery(memoryRecallDeliveryToCommit);
+        memoryRecallDeliveryToCommit = undefined;
+      }
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
@@ -4605,6 +4878,8 @@ export class GeminiClient {
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,
       );
+      this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
+      this.config.getMemoryManager().markAllMemoryBodiesEvictedFromHistory();
       // Re-send a full IDE context blob on the next regular message
       // compression may have summarized away the merged IDE context
       // that lived inside the previous user prompt.
@@ -4684,7 +4959,14 @@ export class GeminiClient {
         microcompactMeta,
         'compress-fast',
       );
+      this.config
+        .getMemoryManager()
+        .markMemoryBodiesEvictedFromHistory(
+          microcompactMeta.evictedMemoryBodies ?? [],
+        );
     }
+    this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
+    this.lastDeliveredMemoryTreeRevision = undefined;
     this.forceFullIdeContext = true;
 
     return info;

@@ -14,8 +14,11 @@ import {
   getAutoMemoryMetadataPath,
   getAutoMemoryConsolidationLockPath,
   clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
+  getUserAutoMemoryRoot,
 } from './paths.js';
 import type { Config } from '../config/config.js';
+import * as metadataMigration from './metadata-migration.js';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
@@ -61,6 +64,264 @@ function makeMockConfig(overrides: Partial<Config> = {}): Config {
 // ─── MemoryManager ────────────────────────────────────────────────────────────
 
 describe('MemoryManager', () => {
+  describe('metadata migration scheduling', () => {
+    let tempDir: string;
+    let projectRoot: string;
+
+    beforeEach(async () => {
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-migration-'));
+      projectRoot = path.join(tempDir, 'project');
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      process.env['QWEN_CODE_MEMORY_BASE_DIR'] = path.join(tempDir, 'global');
+      clearAutoMemoryRootCache();
+      await ensureAutoMemoryScaffold(projectRoot);
+    });
+
+    afterEach(async () => {
+      vi.restoreAllMocks();
+      delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      clearAutoMemoryRootCache();
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    async function writeLegacy(root: string, name: string): Promise<void> {
+      await fs.mkdir(root, { recursive: true });
+      await fs.writeFile(
+        path.join(root, name),
+        ['---', 'type: project', '---', 'Legacy body.'].join('\n'),
+        'utf-8',
+      );
+    }
+
+    it('runs one task per domain while project and user migrate independently', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      await writeLegacy(getUserAutoMemoryRoot(), 'user.md');
+      const resolvers = new Map<string, () => void>();
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockImplementation(
+        ({ scope }) =>
+          new Promise((resolve) => {
+            resolvers.set(scope, () =>
+              resolve({
+                filesScanned: 1,
+                legacyFiles: 1,
+                remainingLegacyFiles: 0,
+                attempted: 1,
+                committed: 1,
+                conflicts: 0,
+                failed: 0,
+                agentDurationMs: 1,
+                inputTokens: 1,
+                outputTokens: 1,
+                totalTokens: 2,
+              }),
+            );
+          }),
+      );
+
+      const manager = new MemoryManager();
+      const config = makeMockConfig();
+      const project = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config,
+      });
+      const user = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'user',
+        config,
+      });
+
+      expect(project.status).toBe('scheduled');
+      expect(user.status).toBe('scheduled');
+      expect(
+        await manager.scheduleMetadataMigration({
+          projectRoot,
+          scope: 'project',
+          config,
+        }),
+      ).toMatchObject({ status: 'skipped', skippedReason: 'running' });
+      expect(
+        await new MemoryManager().scheduleMetadataMigration({
+          projectRoot,
+          scope: 'user',
+          config,
+        }),
+      ).toMatchObject({ status: 'skipped', skippedReason: 'running' });
+
+      resolvers.get('project')?.();
+      resolvers.get('user')?.();
+      await manager.drain({ timeoutMs: 1000 });
+      expect(manager.getTask(project.taskId!)?.status).toBe('completed');
+      expect(manager.getTask(user.taskId!)?.status).toBe('completed');
+    });
+
+    it('cancels a running migration without overwriting the terminal state', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      let capturedSignal: AbortSignal | undefined;
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockImplementation(
+        ({ abortSignal }) =>
+          new Promise((_resolve, reject) => {
+            capturedSignal = abortSignal;
+            abortSignal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      );
+
+      const manager = new MemoryManager();
+      const scheduled = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config: makeMockConfig(),
+      });
+
+      expect(manager.cancelTask(scheduled.taskId!)).toBe(true);
+      expect(capturedSignal?.aborted).toBe(true);
+      await manager.drain({ timeoutMs: 1000 });
+      expect(manager.getTask(scheduled.taskId!)?.status).toBe('cancelled');
+    });
+
+    it('cancels all running migrations during shutdown', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      await writeLegacy(getUserAutoMemoryRoot(), 'user.md');
+      vi.spyOn(
+        metadataMigration,
+        'runMemoryMetadataMigration',
+      ).mockImplementation(
+        ({ abortSignal }) =>
+          new Promise((_resolve, reject) => {
+            abortSignal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError')),
+            );
+          }),
+      );
+      const manager = new MemoryManager();
+      const config = makeMockConfig();
+      const project = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'project',
+        config,
+      });
+      const user = await manager.scheduleMetadataMigration({
+        projectRoot,
+        scope: 'user',
+        config,
+      });
+
+      manager.cancelMigrations();
+      await manager.drain({ timeoutMs: 1000 });
+
+      expect(manager.getTask(project.taskId!)?.status).toBe('cancelled');
+      expect(manager.getTask(user.taskId!)?.status).toBe('cancelled');
+    });
+
+    it('records migration failures and releases the domain for retry', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      vi.spyOn(metadataMigration, 'runMemoryMetadataMigration')
+        .mockRejectedValueOnce(new Error('agent failed'))
+        .mockResolvedValueOnce({
+          filesScanned: 1,
+          legacyFiles: 1,
+          remainingLegacyFiles: 0,
+          attempted: 1,
+          committed: 1,
+          conflicts: 0,
+          failed: 0,
+          agentDurationMs: 1,
+          inputTokens: 1,
+          outputTokens: 1,
+          totalTokens: 2,
+        });
+      const manager = new MemoryManager();
+      const params = {
+        projectRoot,
+        scope: 'project' as const,
+        config: makeMockConfig(),
+      };
+
+      const first = await manager.scheduleMetadataMigration(params);
+      await first.promise;
+      expect(manager.getTask(first.taskId!)).toMatchObject({
+        status: 'failed',
+        error: 'agent failed',
+      });
+
+      const retry = await manager.scheduleMetadataMigration(params);
+      expect(retry.status).toBe('scheduled');
+      await retry.promise;
+      expect(manager.getTask(retry.taskId!)?.status).toBe('completed');
+    });
+
+    it('pauses project and user dream while their legacy files remain', async () => {
+      await writeLegacy(getAutoMemoryRoot(projectRoot), 'project.md');
+      await writeLegacy(getUserAutoMemoryRoot(), 'user.md');
+      const manager = new MemoryManager();
+      const config = makeMockConfig();
+
+      await expect(
+        manager.scheduleDream({
+          projectRoot,
+          sessionId: 'session',
+          config,
+        }),
+      ).resolves.toMatchObject({
+        status: 'skipped',
+        skippedReason: 'migration_pending',
+      });
+      await expect(
+        manager.scheduleUserDream({ projectRoot, config }),
+      ).resolves.toMatchObject({
+        status: 'skipped',
+        skippedReason: 'migration_pending',
+      });
+      expect(runManagedAutoMemoryDream).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('search memory turn state', () => {
+    it('allows rereads after compaction guards are reset', () => {
+      const mgr = new MemoryManager();
+      const signature = '{"mode":"fetch","refs":["project:a.md"]}';
+      mgr.getExhaustedBodyRefsForCurrentTurn().add('project:a.md');
+
+      expect(mgr.claimSearchMemoryRequestForCurrentTurn(signature)).toBe(true);
+      expect(mgr.claimSearchMemoryRequestForCurrentTurn(signature)).toBe(false);
+
+      mgr.resetExhaustedBodyRefsForCurrentTurn();
+
+      expect(mgr.getExhaustedBodyRefsForCurrentTurn()).toEqual(new Set());
+      expect(mgr.claimSearchMemoryRequestForCurrentTurn(signature)).toBe(true);
+    });
+
+    it('tracks resident body versions independently of read history', () => {
+      const mgr = new MemoryManager();
+      const versions = mgr.getBodyPresentVersionsInHistory();
+      versions.set('project:one.md', 1);
+      versions.set('project:two.md', 2);
+
+      mgr.markMemoryBodiesEvictedFromHistory([
+        { memoryRef: 'project:one.md', mtimeMs: 1 },
+        { memoryRef: 'project:two.md', mtimeMs: 1 },
+      ]);
+      expect([...versions]).toEqual([['project:two.md', 2]]);
+
+      mgr.markAllMemoryBodiesEvictedFromHistory();
+      expect(versions.size).toBe(0);
+
+      mgr.restoreMemoryBodiesPresentInHistory([
+        { memoryRef: 'project:restored.md', mtimeMs: 3 },
+      ]);
+      expect([...versions]).toEqual([['project:restored.md', 3]]);
+    });
+  });
+
   describe('globalMemoryManager', () => {
     it('is a MemoryManager instance', () => {
       expect(globalMemoryManager).toBeInstanceOf(MemoryManager);
@@ -843,7 +1104,12 @@ describe('MemoryManager', () => {
       );
       vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
         touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
         dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
         systemMessage: undefined,
       });
     });
@@ -979,7 +1245,12 @@ describe('MemoryManager', () => {
     it('schedules when all conditions are met, releases lock, and records metadata', async () => {
       vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
         touchedTopics: ['user'],
+        createdEntries: 0,
+        updatedEntries: 1,
+        deletedEntries: 1,
         dedupedEntries: 1,
+        splitEntries: 0,
+        keywordBackfilled: 0,
         systemMessage: 'Dream complete.',
       });
 
@@ -997,7 +1268,15 @@ describe('MemoryManager', () => {
       expect(result.status).toBe('scheduled');
       const finalRecord = await result.promise;
       expect(finalRecord?.status).toBe('completed');
-      expect(finalRecord?.metadata?.['touchedTopics']).toEqual(['user']);
+      expect(finalRecord?.metadata).toMatchObject({
+        touchedTopics: ['user'],
+        createdEntries: 0,
+        updatedEntries: 1,
+        deletedEntries: 1,
+        dedupedEntries: 1,
+        splitEntries: 0,
+        keywordBackfilled: 0,
+      });
 
       // Lock must be released
       await expect(
@@ -1123,7 +1402,12 @@ describe('MemoryManager', () => {
           });
           return {
             touchedTopics: [],
+            createdEntries: 0,
+            updatedEntries: 0,
+            deletedEntries: 0,
             dedupedEntries: 0,
+            splitEntries: 0,
+            keywordBackfilled: 0,
             systemMessage: undefined,
           };
         },
@@ -1190,7 +1474,12 @@ describe('MemoryManager', () => {
           });
           return {
             touchedTopics: ['user', 'project'],
+            createdEntries: 0,
+            updatedEntries: 2,
+            deletedEntries: 0,
             dedupedEntries: 0,
+            splitEntries: 0,
+            keywordBackfilled: 0,
             systemMessage: 'Managed auto-memory dream completed.',
           };
         },
@@ -1243,7 +1532,12 @@ describe('MemoryManager', () => {
       // metadata the user just saw via memory_saved toast).
       vi.mocked(runManagedAutoMemoryDream).mockResolvedValue({
         touchedTopics: [],
+        createdEntries: 0,
+        updatedEntries: 0,
+        deletedEntries: 0,
         dedupedEntries: 0,
+        splitEntries: 0,
+        keywordBackfilled: 0,
         systemMessage: undefined,
       });
       const mgr = new MemoryManager(async () => [

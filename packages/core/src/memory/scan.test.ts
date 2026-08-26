@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getAutoMemoryFilePath } from './paths.js';
 import {
   parseAutoMemoryTopicDocument,
+  scanAutoMemorySnapshot,
   scanAutoMemoryTopicDocuments,
+  validateStructuredAutoMemoryDocument,
 } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -53,6 +55,7 @@ describe('auto-memory topic scanning', () => {
     );
 
     expect(parsed).not.toBeNull();
+    expect(parsed?.scope).toBe('project');
     expect(parsed?.type).toBe('project');
     expect(parsed?.title).toBe('CRLF Memory');
     expect(parsed?.description).toBe('Windows line endings');
@@ -77,15 +80,186 @@ describe('auto-memory topic scanning', () => {
     );
 
     expect(parsed).toEqual({
+      scope: 'project',
       type: 'project',
       filePath: '/tmp/project.md',
       relativePath: 'project.md',
       filename: 'project.md',
       title: 'Project Memory',
       description: 'Project context',
+      category: 'uncategorized',
+      keywords: [],
+      usageScenarios: ['Project context'],
       body: '# Project Memory\n\n- Release freeze starts Friday.',
       mtimeMs: 0,
     });
+  });
+
+  it('validates the complete structured-memory frontmatter contract', () => {
+    const content = [
+      '---',
+      'name: Recall design',
+      'description: How memory recall is organized',
+      'type: project',
+      'category: project_introduction',
+      'keywords:',
+      '  - memory recall',
+      '  - focused subtree',
+      'usage_scenarios:',
+      '  - Reviewing memory architecture',
+      '---',
+      'Body remains unchanged.',
+    ].join('\n');
+
+    expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+      valid: true,
+      missingOrInvalidFields: [],
+    });
+  });
+
+  it('keeps legacy parsing permissive while strict validation reports fields', () => {
+    const content = [
+      '---',
+      'title: Legacy memory',
+      'description: Legacy body description',
+      'type: project',
+      'category: invented_category',
+      'keywords:',
+      '  - only-one',
+      'usage_scenarios: invalid',
+      '---',
+      'Legacy body.',
+    ].join('\n');
+
+    expect(
+      parseAutoMemoryTopicDocument('/tmp/legacy.md', content),
+    ).not.toBeNull();
+    expect(validateStructuredAutoMemoryDocument(content)).toEqual({
+      valid: false,
+      missingOrInvalidFields: [
+        'name',
+        'category',
+        'keywords',
+        'usage_scenarios',
+      ],
+    });
+  });
+
+  it('rejects duplicate or malformed structured keyword arrays', () => {
+    const content = [
+      '---',
+      'name: Duplicate terms',
+      'description: Invalid keyword metadata',
+      'type: reference',
+      'category: tool_experience',
+      'keywords:',
+      '  - memory search',
+      '  - Memory Search',
+      'usage_scenarios:',
+      '  - Debugging recall',
+      '---',
+      'Body.',
+    ].join('\n');
+
+    expect(validateStructuredAutoMemoryDocument(content)).toMatchObject({
+      valid: false,
+      missingOrInvalidFields: ['keywords'],
+    });
+  });
+
+  it('parses and sanitizes keyword arrays without dropping the document', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/keywords.md',
+      [
+        '---',
+        'type: feedback',
+        'name: Testing preference',
+        'description: User prefers integration tests.',
+        'keywords:',
+        '  - Integration Testing',
+        '  - integration testing',
+        '  - "database\\u200b mocking"',
+        '  - 42',
+        '---',
+        'Use real databases.',
+      ].join('\n'),
+      0,
+      'feedback/testing.md',
+      'user',
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed?.scope).toBe('user');
+    expect(parsed?.category).toBe('uncategorized');
+    expect(parsed?.keywords).toEqual([
+      'Integration Testing',
+      'database mocking',
+    ]);
+    expect(parsed?.usageScenarios).toEqual(['User prefers integration tests.']);
+  });
+
+  it('ignores invalid keyword fields while preserving semantic recall data', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/invalid-keywords.md',
+      [
+        '---',
+        'type: project',
+        'name: Release plan',
+        'description: Release context',
+        'keywords: deployment',
+        '---',
+        'Freeze starts Friday.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.title).toBe('Release plan');
+    expect(parsed?.keywords).toEqual([]);
+  });
+
+  it('parses category and usage scenarios with safe fallbacks', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/tree.md',
+      [
+        '---',
+        'type: project',
+        'name: Pull memory tree',
+        'description: Use when designing active memory recall.',
+        'category: project_introduction',
+        'usage_scenarios:',
+        '  - Designing memory navigation',
+        '  - "designing memory navigation"',
+        '  - "Reviewing\\u200b active pull behavior"',
+        '  - ignored overflow',
+        '---',
+        'Tree body.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.category).toBe('project_introduction');
+    expect(parsed?.usageScenarios).toEqual([
+      'Designing memory navigation',
+      'Reviewing active pull behavior',
+      'ignored overflow',
+    ]);
+  });
+
+  it('falls back invalid categories to uncategorized', () => {
+    const parsed = parseAutoMemoryTopicDocument(
+      '/tmp/category.md',
+      [
+        '---',
+        'type: reference',
+        'name: Category fallback',
+        'description: Missing category handling',
+        'category: invented_nested_category',
+        'usage_scenarios: invalid',
+        '---',
+        'Body.',
+      ].join('\n'),
+    );
+
+    expect(parsed?.category).toBe('uncategorized');
+    expect(parsed?.usageScenarios).toEqual(['Missing category handling']);
   });
 
   it('scans existing auto-memory files from nested topic folders', async () => {
@@ -112,6 +286,7 @@ describe('auto-memory topic scanning', () => {
     const referenceDoc = docs.find((doc) => doc.type === 'reference');
 
     expect(referenceDoc?.description).toBe('External references');
+    expect(referenceDoc?.scope).toBe('project');
     expect(referenceDoc?.relativePath).toBe('reference/grafana.md');
     expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
   });
@@ -143,5 +318,98 @@ describe('auto-memory topic scanning', () => {
     expect(docs.some((d) => d.relativePath === 'feedback/broken.md')).toBe(
       false,
     );
+  });
+
+  it('returns sourceStatus for a complete project and user snapshot', async () => {
+    const projectPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('project', 'context.md'),
+    );
+    await fs.mkdir(path.dirname(projectPath), { recursive: true });
+    await fs.writeFile(
+      projectPath,
+      '---\ntype: project\nname: Context\ndescription: Project context\n---\nbody',
+      'utf-8',
+    );
+
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['project', 'user'],
+    });
+
+    expect(
+      snapshot.docs.some((doc) => doc.relativePath === 'project/context.md'),
+    ).toBe(true);
+    expect(snapshot.sourceStatus).toEqual({
+      requestedScopes: ['project', 'user'],
+      searchedScopes: ['project', 'user'],
+      unavailableScopes: [],
+      complete: true,
+      incompleteScopes: [],
+    });
+  });
+
+  it('also scans project-local memory files when project memory uses runtime storage', async () => {
+    const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    try {
+      const localPath = path.join(
+        projectRoot,
+        '.qwen',
+        'memory',
+        'feedback',
+        'local.md',
+      );
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.writeFile(
+        localPath,
+        '---\ntype: feedback\nname: Local memory\ndescription: Project-local fixture\nkeywords:\n  - local fixture\n---\nbody',
+        'utf-8',
+      );
+
+      const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+        scopes: ['project'],
+      });
+
+      expect(
+        snapshot.docs.some((doc) => doc.relativePath === 'feedback/local.md'),
+      ).toBe(true);
+      expect(snapshot.sourceStatus.complete).toBe(true);
+    } finally {
+      if (previousLocal === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+      }
+    }
+  });
+
+  it('reports requested but disabled team memory as unavailable', async () => {
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['team'],
+      teamMemoryEnabled: false,
+      trustedProject: true,
+    });
+
+    expect(snapshot.docs).toEqual([]);
+    expect(snapshot.sourceStatus).toEqual({
+      requestedScopes: ['team'],
+      searchedScopes: [],
+      unavailableScopes: [{ scope: 'team', reason: 'disabled' }],
+      complete: true,
+      incompleteScopes: [],
+    });
+  });
+
+  it('reports requested but untrusted team memory as unavailable', async () => {
+    const snapshot = await scanAutoMemorySnapshot(projectRoot, {
+      scopes: ['team'],
+      teamMemoryEnabled: true,
+      trustedProject: false,
+    });
+
+    expect(snapshot.sourceStatus.unavailableScopes).toEqual([
+      { scope: 'team', reason: 'untrusted' },
+    ]);
+    expect(snapshot.sourceStatus.searchedScopes).toEqual([]);
   });
 });

@@ -19,6 +19,9 @@ import {
 import { ToolNames } from '../tools/tool-names.js';
 import { escapeShellArg, getShellConfiguration } from '../utils/shell-utils.js';
 import { createMemoryScopedAgentConfig } from './memory-scoped-agent-config.js';
+import { DREAM_OPERATIONS_FILENAME } from './dream-operations.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 
 const MAX_TURNS = 8;
 const MAX_TIME_MINUTES = 5;
@@ -33,8 +36,11 @@ Rules:
 - Merge semantically duplicate entries among writable topic files — if the same fact appears in multiple writable files, consolidate into one file and delete the rest.
 - Preserve all durable information; do not delete content that is still accurate.
 - Fix contradicted or stale facts only when the evidence is clear from the existing memory content or recent transcript signal.
-- Update the MEMORY.md index to accurately reflect surviving files.
-- Keep the MEMORY.md index concise: one line per file in the format \`- [Title](relative/path.md) — one-line hook\`.
+- Keep each file independently retrievable: one coherent fact, rule, preference, or reference per file.
+- Use description for what the memory says and usage_scenarios for future tasks where it would help.
+- Every memory must have one fixed category, 1-3 usage_scenarios, and 2-6 keywords in YAML frontmatter.
+- Use discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words and put at most 2 exact identifiers last.
+- Do not edit MEMORY.md. The runtime rebuilds it after your work.
 - If nothing needs consolidation, do nothing and say so.`;
 
 export function getTranscriptDir(projectRoot: string): string {
@@ -48,9 +54,37 @@ function quoteShellPathWithTrailingSeparator(dirPath: string): string {
 export function buildConsolidationTaskPrompt(
   memoryRoot: string,
   transcriptDir: string,
+  options: {
+    runtimeManagedOperations?: boolean;
+    keywordVocabularySnapshot?: string;
+  } = {},
 ): string {
   const quotedTranscriptDir =
     quoteShellPathWithTrailingSeparator(transcriptDir);
+  const runtimeManagedOperations = options.runtimeManagedOperations ?? false;
+  const deletionInstructions = runtimeManagedOperations
+    ? [
+        '## Phase 4 — Schedule safe deletions',
+        '',
+        `If files must be removed, write \`${memoryRoot}/${DREAM_OPERATIONS_FILENAME}\` only after every replacement file is complete and valid.`,
+        'Use paths relative to the memory directory and this exact JSON shape:',
+        '`{"version":1,"delete":["project/old.md"],"operations":[{"type":"dedupe","sources":["project/old.md"],"target":"project/canonical.md"},{"type":"split","source":"feedback/long.md","targets":["feedback/rule-a.md","feedback/rule-b.md"]}]}`',
+        '- `delete` contains every old file the runtime should remove',
+        '- `dedupe` records redundant source files merged into a surviving target',
+        '- `split` records one old source replaced by at least two surviving targets',
+        '- Omit unrelated operation types; use an empty operations array for plain stale-file deletion',
+        '- Never schedule `MEMORY.md`, the operations file, an absolute path, or a path outside the memory directory',
+        `- Do not edit \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\`; the runtime validates operations, deletes scheduled files, and rebuilds it`,
+      ]
+    : [
+        '## Phase 4 — Prune and index',
+        '',
+        '- Delete redundant or stale files only after every replacement file is complete and valid',
+        `- Update \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` to contain one concise line per surviving memory`,
+        '- Remove pointers to deleted files and add pointers to newly created files',
+        `- Do not intentionally remove existing index entries for valid \`${AUTO_MEMORY_PINNED_DIRNAME}/\` files; normal index limits still apply`,
+        '- Never create `.dream-operations.json`; manual `/dream` has no background runtime to apply it',
+      ];
 
   return [
     `Memory directory: \`${memoryRoot}\``,
@@ -83,15 +117,18 @@ export function buildConsolidationTaskPrompt(
     `- Exclude \`${AUTO_MEMORY_PINNED_DIRNAME}/\` from duplicate, stale, and contradiction analysis; never use a pinned file as a merge target or deletion candidate`,
     '- Fix stale or contradicted facts when clear from the existing content',
     '- Convert relative dates (for example: "yesterday", "last week") to absolute dates when preserving them',
+    '- Backfill missing `description`, `category`, `usage_scenarios`, and `keywords` from the complete body.',
+    '- Remove duplicate, generic, or corpus-wide hub keywords.',
+    '- Keep 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
+    '- Refresh `description`, `category`, `usage_scenarios`, and `keywords` whenever the body meaning changes',
+    '- Inspect memories over roughly 1,200 characters and remove repetition or incidental detail',
+    '- Strongly compress or split memories over 2,400 characters',
+    '- Split only at semantic retrieval boundaries, never at a fixed character position',
+    '- Preserve the complete rule or fact, including `Why:` and `How to apply:` when present',
     '',
-    '## Phase 4 — Prune and index',
+    options.keywordVocabularySnapshot?.trim() ?? '',
     '',
-    `Update \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\` to reflect surviving files.`,
-    'Each entry: `- [Title](relative/path.md) — one-line hook`',
-    'Keep the index under roughly 200 lines and ~25KB.',
-    `Do not intentionally remove existing index entries for valid \`${AUTO_MEMORY_PINNED_DIRNAME}/\` files during consolidation; normal index limits still apply.`,
-    'Remove pointers to deleted, stale, wrong, or superseded files. Add pointers to any newly created files.',
-    'If an index line is too verbose, shorten it and move the detail back into the memory file itself.',
+    ...deletionInstructions,
     '',
     '---',
     '',
@@ -107,6 +144,7 @@ export async function planManagedAutoMemoryDreamByAgent(
 ): Promise<ForkedAgentResult> {
   const memoryRoot = getAutoMemoryRoot(projectRoot);
   const transcriptDir = getTranscriptDir(projectRoot);
+  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
   const scopedConfig = createMemoryScopedAgentConfig(config, projectRoot, {
     allowShell: true,
     includeUserMemory: false,
@@ -115,7 +153,12 @@ export async function planManagedAutoMemoryDreamByAgent(
   const result = await runForkedAgent({
     name: 'managed-auto-memory-dreamer',
     config: scopedConfig,
-    taskPrompt: buildConsolidationTaskPrompt(memoryRoot, transcriptDir),
+    taskPrompt: buildConsolidationTaskPrompt(memoryRoot, transcriptDir, {
+      runtimeManagedOperations: true,
+      keywordVocabularySnapshot: renderWriterKeywordVocabularySnapshot(docs, {
+        scopes: ['project'],
+      }),
+    }),
     systemPrompt: DREAM_AGENT_SYSTEM_PROMPT,
     maxTurns: config.getMemoryAgentMaxTurns() ?? MAX_TURNS,
     maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? MAX_TIME_MINUTES,

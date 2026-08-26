@@ -462,6 +462,7 @@ async function readDirectory(
   const structure = await getFolderStructure(directoryPath, {
     fileService: config.getFileService(),
     fileFilteringOptions: config.getFileFilteringOptions(),
+    hideManagedMemory: config.getMemoryRecallMode() === 'structured',
   });
   signal?.throwIfAborted();
 

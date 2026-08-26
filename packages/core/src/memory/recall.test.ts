@@ -6,26 +6,30 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  buildRelevantAutoMemoryPrompt,
   MAX_FAST_RECALL_DOCS,
   resolveRelevantAutoMemoryPromptForQuery,
   selectRelevantAutoMemoryDocuments,
 } from './recall.js';
-import type { ScannedAutoMemoryDocument } from './scan.js';
 import type { Config } from '../config/config.js';
-import { scanAllAutoMemoryTopicDocuments } from './scan.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
+import {
+  rereadAutoMemoryDocument,
+  scanAllAutoMemoryTopicDocuments,
+  scanAllUserAutoMemoryTopicDocuments,
+  scanAutoMemorySnapshot,
+  type MemorySourceStatus,
+  type ScannedAutoMemoryDocument,
+} from './scan.js';
+import { logMemoryRecall } from '../telemetry/index.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
   return {
     ...actual,
+    scanAutoMemorySnapshot: vi.fn(),
     scanAllAutoMemoryTopicDocuments: vi.fn(),
-    // Explicit mock — recall now unions user-level docs into the pool, so
-    // leaving this on the real implementation would silently fall through
-    // to the filesystem (only "works" because the path doesn't exist and
-    // listMarkdownFiles swallows ENOENT). Defaults to an empty pool.
-    scanAllUserAutoMemoryTopicDocuments: vi.fn().mockResolvedValue([]),
+    scanAllUserAutoMemoryTopicDocuments: vi.fn(),
+    rereadAutoMemoryDocument: vi.fn(),
   };
 });
 
@@ -33,41 +37,45 @@ vi.mock('./relevanceSelector.js', () => ({
   selectRelevantAutoMemoryDocumentsByModel: vi.fn(),
 }));
 
+vi.mock('../telemetry/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../telemetry/index.js')>()),
+  logMemoryRecall: vi.fn(),
+}));
+
 const docs: ScannedAutoMemoryDocument[] = [
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/reference.md',
     relativePath: 'reference.md',
     filename: 'reference.md',
     title: 'Reference Memory',
     description: 'Dashboards and external docs',
-    body: '# Reference Memory\n\n- Grafana dashboard: grafana.internal/d/api-latency',
+    category: 'project_introduction',
+    keywords: ['latency dashboard'],
+    usageScenarios: ['checking latency dashboards'],
+    body: 'Grafana dashboard: grafana.internal/d/api-latency',
     mtimeMs: 3,
   },
   {
+    scope: 'project',
     type: 'project',
     filePath: '/tmp/project.md',
     relativePath: 'project.md',
     filename: 'project.md',
     title: 'Project Memory',
     description: 'Project constraints and release context',
-    body: '# Project Memory\n\n- Release freeze starts Friday.',
+    category: 'important_decision',
+    keywords: [],
+    usageScenarios: ['planning release work'],
+    body: 'Release freeze starts Friday.',
     mtimeMs: 2,
-  },
-  {
-    type: 'user',
-    filePath: '/tmp/user.md',
-    relativePath: 'user.md',
-    filename: 'user.md',
-    title: 'User Memory',
-    description: 'User preferences',
-    body: '# User Memory\n\n- User prefers terse responses.',
-    mtimeMs: 1,
   },
 ];
 
 const activeToolDocs: ScannedAutoMemoryDocument[] = [
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/ata-tool.md',
     relativePath: 'ata-tool.md',
@@ -75,30 +83,56 @@ const activeToolDocs: ScannedAutoMemoryDocument[] = [
     title: 'ATA tool schema notes',
     description:
       'article-list-query parameter schema and failed tool-call attempts',
-    body: '# ATA tool schema notes\n\n- ata::article-list-query failed with guessed field mappings.',
+    category: 'tool_experience',
+    keywords: [],
+    usageScenarios: ['using ATA tool schema'],
+    body: 'ata::article-list-query failed with guessed field mappings.',
     mtimeMs: 4,
   },
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/ata-gotcha.md',
     relativePath: 'ata-gotcha.md',
     filename: 'ata-gotcha.md',
     title: 'ATA tool gotcha',
     description: 'article-list-query known workaround for transient failures',
-    body: '# ATA tool gotcha\n\n- mcp__ata__article-list-query can return systemError during index rotation; retry after checking the ATA oncall note.',
+    category: 'common_pitfall',
+    keywords: [],
+    usageScenarios: ['handling ATA failures'],
+    body: 'Retry after checking the ATA oncall note.',
     mtimeMs: 6,
   },
   {
+    scope: 'project',
     type: 'reference',
     filePath: '/tmp/ata-owner.md',
     relativePath: 'ata-owner.md',
     filename: 'ata-owner.md',
     title: 'ATA escalation',
     description: 'ATA service owner and escalation path',
-    body: '# ATA escalation\n\n- Ask the ATA oncall when the service returns systemError.',
+    category: 'tool_experience',
+    keywords: [],
+    usageScenarios: ['escalating ATA issues'],
+    body: 'Ask the ATA oncall when the service returns systemError.',
     mtimeMs: 5,
   },
 ];
+
+const completeSourceStatus: MemorySourceStatus = {
+  requestedScopes: ['project', 'user'],
+  searchedScopes: ['project', 'user'],
+  unavailableScopes: [],
+  complete: true,
+  incompleteScopes: [],
+};
+
+function mockSnapshot(snapshotDocs: ScannedAutoMemoryDocument[]): void {
+  vi.mocked(scanAutoMemorySnapshot).mockResolvedValue({
+    docs: snapshotDocs,
+    sourceStatus: completeSourceStatus,
+  });
+}
 
 function memoryDoc(
   filename: string,
@@ -108,12 +142,16 @@ function memoryDoc(
   body: string,
 ): ScannedAutoMemoryDocument {
   return {
+    scope: 'project',
     type,
     filePath: `/tmp/${filename}`,
     relativePath: filename,
     filename,
     title,
     description,
+    category: 'uncategorized',
+    keywords: [],
+    usageScenarios: [],
     body,
     mtimeMs: 1,
   };
@@ -241,22 +279,102 @@ const multilingualRecallCases: Array<
 ];
 
 describe('auto-memory relevant recall', () => {
+  const bodyPresentVersions = new Map<string, number>();
+  const config = {
+    getFastModel: vi.fn().mockReturnValue('fast-model'),
+    getMemoryRecallMode: vi.fn().mockReturnValue('structured'),
+    getMemoryManager: vi.fn().mockReturnValue({
+      getBodyPresentVersionsInHistory: vi
+        .fn()
+        .mockReturnValue(bodyPresentVersions),
+    }),
+  } as unknown as Config;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    bodyPresentVersions.clear();
+    vi.mocked(config.getFastModel).mockReturnValue('fast-model');
+    vi.mocked(config.getMemoryRecallMode).mockReturnValue('structured');
+    mockSnapshot(docs);
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue([]);
+    vi.mocked(rereadAutoMemoryDocument).mockImplementation(async (doc) => doc);
   });
 
-  it('selects the most relevant documents for a query', () => {
-    const selected = selectRelevantAutoMemoryDocuments(
-      'check the dashboard reference for latency',
-      docs,
-    );
-
-    expect(selected[0]?.type).toBe('reference');
-    expect(selected.map((doc) => doc.type)).toContain('reference');
+  it('selects matching documents in heuristic mode', () => {
+    expect(
+      selectRelevantAutoMemoryDocuments('check the latency dashboard', docs),
+    ).toEqual([docs[0]]);
+    expect(
+      selectRelevantAutoMemoryDocuments('unrelated weather', docs),
+    ).toEqual([]);
   });
 
-  it('returns an empty list for an empty query', () => {
+  it('uses keywords and usage scenarios in heuristic mode', () => {
+    const metadataOnlyDoc: ScannedAutoMemoryDocument = {
+      ...docs[1]!,
+      title: 'Operational note',
+      description: 'Durable operational context',
+      keywords: ['provider fallback'],
+      usageScenarios: ['diagnosing selector failures'],
+      body: 'No matching query terms in this body.',
+    };
+
+    expect(
+      selectRelevantAutoMemoryDocuments('provider fallback', [metadataOnlyDoc]),
+    ).toEqual([metadataOnlyDoc]);
+    expect(
+      selectRelevantAutoMemoryDocuments('diagnosing selector failures', [
+        metadataOnlyDoc,
+      ]),
+    ).toEqual([metadataOnlyDoc]);
+  });
+
+  it('matches Chinese metadata in heuristic mode', () => {
+    const chineseDoc: ScannedAutoMemoryDocument = {
+      ...docs[1]!,
+      title: '发布说明',
+      description: '数据库集成测试必须连接真实服务',
+      keywords: ['数据库测试', '真实依赖'],
+      usageScenarios: ['排查集成测试失败'],
+      body: '不要使用数据库 mock。',
+    };
+
+    expect(
+      selectRelevantAutoMemoryDocuments('集成测试为什么不能使用模拟数据库', [
+        chineseDoc,
+      ]),
+    ).toEqual([chineseDoc]);
+    expect(
+      selectRelevantAutoMemoryDocuments('前端按钮应该使用什么颜色', [
+        chineseDoc,
+      ]),
+    ).toEqual([]);
+  });
+
+  it('matches two-character Chinese terms and NFKC-normalized metadata', () => {
+    const normalizedDoc: ScannedAutoMemoryDocument = {
+      ...docs[1]!,
+      title: '召回检查',
+      description: 'ＡＰＩ 调用记录',
+      keywords: ['召回'],
+      usageScenarios: [],
+      body: '',
+    };
+
+    expect(
+      selectRelevantAutoMemoryDocuments('检查记忆召回效果', [normalizedDoc]),
+    ).toEqual([normalizedDoc]);
+    expect(
+      selectRelevantAutoMemoryDocuments('API 调用为什么失败', [normalizedDoc]),
+    ).toEqual([normalizedDoc]);
+  });
+
+  it('returns no heuristic matches for empty or unrelated queries', () => {
     expect(selectRelevantAutoMemoryDocuments('   ', docs)).toEqual([]);
+    expect(
+      selectRelevantAutoMemoryDocuments('unrelated weather question', docs),
+    ).toEqual([]);
   });
 
   it.each(multilingualRecallCases)('%s', (_name, query, expectedFilename) => {
@@ -501,31 +619,222 @@ describe('auto-memory relevant recall', () => {
     expect(selectRelevantAutoMemoryDocuments('late marker', [doc])).toEqual([]);
   });
 
-  it('formats selected documents as a prompt block', () => {
-    const prompt = buildRelevantAutoMemoryPrompt([docs[0], docs[2]]);
+  it('preserves Main body scoring in legacy mode', () => {
+    const bodyOnly = memoryDoc(
+      'legacy-body.md',
+      'reference',
+      'General note',
+      '',
+      '接口延迟排查入口。',
+    );
 
-    expect(prompt).toContain('## Relevant memory');
-    expect(prompt).toContain('Reference Memory (reference.md)');
-    expect(prompt).toContain('User Memory (user.md)');
+    expect(
+      selectRelevantAutoMemoryDocuments('延迟排查', [bodyOnly], 5, false),
+    ).toEqual([bodyOnly]);
   });
 
-  it('uses model-driven selection when config is provided', async () => {
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
+  it('returns selector-selected memory bodies in legacy mode without a tree', async () => {
+    vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+      docs[0]!,
+    ]);
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config },
+    );
+
+    expect(result.treeSnapshot).toBeUndefined();
+    expect(result.prompt).toContain('## Relevant memory');
+    expect(result.prompt).toContain('grafana.internal/d/api-latency');
+    expect(result.prompt).not.toContain('Complete memory tree');
+  });
+
+  it('preserves legacy exclusion of memory bodies already surfaced', async () => {
+    vi.mocked(config.getMemoryRecallMode).mockReturnValue('legacy');
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config, excludedFilePaths: [docs[0]!.filePath] },
+    );
+
+    expect(result.selectedDocs).toEqual([]);
+    expect(result.prompt).toBe('');
+    expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledWith(
+      config,
+      'check the latency dashboard',
+      expect.not.arrayContaining([docs[0]]),
+      5,
+      [],
+      undefined,
+    );
+  });
+
+  it('uses a placeholder only when the selected body version is present', async () => {
+    mockSnapshot(docs);
+    bodyPresentVersions.set('project:reference.md', docs[0]!.mtimeMs);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
       docs[0],
     ]);
 
     const result = await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
-      'check the dashboard reference for latency',
-      {
-        config: {} as Config,
-      },
+      'check the latency dashboard',
+      { config },
     );
 
-    expect(result.strategy).toBe('model');
-    expect(result.selectedDocs).toEqual([docs[0]]);
-    expect(result.prompt).toContain('Reference Memory (reference.md)');
+    expect(result.prompt).toContain(
+      '[内容已在当前上下文] [project:reference.md]',
+    );
+    expect(result.prompt).toContain('关键词：latency dashboard');
+    expect(result.prompt).not.toContain('Dashboards and external docs');
+  });
+
+  it('does not use a placeholder for a body evicted from history', async () => {
+    mockSnapshot(docs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+      docs[0],
+    ]);
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config },
+    );
+
+    expect(result.prompt).not.toContain('[内容已在当前上下文]');
+    expect(result.prompt).toContain('摘要：Dashboards and external docs');
+  });
+
+  it('publishes only strong metadata matches in the fast focused subtree', async () => {
+    const bodyOnly = memoryDoc(
+      'body-only-fast.md',
+      'reference',
+      'General operational note',
+      '',
+      'rare rollback marker',
+    );
+    mockSnapshot([bodyOnly]);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'rare rollback marker',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult).toHaveBeenCalledOnce();
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([]);
+    expect(onFastResult.mock.calls[0]?.[0].treeSnapshot.routerPrompt).toContain(
+      'Complete memory tree',
+    );
+  });
+
+  it('admits an exact stored keyword to the fast focused subtree', async () => {
+    const exact = {
+      ...docs[0]!,
+      keywords: ['provider fallback'],
+    };
+    mockSnapshot([exact]);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'We hit provider fallback again.',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([exact]);
+    expect(onFastResult.mock.calls[0]?.[0].focusedPrompt).toContain(
+      '[project:reference.md]',
+    );
+  });
+
+  it('prioritizes a lexically matched memory whose body version is stale', async () => {
+    const stale = {
+      ...docs[0]!,
+      title: 'Fork setup',
+      description: 'Repository migration notes',
+      keywords: [],
+      usageScenarios: [],
+      mtimeMs: 42,
+    };
+    const strong = {
+      ...docs[1]!,
+      keywords: ['migration update'],
+    };
+    mockSnapshot([strong, stale]);
+    bodyPresentVersions.set('project:reference.md', 41);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'Check the migration update.',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs[0]).toEqual(stale);
+    expect(onFastResult.mock.calls[0]?.[0].focusedPrompt).toContain(
+      '[内容已更新，需要重新读取] [project:reference.md]',
+    );
+  });
+
+  it('does not include selected document rereads in selector duration', async () => {
+    vi.useFakeTimers();
+    mockSnapshot(docs);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return [docs[0]!];
+      },
+    );
+    vi.mocked(rereadAutoMemoryDocument).mockImplementation(async (doc) => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      return doc;
+    });
+
+    const promise = resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'latency dashboard',
+      { config },
+    );
+    await vi.advanceTimersByTimeAsync(140);
+    await promise;
+
+    expect(vi.mocked(logMemoryRecall)).toHaveBeenLastCalledWith(
+      config,
+      expect.objectContaining({ selector_duration_ms: 40 }),
+    );
+    vi.useRealTimers();
+  });
+
+  it('does not publish an unrelated stale memory in the fast result', async () => {
+    const stale = {
+      ...docs[0]!,
+      title: 'Fork setup',
+      description: 'Repository migration notes',
+      keywords: [],
+      usageScenarios: [],
+      mtimeMs: 42,
+    };
+    mockSnapshot([stale]);
+    bodyPresentVersions.set('project:reference.md', 41);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
+    const onFastResult = vi.fn();
+
+    await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'Explain HTTP status 429.',
+      { config, onFastResult },
+    );
+
+    expect(onFastResult.mock.calls[0]?.[0].selectedDocs).toEqual([]);
   });
 
   it('bounds model candidates while retaining lexical and recent documents', async () => {
@@ -559,11 +868,7 @@ describe('auto-memory relevant recall', () => {
       ),
       mtimeMs: 0,
     };
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
-      ...lexicalDocs,
-      ...recentDocs,
-      lexicalTarget,
-    ]);
+    mockSnapshot([...lexicalDocs, ...recentDocs, lexicalTarget]);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
       async (_config, _query, candidates) =>
         candidates.includes(lexicalTarget) ? [lexicalTarget] : [],
@@ -572,7 +877,7 @@ describe('auto-memory relevant recall', () => {
     const result = await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
       'find the overflow zephyr marker',
-      { config: {} as Config },
+      { config },
     );
 
     const modelCandidates = vi.mocked(selectRelevantAutoMemoryDocumentsByModel)
@@ -606,16 +911,13 @@ describe('auto-memory relevant recall', () => {
       ),
       mtimeMs: 250 - index,
     }));
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue([
-      ...lexicalDocs,
-      ...recentDocs,
-    ]);
+    mockSnapshot([...lexicalDocs, ...recentDocs]);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([]);
 
     await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
       'find the sparse target',
-      { config: {} as Config },
+      { config },
     );
 
     const modelCandidates = vi.mocked(selectRelevantAutoMemoryDocumentsByModel)
@@ -628,33 +930,40 @@ describe('auto-memory relevant recall', () => {
   });
 
   it('falls back to heuristic selection when model-driven selection fails', async () => {
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(docs);
+    mockSnapshot(docs);
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
-      new Error('selector failed'),
+      new Error('selector unavailable'),
     );
 
     const result = await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
-      'check the dashboard reference for latency',
-      {
-        config: {} as Config,
-        excludedFilePaths: ['/tmp/user.md'],
-      },
+      'check the latency dashboard',
+      { config },
     );
 
     expect(result.strategy).toBe('heuristic');
-    expect(result.selectedDocs.map((doc) => doc.filePath)).toContain(
-      '/tmp/reference.md',
+    expect(result.selectedDocs).toEqual([docs[0]]);
+  });
+
+  it('keeps model selection enabled when no fast model is configured', async () => {
+    vi.mocked(config.getFastModel).mockReturnValue(undefined);
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockResolvedValue([
+      docs[0],
+    ]);
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'check the latency dashboard',
+      { config },
     );
-    expect(result.selectedDocs.map((doc) => doc.filePath)).not.toContain(
-      '/tmp/user.md',
-    );
+
+    expect(result.strategy).toBe('model');
+    expect(result.selectedDocs).toEqual([docs[0]]);
+    expect(selectRelevantAutoMemoryDocumentsByModel).toHaveBeenCalledOnce();
   });
 
   it('keeps active tool schemas out of heuristic fallback', async () => {
-    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
-      activeToolDocs,
-    );
+    mockSnapshot(activeToolDocs);
     let modelCandidates: ScannedAutoMemoryDocument[] = [];
     vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockImplementation(
       async (_config, _query, candidates) => {
@@ -666,10 +975,7 @@ describe('auto-memory relevant recall', () => {
     const result = await resolveRelevantAutoMemoryPromptForQuery(
       '/tmp/project',
       'read the ATA article with article-list-query',
-      {
-        config: {} as Config,
-        recentTools: ['mcp__ata__article-list-query'],
-      },
+      { config, recentTools: ['mcp__ata__article-list-query'] },
     );
 
     expect(modelCandidates.map((doc) => doc.filePath)).not.toContain(
@@ -688,5 +994,56 @@ describe('auto-memory relevant recall', () => {
     expect(result.selectedDocs.map((doc) => doc.filePath)).toContain(
       '/tmp/ata-owner.md',
     );
+  });
+
+  it('applies active tool filtering to keyword and scenario matches', async () => {
+    const metadataToolDoc: ScannedAutoMemoryDocument = {
+      ...docs[0]!,
+      filePath: '/tmp/metadata-tool.md',
+      relativePath: 'metadata-tool.md',
+      title: 'Archived operational note',
+      description: 'Generic historical details',
+      keywords: ['article-list-query'],
+      usageScenarios: ['checking parameter schema'],
+      body: 'No active tool name or usage marker in the body.',
+    };
+    vi.mocked(scanAutoMemorySnapshot).mockResolvedValue({
+      docs: [metadataToolDoc],
+      sourceStatus: completeSourceStatus,
+    });
+    vi.mocked(selectRelevantAutoMemoryDocumentsByModel).mockRejectedValue(
+      new Error('selector unavailable'),
+    );
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'use article-list-query',
+      { config, recentTools: ['mcp__ata__article-list-query'] },
+    );
+
+    expect(result.selectedDocs).toEqual([]);
+  });
+
+  it('never returns more than five documents', async () => {
+    vi.mocked(config.getFastModel).mockReturnValue(undefined);
+    vi.mocked(scanAutoMemorySnapshot).mockResolvedValue({
+      docs: Array.from({ length: 8 }, (_, index) => ({
+        ...docs[1],
+        filePath: `/tmp/project-${index}.md`,
+        relativePath: `project-${index}.md`,
+        filename: `project-${index}.md`,
+        description: `Shared release context ${index}`,
+        mtimeMs: index,
+      })),
+      sourceStatus: completeSourceStatus,
+    });
+
+    const result = await resolveRelevantAutoMemoryPromptForQuery(
+      '/tmp/project',
+      'shared release context',
+      { config, limit: 99 },
+    );
+
+    expect(result.selectedDocs).toHaveLength(5);
   });
 });
