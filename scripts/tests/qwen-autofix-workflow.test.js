@@ -9963,6 +9963,17 @@ exit 1
     // included. The command jobs stay hosted.
     expect(routeJob).toContain(ecsRunsOn);
     expect(reviewScanJob).toContain(ecsRunsOn);
+    // af-148 carve-out premise: neither job checks code out, so the shared
+    // workspace needs no restore/wipe step. Pin it, so adding a checkout
+    // forces a deliberate update of the hygiene requirement.
+    expect(routeJob).not.toContain('actions/checkout');
+    expect(reviewScanJob).not.toContain('actions/checkout');
+    // The scan's per-run WORKDIR must not outlive the run on the pool:
+    // 0700 at creation and an always() cleanup step mirroring the heavy
+    // jobs' teardown.
+    expect(reviewScanJob).toContain('(umask 077; mkdir -p "${WORKDIR}")');
+    expect(reviewScanJob).toContain("- name: 'Clean up scan workdir'");
+    expect(reviewScanJob).toContain("if: 'always()'");
     for (const name of ['takeover-command', 'retry-command', 'takeover-ack']) {
       const job =
         workflow.match(
@@ -10740,6 +10751,22 @@ exit 1
       );
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
+    }
+    // The scan lane shares the persistent pool with those PAT steps
+    // (af-148), so its gh calls carry the same reroute hardening: a planted
+    // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
+    // collaborator-permission lookups into a local socket.
+    for (const [step, firstGh] of [
+      [routeStep, 'gh api "repos/${REPO}/collaborators'],
+      [reviewScanJob, 'gh pr view'],
+    ]) {
+      const ghPin = step.indexOf('export GH_HOST=github.com');
+      expect(ghPin).toBeGreaterThan(-1);
+      expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
+      expect(step).toContain(
+        'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
+      );
+      expect(step.indexOf(firstGh)).toBeGreaterThan(ghPin);
     }
     // DRIFT ALARM, NOT A BOUNDARY. The guarantee that a planted channel
     // cannot reach the privileged work is the `env -i` clean child, pinned

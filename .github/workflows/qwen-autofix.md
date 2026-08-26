@@ -3756,5 +3756,15 @@ authors may reach the persistent pool; everything else stays
 hosted, and the kill-switch wins everywhere. Neither job
 checks code out — route only decides phases, and review-scan
 only calls the API — so the shared workspace needs no
-restore or wipe step here.
+restore or wipe step here. The pool still leaves two marks
+on the lane, both closed in the same change. One: gh reads
+its config from the shared, attacker-writable $HOME, so both
+steps carry the heavy jobs' gh hardening preamble — a planted
+~/.config/gh/config.yml could reroute their gh calls into a
+local socket, taking CI_DEV_BOT_PAT with the scan and forged
+collaborator-permission answers with route. Two: review-scan
+fills a per-run WORKDIR with API dumps that no VM teardown
+removes on the pool, so it gets a fixed autofix* per-run path
+(the age sweep can reclaim it after a hard kill), an EXIT
+trap, and an always() cleanup step mirroring issue-autofix.
 ```

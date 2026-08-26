@@ -259,6 +259,15 @@ jobs:
           COMMENT_PR_AUTHOR: '${{ github.event.issue.user.login }}'
           HAS_PR_URL: '${{ github.event.issue.pull_request.url }}'
         run: |-
+          # gh has its own reroute channels: pin the host, drop planted tokens,
+          # and point gh at a fresh empty config dir — on the persistent pool
+          # the shared ~/.config/gh is attacker-writable (config.yml can carry
+          # http_unix_socket transport reroutes), and a forged collaborator-
+          # permission response here would open the /takeover and /retry gates.
+          # Mirrors the heavy jobs' preamble. Full rationale → qwen-autofix.md#af-148
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
           DO_ISSUE=false
           DO_REVIEW=false
           TAKEOVER_ACK=''
@@ -2076,6 +2085,11 @@ jobs:
       enum_failed: '${{ steps.scan.outputs.enum_failed }}'
     env:
       REPO: '${{ github.repository }}'
+      # Per-run home for the scan's API dumps. A fixed autofix* name (not
+      # mktemp's tmp.*) so the age sweep in the heavy jobs can reclaim it
+      # after a hard runner kill; cleaned normally by the always() step.
+      # Full rationale → qwen-autofix.md#af-148
+      WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'
     steps:
       - name: 'Scan for PRs with new feedback'
         id: 'scan'
@@ -2087,6 +2101,16 @@ jobs:
           REVIEW_SENDER: '${{ needs.route.outputs.review_sender }}'
           DISPATCH_SOURCE: "${{ github.event_name == 'workflow_dispatch' && inputs.source || '' }}"
         run: |-
+          # gh reroute hardening, mirroring the heavy jobs: pin the host, drop
+          # planted tokens, and use a fresh empty config dir — the pool's
+          # shared ~/.config/gh is attacker-writable, and a config.yml with an
+          # http_unix_socket reroute would swallow this step's gh calls,
+          # CI_DEV_BOT_PAT in the Authorization header included.
+          # Full rationale → qwen-autofix.md#af-148
+          export GH_HOST=github.com
+          unset GH_ENTERPRISE_TOKEN GH_TOKEN
+          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
+
           # Every lane that reaches this scan is supposed to hold the PAT:
           # route now declines the one event GitHub is known to run without
           # secrets (a fork PR's own review) before it can set do_review.
@@ -2102,11 +2126,11 @@ jobs:
           # markers, cross-check checks and fork state) was the only way to see
           # a stall, so stalls stayed invisible until someone went looking.
           FLEET_FILE="$(mktemp)"
-          trap 'rm -f "${FLEET_FILE}"' EXIT
+          trap 'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"' EXIT
           fleet_row() {
             printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${FLEET_FILE}"
           }
-          WORKDIR="$(mktemp -d)"
+          (umask 077; mkdir -p "${WORKDIR}")
 
           read_forced_pr_meta() {
             local attempt meta
@@ -3267,6 +3291,16 @@ jobs:
           } >> "${GITHUB_STEP_SUMMARY}"
           echo "targets=${TARGETS}" >> "${GITHUB_OUTPUT}"
           echo "has_targets=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
+
+      # Nothing else removes the per-run WORKDIR; on the persistent pool
+      # every scan would leave its API dumps behind forever. always() covers
+      # cancellation (the in-step EXIT trap does not fire on a killed run);
+      # only a hard runner kill abandons the dir, and the autofix* age sweep
+      # in the heavy jobs reclaims it. Mirrors issue-autofix's cleanup step.
+      # Full rationale → qwen-autofix.md#af-148
+      - name: 'Clean up scan workdir'
+        if: 'always()'
+        run: 'rm -rf "${WORKDIR}"'
 
   # ===========================================================================
   # REVIEW PHASE (build) — compile the trusted-base CLI bundle ONCE per scan

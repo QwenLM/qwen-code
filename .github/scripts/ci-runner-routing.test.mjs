@@ -69,9 +69,9 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'merge_group'/,
       String(eventName === 'merge_group'),
     ],
-    // The review term MUST substitute before the plain pull_request one:
-    // 'pull_request' is a prefix of 'pull_request_review', so the plain
-    // pattern would otherwise eat the review term's head.
+    // Longest term first as a convention; both patterns are quote-anchored
+    // (the closing quote is part of each regex), so neither can match
+    // inside the other and the substitution order is behaviorally inert.
     [
       /github\.event_name != 'pull_request_review'/,
       String(eventName !== 'pull_request_review'),
@@ -489,7 +489,12 @@ describe('qwen-autofix.yml scan-lane runner routing', () => {
     });
 
     it(`${jobName} obeys the kill-switch on every event`, () => {
-      for (const eventName of ['schedule', 'workflow_dispatch']) {
+      for (const eventName of [
+        'schedule',
+        'workflow_dispatch',
+        'pull_request',
+        'pull_request_review',
+      ]) {
         assert.deepEqual(
           evalRunsOn(runsOn, {
             ecsDisabled: true,
