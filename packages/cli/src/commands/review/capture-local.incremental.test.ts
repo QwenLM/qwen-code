@@ -23,7 +23,7 @@ import {
   existsSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { stateIdOf } from './lib/local-anchor.js';
 import { cacheCommitCommand } from './cache-commit.js';
 import { captureLocalCommand } from './capture-local.js';
@@ -706,6 +706,143 @@ describe('capture-local — the decided stops are machine-readable', () => {
     const second = capture({ cache: cachePath, model: 'model-a' });
     expect(second['incremental']).toBeUndefined();
     expect(stderrLines.join('\n')).toContain('still on disk');
+  });
+
+  it('reads core.fileMode as a bool — a legacy false spelling still folds', () => {
+    // R20-1: `config --get` echoes the STORED spelling, so `off`/`no`/`0`
+    // failed a `!== 'false'` test and the exec fold was silently disabled —
+    // an executable file whose edit is discarded in place then refused as
+    // "dropped out while still on disk", every round, for ever.
+    seedDirtyTree();
+    git('config', 'core.fileMode', 'off');
+    execFileSync('chmod', ['+x', join(repo, CHANGED)]);
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    // The designed discarded-change shape, HEAD unmoved: the edit goes
+    // back, and the exec bit the cache recorded is re-applied — `git diff
+    // HEAD` stays empty under this knob (`git checkout --` resets the mode,
+    // so the chmod comes after), and the path drops out of the capture with
+    // the worktree reading 100755 against HEAD's 100644.
+    git('checkout', '--', CHANGED);
+    execFileSync('chmod', ['+x', join(repo, CHANGED)]);
+
+    stderrLines.length = 0;
+    capture({ cache: cachePath, model: 'model-a' });
+    expect(stderrLines.join('\n')).not.toContain('still on disk');
+  });
+
+  it('re-reviews a materialized symlink under core.symlinks=false — disclosed', () => {
+    // R20-5: with the knob off git materializes a tracked symlink as a
+    // regular file, so the worktree side reads `100644:<oid>:<attrs>`
+    // against HEAD's `120000:<oid>` and the designed discarded-change shape
+    // cannot be certified. A mode fold does not close it (the spellings
+    // also differ in carrying attributes at all), and equalizing the
+    // attributes would drop the rendering dimension for that path — so the
+    // bounded over-review is the accepted answer, pinned here so a later
+    // change cannot turn it into a silent certification.
+    seedDirtyTree();
+    symlinkSync('changed.ts', join(repo, 'src/link.ts'));
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'add symlink');
+    rmSync(join(repo, 'src/link.ts'));
+    symlinkSync('caller.ts', join(repo, 'src/link.ts'));
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    git('config', 'core.symlinks', 'false');
+    rmSync(join(repo, 'src/link.ts'));
+    writeFileSync(join(repo, 'src/link.ts'), 'changed.ts');
+
+    stderrLines.length = 0;
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    // Refused, out loud, and NEVER decided: over-review, not certification.
+    expect(stderrLines.join('\n')).toContain('still on disk');
+    expect(second['nothingToReview']).toBeUndefined();
+  });
+
+  it('certifies a restored SUBMODULE pointer instead of refusing it for ever', () => {
+    // R20-3: a gitlink is unhashable on both sides by design (a directory in
+    // the worktree, type `commit` in the tree), so the both-UNHASHABLE
+    // refusal fired every round once round 1 had touched a submodule — the
+    // permanent wedge. But git measures submodules itself and the pinned
+    // flags keep them in the capture, so a gitlink's ABSENCE from the diff
+    // is git's own answer that the pointer did not move.
+    seedDirtyTree();
+    const sub = realpathSync(mkdtempSync(join(tmpdir(), 'review-sub-')));
+    execFileSync('git', ['init', '-q', '--template=', '.'], { cwd: sub });
+    execFileSync('git', ['config', 'user.email', 'a@b'], { cwd: sub });
+    execFileSync('git', ['config', 'user.name', 'a'], { cwd: sub });
+    writeFileSync(join(sub, 'm.ts'), 'export const m = 0;\n');
+    execFileSync('git', ['add', '-A'], { cwd: sub });
+    execFileSync('git', ['commit', '-q', '--no-verify', '-m', 'm0'], {
+      cwd: sub,
+    });
+    git(
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '-q',
+      sub,
+      'mod',
+    );
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'add submodule');
+    // Round 1 reviews a MOVED pointer, so the gitlink is in the population.
+    writeFileSync(join(sub, 'm.ts'), 'export const m = 1;\n');
+    execFileSync('git', ['commit', '-q', '--no-verify', '-am', 'm1'], {
+      cwd: sub,
+    });
+    execFileSync('git', ['-c', 'protocol.file.allow=always', 'pull', '-q'], {
+      cwd: join(repo, 'mod'),
+    });
+    const first = capture({ model: 'model-a' });
+    const cachePath = promoteCandidate(first, 'model-a');
+    // The user restores the pointer: `git diff HEAD` goes quiet for it.
+    git('submodule', 'update', '--recursive');
+    git('checkout', '--', '.');
+
+    stderrLines.length = 0;
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(stderrLines.join('\n')).not.toContain('still on disk');
+    rmSync(sub, { recursive: true, force: true });
+    expect(second['incremental']).toBeDefined();
+  });
+
+  it('keeps a DIRECTORY subject out of the anchor — it has no bytes', () => {
+    // R20-2: `qwen review <dir>` is a supported entrance, and the subject
+    // was injected into the hashed population unconditionally — recorded as
+    // UNHASHABLE, which never equals itself, so `changedSince` reported the
+    // directory every round and the unchanged-since stop was unreachable
+    // for that target for ever. Its FILES carry the bytes; the directory
+    // carries none.
+    seedDirtyTree();
+    const plan = capture({ file: 'src', model: 'model-a' });
+    const cand = JSON.parse(readFileSync(plan.cacheCandidatePath, 'utf8')) as {
+      files: Record<string, string>;
+    };
+    expect(Object.keys(cand.files)).not.toContain('src');
+    expect(Object.keys(cand.files)).toContain(CHANGED);
+    // …and the round after it converges: no UNHASHABLE entry keeps the
+    // symmetric difference non-empty. The cache goes to the path the plan
+    // published — a FILE review is namespaced, not `local.json`.
+    const cachePath = plan['cachePath'] as string;
+    mkdirSync(dirname(join(repo, cachePath)), { recursive: true });
+    writeFileSync(
+      join(repo, cachePath),
+      JSON.stringify({ ...cand, lastModelId: 'model-a' }),
+    );
+    const second = capture({
+      file: 'src',
+      cache: join(repo, cachePath),
+      model: 'model-a',
+    });
+    expect(second['nothingToReview']).toEqual({
+      reason: 'unchanged-since-last-round',
+    });
   });
 
   it('publishes the stop at a name the PARENT can predict', () => {

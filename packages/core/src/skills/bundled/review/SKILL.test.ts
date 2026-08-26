@@ -1268,6 +1268,13 @@ describe('bundled review skill', () => {
     // what makes "never glob its family" true (pinned structurally above).
     const body = skillBody();
     expect(body).toContain('Remove the plan `--out` you wrote');
+    // R20-4: a file review whose token derives to a RESERVED name shares
+    // the sweep namespace with the whole-tree round, and neither is
+    // lease-guarded — running cleanup there deletes a live concurrent
+    // plan and its records.
+    expect(body).toContain(
+      '**A FILE review whose derived token collides with a RESERVED one — `local`, or `pr-<n>` — must NOT run this command at all**',
+    );
     // R18-5: the file family sits outside every cleanup sweep, so this
     // instruction is its ONLY remover — and cleanup's #9206 retention (keep
     // the record directory of a run that stopped without converging) must
