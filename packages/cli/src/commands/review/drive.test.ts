@@ -33,6 +33,7 @@ import {
   DRIVE_SENTINEL,
   parseCaptureSpecs,
   extractCaptures,
+  readCapped,
   type ExecResult,
 } from './drive.js';
 import { BRIEFS } from './lib/agent-briefs.js';
@@ -153,7 +154,9 @@ describe('the sentinel', () => {
   it('carries the exit code on the same line it announces completion', () => {
     // Two facts read from one capture. A capture holding the marker but not the
     // code would report `completed` with an unknown result.
-    expect(wrapScript('true', '/tmp/rc')).toContain(`${DRIVE_SENTINEL} rc=`);
+    expect(wrapScript('/tmp/body.sh', '/tmp/rc')).toContain(
+      `${DRIVE_SENTINEL} rc=`,
+    );
     expect(sentinelExitCode(`x\n${DRIVE_SENTINEL} rc=0\n`)).toBe(0);
     expect(sentinelExitCode(`x\n${DRIVE_SENTINEL} rc=17\n`)).toBe(17);
   });
@@ -178,7 +181,7 @@ describe('the sentinel', () => {
     // `timed-out` with a null exit code — a run that answered in milliseconds
     // reported as one that never finished. A `set +e` assertion did not catch
     // it, because `set +e` has no bearing on `exit`; the trap does.
-    expect(wrapScript('exit 17', '/tmp/rc')).toMatch(/^trap .* EXIT/);
+    expect(wrapScript('/tmp/body.sh', '/tmp/rc')).toMatch(/^trap .* EXIT/);
   });
 });
 
@@ -190,8 +193,11 @@ describe.skipIf(process.platform === 'win32')(
     // and read the verdict from the sentinel FILE, the channel that has to
     // survive a bounded log.
     const realExit = (script: string): number | null => {
-      const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
-      spawnSync('bash', ['-c', wrapScript(script, rc)], { encoding: 'utf8' });
+      const dir = mkdtempSync(join(tmpdir(), 'drv-'));
+      const rc = join(dir, 'drive.rc');
+      const body = join(dir, 'body.sh');
+      writeFileSync(body, `${script}\n`);
+      spawnSync('bash', ['-c', wrapScript(body, rc)], { encoding: 'utf8' });
       return existsSync(rc) ? sentinelExitCode(readFileSync(rc, 'utf8')) : null;
     };
 
@@ -202,21 +208,34 @@ describe.skipIf(process.platform === 'win32')(
       expect(realExit('exit 0')).toBe(0);
     });
 
-    it('survives a body that ends in exec — the subshell takes the image swap, not the trap', () => {
+    it('survives a body that ends in exec — the child bash takes the image swap, not the trap', () => {
       // A verifier script whose last line is `exec <cmd>` replaces the shell
-      // image; without the subshell wrapper the EXIT trap never fires and the
-      // sentinel is never written, so the driver would read a null verdict for
-      // a run that actually finished. The subshell absorbs the exec and the
-      // outer shell's trap still stamps the subshell's real exit code.
+      // image; if that were the trap-owning shell the EXIT trap would never fire
+      // and the sentinel never be written, so the driver would read a null
+      // verdict for a run that actually finished. Running the body as its own
+      // `bash <file>` child gives exec a child to replace while the wrapper's
+      // trap still stamps that child's real exit code.
       expect(realExit('exec true')).toBe(0);
       expect(realExit('exec bash -c "exit 5"')).toBe(5);
+    });
+
+    it('runs a body that ends in an unterminated heredoc instead of eating the wrapper', () => {
+      // The body is its own file, so `cat <<EOF` with no closing delimiter is
+      // delimited by the end of that file and runs (bash warns, exit 0). An
+      // inlined subshell would have let the dangling heredoc swallow the
+      // wrapper's own closing `)`, turning the whole body into a syntax error
+      // that stamped rc=2 for a body that never ran.
+      expect(realExit('echo ran; cat <<EOF\nsome text')).toBe(0);
     });
 
     it('keeps the script output on stdout and the verdict in its own file', () => {
       // Two channels on purpose. The log is bounded; the verdict must not be
       // bounded with it, and the next test shows what happens when it is.
-      const rc = join(mkdtempSync(join(tmpdir(), 'drv-')), 'drive.rc');
-      const r = spawnSync('bash', ['-c', wrapScript('echo hello-there', rc)], {
+      const dir = mkdtempSync(join(tmpdir(), 'drv-'));
+      const rc = join(dir, 'drive.rc');
+      const body = join(dir, 'body.sh');
+      writeFileSync(body, 'echo hello-there\n');
+      const r = spawnSync('bash', ['-c', wrapScript(body, rc)], {
         encoding: 'utf8',
       });
       expect(r.stdout).toContain('hello-there');
@@ -244,13 +263,12 @@ describe.skipIf(process.platform === 'win32')(
       const dir = mkdtempSync(join(tmpdir(), 'drv-'));
       const rc = join(dir, 'drive.rc');
       const sh = join(dir, 's.sh');
+      const body = join(dir, 'body.sh');
       writeFileSync(
-        sh,
-        wrapScript(
-          'for i in $(seq 1 20000); do echo padding-line-$i-aaaaaaaaaaaaaaaaaaaa; done; exit 5',
-          rc,
-        ),
+        body,
+        'for i in $(seq 1 20000); do echo padding-line-$i-aaaaaaaaaaaaaaaaaaaa; done; exit 5\n',
       );
+      writeFileSync(sh, wrapScript(body, rc));
       spawnSync(
         'bash',
         ['-c', `bash ${sh} 2>&1 | head -c 4096 > ${join(dir, 'log')}`],
@@ -605,6 +623,36 @@ describe('the log cap', () => {
     expect(r.outcome).toBe('overflowed');
     expect(r.exitCode).toBeNull(); // a stopped run never carries a verdict
     expect(r.output).toBe(''); // never read — not the 300 MiB (trimmed) tail
+  });
+
+  it('readCapped reads a file bounded by its size at open, not a concurrent writer', () => {
+    // The load-bearing property: the read is bounded by the fstat AT open, so a
+    // writer that appends after the fstat cannot enlarge the allocation into an
+    // ERR_STRING_TOO_LONG throw. A sparse file grown past the cap after this
+    // handle opened would still stat over-cap here, so this pins the two
+    // reachable outcomes directly: a normal read, an absent read, and an
+    // over-cap file classified overflow WITHOUT allocating it.
+    const dir = mkdtempSync(join(tmpdir(), 'drv-cap-'));
+    const small = join(dir, 'small.log');
+    writeFileSync(small, 'hello');
+    expect(readCapped(small, 1024)).toEqual({ overflow: false, text: 'hello' });
+    // Absent file: an empty snapshot, never an overflow.
+    expect(readCapped(join(dir, 'missing.log'), 1024)).toEqual({
+      overflow: false,
+      text: '',
+    });
+    // Over the cap: overflow, and the bytes are never allocated (empty text).
+    const huge = join(dir, 'huge.log');
+    writeFileSync(huge, '');
+    truncateSync(huge, 300 * 1024 * 1024); // sparse
+    expect(readCapped(huge, 256 * 1024 * 1024)).toEqual({
+      overflow: true,
+      text: '',
+    });
+    // Exactly AT the cap is allowed (boundary is strictly greater-than).
+    writeFileSync(small, 'abc');
+    expect(readCapped(small, 3)).toEqual({ overflow: false, text: 'abc' });
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

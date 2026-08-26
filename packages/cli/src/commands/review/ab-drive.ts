@@ -66,6 +66,7 @@ import {
   POLL_MS,
   SERVER_NAME_RE,
   logBytes,
+  readCapped,
   sentinelExitCode,
   shellQuote,
   spawnExec,
@@ -225,6 +226,25 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       '--script is empty — there is nothing to drive, and an empty script completes vacuously on both arms. Nothing was started.',
     );
   }
+  // Present-but-EMPTY optional flags: yargs passes `--shared ''` (the exact
+  // shape of an unset `$UPSTREAM` substitution) through as "given", but the
+  // consumers below are plain falsy checks — so `''` reads as ABSENT. `--shared
+  // ''` silently makes mode `no-shared` (no upstream starts, both arms complete
+  // identically → observed:true over an A/B whose upstream never ran); `--ready
+  // ''` drops the readiness gate; `--shared-ready ''` lets arm a drive a
+  // mid-startup daemon while arm b drives it fully up. Reject them here so an
+  // empty substitution fails loudly instead of licensing a vacuous verdict.
+  for (const [flag, v] of [
+    ['--shared', args.shared],
+    ['--ready', args.ready],
+    ['--shared-ready', args.sharedReady],
+  ] as const) {
+    if (v !== undefined && v.trim() === '') {
+      return fail(
+        `${flag} was given an empty value — an empty string is indistinguishable from absent and silently disables the upstream or readiness gate it names, licensing a vacuous observed:true. Omit the flag or give it a real value. Nothing was started.`,
+      );
+    }
+  }
   // Directories, not merely existing paths: `tmux new-session -c <a file>`
   // succeeds with a silent cwd fallback to $HOME, and the arm then reports
   // `completed` for a script that never ran in its tree — an A/B verdict
@@ -383,7 +403,11 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       logPath = join(phaseDir, `${name}.log`);
       rcPath = join(phaseDir, `${name}.rc`);
       const scriptPath = join(phaseDir, `${name}.sh`);
-      writeFileSync(scriptPath, wrapScript(prefix + script, rcPath), 'utf8');
+      const bodyPath = join(phaseDir, `${name}.body.sh`);
+      // The user body (with its env prefix) in its own file so wrapScript runs
+      // it with `bash <file>` — see wrapScript on why inlining it breaks.
+      writeFileSync(bodyPath, `${prefix}${script}\n`, 'utf8');
+      writeFileSync(scriptPath, wrapScript(bodyPath, rcPath), 'utf8');
       const create = tmux(
         'new-session',
         '-d',
@@ -668,20 +692,19 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
       let exitCode: number | null = null;
       let output = '';
       for (;;) {
-        // Hard ceiling BEFORE the read. `readIfThere` allocates the whole
-        // file, so an arm writing faster than one poll interval can grow its
-        // log past V8's ~512 MiB string limit between polls; the read then
-        // throws, `readIfThere` swallows it to '', and a COMPLETED arm would
-        // report an empty capture — two provably different arms comparing
-        // equal. Stat first and classify a log past MAX_READ_BYTES as
-        // overflowed WITHOUT reading (never completed), so that empty-capture
-        // verdict can never form. The soft LOG_MAX_BYTES check below still runs
-        // after the read for an ordinary overflow.
-        if (logBytes(a.logPath) > MAX_READ_BYTES) {
+        // Bounded read. `readCapped` opens once, fstats, and reads at most that
+        // many bytes, so an arm writing faster than one poll interval cannot
+        // grow its log past the read into an ERR_STRING_TOO_LONG throw (which
+        // `readIfThere` would swallow to '', reporting a COMPLETED arm's empty
+        // capture — two provably different arms comparing equal). Over
+        // MAX_READ_BYTES is overflowed WITHOUT reading (never completed); the
+        // soft LOG_MAX_BYTES check below still trims an ordinary overflow.
+        const cap = readCapped(a.logPath, MAX_READ_BYTES);
+        if (cap.overflow) {
           outcome = 'overflowed';
           break;
         }
-        output = readIfThere(a.logPath);
+        output = cap.text;
         const rcText = readIfThere(a.rcPath);
         exitCode = rcText === '' ? null : sentinelExitCode(rcText);
         // Completion needs BOTH the sentinel AND the session gone. The
@@ -708,14 +731,15 @@ export function runAbDrive(args: AbDriveArgs): AbDriveReport {
           // near-cap logs). Here the stake is doubled: one arm hitting the
           // race and the other not turns two identical runs into
           // `identicalOutput: false` — a harness-fabricated difference.
-          // Re-check the hard ceiling first: a final burst between the stat at
-          // the top of this iteration and the sentinel could still have pushed
-          // the log past MAX_READ_BYTES, and the re-read would then throw to ''.
-          if (logBytes(a.logPath) > MAX_READ_BYTES) {
+          // Re-read (bounded) now the sentinel is there: a final burst past
+          // MAX_READ_BYTES between the top-of-iteration read and the sentinel
+          // is still classified overflowed rather than swallowed to ''.
+          const done = readCapped(a.logPath, MAX_READ_BYTES);
+          if (done.overflow) {
             outcome = 'overflowed';
             break;
           }
-          output = readIfThere(a.logPath);
+          output = done.text;
           outcome = 'completed';
           break;
         }

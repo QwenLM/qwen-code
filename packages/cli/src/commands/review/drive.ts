@@ -46,6 +46,10 @@ import {
   existsSync,
   rmSync,
   statSync,
+  openSync,
+  fstatSync,
+  readSync,
+  closeSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -439,6 +443,45 @@ export function waitMs(ms: number): void {
 }
 
 /**
+ * Read a file bounded by its size AT open time, never following a concurrent
+ * writer. A `statSync`-then-`readFileSync` guard is check-then-use: readFileSync
+ * keeps reading a file that grows past the size it stat'd, so a log a
+ * backgrounded writer bursts mid-read can still exceed V8's ~512 MiB string
+ * limit and throw `ERR_STRING_TOO_LONG` — the exact throw the ceiling exists to
+ * prevent. Opening once, `fstat`-ing, and reading at most that many bytes caps
+ * the allocation at a size already accepted. `{ overflow: true }` when the file
+ * is already over `maxBytes` (the caller treats it as overflowed); an absent
+ * file reads as an empty snapshot, as before.
+ */
+export function readCapped(
+  path: string,
+  maxBytes: number,
+): { overflow: boolean; text: string } {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch {
+    return { overflow: false, text: '' };
+  }
+  try {
+    const size = fstatSync(fd).size;
+    if (size > maxBytes) return { overflow: true, text: '' };
+    const buf = Buffer.allocUnsafe(size);
+    let off = 0;
+    // Read at most `size` bytes (from absolute positions), so a writer that
+    // grows the file after the fstat cannot enlarge this read.
+    while (off < size) {
+      const n = readSync(fd, buf, off, size - off, off);
+      if (n <= 0) break; // shrank or hit EOF early — keep what we have
+      off += n;
+    }
+    return { overflow: false, text: buf.toString('utf8', 0, off) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * The production exec: 30s hang guard, 64MB buffer, null-status-means-failure.
  * Exported for `ab-drive`, which owns the same tmux mechanics across two arms
  * — a second copy of these limits is where the two commands drift apart under
@@ -497,17 +540,20 @@ export const DRIVE_SENTINEL = '__QWEN_REVIEW_DRIVE_DONE__';
  * not.
  */
 export function wrapScript(
-  script: string,
+  userScriptPath: string,
   sentinelPath: string,
   sentinel = DRIVE_SENTINEL,
 ): string {
-  // The user body runs in a SUBSHELL so the EXIT trap survives it. A drive
-  // script ending in `exec` (`exec node server.js`, `exec my-tool`) replaces
-  // the shell it runs in; if that were the trap-owning shell the sentinel
-  // would never be written and the arm would time out despite finishing.
-  // `( … )` gives exec a child to replace, and `__qwen_rc=$?` in the trap
-  // records the subshell's own exit code.
-  return `trap '__qwen_rc=$?; echo "${sentinel} rc=\${__qwen_rc}" > ${shellQuote(sentinelPath)}' EXIT\nset +e\n(\n${script}\n)\n`;
+  // Run the user body from its OWN file (`bash <file>`), not inlined. Two
+  // properties fall out. `exec` in the body (`exec node server.js`) replaces
+  // only THAT child bash, so the trap-owning wrapper survives to write the
+  // sentinel — without this the arm would time out despite finishing. And a
+  // construct that swallows trailing text — an unterminated heredoc — is
+  // delimited by the END of the user file, so it cannot reach past it. An
+  // earlier inlined subshell `( … )` could not offer the second: a dangling
+  // heredoc consumed the closing paren, the compound never parsed, and the body
+  // silently did not run while the trap stamped the syntax-error rc.
+  return `trap '__qwen_rc=$?; echo "${sentinel} rc=\${__qwen_rc}" > ${shellQuote(sentinelPath)}' EXIT\nset +e\nbash ${shellQuote(userScriptPath)}\n`;
 }
 
 /** Parse the sentinel line back out of a capture. Null when it is not there. */
@@ -620,10 +666,13 @@ export function runDrive(args: DriveArgs): DriveReport {
   const dir = join(tmpdir(), `qwen-review-drive-${server}`);
   mkdirSync(dir, { recursive: true });
   const scriptPath = join(dir, 'drive.sh');
+  const bodyPath = join(dir, 'drive.body.sh');
   const logPath = args.logPath ?? join(dir, 'drive.log');
   const sentinelPath = join(dir, 'drive.rc');
   rmSync(sentinelPath, { force: true });
-  writeFileSync(scriptPath, wrapScript(args.script, sentinelPath), 'utf8');
+  // The user body in its own file so wrapScript runs it with `bash <file>`.
+  writeFileSync(bodyPath, `${args.script}\n`, 'utf8');
+  writeFileSync(scriptPath, wrapScript(bodyPath, sentinelPath), 'utf8');
 
   const droveFrom = Date.now();
   let output = '';
@@ -670,16 +719,17 @@ export function runDrive(args: DriveArgs): DriveReport {
     }
     const deadline = droveFrom + args.timeout * 1000;
     for (;;) {
-      // Hard ceiling BEFORE the read: readFileSync allocates the whole file, so
-      // a log that grows past V8's ~512 MiB string limit between polls throws
-      // ERR_STRING_TOO_LONG out of the loop. Stat first and stop unread past
-      // MAX_READ_BYTES; the soft LOG_MAX_BYTES overflow check below still runs
-      // after the read, so an ordinary overflow keeps its trimmed tail.
-      if (logBytes(logPath) > MAX_READ_BYTES) {
+      // Bounded read: `readCapped` opens once, fstats, and reads at most that
+      // many bytes, so a writer bursting the log past MAX_READ_BYTES mid-read
+      // cannot enlarge the allocation into an ERR_STRING_TOO_LONG throw. Over
+      // the ceiling is `overflowed`; the soft LOG_MAX_BYTES check below still
+      // trims an ordinary overflow.
+      const cap = readCapped(logPath, MAX_READ_BYTES);
+      if (cap.overflow) {
         outcome = 'overflowed';
         break;
       }
-      output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+      output = cap.text;
       exitCode = existsSync(sentinelPath)
         ? sentinelExitCode(readFileSync(sentinelPath, 'utf8'))
         : null;
@@ -697,15 +747,15 @@ export function runDrive(args: DriveArgs): DriveReport {
         // sentinel write, so a read taken after it is complete. Kept to this
         // branch: the other exits stopped the run rather than observing it
         // finish, and have no such guarantee to lean on.
-        // Re-check the hard ceiling first: a final burst between the stat at
-        // the top of this iteration and the sentinel could have pushed the log
-        // past MAX_READ_BYTES, and the re-read would then throw
-        // ERR_STRING_TOO_LONG.
-        if (logBytes(logPath) > MAX_READ_BYTES) {
+        // Re-read (bounded) now the sentinel is there: a final burst past
+        // MAX_READ_BYTES between the top-of-iteration read and the sentinel is
+        // still classified overflowed rather than throwing.
+        const done = readCapped(logPath, MAX_READ_BYTES);
+        if (done.overflow) {
           outcome = 'overflowed';
           break;
         }
-        output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+        output = done.text;
         outcome = 'completed';
         break;
       }
@@ -727,8 +777,15 @@ export function runDrive(args: DriveArgs): DriveReport {
     // invocation would otherwise leave its own directory behind: measured, six
     // runs left five. `output` is already in memory by here, so nothing the
     // caller needs is in this tree. A caller who passed `--log-path` owns that
-    // file and keeps it.
-    if (!args.logPath) rmSync(dir, { recursive: true, force: true });
+    // file and keeps it. Best-effort: an `ENOTEMPTY`/`EIO` from a degraded
+    // tmpdir must not throw the finished report away out of the finally.
+    if (!args.logPath) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best effort */
+      }
+    }
   }
 
   // From the untrimmed log, and on every outcome rather than only `completed`:

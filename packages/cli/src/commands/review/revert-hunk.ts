@@ -410,13 +410,19 @@ function gitTreeState(
   });
   if (r.error) return 'unrunnable';
   if (r.status !== 0) return 'not-repo';
-  const top = (r.stdout ?? '').trim();
-  if (top === '') return 'not-repo';
-  // realpath both sides: `--show-toplevel` prints the canonical path, while the
-  // tree arg may reach it through a symlink (macOS /var → /private/var).
+  const rawTop = (r.stdout ?? '').trim();
+  if (rawTop === '') return 'not-repo';
+  // realpath BOTH sides — not just the tree. git prints POSIX slashes from
+  // `--show-toplevel` even on Windows (`C:/…`), while realpathSync returns the
+  // platform separator (`C:\…`), so a raw comparison never matches there and
+  // every valid root is misread as a subdirectory. realpath-ing git's output
+  // too normalizes the separators (and any symlink, e.g. macOS /var →
+  // /private/var), mirroring the sibling gate in scratch-tree.ts.
   let real: string;
+  let top: string;
   try {
     real = realpathSync(tree);
+    top = realpathSync(rawTop);
   } catch {
     return 'unrunnable';
   }

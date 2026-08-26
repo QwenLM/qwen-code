@@ -287,6 +287,20 @@ describe('runAbDrive, harnessed', () => {
     expect(h.log).toEqual([]);
   });
 
+  it('refuses a present-but-EMPTY --shared / --ready / --shared-ready', () => {
+    // yargs passes `--shared ''` (an unset $UPSTREAM substitution) through as
+    // given, but the consumers are falsy checks, so `''` reads as absent — the
+    // upstream/readiness gate silently vanishes and a vacuous observed:true
+    // follows. Reject the empty value loudly.
+    for (const key of ['shared', 'ready', 'sharedReady'] as const) {
+      const h = harness({ server: 'x' });
+      const r = runAbDrive(baseArgs({ [key]: '', exec: h.exec }));
+      expect(r.observed).toBe(false);
+      expect(r.note).toContain('empty value');
+      expect(h.log).toEqual([]); // rejected before anything ran
+    }
+  });
+
   it('reports the environment gap when tmux is absent', () => {
     const h = harness({ server: 't', tmuxAvailable: false });
     const r = runAbDrive(baseArgs({ exec: h.exec }));
