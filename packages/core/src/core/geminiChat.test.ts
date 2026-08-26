@@ -1982,6 +1982,94 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('accepts a quiet tool-result completion with every signed reasoning episode in history and JSONL', async () => {
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+        chatWithRecording.setHistory([
+          { role: 'user', parts: [{ text: 'inspect the project' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  args: {},
+                },
+              },
+            ],
+          },
+        ]);
+        const expectedParts: Part[] = [
+          {
+            text: 'reasoning A',
+            thought: true,
+            thoughtSignature: 'sigA',
+          },
+          {
+            text: 'reasoning B',
+            thought: true,
+            thoughtSignature: 'sigB',
+          },
+        ];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse(
+            stopResponse([
+              { text: 'reasoning A', thought: true },
+              { thought: true, thoughtSignature: 'sigA' },
+              { text: 'reasoning B', thought: true },
+              { thought: true, thoughtSignature: 'sigB' },
+            ]),
+          ),
+        );
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          {
+            message: [
+              {
+                functionResponse: {
+                  id: 'call_read_file',
+                  name: 'read_file',
+                  response: { output: 'file contents' },
+                },
+              },
+            ],
+          },
+          'prompt-id-quiet-signed-episodes',
+        );
+        await collectStreamWithFakeTimers(stream, 35_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(5);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        expect(chatWithRecording.getHistory().at(-1)).toEqual({
+          role: 'model',
+          parts: expectedParts,
+        });
+        expect(recordAssistantTurn).toHaveBeenCalledOnce();
+        expect(recordAssistantTurn).toHaveBeenCalledWith(
+          expect.objectContaining({ message: expectedParts }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should still surface no-progress for a tool result continuation whose reasoning spans multiple episodes', async () => {
       // Regression guard for the contentText filter needing `&& !part.thought`:
       // consolidatedHistoryParts now contains thought parts inline, so an
