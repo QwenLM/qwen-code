@@ -1,0 +1,230 @@
+name: PR 10212 finalize
+
+on:
+  push:
+    branches:
+      - fix/10197-env-prefix-bash-rules
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/10197-env-prefix-bash-rules
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply review fixes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          rp = Path('packages/core/src/permissions/rule-parser.ts')
+          s = rp.read_text()
+          s = s.replace(
+              'const normalizedCommand = stripLeadingVariableAssignments(command);',
+              'const normalizedCommand = normalizeCommandForPermissionMatch(command);',
+              1,
+          )
+          s = s.replace(
+              'function stripLeadingVariableAssignments(command: string): string {',
+              'function normalizeCommandForPermissionMatch(command: string): string {',
+              1,
+          )
+          old_comment = '''    // Environment assignments are part of the execution semantics. A concrete
+              // Bash allow rule must not silently widen from `cmd` to arbitrary
+              // `NAME=value cmd` invocations, because runtimes and applications may
+              // interpret those variables before the trusted command runs. Preserve the
+              // original command whenever such a prefix is present so the rule must
+              // explicitly include it.
+          '''
+          new_comment = '''    // Environment assignments are part of the execution semantics. Any
+              // command-specific Bash pattern (exact, prefix, or glob) must not silently
+              // widen from `cmd` to arbitrary `NAME=value cmd` invocations, because
+              // runtimes and applications may interpret those variables before the
+              // trusted command runs. Preserve the original command whenever such a
+              // prefix is present so the rule must explicitly include it. The lone `*`
+              // rule is handled above as the intentional allow-all case.
+          '''
+          if old_comment not in s:
+              raise SystemExit('rule-parser comment anchor not found')
+          s = s.replace(old_comment, new_comment, 1)
+          rp.write_text(s)
+
+          pm = Path('packages/core/src/permissions/permission-manager.test.ts')
+          x = pm.read_text()
+          old_test = '''    it('matches commands with leading env var assignments', async () => {
+                expect(
+                  matchesCommandPattern(
+                    'python3 *',
+                    'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+                  ),
+                ).toBe(true);
+              });
+          '''
+          new_test = '''    it('does not let env assignments inherit a glob Bash rule', async () => {
+                expect(
+                  matchesCommandPattern(
+                    'python3 *',
+                    'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+                  ),
+                ).toBe(false);
+              });
+          '''
+          if old_test not in x:
+              raise SystemExit('existing env compatibility test anchor not found')
+          pm.write_text(x.replace(old_test, new_test, 1))
+
+          test = Path('packages/core/src/permissions/rule-parser.env-prefix.test.ts')
+          test.write_text(r'''/**
+           * @license
+           * Copyright 2025 Qwen team
+           * SPDX-License-Identifier: Apache-2.0
+           */
+
+          import { describe, expect, it } from 'vitest';
+          import { PermissionManager } from './permission-manager.js';
+          import type { PermissionManagerConfig } from './permission-manager.js';
+          import { matchesCommandPattern } from './rule-parser.js';
+
+          function makeConfig(allow: string[]): PermissionManagerConfig {
+            return {
+              getPermissionsAllow: () => allow,
+              getPermissionsAsk: () => [],
+              getPermissionsDeny: () => [],
+              getProjectRoot: () => '/repo',
+              getCwd: () => '/repo',
+              getApprovalMode: () => 'default',
+            };
+          }
+
+          describe('matchesCommandPattern environment prefixes', () => {
+            it('keeps plain commands matching', () => {
+              expect(matchesCommandPattern('npm --version', 'npm --version')).toBe(true);
+              expect(matchesCommandPattern('python3 *', 'python3 -c "print(1)"')).toBe(
+                true,
+              );
+            });
+
+            it('does not let static env prefixes inherit exact, prefix, or glob rules', () => {
+              expect(
+                matchesCommandPattern('npm --version', 'FOO=bar npm --version'),
+              ).toBe(false);
+              expect(matchesCommandPattern('npm', 'FOO=bar npm --version')).toBe(false);
+              expect(
+                matchesCommandPattern(
+                  'python3 *',
+                  'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+                ),
+              ).toBe(false);
+            });
+
+            it('does not let NODE_OPTIONS widen an npm allow rule', () => {
+              expect(
+                matchesCommandPattern(
+                  'npm --version',
+                  'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+                ),
+              ).toBe(false);
+            });
+
+            it('does not let GIT_CONFIG_* widen a git allow rule', () => {
+              expect(
+                matchesCommandPattern(
+                  'git status --short',
+                  'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=/tmp/fsmonitor.sh git status --short',
+                ),
+              ).toBe(false);
+            });
+
+            it('also covers substitution-bearing env assignments from #10192', () => {
+              expect(
+                matchesCommandPattern(
+                  'npm --version',
+                  'X=$(printf hidden) npm --version',
+                ),
+              ).toBe(false);
+            });
+
+            it('allows an env-prefixed command when the rule explicitly includes it', () => {
+              expect(
+                matchesCommandPattern(
+                  'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+                  'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+                ),
+              ).toBe(true);
+              expect(
+                matchesCommandPattern(
+                  'PYTHONPATH=/tmp/lib python3 *',
+                  'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+                ),
+              ).toBe(true);
+            });
+
+            it('keeps the intentional Bash(*) allow-all behavior', () => {
+              expect(
+                matchesCommandPattern(
+                  '*',
+                  'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+                ),
+              ).toBe(true);
+            });
+
+            it('fails closed end-to-end when only the unprefixed Bash command is allowed', async () => {
+              const pm = new PermissionManager(makeConfig(['Bash(npm --version)']));
+              pm.initialize();
+
+              await expect(
+                pm.evaluate({
+                  toolName: 'run_shell_command',
+                  command:
+                    'NODE_OPTIONS=--require=/tmp/preload.cjs npm --version',
+                  cwd: '/repo',
+                }),
+              ).resolves.toBe('ask');
+            });
+
+            it('does not let a virtual Read allow downgrade the env-prefix ask decision', async () => {
+              const pm = new PermissionManager(
+                makeConfig(['Bash(cat /repo/file)', 'Read']),
+              );
+              pm.initialize();
+
+              await expect(
+                pm.evaluate({
+                  toolName: 'run_shell_command',
+                  command:
+                    'NODE_OPTIONS=--require=/tmp/preload.cjs cat /repo/file',
+                  cwd: '/repo',
+                }),
+              ).resolves.toBe('ask');
+            });
+          });
+          ''')
+          PY
+      - name: Install dependencies
+        run: npm ci
+      - name: Format
+        run: npx prettier --write packages/core/src/permissions/rule-parser.ts packages/core/src/permissions/rule-parser.env-prefix.test.ts packages/core/src/permissions/permission-manager.test.ts
+      - name: Build workspace
+        run: npm run build
+      - name: Focused tests
+        run: npx vitest run packages/core/src/permissions/rule-parser.env-prefix.test.ts packages/core/src/permissions/permission-manager.test.ts packages/core/src/permissions/shell-semantics.test.ts packages/core/src/utils/shell-utils.test.ts
+      - name: Lint changed files
+        run: npx eslint packages/core/src/permissions/rule-parser.ts packages/core/src/permissions/rule-parser.env-prefix.test.ts packages/core/src/permissions/permission-manager.test.ts --max-warnings 0
+      - name: Commit final patch and remove helper workflow
+        shell: bash
+        run: |
+          rm .github/workflows/pr-10212-finalize.yml
+          git config user.name "SLP-DEV1"
+          git config user.email "298325363+SLP-DEV1@users.noreply.github.com"
+          git add packages/core/src/permissions/rule-parser.ts packages/core/src/permissions/rule-parser.env-prefix.test.ts packages/core/src/permissions/permission-manager.test.ts .github/workflows/pr-10212-finalize.yml
+          git commit -m "fix(permissions): make env-prefix policy explicit"
+          git push origin HEAD:fix/10197-env-prefix-bash-rules
