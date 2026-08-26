@@ -39,11 +39,17 @@ jobs:
           BOOT
           python3 /tmp/apply-pr-10202-fixes.py
 
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
+      - name: Install dependencies and workspace prerequisites
+        run: npm ci
 
-      - name: Build workspace prerequisites
-        run: npm run build
+      - name: Format changed files
+        run: >-
+          npx prettier --write
+          packages/core/src/permissions/rule-parser.ts
+          packages/core/src/tools/tool-registry.ts
+          packages/core/src/core/permissionFlow.ts
+          packages/core/src/core/permissionFlow.test.ts
+          packages/core/src/permissions/mcp-permission-collision.test.ts
 
       - name: Run focused regression suite
         run: >-
@@ -53,8 +59,14 @@ jobs:
           packages/core/src/core/permissionFlow.test.ts
           packages/core/src/core/coreToolScheduler.test.ts
 
-      - name: Check formatting
-        run: npx prettier --check packages/core/src/permissions/rule-parser.ts packages/core/src/tools/tool-registry.ts packages/core/src/core/permissionFlow.ts packages/core/src/core/permissionFlow.test.ts packages/core/src/permissions/mcp-permission-collision.test.ts
+      - name: Verify formatting
+        run: >-
+          npx prettier --check
+          packages/core/src/permissions/rule-parser.ts
+          packages/core/src/tools/tool-registry.ts
+          packages/core/src/core/permissionFlow.ts
+          packages/core/src/core/permissionFlow.test.ts
+          packages/core/src/permissions/mcp-permission-collision.test.ts
 
       - name: Commit fixes and clean temporary workflow files
         shell: bash
