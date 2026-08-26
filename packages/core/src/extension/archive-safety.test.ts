@@ -323,6 +323,18 @@ describe('assertTarArchiveLinksAreSafe', () => {
       },
     );
 
+    it('rejects a dot-relative duplicate of an already-seen entry path', async () => {
+      const archive = path.join(root, 'duplicate-entry.tar');
+      await writeCraftedTar(archive, [
+        createTarFileHeader('foo', 0),
+        createTarFileHeader('./foo', 0),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('duplicate entry path');
+    });
+
     it('accepts a symlink declared before its target', async () => {
       const archive = path.join(root, 'target-after-link.tar');
       await writeCraftedTar(archive, [
@@ -422,6 +434,22 @@ describe('assertTarArchiveLinksAreSafe', () => {
       ).rejects.toThrow('unsupported link entry');
     });
 
+    it('rejects a symlink with a Windows-absolute entry path', async () => {
+      // Distinct from the target-side check exercised by "rejects a
+      // symlink with a Windows-absolute target": this crafts the drive
+      // letter into the *entry* path so only `WINDOWS_ABSOLUTE_PATH.test(
+      // entryPath)` can reject it (the target, 'target', is unremarkable).
+      const archive = path.join(root, 'windows-entry-path.tar');
+      await writeCraftedTar(archive, [
+        symlinkHeader('C:\\pwn', 'target'),
+        createTarFileHeader('target', 0),
+      ]);
+
+      await expect(
+        assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
+      ).rejects.toThrow('unsupported link entry');
+    });
+
     it('rejects a symlink whose entry path normalizes to the archive root', async () => {
       const archive = path.join(root, 'root-entry.tar');
       await writeCraftedTar(archive, [
@@ -434,18 +462,35 @@ describe('assertTarArchiveLinksAreSafe', () => {
       ).rejects.toThrow('unsupported link entry');
     });
 
-    it('rejects a symlink resolving to its own directory', async () => {
-      const archive = path.join(root, 'self-cycle.tar');
-      await writeCraftedTar(archive, [symlinkHeader('self', '.')]);
+    it('rejects a symlink whose target resolves to its own entry path', async () => {
+      // dirname('link') + 'link' normalizes back to 'link' itself. This
+      // does NOT discriminate the `normalizedEntry === resolved`
+      // self-reference clause the way the sibling ancestor-entry test
+      // discriminates its own clause: onReadEntry always records the
+      // symlink itself in `archiveEntries` (typed SymbolicLink) before
+      // this check runs, so even with the clause removed, the post-loop
+      // "target must be a distinct regular-file entry" scan independently
+      // rejects a link that names itself. Kept as a plain regression test;
+      // deleting the self-reference clause does not fail it.
+      const archive = path.join(root, 'self-reference.tar');
+      await writeCraftedTar(archive, [symlinkHeader('link', 'link')]);
 
       await expect(
         assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),
       ).rejects.toThrow('unsupported link entry');
     });
 
-    it('rejects a symlink resolving to an ancestor directory', async () => {
-      const archive = path.join(root, 'ancestor-cycle.tar');
-      await writeCraftedTar(archive, [symlinkHeader('sub/loop', '..')]);
+    it('rejects a symlink whose target resolves to an ancestor entry', async () => {
+      // dirname('a/b/link') + '..' normalizes to 'a', an ancestor of the
+      // entry itself (not '.' or '..'), so this is rejected by the
+      // `normalizedEntry.startsWith(`${resolved}/`)` ancestor clause
+      // specifically (unlike `symlinkHeader('sub/loop', '..')`, whose
+      // resolved target is exactly '.' and never reaches this clause).
+      const archive = path.join(root, 'ancestor-entry.tar');
+      await writeCraftedTar(archive, [
+        createTarFileHeader('a', 0),
+        symlinkHeader('a/b/link', '..'),
+      ]);
 
       await expect(
         assertTarArchiveLinksAreSafe(archive, undefined, allowLinks),

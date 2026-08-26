@@ -8,6 +8,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import * as tar from 'tar';
+import { isSubpath } from '../utils/paths.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const MAX_REPORTED_ENTRY_PATH_LENGTH = 200;
@@ -108,13 +109,7 @@ function formatEntryPath(entryPath: string): string {
 }
 
 function isContainedPath(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative !== '' &&
-    relative !== '..' &&
-    !relative.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(relative)
-  );
+  return isSubpath(root, candidate) && path.relative(root, candidate) !== '';
 }
 
 export async function assertTarArchiveLinksAreSafe(
@@ -148,6 +143,20 @@ export async function assertTarArchiveLinksAreSafe(
     validationError = error;
     stream.destroy();
   };
+  // Shared by both the entry-path and the accepted-link-target accounting
+  // below, so the two stay under one budget instead of silently drifting.
+  const exceedsRetainedPathBudget = (value: string): boolean => {
+    retainedPathBytes += Buffer.byteLength(value);
+    if (retainedPathBytes > MAX_ARCHIVE_PATH_BYTES) {
+      failValidation(
+        new Error(
+          `Tar archive path metadata exceeds ${MAX_ARCHIVE_PATH_BYTES} bytes.`,
+        ),
+      );
+      return true;
+    }
+    return false;
+  };
   const onReadEntry = (entry: tar.ReadEntry) => {
     if (validationError) return;
     const entryPath = normalizeArchiveEntryPath(entry.path);
@@ -160,15 +169,7 @@ export async function assertTarArchiveLinksAreSafe(
         );
         return;
       }
-      retainedPathBytes += Buffer.byteLength(entryPath);
-      if (retainedPathBytes > MAX_ARCHIVE_PATH_BYTES) {
-        failValidation(
-          new Error(
-            `Tar archive path metadata exceeds ${MAX_ARCHIVE_PATH_BYTES} bytes.`,
-          ),
-        );
-        return;
-      }
+      if (exceedsRetainedPathBudget(entryPath)) return;
       archiveEntries.set(entryPath, { type: entry.type });
     }
     if (enforceResourceLimits) {
@@ -213,15 +214,7 @@ export async function assertTarArchiveLinksAreSafe(
           entry.linkpath,
         );
         if (targetPath) {
-          retainedPathBytes += Buffer.byteLength(targetPath);
-          if (retainedPathBytes > MAX_ARCHIVE_PATH_BYTES) {
-            failValidation(
-              new Error(
-                `Tar archive path metadata exceeds ${MAX_ARCHIVE_PATH_BYTES} bytes.`,
-              ),
-            );
-            return;
-          }
+          if (exceedsRetainedPathBudget(targetPath)) return;
           acceptedSymlinks.push({ entryPath, targetPath });
           return;
         }
@@ -318,13 +311,14 @@ export async function assertDirectorySymlinksAreSafe(
       }
       if (!entryStat.isSymbolicLink()) {
         throw new Error(
-          `Tar archive contains unsupported entry: ${formatEntryPath(path.relative(resolvedRoot, entryPath))}`,
+          `Extracted directory tree contains unsupported entry: ${formatEntryPath(path.relative(resolvedRoot, entryPath))}`,
         );
       }
       const linkPath = await fs.promises.readlink(entryPath);
       const targetPath = path.resolve(path.dirname(entryPath), linkPath);
       const rawTargetPath = `${path.dirname(entryPath)}${path.sep}${linkPath}`;
       let targetSize: number | undefined;
+      let statError: unknown;
       try {
         if (
           !path.isAbsolute(linkPath) &&
@@ -337,14 +331,20 @@ export async function assertDirectorySymlinksAreSafe(
             targetSize = targetStat.size;
           }
         }
-      } catch {
+      } catch (error) {
         signal?.throwIfAborted();
         targetSize = undefined;
+        // Not-contained is a normal rejection; anything else (EMFILE from fd
+        // exhaustion, EACCES from a restrictive mount, a flaky-disk EIO) is a
+        // local resource failure, not evidence of a hostile archive. Keep it
+        // on the thrown error below so it doesn't get misdiagnosed as one.
+        statError = error;
       }
       signal?.throwIfAborted();
       if (targetSize === undefined) {
         throw new Error(
-          `Tar archive contains unsupported link entry: ${formatEntryPath(path.relative(resolvedRoot, entryPath))}`,
+          `Extracted directory tree contains unsupported link entry: ${formatEntryPath(path.relative(resolvedRoot, entryPath))}`,
+          { cause: statError },
         );
       }
       accountForMaterializedFile(targetSize);

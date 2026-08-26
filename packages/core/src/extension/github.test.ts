@@ -1181,7 +1181,7 @@ describe('git extension helpers', () => {
               destination,
             ),
           ).rejects.toThrow(
-            /Extension archive could not be extracted.*Tar archive contains unsupported link entry: .*escape/,
+            /Extension archive could not be extracted.*Extracted directory tree contains unsupported link entry: .*escape/,
           );
         } finally {
           await fs.rm(tempDir, { recursive: true, force: true });
