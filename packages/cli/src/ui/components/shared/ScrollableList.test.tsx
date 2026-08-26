@@ -137,6 +137,43 @@ describe('<ScrollableList /> mouse scrolling', () => {
     expect(listRef.current?.getScrollState().scrollTop).toBe(105);
   });
 
+  it('applies a single wheel event before any frame timer fires', async () => {
+    // Pin the PR's headline behavior through the real
+    // stdin → handler → schedule() pipeline, not just at hook level: the
+    // leading flush must move the viewport immediately, with no timer
+    // advanced before the assertion. A regression that re-introduces delay
+    // before the first flush in the mouse path would fail here.
+    const listRef = createRef<ScrollableListRef<Item>>();
+    const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
+    const Wrapper = () => (
+      <ScrollableList<Item>
+        ref={listRef}
+        hasFocus
+        data={makeItems(50)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={0}
+        containerHeight={5}
+        width={40}
+        showScrollbar={false}
+      />
+    );
+
+    const { stdin, rerender } = render(withKeypress(<Wrapper />));
+    rerender(withKeypress(<Wrapper />));
+    await act(async () => {});
+    expect(listRef.current?.getScrollState().scrollTop).toBe(0);
+
+    await act(async () => {
+      stdin.write(wheelDown(5, 5));
+    });
+    await act(async () => {});
+
+    // One SGR wheel tick moves exactly WHEEL_LINES_PER_TICK (3) rows.
+    expect(listRef.current?.getScrollState().scrollTop).toBe(3);
+  });
+
   it('does not crash when hasFocus is false (mouse pipeline inactive)', () => {
     const renderItem = ({ item }: { item: Item }) => <Text>{item.label}</Text>;
     const Wrapper = () => (

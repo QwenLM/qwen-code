@@ -78,4 +78,25 @@ describe('useFrameCoalescedFlush', () => {
 
     expect(flush).toHaveBeenCalledTimes(1);
   });
+
+  it('clears a pending trailing flush on unmount', () => {
+    // Guard the documented "timer is always cleared on unmount" contract.
+    // Deleting the cleanup effect is a surviving mutant unless unmount is
+    // exercised: schedule twice (leading applies, trailing is pending),
+    // unmount, then advance past the deadline — the trailing flush must not
+    // run.
+    const flush = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useFrameCoalescedFlush(flush, 16),
+    );
+
+    act(() => result.current.schedule()); // leading → applies immediately
+    act(() => result.current.schedule()); // trailing → pending until deadline
+    expect(flush).toHaveBeenCalledTimes(1);
+
+    unmount();
+    act(() => vi.advanceTimersByTime(16));
+
+    expect(flush).toHaveBeenCalledTimes(1);
+  });
 });
