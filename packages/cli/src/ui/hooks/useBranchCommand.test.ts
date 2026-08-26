@@ -134,7 +134,7 @@ describe('useBranchCommand', () => {
         findSessionTitlesByPrefix,
       }),
       getChatRecordingService: () => ({ finalize, flush }),
-      getGeminiClient: () => ({ initialize: vi.fn() }),
+      getLlmClient: () => ({ initialize: vi.fn() }),
       getBackgroundTaskRegistry: () => backgroundTaskRegistry,
       getMonitorRegistry: () => monitorRegistry,
       getBackgroundShellRegistry: () => backgroundShellRegistry,
@@ -443,9 +443,9 @@ describe('useBranchCommand', () => {
     );
   });
 
-  it('initializes GeminiClient with SessionStartSource.Branch', async () => {
+  it('initializes LlmClient with SessionStartSource.Branch', async () => {
     const initialize = vi.fn().mockResolvedValue(undefined);
-    config.getGeminiClient = () => ({ initialize });
+    config.getLlmClient = () => ({ initialize });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -563,9 +563,9 @@ describe('useBranchCommand', () => {
     expect(startNewSessionUI).not.toHaveBeenCalled();
   });
 
-  it('rolls core back to the parent session when getGeminiClient().initialize() rejects after swap', async () => {
+  it('rolls core back to the parent session when getLlmClient().initialize() rejects after swap', async () => {
     // The reviewer's scenario: config.startNewSession succeeds (core is now
-    // on the fork), but then getGeminiClient().initialize() rejects. Without
+    // on the fork), but then getLlmClient().initialize() rejects. Without
     // rollback, core stays on the fork while UI is still on the parent, so
     // the recorder silently writes subsequent user input into an orphan
     // JSONL. This test pins the rollback invariant — after the failure core
@@ -591,7 +591,7 @@ describe('useBranchCommand', () => {
       .fn()
       .mockRejectedValueOnce(new Error('init boom')) // fork init fails
       .mockResolvedValueOnce(undefined); // rollback re-init succeeds
-    config.getGeminiClient = () => ({ initialize });
+    config.getLlmClient = () => ({ initialize });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -646,7 +646,7 @@ describe('useBranchCommand', () => {
       .fn()
       .mockRejectedValueOnce(new Error('init boom'))
       .mockRejectedValueOnce(new Error('rollback boom'));
-    config.getGeminiClient = () => ({ initialize });
+    config.getLlmClient = () => ({ initialize });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {

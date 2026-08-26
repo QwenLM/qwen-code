@@ -21,15 +21,15 @@ import type {
 } from '../contentGenerator.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
-  reportGeminiChunk,
-  reportGeminiRequest,
-  reportGeminiResponse,
+  reportLlmChunk,
+  reportLlmRequest,
+  reportLlmResponse,
   type GenAiAttemptHandle,
 } from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
-function observeGeminiStream(
+function observeLlmStream(
   stream: AsyncIterable<GenerateContentResponse>,
   telemetryAttempt: GenAiAttemptHandle | undefined,
 ): AsyncGenerator<GenerateContentResponse> {
@@ -37,7 +37,7 @@ function observeGeminiStream(
   return {
     async next() {
       const result = await iterator.next();
-      if (!result.done) reportGeminiChunk(telemetryAttempt, result.value);
+      if (!result.done) reportLlmChunk(telemetryAttempt, result.value);
       return result;
     },
     async return(value?: GenerateContentResponse) {
@@ -58,7 +58,7 @@ function observeGeminiStream(
 /**
  * A wrapper for GoogleGenAI that implements the ContentGenerator interface.
  */
-export class GeminiContentGenerator implements ContentGenerator {
+export class LlmContentGenerator implements ContentGenerator {
   private readonly googleGenAI: GoogleGenAI;
   private readonly contentGeneratorConfig?: ContentGeneratorConfig;
   // Latch so the effort-clamp warning fires once per generator lifetime
@@ -223,10 +223,10 @@ export class GeminiContentGenerator implements ContentGenerator {
       contents: this.stripUnsupportedFields(request.contents),
       config: this.buildGenerateContentConfig(request),
     };
-    const telemetryAttempt = reportGeminiRequest(finalRequest);
+    const telemetryAttempt = reportLlmRequest(finalRequest);
     const response =
       await this.googleGenAI.models.generateContent(finalRequest);
-    reportGeminiResponse(telemetryAttempt, response);
+    reportLlmResponse(telemetryAttempt, response);
     return response;
   }
 
@@ -239,10 +239,10 @@ export class GeminiContentGenerator implements ContentGenerator {
       contents: this.stripUnsupportedFields(request.contents),
       config: this.buildGenerateContentConfig(request),
     };
-    const telemetryAttempt = reportGeminiRequest(finalRequest);
+    const telemetryAttempt = reportLlmRequest(finalRequest);
     const stream =
       await this.googleGenAI.models.generateContentStream(finalRequest);
-    return observeGeminiStream(stream, telemetryAttempt);
+    return observeLlmStream(stream, telemetryAttempt);
   }
 
   /**

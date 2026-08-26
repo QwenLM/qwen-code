@@ -221,7 +221,7 @@ async function setOutputLanguage(
     if (config) {
       try {
         await config.refreshHierarchicalMemory();
-        await config.getGeminiClient().refreshSystemInstruction();
+        await config.getLlmClient().refreshSystemInstruction();
       } catch (error) {
         debugLogger.warn(
           'Failed to apply output language to running session:',

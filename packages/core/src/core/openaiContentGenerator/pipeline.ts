@@ -575,13 +575,12 @@ export class ContentGenerationPipeline {
           )) as OpenAI.Chat.ChatCompletion;
           reportOpenAiResponse(telemetryAttempt, openaiResponse);
 
-          const geminiResponse =
-            OpenAIContentConverter.convertOpenAIResponseToGemini(
-              openaiResponse,
-              context,
-            );
+          const llmResponse = OpenAIContentConverter.convertOpenAIResponseToLlm(
+            openaiResponse,
+            context,
+          );
 
-          return geminiResponse;
+          return llmResponse;
         } finally {
           perRequestAc?.abort();
         }
@@ -787,7 +786,7 @@ export class ContentGenerationPipeline {
           throw new StreamContentError(errorContent);
         }
 
-        const response = OpenAIContentConverter.convertOpenAIChunkToGemini(
+        const response = OpenAIContentConverter.convertOpenAIChunkToLlm(
           chunk,
           context,
         );
@@ -1048,7 +1047,7 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     isStreaming: boolean,
   ): Promise<OpenAI.Chat.ChatCompletionCreateParams> {
-    const messages = OpenAIContentConverter.convertGeminiRequestToOpenAI(
+    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
       request,
       context,
     );
@@ -1076,11 +1075,10 @@ export class ContentGenerationPipeline {
     // Add tools if present and non-empty.
     // Some providers reject tools: [] (empty array), so skip when there are no tools.
     if (request.config?.tools && request.config.tools.length > 0) {
-      baseRequest.tools =
-        await OpenAIContentConverter.convertGeminiToolsToOpenAI(
-          request.config.tools,
-          this.contentGeneratorConfig.schemaCompliance ?? 'auto',
-        );
+      baseRequest.tools = await OpenAIContentConverter.convertLlmToolsToOpenAI(
+        request.config.tools,
+        this.contentGeneratorConfig.schemaCompliance ?? 'auto',
+      );
 
       // Map Gemini-style toolConfig.functionCallingConfig.mode to OpenAI's
       // tool_choice so structured side queries (e.g. the AUTO-mode

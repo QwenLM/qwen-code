@@ -283,7 +283,7 @@ export async function collectHistoryReplayUpdates({
       suppressRestoreAskUserQuestion !== true &&
       config?.getRestoreAskUserQuestion?.() === true
     ) {
-      const replayClient = config.getGeminiClient?.();
+      const replayClient = config.getLlmClient?.();
       const lastHistoryContent =
         replayClient?.isInitialized?.() === true
           ? (replayClient.getChat?.()?.peekLastHistoryEntry?.() ??

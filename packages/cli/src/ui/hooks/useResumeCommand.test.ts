@@ -241,7 +241,7 @@ describe('useResumeCommand', () => {
     };
     const startNewSession = vi.fn();
     const clearPendingState = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
     const resetMonitorRegistry = vi.fn();
@@ -249,7 +249,7 @@ describe('useResumeCommand', () => {
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
@@ -323,8 +323,8 @@ describe('useResumeCommand', () => {
       }),
     );
     expect(startNewSession).toHaveBeenCalledWith('session-2');
-    expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
-    expect(geminiClient.initialize).toHaveBeenCalledWith();
+    expect(llmClient.initialize).toHaveBeenCalledTimes(1);
+    expect(llmClient.initialize).toHaveBeenCalledWith();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
     expect(clearPendingState).toHaveBeenCalledTimes(1);
@@ -349,7 +349,7 @@ describe('useResumeCommand', () => {
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => ({
+      getLlmClient: () => ({
         initialize: vi.fn().mockResolvedValue(undefined),
       }),
       startNewSession: vi.fn(),
@@ -423,14 +423,14 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
 
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
@@ -506,7 +506,7 @@ describe('useResumeCommand', () => {
 
   it('applies collapseOnResume policy when resuming a session', async () => {
     const startNewSession = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn(),
     };
     const resetMonitorRegistry = vi.fn();
@@ -514,7 +514,7 @@ describe('useResumeCommand', () => {
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
@@ -600,7 +600,7 @@ describe('useResumeCommand', () => {
       loadHistory: vi.fn(),
     };
     const startNewSession = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn(),
     };
     const buildRecoveredBackgroundAgentsNotice = vi
@@ -610,7 +610,7 @@ describe('useResumeCommand', () => {
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
@@ -822,7 +822,7 @@ describe('useResumeCommand', () => {
 
   it('rolls core back when persisted Goal state is malformed', async () => {
     const startNewSession = vi.fn();
-    const geminiClient = {
+    const llmClient = {
       initialize: vi.fn().mockResolvedValue(undefined),
     };
     const goalFailure = new Error('unsupported Goal lifecycle record');
@@ -830,7 +830,7 @@ describe('useResumeCommand', () => {
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
-      getGeminiClient: () => geminiClient,
+      getLlmClient: () => llmClient,
       startNewSession: vi.fn(),
       getGoalRuntimeReady: vi.fn().mockRejectedValue(goalFailure),
       getBackgroundTaskRegistry: () => ({
@@ -907,6 +907,6 @@ describe('useResumeCommand', () => {
       }),
       expect.any(Number),
     );
-    expect(geminiClient.initialize).not.toHaveBeenCalled();
+    expect(llmClient.initialize).not.toHaveBeenCalled();
   });
 });

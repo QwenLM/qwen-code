@@ -200,7 +200,7 @@ export function useBranchCommand(
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);
-        await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
+        await config.getLlmClient()?.initialize?.(SessionStartSource.Branch);
 
         // 8. Swap UI. Once this commits, rolling core back is unsafe —
         //    it would leave UI on the branch but recorder writing into
@@ -273,7 +273,7 @@ export function useBranchCommand(
             // Re-hydrate chat history against the restored session. Best-
             // effort: if this throws too, sessionId + recorder are still
             // back on the parent, which is the load-bearing invariant.
-            await config.getGeminiClient()?.initialize?.();
+            await config.getLlmClient()?.initialize?.();
           } catch (rollbackErr) {
             config
               .getDebugLogger()

@@ -178,7 +178,7 @@ export function useResumeCommand(
         config
           .getChatRecordingService()
           ?.rebuildTurnBoundaries(sessionData.conversation.messages);
-        await config.getGeminiClient()?.initialize?.();
+        await config.getLlmClient()?.initialize?.();
 
         const recovered = await config.loadPausedBackgroundAgents(sessionId);
         if (recovered.length > 0) {

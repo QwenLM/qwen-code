@@ -98,8 +98,8 @@ Non-test files; `gemini-converter.ts` is intentionally NOT renamed (see above).
 | `packages/core/src/core/geminiContentGenerator/index.ts`                  | `packages/core/src/core/llm-content-generator/index.ts`                 |
 | `packages/core/src/core/geminiRequest.ts`                                 | `packages/core/src/core/llm-request.ts`                                 |
 
-The old `geminiRequest.ts` path remains as a deprecated re-export shim until a
-future major release.
+The old `geminiRequest.ts` and `geminiChat.ts` paths remain as deprecated
+re-export shims until a future major release.
 
 ## Phasing
 
@@ -133,6 +133,9 @@ move as one atomic PR.
 - Stream layer: `useGeminiStream` → `useLlmStream` (`use-llm-stream.ts`),
   `gemini.tsx` → `llm.tsx`.
 - Protocol converters: `convert*ToGemini*` / `convertGemini*To*` → `Llm`.
+- Deprecated compatibility aliases for the published core classes, event
+  types, `Config` client access/initialization option, and old chat module
+  path.
 
 ## Risks
 

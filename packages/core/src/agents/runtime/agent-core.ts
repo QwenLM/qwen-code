@@ -35,9 +35,9 @@ import {
 import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
-  GeminiEventType,
+  LlmEventType,
   markDuplicateProviderToolCallResponseSent,
-  type ServerGeminiStreamEvent,
+  type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
 } from '../../core/turn.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
@@ -74,7 +74,7 @@ import type {
   FunctionDeclaration,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { GeminiChat } from '../../core/geminiChat.js';
+import { LlmChat } from '../../core/llm-chat.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
@@ -242,7 +242,8 @@ export function extractParentToolNames(
     new Set(
       (
         generationConfig?.tools as
-          Array<{ functionDeclarations?: FunctionDeclaration[] }> | undefined
+          | Array<{ functionDeclarations?: FunctionDeclaration[] }>
+          | undefined
       )
         ?.flatMap((tool) => tool.functionDeclarations ?? [])
         .map((declaration) => declaration.name)
@@ -510,17 +511,17 @@ export class AgentCore {
   // ─── Chat Creation ────────────────────────────────────────
 
   /**
-   * Creates a GeminiChat instance configured for this agent.
+   * Creates a LlmChat instance configured for this agent.
    *
    * @param context - Context state for template variable substitution.
    * @param options - Chat creation options.
    *   - `interactive`: When true, omits the "non-interactive mode" system prompt suffix.
-   * @returns A configured GeminiChat, or undefined if initialization fails.
+   * @returns A configured LlmChat, or undefined if initialization fails.
    */
   async createChat(
     context: ContextState,
     options?: CreateChatOptions,
-  ): Promise<GeminiChat | undefined> {
+  ): Promise<LlmChat | undefined> {
     if (
       !this.promptConfig.systemPrompt &&
       !this.promptConfig.renderedSystemPrompt &&
@@ -576,7 +577,7 @@ export class AgentCore {
     }
 
     try {
-      const chat = new GeminiChat(
+      const chat = new LlmChat(
         this.runtimeContext,
         generationConfig,
         startHistory,
@@ -761,7 +762,7 @@ export class AgentCore {
    * - maxTimeMinutes is exceeded
    * - The abortController signal fires
    *
-   * @param chat - The GeminiChat session to use.
+   * @param chat - The LlmChat session to use.
    * @param initialMessages - The first messages to send (e.g., user task prompt).
    * @param toolsList - Available tool declarations.
    * @param abortController - Controls cancellation of the current loop.
@@ -769,7 +770,7 @@ export class AgentCore {
    * @returns ReasoningLoopResult with the final text, terminate mode, and turns used.
    */
   async runReasoningLoop(
-    chat: GeminiChat,
+    chat: LlmChat,
     initialMessages: Content[],
     toolsList: FunctionDeclaration[],
     abortController: AbortController,
@@ -875,7 +876,7 @@ export class AgentCore {
   }
 
   private async _runReasoningLoopInner(
-    chat: GeminiChat,
+    chat: LlmChat,
     initialMessages: Content[],
     toolsList: FunctionDeclaration[],
     abortController: AbortController,
@@ -900,7 +901,7 @@ export class AgentCore {
     loopDetector.reset(
       `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
     );
-    const checkSubagentLoop = (event: ServerGeminiStreamEvent): boolean => {
+    const checkSubagentLoop = (event: ServerLlmStreamEvent): boolean => {
       if (loopDetector.checkAlwaysOnSafeties(event)) {
         return true;
       }
@@ -990,7 +991,7 @@ export class AgentCore {
           if (streamEvent.type === 'retry') {
             if (
               checkSubagentLoop({
-                type: GeminiEventType.Retry,
+                type: LlmEventType.Retry,
                 ...('isContinuation' in streamEvent
                   ? { isContinuation: streamEvent.isContinuation }
                   : {}),
@@ -1012,7 +1013,7 @@ export class AgentCore {
             continue;
           }
 
-          // GeminiChat already mutated its own history; surface to the debug
+          // LlmChat already mutated its own history; surface to the debug
           // log so subagent compactions show up alongside the main session's.
           if (streamEvent.type === 'compressed') {
             this.runtimeContext
@@ -1061,7 +1062,7 @@ export class AgentCore {
             if (
               thoughtSummary &&
               checkSubagentLoop({
-                type: GeminiEventType.Thought,
+                type: LlmEventType.Thought,
                 value: thoughtSummary,
               })
             ) {
@@ -1074,7 +1075,7 @@ export class AgentCore {
             if (
               responseText &&
               checkSubagentLoop({
-                type: GeminiEventType.Content,
+                type: LlmEventType.Content,
                 value: responseText,
               })
             ) {
@@ -1087,7 +1088,7 @@ export class AgentCore {
               const toolName = String(fc.name);
               if (
                 checkSubagentLoop({
-                  type: GeminiEventType.ToolCallRequest,
+                  type: LlmEventType.ToolCallRequest,
                   value: {
                     callId: fc.id ?? `${toolName}-${Date.now()}`,
                     providerCallId: getProviderToolCallId(fc),
@@ -1113,7 +1114,7 @@ export class AgentCore {
             if (
               finishReason &&
               checkSubagentLoop({
-                type: GeminiEventType.Finished,
+                type: LlmEventType.Finished,
                 value: {
                   reason: finishReason,
                   usageMetadata: resp.usageMetadata,
@@ -1539,7 +1540,8 @@ export class AgentCore {
     const registeredTool = this.runtimeContext
       .getToolRegistry()
       .getTool(toolName) as
-      { serverName?: unknown; serverToolName?: unknown } | undefined;
+      | { serverName?: unknown; serverToolName?: unknown }
+      | undefined;
     if (
       typeof registeredTool?.serverName !== 'string' ||
       typeof registeredTool.serverToolName !== 'string'

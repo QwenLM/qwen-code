@@ -858,7 +858,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         responses.push(lastResponseForLogging);
       }
       const consolidatedResponse = shouldCollectResponses
-        ? this.consolidateGeminiResponsesForLogging(responses)
+        ? this.consolidateLlmResponsesForLogging(responses)
         : undefined;
       if (consolidatedResponse) {
         consolidatedResponse.usageMetadata = lastUsageMetadata;
@@ -979,7 +979,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
 
     const requestContext = this.createLoggingRequestContext(request.model);
-    const messages = OpenAIContentConverter.convertGeminiRequestToOpenAI(
+    const messages = OpenAIContentConverter.convertLlmRequestToOpenAI(
       request,
       requestContext,
       {
@@ -994,7 +994,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     if (request.config?.tools) {
       openaiRequest.tools =
-        await OpenAIContentConverter.convertGeminiToolsToOpenAI(
+        await OpenAIContentConverter.convertLlmToolsToOpenAI(
           request.config.tools,
           this.schemaCompliance ?? 'auto',
         );
@@ -1043,7 +1043,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
 
     const openaiResponse = response
-      ? this.convertGeminiResponseToOpenAIForLogging(response, openaiRequest)
+      ? this.convertLlmResponseToOpenAIForLogging(response, openaiRequest)
       : undefined;
 
     await this.openaiLogger.logInteraction(
@@ -1071,17 +1071,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     }
   }
 
-  private convertGeminiResponseToOpenAIForLogging(
+  private convertLlmResponseToOpenAIForLogging(
     response: GenerateContentResponse,
     openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
   ): OpenAI.Chat.ChatCompletion {
-    return OpenAIContentConverter.convertGeminiResponseToOpenAI(
+    return OpenAIContentConverter.convertLlmResponseToOpenAI(
       response,
       this.createLoggingRequestContext(openaiRequest.model),
     );
   }
 
-  private consolidateGeminiResponsesForLogging(
+  private consolidateLlmResponsesForLogging(
     responses: GenerateContentResponse[],
   ): GenerateContentResponse | undefined {
     if (responses.length === 0) {

@@ -968,7 +968,7 @@ export function logContentRetryFailure(
 /**
  * Phase 4b — Emits an HTTP-status retry event fired from `retryWithBackoff`
  * at an LLM call site (via the `onRetry` callback opt-in). Distinct from
- * `logContentRetry`, which is fired by `geminiChat`'s content-recovery loop.
+ * `logContentRetry`, which is fired by `llmChat`'s content-recovery loop.
  *
  * Fan-out (sink 0 fires first, before the SDK guard, so retries are counted
  * even with telemetry off; sinks 1–3 match the `logContentRetry` shape):

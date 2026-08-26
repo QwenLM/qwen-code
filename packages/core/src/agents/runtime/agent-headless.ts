@@ -16,7 +16,7 @@
 
 import type { Content, FunctionDeclaration } from '@google/genai';
 import type { Config } from '../../config/config.js';
-import type { GeminiChat } from '../../core/geminiChat.js';
+import type { LlmChat } from '../../core/llm-chat.js';
 import type { RuntimeContentGeneratorView } from './agent-context.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -139,7 +139,7 @@ export class AgentHeadless {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
-  private chat?: GeminiChat;
+  private chat?: LlmChat;
   private toolsList?: FunctionDeclaration[];
   private executing = false;
   private hasStartedReasoning = false;

@@ -52,8 +52,8 @@ export const compressCommand: SlashCommand = {
     };
 
     const config = context.services.config;
-    const geminiClient = config?.getGeminiClient();
-    if (!config || !geminiClient) {
+    const llmClient = config?.getLlmClient();
+    if (!config || !llmClient) {
       return {
         type: 'message',
         messageType: 'error',
@@ -77,7 +77,7 @@ export const compressCommand: SlashCommand = {
 
     const doCompress = async () => {
       const promptId = `compress-${Date.now()}`;
-      return await geminiClient.tryCompressChat(
+      return await llmClient.tryCompressChat(
         promptId,
         true,
         abortSignal,

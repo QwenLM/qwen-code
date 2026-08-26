@@ -54,8 +54,8 @@ export const compressFastCommand: SlashCommand = {
     };
 
     const config = context.services.config;
-    const geminiClient = config?.getGeminiClient();
-    if (!config || !geminiClient) {
+    const llmClient = config?.getLlmClient();
+    if (!config || !llmClient) {
       return {
         type: 'message',
         messageType: 'error',
@@ -63,7 +63,7 @@ export const compressFastCommand: SlashCommand = {
       };
     }
 
-    const doCompress = async () => await geminiClient.tryCompressChatFast();
+    const doCompress = async () => await llmClient.tryCompressChatFast();
 
     if (executionMode === 'acp') {
       const messages = async function* () {

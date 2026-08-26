@@ -293,16 +293,16 @@ function createOwnedLlmSpan(
   };
 }
 
-const realConvertGeminiRequestToOpenAI =
-  OpenAIContentConverter.convertGeminiRequestToOpenAI;
-const convertGeminiRequestToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter, 'convertGeminiRequestToOpenAI')
+const realConvertLlmRequestToOpenAI =
+  OpenAIContentConverter.convertLlmRequestToOpenAI;
+const convertLlmRequestToOpenAISpy = vi
+  .spyOn(OpenAIContentConverter, 'convertLlmRequestToOpenAI')
   .mockReturnValue([{ role: 'user', content: 'converted' }]);
-const convertGeminiToolsToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter, 'convertGeminiToolsToOpenAI')
+const convertLlmToolsToOpenAISpy = vi
+  .spyOn(OpenAIContentConverter, 'convertLlmToolsToOpenAI')
   .mockResolvedValue([{ type: 'function', function: { name: 'tool' } }]);
-const convertGeminiResponseToOpenAISpy = vi
-  .spyOn(OpenAIContentConverter, 'convertGeminiResponseToOpenAI')
+const convertLlmResponseToOpenAISpy = vi
+  .spyOn(OpenAIContentConverter, 'convertLlmResponseToOpenAI')
   .mockReturnValue({
     id: 'openai-response',
     object: 'chat.completion',
@@ -418,9 +418,9 @@ describe('LoggingContentGenerator', () => {
 
   afterEach(() => {
     vi.useRealTimers();
-    convertGeminiRequestToOpenAISpy.mockClear();
-    convertGeminiToolsToOpenAISpy.mockClear();
-    convertGeminiResponseToOpenAISpy.mockClear();
+    convertLlmRequestToOpenAISpy.mockClear();
+    convertLlmToolsToOpenAISpy.mockClear();
+    convertLlmResponseToOpenAISpy.mockClear();
   });
 
   it('passes the owning config identity to a standalone LLM span', async () => {
@@ -662,9 +662,9 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.input_token_count).toBe(3);
     expect(responseEvent.response_text).toBe('ok');
 
-    expect(convertGeminiRequestToOpenAISpy).toHaveBeenCalledTimes(1);
-    expect(convertGeminiToolsToOpenAISpy).toHaveBeenCalledTimes(1);
-    expect(convertGeminiResponseToOpenAISpy).toHaveBeenCalledTimes(1);
+    expect(convertLlmRequestToOpenAISpy).toHaveBeenCalledTimes(1);
+    expect(convertLlmToolsToOpenAISpy).toHaveBeenCalledTimes(1);
+    expect(convertLlmResponseToOpenAISpy).toHaveBeenCalledTimes(1);
 
     const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results[0]
       ?.value as { logInteraction: ReturnType<typeof vi.fn> };
@@ -1895,9 +1895,8 @@ describe('LoggingContentGenerator', () => {
     expect(responseEvent.input_token_count).toBe(2);
     expect(responseEvent.response_text).toBe('Hello world');
 
-    expect(convertGeminiResponseToOpenAISpy).toHaveBeenCalledTimes(1);
-    const [consolidatedResponse] =
-      convertGeminiResponseToOpenAISpy.mock.calls[0];
+    expect(convertLlmResponseToOpenAISpy).toHaveBeenCalledTimes(1);
+    const [consolidatedResponse] = convertLlmResponseToOpenAISpy.mock.calls[0];
     const consolidatedParts =
       consolidatedResponse.candidates?.[0]?.content?.parts || [];
     expect(consolidatedParts).toEqual([
@@ -1947,11 +1946,11 @@ describe('LoggingContentGenerator', () => {
     });
     const consolidateSpy = vi.spyOn(
       generator as unknown as {
-        consolidateGeminiResponsesForLogging: (
+        consolidateLlmResponsesForLogging: (
           responses: GenerateContentResponse[],
         ) => GenerateContentResponse | undefined;
       },
-      'consolidateGeminiResponsesForLogging',
+      'consolidateLlmResponsesForLogging',
     );
 
     const stream = await generator.generateContentStream(
@@ -2834,9 +2833,9 @@ describe('LoggingContentGenerator', () => {
   });
 
   it('uses generator modalities when converting logged OpenAI requests', async () => {
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(
       (request, requestContext, options) =>
-        realConvertGeminiRequestToOpenAI(request, requestContext, options),
+        realConvertLlmRequestToOpenAI(request, requestContext, options),
     );
 
     const wrapped = createWrappedGenerator(
@@ -2881,7 +2880,7 @@ describe('LoggingContentGenerator', () => {
 
     await generator.generateContent(request, 'prompt-5');
 
-    expect(convertGeminiRequestToOpenAISpy).toHaveBeenCalledWith(
+    expect(convertLlmRequestToOpenAISpy).toHaveBeenCalledWith(
       request,
       expect.objectContaining({
         model: 'test-model',
@@ -2912,9 +2911,9 @@ describe('LoggingContentGenerator', () => {
   });
 
   it('uses string tool result content in reconstructed OpenAI logs when configured', async () => {
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(
       (request, requestContext, options) =>
-        realConvertGeminiRequestToOpenAI(request, requestContext, options),
+        realConvertLlmRequestToOpenAI(request, requestContext, options),
     );
 
     const wrapped = createWrappedGenerator(
@@ -3128,7 +3127,7 @@ describe('LoggingContentGenerator', () => {
 
     // No capture fires, so resolve() falls through to the synthetic builder.
     // Force the synthetic build to throw, then verify the API result still surfaces.
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(() => {
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(() => {
       throw new Error('synth-fail-success');
     });
 
@@ -3152,7 +3151,7 @@ describe('LoggingContentGenerator', () => {
       enableOpenAILogging: true,
       openAILoggingDir: 'logs',
     });
-    convertGeminiRequestToOpenAISpy.mockImplementationOnce(() => {
+    convertLlmRequestToOpenAISpy.mockImplementationOnce(() => {
       throw new Error('synth-fail-error');
     });
 

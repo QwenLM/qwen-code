@@ -538,7 +538,7 @@ describe('languageCommand', () => {
 
       const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
       const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
-      const getGeminiClient = vi
+      const getLlmClient = vi
         .fn()
         .mockReturnValue({ refreshSystemInstruction });
       (
@@ -550,7 +550,7 @@ describe('languageCommand', () => {
         getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
         setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
-        getGeminiClient,
+        getLlmClient,
       };
 
       const result = await languageCommand.action(mockContext, 'output auto');
@@ -582,7 +582,7 @@ describe('languageCommand', () => {
 
       const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
       const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
-      const getGeminiClient = vi
+      const getLlmClient = vi
         .fn()
         .mockReturnValue({ refreshSystemInstruction });
       (
@@ -594,7 +594,7 @@ describe('languageCommand', () => {
         getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
         setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
-        getGeminiClient,
+        getLlmClient,
       };
 
       const result = await languageCommand.action(
@@ -603,7 +603,7 @@ describe('languageCommand', () => {
       );
 
       expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-      expect(getGeminiClient).toHaveBeenCalledTimes(1);
+      expect(getLlmClient).toHaveBeenCalledTimes(1);
       expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
       // Memory MUST be refreshed before the system instruction is rebuilt;
       // otherwise the new instruction would be built from stale userMemory
@@ -637,7 +637,7 @@ describe('languageCommand', () => {
         getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
         setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
-        // No getGeminiClient — refreshSystemInstruction must not be reached.
+        // No getLlmClient — refreshSystemInstruction must not be reached.
       };
 
       const result = await languageCommand.action(mockContext, 'output Korean');

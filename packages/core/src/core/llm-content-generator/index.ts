@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GeminiContentGenerator } from './geminiContentGenerator.js';
+import { LlmContentGenerator } from './llm-content-generator.js';
 import { AuthType } from '../contentGenerator.js';
 import type {
   ContentGenerator,
@@ -13,12 +13,12 @@ import type {
 import type { Config } from '../../config/config.js';
 import { InstallationManager } from '../../config/installationManager.js';
 
-export { GeminiContentGenerator } from './geminiContentGenerator.js';
+export { LlmContentGenerator } from './llm-content-generator.js';
 
 /**
- * Create a Gemini content generator.
+ * Create the Google GenAI-backed LLM content generator.
  */
-export function createGeminiContentGenerator(
+export function createLlmContentGenerator(
   config: ContentGeneratorConfig,
   gcConfig: Config,
 ): ContentGenerator {
@@ -46,7 +46,7 @@ export function createGeminiContentGenerator(
       }
     : { headers };
 
-  const geminiContentGenerator = new GeminiContentGenerator(
+  const llmContentGenerator = new LlmContentGenerator(
     {
       apiKey: config.apiKey === '' ? undefined : config.apiKey,
       // Derive Vertex mode from the auth type rather than leaving it to the
@@ -63,5 +63,5 @@ export function createGeminiContentGenerator(
     config,
   );
 
-  return geminiContentGenerator;
+  return llmContentGenerator;
 }
