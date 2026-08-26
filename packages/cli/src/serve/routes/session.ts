@@ -4568,6 +4568,7 @@ export function registerSessionRoutes(
       async (_req, res, sessionId, runtime) => {
         res
           .status(200)
+          .set('Cache-Control', 'no-store')
           .json(await runtime.bridge.getSessionStatsStatus(sessionId));
       },
     ),

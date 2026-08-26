@@ -19,7 +19,10 @@
 import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
-import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import {
+  subagentIdentityContext,
+  subagentNameContext,
+} from '../../utils/subagentNameContext.js';
 import { runWithInvocationContext } from '../../utils/invocation-context.js';
 import type { Config } from '../../config/config.js';
 import {
@@ -398,6 +401,8 @@ export class AgentCore {
   private promptOrdinal = 0;
   readonly subagentId: string;
   readonly name: string;
+  /** Business/task name used for local per-invocation usage labels. */
+  readonly taskName?: string;
   readonly runtimeContext: Config;
   readonly promptConfig: PromptConfig;
   readonly modelConfig: ModelConfig;
@@ -477,10 +482,13 @@ export class AgentCore {
     eventEmitter?: AgentEventEmitter,
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
+    taskName?: string,
+    subagentId?: string,
   ) {
-    const randomPart = randomUUID().replace(/-/g, '').slice(0, 8);
-    this.subagentId = `${name}-${randomPart}`;
+    this.subagentId =
+      subagentId ?? `${name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
     this.name = name;
+    this.taskName = taskName;
     this.runtimeContext = runtimeContext;
     this.promptConfig = promptConfig;
     this.modelConfig = modelConfig;
@@ -842,20 +850,29 @@ export class AgentCore {
     inheritedAgentDepth?: number,
   ): Promise<T> {
     const runInner = () =>
-      subagentNameContext.run(this.name, () => {
-        const runWithView = () => this.withRuntimeView(fn, inheritedView);
-        // inheritedAgentDepth restores the agent's original nesting depth.
-        // Without it the frame recomputes from the UI's frame-less async
-        // chain to depth 0, and an approved `agent` tool call from a
-        // leaf-depth sub-agent would bypass maxSubagentDepth.
-        return inheritedAgentId
-          ? runWithAgentContext(
-              inheritedAgentId,
-              runWithView,
-              inheritedAgentDepth,
-            )
-          : runWithView();
-      });
+      subagentNameContext.run(this.name, () =>
+        subagentIdentityContext.run(
+          {
+            type: this.name,
+            id: this.subagentId,
+            ...(this.taskName ? { taskName: this.taskName } : {}),
+          },
+          () => {
+            const runWithView = () => this.withRuntimeView(fn, inheritedView);
+            // inheritedAgentDepth restores the agent's original nesting depth.
+            // Without it the frame recomputes from the UI's frame-less async
+            // chain to depth 0, and an approved `agent` tool call from a
+            // leaf-depth sub-agent would bypass maxSubagentDepth.
+            return inheritedAgentId
+              ? runWithAgentContext(
+                  inheritedAgentId,
+                  runWithView,
+                  inheritedAgentDepth,
+                )
+              : runWithView();
+          },
+        ),
+      );
     return inheritedTeammateIdentity
       ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
       : runInner();
