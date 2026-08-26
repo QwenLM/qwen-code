@@ -756,6 +756,33 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('renders the wind-down hand-off on a budget-spent Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({ ...input, windDown: true }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-wind-down',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'The autonomous token budget for this Goal window is spent.',
+    );
+  });
+
   it('keeps the exact Goal permit through a ToolResult continuation', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);
