@@ -52,8 +52,17 @@ import type {
   CreateSubSessionInfo,
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
+import {
+  isReservedStandaloneSessionSourceType,
+  isScheduledTaskRunSource,
+} from '@qwen-code/acp-bridge/sessionSource';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { isScheduledTaskRunSource } from '@qwen-code/acp-bridge';
+import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
+
+type StandaloneSubSessionService = Pick<
+  StandaloneSessionService,
+  'createChildWithInitialPrompt' | 'resume' | 'continueSession'
+>;
 
 const log = createDebugLogger('SUB_SESSION');
 
@@ -129,6 +138,7 @@ export interface SubSessionLauncher {
 
 export interface CreateSubSessionLauncherOptions {
   getBridge: () => AcpSessionBridge | undefined;
+  getStandaloneSessionService?: () => StandaloneSubSessionService | undefined;
   boundWorkspace: string;
   /** Return sent-mode completions to the parent as automatic follow-up turns.
    * Enabled only for the Live conversation runtime. */
@@ -402,6 +412,7 @@ async function deliverSentCompletion(
   notification: BridgeBackgroundNotification,
   stopSignal: AbortSignal,
   isolatedWorkspace?: IsolatedWorkspace,
+  standaloneService?: StandaloneSubSessionService,
 ): Promise<void> {
   const deadline = Date.now() + RECOVERED_PARENT_NOTIFICATION_TIMEOUT_MS;
   const initialDelivery = await awaitSentCompletionAcceptance(
@@ -412,6 +423,62 @@ async function deliverSentCompletion(
     deadline,
   );
   if (initialDelivery === 'accepted') return;
+
+  if (standaloneService) {
+    await standaloneService.resume(parentSessionId);
+    let ownerBridge: AcpSessionBridge | undefined;
+    let ownerSessionId = '';
+    let lastEventId = 0;
+    let eventEpoch = '';
+    const recoveredDelivery = await standaloneService.continueSession(
+      parentSessionId,
+      async (runtime, canonicalSessionId) => {
+        ownerBridge = runtime.bridge;
+        ownerSessionId = canonicalSessionId;
+        lastEventId = runtime.bridge.getSessionLastEventId(canonicalSessionId);
+        eventEpoch = runtime.bridge.getSessionEventEpoch(canonicalSessionId);
+        return awaitSentCompletionAcceptance(
+          runtime.bridge,
+          canonicalSessionId,
+          notification,
+          stopSignal,
+          deadline,
+        );
+      },
+    );
+    if (recoveredDelivery === 'missing' || !ownerBridge || !ownerSessionId) {
+      throw new SessionNotFoundError(parentSessionId);
+    }
+    void awaitRecoveredParentNotification(
+      ownerBridge,
+      ownerSessionId,
+      notification,
+      lastEventId,
+      eventEpoch,
+      stopSignal,
+    ).then(
+      (continuationCompleted) => {
+        if (!continuationCompleted && !stopSignal.aborted) {
+          writeStderrLine(
+            `qwen serve: restored parent ${parentSessionId} accepted completion ` +
+              `for sub-session ${notification.taskId}, but its automatic continuation ` +
+              `did not reach an end-turn boundary; leaving recovery attachment for ` +
+              `the idle reaper`,
+          );
+        }
+      },
+      (error) => {
+        if (!stopSignal.aborted) {
+          writeStderrLine(
+            `qwen serve: restored parent ${parentSessionId} accepted completion ` +
+              `for sub-session ${notification.taskId}, but its automatic continuation ` +
+              `could not be observed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      },
+    );
+    return;
+  }
 
   let restoredParent: BridgeSession | undefined;
   // Materialize before restore so the first synchronous operation after the
@@ -657,6 +724,7 @@ export function createSubSessionLauncher(
 ): SubSessionLauncher {
   const {
     getBridge,
+    getStandaloneSessionService,
     boundWorkspace,
     notifySentCompletion = false,
     isolatedWorkspace,
@@ -730,6 +798,13 @@ export function createSubSessionLauncher(
     // when the launcher set is empty but the restored bridge entry has been
     // re-seeded from its transcript metadata.
     const caller = bridge.getSessionSummary(info.callerSessionId);
+    const standalone = isReservedStandaloneSessionSourceType(caller.sourceType);
+    const standaloneService = standalone
+      ? getStandaloneSessionService?.()
+      : undefined;
+    if (standalone && !standaloneService) {
+      throw new Error('Standalone session service is unavailable.');
+    }
     if (
       spawnedSessionIds.has(info.callerSessionId) ||
       caller.parentSessionId !== undefined
@@ -779,19 +854,39 @@ export function createSubSessionLauncher(
     let promptDispatched = false;
 
     try {
-      const sub = await bridge.spawnOrAttach({
-        workspaceCwd: boundWorkspace,
-        sessionScope: 'thread', // force a fresh top-level session, never attach
-        // Record the caller as the sub-session's parent so the UI can link it
-        // back. Persisted into the sub-session's transcript at spawn time.
-        parentSessionId: info.callerSessionId,
-        ...(info.sourceType ? { sourceType: info.sourceType } : {}),
-        ...(info.sourceId ? { sourceId: info.sourceId } : {}),
-        ...(info.model ? { modelServiceId: info.model } : {}),
-      });
+      const promptId = randomUUID();
+      let lastEventId!: number;
+      let turn!: ReturnType<AcpSessionBridge['sendPrompt']>;
+      let sub: BridgeSession;
+      if (standalone) {
+        const created = await standaloneService!.createChildWithInitialPrompt(
+          {
+            sessionId: randomUUID(),
+            parentSessionId: info.callerSessionId,
+            promptId,
+            ...(info.model ? { modelServiceId: info.model } : {}),
+          },
+          info.prompt,
+        );
+        sub = created.session;
+        lastEventId = created.initialPrompt.lastEventId;
+        turn = created.initialPrompt.turn;
+        promptDispatched = true;
+      } else {
+        sub = await bridge.spawnOrAttach({
+          workspaceCwd: boundWorkspace,
+          sessionScope: 'thread', // force a fresh top-level session, never attach
+          // Record the caller as the sub-session's parent so the UI can link it
+          // back. Persisted into the sub-session's transcript at spawn time.
+          parentSessionId: info.callerSessionId,
+          ...(info.sourceType ? { sourceType: info.sourceType } : {}),
+          ...(info.sourceId ? { sourceId: info.sourceId } : {}),
+          ...(info.model ? { modelServiceId: info.model } : {}),
+        });
+      }
       spawnedSession = sub;
       const sessionId = sub.sessionId;
-      if (isolatedWorkspace) {
+      if (isolatedWorkspace && !standalone) {
         const isolatedCwd =
           await isolatedWorkspace.materializeDirectory(sessionId);
         const changed = await bridge.changeSessionCwd(sessionId, {
@@ -820,24 +915,20 @@ export function createSubSessionLauncher(
         log.debug('sub-session: updateSessionMetadata failed', sessionId, err);
       }
 
-      // Capture the event cursor BEFORE dispatching so subscriptions can replay
-      // every chunk of the turn (no early-chunk loss). Called unconditionally
-      // — even sent mode needs it for the background drain that holds the
-      // concurrency slot; hardcoding 0 would work on a fresh bus but is
-      // load-bearing and subtle, so always ask the bridge.
-      const lastEventId = bridge.getSessionLastEventId(sessionId);
-
-      const promptId = randomUUID();
-      const turn = bridge.sendPrompt(
-        sessionId,
-        {
+      if (!standalone) {
+        lastEventId = bridge.getSessionLastEventId(sessionId);
+        turn = bridge.sendPrompt(
           sessionId,
-          prompt: [{ type: 'text', text: info.prompt }],
-        } as Parameters<AcpSessionBridge['sendPrompt']>[1],
-        undefined,
-        { promptId },
-      );
-      promptDispatched = true;
+          {
+            sessionId,
+            prompt: [{ type: 'text', text: info.prompt }],
+          } as Parameters<AcpSessionBridge['sendPrompt']>[1],
+          undefined,
+          { promptId },
+        );
+        promptDispatched = true;
+      }
+
       // The result comes from the event stream (turn_error surfaces failures);
       // swallow the promise so it can't raise an unhandled rejection, but log
       // the error so dispatch failures are not invisible.
@@ -916,6 +1007,7 @@ export function createSubSessionLauncher(
                 notification,
                 stopAc.signal,
                 isolatedWorkspace,
+                standaloneService,
               );
             } catch (notificationError) {
               if (!stopAc.signal.aborted) {
@@ -985,7 +1077,7 @@ export function createSubSessionLauncher(
       // If the spawn succeeded but a later step failed (e.g. sendPrompt threw
       // synchronously), roll back the orphaned session so it doesn't leak a slot
       // in the bridge's session pool while this launch reports failure.
-      if (spawnedSession !== undefined && isolatedWorkspace) {
+      if (spawnedSession !== undefined && isolatedWorkspace && !standalone) {
         let sessionClosed = false;
         try {
           if (spawnedSession.attached) {
@@ -1034,7 +1126,7 @@ export function createSubSessionLauncher(
             );
           }
         }
-      } else if (spawnedSession !== undefined) {
+      } else if (spawnedSession !== undefined && !standalone) {
         // Both guards are load-bearing. `.catch()` swallows the async
         // rejection; the try/catch contains a SYNCHRONOUS throw. We are already
         // inside the catch block, so an escaping throw here would replace `err`
