@@ -5479,6 +5479,51 @@ describe('Session', () => {
       expect(notifyConfigChanged).not.toHaveBeenCalled();
     });
 
+    it('does not publish refreshed skills while standalone activation is held', async () => {
+      session.dispose();
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      const expectation = {
+        canonicalSessionId: 'test-session-id',
+        root: { canonicalPath: '/managed', device: 1, inode: 2 },
+        child: {
+          name: 'child',
+          canonicalPath: '/managed/child',
+          device: 1,
+          inode: 3,
+        },
+      };
+      session.installPendingManagedConversationBinding(
+        expectation,
+        vi.fn().mockResolvedValue(undefined),
+      );
+      await session.commitManagedConversationBinding(expectation);
+      getAvailableCommandsSpy.mockClear();
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+
+      await session.refreshSkillsFromSettings({
+        reloadSettings: false,
+        notifyConfigChanged: false,
+      });
+
+      expect(getAvailableCommandsSpy).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+
+      await session.releaseManagedConversationBinding(expectation);
+
+      await vi.waitFor(() =>
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1),
+      );
+      expect(getAvailableCommandsSpy).toHaveBeenCalledTimes(1);
+    });
+
     it('notifies SkillManager when the command update fails', async () => {
       const suppressNextSlashReload = vi.fn();
       const notifyConfigChanged = vi.fn().mockResolvedValue(undefined);

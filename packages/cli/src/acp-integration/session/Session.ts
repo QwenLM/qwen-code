@@ -9183,12 +9183,6 @@ export class Session implements SessionContext {
   }
 
   async sendAvailableCommandsUpdate(): Promise<void> {
-    if (
-      this.requiresManagedConversationBinding &&
-      this.managedConversationBinding?.state !== 'released'
-    ) {
-      return;
-    }
     try {
       await this.sendAvailableCommandsUpdateOrThrow();
     } catch (error) {
@@ -9244,6 +9238,7 @@ export class Session implements SessionContext {
   }
 
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
+    if (this.#isAutomaticWorkHeld()) return;
     const { availableCommands, availableSkills, availableSkillDetails } =
       await this.buildAvailableCommandsSnapshot();
     const update: SessionUpdate = {
