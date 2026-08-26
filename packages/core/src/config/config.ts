@@ -229,6 +229,7 @@ import {
   patchSessionRecord,
   unregisterSession,
 } from '../services/session-registry.js';
+import { delay } from '../utils/retry.js';
 import {
   SessionService,
   type ResumedSessionData,
@@ -4336,6 +4337,50 @@ export class Config {
         this.sessionRegistered = false;
         this.sessionRegistryActive = false;
       });
+  }
+
+  /**
+   * Resolves once initial registration has settled, reporting whether a
+   * record actually exists.
+   *
+   * Anything that publishes *into* the record — the peer-messaging socket
+   * path, today — has to wait for this: `patchSessionRecord` no-ops when
+   * the record is missing, so advertising an address before registration
+   * lands would silently never advertise it at all. Reuses the same write
+   * queue rather than adding a second signal to keep in sync.
+   */
+  async whenSessionRegistered(): Promise<boolean> {
+    await this.sessionRegistryWrite.catch(() => {
+      // A failed earlier write is reported by the flag, not by throwing.
+    });
+    return this.sessionRegistered;
+  }
+
+  /** Serialize the peer inbox address with every other registry patch. */
+  async updateSessionRegistryIpcPath(
+    ipcPath: string | undefined,
+  ): Promise<void> {
+    if (!this.sessionRegistryActive) return;
+    let applied = false;
+    this.queueSessionRegistryWrite(async () => {
+      applied = await patchSessionRecord({ ipcPath });
+      if (ipcPath === undefined || applied) return;
+      // The advertise is one-shot: no later patch re-asserts ipcPath, and
+      // every skip is transient (the fd-pressure window on this process's
+      // own start-token read, or a momentary read error) — the same window
+      // registration retries the same reads for. Without a retry here the
+      // session would keep a live inbox no peer can ever discover.
+      for (let attempt = 0; attempt < 2 && !applied; attempt += 1) {
+        await delay(250);
+        applied = await patchSessionRecord({ ipcPath });
+      }
+      if (!applied) {
+        this.debugLogger.warn(
+          'peer inbox address was not published to the session registry; peers cannot discover this session until it restarts',
+        );
+      }
+    });
+    await this.sessionRegistryWrite;
   }
 
   /** Drain queued patches, then remove this process's registered record. */

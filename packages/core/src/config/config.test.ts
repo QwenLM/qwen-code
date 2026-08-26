@@ -6965,6 +6965,7 @@ describe('Server Config (config.ts)', () => {
       .mockImplementation(async () => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         settled.push('patch');
+        return true;
       });
 
     await config.relocateWorkingDirectory(newDir);
@@ -7019,7 +7020,7 @@ describe('Server Config (config.ts)', () => {
     );
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
 
     await config.relocateWorkingDirectory(newDir);
 
@@ -7066,7 +7067,7 @@ describe('Server Config (config.ts)', () => {
     });
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
 
     await config.relocateWorkingDirectory(newDir);
 
@@ -7097,7 +7098,7 @@ describe('Server Config (config.ts)', () => {
       .mockRejectedValue(new Error('read-only project fs'));
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
 
     const newSessionId = config.startNewSession('replacement-session');
 
@@ -7123,8 +7124,8 @@ describe('Server Config (config.ts)', () => {
       .spyOn(sessionRegistry, 'patchSessionRecord')
       .mockImplementation(
         () =>
-          new Promise<void>((resolve) => {
-            finishPatch = resolve;
+          new Promise<boolean>((resolve) => {
+            finishPatch = () => resolve(true);
           }),
       );
     const unregisterSessionSpy = vi
@@ -7153,6 +7154,80 @@ describe('Server Config (config.ts)', () => {
 
     patchSessionRecordSpy.mockRestore();
     unregisterSessionSpy.mockRestore();
+  });
+
+  it('serializes the peer inbox address with session transitions', async () => {
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+
+    let finishIpcPatch!: () => void;
+    const calls: Array<Record<string, unknown>> = [];
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockImplementation(async (patch) => {
+        calls.push(patch);
+        if ('ipcPath' in patch) {
+          await new Promise<void>((resolve) => {
+            finishIpcPatch = resolve;
+          });
+        }
+        return true;
+      });
+
+    const advertise = config.updateSessionRegistryIpcPath('/tmp/peer.sock');
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    const newSessionId = config.startNewSession('replacement-session');
+
+    await Promise.resolve();
+    expect(calls).toEqual([{ ipcPath: '/tmp/peer.sock' }]);
+
+    finishIpcPatch();
+    await advertise;
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1]).toEqual({
+      sessionId: newSessionId,
+      cwd: config.getTargetDir(),
+    });
+
+    patchSessionRecordSpy.mockRestore();
+  });
+
+  it('retries the peer inbox advertise when the registry patch skips', async () => {
+    // The advertise is one-shot: no later /clear or /cd re-asserts
+    // ipcPath, so a patch skipped on transient fd pressure must retry
+    // itself or the inbox stays undiscoverable until restart.
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValueOnce(false)
+      .mockResolvedValue(true);
+
+    await config.updateSessionRegistryIpcPath('/tmp/peer.sock');
+
+    expect(patchSessionRecordSpy).toHaveBeenCalledTimes(2);
+    expect(patchSessionRecordSpy).toHaveBeenCalledWith({
+      ipcPath: '/tmp/peer.sock',
+    });
+    patchSessionRecordSpy.mockRestore();
+  });
+
+  it('gives up on the peer inbox advertise after a bounded retry', async () => {
+    const config = new Config(baseParams);
+    config.trackSessionRegistration(Promise.resolve(true));
+    await expect(config.whenSessionRegistered()).resolves.toBe(true);
+    const patchSessionRecordSpy = vi
+      .spyOn(sessionRegistry, 'patchSessionRecord')
+      .mockResolvedValue(false);
+
+    await expect(
+      config.updateSessionRegistryIpcPath('/tmp/peer.sock'),
+    ).resolves.toBeUndefined();
+
+    expect(patchSessionRecordSpy).toHaveBeenCalledTimes(3);
+    patchSessionRecordSpy.mockRestore();
   });
 
   it('does not unregister when initial registration was refused', async () => {
@@ -7189,7 +7264,7 @@ describe('Server Config (config.ts)', () => {
     );
     const patchSessionRecordSpy = vi
       .spyOn(sessionRegistry, 'patchSessionRecord')
-      .mockResolvedValue(undefined);
+      .mockResolvedValue(true);
 
     await config.relocateWorkingDirectory(newDir);
 
