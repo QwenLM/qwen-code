@@ -74,7 +74,6 @@ import {
   LEDGER_BODY_FILE,
   LEDGER_ID_READBACK,
   LEDGER_MAX_CLOSED,
-  LEDGER_MAX_FILE,
   LEDGER_MAX_ID,
   LEDGER_MAX_TITLE,
   claimLocator,
@@ -1702,73 +1701,66 @@ export function composeReview(
   const postedIds = new Set(postedLedger?.findings.map((f) => f.id) ?? []);
   // Claim identity, not id identity: a claim this round RE-POSTS without a
   // carried id — a gate Critical regenerated from the report, a model
-  // re-post the readback lost, a floor-stripped Suggestion that re-voiced
-  // it — gets a FRESH id in the build (or no build entry at all), so the
-  // original is absent from `postedIds` while the claim still stands. Read
-  // absent-by-id alone, a still-standing blocker mints a closure every
-  // round of its life, in the very body that re-posts it open. So the join
-  // also runs on the locator projection the gate-repost dedup uses — over
-  // the SAME build the marker stamps, so the record and the mint cannot
-  // disagree about what closed. Both sides project from the WRITE-CAPPED
-  // title: the previous list's titles were sliced to LEDGER_MAX_TITLE at
-  // write time (and again at read), so a build-side projection over the
-  // uncapped title never meets a previous locator that outruns the cap —
-  // and every entry side below caps BEFORE projecting, the serializer's
-  // order, never after. The two channels that CARRY an id — a re-filed
-  // deferral title, a re-voiced reroute title — strip it BEFORE the window
-  // too: windowing with the id still on shortens the window by the prefix,
-  // and the id-less previous locator never meets it.
+  // re-post the readback lost — gets a FRESH id in the build (or no build
+  // entry at all), so the original is absent from `postedIds` while the
+  // claim still stands. Read absent-by-id alone, a still-standing blocker
+  // mints a closure every round of its life, in the very body that
+  // re-posts it open. So the join ALSO runs on the locator projection the
+  // gate-repost dedup uses — over the SAME build the marker stamps, so the
+  // record and the mint cannot disagree about what closed, with the SAME
+  // write-capped window on both sides: the previous list's titles were
+  // sliced to LEDGER_MAX_TITLE at write time (and again at read), so a
+  // build-side projection over the uncapped title never meets a previous
+  // locator that outruns the cap.
   const standingClaims = new Set(
     (postedLedger?.findings ?? [])
       .map((g) => claimLocator(g.title.slice(0, LEDGER_MAX_TITLE)))
       .filter((k) => k !== ''),
   );
-  // The deferral channel's relocated Criticals re-post their claim under a
-  // fresh id the locator join above cannot follow: the typed channel
-  // carries no id field, and the rendered entry's title projects to the
-  // `file:line` locator under `claimLocator` while an inline-drafted
-  // predecessor's title projects to the claim text — the two projections
-  // never meet. Join the previous list against the typed entries
-  // themselves, on (file, claim), the entry side stripped of its carried id
-  // and capped the way the previous list was normalised. Read ONLY where
-  // the build above already parsed the same channel — a null build returned
-  // before any parse, so this adds no throw the round did not already have.
-  const relocatedClaims = new Set(
-    (postedLedger === null ? [] : toDeferredEntries(input.deferredSuggestions))
-      .filter((e) => e.severity === 'Critical')
-      .map(
-        (e) =>
-          `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(
-            e.title.replace(LEDGER_ID_READBACK, '').slice(0, LEDGER_MAX_TITLE),
-          )}`,
-      ),
-  );
-  // The reroute output is a third channel the joins above are blind to: a
-  // floor-stripped Suggestion that RE-VOICED a previous Critical leaves the
-  // posting set (no build entry) and is not a typed deferral — its claim
-  // rides only the deferral line this render prints. Project it the same
-  // way the relocated entries are projected, so the re-voiced claim still
-  // stands for the mint.
-  const reroutedClaims = new Set(
-    reroute.entries.map(
-      (e) =>
-        `${e.file.slice(0, LEDGER_MAX_FILE)}\u0000${claimLocator(
-          e.title.replace(LEDGER_ID_READBACK, '').slice(0, LEDGER_MAX_TITLE),
-        )}`,
-    ),
-  );
+  // The re-post channels — the typed deferral channel and the reroute the
+  // floor enforcement feeds into it — carry claims OUTSIDE the build's id
+  // space, and their join is an ID join, never a text projection: four
+  // review rounds each patched a hand-rolled projection here, and each
+  // generation of fixes grew the next defect (R4-1: a moved-path re-file,
+  // a dash-less collapsed body, a Suggestion-severity re-voice — three
+  // entrances one probe round named, in a space of re-post shapes that
+  // cannot be enumerated and closed one entrance at a time). An entry
+  // whose title BEARS the original id proves which claim it re-posts —
+  // severity, path, and wording are all irrelevant to that readback; an
+  // entry that bears none proves nothing — it may carry ANY vanished
+  // claim — so the round fails closed and mints no closure at all: the
+  // same honesty leg the mint applies to a PARTIAL previous list, one
+  // element the round cannot account for suppressing the whole inference.
+  // The cost is a true closure withheld beside an id-less re-post; the
+  // opposite error is a fabricated lineage the sentinel fires one round
+  // later. Parse ONLY where the build above already parsed the same
+  // channel — a null build returned before any parse, so this adds no
+  // throw the round did not already have.
+  const repostEntries = [
+    ...(postedLedger === null
+      ? []
+      : toDeferredEntries(input.deferredSuggestions)),
+    ...reroute.entries,
+  ];
+  const repostedIds = new Set<string>();
+  let repostUnidentified = false;
+  for (const e of repostEntries) {
+    const carried = LEDGER_ID_READBACK.exec(e.title)?.[1];
+    if (carried === undefined) repostUnidentified = true;
+    else repostedIds.add(carried);
+  }
   const closuresThisRound: LedgerClosure[] =
     carriedWorkList.complete &&
     postedLedger !== null &&
-    !(prevFacts.foreign === true && prevFacts.merged !== true)
+    !(prevFacts.foreign === true && prevFacts.merged !== true) &&
+    !repostUnidentified
       ? prevFacts.findings
           .filter(
             (f) =>
               f.sev === 'C' &&
               !postedIds.has(f.id) &&
-              !standingClaims.has(claimLocator(f.title)) &&
-              !relocatedClaims.has(`${f.file}\u0000${claimLocator(f.title)}`) &&
-              !reroutedClaims.has(`${f.file}\u0000${claimLocator(f.title)}`),
+              !repostedIds.has(f.id) &&
+              !standingClaims.has(claimLocator(f.title)),
           )
           .map((f) => ({ r: postedLedger.round, id: f.id, f: f.file }))
       : [];

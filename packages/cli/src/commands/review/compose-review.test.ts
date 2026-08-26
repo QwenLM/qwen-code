@@ -13509,13 +13509,14 @@ describe('convergence diagnosis reaches the POSTED body', () => {
 
   it('mints no closure for a claim re-filed through the deferral channel', () => {
     // Same hazard class as the gate blocker, other channel: the typed
-    // deferral channel carries no id field, so the build stamps the
-    // re-file fresh, and its rendered title projects to the `file:line`
-    // locator while an inline-drafted predecessor's title projects to the
-    // claim text — the locator join never meets, and the exact-id read
-    // mints a closure on a claim this very body re-posts open. A round
-    // later, the fabricated entry arms the sentinel over a lineage whose
-    // first link never happened.
+    // deferral channel carries no id field, and a re-file whose title
+    // carries no readable id leaves the round unable to PROVE which claim
+    // the entry re-posts — it may be the vanished sibling, it may be the
+    // standing one. A closure is the inference "ruled fixed", and doubt
+    // defeats it: the mint withholds every closure the round cannot
+    // certify, rather than text-matching the entry against the previous
+    // list shape by shape. The id-carrying siblings below are the shape
+    // that still mints beside a re-file.
     const r = composeReview({
       planPath: coveredPrev({
         round: 10,
@@ -13541,9 +13542,11 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     const marker = parseLedger(r.body)!;
     // The re-filed claim rides the work list, fresh-stamped ...
     expect(marker.findings.some((f) => f.sev === 'C')).toBe(true);
-    // ... so its still-standing original mints no closure — while a truly
-    // vanished same-file Critical beside it still does.
-    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
+    // ... and the re-file's title carries NO readable id, so the round
+    // cannot prove which claim the entry re-posts — the mint fails closed
+    // for the whole round, withholding even the truly vanished sibling.
+    expect(marker.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
   });
 
   it('mints no closure for a long claim re-filed under its carried id through the deferral channel', () => {
@@ -13682,6 +13685,231 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // … and the sentinel carries no fabricated lineage for it: the false
     // closure would have fired the chain over the round-10 generation.
     expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  // R4-1: the closure mint's claim-identity defense was an unbounded
+  // text-matching surface — one hand-rolled projection per re-posting
+  // channel, and the space of re-post shapes (moved paths, dash-less
+  // bodies, severity changes) cannot be enumerated and closed one entrance
+  // at a time. The class fix joins on EXPLICIT IDENTITY — the carried id a
+  // re-post channel's title may bear — and fails closed where the channel
+  // bears none: the round cannot prove what an id-less entry re-posts, so
+  // it certifies nothing. The witnesses below pin each demonstrated
+  // entrance, id-less (fail closed) and id-carrying (the exact join).
+
+  it('fails closed for a moved-path re-file the deferral channel carries without an id', () => {
+    // Entrance one: the relocated join keyed on (file, claim), so a claim
+    // re-filed at a MOVED path slipped every conjunct and minted a closure
+    // over the very body re-posting it open. The id-less re-file proves
+    // nothing about which claim it carries — neither one closes.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/auth.ts', title: 'auth bypass' },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/auth.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/moved/auth.ts',
+          line: 12,
+          source: 'test',
+          severity: 'Critical',
+          title: 'auth bypass',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    // The fabricated closure would have fired the chain one link later —
+    // the sentinel reads the marker this round writes.
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints the vanished closure beside a moved-path re-file that carries its id', () => {
+    // The same entrance with identity PROVEN: the re-filed entry bears the
+    // original id, the mint joins on the id set, and the moved path costs
+    // nothing — while the truly vanished sibling still closes.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/auth.ts', title: 'auth bypass' },
+          { id: 'R10-2', sev: 'C', file: 'src/auth.ts', title: 'token leak' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/moved/auth.ts',
+          line: 12,
+          source: 'test',
+          severity: 'Critical',
+          title: 'R10-1: auth bypass',
+        },
+      ],
+    });
+    const marker = parseLedger(r.body)!;
+    expect(marker.findings.some((f) => f.sev === 'C')).toBe(true);
+    expect(marker.closed).toEqual([{ r: 11, id: 'R10-2', f: 'src/auth.ts' }]);
+  });
+
+  it('fails closed for a dash-less claim re-voiced as a floor-stripped Suggestion', () => {
+    // Entrance two: the reroute join projected the WHOLE marker-stripped
+    // body collapsed to one line while the previous side projected only
+    // the claim line, so a dash-less claim line never met. The re-voice
+    // bears no id and the round cannot tell it from any vanished claim —
+    // nothing closes, and no fabricated lineage fires in the same round.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: 'dashless claim text',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 5, body: '**[Critical]** gen 3' },
+        {
+          path: 'src/f.ts',
+          line: 5,
+          body:
+            '**[Suggestion]** dashless claim text\n\n' +
+            'Failure scenario: it still fails.\n' +
+            'Suggested fix: do the other thing.',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([1]);
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+    expect(r.body).not.toContain('⚠️ Divergence:');
+  });
+
+  it('mints the vanished closure beside a dash-less re-voice that carries its id', () => {
+    // The same entrance with identity proven: the rerouted body leads with
+    // the carried id, so the claim stands by the id set no matter how the
+    // rest of the body collapses — and the true lineage is the only one
+    // the sentinel names.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          {
+            id: 'R10-1',
+            sev: 'C',
+            file: 'src/f.ts',
+            title: 'dashless claim text',
+          },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+        closed: [{ r: 10, id: 'R9-1', f: 'src/f.ts' }],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/f.ts', line: 5, body: '**[Critical]** gen 3' },
+        {
+          path: 'src/f.ts',
+          line: 5,
+          body:
+            '**[Suggestion]** R10-1: dashless claim text\n\n' +
+            'Failure scenario: it still fails.\n' +
+            'Suggested fix: do the other thing.',
+        },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([1]);
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/f.ts' },
+    ]);
+    expect(r.body).toContain('R9-1 → R10-2 → R11-1');
+    expect(r.body).not.toContain('R10-1/R10-2');
+  });
+
+  it('fails closed for a previous Critical re-voiced by a Suggestion-severity deferral entry', () => {
+    // Entrance three: the typed-deferral join filtered severity Critical
+    // before keying, so a Suggestion-severity entry re-voicing a previous
+    // Critical — the convergence-posture deferral flow — was invisible.
+    // Id-less, the round cannot tell which claim the entry carries, and
+    // the mint withholds everything.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'claim X' },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/f.ts',
+          line: 5,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'claim X',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toBeUndefined();
+  });
+
+  it('mints the vanished closure beside a Suggestion-severity re-voice that carries its id', () => {
+    // The same entrance with identity proven — severity is irrelevant to
+    // the id join: a re-voice stands under whichever severity re-voices
+    // it, and only the truly vanished sibling closes.
+    const r = composeReview({
+      planPath: coveredPrev({
+        round: 10,
+        findings: [
+          { id: 'R10-1', sev: 'C', file: 'src/f.ts', title: 'claim X' },
+          { id: 'R10-2', sev: 'C', file: 'src/f.ts', title: 'claim Y' },
+        ],
+      }),
+      env: ENV,
+      modelId: MODEL,
+      severityFloor: 'critical',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      deferredSuggestions: [
+        {
+          file: 'src/f.ts',
+          line: 5,
+          source: 'review',
+          severity: 'Suggestion',
+          title: 'R10-1: claim X',
+        },
+      ],
+    });
+    expect(parseLedger(r.body)?.closed).toEqual([
+      { r: 11, id: 'R10-2', f: 'src/f.ts' },
+    ]);
   });
 
   it("names no re-minted re-post as the chain's fresh generation", () => {

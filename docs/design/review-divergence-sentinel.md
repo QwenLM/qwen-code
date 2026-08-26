@@ -52,8 +52,14 @@ ruling), a diff-only round that could not rule, a round that publicly
 answered "cannot tell" on a Critical, and a pure-foreign previous list
 whose entries are a stranger's. Minting also closes on CLAIM identity,
 not id identity: a claim the round re-posts under a re-minted id (a
-regenerated gate Critical, a relocated entry) still stands. Thin
-history stays silent rather than guesses.
+regenerated gate Critical, a model re-post the readback lost) still
+stands. The re-post channels — the deferral channel and the
+floor-enforced reroute — join on the ID they carry: an entry whose title
+bears the original finding id keeps that claim standing under whichever
+severity or path re-posts it, and an entry that bears none leaves the
+round unable to prove what it re-posts, so the mint fails closed and
+mints nothing that round. Thin history stays silent rather than
+guesses.
 
 `parseLedger` validates closures through `isLedgerClosure` (caps and the
 round bound, mirrored from the serializer); `prevLedgerFacts` carries them
