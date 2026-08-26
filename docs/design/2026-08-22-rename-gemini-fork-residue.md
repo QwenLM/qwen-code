@@ -98,8 +98,9 @@ Non-test files; `gemini-converter.ts` is intentionally NOT renamed (see above).
 | `packages/core/src/core/geminiContentGenerator/index.ts`                  | `packages/core/src/core/llm-content-generator/index.ts`                 |
 | `packages/core/src/core/geminiRequest.ts`                                 | `packages/core/src/core/llm-request.ts`                                 |
 
-The old `geminiRequest.ts` and `geminiChat.ts` paths remain as deprecated
-re-export shims until a future major release.
+The old `geminiRequest.ts`, `geminiChat.ts`, and
+`geminiContentGenerator/` paths remain as deprecated re-export shims until a
+future major release.
 
 ## Phasing
 
@@ -134,8 +135,8 @@ move as one atomic PR.
   `gemini.tsx` → `llm.tsx`.
 - Protocol converters: `convert*ToGemini*` / `convertGemini*To*` → `Llm`.
 - Deprecated compatibility aliases for the published core classes, event
-  types, `Config` client access/initialization option, and old chat module
-  path.
+  types, `Config` client access/initialization option, and old chat and content
+  generator module paths.
 
 ## Risks
 
@@ -161,5 +162,5 @@ move as one atomic PR.
 - `cd packages/cli && npx tsc --noEmit`
 - Targeted unit tests per renamed module
 - Legacy-name grep results are confined to the documented compatibility aliases
-  and `geminiRequest.ts` shim; active repository consumers use the new names.
+  and re-export shims; active repository consumers use the new names.
 - `npm run lint` (kebab-case filenames are enforced)
