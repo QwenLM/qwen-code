@@ -193,6 +193,7 @@ function makeFakeEnv() {
     }),
     renameSession: vi.fn().mockResolvedValue(true),
     findSessionTitlesByPrefix: vi.fn().mockResolvedValue([]),
+    getSessionDisplayName: vi.fn().mockResolvedValue(undefined),
   };
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
