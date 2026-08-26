@@ -2619,7 +2619,9 @@ export function registerSessionRoutes(
           }),
         );
       } catch (err) {
-        sendBridgeError(res, err, { route, sessionId });
+        if (!res.headersSent) {
+          sendBridgeError(res, err, { route, sessionId });
+        }
       }
     };
   };

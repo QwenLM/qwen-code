@@ -34994,91 +34994,125 @@ describe('Live conversation runtime lifecycle', () => {
     }
   });
 
-  it('keeps a sent standalone continuation response when the runtime changes afterward', async () => {
-    const sessionId = '550e8400-e29b-41d4-a716-446655440012';
-    let restored = false;
-    const setupRef: { current?: ReturnType<typeof setupLiveRuntime> } = {};
-    const setup = setupLiveRuntime(
-      {
-        loadImpl: async (req) => {
-          restored = true;
-          return {
-            sessionId: req.sessionId,
-            workspaceCwd: req.workspaceCwd,
-            currentCwd: req.workspaceCwd,
-            attached: false,
-            clientId: req.clientId ?? 'client-continue-race',
-            sourceType: req.sourceType,
-            state: {},
-            hasActivePrompt: false,
-          };
-        },
-        summaryImpl: (id) => {
-          if (!restored) throw new SessionNotFoundError(id);
-          const current = setupRef.current!;
-          return {
-            sessionId: id,
-            workspaceCwd: current.root.canonicalRoot,
-            currentCwd: `${current.root.canonicalRoot}/conversation-${id}`,
-            createdAt: '2026-08-24T00:00:00.000Z',
-            sourceType: 'standalone',
-            clientCount: 0,
-            hasActivePrompt: false,
-          };
-        },
-        continueSessionImpl: async () => {
-          const current = setupRef.current!;
-          const entry = current.registry.getManagedEntryByWorkspaceId(
-            current.liveRuntime.workspaceId,
-          );
-          expect(entry).toBeDefined();
-          expect(current.registry.beginReplacement(entry!, 'policy-2')).toBe(
-            true,
-          );
-          return { accepted: true, interruption: 'none' as const };
-        },
-      },
-      {},
-      { token: 'secret' },
-    );
-    setupRef.current = setup;
-    setup.registry.add(setup.liveRuntime);
-    const findSessionId = vi
-      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-      .mockResolvedValue(sessionId);
-    const getLocation = vi
-      .spyOn(SessionService.prototype, 'getSessionLocation')
-      .mockResolvedValue('active');
-    const readCreationMetadata = vi
-      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
-      .mockResolvedValue({ sourceType: 'default' });
-    try {
-      const load = await request(setup.app)
-        .post(`/session/${sessionId}/load`)
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('Authorization', 'Bearer secret')
-        .send({ cwd: setup.root.canonicalRoot });
-      expect(load.status).toBe(200);
-
-      const continued = await request(setup.app)
-        .post(`/session/${sessionId}/continue`)
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('Authorization', 'Bearer secret')
-        .send({});
-      expect(continued.status).toBe(200);
-      expect(continued.body).toEqual({
+  it.each([
+    {
+      operation: 'continuation',
+      route: 'continue',
+      body: {},
+      expectedStatus: 200,
+      expectedBody: {
         accepted: true,
         interruption: 'none',
-      });
-    } finally {
-      readCreationMetadata.mockRestore();
-      getLocation.mockRestore();
-      findSessionId.mockRestore();
-      await (
-        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
-      )();
-    }
-  });
+      },
+    },
+    {
+      operation: 'fork',
+      route: 'fork',
+      body: { directive: 'review the current code' },
+      expectedStatus: 202,
+      expectedBody: {
+        sessionId: '550e8400-e29b-41d4-a716-446655440012',
+        description: 'review the current code',
+        launched: true,
+      },
+    },
+  ])(
+    'keeps a sent standalone $operation response when the runtime changes afterward',
+    async ({ route, body, expectedStatus, expectedBody }) => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440012';
+      let restored = false;
+      const setupRef: { current?: ReturnType<typeof setupLiveRuntime> } = {};
+      const beginReplacement = () => {
+        const current = setupRef.current!;
+        const entry = current.registry.getManagedEntryByWorkspaceId(
+          current.liveRuntime.workspaceId,
+        );
+        expect(entry).toBeDefined();
+        expect(current.registry.beginReplacement(entry!, 'policy-2')).toBe(
+          true,
+        );
+      };
+      const setup = setupLiveRuntime(
+        {
+          loadImpl: async (req) => {
+            restored = true;
+            return {
+              sessionId: req.sessionId,
+              workspaceCwd: req.workspaceCwd,
+              currentCwd: req.workspaceCwd,
+              attached: false,
+              clientId: req.clientId ?? 'client-continue-race',
+              sourceType: req.sourceType,
+              state: {},
+              hasActivePrompt: false,
+            };
+          },
+          summaryImpl: (id) => {
+            if (!restored) throw new SessionNotFoundError(id);
+            const current = setupRef.current!;
+            return {
+              sessionId: id,
+              workspaceCwd: current.root.canonicalRoot,
+              currentCwd: `${current.root.canonicalRoot}/conversation-${id}`,
+              createdAt: '2026-08-24T00:00:00.000Z',
+              sourceType: 'standalone',
+              clientCount: 0,
+              hasActivePrompt: false,
+            };
+          },
+          continueSessionImpl: async () => {
+            beginReplacement();
+            return { accepted: true, interruption: 'none' as const };
+          },
+          launchSessionForkAgentImpl: async (id, directive) => {
+            beginReplacement();
+            return { sessionId: id, description: directive, launched: true };
+          },
+        },
+        {},
+        { token: 'secret' },
+      );
+      setupRef.current = setup;
+      setup.registry.add(setup.liveRuntime);
+      const findSessionId = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockResolvedValue(sessionId);
+      const getLocation = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockResolvedValue('active');
+      const readCreationMetadata = vi
+        .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+        .mockResolvedValue({ sourceType: 'default' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const load = await request(setup.app)
+          .post(`/session/${sessionId}/load`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({ cwd: setup.root.canonicalRoot });
+        expect(load.status).toBe(200);
+
+        const response = await request(setup.app)
+          .post(`/session/${sessionId}/${route}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send(body);
+        expect(response.status).toBe(expectedStatus);
+        expect(response.body).toEqual(expectedBody);
+        expect(stderr).not.toHaveBeenCalledWith(
+          expect.stringContaining('unhandled error'),
+        );
+      } finally {
+        stderr.mockRestore();
+        readCreationMetadata.mockRestore();
+        getLocation.mockRestore();
+        findSessionId.mockRestore();
+        await (
+          setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+        )();
+      }
+    },
+  );
 
   it('reads the authoritative persisted spelling for internal restore while keeping the private directory canonical, and rejects case conflicts', async () => {
     const setup = setupLiveRuntime();

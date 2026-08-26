@@ -59,6 +59,7 @@ import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';
 import { DaemonDrainingError } from './session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -233,6 +234,14 @@ export function sendBridgeError(
       error: err.message,
       code: err.code,
       errorKind: err.code,
+    });
+    return;
+  }
+  if (err instanceof ConversationRuntimeOwnershipError) {
+    res.status(err.status).json({
+      error: err.message,
+      code: err.code,
+      retryable: err.retryable,
     });
     return;
   }

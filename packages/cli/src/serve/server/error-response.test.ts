@@ -17,6 +17,7 @@ import {
 import { sendBridgeError } from './error-response.js';
 import { DaemonDrainingError } from './session-archive.js';
 import { StandaloneSessionServiceError } from '../conversations/standalone-session-service.js';
+import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 
 function responseMock(): {
@@ -69,6 +70,28 @@ describe('sendBridgeError session writer errors', () => {
       errorKind: 'daemon_draining',
     });
   });
+
+  it.each([
+    ['conversation_runtime_in_use', true],
+    ['conversation_runtime_unavailable', true],
+    ['conversation_root_compromised', false],
+    ['conversation_runtime_ownership_compromised', false],
+  ] as const)(
+    'maps Conversations runtime ownership %s to 503',
+    (code, retryable) => {
+      const { response, status, json } = responseMock();
+      const error = new ConversationRuntimeOwnershipError(code, retryable);
+
+      sendBridgeError(response, error);
+
+      expect(status).toHaveBeenCalledWith(503);
+      expect(json).toHaveBeenCalledWith({
+        error: error.message,
+        code,
+        retryable,
+      });
+    },
+  );
 
   it.each([
     ['invalid_request', 400, false],
