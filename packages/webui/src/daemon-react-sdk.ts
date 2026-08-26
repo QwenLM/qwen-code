@@ -243,6 +243,8 @@ export type {
   DaemonSessionOwnerSnapshot,
   /** Per-model API and token metrics within a stats response. */
   DaemonSessionStatsModelMetrics,
+  /** Per-subagent token metrics within a stats response. */
+  DaemonSessionStatsSource,
   /** Structured session statistics from `GET /session/:id/stats`. */
   DaemonSessionStatsStatus,
   /** Per-tool call count, success/fail, and duration within a stats response. */
