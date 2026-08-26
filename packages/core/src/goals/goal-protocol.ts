@@ -172,6 +172,16 @@ export interface GoalRecord {
    * on Goals persisted before budgets existed: those stay unbounded.
    */
   tokenBudget?: number;
+  /**
+   * The turn that delivered this spend window's wind-down hand-off. A spent
+   * budget grants one more continuation before it stops the Goal, so the
+   * model can hand off instead of being cut mid-thought; this marks that
+   * turn as finished. Stamped by the turn's own `turn_finished` record, so a
+   * restart mid-hand-off (marker absent, hand-off never delivered) grants the
+   * hand-off again, while a restart after it (marker present) does not.
+   * Cleared whenever the budget is re-armed.
+   */
+  windDownTurnId?: string;
   createdAt: number;
   updatedAt: number;
   evidenceCheckpoint?: GoalEvidenceCheckpoint;

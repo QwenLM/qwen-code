@@ -18877,6 +18877,7 @@ describe('Session', () => {
         await boundGoalHost!.startGoalTurn({
           permit,
           continuationContext: 'check weather',
+          windDown: true,
           verifierFeedback: 'Need independent evidence',
         });
 
@@ -18905,6 +18906,11 @@ describe('Session', () => {
               expect.objectContaining({
                 text: expect.stringContaining(
                   'not evidence that the user supplied it',
+                ),
+              }),
+              expect.objectContaining({
+                text: expect.stringContaining(
+                  'The autonomous token budget for this Goal window is spent.',
                 ),
               }),
               expect.objectContaining({

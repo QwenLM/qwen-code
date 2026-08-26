@@ -119,6 +119,12 @@ export interface GoalTurnHost {
   startGoalTurn(input: {
     permit: GoalTurnPermit;
     continuationContext: string;
+    /**
+     * Set on the one continuation a spent budget still grants: the model is
+     * to hand off, not to keep working. Hosts pass it straight to
+     * `renderGoalContinuationPrompt`.
+     */
+    windDown?: boolean;
     verifierFeedback?: string;
   }): Promise<void>;
   preemptGoalTurn(reason: string): void;
@@ -252,6 +258,12 @@ export function createGoalRuntime(
   let currentTurnFeedback: string | undefined;
   let restored = false;
   let restoreActivationPending = false;
+  /**
+   * The permit turn of the wind-down continuation now in flight, if any.
+   * In memory only: a wind-down the host dropped undelivered must be minted
+   * again, and only the turn that actually finishes stamps the record.
+   */
+  let windDownTurnId: string | undefined;
   let restorePreparation: Promise<CheckpointAttempt | undefined> | undefined;
   let restoreActivation: Promise<void> | undefined;
   let preparedRestoreCause: GoalStateCause | undefined;
@@ -435,7 +447,7 @@ export function createGoalRuntime(
     }
   };
 
-  const flushContinuation = (cause?: GoalStateCause) => {
+  const flushContinuation = (cause?: GoalStateCause, windDown = false) => {
     if (
       !continuationQueued ||
       !host ||
@@ -462,6 +474,7 @@ export function createGoalRuntime(
     currentPermitHost = scheduledHost;
     currentTurnKey = `goal-runtime:${currentPermit.turnId}`;
     const startedPermit = structuredClone(currentPermit);
+    windDownTurnId = windDown ? startedPermit.turnId : undefined;
     snapshot = { ...snapshot, activity: 'running' };
     broadcast(cause);
     const handleStartFailure = () => {
@@ -503,6 +516,7 @@ export function createGoalRuntime(
       started = scheduledHost.startGoalTurn({
         permit: startedPermit,
         continuationContext,
+        ...(windDown ? { windDown } : {}),
         ...(verifierFeedback ? { verifierFeedback } : {}),
       });
     } catch {
@@ -524,7 +538,15 @@ export function createGoalRuntime(
       return;
     }
     if (isGoalTokenBudgetSpent(snapshot.goal)) {
-      stopForSpentBudget();
+      // A spent window buys one hand-off before it stops. The record marks
+      // the hand-off that finished; until then -- never granted, or granted
+      // and dropped by the host before the model saw it -- grant it.
+      if (snapshot.goal.windDownTurnId !== undefined) {
+        stopForSpentBudget();
+        return;
+      }
+      continuationQueued = true;
+      flushContinuation(cause, true);
       return;
     }
     continuationQueued = true;
@@ -1409,10 +1431,13 @@ export function createGoalRuntime(
             throw new Error(STALE_GOAL_TURN_MESSAGE);
           }
           const recordUuid = randomUUID();
+          const finishedWindDown = windDownTurnId === permit.turnId;
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
             now: Date.now(),
             tokensUsed: takeTurnTokens(permit.turnId),
+            ...(finishedWindDown ? { windDownTurnId: permit.turnId } : {}),
           });
+          if (finishedWindDown) windDownTurnId = undefined;
           const persistedSnapshot: GoalSnapshotV2 = {
             v: GOAL_STATE_VERSION,
             goal: nextGoal,

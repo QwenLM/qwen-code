@@ -95,6 +95,7 @@ describe('useMessageQueue', () => {
     const input: Parameters<GoalTurnHost['startGoalTurn']>[0] = {
       permit,
       continuationContext: 'Continue the active Goal',
+      windDown: true,
       verifierFeedback: 'Need stronger evidence',
     };
     const { result } = renderHook(() => useMessageQueue());
@@ -122,6 +123,7 @@ describe('useMessageQueue', () => {
       permit,
       turnKey: 'goal-runtime:turn-1',
       continuationContext: 'Continue the active Goal',
+      windDown: true,
       verifierFeedback: 'Need stronger evidence',
     });
     expect(queue.popNextSubmission!()).toBeNull();
