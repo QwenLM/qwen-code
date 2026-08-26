@@ -184,6 +184,7 @@ describe('<HistoryItemDisplay />', () => {
           evidenceCursor: { recordId: 'record-1' },
           turnCount: 2,
           activeTimeMs: 4_000,
+          tokensUsed: 0,
           createdAt: 1_000,
           updatedAt: 5_000,
           lastReason: 'waiting for approval',

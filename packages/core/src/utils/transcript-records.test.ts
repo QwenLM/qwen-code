@@ -157,6 +157,26 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts session model metadata as a known record subtype', () => {
+    const prepared = prepareTranscriptRecords([
+      record('model', null, {
+        type: 'system',
+        subtype: 'session_model',
+        message: undefined,
+        systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+      }),
+      record('root', 'model'),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        recordId: 'model',
+        path: 'subtype',
+      }),
+    );
+  });
+
   it('accepts the workflow agent retry marker as a known record subtype', () => {
     const prepared = prepareTranscriptRecords([
       record('root', null),

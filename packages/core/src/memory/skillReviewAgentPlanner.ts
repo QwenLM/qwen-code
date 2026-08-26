@@ -13,7 +13,7 @@ import type {
   PermissionCheckContext,
   PermissionDecision,
 } from '../permissions/types.js';
-import { runForkedAgent } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../agents/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -51,6 +51,7 @@ type SkillScopedPermissionManager = Pick<
   | 'findMatchingDenyRule'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
+  | 'isPermissionsAllowListActive'
   | 'isToolEnabled'
 >;
 
@@ -253,6 +254,14 @@ export function createSkillScopedAgentConfig(
       if (isScopedTool(toolName)) return true;
       if (basePm) return basePm.isToolEnabled(toolName);
       return true;
+    },
+    // The scheduler's permission-denied message branch calls this on
+    // whatever `getPermissionManager()` returns (#9827). Without the
+    // delegation a shim-rejected call under an active allowlist threw
+    // `TypeError: ... is not a function` instead of reaching the
+    // designed permission error.
+    isPermissionsAllowListActive(): boolean {
+      return basePm?.isPermissionsAllowListActive() ?? false;
     },
   };
 

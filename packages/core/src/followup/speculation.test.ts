@@ -12,9 +12,19 @@ import {
 } from './speculation.js';
 import type { Content } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
-import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import type { CacheSafeParams } from '../agents/forkedAgent.js';
+import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 
 const forkedAgentMocks = vi.hoisted(() => ({
+  getCacheSafeParams: vi.fn<
+    (expectedSessionId?: string) => CacheSafeParams | null
+  >(() => ({
+    generationConfig: {},
+    history: [],
+    model: 'qwen-fast',
+    version: 1,
+  })),
+  createForkedChat: vi.fn(),
   runForkedAgent: vi.fn(),
   sendMessageStream: vi.fn(),
 }));
@@ -23,25 +33,22 @@ const boundaryMocks = vi.hoisted(() => ({
 }));
 
 vi.mock(
-  '../utils/tool-result-boundary-diagnostics.js',
+  '../tools/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../tools/tool-result-boundary-diagnostics.js')
     >()),
     observeToolResultBoundary: boundaryMocks.observe,
   }),
 );
 
-vi.mock('../utils/forkedAgent.js', () => ({
-  getCacheSafeParams: vi.fn(() => ({
-    generationConfig: {},
-    history: [],
-    model: 'qwen-fast',
-    version: 1,
-  })),
-  createForkedChat: vi.fn(() => ({
-    sendMessageStream: forkedAgentMocks.sendMessageStream,
-  })),
+vi.mock('../agents/forkedAgent.js', () => ({
+  getCacheSafeParams: forkedAgentMocks.getCacheSafeParams,
+  createForkedChat: forkedAgentMocks.createForkedChat.mockImplementation(
+    () => ({
+      sendMessageStream: forkedAgentMocks.sendMessageStream,
+    }),
+  ),
   runForkedAgent: forkedAgentMocks.runForkedAgent,
   runWithForkedChatModel: vi.fn(
     async (
@@ -57,6 +64,20 @@ afterEach(() => {
 });
 
 describe('startSpeculation', () => {
+  it('does not start when the session-scoped lookup returns null', async () => {
+    const config = {
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(null);
+
+    await expect(startSpeculation(config, 'read a.ts')).rejects.toThrow(
+      'CacheSafeParams not available for speculation',
+    );
+
+    expect(forkedAgentMocks.createForkedChat).not.toHaveBeenCalled();
+    expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+  });
+
   it('stops at a boundary when the host guard denies a speculative invocation', async () => {
     const execute = vi.fn();
     const guard = vi.fn().mockResolvedValue({
@@ -112,6 +133,9 @@ describe('startSpeculation', () => {
     const state = await startSpeculation(config, 'read a.ts');
     await vi.waitFor(() => expect(state.status).toBe('boundary'));
 
+    expect(forkedAgentMocks.getCacheSafeParams).toHaveBeenCalledWith(
+      'spec-session',
+    );
     expect(guard).toHaveBeenCalledWith({
       callId: 'call-speculation-guard',
       toolName: 'read_file',
@@ -179,7 +203,14 @@ describe('startSpeculation', () => {
 
     const state = await startSpeculation(config, 'read a.ts');
     await vi.waitFor(() => expect(state.status).toBe('completed'));
+    await vi.waitFor(() =>
+      expect(forkedAgentMocks.getCacheSafeParams).toHaveBeenCalledTimes(2),
+    );
 
+    expect(forkedAgentMocks.getCacheSafeParams).toHaveBeenNthCalledWith(
+      2,
+      'spec-session',
+    );
     expect(guard).toHaveBeenCalledWith({
       callId: 'call-speculation-guard-allow',
       toolName: 'read_file',
@@ -212,6 +243,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
 
@@ -295,6 +327,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
 
@@ -357,6 +390,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
 
@@ -418,6 +452,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
 
@@ -481,6 +516,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
       getToolOutputBatchBudget: vi.fn().mockReturnValue(10_000),
     } as unknown as Config;
@@ -544,6 +580,7 @@ describe('startSpeculation', () => {
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getCwd: vi.fn().mockReturnValue(process.cwd()),
       getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
       getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
     } as unknown as Config;
     forkedAgentMocks.runForkedAgent.mockResolvedValue({
@@ -585,6 +622,42 @@ describe('startSpeculation', () => {
 
     await abortSpeculation(state);
   });
+
+  it('does not generate a pipelined suggestion when its scoped lookup returns null', async () => {
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams
+      .mockReturnValueOnce({
+        generationConfig: {},
+        history: [],
+        model: 'qwen-fast',
+        version: 1,
+      })
+      .mockReturnValueOnce(null);
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [{ content: { parts: [{ text: 'done' }] } }],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'do something');
+    await vi.waitFor(() => expect(state.status).toBe('completed'));
+    await vi.waitFor(() =>
+      expect(forkedAgentMocks.getCacheSafeParams).toHaveBeenCalledTimes(2),
+    );
+
+    expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+    expect(state.pipelinedSuggestion).toBeUndefined();
+
+    await abortSpeculation(state);
+  });
 });
 
 describe.each([
@@ -606,6 +679,7 @@ describe.each([
         getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
         getCwd: vi.fn().mockReturnValue(process.cwd()),
         getFastModel: vi.fn().mockReturnValue(fastModel),
+        getSessionId: vi.fn().mockReturnValue('spec-session'),
         getToolRegistry: vi.fn().mockReturnValue({
           ensureTool: vi.fn().mockResolvedValue({
             build: vi.fn().mockReturnValue({

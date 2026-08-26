@@ -101,6 +101,8 @@ const rootDir = join(__dirname, '..');
 // (`unrecognizedDiagnostics` routing + selector, #8823).
 // Bumped from 198KB to 199KB for persistent session attachment read/remove and
 // binary resource hydration.
+// Bumped from 199KB to 200KB for the session PR binding (`DaemonSessionPrInfo`
+// + validators).
 // Bumped from 199KB to 200KB for the retention byte budget (block byte
 // estimation + budget-aware trimming) and backing-store-detached string caps
 // (#9303 review round 3).
@@ -111,7 +113,9 @@ const rootDir = join(__dirname, '..');
 // its own delta in isolation, and the combined feature sets land here. The
 // attachment read/remove + binary hydration feature that separately bumped
 // main to 199KB merges within this headroom, so no further bump is needed.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 206 * 1024;
+// Bumped from 206KB to 208KB for transcript block change summaries used to
+// avoid complete Web Shell projection on every streamed text update.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 208 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

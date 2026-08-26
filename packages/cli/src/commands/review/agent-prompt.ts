@@ -41,6 +41,7 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   writeStdoutLine,
   writeStderrLine,
@@ -98,7 +99,11 @@ import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
-import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
+import {
+  RESIDUE_PATH_CAP,
+  worktreeResidue,
+  type WorktreeResidue,
+} from './lib/worktree.js';
 import {
   isTerritoryFanOut,
   requiredAgents,
@@ -150,6 +155,8 @@ interface PlanReport {
   prNumber?: unknown;
   ownerRepo?: unknown;
   worktreePath?: unknown;
+  /** The PR head sha fetch-pr recorded — the probe's identity anchor. */
+  fetchedSha?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
   repositoryContext?: unknown;
@@ -373,6 +380,7 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - **Issue:** <one-line statement of the defect>
 - **Failure scenario:** <the concrete trigger and the concrete wrong outcome: what input, state, timing, or config makes this code misbehave, and what incorrect output / crash / leak / exposure results>
 - **Suggested fix:** <concrete code suggestion when possible, or "N/A">
+- **Fix witness:** <the test that must go RED if that fix is removed — the test file and the behaviour it pins — or "N/A" when the fix adds no guard, branch or behaviour a test can pin>
 - **Severity:** Critical | Suggestion | Nice to have
 - **Confidence:** high | low
 
@@ -385,7 +393,9 @@ const FINDING_FORMAT = `Format each finding using this structure:
 - A line too long to quote whole — a multi-KB single-line Markdown paragraph — may be quoted as a distinctive verbatim **fragment** of at least 12 characters (measured after whitespace collapse); it resolves to the line containing it.
 - Fill in **File** and the line number anyway. The path selects the file and the line breaks a tie when the snippet genuinely repeats. Neither is trusted as the answer.
 
-**The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.`;
+**The failure scenario is the finding's evidence, and it gates reporting.** For a quality finding, state the concrete cost instead of a crash — what is duplicated, wasted, or made harder to change — or quote the rule it violates. A **Suggestion** or **Nice to have** whose failure scenario you cannot fill in concretely **is not a finding: do not report it.** A suspected **Critical** whose trigger you cannot pin down IS still reported, at \`Confidence: low\`, with the scenario naming the mechanism and what remains uncertain — a later verification stage rules on it. "This looks risky", with no nameable trigger and no nameable cost, is how a hallucinated finding reaches a pull request.
+
+**A fix that adds a guard owes a test that fails without it — say so in the finding.** The fix round is this loop's largest single source of its own next round: measured across six multi-round pull requests, roughly a third of every post-first-round finding was introduced by the fix immediately before it, and the dominant shape was a guard or branch added with no test of its own. The suite re-runs only the tests that exist, so an unwitnessed guard passes every gate and its hole comes back as next round's finding. So when your **Suggested fix** adds or changes a guard, a branch, or a behaviour, fill **Fix witness** with the test that must go red without it — the file and what it asserts — and, where you can, the mutation that proves it: remove the guard, run that test, watch it fail. Write \`N/A\` when there is genuinely nothing to pin — a rename, a comment, a docs line, a type-only change, a fix whose whole content is deleting code. **This field never gates reporting**: a finding whose fix you cannot pin is still filed, with \`N/A\`. It is an acceptance criterion for the author, not a bar for you.`;
 
 /**
  * What not to report.
@@ -1313,6 +1323,27 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 }
 
 /**
+ * The plan's fetched head sha when it carries a usable one. Absent or
+ * malformed answers nothing rather than a broken anchor: every worktree-mode
+ * fetch writes the field, so both call sites fail closed on that absence,
+ * each in its own way.
+ *
+ * A usable one is a FULL Git object ID: 40 hex for SHA-1 repositories and
+ * 64 for SHA-256 ones — fetch-pr records `git rev-parse` verbatim, and the
+ * pipeline's own shape contract admits both lengths (pr-context's
+ * COMMIT_SHA_RE carries its {40,64} breadth for exactly that class). A
+ * validator matching only the SHA-1 length would drop the record every
+ * SHA-256 review writes, failing closed as though the plan were tampered
+ * with and welding an unpinned scratch-tree command.
+ */
+function fetchedShaOf(report: PlanReport): string | undefined {
+  const sha = report.fetchedSha;
+  return typeof sha === 'string' && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha)
+    ? sha
+    : undefined;
+}
+
+/**
  * The review worktree's residue, or nothing at all when there is no worktree to
  * have any. Resolved against the process cwd, like every other use of
  * `worktreePath` here: the report stores it repo-relative and review commands
@@ -1321,7 +1352,28 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
-  return worktreeResidue(resolve(wt));
+  // Hand over the sha fetch-pr recorded: committing the contamination moves
+  // a forge's HEAD off it, so with it the probe refuses a forged admin entry
+  // (see worktreeResidue). The record raises the plant's cost; it does not
+  // make planting impossible — it is re-read from the plan file at every
+  // invocation, and a same-user writer can rewrite it along with the forge.
+  // Absent or malformed it fails CLOSED: every worktree-mode fetch writes
+  // the field, so a plan that names a worktree without it is tampered or
+  // corrupted, and measuring unpinned would certify whichever index the
+  // gitfile names.
+  const sha = fetchedShaOf(report);
+  if (sha === undefined) {
+    return {
+      paths: [],
+      total: 0,
+      unmeasured:
+        'the plan carries no usable record of the fetched head sha — ' +
+        'every worktree-mode fetch writes one, so its absence means ' +
+        'tampering or corruption, and measuring without it would certify ' +
+        'whichever index the .git gitfile names',
+    };
+  }
+  return worktreeResidue(resolve(wt), RESIDUE_PATH_CAP, sha);
 }
 
 /**
@@ -1376,7 +1428,7 @@ function worktreeEvidenceBlock(
   if (residue?.unmeasured) {
     parts.push(
       '',
-      `**Whether it is clean could not be measured** (\`git status\` failed: ` +
+      `**Whether it is clean could not be measured** (reason: ` +
         `${inertPath(residue.unmeasured)}). That is not the same as clean: treat ` +
         'anything that surprises you in this tree as unverified until you have ' +
         'checked it against `git show HEAD:<path>`.',
@@ -1583,14 +1635,15 @@ export function buildRoleBrief(
     }
   }
 
-  // Cross-repo lightweight mode: there is no tree, only the diff. Two briefs assume
-  // one, and the degradation used to be a sentence the orchestrator was told to add
-  // by hand — which is not a thing that survives, and is now not a thing it can do:
-  // it does not write these any more. So the builder degrades them, from the same
-  // plan the roster reads.
+  // Cross-repo lightweight mode: there is no tree, only the diff. Several briefs
+  // assume one, and the degradation used to be a sentence the orchestrator was told
+  // to add by hand — which is not a thing that survives, and is now not a thing it
+  // can do: it does not write these any more. So the builder degrades them, from
+  // the same plan the roster reads.
   //
-  // 1b's is a *precision* rule, not a convenience: an agent that cannot grep for a
-  // re-establishment and asserts one is missing files a false Critical, and a false
+  // The clause below is a *precision* rule, not a convenience: an agent that
+  // cannot grep for a re-establishment (1b), a caller (1c), or a wrapper's call
+  // sites (1e) and asserts one is missing files a false Critical, and a false
   // Critical blocks a merge.
   if (reviewMode(report as RosterPlan) === 'diff-only' && brief.reviewsCode) {
     parts.push(
@@ -1599,12 +1652,16 @@ export function buildRoleBrief(
         'local checkout to read enclosing functions from, and nothing to `grep_search`. ' +
         'Work from the diff alone.',
     );
-    if (role === '1b' || role === '1c') {
+    // 1e's forwarding-completeness walk greps the wrapper's call sites, and a
+    // caller lives outside the diff exactly like 1b's replacement or 1c's
+    // consumers — the same precision rule applies.
+    if (role === '1b' || role === '1c' || role === '1e') {
       parts.push(
         '',
         'Which changes what you may conclude. When the evidence you would need sits **outside ' +
           'the diff** — the replacement for a deleted export, the call sites of a changed ' +
-          'signature, the read sites of a new field — you cannot check it, and you must not ' +
+          'signature, the read sites of a new field, the callers a wrapper does not forward — ' +
+          'you cannot check it, and you must not ' +
           'assert it is missing. Report the candidate at `Confidence: low` and say plainly that ' +
           'the check could not be made. A false Critical blocks a merge.',
       );
@@ -1645,6 +1702,11 @@ export function buildRoleBrief(
       // written into a shell command, and the one function that decides the
       // tree's name is also what keeps a metacharacter out of that command.
       const label = scratchLabel(opts.key ?? role);
+      // The identity anchor fetch-pr recorded, when the plan carries a usable
+      // one: with it the probe pins the shared tree and a healthy run measures
+      // clean — without it the no-record refusal fires on every run, and a
+      // tampering note that fires always is a note nobody reads.
+      const sha = fetchedShaOf(report);
       parts.push(
         '',
         '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
@@ -1663,7 +1725,8 @@ export function buildRoleBrief(
         // a bare interpolation, and the failure would be silent — every shard's
         // scratch tree unavailable, every probe demoted to a reading.
         `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
-        `  --label ${label}`,
+        `  --label ${label}${sha === undefined ? '' : ' \\'}`,
+        ...(sha === undefined ? [] : [`  --fetched-sha ${sha}`]),
         '```',
         '',
         'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +
@@ -2410,6 +2473,27 @@ function rosterLabel(req: RequiredAgent): string {
  * the list it builds is the same one `check-coverage` will hold the run to,
  * because both come from `requiredAgents(plan)`.
  */
+/**
+ * The launch parameters every review agent needs, on every emission path.
+ *
+ * It lived inside `runRoster`'s worktree-only note because that block began as
+ * a `working_dir` reminder — so three review modes were told nothing, and then
+ * so were Step 4's verify shards and Step 5's audit rounds, which are the most
+ * numerous agents a high-effort review launches and the ones furthest from
+ * SKILL.md's own statement of the rule. Omitting the type is not a no-op:
+ * `AgentTool.execute` resolves an omitted `subagent_type` to `general-purpose`,
+ * which declares no `tools` and so takes `prepareTools`' inherit-everything
+ * branch — the entire cost `review-agent` exists to remove, spent silently.
+ * Before the review had its own type, forgetting the parameter was harmless
+ * because the default WAS the right answer.
+ */
+const TYPE_NOTE =
+  `\n\n**Set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and ` +
+  `\`run_in_background: false\` on EVERY agent call below**, in every review ` +
+  `mode and at every step. An omitted \`subagent_type\` is not left blank — it ` +
+  `resolves to the general-purpose default, which inherits every tool in the ` +
+  `session and re-declares them on each agent's every turn.`;
+
 function runRoster(
   report: PlanReport,
   planPath: string,
@@ -2454,12 +2538,20 @@ function runRoster(
   const paramNote =
     typeof wt === 'string' && wt
       ? `\n\n**Agent tool parameters (worktree mode):** Set ` +
-        `\`working_dir: "${wt}"\` and ` +
-        `\`subagent_type: "general-purpose"\`, \`run_in_background: false\` ` +
-        `on EVERY agent call below. Do NOT set \`isolation\` — the worktree ` +
-        `already exists; \`isolation\` creates a new copy and is mutually ` +
-        `exclusive with \`working_dir\`.`
+        `\`working_dir: "${wt}"\` on EVERY agent call below. Do NOT set ` +
+        `\`isolation\` — the worktree already exists; \`isolation\` creates a ` +
+        `new copy and is mutually exclusive with \`working_dir\`.`
       : '';
+  // The type belongs OUTSIDE that gate. It was written inside it because the
+  // block began as a `working_dir` reminder, and worktrees are the only mode
+  // that needs one — but the type is needed by all four (local diff, file
+  // path and cross-repo lightweight reviews have no worktree and were
+  // therefore told nothing). Omitting it is not a no-op: `AgentTool.execute`
+  // substitutes `general-purpose` for an omitted `subagent_type`, which
+  // declares no `tools` and so takes prepareTools' inherit-everything branch —
+  // 13 agents × 4 turns × ~17.7k tokens of tool declarations, the entire cost
+  // this type exists to remove. Before the review had its own type, forgetting
+  // the parameter was harmless because the default WAS the right answer.
   // The Agent tool's `description` is the task name the user watches in the
   // TUI while the agent runs, and nothing downstream reads it — the delivery
   // check compares prompts, coverage reads transcripts. So it is the one part
@@ -2486,6 +2578,7 @@ function runRoster(
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
         `plus the same --rules this call was given.` +
         descNote +
+        TYPE_NOTE +
         paramNote,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,
@@ -2918,7 +3011,8 @@ function runAllChunks(
         `rebuild just the missing chunks with --chunk <id>. Write each ` +
         `Agent call's \`description\` (the task ` +
         `name the user watches) in your output language, translating the ` +
-        `separator label — display only; the prompt stays the block VERBATIM.`,
+        `separator label — display only; the prompt stays the block VERBATIM.` +
+        TYPE_NOTE,
       ...blocks,
       `───── end of round — ${dueChunks.length} auditors ─────`,
       ...retirementNote,
@@ -3177,7 +3271,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   const residue = worktreeResidueOf(report);
   if (residue.unmeasured) {
     writeStderrLine(
-      `warning: could not measure whether the review worktree is clean (git status failed: ` +
+      `warning: could not measure whether the review worktree is clean (reason: ` +
         `${inertPath(residue.unmeasured)}). Every brief built by this call says so; an unmeasured tree is ` +
         'not a clean one.',
     );
@@ -3483,6 +3577,21 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       ? foldFindings(args.role as RoleId, findingsContent, prompt, findingsFile)
       : prompt;
   recordPrompt(args.plan, key, printed);
+  // The whole output of this path IS the block the orchestrator pastes
+  // verbatim, and the delivery check compares that paste against the record.
+  // So the launch note gets NO channel here, and the second-best channel is
+  // not stderr: `ShellExecutionService` builds its result as
+  // `stdout + separator + stderr`, and `ShellToolInvocation` hands that
+  // combined string back, so a note on stderr arrives inside the very text
+  // the caller is told to copy. It fails the same equality as stdout would,
+  // only invisibly — the five tests that catch the stdout version see
+  // nothing. Removing it by hand is the edit the delivery gate forbids, so
+  // the launch would enter drift/relaunch repair.
+  //
+  // The rule still reaches these launches: SKILL.md states it for every
+  // `agent` call, and the two paths that CAN carry a note — the roster
+  // header and the audit-round header — do, because there the note sits
+  // outside the ───── blocks that get pasted.
   writeStdoutLine(printed);
   // Admitted AND built — the single-build twin of the all-chunks stamp in
   // `runAllChunks`. A `--chunk <id>` build lands here too: the first chunk

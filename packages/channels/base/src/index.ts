@@ -96,6 +96,7 @@ export {
   sanitizeDisplayText,
   sanitizeLogText,
   truncateCodePoints,
+  truncateUtf16Units,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
 export type {

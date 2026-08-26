@@ -5,7 +5,7 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -3069,9 +3069,28 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(job.if).toContain("needs.review-pr.result == 'failure'");
     // A review-pr that dies to its own job-level timeout is auto-cancelled
     // (result 'cancelled', failure() false), which would open neither this
-    // gate nor the in-job step; a run-level cancel cancels this queued job
-    // too, so a live evaluation seeing 'cancelled' is the timeout case.
-    expect(job.if).toContain("needs.review-pr.result == 'cancelled'");
+    // gate nor the in-job step — but `always()` keeps this job alive through
+    // a RUN-level cancel, so a bare 'cancelled' clause posts a false "did
+    // not complete" from a concurrency-superseded run while its same-head
+    // twin is still reviewing (PR #9131, run 32558544379 — same head, so
+    // the in-step head-moved guard cannot catch it). The two cancels differ
+    // in `needs`: a timeout cancels review-pr ALONE, a run-level cancel
+    // sweeps the upstream chain too. Pin the full compound clause — the
+    // grouping included — so reverting either upstream conjunct fails here.
+    expect(job.if).toContain(
+      "(needs.review-pr.result == 'cancelled' &&\n" +
+        "  needs.authorize.result != 'cancelled' &&\n" +
+        "  needs.delay-automatic-review.result != 'cancelled') ||",
+    );
+    // ...and that clause must be the ONLY place the gate tests review-pr
+    // for 'cancelled': a merge-conflict resolution keeping both sides
+    // re-adds a bare `== 'cancelled'` disjunct beside the intact compound
+    // clause — in any rendering (bare, parenthesized, respaced) — and the
+    // gate opens on every cancelled review-pr again while the pin above
+    // stays green. Counting occurrences catches every rendering.
+    expect(
+      job.if.match(/needs\.review-pr\.result == 'cancelled'/g),
+    ).toHaveLength(1);
     expect(job.if).toContain("needs.authorize.result == 'failure'");
     expect(job.if).toContain("needs.review-config.result == 'failure'");
     expect(job.if).toContain(
@@ -3118,6 +3137,21 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(run).toContain('status=1');
     expect(run.trim()).toMatch(/exit "\$status"$/);
   });
+
+  // The repair path names its canary with GNU `mktemp -u` (print-only):
+  // BSD mktemp's `-u` still tries to create the file, so in the unwritable
+  // directory the repair case breaks it exits nonzero with an empty name
+  // and the post-repair touch can never succeed. The health probe only
+  // runs on Linux runners (the review pool is Linux-only, same as the
+  // realpath case above), so the defect cannot exist in production; probe
+  // the host, not the platform — a BSD host with GNU coreutils fronting
+  // PATH keeps the coverage.
+  const hasGnuMktemp =
+    spawnSync(
+      'mktemp',
+      ['-u', join(tmpdir(), 'qwen-no-such-dir', '.probe-XXXXXX')],
+      { stdio: 'ignore' },
+    ).status === 0;
 
   // Executed shape for the health probe: run the step's REAL bash against
   // a fake runner tree with a stub sudo, so the repair-vs-fail-fast
@@ -3191,13 +3225,16 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(r.stdout).not.toContain('repaired');
   });
 
-  it('repairs a single unwritable directory instead of failing fast', () => {
-    // Mutant control: a status=1 right after the first failed touch would
-    // abort this repairable runner (exit 1) — a false fail-fast.
-    const r = runHealthProbe({ breakDir: 'home' });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('repaired write access');
-  });
+  it.skipIf(!hasGnuMktemp)(
+    'repairs a single unwritable directory instead of failing fast',
+    () => {
+      // Mutant control: a status=1 right after the first failed touch would
+      // abort this repairable runner (exit 1) — a false fail-fast.
+      const r = runHealthProbe({ breakDir: 'home' });
+      expect(r.status).toBe(0);
+      expect(r.stdout).toContain('repaired write access');
+    },
+  );
 
   it('fails fast when repair is impossible', () => {
     // Mutant control: dropping the post-repair re-probe would report this

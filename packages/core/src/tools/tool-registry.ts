@@ -204,6 +204,10 @@ export class ToolRegistry {
   // tool's schema is included in subsequent function-declaration lists even
   // though it would normally be hidden.
   private revealedDeferred: Set<string> = new Set();
+  // Reveals that are session SETUP rather than ToolSearch discovery (see
+  // pinDeferredToolReveal): they survive the `/clear` reset that
+  // intentionally drops discovered reveals so the new session starts clean.
+  private pinnedDeferredReveals: Set<string> = new Set();
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -690,10 +694,32 @@ export class ToolRegistry {
         }
       }
       // register each function as a tool
+      //
+      // The same PermissionManager gate that createToolRegistry applies to
+      // built-ins (via registerLazy) applies here too. Without it, a
+      // discovered tool not covered by an active `permissions.allow`
+      // registry allowlist would stay registered and advertised to the
+      // model while the runtime scheduler gate rejects every invocation
+      // with EXECUTION_DENIED — advertised-then-rejected (#9827). Gating
+      // at registration keeps both sides of the gate consistent: an
+      // uncovered tool is hidden from the model instead of always
+      // failing. Whole-tool deny rules benefit from the same consistency
+      // ("a whole-tool deny rule also removes the tool from the registry",
+      // settings.md). Deny rules still apply at runtime regardless.
+      const permissionManager = this.config.getPermissionManager?.();
       for (const func of functions) {
         if (!func.name) {
           debugLogger.warn('Discovered a tool with no name. Skipping.');
           continue;
+        }
+        if (permissionManager) {
+          const toolEnabled = await permissionManager.isToolEnabled(func.name);
+          if (!toolEnabled) {
+            debugLogger.info(
+              `Discovered tool "${func.name}" skipped: not enabled by the permission manager (permissions.allow registry allowlist or whole-tool deny rule, #9827).`,
+            );
+            continue;
+          }
         }
         const parameters =
           func.parametersJsonSchema &&
@@ -757,6 +783,20 @@ export class ToolRegistry {
   }
 
   /**
+   * Marks a deferred tool's reveal as session-setup state that must survive
+   * `/clear` resets: {@link clearRevealedDeferredTools} re-reveals pinned
+   * tools (while still registered and deferred) so the fresh session's
+   * `startChat` → `setTools()` re-declares them. Without a pin, a tool
+   * revealed at session creation silently drops out of the declaration list
+   * on the first `/clear` whenever the budget-based startup preload
+   * withholds it — that preload is all-or-nothing on a schema-size budget
+   * and returns early when preloading is disabled.
+   */
+  pinDeferredToolReveal(name: string): void {
+    this.pinnedDeferredReveals.add(name);
+  }
+
+  /**
    * Removes a single tool from the revealed-deferred set. Used for rollback
    * when a `setTools()` re-sync fails after revealing — leaving the tool
    * "revealed" in the registry while the chat's declaration list never
@@ -795,10 +835,19 @@ export class ToolRegistry {
   /**
    * Clears the set of revealed deferred tools. Called by {@link GeminiClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
-   * with no revealed tools — the same state as any fresh session.
+   * with no ToolSearch-discovered reveals — the same state as any fresh
+   * session. Session-setup reveals pinned via {@link pinDeferredToolReveal}
+   * survive the reset (while still registered and deferred): they are part
+   * of that fresh session's setup, not of the dropped session's discovery.
    */
   clearRevealedDeferredTools(): void {
     this.revealedDeferred.clear();
+    for (const name of this.pinnedDeferredReveals) {
+      const tool = this.tools.get(name);
+      if (tool && tool.shouldDefer && !tool.alwaysLoad) {
+        this.revealedDeferred.add(name);
+      }
+    }
   }
 
   /**

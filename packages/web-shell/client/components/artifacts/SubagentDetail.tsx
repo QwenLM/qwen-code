@@ -7,7 +7,7 @@ import {
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
 import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';
-import { useAnimationFrameTranscriptBlocks } from '../../hooks/useAnimationFrameTranscriptBlocks';
+import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
@@ -133,8 +133,8 @@ function SubagentDetailContent({
 }) {
   const { t } = useI18n();
   const connection = useConnection();
-  const blocks = useAnimationFrameTranscriptBlocks();
-  const messages = useMessagesFromBlocks(t, blocks);
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const { artifacts } = useSessionArtifacts();
   const artifactsByTurn = useMemo(
     () =>
@@ -271,8 +271,13 @@ export function SubagentDetail({
   const { t } = useI18n();
   const workspace = useWorkspace();
   const parentConnection = useConnection();
-  const parentBlocks = useAnimationFrameTranscriptBlocks();
-  const parentMessages = useMessagesFromBlocks(t, parentBlocks);
+  const { blocks: parentBlocks, blockChangeSummary: parentBlockChangeSummary } =
+    useAnimationFrameTranscriptSnapshot();
+  const parentMessages = useMessagesFromBlocks(
+    t,
+    parentBlocks,
+    parentBlockChangeSummary,
+  );
   const rootTool =
     (parentConnection.sessionId === sessionId
       ? findSubagentRootTool(parentMessages, rootToolCallId)

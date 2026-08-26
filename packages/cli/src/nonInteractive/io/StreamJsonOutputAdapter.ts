@@ -29,7 +29,7 @@ import {
   type ResultOptions,
   type JsonOutputAdapterInterface,
 } from './BaseJsonOutputAdapter.js';
-import { observeHeadlessToolResultWire } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeHeadlessToolResultWire } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Stream JSON output adapter that emits messages immediately

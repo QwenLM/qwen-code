@@ -7,6 +7,10 @@
 import { useState, useRef, useCallback, useMemo } from 'react';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import {
+  coalesceFindingsHistoryItems,
+  isFindingsListDisplay,
+} from '../utils/findings-coalescing.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('HISTORY_MANAGER');
@@ -81,6 +85,18 @@ export function useHistory(): UseHistoryManagerReturn {
               `textSize=${textSize}, ` +
               `historyLength=${newHistory.length}`,
           );
+        }
+        // A delivered report_findings list REPLACES the session's earlier
+        // one; collapse the superseded displays the moment the new group
+        // commits so live history, the Ctrl+O transcript, and every
+        // re-render surface show only the latest list.
+        if (
+          newItem.type === 'tool_group' &&
+          newItem.tools.some((tool) =>
+            isFindingsListDisplay(tool.resultDisplay),
+          )
+        ) {
+          return coalesceFindingsHistoryItems(newHistory);
         }
         return newHistory;
       });
@@ -300,6 +316,7 @@ export function useHistory(): UseHistoryManagerReturn {
                   ...t,
                   resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
                   detailedDisplay: undefined,
+                  supersededFindingsDisplay: undefined,
                   images: undefined,
                   omittedImageCount: undefined,
                 };

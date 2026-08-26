@@ -81,6 +81,19 @@ export interface DraftedFinding {
    * which has no id until this round's ledger is built.
    */
   carriedId?: string;
+  /**
+   * The carried id fronts a NEW defect — one the fix for that entry
+   * introduced — rather than a re-assertion of the entry's own claim.
+   *
+   * A carried id means two things since the fix-induced disposition shipped,
+   * and only one of them is a re-post. Without this the trend counted both,
+   * so a round that newly identified six defects, four of them re-reported
+   * under the ids whose fixes produced them, recorded a first-time count of
+   * two — the baseline falling on exactly the churning pull requests where
+   * new work was not falling at all. Read off the comment body beside the id,
+   * so a marking the reader cannot see is one the count does not get either.
+   */
+  fixInduced?: boolean;
 }
 
 /** What the previous round left behind, and how far it can be trusted. */
@@ -129,6 +142,20 @@ export interface PrevRound {
    * The number the trend is about — see `fresh` on the diagnosis.
    */
   fresh?: number;
+  /** Its own round number; 0 when nothing was recovered. */
+  round?: number;
+  /**
+   * Whether it carried an incremental anchor THIS round can use — a grafted
+   * one whose certifier mismatches, or whose re-run this round's fetch
+   * refused or resolved to the head, does not count (Step 1 cannot scope to
+   * it, so the chain is still broken). Read only by the mechanism-health
+   * check: two consecutive withholds mean every later round re-reads the
+   * whole diff until a round's marker carries an anchor again or a graft
+   * lands that the round running it can use — which a clean close does not
+   * guarantee, because the marker also withholds on a missing fetched sha
+   * and on a model-identity drift.
+   */
+  anchored?: boolean;
 }
 
 export interface ConvergenceDiagnosis {
@@ -165,10 +192,119 @@ export interface ConvergenceDiagnosis {
    * unavailable, which an unconditional-sounding claim would misstate.
    */
   criticalFloorKind?: CriticalFloorKind;
+  /**
+   * Blockers THIS round posts — inline plus body. A fact about the round
+   * being composed, not about the recovered list: a Critical in the previous
+   * work list this round does not re-post was fixed.
+   */
+  openCriticals?: number;
 }
 
 /** How a round's posting floor came to be `critical`. */
-export type CriticalFloorKind = 'explicit' | 'auto-resolved';
+export type CriticalFloorKind =
+  | 'explicit'
+  | 'auto-resolved'
+  /**
+   * `auto` engaged EARLY, before the round-6 schedule, because the
+   * first-time-finding rate had not fallen for the streak's bar of
+   * consecutive rounds (#9903) — the trigger acting on the `stem-surface`
+   * advice this module already prints instead of only printing it. A kind
+   * of its own, not folded into `auto-resolved`, because the round owes its
+   * reader the reason the posture changed ahead of schedule: the deferral
+   * header and the "already" wording below name the trigger off it.
+   */
+  | 'auto-signaled';
+
+/**
+ * The closed set of handling recommendations this module can match.
+ *
+ * Closed on purpose: a caller wires actions to these codes without parsing
+ * prose, so the vocabulary is a contract. Matching is measurement → advice,
+ * with zero constants and zero decisions — every entry carries the factual
+ * basis it was matched from, and none of them is a claim about how the code
+ * should be restructured.
+ *
+ * The design's menu is larger than this. The codes NOT emitted here are the
+ * ones whose evidence this round does not hold, and each is absent for a
+ * stated reason rather than forgotten:
+ *
+ * - `split` needs the diff-topology test (a separate work item); this module
+ *   can see that a cluster recurs, not that its hunks are separable.
+ * - `reset-drift` / `rescope` need `srcDelta`, which is gated on the anchor
+ *   write-side work.
+ * - `fix-pipeline` needs marker content-hash dedup to tell a repost storm
+ *   from real volume.
+ * - `reduce-cadence` is matched to "many rounds, small per-round increments",
+ *   and both halves are thresholds — the one thing this module does not own.
+ *   Its threshold-free reading ("healthy but oversampled") is also a round
+ *   that produces no diagnosis at all, so there is no paragraph to carry it.
+ * - `re-anchor` was matched to an anchorless chain on the premise that agent
+ *   budget caps dominate it. Measured on this repository the dominant causes
+ *   were a non-converged reverse audit and skipped integration tests, which
+ *   one raised-budget round does not clear — so the chain is DISCLOSED below
+ *   as mechanism health and prescribes nothing.
+ * - `human-triage` is matched to "any shape" in the design, which makes it
+ *   advice no measurement selected. Emitting it on every diagnosis would
+ *   spend the code set's only real property — that a code means a fact was
+ *   observed — on a constant.
+ *
+ * That is the whole menu: eleven codes in the design, four emitted here,
+ * seven named above.
+ */
+export const RECOMMENDATION_CODES = [
+  'root-cause-triage',
+  'land-and-defer',
+  'batch-fixes',
+  'stem-surface',
+] as const;
+
+/**
+ * Derived from the runtime list above, not declared beside it: a validator
+ * needs the membership check and a caller needs the type, and two hand-kept
+ * copies of a closed vocabulary drift the moment one gains a code.
+ */
+export type RecommendationCode = (typeof RECOMMENDATION_CODES)[number];
+
+/** One matched recommendation and the measurement that matched it. */
+export interface Recommendation {
+  code: RecommendationCode;
+  /** The deterministic fact this was matched from — never a judgement. */
+  basis: string;
+}
+
+/**
+ * What the round can say about the MECHANISM, as opposed to about the loop.
+ *
+ * A pipeline that has stopped working is indistinguishable from one with
+ * nothing to do: both are silent. These are the shapes where the round can
+ * see its own machinery failing, and they are stated as facts with no
+ * prescription attached.
+ */
+export interface MechanismHealth {
+  /**
+   * The floor resolved to `critical`, and Suggestions posted inline anyway.
+   * The posture is nominally engaged and mechanically is not.
+   */
+  postureNotEngaging: boolean;
+  /**
+   * This round did not close cleanly — unproven scope, a dimension gap that
+   * is not depth-only, or any verdict cap other than an unreviewable
+   * dimension — which withholds the incremental anchor, and the round it
+   * recovered carried none this round could use. Two consecutive withholds
+   * mean the next round re-reads the whole diff, and the round after that,
+   * until something clears it: the closed loop measured at 119 minutes and
+   * 34M tokens on a PR whose code had not changed a line.
+   *
+   * A stated limit: those are the only withholding legs visible from here.
+   * The marker also withholds when the plan carries no fetched sha, when it
+   * cannot be read, and when the round's model identity drifted — those are
+   * decided where the marker is built, with the plan in hand, and a round
+   * withheld only by one of them is a chain this check does not see. It
+   * under-reports rather than over-reports, and the wording claims only what
+   * it measured.
+   */
+  anchorChainBroken: boolean;
+}
 
 /**
  * Is this draft a finding reported for the FIRST time?
@@ -194,6 +330,24 @@ export function isFreshDraft(
 ): boolean {
   const minted = birthRound(d?.carriedId);
   if (minted === undefined) return true;
+  // A fix-induced re-report is first-time work wearing an earlier id. The id
+  // is bookkeeping — it keeps one churning site on one thread instead of
+  // opening a new one every round — and reading it as a re-post is what made
+  // this count understate new work precisely where the loop was creating the
+  // most of it. Placed before every arm below on purpose: the membership test
+  // exists to stop a STRAY id from hiding real work and this id is not stray,
+  // and the round-cap arm is the one place the counter stops advancing, which
+  // must not also be the place this stops counting.
+  //
+  // It is the one input here that can only come from the model asserting
+  // something, so weigh it the way the caller's own asymmetry note does. An
+  // OMITTED marking degrades to the reading every round had before it
+  // existed — a re-post, one round of silence. A marking wrongly added to a
+  // still-stands would narrate divergence at the steady state, which is the
+  // expensive error, and that is why the skill restricts the token to a
+  // re-report that genuinely is fix-induced rather than offering it as a way
+  // to flag any carried finding as interesting.
+  if (d?.fixInduced === true) return true;
   // The id must NAME an entry in the work list it claims to carry forward.
   // Step 6 teaches the model to lead a re-post with `R1-2: <the claim>`, and
   // models emit stray ids at the head of a claim line — so a genuinely new
@@ -279,6 +433,13 @@ export function diagnoseConvergence(input: {
    */
   floor?: 'c' | 'o';
   criticalFloorKind?: CriticalFloorKind;
+  /**
+   * Blockers THIS round posts — inline plus body. The one fact
+   * `land-and-defer` turns on, and it is a fact about the round being
+   * composed rather than about the recovered list: a Critical in the
+   * previous work list this round does not re-post was fixed.
+   */
+  openCriticals?: number;
 }): ConvergenceDiagnosis | null {
   const priorByFile = new Map<string, Set<number>>();
   for (const f of input.prev.findings) {
@@ -432,7 +593,11 @@ export function diagnoseConvergence(input: {
     fresh.length >= input.prev.fresh;
 
   if (clusters.length === 0 && !volumeNotShrinking) return null;
+
   return {
+    ...(input.openCriticals === undefined
+      ? {}
+      : { openCriticals: input.openCriticals }),
     round: input.round,
     posted: input.posted,
     fresh: fresh.length,
@@ -448,6 +613,91 @@ export function diagnoseConvergence(input: {
     ...(input.criticalFloorKind === undefined
       ? {}
       : { criticalFloorKind: input.criticalFloorKind }),
+  };
+}
+
+/**
+ * The handling recommendations this diagnosis matches — measurement to
+ * advice, with zero constants and zero decisions.
+ *
+ * DERIVED from the diagnosis rather than stored on it. Carried as a field,
+ * the same round would have two representations of one thing, and a caller
+ * (or a test) could hold a diagnosis whose codes and whose facts describe
+ * different rounds. Derived, the paragraph a human reads and the codes a
+ * caller wires cannot disagree, because there is only one of them.
+ */
+export function recommendationsFor(d: ConvergenceDiagnosis): Recommendation[] {
+  const out: Recommendation[] = [];
+  if (d.clusters.length > 0) {
+    const shown = d.clusters.slice(0, MAX_RENDERED_CLUSTERS).map((c) => c.file);
+    out.push({
+      code: 'root-cause-triage',
+      basis: `${d.clusters.length} file(s) carried findings in earlier rounds and carry new ones now: ${shown.join(', ')}${d.clusters.length > shown.length ? ', …' : ''}`,
+    });
+  }
+  if (d.volumeNotShrinking) {
+    out.push({
+      code: 'batch-fixes',
+      basis: `round ${d.round} produced ${d.fresh} first-time finding(s); the previous round produced ${d.prevFresh}`,
+    });
+    // The floor rung is offered only where there is a rung left to take.
+    if (d.criticalFloorKind === undefined) {
+      out.push({
+        code: 'stem-surface',
+        basis: `the posting floor for this round did not resolve to critical`,
+      });
+    }
+  }
+  // Decidable, and decidable ONLY from this round: a loop whose blockers are
+  // all fixed can end by merging, and a merged pull request cannot diverge
+  // further. Absent `openCriticals` is not zero — an unrecorded count is not
+  // a count of none.
+  if (d.openCriticals === 0) {
+    out.push({
+      code: 'land-and-defer',
+      basis: `this round posts no Critical finding(s)`,
+    });
+  }
+  return out;
+}
+
+/**
+ * The mechanism-health disclosure, or null when nothing is wrong with the
+ * machinery itself.
+ *
+ * Separate from the loop reading on purpose. A diverging loop is a fact
+ * about the WORK; these are facts about the pipeline, and they are the
+ * shapes where a failure is otherwise indistinguishable from having nothing
+ * to do — both are silent. Stated, never prescribed: what to do about a
+ * posture that is not engaging, or an anchor chain that has stopped, is the
+ * operator's call, and the one prescription the design once carried here
+ * (`re-anchor`) was matched to a cause the measurements did not bear out.
+ */
+export function renderMechanismHealth(
+  h: MechanismHealth,
+): { en: string; zh: string } | null {
+  const en: string[] = [];
+  const zh: string[] = [];
+  if (h.postureNotEngaging) {
+    en.push(
+      `the posting floor for this round resolved to critical, and Suggestion-level findings posted inline anyway — the posture is engaged in name and not in effect`,
+    );
+    zh.push(
+      `本轮的发布下限解析为 critical，但仍有 Suggestion 级发现以行内评论发布——该姿态名义上生效、实际未生效`,
+    );
+  }
+  if (h.anchorChainBroken) {
+    en.push(
+      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had no anchor this round could use either — none at all, one with no certifier, one certified by an identity other than the one this round runs under, or one this round's fetch refused or resolved to the head — so the next review re-reads the whole diff unless recovery grafts an earlier own anchor that the round running it can use onto the complete work list this round leaves behind, and keeps doing so until a round's marker carries an anchor again or a graft lands that the round running it can use`,
+    );
+    zh.push(
+      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有留下本轮可用的锚点——要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证、要么被本轮的获取拒绝或解析为头提交——因此下一次评审将重读整个 diff，除非恢复流程把本轮能使用的更早自有锚点嫁接到本轮留下的完整工作清单上；并会一直如此，直到某一轮的标记重新带上锚点，或落地的嫁接能被运行该轮的评审使用`,
+    );
+  }
+  if (en.length === 0) return null;
+  return {
+    en: `Mechanism health: ${en.join('; ')}. (Stated, not acted on — this changes nothing about what the round posts.)`,
+    zh: `机制健康：${zh.join('；')}。（仅陈述，不据此行动——这不改变本轮发布的任何内容。）`,
   };
 }
 
@@ -481,7 +731,7 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   const clusterEn = shown
     .map(
       (c) =>
-        `${mdField(c.file)} (findings in round${c.priorRounds.length > 1 ? 's' : ''} ${c.priorRounds.join(', ')}, ${c.thisRound} more now)`,
+        `${mdField(c.file)} (findings in round${c.priorRounds.length > 1 ? 's' : ''} ${c.priorRounds.join(', ')}; ${c.thisRound} more now)`,
     )
     .join('; ');
   const clusterZh = shown
@@ -594,36 +844,59 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // checked. And it names the posture the way that round actually got it —
   // `auto` is the DEFAULT, so wording an auto-resolved floor as an explicit
   // setting claims a flag nobody passed.
+  const matched = recommendationsFor(d);
+  const has = (code: RecommendationCode): boolean =>
+    matched.some((r) => r.code === code);
   const batchEn = `Batching the remaining fixes and verifying them before the next push`;
   const batchZh = `把剩余修复攒成一批、验证后再推送`;
   const alreadyEn: Record<CriticalFloorKind, string> = {
     explicit: `this PR's reviews are already at \`--severity-floor critical\``,
     'auto-resolved': `this PR's reviews already resolve to a critical posting floor`,
+    'auto-signaled': `this PR's reviews already engage the critical posting floor — it resolved early, ahead of the round-6 schedule, because the first-time-finding rate has not fallen for consecutive rounds`,
   };
   const alreadyZh: Record<CriticalFloorKind, string> = {
     explicit: `本 PR 的评审已处于 \`--severity-floor critical\``,
     'auto-resolved': `本 PR 的评审已解析为 critical 发布下限`,
+    'auto-signaled': `本 PR 的评审已处于 critical 发布下限——因首次发现速率连续多轮未下降，已先于第 6 轮的既定计划提前生效`,
   };
-  const floorEn =
-    d.criticalFloorKind === undefined
-      ? `${batchEn}, or dropping this PR's reviews to \`--severity-floor critical\`, keeps the loop from re-deriving the same set.`
-      : `${batchEn} keeps the loop from re-deriving the same set; ${alreadyEn[d.criticalFloorKind]}.`;
-  const floorZh =
-    d.criticalFloorKind === undefined
-      ? `${batchZh}，或将本 PR 的评审降到 \`--severity-floor critical\`，可以避免循环反复推导同一组发现。`
-      : `${batchZh}，可以避免循环反复推导同一组发现；${alreadyZh[d.criticalFloorKind]}。`;
+  // The floor rung rides the batching sentence when it was MATCHED — the
+  // same condition, read off the set rather than re-derived from the flag.
+  const stem = has('stem-surface');
+  const floorEn = stem
+    ? `${batchEn}, or dropping this PR's reviews to \`--severity-floor critical\`, keeps the loop from re-deriving the same set.`
+    : `${batchEn} keeps the loop from re-deriving the same set${
+        d.criticalFloorKind === undefined
+          ? ''
+          : `; ${alreadyEn[d.criticalFloorKind]}`
+      }.`;
+  const floorZh = stem
+    ? `${batchZh}，或将本 PR 的评审降到 \`--severity-floor critical\`，可以避免循环反复推导同一组发现。`
+    : `${batchZh}，可以避免循环反复推导同一组发现${
+        d.criticalFloorKind === undefined
+          ? ''
+          : `；${alreadyZh[d.criticalFloorKind]}`
+      }。`;
 
   const clusterAdviceEn = `A cluster that keeps producing siblings usually means the fixes are treating instances of a shared root cause — triaging that cause before the next round, or splitting an independent cluster into its own pull request, tends to end the loop faster than fixing them one at a time.`;
   const clusterAdviceZh = `一个不断再生兄弟发现的簇，通常意味着逐条修复只在处理同一根因的实例——先定位并处理该根因，或把独立的簇拆成单独的 PR，通常比逐条修复更快结束循环。`;
+  const landEn = `No Critical finding is open on this round, so merging and moving the remaining Suggestion threads to a follow-up issue is available as an ending — a merged pull request cannot diverge further.`;
+  const landZh = `本轮没有未决的 Critical，因此"合入后把剩余 Suggestion 线程转到后续 issue"是一个可选的结束方式——已合入的 PR 不会继续发散。`;
+
+  // The prose is generated FROM the matched set, not beside it. Two lists
+  // would let the paragraph a human reads and the codes a caller wires
+  // describe different rounds — and this module's whole claim is that its
+  // advice is matched to what it measured.
   const adviceEn = [
-    d.clusters.length > 0 ? clusterAdviceEn : null,
-    d.volumeNotShrinking ? floorEn : null,
+    has('root-cause-triage') ? clusterAdviceEn : null,
+    has('batch-fixes') ? floorEn : null,
+    has('land-and-defer') ? landEn : null,
   ]
     .filter(Boolean)
     .join(' ');
   const adviceZh = [
-    d.clusters.length > 0 ? clusterAdviceZh : null,
-    d.volumeNotShrinking ? floorZh : null,
+    has('root-cause-triage') ? clusterAdviceZh : null,
+    has('batch-fixes') ? floorZh : null,
+    has('land-and-defer') ? landZh : null,
   ]
     .filter(Boolean)
     .join('');
@@ -637,4 +910,332 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
     en: `Convergence: ${factsEn}. ${reasonEn}${caveatEn} ${adviceEn} (Observation only — nothing was withheld from this review because of this observation.)`,
     zh: `收敛情况：${factsZh}。${reasonZh}${caveatZh}${adviceZh}（仅为观察——本轮评审未因此扣留任何内容。）`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// The convergence EXIT, past the diagnosis above.
+//
+// Everything above answers "is this loop settling, and if not, why", and its
+// handling advice ends at a posture the operator can still change — including
+// dropping the round to a Critical-only floor. What follows picks up where
+// that advice has already been taken and the loop STILL does not settle: the
+// floor is engaged, the Suggestions are gone, and the volume has flatlined on
+// Criticals that never clear. The diagnosis names the shape; this names the
+// way out of it (#9410).
+// ---------------------------------------------------------------------------
+
+// Persistently-critical loop detection — the convergence exit the severity
+// floor cannot provide (#9410).
+//
+// The floor (round 6 onward, or an explicit `critical` floor) removes
+// Suggestions from posting, so a healthy loop's posting volume shrinks to its
+// Criticals and then to zero as those Criticals get fixed. But a loop whose
+// Criticals never clear — the security-sensitive PR under adversarial review
+// that PR 9226 ran for twelve rounds — posts Criticals every round forever:
+// the floor engages, the Suggestions stop, and the volume flatlines at the
+// Critical count instead of falling. The floor has done its job and the loop
+// STILL does not converge, and nothing before this module said so.
+//
+// This module names that shape. It is DATA the operator rules on, never
+// authority: it computes one fact from the carried telemetry (Criticals in
+// the previous round's work-list AND this round, the severity floor
+// engaged, and the two-round posting window not shrinking) and, when it
+// fires, surfaces the ONE recommendation
+// that fits — `land-with-residual-risk`, merge and accept the residual risk.
+// It decides nothing: it cannot block a post, cannot merge, cannot close, and
+// holds no numeric threshold (the "two-round window" is the shortest one the
+// ledger's own `posted`/`prevPosted` pair can express, not a tuned constant).
+// Every input degrades OPEN — a missing volume or an unrecovered previous
+// round costs a missed advisory, never a false one and never a changed post.
+
+/**
+ * The facts the signal reads, all carried by the compose boundary — nothing
+ * here reads a file or asks the model.
+ *
+ * `prevHadCritical` is `undefined` (not `false`) when no previous round was
+ * recovered: "no prior work-list" is not "the previous round had no
+ * Criticals". Both `false` and `undefined` suppress the signal (the guard
+ * is `!== true`); `undefined` marks "no previous round recovered" for
+ * readability, and production only ever yields `true | undefined`.
+ */
+export interface ConvergenceFacts {
+  /** Did the PREVIOUS round's carried work-list hold a Critical? */
+  prevHadCritical: boolean | undefined;
+  /**
+   * Critical findings THIS round posts — inline, body-only, and relocated
+   * (deferred Critical markers restored to the posting set).
+   */
+  thisCriticals: number;
+  /**
+   * How many of THIS round's comments report a finding for the FIRST time.
+   *
+   * The FRESH count, not the posting total, and for the reason the sibling
+   * diagnosis above measures its own trend on the same number: Step 6
+   * re-posts every still-standing ledger Critical under its ORIGINAL id, so
+   * the re-post floor only ever rises. Measured on totals, a loop whose new
+   * findings collapsed from five to one still posts more comments than the
+   * round before — and this signal would read that as "not shrinking" and
+   * recommend landing with residual risk over a loop that is converging.
+   */
+  fresh: number | undefined;
+  /** The PREVIOUS round's fresh count (the ledger's two-round window). */
+  prevFresh: number | undefined;
+  /**
+   * How many Criticals stood in the PREVIOUS round's carried work-list, when
+   * that can be counted.
+   *
+   * The backlog, and it is here because the fresh window alone cannot see
+   * it. A loop whose reviewer finds nothing new for two rounds while the
+   * author clears blockers — the healthiest state a still-Critical PR can be
+   * in — has fresh 0 on both sides, which "not shrinking" reads as stuck.
+   * The standing count is what tells the two apart.
+   *
+   * A veto, not a requirement: it suppresses on OBSERVED shrinkage and
+   * abstains otherwise. That is what keeps it sound over a work-list the
+   * marker's byte budget shortened — an undercounted predecessor can only
+   * make the shrinkage harder to observe, never invent one.
+   */
+  prevCriticals: number | undefined;
+  /**
+   * Was the previous round's work-list known to be INCOMPLETE — shed by the
+   * marker's byte budget, or refused by the admission test?
+   *
+   * It changes nothing about whether the signal fires, and that is
+   * deliberate: requiring a whole list would silence the advisory on the
+   * deep-work-list rounds it exists for, which are precisely the rounds the
+   * budget shortens (measured at up to 35 shed per round). What it changes
+   * is what the advisory may CLAIM. Two of the facts read off that list —
+   * "no Suggestion, so the floor was enforcing" and "the backlog is not
+   * shrinking" — are read off ABSENCE, and absence in a shortened list is
+   * not evidence. Both therefore lean toward FIRING here, against the
+   * fail-open direction every other input has, so the rendered paragraph
+   * discloses it rather than publishing an unqualified reading. The sibling
+   * diagnosis in this file qualifies its own recurrence reading on the same
+   * fact, for the same reason.
+   */
+  prevTruncated: boolean | undefined;
+  /**
+   * Is the severity floor ENGAGED this round — an explicit `critical`
+   * floor, or `auto` from round 6 with the round knowable? The advisory
+   * claims the floor "will not converge" the loop; that claim is provable
+   * only where the floor is actually running, so a disengaged floor (early
+   * `auto` rounds, an explicit `suggestion`, an unknowable round)
+   * suppresses the signal — fail open, like every other conjunct.
+   */
+  floorEngaged: boolean | undefined;
+  /**
+   * The posting floor the PREVIOUS round ran under, when its marker
+   * recorded one. The volume window is a two-round comparison, and two
+   * rounds that posted under different postures are not two points on one
+   * loop's trend: the round the floor engages on drops its Suggestions, so
+   * its volume falls against a predecessor that still posted them, and the
+   * round after an operator loosens the floor rises for the same reason.
+   * Neither movement is the loop.
+   *
+   * Read the way the sibling diagnosis in this file reads it — a floor that
+   * was never recorded is not a floor that DIFFERS, so a pre-field marker
+   * evaluates exactly as it did before this conjunct existed.
+   */
+  prevFloor: 'c' | 'o' | undefined;
+  /**
+   * Did the PREVIOUS round's work-list still carry a Suggestion?
+   *
+   * The direct evidence that the floor was NOT enforcing there, and it is
+   * needed because the recorded `prevFloor` above cannot supply it. That
+   * stamp is written from the REPORTING reading, which folds an absent
+   * `severityFloor` into `auto` and so stamps `c` on any round >= 6 whose
+   * state named no floor at all — while the strict enforcement reading
+   * moved nothing and Suggestions posted normally. Pairing that stamp
+   * against this round's enforcement reading let a genuinely un-enforced
+   * predecessor pass as an engaged one, and the advisory then published
+   * "the severity floor will not converge it" against a window whose far
+   * end still included Suggestions (#9526).
+   *
+   * The work-list settles it without either reading: enforcement moves
+   * drafted Suggestions out of the posting set before the marker is built,
+   * so an engaged round's list is Critical-only and an un-enforced one is
+   * not. Suppresses on the POSITIVE observation, so the two ways it can be
+   * wrong land on opposite sides and only one of them fires: a shortened
+   * list that shed its Suggestion reads as engaged (bounded by the same
+   * truncation caveat the backlog veto carries), while a pathless
+   * Suggestion that an engaged round left inline reads as un-enforced and
+   * costs one round of silence.
+   */
+  prevPostedSuggestion: boolean | undefined;
+}
+
+/** The one shape this module detects. */
+export type ConvergenceShape = 'persistently-critical';
+
+/**
+ * The one recommendation that fits a persistently-critical loop. Spelled as
+ * a stable code because the operator's tooling keys on it: it names the exit
+ * (land — merge — with the residual risk accepted), never an action the tool
+ * takes itself.
+ */
+export const LAND_WITH_RESIDUAL_RISK = 'land-with-residual-risk';
+
+/** The fired assessment, all fields pure facts about the loop. */
+export interface ConvergenceAssessment {
+  shape: ConvergenceShape;
+  recommendation: typeof LAND_WITH_RESIDUAL_RISK;
+  /** Critical findings this round posts — what the residual inventory covers. */
+  criticals: number;
+  /** Findings this round reported for the first time. */
+  fresh: number;
+  /** The previous round's, the other end of the window. */
+  prevFresh: number;
+  /**
+   * The predecessor's work-list was known-incomplete, so the two readings
+   * taken off its ABSENCES are weaker than the rest. Carried onto the
+   * assessment because the paragraph has to disclose it — see the field of
+   * the same name on `ConvergenceFacts`.
+   */
+  prevTruncated: boolean;
+}
+
+/**
+ * Detect the persistently-critical shape, or return null when the loop is not
+ * (provably) in it.
+ *
+ * Fires only on the conjunction, and every conjunct degrades open:
+ *  - the previous round's work-list held a Critical (`prevHadCritical ===
+ *    true` — an UNrecovered previous round is `undefined` and suppresses the
+ *    signal, so a second round introducing its first Critical cannot read as
+ *    "persistent");
+ *  - this round posts at least one Critical;
+ *  - the severity floor is ENGAGED this round (`floorEngaged === true`) —
+ *    the advisory's "the floor will not converge it" claim is provable only
+ *    where the floor is actually running; before engagement the loop may
+ *    still converge once it does, so a disengaged floor suppresses the
+ *    signal;
+ *  - the previous round posted under the SAME engaged floor. Two facts say
+ *    so and both must hold: its recorded floor is not `o`, and its
+ *    work-list carried no Suggestion. The stamp alone is not enough — it is
+ *    written from the reporting reading, which folds an absent floor into
+ *    `auto` and stamps `c` on a round enforcement never touched. The round
+ *    the floor engages on compares a Critical-only window against a
+ *    predecessor that still posted Suggestions, and "the floor will not
+ *    converge it" is not a claim one round of the floor can support;
+ *  - the two-round FRESH window is present and NOT shrinking — both counts
+ *    recorded, and this round's at least the previous round's. A falling
+ *    rate of new findings is a converging loop even with Criticals present,
+ *    and a missing count says nothing, so both fail open. Fresh rather than
+ *    total, because Step 6 re-posts every standing Critical and the total
+ *    therefore only ever rises;
+ *  - and the standing Critical backlog is not observably shrinking. The
+ *    fresh window cannot see this one: a loop finding nothing new while the
+ *    author clears blockers sits at fresh 0 on both sides, which "not
+ *    shrinking" reads as stuck. This conjunct vetoes on observed shrinkage
+ *    and abstains when the predecessor's count is unknown.
+ *
+ * No threshold anywhere: "not shrinking" is `fresh >= prevFresh` over the
+ * shortest window the ledger carries, the backlog veto is a plain `<`, and
+ * "persistent" is two consecutive rounds with Criticals — the minimum
+ * evidence for each claim, derived from the carried telemetry, never tuned.
+ *
+ * One deliberate difference from the sibling diagnosis above, which also
+ * runs on fresh counts: it additionally requires `prev.fresh > 0`, because
+ * it is about a loop GENERATING work. This one must fire at fresh 0 on both
+ * sides — Criticals standing round after round with nothing new is not a
+ * quiet loop, it is the persistently-critical shape itself, and the backlog
+ * veto is what separates it from a backlog being cleared.
+ */
+export function convergenceAssessment(
+  facts: ConvergenceFacts,
+): ConvergenceAssessment | null {
+  const {
+    prevHadCritical,
+    thisCriticals,
+    fresh,
+    prevFresh,
+    floorEngaged,
+    prevFloor,
+    prevPostedSuggestion,
+    prevCriticals,
+    prevTruncated,
+  } = facts;
+  if (prevHadCritical !== true) return null;
+  if (thisCriticals <= 0) return null;
+  if (floorEngaged !== true) return null;
+  // This round is `c` by the line above, so a RECORDED `o` predecessor is a
+  // posture change and its window is not a comparable point. Unrecorded
+  // stays evaluable, like the sibling diagnosis above.
+  if (prevFloor !== undefined && prevFloor !== 'c') return null;
+  // And a `c` STAMP is not proof the floor enforced: the stamp comes from
+  // the reporting fold. A Suggestion in the predecessor's work-list is the
+  // proof, and it says the floor did not.
+  if (prevPostedSuggestion === true) return null;
+  if (fresh === undefined || prevFresh === undefined) return null;
+  if (fresh < prevFresh) return null;
+  // The backlog veto. Positive evidence only: an unknown predecessor count
+  // abstains rather than suppressing, and a shortened work-list can only
+  // hide shrinkage, never manufacture it.
+  if (prevCriticals !== undefined && thisCriticals < prevCriticals) {
+    return null;
+  }
+  return {
+    shape: 'persistently-critical',
+    recommendation: LAND_WITH_RESIDUAL_RISK,
+    criticals: thisCriticals,
+    fresh,
+    prevFresh,
+    prevTruncated: prevTruncated === true,
+  };
+}
+
+/**
+ * The advisory sentence, bilingual — one rendering shared by the body clause
+ * and the terminal line so the two surfaces cannot drift. Pure facts plus the
+ * recommendation code; it names the exit, then disclaims itself: advisory
+ * only, blocks nothing. The residual-risk inventory is scaffolded as a blank
+ * three-column table (attack surface · attacker-dependency · blast radius)
+ * for the maintainer to complete — the tool cannot judge those dimensions,
+ * and a scaffold it pre-filled would be a verdict it has no authority to
+ * make. Bounded by construction: fixed prose plus a count, no model text.
+ *
+ * Led by "Residual risk", not by "Convergence": the loop-settling
+ * observation above already opens its paragraph that way, both can render
+ * into the SAME body, and two paragraphs with one opening word is a body
+ * whose reader cannot tell which one is speaking. The lead-in matches the
+ * recommendation it carries and the terminal label it prints under.
+ */
+export function convergenceAdvisory(a: ConvergenceAssessment): {
+  en: string;
+  zh: string;
+} {
+  const en =
+    `Residual risk: this loop is persistently critical — Criticals stood in ` +
+    `the previous round's work-list and stand again this round (${a.criticals} ` +
+    `Critical(s)), the rate of first-time findings is not falling (this ` +
+    `round ${a.fresh}, previous ${a.prevFresh}), and the standing Critical ` +
+    `backlog is not shrinking${
+      a.prevTruncated
+        ? ` — though the previous round's work list was truncated to fit the ` +
+          `marker, so "the backlog is not shrinking" and "the floor was ` +
+          `enforcing" are both read off a list known to be incomplete`
+        : ''
+    }. The severity floor will not ` +
+    `converge it. Recommendation: \`${a.recommendation}\` — the exit is a ` +
+    `maintainer risk-acceptance decision (merge, carrying the residual risk), ` +
+    `not another review round. Residual-risk inventory for that decision ` +
+    `(maintainer to complete):\n\n` +
+    `| standing Critical | attack surface | attacker-dependency | blast radius |\n` +
+    `| --- | --- | --- | --- |\n` +
+    `| (each standing Critical) | … | … | … |\n\n` +
+    `Advisory only — it does not block this review.`;
+  const zh =
+    `残余风险：本循环处于 persistently-critical 形态——上一轮工作清单中的 Critical ` +
+    `本轮依然存在（本轮 ${a.criticals} 条 Critical），首次发现的速率没有下降（本轮 ` +
+    `${a.fresh}，上一轮 ${a.prevFresh}），且未决 Critical 积压没有减少${
+      a.prevTruncated
+        ? `——但上一轮的工作清单为适配 marker 被截断，因此「积压没有减少」与` +
+          `「floor 已在执法」都是从一份已知不完整的清单上读出的`
+        : ''
+    }。severity floor 无法使其收敛。` +
+    `建议：\`${a.recommendation}\`——出口是 maintainer 的风险接受决定（合入并` +
+    `承担残余风险），而非再开一轮评审。供该决定使用的残余风险清单（maintainer 填写）：` +
+    `按每条未决 Critical 列出「攻击面 · 攻击者依赖性 · 影响范围」三栏。` +
+    `仅为建议——不阻断本次评审。`;
+  return { en, zh };
 }

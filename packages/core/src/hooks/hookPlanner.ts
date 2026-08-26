@@ -8,7 +8,7 @@ import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, HookEventName } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { getAliasSetForTool } from '../utils/tool-utils.js';
+import { getAliasSetForTool } from '../tools/tool-utils.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 

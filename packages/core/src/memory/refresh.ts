@@ -8,7 +8,7 @@ import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { getAllGeminiMdFilenames } from './const.js';
+import { getAllGeminiMdFilenames } from '../utils/memory-constants.js';
 import { isAllowedMemoryPath } from './memory-scoped-agent-config.js';
 import {
   rebuildManagedAutoMemoryIndex,

@@ -80,6 +80,60 @@ describe('SessionDetailsTooltip', () => {
     act(() => root.unmount());
   });
 
+  it('shows the bound pull request as a link', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionDetailsTooltip
+            session={{
+              sessionId: 'session-1',
+              workspaceCwd: '/work/qwen-code',
+              clientCount: 1,
+              prs: [
+                { number: 9500, url: 'https://github.com/o/r/pull/9500' },
+                { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+                // A hand-edited sidecar can carry non-openable schemes; the
+                // tooltip must filter them exactly like SessionPrBadge does.
+                { number: 9999, url: 'javascript:alert(1)' },
+              ],
+            }}
+            label="Fix CI"
+            time=""
+            completedUnread={false}
+          >
+            <button type="button">Fix CI</button>
+          </SessionDetailsTooltip>
+        </I18nProvider>,
+      );
+    });
+
+    await openDetails(container);
+
+    const details = document.querySelector('[role="dialog"]');
+    expect(details?.textContent).toContain('Pull Request #9517');
+    expect(details?.textContent).toContain('Pull Request #9500');
+    const link = details?.querySelector(
+      'a[href="https://github.com/o/r/pull/9517"]',
+    );
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute('target')).toBe('_blank');
+    // Latest binding listed first.
+    const links = details?.querySelectorAll('a[href*="/pull/"]');
+    expect(links?.[0]?.getAttribute('href')).toBe(
+      'https://github.com/o/r/pull/9517',
+    );
+    // Non-http(s) bindings are dropped, matching the badge surface.
+    expect(details?.querySelector('a[href="javascript:alert(1)"]')).toBeNull();
+    expect(details?.textContent).not.toContain('#9999');
+
+    act(() => root.unmount());
+  });
+
   it('does not reopen after a row action opens its menu', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
