@@ -22,6 +22,7 @@ import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
+  createScheduledTaskWithExistingSession,
   scheduledTaskSessionName,
 } from './scheduled-tasks.js';
 import type {
@@ -61,7 +62,10 @@ interface StubBridge {
     sessionId: string;
     workspaceCwd: string;
     hasActivePrompt: boolean;
+    pendingInteractionCount?: number;
+    parentSessionId?: string;
     sourceType?: string;
+    sourceId?: string;
   };
   liveSessions: Map<
     string,
@@ -69,7 +73,10 @@ interface StubBridge {
       sessionId: string;
       workspaceCwd: string;
       hasActivePrompt: boolean;
+      pendingInteractionCount?: number;
+      parentSessionId?: string;
       sourceType?: string;
+      sourceId?: string;
     }
   >;
   markSessionCatalogChanged: ReturnType<typeof vi.fn>;
@@ -134,13 +141,26 @@ function addLiveSession(
   bridge: StubBridge,
   sessionId: string,
   workspaceCwd: string,
-  options: { busy?: boolean; sourceType?: string } = {},
+  options: {
+    busy?: boolean;
+    pendingInteractionCount?: number;
+    parentSessionId?: string;
+    sourceType?: string;
+    sourceId?: string;
+  } = {},
 ): void {
   bridge.liveSessions.set(sessionId, {
     sessionId,
     workspaceCwd,
     hasActivePrompt: options.busy === true,
+    ...(options.pendingInteractionCount !== undefined
+      ? { pendingInteractionCount: options.pendingInteractionCount }
+      : {}),
+    ...(options.parentSessionId !== undefined
+      ? { parentSessionId: options.parentSessionId }
+      : {}),
     ...(options.sourceType ? { sourceType: options.sourceType } : {}),
+    ...(options.sourceId ? { sourceId: options.sourceId } : {}),
   });
 }
 
@@ -757,6 +777,121 @@ describe('scheduled-tasks routes', () => {
     });
     expect(busy.status).toBe(409);
     expect(busy.body.code).toBe('session_busy');
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('rejects a pending interaction and ineligible session sources', async () => {
+    addLiveSession(h.bridge, CALLER_SESSION_ID, h.workspace, {
+      pendingInteractionCount: 1,
+    });
+    const pending = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+    expect(pending.status).toBe(409);
+    expect(pending.body.code).toBe('session_busy');
+
+    h.bridge.liveSessions.delete(CALLER_SESSION_ID);
+    for (const [index, options] of [
+      { parentSessionId: 'parent-1' },
+      { sourceType: 'channel' },
+      { sourceType: 'standalone' },
+      { sourceType: 'live_voice' },
+      { sourceType: 'unknown' },
+      { sourceId: 'source-1' },
+    ].entries()) {
+      const sessionId = `10000000-0000-4000-8000-${String(index + 10).padStart(12, '0')}`;
+      addLiveSession(h.bridge, sessionId, h.workspace, options);
+      const response = await create({
+        cron: '0 9 * * *',
+        prompt: 'p',
+        sessionId,
+      });
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe('session_source_ineligible');
+    }
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('allows the trusted cron-tool path to bind its active caller session', async () => {
+    addLiveSession(h.bridge, BUSY_SESSION_ID, h.workspace, { busy: true });
+
+    const task = await createScheduledTaskWithExistingSession(
+      {
+        workspaceCwd: h.workspace,
+        runtimeBaseDir: h.scratch,
+        bridge: h.bridge,
+      },
+      {
+        sessionId: BUSY_SESSION_ID,
+        cron: '0 9 * * *',
+        prompt: 'continue',
+        recurring: true,
+      },
+      { source: 'cron-tool', assertCallerPromptActive: () => undefined },
+    );
+
+    expect(task).toEqual(
+      expect.objectContaining({
+        sessionId: BUSY_SESSION_ID,
+        sessionOwnedByTask: false,
+      }),
+    );
+    expect(task.lastFiredAt).not.toBeNull();
+    expect(task.lastFiredAt! % 60_000).toBe(0);
+  });
+
+  it('rechecks the exact caller prompt inside the task-file lock', async () => {
+    addLiveSession(h.bridge, BUSY_SESSION_ID, h.workspace, { busy: true });
+    let activePromptId = 'prompt-a';
+    const assertCallerPromptActive = vi.fn(() => {
+      if (activePromptId !== 'prompt-a') throw new Error('stale prompt');
+      activePromptId = 'prompt-b';
+    });
+
+    await expect(
+      createScheduledTaskWithExistingSession(
+        {
+          workspaceCwd: h.workspace,
+          runtimeBaseDir: h.scratch,
+          bridge: h.bridge,
+        },
+        {
+          sessionId: BUSY_SESSION_ID,
+          cron: '0 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+        },
+        { source: 'cron-tool', assertCallerPromptActive },
+      ),
+    ).rejects.toThrow('stale prompt');
+    expect(assertCallerPromptActive).toHaveBeenCalledTimes(2);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
+  });
+
+  it('keeps pending interactions ineligible on the trusted cron-tool path', async () => {
+    addLiveSession(h.bridge, BUSY_SESSION_ID, h.workspace, {
+      busy: true,
+      pendingInteractionCount: 1,
+    });
+
+    await expect(
+      createScheduledTaskWithExistingSession(
+        {
+          workspaceCwd: h.workspace,
+          runtimeBaseDir: h.scratch,
+          bridge: h.bridge,
+        },
+        {
+          sessionId: BUSY_SESSION_ID,
+          cron: '0 9 * * *',
+          prompt: 'continue',
+          recurring: true,
+        },
+        { source: 'cron-tool', assertCallerPromptActive: () => undefined },
+      ),
+    ).rejects.toMatchObject({ code: 'session_busy' });
     expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
@@ -2167,6 +2302,7 @@ interface QualifiedHarness {
   secondary: QualifiedRuntime;
   untrusted: QualifiedRuntime;
   activity: ConversationRuntimeActivityGate;
+  workspaceRegistry: WorkspaceRegistry;
 }
 
 /** A registry stub exposing only what the qualified route resolver touches:
@@ -2302,7 +2438,15 @@ async function makeQualifiedHarness(): Promise<QualifiedHarness> {
     manageScheduledTaskSessions: true,
     conversationRuntimeActivity: activity,
   });
-  return { app, scratch, primary, secondary, untrusted, activity };
+  return {
+    app,
+    scratch,
+    primary,
+    secondary,
+    untrusted,
+    activity,
+    workspaceRegistry,
+  };
 }
 
 describe('workspace-qualified scheduled-tasks routes', () => {
@@ -2402,6 +2546,37 @@ describe('workspace-qualified scheduled-tasks routes', () => {
     expect(res.body.code).toBe('ambiguous_session_owner');
     expect(h.primary.bridge.spawned).toEqual([]);
     expect(h.secondary.bridge.spawned).toEqual([]);
+  });
+
+  it('maps owner lookup failures to a session error', async () => {
+    h.workspaceRegistry.resolveLiveSessionOwner = () => {
+      throw new Error('owner lookup failed');
+    };
+
+    const res = await request(h.app).post('/scheduled-tasks').send({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('scheduled_tasks_session_failed');
+  });
+
+  it('preserves the retry hint for an unavailable session owner', async () => {
+    h.workspaceRegistry.resolveLiveSessionOwner = () => ({
+      kind: 'unavailable',
+    });
+
+    const res = await request(h.app).post('/scheduled-tasks').send({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      sessionId: CALLER_SESSION_ID,
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(res.headers['retry-after']).toBe('1');
   });
 
   it('writes to the targeted workspace’s own cron file on disk', async () => {

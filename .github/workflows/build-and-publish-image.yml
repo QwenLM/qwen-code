@@ -25,8 +25,26 @@ jobs:
     permissions:
       contents: 'read'
       packages: 'write'
+    outputs:
+      # Job-level `if:` cannot read the env context, so PUSH_IMAGE leaves the
+      # build job through this output and file-failure-issue gates on it
+      # instead of restating the publish predicate (which would drift apart
+      # from PUSH_IMAGE the next time the predicate changes).
+      push_image: '${{ steps.publish-decision.outputs.push_image }}'
+    env:
+      # Whether this run publishes. Defined once at the job level so the
+      # login gate and both build steps cannot drift apart.
+      PUSH_IMAGE: |-
+        ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}
 
     steps:
+      # First on purpose: this output gates file-failure-issue, and it must
+      # exist even when every later step fails — a checkout or login failure
+      # on a publishing run is exactly a run the reporting job must cover.
+      - name: 'Export the publish decision'
+        id: 'publish-decision'
+        run: 'echo "push_image=${PUSH_IMAGE}" >> "$GITHUB_OUTPUT"'
+
       - name: 'Checkout repository'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
@@ -97,23 +115,91 @@ jobs:
             type=sha,prefix=sha-,format=short,enable=${{ steps.version.outputs.clean == '' }}
 
       - name: 'Log in to the Container registry'
-        if: |-
-          ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}
+        if: "${{ env.PUSH_IMAGE == 'true' }}"
         uses: 'docker/login-action@v4' # ratchet:exclude
         with:
           registry: '${{ env.REGISTRY }}'
           username: '${{ github.actor }}'
           password: '${{ secrets.GITHUB_TOKEN }}'
 
+      # continue-on-error is load-bearing: a failed first attempt must not
+      # pre-fail the job, or a successful retry below would still leave the
+      # job red and file-failure-issue would report an image that WAS
+      # published. The job only fails when the retry fails too.
       - name: 'Build and push Docker image'
         id: 'build-and-push'
+        continue-on-error: true
         uses: 'docker/build-push-action@v7' # ratchet:exclude
         with:
           context: '.'
           platforms: 'linux/amd64,linux/arm64'
-          push: |-
-            ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'true') }}
+          push: '${{ env.PUSH_IMAGE }}'
           tags: '${{ steps.meta.outputs.tags }}'
           labels: '${{ steps.meta.outputs.labels }}'
           build-args: |
             CLI_VERSION_ARG=${{ steps.version.outputs.clean || github.sha }}
+
+      # One bounded retry: the docker build hits transient buildx races such as
+      # ETXTBSY during `npm ci` (the v0.22.0 tag build died this way and the
+      # image was never published, breaking every sandbox-based CI lane — see
+      # issue #9898). A retry reuses the build cache and almost always passes;
+      # a genuine failure fails this step and with it the job.
+      - name: 'Build and push Docker image (retry)'
+        id: 'build-and-push-retry'
+        if: "${{ steps.build-and-push.outcome == 'failure' }}"
+        uses: 'docker/build-push-action@v7' # ratchet:exclude
+        with:
+          context: '.'
+          platforms: 'linux/amd64,linux/arm64'
+          push: '${{ env.PUSH_IMAGE }}'
+          tags: '${{ steps.meta.outputs.tags }}'
+          labels: '${{ steps.meta.outputs.labels }}'
+          build-args: |
+            CLI_VERSION_ARG=${{ steps.version.outputs.clean || github.sha }}
+
+  # One issue per version when the release build job fails (the gate covers
+  # the whole job, not only the build steps — the issue wording stays
+  # step-agnostic for the same reason). A released npm version without a
+  # sandbox image silently breaks every sandbox-based CI lane. Covers
+  # publishing dispatches too: that is the recovery path the
+  # issue body recommends. Logic lives in the script named below. A
+  # publishing dispatch without a version input is skipped by design: the
+  # build job tags such runs with its branch/sha fallback, but this job
+  # files one issue per VERSION and cannot dedup a versionless failure.
+  # Known residual gap: a build job that fails before its first step runs
+  # at all (e.g. runner provisioning failure) never executes
+  # publish-decision, so push_image stays empty and this gate skips the
+  # job even though failure() is true — no issue gets filed. A "failed
+  # publish, no issue filed" investigation should start here; a scheduled
+  # npm-vs-GHCR reconciliation is the remaining backstop for this case.
+  # Second known gap: dedup needs the scope/ci-cd label the create call
+  # applies and the version marker in the issue body; if a human removes
+  # either, the lookup misses the tracked issue and the next failure files
+  # a duplicate. The edit call cannot repair either because the edit path
+  # is unreachable without them — same reconciliation backstop as above.
+  file-failure-issue:
+    needs: ['build-and-push-to-ghcr']
+    if: |-
+      ${{ failure() && github.repository == 'QwenLM/qwen-code' && needs.build-and-push-to-ghcr.outputs.push_image == 'true' && (github.event_name == 'push' || github.event.inputs.version != '') }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      # checkout needs contents even though the job only files an issue.
+      contents: 'read'
+      issues: 'write'
+    steps:
+      - name: 'Checkout repository'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: 'File or update the image-build failure issue'
+        env:
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          TAG_NAME: '${{ github.ref_name }}'
+          INPUT_VERSION: '${{ github.event.inputs.version }}'
+          DEDUP_LABEL: 'scope/ci-cd'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: 'bash .github/scripts/image-build-failure-issue.sh'

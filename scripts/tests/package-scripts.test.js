@@ -530,13 +530,27 @@ describe('package scripts', () => {
         'release-sdk',
         'Publish @qwen-code/sdk',
       ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-sdk',
+        'Publish immutable SDK tarball',
+      ],
+      [
+        '.github/workflows/cd-cua-driver.yml',
+        'publish-node-repl',
+        'Publish immutable Node REPL tarball',
+      ],
       ['.github/workflows/cd-mobile-mcp.yml', 'build-and-publish', 'Publish'],
     ]) {
       const publishJob = getWorkflowJob(readWorkflow(workflowPath), jobName);
       const installStep = getWorkflowStep(publishJob, 'Install npm 11');
+      const publishStep = getWorkflowStep(publishJob, publishStepName);
       expect(installStep).toContain('npm install --global npm@11.19.0');
+      expect(publishJob).toContain("id-token: 'write'");
+      expect(publishStep).toContain('--provenance');
+      expect(publishJob).toContain("name: 'production-release'");
       expect(publishJob.indexOf(installStep)).toBeLessThan(
-        publishJob.indexOf(getWorkflowStep(publishJob, publishStepName)),
+        publishJob.indexOf(publishStep),
       );
     }
 
@@ -552,7 +566,9 @@ describe('package scripts', () => {
       'packages/channels/telegram',
       'packages/channels/wecom',
       'packages/channels/weixin',
+      'packages/cua-driver/typescript',
       'packages/mobile-mcp',
+      'packages/node-repl',
       'packages/sdk-typescript',
     ]) {
       const packageJson = JSON.parse(

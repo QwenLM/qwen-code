@@ -325,7 +325,7 @@
           "default": false
         },
         "statusLine": {
-          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (model, git branch, context usage, current dir) is shown automatically; set to `null` to explicitly disable the status line.",
+          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh. Set `respectUserColors: true` to preserve ANSI color codes in command output instead of applying dim/theme styling. Set `hideContextIndicator: true` to hide the built-in context usage indicator in the footer right section, or `false` to always show it. When `hideContextIndicator` is unset, the footer indicator is hidden automatically for preset status lines that already include `context-used` or `context-remaining`, and shown otherwise (including for `command` status lines). When unset (default), the built-in default preset (project name, git branch, model, context usage) is shown automatically; set to `null` to explicitly disable the status line.",
           "type": "object",
           "additionalProperties": true
         },
@@ -451,7 +451,7 @@
           "default": 0
         },
         "compactMode": {
-          "description": "Compact view (web shell only; not used by the TUI).",
+          "description": "Retired: compact view is always on in both the TUI and the web shell. The key is kept so existing settings files do not warn.",
           "type": "boolean",
           "default": false
         },
