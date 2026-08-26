@@ -273,10 +273,6 @@ export function ChatPane({
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
-  const queuedPromptStreamingState =
-    streamingState === 'idle' && sessionHasActivePrompt
-      ? 'responding'
-      : streamingState;
   const [goalControlBusy, setGoalControlBusy] = useState(false);
   const goalControlOpSeqRef = useRef(0);
   const goalControlOwnerRef = useRef<
@@ -608,7 +604,8 @@ export function ChatPane({
     canQueryMidTurn,
     canInjectMidTurnMedia,
     workspaceFileActions: attachmentWorkspaceTarget?.actions,
-    streamingState: queuedPromptStreamingState,
+    streamingState,
+    sessionHasActivePrompt,
     sessionActions: actions,
     store,
     editorRef,
@@ -1351,7 +1348,9 @@ export function ChatPane({
                 prompts={queuedPrompts}
                 t={t}
                 canMutateMidTurn={canMutateMidTurn}
-                canInsertMidTurn={queuedPromptStreamingState !== 'idle'}
+                canInsertMidTurn={
+                  streamingState !== 'idle' || sessionHasActivePrompt
+                }
                 onDelete={removeQueuedPrompt}
                 onInsert={insertQueuedPrompt}
                 onEdit={editQueuedPrompt}

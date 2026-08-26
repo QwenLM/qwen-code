@@ -62,7 +62,7 @@ vi.mock('../tools/tool-registry', () => {
   return { ToolRegistry: ToolRegistryMock };
 });
 
-vi.mock('../utils/memoryDiscovery.js', () => ({
+vi.mock('../memory/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
     fileCount: 0,

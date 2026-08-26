@@ -19,10 +19,10 @@ import {
   LEDGER_MAX_TITLE,
   LEDGER_MAX_BYTES,
   LEDGER_MAX_MODEL,
+  LEDGER_MAX_ROUND,
   LEDGER_MAX_VOLUME,
   LEDGER_MAX_ID,
   LEDGER_ID_SHAPE,
-  LEDGER_MAX_ROUND,
   isLedgerFinding,
   type Ledger,
   type LedgerFinding,
@@ -710,6 +710,78 @@ describe('LEDGER_ID_READBACK', () => {
   });
 });
 
+// `src0` is the approach signal's baseline — see `Ledger.src0`. It is the one
+// field that survives truncation, because the ruling that withholds an anchor
+// from a partial finding list does not extend to a measurement of the diff.
+describe('ledger src0 — the approach-signal baseline', () => {
+  it('serializes a positive baseline and omits a missing or zero one', () => {
+    expect(
+      serializeLedger({ v: 1, round: 2, findings: [], src0: 228 }),
+    ).toContain('"src0":228');
+    expect(serializeLedger({ v: 1, round: 2, findings: [] })).not.toContain(
+      'src0',
+    );
+    expect(
+      serializeLedger({ v: 1, round: 2, findings: [], src0: 0 }),
+    ).not.toContain('src0');
+  });
+
+  // The explicit ruling the schema demands of any new field: `sha` is dropped
+  // on a truncated list because a partial work list must not certify a commit
+  // range; `src0` certifies nothing, so it rides.
+  it('survives truncation where the anchor does not', () => {
+    const findings = Array.from({ length: 400 }, (_, i) => ({
+      id: `R1-${i}`,
+      sev: 'S' as const,
+      file: `src/some/reasonably/long/path/to/file-${i}.ts`,
+      line: i,
+      title: `a finding title long enough to push the marker past its byte cap ${i}`,
+    }));
+    const parsed = parseLedger(
+      serializeLedger({
+        v: 1,
+        round: 3,
+        findings,
+        sha: 'deadbeef00112233445566778899aabbccddeeff',
+        src0: 228,
+      }),
+    );
+    expect(parsed?.dropped).toBeGreaterThan(0);
+    expect(parsed?.sha).toBeUndefined();
+    expect(parsed?.src0).toBe(228);
+  });
+
+  // A garbled baseline must degrade to "unknown" — which the consumer reads as
+  // silence — rather than to a number that would read as no growth.
+  it.each([0, -5, 1.5, '228', null, undefined])(
+    'drops a non-positive-integer baseline (%p)',
+    (bad) => {
+      const marker = `<!-- qwen-review-ledger ${JSON.stringify({
+        v: 1,
+        round: 2,
+        findings: [],
+        src0: bad,
+      })} -->`;
+      expect(parseLedger(marker)?.src0).toBeUndefined();
+    },
+  );
+
+  it('round-trips a baseline alongside the -- escaping', () => {
+    const parsed = parseLedger(
+      serializeLedger({
+        v: 1,
+        round: 4,
+        findings: [
+          { id: 'R1-1', sev: 'C', file: 'a.ts', title: 'rejects --unsafe' },
+        ],
+        src0: 512,
+      }),
+    );
+    expect(parsed?.src0).toBe(512);
+    expect(parsed?.findings[0].title).toBe('rejects --unsafe');
+  });
+});
+
 describe('the volume fields — telemetry across the untrusted boundary', () => {
   // This suite is the marker's untrusted-input boundary: `parseLedger` reads
   // PR bodies any account can write, so the volume fields are pinned here
@@ -874,5 +946,316 @@ describe('the volume fields — telemetry across the untrusted boundary', () => 
     expect(l.dropped).toBeGreaterThan(0);
     expect(l.sha).toBeUndefined();
     expect(l.posted).toBe(12);
+  });
+});
+
+describe('the churn streak', () => {
+  const base = { v: 1 as const, round: 3, findings: [] };
+  const handCrafted = (over: Record<string, unknown>) =>
+    `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 5,
+      findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      ...over,
+    })} -->`;
+
+  // The boundary is located by the PROPERTY, never by a byte count: the
+  // serializer self-sheds, so `serializeLedger(...).length` can never be
+  // observed above the cap and any arithmetic built on it measures the shed
+  // output rather than the pressure. So: grow the last entry's path a byte
+  // at a time until the carried volume is the thing that stops fitting, and
+  // keep the render one byte BELOW that as the control.
+  const withVolume = (findings: LedgerFinding[], over: Partial<Ledger> = {}) =>
+    serializeLedger({
+      ...base,
+      ...over,
+      findings,
+      posted: 12,
+      prevPosted: 9,
+    });
+
+  const atTheVolumeBoundary = (over: Partial<Ledger> = {}) => {
+    const findings: LedgerFinding[] = [];
+    for (let i = 0; i < LEDGER_MAX_FINDINGS; i++) {
+      const next: LedgerFinding = {
+        id: `R3-${i + 1}`,
+        sev: 'S',
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      };
+      if (withVolume([...findings, next], over).includes('"prevPosted"')) {
+        findings.push(next);
+      } else {
+        break;
+      }
+    }
+    // Whole findings are ~130 bytes each, so the coarse fill lands up to one
+    // entry short. Pad the last entry's PATH — the one capped field with room
+    // left — until the carried volume is exactly what no longer fits.
+    const grow = (n: number): LedgerFinding[] => {
+      const fs = findings.slice();
+      const last = fs[fs.length - 1];
+      fs[fs.length - 1] = { ...last, file: last.file + 'x'.repeat(n) };
+      return fs;
+    };
+    const room = LEDGER_MAX_FILE - findings[findings.length - 1].file.length;
+    let pad = 0;
+    while (pad < room && withVolume(grow(pad), over).includes('"prevPosted"')) {
+      pad++;
+    }
+    return { over: grow(pad), under: grow(pad - 1) };
+  };
+
+  it('keeps the streak through the FIRST byte squeeze', () => {
+    // The streak is NOT telemetry: it is the review's own standing claim
+    // about the pull request, and `compose-review` reads it back to decide
+    // whether to file the non-convergence finding. The pull request most
+    // likely to be churning is also the one whose marker is closest to its
+    // byte cap, so shedding the streak there would disarm the mechanism on
+    // exactly the pull requests it exists for.
+    const { over, under } = atTheVolumeBoundary({ churnRounds: 3 });
+    // The control proves the fixture is AT the boundary rather than merely
+    // over-fat: one byte less and the carried volume still fits.
+    expect(withVolume(under, { churnRounds: 3 })).toContain('"prevPosted":9');
+    const written = withVolume(over, { churnRounds: 3 });
+    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    expect(written).not.toContain('"prevPosted"');
+    expect(written).toContain('"churnRounds":3');
+    expect(parseLedger(written)?.churnRounds).toBe(3);
+    expect(parseLedger(written)?.findings).toHaveLength(over.length);
+  });
+
+  it('keeps the streak past the rung where the VOLUME itself goes', () => {
+    // The census rung alone cannot tell the two placements apart: a streak
+    // wrongly nested inside the volume block still survives the first squeeze
+    // (the cascade's second rung still writes a volume). The discriminating
+    // fixture is the rung where `posted` ITSELF is shed — there the correct
+    // placement keeps the streak and the nested one drops it, which is
+    // exactly the pull request this mechanism is for: fifty findings, marker
+    // at its cap, and the one integer that can end the loop.
+    const fat = (n: number): LedgerFinding[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      }));
+    let n = 1;
+    let written = '';
+    for (; n <= LEDGER_MAX_FINDINGS; n++) {
+      written = serializeLedger({
+        ...base,
+        findings: fat(n),
+        posted: 12,
+        prevPosted: 9,
+        churnRounds: 3,
+      });
+      if (!written.includes('"posted"')) break;
+    }
+    // The fixture reached that rung at all — otherwise the assertions below
+    // are about a marker that never squeezed and prove nothing.
+    expect(written).not.toContain('"posted"');
+    expect(written).toContain('"churnRounds":3');
+    expect(parseLedger(written)?.churnRounds).toBe(3);
+  });
+
+  it('omits a zero streak rather than spending bytes on it', () => {
+    // A converging pull request is the common case; it should cost nothing.
+    const written = serializeLedger({ ...base, churnRounds: 0 });
+    expect(written).not.toContain('churnRounds');
+    expect(parseLedger(written)?.churnRounds).toBeUndefined();
+  });
+
+  it.each([
+    ['a float', 2.5],
+    ['a negative', -1],
+    ['a string', '7'],
+    ['null', null],
+    ['a NaN', Number.NaN],
+  ])('refuses %s as a streak without losing the ledger', (_label, bad) => {
+    const l = parseLedger(handCrafted({ churnRounds: bad }))!;
+    expect(l.findings).toHaveLength(1);
+    expect(l.churnRounds).toBeUndefined();
+  });
+
+  it('clamps the streak to the round cap on write AND on read', () => {
+    // Same domain as `round`, same arithmetic hazard past the cap — and the
+    // raw text is asserted for the same reason the volume cap's is: a
+    // round-trip alone passes while the write side emits uncapped digits.
+    const over = LEDGER_MAX_ROUND + 1;
+    const written = serializeLedger({ ...base, churnRounds: over });
+    expect(written).toContain(`"churnRounds":${LEDGER_MAX_ROUND}`);
+    expect(written).not.toContain(String(over));
+    expect(
+      parseLedger(handCrafted({ round: LEDGER_MAX_ROUND, churnRounds: over }))
+        ?.churnRounds,
+    ).toBe(LEDGER_MAX_ROUND);
+  });
+
+  it('clamps a recovered streak to the marker’s own round', () => {
+    // The streak counts rounds INSIDE the round it rides, so a legitimate
+    // marker can never carry more counted rounds than rounds it claims.
+    // The marker body is any GitHub user's writable surface: unclamped,
+    // `{round: 2, churnRounds: 9999}` beside one honest above-bar round
+    // posts "the 10000th round…" on a pull request in its third. Same
+    // invariant the finding-id squat filter enforces — a claim about rounds
+    // that did not exist is not read.
+    const forged = `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      churnRounds: 9999,
+    })} -->`;
+    expect(parseLedger(forged)?.churnRounds).toBe(2);
+    // A streak AT the round rides untouched — the clamp strips nothing a
+    // legitimate marker can carry (round 5 is the handCrafted default).
+    expect(parseLedger(handCrafted({ churnRounds: 5 }))?.churnRounds).toBe(5);
+  });
+});
+
+describe('the flat streak', () => {
+  // Mirror of the churn block above for the floor trigger's streak (#9903):
+  // the two fields share the serializer rung and the trust shape, and two
+  // mutations of the diff's own lines — nesting the write inside the
+  // volume-shed block, and deleting the parse-side clamp — survive the whole
+  // suite unless pinned here. The values used are HONEST ones (round 3
+  // carries at most 1): the read clamps to the honest maximum, because the
+  // signal that advances the streak gates on round >= 3.
+  const base = { v: 1 as const, round: 3, findings: [] };
+  const handCrafted = (over: Record<string, unknown>) =>
+    `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 5,
+      findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      ...over,
+    })} -->`;
+
+  const withVolume = (findings: LedgerFinding[], over: Partial<Ledger> = {}) =>
+    serializeLedger({
+      ...base,
+      ...over,
+      findings,
+      posted: 12,
+      prevPosted: 9,
+    });
+
+  const atTheVolumeBoundary = (over: Partial<Ledger> = {}) => {
+    const findings: LedgerFinding[] = [];
+    for (let i = 0; i < LEDGER_MAX_FINDINGS; i++) {
+      const next: LedgerFinding = {
+        id: `R3-${i + 1}`,
+        sev: 'S',
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      };
+      if (withVolume([...findings, next], over).includes('"prevPosted"')) {
+        findings.push(next);
+      } else {
+        break;
+      }
+    }
+    const grow = (n: number): LedgerFinding[] => {
+      const fs = findings.slice();
+      const last = fs[fs.length - 1];
+      fs[fs.length - 1] = { ...last, file: last.file + 'x'.repeat(n) };
+      return fs;
+    };
+    const room = LEDGER_MAX_FILE - findings[findings.length - 1].file.length;
+    let pad = 0;
+    while (pad < room && withVolume(grow(pad), over).includes('"prevPosted"')) {
+      pad++;
+    }
+    return { over: grow(pad), under: grow(pad - 1) };
+  };
+
+  it('keeps the streak through the FIRST byte squeeze', () => {
+    // The pull request whose first-time-finding rate never falls is exactly
+    // the one whose marker sits at the byte cap; shedding the latched streak
+    // there would silently release the floor between rounds 4 and 6.
+    const { over, under } = atTheVolumeBoundary({ flatRounds: 1 });
+    expect(withVolume(under, { flatRounds: 1 })).toContain('"prevPosted":9');
+    const written = withVolume(over, { flatRounds: 1 });
+    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
+    expect(written).not.toContain('"prevPosted"');
+    expect(written).toContain('"flatRounds":1');
+    expect(parseLedger(written)?.flatRounds).toBe(1);
+    expect(parseLedger(written)?.findings).toHaveLength(over.length);
+  });
+
+  it('keeps the streak past the rung where the VOLUME itself goes', () => {
+    // The discriminating rung: a streak wrongly nested inside the volume
+    // block survives the first squeeze but sheds with `posted` itself — the
+    // correct placement keeps it, on exactly the over-cap markers.
+    const fat = (n: number): LedgerFinding[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `R3-${i + 1}`,
+        sev: 'S' as const,
+        file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
+        title: 'x'.repeat(LEDGER_MAX_TITLE),
+      }));
+    let n = 1;
+    let written = '';
+    for (; n <= LEDGER_MAX_FINDINGS; n++) {
+      written = serializeLedger({
+        ...base,
+        findings: fat(n),
+        posted: 12,
+        prevPosted: 9,
+        flatRounds: 1,
+      });
+      if (!written.includes('"posted"')) break;
+    }
+    expect(written).not.toContain('"posted"');
+    expect(written).toContain('"flatRounds":1');
+    expect(parseLedger(written)?.flatRounds).toBe(1);
+  });
+
+  it('omits a zero streak rather than spending bytes on it', () => {
+    const written = serializeLedger({ ...base, flatRounds: 0 });
+    expect(written).not.toContain('flatRounds');
+    expect(parseLedger(written)?.flatRounds).toBeUndefined();
+  });
+
+  it.each([
+    ['a float', 2.5],
+    ['a negative', -1],
+    ['a string', '7'],
+    ['null', null],
+    ['a NaN', Number.NaN],
+  ])('refuses %s as a streak without losing the ledger', (_label, bad) => {
+    const l = parseLedger(handCrafted({ flatRounds: bad }))!;
+    expect(l.findings).toHaveLength(1);
+    expect(l.flatRounds).toBeUndefined();
+  });
+
+  it('clamps the streak to the round cap on write AND on read', () => {
+    const over = LEDGER_MAX_ROUND + 1;
+    const written = serializeLedger({ ...base, flatRounds: over });
+    expect(written).toContain(`"flatRounds":${LEDGER_MAX_ROUND}`);
+    expect(written).not.toContain(String(over));
+    // The read side clamps TIGHTER — to the honest maximum: at the round
+    // cap no honest run has measured more than cap - 2 firing rounds.
+    expect(
+      parseLedger(handCrafted({ round: LEDGER_MAX_ROUND, flatRounds: over }))
+        ?.flatRounds,
+    ).toBe(LEDGER_MAX_ROUND - 2);
+  });
+
+  it('clamps a recovered streak to the honest maximum, not merely the round', () => {
+    // The signal that advances the streak gates on round >= 3, so rounds
+    // 1–2 are unmeasurable and at round N no honest marker carries more
+    // than N - 2. The round-clamp alone admitted `{round: 2, flatRounds: 2}`
+    // — a streak the serializer never emits, which the model-side routing
+    // reads raw off the side file.
+    const forged = `<!-- qwen-review-ledger ${JSON.stringify({
+      v: 1,
+      round: 2,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'a.ts', title: 'x' }],
+      flatRounds: 9999,
+    })} -->`;
+    expect(parseLedger(forged)?.flatRounds).toBeUndefined();
+    expect(parseLedger(handCrafted({ flatRounds: 9999 }))?.flatRounds).toBe(3);
+    // A streak AT the honest maximum rides untouched (round 5 → 3).
+    expect(parseLedger(handCrafted({ flatRounds: 3 }))?.flatRounds).toBe(3);
   });
 });

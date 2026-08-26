@@ -129,7 +129,7 @@ const syncFileEncodingTreeShakePlugin = {
   name: 'sync-file-encoding-tree-shake',
   setup(build) {
     build.onResolve(
-      { filter: /^\.\/utils\/sync-file-encoding\.js$/ },
+      { filter: /^\.\/services\/sync-file-encoding\.js$/ },
       (args) => {
         if (
           !/[\\/]packages[\\/]core[\\/](?:src|dist[\\/]src)[\\/]index\.(?:ts|js)$/.test(

@@ -32,7 +32,7 @@ import {
   isBackgroundSubAgentToolCall,
   isSubAgentToolCall,
 } from '../adapters/toolClassification';
-import { CompactModeContext } from '../App';
+import { CompactModeContext } from '../WebShellContexts';
 import {
   useWebShellCustomization,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -53,11 +53,10 @@ import {
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
 import { useSharedNow } from '../hooks/useSharedNow';
 import {
-  isAskUserQuestionToolName,
   isActiveToolStatus,
   toolContainsCallId,
 } from './messages/toolFormatting';
-import { isTodoWriteToolName } from '../utils/todos';
+import { getMcpAppDisplay } from './messages/McpApp';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
@@ -288,9 +287,13 @@ export interface SessionTimelineRange {
   currentIndex: number;
 }
 
+// Synthetic compact summaries carry a folded thought next to their single
+// tool; the parallel-agent path must never swallow that row, so agent-only
+// detection excludes them.
 function isAgentOnlyToolGroup(msg: Message): boolean {
   return (
     msg.role === 'tool_group' &&
+    !msg.id.startsWith('summary-') &&
     msg.tools.length === 1 &&
     isSubAgentToolCall(msg.tools[0])
   );
@@ -299,6 +302,7 @@ function isAgentOnlyToolGroup(msg: Message): boolean {
 function isBackgroundAgentOnlyToolGroup(msg: Message): boolean {
   return (
     msg.role === 'tool_group' &&
+    !msg.id.startsWith('summary-') &&
     msg.tools.length === 1 &&
     isBackgroundSubAgentToolCall(msg.tools[0])
   );
@@ -326,18 +330,6 @@ function isForceExpandGroup(
   return false;
 }
 
-function isStandaloneToolGroup(msg: Message): boolean {
-  return (
-    msg.role === 'tool_group' &&
-    msg.tools.some(
-      (tool) =>
-        isSubAgentToolCall(tool) ||
-        isTodoWriteToolName(tool.toolName) ||
-        isAskUserQuestionToolName(tool.toolName),
-    )
-  );
-}
-
 function mergeCompactToolGroups(
   messages: Message[],
   pendingApproval: PermissionRequest | null,
@@ -346,9 +338,7 @@ function mergeCompactToolGroups(
   let i = 0;
 
   const isMergedToolGroup = (m: Message): boolean =>
-    m.role === 'tool_group' &&
-    !isForceExpandGroup(m, pendingApproval) &&
-    !isStandaloneToolGroup(m);
+    m.role === 'tool_group' && !isForceExpandGroup(m, pendingApproval);
 
   while (i < messages.length) {
     const msg = messages[i];
@@ -379,18 +369,22 @@ function mergeCompactToolGroups(
     const tools = run
       .filter((m): m is DaemonToolGroupMessage => m.role === 'tool_group')
       .flatMap((group) => group.tools);
-    const hasStreamingThought = run.some(
-      (m) => m.role === 'thinking' && m.isStreaming === true,
-    );
-    if (tools.length === 0 && !hasStreamingThought) {
-      // Completed thinking with no adjacent tools stays a standalone row.
+    if (
+      tools.length === 0 ||
+      run.length <= 1 ||
+      (run.length >= 2 && run.every(isAgentOnlyToolGroup))
+    ) {
+      // A lone thought or tool stays a standalone row: only multi-item runs
+      // aggregate into a summary. A parallel-agent-only run keeps its direct
+      // x/x row; it nests only when thinking or other tools join the run.
       for (const item of run) result.push(item);
       i = lastRunIdx + 1;
       continue;
     }
 
-    // Each thought remembers the tool that follows it, so the group renders
-    // in the original order without the view reordering anything.
+    // Each thought remembers the tool that follows it. Consecutive agents may
+    // later render as one row anchored at the first agent; launch narration
+    // bound to later agents follows that aggregate row.
     const thoughts: Array<{
       content: string;
       isStreaming?: boolean;
@@ -791,7 +785,7 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
       }
-      return false;
+      return item.message.source === 'vision_bridge_notice';
     case 'user':
     case 'user_shell':
     case 'btw':
@@ -1524,6 +1518,19 @@ function turnHasActiveAgent(
   );
 }
 
+function turnHasMcpApp(
+  items: DisplayItem[],
+  start: number,
+  end: number,
+): boolean {
+  return someTurnToolCall(
+    items,
+    start,
+    end,
+    (tool) => getMcpAppDisplay(tool.rawOutput) !== undefined,
+  );
+}
+
 function completedBackgroundShellTaskIds(
   items: readonly DisplayItem[],
   terminalTaskIds?: ReadonlySet<string>,
@@ -1824,6 +1831,7 @@ export function applyTurnCollapse(
     const isLastTurn = k === userIdxs.length - 1;
     const isActiveTurn = isLastTurn && isResponding;
     const hasActiveAgent = turnHasActiveAgent(items, start, end);
+    const hasMcpApp = turnHasMcpApp(items, start, end);
     const hasPendingBackgroundShell = turnHasPendingBackgroundShell(
       items,
       start,
@@ -1949,6 +1957,7 @@ export function applyTurnCollapse(
     const shouldStayOpen =
       isActiveTurn ||
       hasActiveAgent ||
+      hasMcpApp ||
       hasPendingBackgroundShell ||
       hasAutomaticallyExpandedAgent ||
       awaitsBackgroundSummary ||

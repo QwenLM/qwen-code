@@ -600,6 +600,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_status',
   'session_close',
   'session_archive',
+  'session_storage_conflict_repair',
   'session_metadata',
   'session_organization',
   'session_export',
@@ -705,6 +706,9 @@ const EXPECTED_REGISTERED_FEATURES = [
     }
     if (feature === 'mcp_guardrail_events') {
       return [feature, 'external_tool_guard'];
+    }
+    if (feature === 'session_tasks') {
+      return [feature, 'scheduled_task_session_reuse'];
     }
     return [feature];
   }).filter(
@@ -2998,6 +3002,24 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'scheduled_task_session_reuse') {
+          expect(predicate({ currentSessionSchedulingAvailable: true })).toBe(
+            true,
+          );
+          expect(predicate({ currentSessionSchedulingAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              currentSessionSchedulingAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_generation') {
           expect(predicate({ workspaceGenerationAvailable: true })).toBe(true);
           expect(predicate({ workspaceGenerationAvailable: false })).toBe(
@@ -3884,6 +3906,22 @@ describe('createServeApp', () => {
         .set('Accept', 'text/html');
       expect(api.status).toBe(401);
     });
+
+    it('serves /mcp-app-sandbox pre-auth while the API stays token-gated', async () => {
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        webShellDir,
+      });
+      const sandbox = await request(app)
+        .get('/mcp-app-sandbox')
+        .set('Host', host);
+      expect(sandbox.status).toBe(200);
+      expect(sandbox.text).toContain('ui/notifications/sandbox-proxy-ready');
+      expect(sandbox.headers['content-security-policy']).toContain(
+        "form-action 'none'",
+      );
+      const api = await request(app).get('/capabilities').set('Host', host);
+      expect(api.status).toBe(401);
+    });
   });
 
   describe('GET /health', () => {
@@ -3994,6 +4032,31 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(unsupported.body.features).not.toContain('session_generation');
+    });
+
+    it('advertises current-session scheduling only with managed task sessions', async () => {
+      const unmanaged = await request(
+        createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          currentSessionSchedulingAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(unmanaged.body.features).not.toContain(
+        'scheduled_task_session_reuse',
+      );
+
+      const managed = await request(
+        createServeApp(baseOpts, undefined, {
+          bridge: fakeBridge(),
+          manageScheduledTaskSessions: true,
+          currentSessionSchedulingAvailable: true,
+        }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(managed.body.features).toContain('scheduled_task_session_reuse');
     });
 
     it('advertises workspace generation only when the primary bridge supports it', async () => {
@@ -13090,6 +13153,7 @@ describe('createServeApp', () => {
             [sessionId],
             expect.any(Function),
           );
+          expect(findSessionId).toHaveBeenCalledTimes(1);
         } finally {
           runSharedMany.mockRestore();
           findSessionId.mockRestore();
@@ -13099,15 +13163,11 @@ describe('createServeApp', () => {
     );
 
     it.each(['load', 'resume'] as const)(
-      'converts a pre-guard both-states %s conflict to actionable session conflict',
+      'keeps a differently spelled both-states %s conflict strict',
       async (action) => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440147';
         const storageSessionId = sessionId.toUpperCase();
         const bridge = fakeBridge();
-        // Same spelling persisted in both active and archived states: the
-        // resolver carries the candidate spelling, so the conversion must
-        // re-check THAT spelling — the request-case id finds nothing on a
-        // case-sensitive filesystem and would skip SessionConflictError.
         const conflict = new SessionIdCaseConflictError(
           sessionId,
           storageSessionId,
@@ -13117,62 +13177,8 @@ describe('createServeApp', () => {
           .mockRejectedValue(conflict);
         const getSessionLocation = vi
           .spyOn(SessionService.prototype, 'getSessionLocation')
-          .mockImplementation(async (candidateId) =>
-            candidateId === storageSessionId ? 'conflict' : undefined,
-          );
-        const runSharedMany = vi.spyOn(
-          SessionArchiveCoordinator.prototype,
-          'runSharedMany',
-        );
-        const app = createServeApp(
-          { ...baseOpts, workspace: WS_BOUND },
-          undefined,
-          { bridge },
-        );
-
-        try {
-          const res = await request(app)
-            .post(`/session/${sessionId}/${action}`)
-            .set('Host', `127.0.0.1:${baseOpts.port}`)
-            .send({});
-
-          expect(res.status).toBe(409);
-          expect(res.body.code).toBe('session_conflict');
-          expect(res.body.error).toContain(
-            'Delete the session with POST /sessions/delete',
-          );
-          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
-          // The pre-guard conversion must fire before the guard is entered,
-          // so the shared guard never runs.
-          expect(runSharedMany).not.toHaveBeenCalled();
-          expect(bridge.loadCalls).toEqual([]);
-          expect(bridge.resumeCalls).toEqual([]);
-        } finally {
-          runSharedMany.mockRestore();
-          getSessionLocation.mockRestore();
-          findSessionId.mockRestore();
-        }
-      },
-    );
-
-    it.each(['load', 'resume'] as const)(
-      'converts an in-guard both-states %s conflict to actionable session conflict',
-      async (action) => {
-        const sessionId = '550e8400-e29b-41d4-a716-446655440148';
-        const storageSessionId = sessionId.toUpperCase();
-        const bridge = fakeBridge();
-        const conflict = new SessionIdCaseConflictError(
-          sessionId,
-          storageSessionId,
-        );
-        const findSessionId = vi
-          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-          .mockResolvedValueOnce(storageSessionId)
-          .mockRejectedValue(conflict);
-        const getSessionLocation = vi
-          .spyOn(SessionService.prototype, 'getSessionLocation')
-          .mockImplementation(async (candidateId) =>
-            candidateId === storageSessionId ? 'conflict' : undefined,
+          .mockRejectedValue(
+            Object.assign(new Error('catalog failed'), { code: 'EIO' }),
           );
         const app = createServeApp(
           { ...baseOpts, workspace: WS_BOUND },
@@ -13188,15 +13194,7 @@ describe('createServeApp', () => {
 
           expect(res.status).toBe(409);
           expect(res.body.code).toBe('session_conflict');
-          expect(res.body.error).toContain(
-            'Delete the session with POST /sessions/delete',
-          );
-          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
-          // Without the call-count assertion below, replacing the in-guard
-          // re-resolve with the pre-guard result still yields the same 409
-          // via assertSessionLoadable's mocked 'conflict' location — the
-          // count is what pins the second resolution.
-          expect(findSessionId).toHaveBeenCalledTimes(2);
+          expect(getSessionLocation).not.toHaveBeenCalled();
           expect(bridge.loadCalls).toEqual([]);
           expect(bridge.resumeCalls).toEqual([]);
         } finally {
@@ -24346,6 +24344,36 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
+    it('reads and exports the active copy of an exact persisted conflict', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaac';
+      await writeTranscriptSession(sid);
+      await writeTranscriptSession(sid, 'archived');
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+        }),
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const exported = await request(app)
+        .get(`/session/${sid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(200);
+      expect(exported.status).toBe(200);
+      expect(exported.text).toContain(sid);
+      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+    });
+
     it('redacts skill bodies from flat transcript events (#9234)', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
       const bridge = fakeBridge({
@@ -25576,6 +25604,7 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({
         archived: [sid],
         alreadyArchived: [],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       });
@@ -25586,6 +25615,51 @@ describe('createServeApp', () => {
       await expect(
         fsp.access(sessionFilePath(sid, 'archived')),
       ).resolves.toBeUndefined();
+    });
+
+    it('requires an explicit boolean to repair active/archive conflicts', async () => {
+      const sid = '11111111-bbbb-cccc-dddd-eeeeeeeeeeea';
+      await writeSession(sid);
+      await writeSession(sid, 'archived');
+      const app = createArchiveApp();
+
+      const invalid = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: 'yes' });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body.code).toBe('invalid_request');
+
+      const archived = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: true });
+      expect(archived.status).toBe(200);
+      expect(archived.body).toMatchObject({
+        archived: [sid],
+        resolvedConflicts: [sid],
+        errors: [],
+      });
+      await expect(fsp.access(sessionFilePath(sid))).rejects.toThrow();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).resolves.toBeUndefined();
+
+      await writeSession(sid);
+      const unarchived = await request(app)
+        .post('/sessions/unarchive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid], resolveConflicts: true });
+      expect(unarchived.status).toBe(200);
+      expect(unarchived.body).toMatchObject({
+        unarchived: [sid],
+        resolvedConflicts: [sid],
+        errors: [],
+      });
+      await expect(fsp.access(sessionFilePath(sid))).resolves.toBeUndefined();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).rejects.toThrow();
     });
 
     it('invalidates active and archived catalogs across archive, unarchive, and delete', async () => {
@@ -25854,6 +25928,7 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({
         unarchived: [sid],
         alreadyActive: [],
+        resolvedConflicts: [],
         notFound: [],
         errors: [],
       });
@@ -25923,27 +25998,27 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
-    it('rejects load for active/archive conflicts with session_conflict', async () => {
-      const sid = '44444444-bbbb-cccc-dddd-eeeeeeeeeeef';
-      await writeSession(sid);
-      await writeSession(sid, 'archived');
-      const bridge = fakeBridge();
-      const app = createArchiveApp(bridge);
+    it.each(['load', 'resume'] as const)(
+      '%s restores active/archive conflicted sessions from the active copy',
+      async (action) => {
+        const sid = '44444444-bbbb-cccc-dddd-eeeeeeeeeeef';
+        await writeSession(sid);
+        await writeSession(sid, 'archived');
+        const bridge = fakeBridge();
+        const app = createArchiveApp(bridge);
 
-      const loadRes = await request(app)
-        .post(`/session/${sid}/load`)
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ cwd: wsDir });
-      expect(loadRes.status).toBe(409);
-      expect(loadRes.body).toMatchObject({
-        code: 'session_conflict',
-        sessionId: sid,
-      });
-      expect(loadRes.body.error).toContain(
-        'Delete the session with POST /sessions/delete',
-      );
-      expect(bridge.loadCalls).toHaveLength(0);
-    });
+        const response = await request(app)
+          .post(`/session/${sid}/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: wsDir });
+        // Loads read the active copy (CLI resume parity): a session left in
+        // both states by a crashed archive stays loadable.
+        expect(response.status).toBe(200);
+        expect(
+          action === 'load' ? bridge.loadCalls : bridge.resumeCalls,
+        ).toHaveLength(1);
+      },
+    );
 
     it('returns session_archiving for prompt while archive is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -34095,9 +34170,18 @@ describe('Live conversation runtime lifecycle', () => {
         bridge: primaryBridge,
       }),
     ]);
+    // The Live catalog routes prove an exact root with
+    // `path.resolve(selector) === selector`, which only holds in the host's
+    // native path shape — build it the way the WS_BOUND fixtures above do,
+    // so it round-trips through `path.resolve` on every platform.
+    const liveConversationsRoot = path.resolve(
+      path.sep,
+      'work',
+      'live-conversations',
+    );
     const root = {
-      configuredRoot: '/work/live-conversations',
-      canonicalRoot: '/work/live-conversations',
+      configuredRoot: liveConversationsRoot,
+      canonicalRoot: liveConversationsRoot,
       device: 1,
       inode: 2,
       inodeVerifiable: true,
@@ -34541,6 +34625,20 @@ describe('Live conversation runtime lifecycle', () => {
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
+    const getMaintainableLocation = vi
+      .spyOn(SessionService.prototype, 'getMaintainableSessionLocation')
+      .mockImplementation(async function (candidateId) {
+        if (candidateId === 'ordinary-session') {
+          return this.getProjectRoot() === '/work/live-primary'
+            ? 'active'
+            : undefined;
+        }
+        return this.getProjectRoot() === setup.root.canonicalRoot &&
+          candidateId !== 'not-live' &&
+          candidateId !== 'missing-live-session'
+          ? 'active'
+          : undefined;
+      });
     const sessionExists = vi
       .spyOn(SessionService.prototype, 'sessionExistsInAnyState')
       .mockImplementation(async function (candidateId) {
@@ -34651,6 +34749,7 @@ describe('Live conversation runtime lifecycle', () => {
       expect(updateOrganization).toHaveBeenCalledOnce();
     } finally {
       getLocation.mockRestore();
+      getMaintainableLocation.mockRestore();
       sessionExists.mockRestore();
       readMetadata.mockRestore();
       readMetadataIfReadable.mockRestore();

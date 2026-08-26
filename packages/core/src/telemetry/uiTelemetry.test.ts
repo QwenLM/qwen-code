@@ -1320,4 +1320,167 @@ describe('UiTelemetryService', () => {
       expect(metrics.models['m']?.tokens.prompt).toBe(99);
     });
   });
+
+  describe('Replay snapshot / restore (session-swap undo, #9833)', () => {
+    const SESSION_A = 'session-aaa';
+    const SESSION_B = 'session-bbb';
+    const SESSION_C = 'session-ccc';
+
+    const makeApiEvent = (
+      model: string,
+      inputTokens: number,
+      subagent?: string,
+    ) =>
+      ({
+        'event.name': EVENT_API_RESPONSE,
+        model,
+        duration_ms: 100,
+        input_token_count: inputTokens,
+        output_token_count: 10,
+        total_token_count: inputTokens + 10,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        subagent_name: subagent,
+      }) as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+    const makeToolEvent = (name: string) =>
+      ({
+        'event.name': EVENT_TOOL_CALL,
+        function_name: name,
+        duration_ms: 50,
+        success: true,
+        decision: ToolCallDecision.AUTO_ACCEPT,
+        prompt_id: 'p1',
+      }) as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
+
+    it('round-trips the whole observable surface', () => {
+      // Rich pre-swap state: two models, a per-source breakdown, tool and
+      // skill calls, two live buckets, token counts.
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-b', 200, 'sub-1'), SESSION_A);
+      service.addEvent(makeToolEvent('read_file'), SESSION_A);
+      service.recordSkillInvocation('skill-a', true, SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 300), SESSION_B);
+      service.setLastPromptTokenCount(42);
+      service.setLastCachedContentTokenCount(7);
+      const preGlobal = structuredClone(service.getMetrics());
+      const preA = structuredClone(service.getMetricsForSession(SESSION_A));
+      const preB = structuredClone(service.getMetricsForSession(SESSION_B));
+
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+
+      // The replay + its fallout: new events into the aggregate and both
+      // buckets, token counts moved, the outgoing bucket wiped by the
+      // rollback's resetSession, a replay-created phantom state.
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('model-c', 999), SESSION_B);
+      service.resetSession(SESSION_A);
+      service.addEvent(makeApiEvent('model-c', 111), SESSION_A);
+      service.setLastPromptTokenCount(999);
+      service.setLastCachedContentTokenCount(999);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(service.getMetrics()).toEqual(preGlobal);
+      expect(service.getMetricsForSession(SESSION_A)).toEqual(preA);
+      expect(service.getMetricsForSession(SESSION_B)).toEqual(preB);
+      expect(service.getLastPromptTokenCount()).toBe(42);
+      expect(service.getLastCachedContentTokenCount()).toBe(7);
+    });
+
+    it('drops a bucket the replay created and restores the closed flag', () => {
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      // SESSION_B has no bucket yet and is marked closed — exactly the state
+      // a resume of a finished session starts from.
+      service.removeSession(SESSION_B);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+
+      // The replay creates B's bucket and reopens it.
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('model-a', 50), SESSION_B);
+      expect(service.getMetricsForSession(SESSION_B).models).not.toEqual({});
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      // No leftover bucket reading as a live session; closed flag restored —
+      // a fresh event for B must NOT land in a per-session bucket (closed
+      // sessions are excluded from per-session accumulation).
+      expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
+      service.addEvent(makeApiEvent('model-a', 77), SESSION_B);
+      expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
+      // ...but the aggregate still counts it.
+      expect(service.getMetrics().models['model-a']?.api.totalRequests).toBe(2);
+    });
+
+    it('keeps the bySource null prototype across restore', () => {
+      // The bySource maps are prototype-free (crash guard for subagent names
+      // like "constructor"); structuredClone silently re-arms the prototype,
+      // so snapshot/restore must re-null it.
+      service.addEvent(makeApiEvent('model-a', 100, 'constructor'), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_B);
+      service.restoreFromReplaySnapshot(snapshot);
+
+      const bySource =
+        service.getMetrics().models['model-a']?.bySource ??
+        service.getMetricsForSession(SESSION_A).models['model-a']?.bySource;
+      expect(bySource).toBeDefined();
+      expect(Object.getPrototypeOf(bySource)).toBeNull();
+      expect(bySource!['constructor']?.api.totalRequests).toBe(1);
+      // The live accumulation path must keep working after the restore.
+      service.addEvent(makeApiEvent('model-a', 5, 'constructor'), SESSION_A);
+      expect(bySource!['constructor']?.api.totalRequests).toBe(2);
+    });
+
+    it('does not touch unrelated sessions', () => {
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 55), SESSION_C);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 999), SESSION_B);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(
+        service.getMetricsForSession(SESSION_C).models['model-a']?.tokens
+          .prompt,
+      ).toBe(55);
+    });
+
+    it('emits update so keyed displays re-render', () => {
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 999), SESSION_B);
+
+      const spy = vi.fn();
+      service.on('update', spy);
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(spy).toHaveBeenCalledOnce();
+      expect(
+        spy.mock.calls[0][0].metrics.models['model-a']?.tokens.prompt,
+      ).toBe(100);
+    });
+
+    it('restore is overwrite-safe after another replay landed on top', () => {
+      // The /branch rollback re-initializes the parent BEFORE the undo runs:
+      // restore must supersede that second replay, not subtract from it.
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B, SESSION_A);
+
+      // Forward replay of the abandoned session...
+      service.addEvent(makeApiEvent('model-a', 200), SESSION_B);
+      // ...then the rollback's own replay of the parent on top.
+      service.resetSession(SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(service.getMetrics().models['model-a']?.tokens.prompt).toBe(100);
+      expect(
+        service.getMetricsForSession(SESSION_A).models['model-a']?.tokens
+          .prompt,
+      ).toBe(100);
+    });
+  });
 });

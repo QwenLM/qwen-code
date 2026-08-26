@@ -42,9 +42,9 @@ import type {
   ToolUseBlock,
   Usage,
 } from '../types.js';
-import { functionResponsePartsToString } from '../../utils/nonInteractiveHelpers.js';
+import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
 import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
-import { observeHeadlessToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Internal state for managing a single message context (main agent or subagent).
@@ -1420,6 +1420,21 @@ function checkResponsePartsForError(
  * @param response - Tool call response
  * @returns String content or undefined
  */
+function mcpAppFallbackText(display: unknown): string | undefined {
+  if (
+    !display ||
+    typeof display !== 'object' ||
+    !('type' in display) ||
+    display.type !== 'mcp_app' ||
+    !('fallbackText' in display) ||
+    typeof display.fallbackText !== 'string'
+  ) {
+    return undefined;
+  }
+  const text = display.fallbackText.trim();
+  return text.length > 0 ? display.fallbackText : undefined;
+}
+
 export function toolResultContent(
   response: ToolCallResponseInfo,
 ): string | undefined {
@@ -1455,6 +1470,10 @@ export function toolResultContent(
   }
   if (response.error) {
     return response.error.message;
+  }
+  const mcpAppFallback = mcpAppFallbackText(response.resultDisplay);
+  if (mcpAppFallback) {
+    return mcpAppFallback;
   }
   if (
     typeof response.resultDisplay === 'string' &&

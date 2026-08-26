@@ -92,6 +92,90 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('context');
   });
 
+  it('restores workspace model previews after clearing session context models', () => {
+    const next = getConnectionAfterSessionClear(
+      {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: 'session-a',
+        context: contextStatus('session-a'),
+        models: [
+          {
+            id: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            label: 'Qwen 3.8 Max',
+          },
+        ],
+        providers: {
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          current: { modelId: 'qwen3.8-max' },
+          providers: [
+            {
+              kind: 'model_provider',
+              status: 'ok',
+              authType: 'qwen-oauth',
+              current: true,
+              models: [
+                {
+                  modelId: 'qwen3.8-max',
+                  baseModelId: 'qwen3.8-max',
+                  name: 'Qwen 3.8 Max',
+                  isCurrent: true,
+                  isRuntime: false,
+                  configOptions: [
+                    {
+                      id: 'reasoning_effort',
+                      currentValue: 'xhigh',
+                      options: [
+                        { value: 'none' },
+                        { value: 'low' },
+                        { value: 'medium' },
+                        { value: 'xhigh' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      } as DaemonConnectionState,
+      'session-a',
+    );
+
+    expect(next.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it('keeps the prior model list when no workspace providers are loaded', () => {
+    // Older daemons without workspaceProviders support (or a rejected fetch)
+    // leave `providers` undefined; the pre-clear list must survive the clear.
+    const models = [
+      {
+        id: 'qwen3.8-max',
+        baseModelId: 'qwen3.8-max',
+        label: 'Qwen 3.8 Max',
+      },
+    ];
+    const next = getConnectionAfterSessionClear(
+      {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        sessionId: 'session-a',
+        context: contextStatus('session-a'),
+        models,
+      } as DaemonConnectionState,
+      'session-a',
+    );
+
+    expect(next.models).toEqual(models);
+  });
+
   it('preserves a concurrently loaded session', () => {
     const next = getConnectionAfterSessionClear(
       {
@@ -2343,6 +2427,52 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  it('applies a reasoning effort only when the daemon confirms it', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({
+      configOptions: reasoningConfigOptions('medium'),
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+      },
+      session,
+    });
+
+    await expect(actions.setReasoningEffort('medium')).resolves.toBeUndefined();
+
+    expect(session.setConfigOption).toHaveBeenCalledWith(
+      'reasoning_effort',
+      'medium',
+    );
+    expect(getConnection().reasoning).toEqual({
+      enabled: true,
+      effort: 'medium',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it('rejects a reasoning effort when live config options do not confirm it', async () => {
+    const session = createMockSession('session-a');
+    session.setConfigOption.mockResolvedValueOnce({ configOptions: [] });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        currentModel: 'qwen3.8-max',
+      },
+      session,
+    });
+
+    await expect(actions.setReasoningEffort('medium')).rejects.toThrow(
+      'Daemon did not confirm reasoning effort "medium"',
+    );
+
+    expect(getConnection().reasoning).toBeUndefined();
+  });
+
   it('does not apply a late approval mode to a replacement attachment', async () => {
     const source = createMockSession('session-a', 'client-a');
     const target = createMockSession('session-a', 'client-b');
@@ -2564,6 +2694,9 @@ function createMockSession(
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    setConfigOption: vi.fn(async (_configId: string, value: string) => ({
+      configOptions: reasoningConfigOptions(value),
+    })),
     uploadAttachment: vi.fn(
       async (data: Blob, name: string, mimeType: string) => ({
         type: mimeType.startsWith('image/')
@@ -2586,6 +2719,21 @@ function createMockSession(
     goal: vi.fn(),
     controlGoal: vi.fn(),
   };
+}
+
+function reasoningConfigOptions(currentValue: string) {
+  return [
+    {
+      id: 'reasoning_effort',
+      currentValue,
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+    },
+  ];
 }
 
 function createDeferred<T>() {

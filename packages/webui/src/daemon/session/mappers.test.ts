@@ -7,11 +7,13 @@
 import { describe, expect, it } from 'vitest';
 import type {
   DaemonEvent,
+  DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
   getReplayTokenCount,
   getReplayTokenUsage,
+  mapProviderStatus,
   mapReasoningControls,
   mapWorkspaceSkills,
   selectGoalState,
@@ -95,6 +97,93 @@ describe('mapReasoningControls', () => {
     });
   });
 });
+
+describe('mapProviderStatus reasoning preview', () => {
+  it('maps a valid preview onto its model entry', () => {
+    const result = mapProviderStatus(
+      workspaceProvidersWithConfigOptions([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none' },
+            { value: 'low' },
+            { value: 'medium' },
+            { value: 'xhigh' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+          },
+        },
+      ]),
+    );
+
+    expect(result.models[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it.each([
+    { name: 'absent', configOptions: undefined },
+    { name: 'empty', configOptions: [] },
+    {
+      name: 'missing Thinking off',
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [{ value: 'default' }, { value: 'xhigh' }],
+        },
+      ],
+    },
+    {
+      name: 'unknown current value',
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'bogus',
+          options: [{ value: 'none' }, { value: 'low' }],
+        },
+      ],
+    },
+  ])('ignores $name preview', ({ configOptions }) => {
+    const result = mapProviderStatus(
+      workspaceProvidersWithConfigOptions(configOptions),
+    );
+    expect(result.models[0]?.reasoningPreview).toBeUndefined();
+  });
+});
+
+function workspaceProvidersWithConfigOptions(
+  configOptions: unknown[] | undefined,
+): DaemonWorkspaceProvidersStatus {
+  return {
+    v: 1,
+    workspaceCwd: '/workspace',
+    initialized: true,
+    current: { modelId: 'qwen3.8-max' },
+    providers: [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'qwen-oauth',
+        current: true,
+        models: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            isCurrent: true,
+            isRuntime: false,
+            ...(configOptions ? { configOptions } : {}),
+          },
+        ],
+      },
+    ],
+  };
+}
 
 describe('getReplayTokenCount', () => {
   it('returns undefined for an empty array', () => {
@@ -656,9 +745,12 @@ describe('updateConnectionFromDaemonEvent', () => {
   });
 
   it('carries limitKind through from the wire', () => {
-    // The client gates Resume on it: an evidence-limited Goal cannot be
-    // resumed, and dropping the field here leaves the UI offering a control the
-    // daemon always rejects.
+    // The mapper rebuilds the Goal record field-by-field after validating it,
+    // which is exactly how a newly added field gets dropped in silence. No
+    // client logic keys off `limitKind` any more (resumability is decided by
+    // status alone; the reducer resumes an evidence-limited Goal by restarting
+    // its window), but the wire copy is the client's only copy of the record
+    // -- the pin is that mapping does not quietly narrow it.
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },
       {
@@ -695,6 +787,46 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.goalState?.goal).toMatchObject({
       status: 'usage_limited',
       limitKind: 'evidence_catalog',
+    });
+  });
+
+  it('carries a token_budget limitKind through from the wire', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: {
+              goalState: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 3,
+                  objective: 'ship it',
+                  status: 'usage_limited',
+                  evidenceCursor: { recordId: 'record-1' },
+                  turnCount: 2,
+                  activeTimeMs: 10,
+                  createdAt: 1,
+                  updatedAt: 2,
+                  lastReason: 'The Goal spent its autonomous token budget.',
+                  limitKind: 'token_budget',
+                },
+              },
+            },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.goalState?.goal).toMatchObject({
+      status: 'usage_limited',
+      limitKind: 'token_budget',
     });
   });
 
@@ -843,6 +975,49 @@ describe('updateConnectionFromDaemonEvent', () => {
 
     expect(next.commands?.map((command) => command.name)).toEqual(['review']);
     expect(next.skills).toEqual(['review']);
+  });
+
+  it('reads nested availableSkills from the daemon wire shape', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              { name: 'review', description: 'Review a PR', input: null },
+            ],
+            _meta: { availableSkills: ['review'] },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.skills).toEqual(['review']);
+  });
+
+  it('prefers flat availableSkills when both wire shapes are present', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [],
+            availableSkills: ['flat-skill'],
+            _meta: { availableSkills: ['nested-skill'] },
+          },
+        },
+      } as DaemonEvent,
+    );
+
+    expect(next.skills).toEqual(['flat-skill']);
   });
 
   it('clears stale commands when the update reports an empty list', () => {

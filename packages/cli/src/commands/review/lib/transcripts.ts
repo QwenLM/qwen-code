@@ -264,7 +264,7 @@ function rangeOf(args: Record<string, unknown>): [number, number] | null {
  * (normalisation, escaping, a stricter compare) reaches the whole bar at once
  * rather than half of it.
  *
- * NOT `namesPath` in `utils/findings.ts`: that one matches a path mentioned in
+ * NOT `namesPath` in `findings.ts`: that one matches a path mentioned in
  * PROSE on a name boundary, so it credits `rm /plan/chunk-3.brief.md` for
  * naming the brief. Crediting an agent for deleting a file it never opened is
  * precisely what this predicate must not do, which is why the two keep

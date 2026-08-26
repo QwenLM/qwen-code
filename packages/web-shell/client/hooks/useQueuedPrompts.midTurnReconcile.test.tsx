@@ -100,6 +100,7 @@ interface HarnessOptions {
   canQueryMidTurn?: boolean;
   canInjectMidTurnMedia?: boolean;
   streamingState?: DaemonStreamingState;
+  sessionHasActivePrompt?: boolean;
   holdQueuedPromptsLocally?: boolean;
 }
 
@@ -155,6 +156,7 @@ function createHarness() {
       canInjectMidTurnMedia: opts.canInjectMidTurnMedia ?? true,
       workspaceFileActions: stableWorkspaceFileActions as never,
       streamingState: opts.streamingState ?? 'responding',
+      sessionHasActivePrompt: opts.sessionHasActivePrompt ?? false,
       holdQueuedPromptsLocally: opts.holdQueuedPromptsLocally ?? false,
       sessionActions: sdkMock.actions as never,
       store: stableStore as never,
@@ -569,6 +571,93 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
         'query late response',
         expect.objectContaining({ sessionId: 'session-a' }),
+      );
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('falls back when live state is active but raw streaming is idle', async () => {
+    let resolveAdmission:
+      | ((value: { accepted: boolean; messageId?: string }) => void)
+      | undefined;
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementation(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) =>
+        new Promise((resolve) => {
+          opts?.onAdmissionStarted?.();
+          resolveAdmission = resolve;
+        }),
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'idle',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('live state race');
+      });
+      await act(async () => {
+        resolveAdmission?.({ accepted: false });
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledOnce();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledOnce();
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        'live state race',
+        expect.objectContaining({ sessionId: 'session-a' }),
+      );
+      expect(harness.reportError).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('preserves file annotations when a live-state insert falls back', async () => {
+    const fileText = '@docs/notes.txt';
+    const text = `${fileText} explain this`;
+    const annotation = {
+      type: 'reference' as const,
+      start: 0,
+      end: fileText.length,
+      text: fileText,
+      reference: {
+        id: 'file:docs/notes.txt',
+        kind: 'file' as const,
+        value: 'docs/notes.txt',
+      },
+    };
+    sdkMock.actions.enqueueMidTurnMessage.mockImplementationOnce(
+      (_message: string, opts?: { onAdmissionStarted?: () => void }) => {
+        opts?.onAdmissionStarted?.();
+        return Promise.resolve({ accepted: false });
+      },
+    );
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'idle',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness
+          .result()
+          .enqueuePrompt(text, undefined, undefined, undefined, [annotation]);
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.removeAttachment).toHaveBeenCalledWith(
+        'notes.txt',
+        { sessionId: 'session-a' },
+      );
+      expect(sdkMock.actions.submitPrompt).toHaveBeenCalledWith(
+        text,
+        expect.objectContaining({
+          files: undefined,
+          inputAnnotations: [annotation],
+          sessionId: 'session-a',
+        }),
       );
       expect(harness.reportError).not.toHaveBeenCalled();
     } finally {

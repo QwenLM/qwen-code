@@ -64,6 +64,7 @@ import {
 } from './externalToolGuard.js';
 import type { ChannelFactory } from './channel.js';
 import type {
+  BridgeOptions,
   BridgeFreshSessionAdmissionContext,
   BridgeTelemetry,
 } from './bridgeOptions.js';
@@ -86,6 +87,8 @@ import {
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
   ACTIVE_WORK_STALE_INTERVALS,
+  CHANNEL_LIVENESS_META_KEY,
+  CHANNEL_LIVENESS_VERSION,
   gradeActiveWorkCoverage,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
@@ -93,6 +96,11 @@ import {
   WORKTREE_MCP_DEFER_META_KEY,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
 } from './bridgeTypes.js';
+import {
+  CHANNEL_LIVENESS_INTERVAL_MS,
+  CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+  CHANNEL_LIVENESS_TIMEOUT_CODE,
+} from './channel-liveness.js';
 import {
   ApprovalMode,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -113,6 +121,7 @@ import {
 } from './internal/testUtils.js';
 import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
 import { SessionAttachmentStore } from './sessionAttachments.js';
+import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -270,6 +279,18 @@ function activeWorkInitializeResponse(
         categories: [...ACTIVE_WORK_HOLD_CATEGORIES],
         ...overrides,
       },
+    },
+  };
+}
+
+function channelLivenessInitializeResponse(): InitializeResponse {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    agentInfo: { name: 'channel-liveness-agent', version: '0' },
+    authMethods: [],
+    agentCapabilities: {},
+    _meta: {
+      [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
     },
   };
 }
@@ -765,6 +786,93 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(1);
       // The refusal's hold set is adopted, so the daemon now agrees it is busy.
       expect(bridge.activeWork).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it.each([
+      {
+        count: ACTIVE_WORK_MAX_SESSION_HOLDS,
+        expectedActiveWork: true,
+      },
+      {
+        count: ACTIVE_WORK_MAX_SESSION_HOLDS + 1,
+        expectedActiveWork: false,
+      },
+    ])(
+      'bounds close-refusal adoption at $count holds',
+      async ({ count, expectedActiveWork }) => {
+        const refusalHolds = Array.from({ length: count }, (_unused, index) =>
+          agentHold(`h${index}`),
+        );
+        const handle = makeChannel({
+          initializeImpl: () => activeWorkInitializeResponse(),
+          extMethodImpl: async (method, params) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+            if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+              return { closed: false, holds: refusalHolds };
+            }
+            return { closed: true };
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+
+        await bridge.detachClient(session.sessionId, session.clientId);
+
+        expect(bridge.sessionCount).toBe(1);
+        expect(bridge.activeWork).toBe(expectedActiveWork);
+        expect(reportingGrade(bridge)).toBe('full');
+
+        await bridge.shutdown();
+      },
+    );
+
+    it('retains a stale non-empty cache after an oversized close refusal', async () => {
+      const refusalHolds = Array.from(
+        { length: ACTIVE_WORK_MAX_SESSION_HOLDS + 1 },
+        (_unused, index) => agentHold(`h${index}`),
+      );
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            return { closed: false, holds: refusalHolds };
+          }
+          return { closed: true };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 0,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [agentHold('cached-agent')] },
+      ]);
+
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(
+          Date.now() +
+            ACTIVE_WORK_HEARTBEAT_INTERVAL_MS * ACTIVE_WORK_STALE_INTERVALS +
+            1_000,
+        );
+        await bridge.detachClient(session.sessionId, session.clientId);
+
+        expect(bridge.sessionCount).toBe(1);
+        expect(bridge.activeWork).toBe(true);
+        expect(reportingGrade(bridge)).toBe('partial');
+      } finally {
+        vi.useRealTimers();
+      }
 
       await bridge.shutdown();
     });
@@ -11801,6 +11909,155 @@ describe('createAcpSessionBridge', () => {
     void killPromise;
   });
 
+  describe('channel liveness', () => {
+    it('advertises v1 but stays disabled when the child does not acknowledge it', async () => {
+      vi.useFakeTimers();
+      try {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        expect(handle.agent.initializeCalls[0]?._meta).toMatchObject({
+          [CHANNEL_LIVENESS_META_KEY]: { v: CHANNEL_LIVENESS_VERSION },
+        });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS + CHANNEL_LIVENESS_PROBE_TIMEOUT_MS * 2,
+        );
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({
+            method: SERVE_STATUS_EXT_METHODS.channelPing,
+          }),
+        );
+        expect(handle.killed).toBe(false);
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('fails the transport after two unanswered channel probes', async () => {
+      vi.useFakeTimers();
+      try {
+        const event = vi.fn();
+        const channelLifecycle = vi.fn();
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        const baseKill = handle.channel.kill;
+        const transportFail = vi.fn((error: unknown) => {
+          void baseKill();
+          return error;
+        });
+        handle.channel = {
+          ...handle.channel,
+          transportGuard: {
+            maxActiveHandlers: 10,
+            maxActiveHandlerBytes: 1024 * 1024,
+            reserveOutboundOperation: () => () => {},
+            reservePreparedResponse: () => {},
+            fail: transportFail,
+          },
+        };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionScope: 'thread',
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle,
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(bridge.sessionCount).toBe(2);
+        const firstEvents: BridgeEvent[] = [];
+        const secondEvents: BridgeEvent[] = [];
+        const firstDrain = (async () => {
+          for await (const event of bridge.subscribeEvents(first.sessionId)) {
+            firstEvents.push(event);
+          }
+        })();
+        const secondDrain = (async () => {
+          for await (const event of bridge.subscribeEvents(second.sessionId)) {
+            secondEvents.push(event);
+          }
+        })();
+
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_INTERVAL_MS);
+        const firstProbeCalls = handle.agent.extMethodCalls.filter(
+          ({ method }) => method === SERVE_STATUS_EXT_METHODS.channelPing,
+        );
+        expect(firstProbeCalls).toEqual([
+          {
+            method: SERVE_STATUS_EXT_METHODS.channelPing,
+            params: { v: CHANNEL_LIVENESS_VERSION, nonce: 0 },
+          },
+        ]);
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+        expect(transportFail).not.toHaveBeenCalled();
+        expect(
+          handle.agent.extMethodCalls.filter(
+            ({ method }) => method === SERVE_STATUS_EXT_METHODS.channelPing,
+          ),
+        ).toHaveLength(2);
+
+        await vi.advanceTimersByTimeAsync(CHANNEL_LIVENESS_PROBE_TIMEOUT_MS);
+        await handle.channel.exited;
+        await Promise.all([firstDrain, secondDrain]);
+
+        expect(transportFail).toHaveBeenCalledOnce();
+        expect(transportFail.mock.calls[0]?.[0]).toMatchObject({
+          code: CHANNEL_LIVENESS_TIMEOUT_CODE,
+        });
+        expect(bridge.sessionCount).toBe(0);
+        expect(firstEvents.at(-1)).toMatchObject({
+          type: 'session_died',
+          data: { sessionId: first.sessionId, reason: 'channel_closed' },
+        });
+        expect(secondEvents.at(-1)).toMatchObject({
+          type: 'session_died',
+          data: { sessionId: second.sessionId, reason: 'channel_closed' },
+        });
+        expect(channelLifecycle).toHaveBeenCalledWith('exit', false);
+        expect(event).toHaveBeenCalledWith(
+          'channel.liveness_failed',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.session_count': 2,
+            'qwen-code.daemon.channel.transport_error_code':
+              CHANNEL_LIVENESS_TIMEOUT_CODE,
+          }),
+        );
+        expect(event).toHaveBeenCalledWith(
+          'channel.exited',
+          expect.objectContaining({
+            'qwen-code.daemon.channel.transport_failed': true,
+            'qwen-code.daemon.channel.transport_failure_initiated_teardown': true,
+            'qwen-code.daemon.channel.transport_error_code':
+              CHANNEL_LIVENESS_TIMEOUT_CODE,
+          }),
+        );
+        await bridge.shutdown();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
   it('transport failure marks the channel dying before process exit', async () => {
     const handles: ChannelHandle[] = [];
     const failures: Array<ReturnType<typeof deferred<unknown>>> = [];
@@ -12403,6 +12660,97 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
       ).toBe(undefined);
+      await bridge.shutdown();
+    });
+
+    it('strips a client-spoofed restoreAskUserQuestion meta key', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'spoof restore' }],
+        _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+      } as PromptRequest);
+
+      expect(
+        handle.agent.promptCalls[0]?._meta?.[
+          'qwen.daemon.restoreAskUserQuestion'
+        ],
+      ).toBe(undefined);
+      await bridge.shutdown();
+    });
+
+    it('does not auto-restore ask_user_question when the switch is off', async () => {
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+
+      await bridge.loadSession({
+        sessionId: 'persisted-auq',
+        workspaceCwd: WS_A,
+      });
+      await Promise.resolve();
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
+    it('fires a tracked restore prompt when load hints and the switch is on', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      await bridge.loadSession({
+        sessionId: 'persisted-auq',
+        workspaceCwd: WS_A,
+        clientId: 'client-1',
+      });
+      await vi.waitFor(() => {
+        expect(handle.agent.promptCalls).toHaveLength(1);
+      });
+      expect(handle.agent.promptCalls[0]?.prompt).toEqual([]);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.[
+          'qwen.daemon.restoreAskUserQuestion'
+        ],
+      ).toBe(true);
+      await bridge.shutdown();
+    });
+
+    it('does not fire a restore prompt without an attached client', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      // Internal restores (boot rehydrate, keepalive) pass no clientId;
+      // nobody could answer the re-hung question, so it must not fire.
+      await bridge.loadSession({
+        sessionId: 'persisted-auq',
+        workspaceCwd: WS_A,
+      });
+      await Promise.resolve();
+      expect(handle.agent.promptCalls).toHaveLength(0);
       await bridge.shutdown();
     });
 
@@ -18620,7 +18968,7 @@ describe('createAcpSessionBridge', () => {
     /** Spin up a bridge with a hand-driven channel; returns the bridge,
      *  session, and a function the test uses to call `requestPermission`
      *  from the agent side. */
-    async function setupForPermission() {
+    async function setupForPermission(opts: Partial<BridgeOptions> = {}) {
       let capturedConn: AgentSideConnection | undefined;
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {
@@ -18650,10 +18998,102 @@ describe('createAcpSessionBridge', () => {
           },
         };
       };
-      const bridge = makeBridge({ channelFactory: factory });
+      const bridge = makeBridge({ ...opts, channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       return { bridge, session, conn: capturedConn!, handles };
     }
+
+    it('disables the permission timer by default and honors an explicit timeout', async () => {
+      const requestPermission = (
+        conn: AgentSideConnection,
+        sessionId: string,
+        toolCall: Record<string, unknown>,
+      ) =>
+        (
+          conn as unknown as {
+            requestPermission(p: unknown): Promise<unknown>;
+          }
+        ).requestPermission({
+          sessionId,
+          toolCall,
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        });
+      const resolvePending = (
+        bridge: ReturnType<typeof makeBridge>,
+        sessionId: string,
+      ) => {
+        const requestId =
+          bridge.getSessionSummary(sessionId)?.pendingInteractions?.[0]
+            ?.requestId;
+        expect(requestId).toBeDefined();
+        bridge.respondToPermission(requestId!, {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        });
+      };
+      const exerciseBothInteractionKinds = async (
+        bridge: ReturnType<typeof makeBridge>,
+        sessionId: string,
+        conn: AgentSideConnection,
+        expectedTimeoutMs: number,
+      ) => {
+        const toolCalls = [
+          { toolCallId: 'ordinary', title: 'Need permission' },
+          {
+            toolCallId: 'question',
+            title: 'Need an answer',
+            _meta: { qwenInteractionKind: 'user_question' },
+          },
+        ];
+        for (const toolCall of toolCalls) {
+          const firstRelevantCall = mediatorRequest.mock.calls.length;
+          const response = requestPermission(conn, sessionId, toolCall);
+          await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+          expect(mediatorRequest.mock.calls).toHaveLength(
+            firstRelevantCall + 1,
+          );
+          expect(mediatorRequest.mock.calls[firstRelevantCall]?.[1]).toBe(
+            expectedTimeoutMs,
+          );
+          resolvePending(bridge, sessionId);
+          await response;
+        }
+      };
+      const mediatorRequest = vi.spyOn(
+        MultiClientPermissionMediator.prototype,
+        'request',
+      );
+      try {
+        const { bridge, session, conn } = await setupForPermission();
+        try {
+          await exerciseBothInteractionKinds(
+            bridge,
+            session.sessionId,
+            conn,
+            0,
+          );
+        } finally {
+          await bridge.cancelSession(session.sessionId);
+          await bridge.shutdown();
+        }
+
+        const configured = await setupForPermission({
+          permissionResponseTimeoutMs: 45_000,
+        });
+        try {
+          await exerciseBothInteractionKinds(
+            configured.bridge,
+            configured.session.sessionId,
+            configured.conn,
+            45_000,
+          );
+        } finally {
+          await configured.bridge.cancelSession(configured.session.sessionId);
+          await configured.bridge.shutdown();
+        }
+      } finally {
+        mediatorRequest.mockRestore();
+      }
+    });
 
     it('publishes a permission_request event with a generated requestId and awaits a vote', async () => {
       const { bridge, session, conn } = await setupForPermission();
@@ -26614,8 +27054,12 @@ describe('createAcpSessionBridge', () => {
         expect(stderrSpy).toHaveBeenCalledWith(
           expect.stringContaining('updated session metadata'),
         );
+        // The audit line prints the id through JSON.stringify, which escapes
+        // the backslashes of a Windows-spelled session id.
         expect(stderrSpy).toHaveBeenCalledWith(
-          expect.stringContaining(session.sessionId),
+          expect.stringContaining(
+            JSON.stringify(session.sessionId).slice(1, -1),
+          ),
         );
         expect(stderrSpy).toHaveBeenCalledWith(
           expect.stringContaining('pr=9517'),

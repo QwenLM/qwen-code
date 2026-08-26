@@ -51,6 +51,12 @@ export interface PendingTranscriptToolCall {
   readonly toolName: string;
   readonly sourceRecordId: string;
   readonly sourceTimestamp?: string;
+  /**
+   * The transcript's own id when dedup renamed `callId` (`<id>:2`). Skip
+   * sets derived from chat history hold RAW ids, so finalize must match
+   * against both.
+   */
+  readonly rawCallId?: string;
 }
 
 export interface TranscriptReplayStateV1 {
@@ -83,6 +89,7 @@ export interface TranscriptReplayMachineOptions {
   readonly gaps?: readonly TranscriptReplayGapInput[];
   readonly presentation?: TranscriptReplayPresentationAdapter;
   readonly onDiagnostic?: (diagnostic: TranscriptProjectionDiagnostic) => void;
+  readonly skipFinalizeCallIds?: ReadonlySet<string>;
 }
 
 export interface TranscriptReplayMachine {
@@ -554,8 +561,15 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
   *finalize(): Iterable<TranscriptReplayEmission> {
     if (this.finalized) return;
     this.finalized = true;
+    const skip = this.options.skipFinalizeCallIds;
     let ordinal = 0;
     for (const pending of [...this.pendingToolCalls.values()]) {
+      if (
+        skip &&
+        (skip.has(pending.callId) ||
+          (pending.rawCallId !== undefined && skip.has(pending.rawCallId)))
+      )
+        continue;
       this.pendingToolCalls.delete(pending.callId);
       this.report(
         'missing_tool_result',
@@ -830,6 +844,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
             toolName,
             sourceRecordId: record.uuid,
             ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
+            ...(explicitId !== undefined && explicitId !== callId
+              ? { rawCallId: explicitId }
+              : {}),
           });
         }
       }

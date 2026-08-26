@@ -2,10 +2,12 @@
 # Push the round's commit to the PR head and post the round report.
 #
 # The body below is the 'Push and report' step of review-address in
-# .github/workflows/qwen-autofix.yml, byte-identical to the inline block it
-# came from: 626 lines, ~41 KB. The file it left is within a few KB of the
-# repo's 470,000-byte gate, and GitHub stops starting runs past 512,000 without
-# saying so (.github/scripts/check-workflow-size.sh). No absolute size is
+# .github/workflows/qwen-autofix.yml — the inline block it came from (626
+# lines, ~41 KB at the move), its long comments since migrated to
+# qwen-autofix.md pointers like the rest of the workflow. The file it left
+# is within a few KB of the repo's 470,000-byte gate, and GitHub stops starting
+# runs past 512,000 without saying so (.github/scripts/check-workflow-size.sh).
+# No absolute size is
 # quoted here on purpose — main moves it every day, and a number that decays is
 # how this comment earned three review rounds. It is also
 # the step docs/design/autofix-gate-runner-isolation.md moves into its own
@@ -78,15 +80,8 @@ MODEL_DISPLAY="${MODEL:-default}"
 # Growth-audit trail (+ re-arm on sound): audit rounds record the
 # verdict under the key the baseline was READ under — same rule as
 # the growth markers, same dead-key hazard (a supersede-exempt
-# round can report under a stale WINDOW after a re-arm). The
-# verdict comes from AUDIT_VERDICT — the verdict the verification
-# GATE validated and surfaced as a step output — NOT a re-read of
-# growth-audit.json: the branch's own build/tests run as the runner
-# user and WORKDIR is a predictable path they can write, so the
-# file could change after the gate looked. Re-arming is allowed
-# for completed rounds only ($1 = allow): a sound verdict whose
-# round then FAILED must not re-anchor the window — the failure
-# path re-measures under the same window instead.
+# round can report under a stale WINDOW after a re-arm).
+# Full rationale → qwen-autofix.md#af-131
 emit_growth_audit_marker() {
   local allow_rearm="${1:-false}"
   [[ "${KISS_AUDIT}" == 'true' ]] || return 0
@@ -233,12 +228,7 @@ resolve_and_reply_threads() {
   fi
   # The mirror of the resolve above: a finding the agent did NOT
   # resolve keeps its thread open, and this answers it IN that thread.
-  # Without it the reason sits only in the round summary, so the
-  # reviewer who opens the still-open thread sees silence and cannot
-  # tell their finding was read. Same neutralisation as the summary
-  # body — a reply is model output posted verbatim under the bot
-  # identity, so it could otherwise smuggle a forged control marker.
-  # Best-effort: a reply failure must never fail a good push.
+  # Full rationale → qwen-autofix.md#af-132
   if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
     jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
     REPLIED_N=0
@@ -271,12 +261,8 @@ resolve_and_reply_threads() {
       # later round whose agent rewrites an unchanged declination
       # must not post the same bot reply twice on one thread
       # (observed 2026-08-16: an identical reply posted three
-      # times, #9296). Skip when the thread already carries a
-      # comment by the bot whose body EQUALS the neutralised body
-      # about to be posted; a changed body — a new reason in a
-      # later round — still posts. Best-effort like the rest: with
-      # a stale or empty threads view this degrades to the old
-      # post-always behavior.
+      # times, #9296).
+      # Full rationale → qwen-autofix.md#af-133
       if jq -e --argjson id "${root_id}" --arg bot "${AUTOFIX_BOT}" \
         --arg body "${REPLY_BODY}" '
           map(select(any(.comments.nodes[]; .databaseId == $id)))
@@ -338,8 +324,9 @@ run_deferred_upsert() {
   if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
     echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
   fi
-  # The child's output is agent-reachable content, so a line-start
-  # `::` is neutralized before it reaches this step's stdout.
+  # The child's output is agent-reachable content, so both workflow-command
+  # syntaxes are neutralized before it reaches this step's stdout (`##[`
+  # parses mid-line too — #9761).
   while IFS= read -r _upsert_line; do
     # Wrapper-authored lines carry a marker and are emitted
     # VERBATIM so they still render as GitHub annotations; the
@@ -349,7 +336,10 @@ run_deferred_upsert() {
     elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
       printf '%s\n' "${_upsert_line#__upsert_trusted__}"
     else
-      printf '%s\n' "${_upsert_line//::/;;}"
+      # The canonical two-expression neutralizer, identical to every other
+      # echo site — one spelling for the whole family, so a syntax change
+      # cannot drift across two implementations.
+      printf '%s\n' "${_upsert_line}" | sed -e 's/::/;;/g' -e 's/##\[/##［/g'
     fi
   done <<< "${UPSERT_OUT}"
 }
@@ -382,13 +372,8 @@ bash "${RUNNER_TEMP}/resanitize-git-config.sh"
 if [[ "${OUTCOME}" == "fixed" ]]; then
   NEXT_ROUND="$(( ROUND + 1 ))"
   # The tree the gate verified is what gets pushed: assert HEAD is
-  # the gate's verified_head before touching credentials. A repo
-  # redirect (a planted .git/commondir/GIT_DIR — the first defused
-  # by resanitize, the second by the env strip) would otherwise let
-  # `git rev-parse HEAD` and the push read an attacker repo whose
-  # HEAD differs; this compares against the value the gate recorded
-  # in GITHUB_OUTPUT (unreachable from a disk write). Empty
-  # verified_head only on a noop, which does not reach this push.
+  # the gate's verified_head before touching credentials.
+  # Full rationale → qwen-autofix.md#af-134
   HEAD_NOW="$(git rev-parse HEAD)"
   if [[ -z "${VERIFIED_HEAD}" || "${HEAD_NOW}" != "${VERIFIED_HEAD}" ]]; then
     echo "::error::HEAD ${HEAD_NOW} is not the gate's verified head ${VERIFIED_HEAD:-<empty>} — refusing to push"
@@ -560,13 +545,8 @@ fi
 
 # Bounded retry on the report post: this one comment carries the
 # round's ENTIRE persisted state (autofix-eval watermark/round,
-# redcheck head, growth baseline). The push has already landed, so
-# a transient API failure here loses the marker while keeping the
-# growth — the retry scan would re-anchor the baseline at the
-# post-push size and re-evaluate feedback it already addressed.
-# Three attempts bound that to genuine outages; the final failure
-# keeps today's semantics (step fails, no marker, next scan
-# retries the round).
+# redcheck head, growth baseline).
+# Full rationale → qwen-autofix.md#af-135
 REPORT_POSTED='false'
 for attempt in 1 2 3; do
   if gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"; then
@@ -590,13 +570,8 @@ if [[ "${OUTCOME}" == "fixed" && "${MAX_ROUNDS}" == "${TAKEOVER_MAX_ROUNDS}" ]] 
   # Crossing trigger, not an equality test: failure rounds also
   # advance the round counter, so `push@9, crash@10, push@11`
   # would skip an exact %10 check forever — and a failure-heavy
-  # PR is the very PR the digest exists for. Post on the first
-  # PUSHED round once 10+ rounds have accumulated since the last
-  # digest in THIS window (or since the window opened). The
-  # window opens at the round SEED, not at zero: a '/takeover
-  # from 60' counter starts at 60, so the no-digest-yet baseline
-  # is the seed — otherwise the seed-inflated counter digests on
-  # the window's first push with a 1-2 round census.
+  # PR is the very PR the digest exists for.
+  # Full rationale → qwen-autofix.md#af-136
   MS_LAST="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" --argjson start "${ROUND_START:-0}" '
     [ .[] | select((.user.login // "") == $ab) | (.body // "")
       | [ scan("<!-- autofix-milestone round=([0-9]+) win=([^ ]+) -->") ] | .[]

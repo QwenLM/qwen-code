@@ -11,6 +11,7 @@ import type {
   DaemonClient,
   DaemonSessionArchiveState,
   DaemonSessionListPageOptions,
+  DaemonSessionSummary,
 } from '@qwen-code/sdk/daemon';
 import {
   getSessionCatalogQueryKey,
@@ -289,6 +290,15 @@ export function useSessionCatalogController(client: DaemonClient) {
           store.patchSession(workspaceCwd, sessionId, { displayName });
           store.invalidateWorkspace(workspaceCwd);
         });
+      },
+      toggleSessionPinned(
+        workspaceCwd: string,
+        session: DaemonSessionSummary,
+        toggle: { pinned: boolean; pinnedAt?: string },
+      ) {
+        update(() =>
+          store.applySessionPinToggle(workspaceCwd, session, toggle),
+        );
       },
       turnCompleted(workspaceCwd: string, sessionId: string) {
         update(() => {

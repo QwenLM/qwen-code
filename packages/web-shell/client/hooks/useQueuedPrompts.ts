@@ -78,6 +78,7 @@ interface UseQueuedPromptsArgs {
   canInjectMidTurnMedia: boolean;
   workspaceFileActions?: Pick<DaemonWorkspaceActions, 'readFileBytes' | 'stat'>;
   streamingState: DaemonStreamingState;
+  sessionHasActivePrompt?: boolean;
   /** Keep ordinary submissions local until the Goal is paused, cleared, or the
    * user explicitly inserts one into the current turn. */
   holdQueuedPromptsLocally?: boolean;
@@ -403,6 +404,7 @@ export function useQueuedPrompts({
   canInjectMidTurnMedia,
   workspaceFileActions,
   streamingState,
+  sessionHasActivePrompt = false,
   holdQueuedPromptsLocally = false,
   sessionActions,
   store,
@@ -472,7 +474,10 @@ export function useQueuedPrompts({
   >(new Map());
   const appendedBeforeResponsePromptIdsRef = useRef<Set<string>>(new Set());
   const removedBeforeResponsePromptIdsRef = useRef<Set<string>>(new Set());
-  const latestStreamingStateRef = useRef(streamingState);
+  const latestRawStreamingStateRef = useRef(streamingState);
+  const latestSessionActiveRef = useRef(
+    streamingState !== 'idle' || sessionHasActivePrompt,
+  );
   const holdQueuedPromptsLocallyRef = useRef(holdQueuedPromptsLocally);
   const refreshRequestSeqRef = useRef(0);
   /** Stale-response fence for `getMidTurnMessages` reconciliation calls. */
@@ -496,11 +501,12 @@ export function useQueuedPrompts({
   latestSessionIdRef.current = sessionId;
   latestWorkspaceCwdRef.current = workspaceCwd;
   holdQueuedPromptsLocallyRef.current = holdQueuedPromptsLocally;
-  const streamingIdle = streamingState === 'idle';
+  const sessionActive = streamingState !== 'idle' || sessionHasActivePrompt;
   useLayoutEffect(() => {
     midTurnReconcileSeqRef.current += 1;
-  }, [streamingIdle]);
-  latestStreamingStateRef.current = streamingState;
+  }, [sessionActive]);
+  latestRawStreamingStateRef.current = streamingState;
+  latestSessionActiveRef.current = sessionActive;
 
   const visibleQueuedPrompts =
     queuedPromptsOwnerRef.current === ownerToken ? queuedPrompts : [];
@@ -1149,7 +1155,7 @@ export function useQueuedPrompts({
     prevPendingVersionRef.current = pendingPromptVersion;
     if (!versionChanged) {
       if (!canQueryMidTurn && queuedPromptsRef.current.length > 0) return;
-      if (streamingState === 'idle' && !canQueryMidTurn) return;
+      if (!sessionActive && !canQueryMidTurn) return;
       if (initialRefreshSessionIdRef.current === sessionId) return;
       initialRefreshSessionIdRef.current = sessionId;
     }
@@ -1163,7 +1169,7 @@ export function useQueuedPrompts({
     pendingPromptVersion,
     connected,
     sessionId,
-    streamingState,
+    sessionActive,
     canQueryMidTurn,
     ownerToken,
     refreshPendingPrompts,
@@ -1387,7 +1393,7 @@ export function useQueuedPrompts({
             displayedServerPromptIdsRef.current.delete(result.promptId);
             return;
           }
-          if (latestStreamingStateRef.current === 'idle') {
+          if (!latestSessionActiveRef.current) {
             if (!localMessageAppended) {
               appendLocalQueuedPrompt(prompt, result.promptId);
             }
@@ -1591,7 +1597,7 @@ export function useQueuedPrompts({
         workspaceFileActions !== undefined;
       const shouldInsertMidTurn =
         !holdQueuedPromptsLocallyRef.current &&
-        latestStreamingStateRef.current !== 'idle' &&
+        latestSessionActiveRef.current &&
         (imageList.length === 0 || canSendMidTurnMedia) &&
         (fileList.length === 0 || canSendMidTurnFiles) &&
         annotated !== undefined &&
@@ -1796,13 +1802,13 @@ export function useQueuedPrompts({
               // runs) instead of dropping it.
               if (
                 targetIsCurrent() &&
-                latestStreamingStateRef.current === 'idle'
+                latestRawStreamingStateRef.current === 'idle'
               ) {
                 const shouldHold =
                   holdQueuedPromptsLocallyRef.current ||
                   writeBlockedRef.current;
                 const prompt: QueuedPrompt = {
-                  ...pendingAdmission,
+                  ...restoreAdmission,
                   midTurnState: undefined,
                   midTurnMessageId: undefined,
                   ...(shouldHold ? {} : { serverState: 'submitting' as const }),
@@ -1973,7 +1979,7 @@ export function useQueuedPrompts({
             fallbackToPendingPrompt(prompt.id);
             return;
           }
-          if (latestStreamingStateRef.current === 'idle') {
+          if (!latestSessionActiveRef.current) {
             const next = current.filter((item) => item.id !== prompt.id);
             queuedPromptsRef.current = next;
             setQueuedPrompts(next);
@@ -2065,7 +2071,7 @@ export function useQueuedPrompts({
   ]);
 
   useEffect(() => {
-    if (streamingState !== 'idle' || writeBlocked) return;
+    if (sessionActive || writeBlocked) return;
     if (!canQueryMidTurn) {
       const acceptedIds = new Set(
         queuedPromptsRef.current
@@ -2167,7 +2173,7 @@ export function useQueuedPrompts({
       reconcileCtrl.abort();
     };
   }, [
-    streamingState,
+    sessionActive,
     writeBlocked,
     holdQueuedPromptsLocally,
     canQueryMidTurn,
@@ -2364,7 +2370,7 @@ export function useQueuedPrompts({
             );
             return false;
           }
-          const settledAtIdle = latestStreamingStateRef.current === 'idle';
+          const settledAtIdle = !latestSessionActiveRef.current;
           if (settledAtIdle) {
             const next = current.filter((prompt) => prompt.id !== target.id);
             queuedPromptsRef.current = next;
@@ -2405,7 +2411,7 @@ export function useQueuedPrompts({
             reportError(error, fallback);
             return false;
           }
-          const settledAtIdle = latestStreamingStateRef.current === 'idle';
+          const settledAtIdle = !latestSessionActiveRef.current;
           if (settledAtIdle) {
             const next = queuedPromptsRef.current.filter(
               (prompt) => prompt.id !== target.id,
@@ -2475,7 +2481,7 @@ export function useQueuedPrompts({
       const prompt = queuedPromptsRef.current.find((item) => item.id === id);
       if (
         !canMutateMidTurn ||
-        latestStreamingStateRef.current === 'idle' ||
+        !latestSessionActiveRef.current ||
         !prompt ||
         prompt.serverState !== undefined ||
         prompt.serverPromptId !== undefined ||
@@ -2579,8 +2585,7 @@ export function useQueuedPrompts({
         const submitAtIdle =
           isCurrentOwnerTokenRef.current(insertionOwnerToken) &&
           insertOwnerMatches() &&
-          (latestStreamingStateRef.current as DaemonStreamingState) ===
-            'idle' &&
+          !latestSessionActiveRef.current &&
           !writeBlockedRef.current &&
           !holdQueuedPromptsLocallyRef.current;
         const nextFlags = {
@@ -2686,7 +2691,7 @@ export function useQueuedPrompts({
       const index = current.findIndex((item) => item.id === prompt.id);
       const acceptedAtLegacyIdle =
         insertOwnerMatches() &&
-        (latestStreamingStateRef.current as DaemonStreamingState) === 'idle' &&
+        !latestSessionActiveRef.current &&
         !canQueryMidTurn;
       if (index === -1) {
         const stashKey = currentStashKey();

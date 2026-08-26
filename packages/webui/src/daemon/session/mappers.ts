@@ -56,6 +56,7 @@ export function mapProviderStatus(
       ].join('\0');
       if (seen.has(modelKey)) continue;
       seen.add(modelKey);
+      const reasoningPreview = mapReasoningControls(model.configOptions);
       models.push({
         id: model.modelId,
         baseModelId: model.baseModelId,
@@ -70,6 +71,7 @@ export function mapProviderStatus(
         ...(model.baseUrl !== undefined ? { baseUrl: model.baseUrl } : {}),
         ...(model.envKey !== undefined ? { envKey: model.envKey } : {}),
         ...(model.isRuntime ? { isRuntime: true } : {}),
+        ...(reasoningPreview ? { reasoningPreview } : {}),
       });
     }
   }
@@ -149,6 +151,7 @@ export function mapReasoningControls(
   });
   if (!values.includes('none')) return undefined;
   const currentValue = getString(option, 'currentValue');
+  if (!currentValue || !values.includes(currentValue)) return undefined;
   const meta = getRecord(option['_meta']);
   const reasoningMeta = getRecord(meta?.['qwenCode/reasoning']);
   const selectableValues = values.filter((value) => value !== 'none');
@@ -610,12 +613,11 @@ function getGoalState(
     return undefined;
   }
   const lastReason = getString(source, 'lastReason');
-  // `limitKind` is what tells a client an evidence-limited Goal cannot be
-  // resumed; dropping it here would leave the UI offering a Resume the reducer
-  // always rejects.
   const limitKindRaw = getString(source, 'limitKind');
   const limitKind =
-    limitKindRaw === 'evidence_catalog' || limitKindRaw === 'checkpoint_request'
+    limitKindRaw === 'evidence_catalog' ||
+    limitKindRaw === 'checkpoint_request' ||
+    limitKindRaw === 'token_budget'
       ? limitKindRaw
       : undefined;
   return {
@@ -766,11 +768,15 @@ function mapAvailableCommandsUpdate(
       },
     ];
   });
-  const skills = Array.isArray(update['availableSkills'])
-    ? update['availableSkills'].filter(
-        (skill): skill is string => typeof skill === 'string',
-      )
-    : [];
+  const nestedSkills = getRecord(update['_meta'])?.['availableSkills'];
+  const rawSkills = Array.isArray(update['availableSkills'])
+    ? update['availableSkills']
+    : Array.isArray(nestedSkills)
+      ? nestedSkills
+      : [];
+  const skills = rawSkills.filter(
+    (skill): skill is string => typeof skill === 'string',
+  );
   const skillCommands = skills.map((skill) => ({
     name: skill,
     description: '',

@@ -49,6 +49,8 @@ import {
   type DurableCronTask,
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import {
@@ -78,9 +80,8 @@ const MAX_NAME_LENGTH = 200;
 const MAX_CRON_LENGTH = 200;
 
 /**
- * The slice of the session bridge this route needs: mint a task's dedicated
- * session, and tear it back down if the create fails after minting. Narrowed
- * to a structural type so tests can stub it without the full bridge.
+ * The slice of the session bridge this route needs. Narrowed to a structural
+ * type so tests can stub it without the full bridge.
  */
 export interface ScheduledTasksSessionBridge {
   spawnOrAttach(req: {
@@ -101,6 +102,14 @@ export interface ScheduledTasksSessionBridge {
     sessionId: string,
     metadata: { displayName?: string },
   ): unknown;
+  getSessionSummary(sessionId: string): {
+    workspaceCwd: string;
+    hasActivePrompt: boolean;
+    pendingInteractionCount?: number;
+    parentSessionId?: string;
+    sourceType?: string;
+    sourceId?: string;
+  };
 }
 
 // Cap for the derived session display name — a session label, not the full
@@ -142,13 +151,243 @@ export function scheduledTaskSessionName(label: string): string {
  * missing bridge means tasks are created unbound (shared per-project
  * durable-owner firing) — the same fallback a bridge-less embedding gets.
  */
-interface ScheduledTaskTarget {
+export interface ScheduledTaskTarget {
   workspaceCwd: string;
   runtimeBaseDir?: string;
   bridge?: ScheduledTasksSessionBridge;
   cleanupSession?: (sessionId: string) => Promise<unknown>;
   assertGenerationOpen?: () => void;
   activity?: ConversationRuntimeActivityGate;
+  resolveLiveSessionOwner?: WorkspaceRegistry['resolveLiveSessionOwner'];
+}
+
+export interface ExistingSessionScheduledTaskCreateInput {
+  sessionId: string;
+  cron: string;
+  prompt: string;
+  recurring: boolean;
+  enabled?: boolean;
+  name?: string;
+  delivery?: CronTaskDelivery;
+}
+
+export class ExistingSessionScheduledTaskCreateError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ExistingSessionScheduledTaskCreateError';
+  }
+}
+
+function assertReusableScheduledTaskSession(
+  target: ScheduledTaskTarget,
+  sessionId: string,
+  allowActivePrompt: boolean,
+  assertCallerPromptActive?: () => void,
+): void {
+  const { bridge, workspaceCwd } = target;
+  if (!bridge) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_binding_unavailable',
+      'Session management is not available for this workspace',
+    );
+  }
+  assertCallerPromptActive?.();
+  let owner:
+    | ReturnType<NonNullable<ScheduledTaskTarget['resolveLiveSessionOwner']>>
+    | undefined;
+  try {
+    owner = target.resolveLiveSessionOwner?.(sessionId);
+  } catch (error) {
+    writeStderrLine(
+      `qwen serve: failed to resolve scheduled-task session owner '${sessionId}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'scheduled_tasks_session_failed',
+      'Failed to look up the requested session',
+    );
+  }
+  if (owner?.kind === 'unavailable') {
+    throw new ExistingSessionScheduledTaskCreateError(
+      503,
+      'workspace_runtime_unavailable',
+      'The workspace runtime is unavailable',
+    );
+  }
+  if (owner?.kind === 'ambiguous') {
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'ambiguous_session_owner',
+      `Session owner is ambiguous for "${sessionId}"`,
+    );
+  }
+  if (owner?.kind === 'found' && owner.runtime.workspaceCwd !== workspaceCwd) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'session_workspace_mismatch',
+      "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
+    );
+  }
+
+  let summary: ReturnType<ScheduledTasksSessionBridge['getSessionSummary']>;
+  try {
+    summary = bridge.getSessionSummary(sessionId);
+  } catch (error) {
+    if (error instanceof SessionNotFoundError) {
+      throw new ExistingSessionScheduledTaskCreateError(
+        404,
+        'session_not_found',
+        `Session '${sessionId}' was not found`,
+      );
+    }
+    writeStderrLine(
+      `qwen serve: failed to look up scheduled-task session '${sessionId}': ${error instanceof Error ? error.message : String(error)}`,
+    );
+    throw new ExistingSessionScheduledTaskCreateError(
+      500,
+      'scheduled_tasks_session_failed',
+      'Failed to look up the requested session',
+    );
+  }
+  if (summary.workspaceCwd !== workspaceCwd) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'session_workspace_mismatch',
+      "The requested session belongs to a different workspace; use that workspace's scheduled-task endpoint",
+    );
+  }
+  if (
+    (!allowActivePrompt && summary.hasActivePrompt) ||
+    (summary.pendingInteractionCount ?? 0) > 0
+  ) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_busy',
+      allowActivePrompt
+        ? 'The caller session has a pending interaction; resolve it before binding the session to a task'
+        : 'The requested session is busy; wait for its active prompt or pending interaction to finish before binding it to a task',
+    );
+  }
+  if (summary.sourceType === 'scheduled_task') {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_already_bound',
+      'The requested session is already reserved for a scheduled task',
+    );
+  }
+  if (
+    summary.parentSessionId !== undefined ||
+    summary.sourceId !== undefined ||
+    (summary.sourceType !== undefined && summary.sourceType !== 'default')
+  ) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      409,
+      'session_source_ineligible',
+      'The requested session source cannot own a scheduled task',
+    );
+  }
+}
+
+export async function createScheduledTaskWithExistingSession(
+  target: ScheduledTaskTarget,
+  input: ExistingSessionScheduledTaskCreateInput,
+  options:
+    | { source: 'rest' }
+    | { source: 'cron-tool'; assertCallerPromptActive: () => void },
+): Promise<DurableCronTask> {
+  if (
+    input.cron.length === 0 ||
+    input.cron.length > MAX_CRON_LENGTH ||
+    validateCron(input.cron) !== null
+  ) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'invalid_cron',
+      'The scheduled-task cron expression is invalid',
+    );
+  }
+  const prompt = input.prompt.trim();
+  if (prompt.length === 0 || prompt.length > MAX_PROMPT_LENGTH) {
+    throw new ExistingSessionScheduledTaskCreateError(
+      400,
+      'invalid_prompt',
+      'The scheduled-task prompt is invalid',
+    );
+  }
+  const allowActivePrompt = options.source === 'cron-tool';
+  const assertCallerPromptActive =
+    options.source === 'cron-tool'
+      ? options.assertCallerPromptActive
+      : undefined;
+  assertReusableScheduledTaskSession(
+    target,
+    input.sessionId,
+    allowActivePrompt,
+    assertCallerPromptActive,
+  );
+  target.assertGenerationOpen?.();
+
+  const now = Date.now();
+  const task: DurableCronTask = {
+    id: generateCronTaskId(),
+    cron: input.cron,
+    prompt,
+    recurring: input.recurring,
+    createdAt: now,
+    lastFiredAt: now - (now % 60_000),
+    enabled: input.enabled !== false,
+    sessionId: input.sessionId,
+    sessionOwnedByTask: false,
+    ...(input.delivery !== undefined ? { delivery: input.delivery } : {}),
+    ...(input.name !== undefined ? { name: input.name } : {}),
+  };
+  let before: DurableCronTask[] | undefined;
+  let after: DurableCronTask[] | undefined;
+  await runWithScheduledTaskTarget(target, () =>
+    updateCronTasks(
+      target.workspaceCwd,
+      (tasks) => {
+        assertReusableScheduledTaskSession(
+          target,
+          input.sessionId,
+          allowActivePrompt,
+          assertCallerPromptActive,
+        );
+        if (
+          tasks.some((candidate) => candidate.sessionId === input.sessionId)
+        ) {
+          throw new ExistingSessionScheduledTaskCreateError(
+            409,
+            'session_already_bound',
+            'The requested session is already bound to another scheduled task',
+          );
+        }
+        if (tasks.length >= MAX_SCHEDULED_TASKS) {
+          throw new ExistingSessionScheduledTaskCreateError(
+            409,
+            'max_tasks_reached',
+            `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
+          );
+        }
+        before = tasks;
+        after = [...tasks, task];
+        return after;
+      },
+      { assertCanCommit: target.assertGenerationOpen },
+    ),
+  );
+  try {
+    target.assertGenerationOpen?.();
+  } catch (error) {
+    await rollbackCronMutation(target, before, after, 'scheduled-task create');
+    throw error;
+  }
+  return task;
 }
 
 function requireOpenGeneration(
@@ -224,9 +463,8 @@ interface RegisterScheduledTasksRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   /**
-   * Session bridge used to mint a dedicated session per task. When absent
-   * (e.g. a minimal embedding), tasks are created without a bound session and
-   * fall back to the shared per-project durable-owner firing model.
+   * Session bridge used to mint or validate a task session. When absent,
+   * creates without `sessionId` remain unbound.
    */
   bridge?: ScheduledTasksSessionBridge;
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
@@ -235,6 +473,7 @@ interface RegisterScheduledTasksRoutesDeps {
     runtime: WorkspaceRuntime,
     sessionId: string,
   ) => Promise<unknown>;
+  workspaceRegistry?: WorkspaceRegistry;
 }
 
 interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
@@ -525,6 +764,19 @@ function registerScheduledTaskCrudRoutes(
         });
         return;
       }
+      const parsedSessionId = parseCallerSuppliedSessionId(body['sessionId']);
+      if (parsedSessionId.kind === 'invalid') {
+        res.status(400).json({
+          error:
+            '`sessionId` must be an RFC UUID v1-v5 (e.g. "550e8400-e29b-41d4-a716-446655440000")',
+          code: 'invalid_session_id',
+        });
+        return;
+      }
+      const providedSessionId =
+        parsedSessionId.kind === 'valid'
+          ? parsedSessionId.sessionId
+          : undefined;
       let delivery: PublicChannelDelivery | undefined;
       if (body['delivery'] !== undefined) {
         try {
@@ -544,33 +796,65 @@ function registerScheduledTaskCrudRoutes(
       const enabled = body['enabled'] !== false;
       const taskId = generateCronTaskId();
 
-      // Mint the task's dedicated session up front. The task is BOUND to it and
-      // fires only inside it — its transcript becomes the task's run history, and
-      // archiving/deleting the session stops the task. Done before the write so a
-      // task never lands on disk without its session; if the bridge is absent
-      // (minimal embedding) the task is created unbound (shared-owner firing).
-      //
-      // `sessionScope: 'thread'` is REQUIRED: the daemon's default scope is
-      // 'single', which would attach to (and reuse) the shared workspace session
-      // instead of minting a fresh one. Two tasks — or a task and an open chat —
-      // would then bind to the same session: the task renames it, scheduled runs
-      // land in the wrong transcript, and deleting one task closes the shared
-      // session. Forcing 'thread' guarantees each task gets an isolated session.
-      let boundSessionId: string | undefined;
-      if (bridge) {
-        // Pre-check the cap BEFORE spawning: an over-cap create must not spawn a
-        // session it will immediately tear down, because closeSession removes the
-        // live bridge entry but can leave the just-spawned+named session listed as
-        // an orphan with no owning task. Best-effort — the write-lock cap check
-        // below stays authoritative for the concurrent-create race.
+      if (providedSessionId !== undefined) {
         try {
-          if (
-            (
-              await runWithScheduledTaskTarget(target, () =>
-                readCronTasks(workspaceCwd),
-              )
-            ).length >= MAX_SCHEDULED_TASKS
-          ) {
+          const task = await createScheduledTaskWithExistingSession(
+            target,
+            {
+              sessionId: providedSessionId,
+              cron,
+              prompt,
+              recurring,
+              enabled,
+              ...(delivery !== undefined ? { delivery } : {}),
+              ...(nameResult.value !== undefined
+                ? { name: nameResult.value }
+                : {}),
+            },
+            { source: 'rest' },
+          );
+          if (task.delivery && task.sessionId) {
+            channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
+              sessionId: task.sessionId,
+              taskId: task.id,
+              target: task.delivery.target,
+              recurring: task.recurring,
+              lastFiredAt: task.lastFiredAt ?? undefined,
+            });
+          }
+          res.status(201).json(toView(task));
+        } catch (error) {
+          if (error instanceof ExistingSessionScheduledTaskCreateError) {
+            if (error.code === 'workspace_runtime_unavailable') {
+              res.set('Retry-After', '1');
+            }
+            res
+              .status(error.status)
+              .json({ error: error.message, code: error.code });
+            return;
+          }
+          if (sendActivityGateError(res, error)) return;
+          if (sendGenerationClosedError(res, error)) return;
+          writeStderrLine(
+            `qwen serve: POST ${base} failed to create a task for session '${providedSessionId}': ${error instanceof Error ? error.message : String(error)}`,
+          );
+          res.status(500).json({
+            error: 'Failed to create scheduled task',
+            code: 'scheduled_tasks_write_failed',
+          });
+        }
+        return;
+      }
+
+      let boundSessionId: string | undefined;
+      let sessionMintedHere = false;
+      if (bridge) {
+        // Best-effort pre-check; the write-lock checks below are authoritative.
+        try {
+          const tasks = await runWithScheduledTaskTarget(target, () =>
+            readCronTasks(workspaceCwd),
+          );
+          if (tasks.length >= MAX_SCHEDULED_TASKS) {
             res.status(409).json({
               error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
               code: 'max_tasks_reached',
@@ -591,12 +875,11 @@ function registerScheduledTaskCrudRoutes(
             }),
           );
           boundSessionId = session.sessionId;
+          sessionMintedHere = true;
           if (!requireOpenGeneration(target, res)) {
             await teardownBoundSession(target, boundSessionId);
             return;
           }
-          // Name the session after the task so it's recognizable in the session
-          // list. Best-effort — a nameless session still fires correctly.
           try {
             await runWithScheduledTaskTarget(target, async () =>
               bridge.updateSessionMetadata(boundSessionId!, {
@@ -634,7 +917,11 @@ function registerScheduledTaskCrudRoutes(
         lastFiredAt: now - (now % 60_000),
         enabled,
         ...(delivery !== undefined ? { delivery } : {}),
-        ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
+        ...(boundSessionId !== undefined
+          ? {
+              sessionId: boundSessionId,
+            }
+          : {}),
         ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
       };
 
@@ -645,7 +932,7 @@ function registerScheduledTaskCrudRoutes(
       // which passes the pre-check but loses the authoritative write) would leave
       // a named "⏰ …" session in the list with no owning task.
       const rollbackSession = async () => {
-        if (boundSessionId !== undefined) {
+        if (boundSessionId !== undefined && sessionMintedHere) {
           await teardownBoundSession(target, boundSessionId);
         }
       };
@@ -989,7 +1276,12 @@ function registerScheduledTaskCrudRoutes(
         patch.name !== undefined ||
         clearName ||
         (patch.prompt !== undefined && updated.name === undefined);
-      if (bridge && updated.sessionId && effectiveLabelChanged) {
+      if (
+        bridge &&
+        updated.sessionId &&
+        updated.sessionOwnedByTask !== false &&
+        effectiveLabelChanged
+      ) {
         try {
           bridge.updateSessionMetadata(updated.sessionId, {
             displayName: scheduledTaskSessionName(
@@ -1035,9 +1327,10 @@ function registerScheduledTaskCrudRoutes(
       }
       // Single atomic read-modify-write: capture the task's bound session AND
       // remove it in one cycle, closing the TOCTOU window a separate
-      // read-then-remove would open (and cutting three file reads to one). The
-      // dedicated session exists only to run this task, so it's torn down after.
+      // read-then-remove would open (and cutting three file reads to one). A
+      // task-owned session is torn down after; a caller-owned session survives.
       let boundSessionId: string | undefined;
+      let sessionOwnedByTask = true;
       let removed = false;
       let rollbackBefore: DurableCronTask[] | undefined;
       let rollbackAfter: DurableCronTask[] | undefined;
@@ -1051,6 +1344,7 @@ function registerScheduledTaskCrudRoutes(
               const match = tasks[idx]!.sessionId;
               if (typeof match === 'string' && match.length > 0) {
                 boundSessionId = match;
+                sessionOwnedByTask = tasks[idx]!.sessionOwnedByTask !== false;
               }
               removed = true;
               rollbackBefore = tasks;
@@ -1093,7 +1387,7 @@ function registerScheduledTaskCrudRoutes(
         return;
       }
       // Stop the now-orphaned session (keeps its transcript on disk as history).
-      if (boundSessionId && bridge) {
+      if (boundSessionId && sessionOwnedByTask && bridge) {
         try {
           await runWithScheduledTaskTarget(target, () =>
             bridge.closeSession(boundSessionId!),
@@ -1304,10 +1598,21 @@ export function registerScheduledTasksRoutes(
                 : {}),
             }
           : {}),
-        bridge: runtime?.bridge ?? bridge,
+        // The runtime bridge only refines an ENABLED deps bridge; it must never
+        // re-enable binding when deps `bridge` is undefined. server.ts passes
+        // the bridge only when resident task-session management is on, and a
+        // bound task must always have something to keep it resident + rehydrate
+        // it — the same gate the qualified surface enforces below.
+        bridge: bridge === undefined ? undefined : (runtime?.bridge ?? bridge),
         ...(runtime?.generationGuard
           ? {
               assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
+            }
+          : {}),
+        ...(deps.workspaceRegistry
+          ? {
+              resolveLiveSessionOwner: (sessionId: string) =>
+                deps.workspaceRegistry!.resolveLiveSessionOwner(sessionId),
             }
           : {}),
       };
@@ -1358,7 +1663,9 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
       if (
         runtime.provenance === 'live-conversation' &&
         req.method === 'POST' &&
-        req.params['id'] === undefined
+        req.params['id'] === undefined &&
+        parseCallerSuppliedSessionId(safeBody(req)['sessionId']).kind ===
+          'absent'
       ) {
         res.status(400).json({
           error:
@@ -1388,6 +1695,8 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
               assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
             }
           : {}),
+        resolveLiveSessionOwner: (sessionId: string) =>
+          workspaceRegistry.resolveLiveSessionOwner(sessionId),
       };
     },
     mutate,

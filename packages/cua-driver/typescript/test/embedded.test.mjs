@@ -11,25 +11,22 @@ const libraryName =
     : process.platform === "win32"
       ? "cua_driver_sdk.dll"
       : "libcua_driver_sdk.so"
-const nodeTriple =
+const nativeKey =
   process.platform === "darwin"
-    ? `darwin-${process.arch}`
+    ? "darwin-universal"
     : process.platform === "win32"
-      ? `win32-${process.arch}-msvc`
-      : `linux-${process.arch}-${process.report.getReport().header.glibcVersionRuntime ? "gnu" : "musl"}`
-const library = path.resolve(
-  testDirectory,
-  "../node_modules/@trycua",
-  `cua-driver-${nodeTriple}`,
-  libraryName,
-)
+      ? `windows-${process.arch === "x64" ? "x86_64" : "arm64"}`
+      : `linux-${process.arch === "x64" ? "x86_64" : "arm64"}`
+const library = process.env.QWEN_CUA_SDK_NATIVE_DIR
+  ? path.resolve(process.env.QWEN_CUA_SDK_NATIVE_DIR, libraryName)
+  : path.resolve(testDirectory, "../.native", nativeKey, libraryName)
 
 test(
   "embedded subpath is the same generated Rust host as the SDK root",
   { skip: !existsSync(library) },
   async () => {
-    const root = await import("@trycua/cua-driver")
-    const embedded = await import("@trycua/cua-driver/embedded")
+    const root = await import("@qwen-code/cua-sdk")
+    const embedded = await import("@qwen-code/cua-sdk/embedded")
 
     assert.equal(embedded.EmbeddedCuaDriverHost, root.EmbeddedCuaDriverHost)
     assert.equal(embedded.EmbeddedDriverHostOptions, root.EmbeddedDriverHostOptions)

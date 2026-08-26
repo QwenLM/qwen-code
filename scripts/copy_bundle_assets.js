@@ -110,13 +110,9 @@ export function reviewSourceDigestForBuild(root) {
       ),
       kind: 'code',
     },
-    // Mirrors the lifted-helpers roots `reviewSourceRoots` (stale-bundle.ts)
+    // Mirrors the utils-helpers roots `reviewSourceRoots` (stale-bundle.ts)
     // adds; the repo-tree case in review-source-digest.test.ts holds the two
     // equal.
-    {
-      path: join(root, 'packages', 'cli', 'src', 'utils', 'findings.ts'),
-      kind: 'code',
-    },
     {
       path: join(root, 'packages', 'cli', 'src', 'utils', 'shell-args.ts'),
       kind: 'code',

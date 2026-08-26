@@ -7,6 +7,7 @@
 import type {
   CompactionThresholds,
   CompressionStatus,
+  FindingsResultDisplay,
   MCPServerConfig,
   ThoughtSummary,
   ToolCallConfirmationDetails,
@@ -84,6 +85,12 @@ export interface IndividualToolCallDisplay {
    * is only a count. Undefined → fall back to the summary.
    */
   detailedDisplay?: string;
+  /**
+   * The findings display a later report_findings call replaced. Kept so a
+   * rewind past the replacing call can restore this report's checklist;
+   * dropped by history compaction together with resultDisplay.
+   */
+  supersededFindingsDisplay?: FindingsResultDisplay;
   /** Inline images carried by this tool's persisted response parts. */
   images?: InlineImageData[];
   /** Images hidden after the per-row rendering limit. */
@@ -110,6 +117,13 @@ export interface CompressionProps {
    * older sessions, which are treated as 'summarize'.
    */
   compressionKind?: 'summarize' | 'fast';
+  /**
+   * Token-count provenance (#9309). The compression paths measure on
+   * different scales, so estimated numbers are rendered with a '~' prefix
+   * to keep consecutive banners from reading as lost context.
+   */
+  originalTokenCountIsEstimated?: boolean;
+  newTokenCountIsEstimated?: boolean;
 }
 
 export interface SummaryProps {

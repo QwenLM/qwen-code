@@ -1530,6 +1530,7 @@ export default {
   'rejected — edit config to re-approve':
     'abgelehnt — Konfiguration bearbeiten, um erneut zu genehmigen',
   'Background agent needs approval': 'Hintergrund-Agent wartet auf Genehmigung',
+  'from nested agent': 'von verschachteltem Agent',
   'Approve or deny the request above':
     'Genehmigen oder lehnen Sie die obige Anfrage ab',
   Running: 'Läuft',

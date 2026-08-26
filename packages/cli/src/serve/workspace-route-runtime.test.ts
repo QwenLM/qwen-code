@@ -20,6 +20,7 @@ import {
   resolveContainedCwdOrFail,
   resolveSessionManagedGitCwd,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveTrustedRuntime,
   resolveWorkspaceRuntimeFromParam,
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
 } from './workspace-route-runtime.js';
@@ -453,6 +454,44 @@ describe('resolveWorkspaceRuntimeFromParam', () => {
     expect(response.json).toHaveBeenCalledWith({
       error: '`:workspace` must decode to a workspace id or absolute path',
       code: 'workspace_mismatch',
+    });
+  });
+});
+
+describe('resolveTrustedRuntime', () => {
+  it('returns an active trusted runtime', () => {
+    const runtime = makeRuntime();
+    const registry = createSingleWorkspaceRegistry(runtime);
+
+    expect(
+      resolveTrustedRuntime(
+        registry,
+        {
+          params: { workspace: runtime.workspaceId },
+        } as unknown as Request,
+        makeResponse(),
+      ),
+    ).toBe(runtime);
+  });
+
+  it('rejects an active untrusted runtime', () => {
+    const runtime = { ...makeRuntime(), trusted: false };
+    const registry = createSingleWorkspaceRegistry(runtime);
+    const response = makeResponse();
+
+    expect(
+      resolveTrustedRuntime(
+        registry,
+        {
+          params: { workspace: runtime.workspaceId },
+        } as unknown as Request,
+        response,
+      ),
+    ).toBeNull();
+    expect(response.status).toHaveBeenCalledWith(403);
+    expect(response.json).toHaveBeenCalledWith({
+      error: 'Workspace is not trusted.',
+      code: 'untrusted_workspace',
     });
   });
 });

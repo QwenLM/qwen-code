@@ -11,8 +11,8 @@ import {
 } from './types.js';
 import { openBrowserSecurely } from '@qwen-code/qwen-code-core';
 import { MessageType, type HistoryItem } from '../types.js';
-import { getExtendedSystemInfo } from '../../utils/systemInfo.js';
-import { getSystemInfoFields } from '../../utils/systemInfoFields.js';
+import { getExtendedSystemInfo } from '../systemInfo.js';
+import { getSystemInfoFields } from '../systemInfoFields.js';
 import { t } from '../../i18n/index.js';
 
 export const bugCommand: SlashCommand = {

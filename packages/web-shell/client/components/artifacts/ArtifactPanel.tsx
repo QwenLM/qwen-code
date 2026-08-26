@@ -68,6 +68,7 @@ import {
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
   isDownloadOnlyWorkspaceArtifact,
+  normalizeArtifactMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
   withArtifactPreviewCsp,
@@ -2556,7 +2557,7 @@ function CodeReviewWorkspaceRequired() {
 
 function isHtmlArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
-  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   return (
     artifact.kind === 'html' ||
     path.endsWith('.html') ||
@@ -2567,10 +2568,11 @@ function isHtmlArtifact(artifact: DaemonSessionArtifact) {
 
 function isMarkdownArtifact(artifact: DaemonSessionArtifact) {
   const path = artifact.workspacePath?.toLowerCase() ?? '';
+  const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   return (
     path.endsWith('.md') ||
     path.endsWith('.markdown') ||
-    artifact.mimeType?.toLowerCase() === 'text/markdown'
+    mimeType === 'text/markdown'
   );
 }
 

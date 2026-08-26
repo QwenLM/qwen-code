@@ -167,7 +167,7 @@ function SessionOverviewPanelInner({
   includeOtherWorkspaces,
   workspaceCwd,
 }: {
-  onOpenSession: (sessionId: string) => void;
+  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   includeOtherWorkspaces: boolean;
   workspaceCwd?: string;
@@ -417,7 +417,7 @@ function SessionOverviewPanelInner({
               <button
                 type="button"
                 className={styles.cardLabel}
-                onClick={() => onOpenSession(card.sessionId)}
+                onClick={() => onOpenSession(card.sessionId, card.workspaceCwd)}
                 title={card.label}
               >
                 {card.label}
@@ -485,7 +485,7 @@ export function SessionOverviewPanel({
   includeOtherWorkspaces = true,
   workspaceCwd,
 }: {
-  onOpenSession: (sessionId: string) => void;
+  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
   onOpenSplit?: (sessionIds: string[]) => void;
   includeOtherWorkspaces?: boolean;
   workspaceCwd?: string;

@@ -204,6 +204,16 @@ export class ConversationWorkspace {
         this.directoryKey(sessionId),
       );
     } catch (error) {
+      // A root that vanished mid-inspection means there is nothing left to
+      // discard: keep the ENOENT-race → `false` contract instead of
+      // reporting an identity violation.
+      if (
+        error instanceof ConversationDirectoryIdentityError &&
+        error.reason === 'io_error' &&
+        (error.cause as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+      ) {
+        return false;
+      }
       liveIdentityError(error);
     }
     if (!identity) return false;

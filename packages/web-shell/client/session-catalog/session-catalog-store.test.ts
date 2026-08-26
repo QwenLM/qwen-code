@@ -496,6 +496,190 @@ describe('SessionCatalogStore', () => {
     );
   });
 
+  describe('applySessionPinToggle', () => {
+    const pinnedView = (workspaceCwd: string): SessionCatalogQuery => ({
+      routeKind: 'legacy',
+      workspaceCwd,
+      options: {
+        pageSize: 1000,
+        archiveState: 'active',
+        view: 'organized',
+        group: 'pinned',
+      },
+    });
+
+    it('pins across loaded pages and leaves unloaded or foreign pages alone', async () => {
+      const row = { sessionId: 'plain', workspaceCwd: '/work' };
+      const existingPin = {
+        sessionId: 'other',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(async (cwd: string) => ({
+        sessions:
+          cwd === '/work'
+            ? [row]
+            : [{ sessionId: 'foreign', workspaceCwd: cwd }],
+      }));
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(query('/other'), { fresh: true });
+      // The pinned-view page stays unloaded for /work: no entry may be
+      // invented for it.
+      await store.loadOnce(pinnedView('/other'), { fresh: true });
+      legacy.mockImplementation(async () => ({ sessions: [existingPin] }));
+
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+
+      expect(store.getSnapshot(query('/work')).page?.sessions[0]).toMatchObject(
+        {
+          isPinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+      expect(
+        store.getSnapshot(query('/other')).page?.sessions[0],
+      ).toMatchObject({ sessionId: 'foreign' });
+      expect(store.getSnapshot(pinnedView('/work')).page).toBeUndefined();
+    });
+
+    it('inserts the row into a loaded pinned-view page and patches it in place when already present', async () => {
+      const row = { sessionId: 'plain', workspaceCwd: '/work' };
+      const existingPin = {
+        sessionId: 'other',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(
+        async (_cwd: string, options: { group?: string }) =>
+          options?.group === 'pinned'
+            ? { sessions: [existingPin] }
+            : { sessions: [row] },
+      );
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(pinnedView('/work'), { fresh: true });
+
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+
+      expect(store.getSnapshot(pinnedView('/work')).page?.sessions).toEqual([
+        existingPin,
+        {
+          ...row,
+          isPinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      ]);
+
+      // Re-pin patches the existing row instead of duplicating it.
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-03-03T00:00:00.000Z',
+        },
+      );
+      expect(
+        store.getSnapshot(pinnedView('/work')).page?.sessions,
+      ).toHaveLength(2);
+    });
+
+    it('unpins by removing the row from the pinned page and clearing pinnedAt elsewhere', async () => {
+      const row = {
+        sessionId: 'plain',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(
+        async (_cwd: string, options: { group?: string }) =>
+          options?.group === 'pinned'
+            ? { sessions: [row] }
+            : { sessions: [row] },
+      );
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(pinnedView('/work'), { fresh: true });
+
+      store.applySessionPinToggle('/work', { ...row }, { pinned: false });
+
+      expect(store.getSnapshot(pinnedView('/work')).page?.sessions).toEqual([]);
+      const patched = store.getSnapshot(query('/work')).page?.sessions[0];
+      expect(patched?.isPinned).toBe(false);
+      expect(patched?.pinnedAt).toBeUndefined();
+    });
+
+    it('survives unrelated patchSession churn after the toggle (R5-1)', async () => {
+      const row = { sessionId: 'plain', workspaceCwd: '/work' };
+      const sibling = {
+        sessionId: 'sibling',
+        workspaceCwd: '/work',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      };
+      legacy.mockImplementation(
+        async (_cwd: string, options: { group?: string }) =>
+          options?.group === 'pinned'
+            ? { sessions: [sibling] }
+            : { sessions: [row, sibling] },
+      );
+      await store.loadOnce(query('/work'), { fresh: true });
+      await store.loadOnce(pinnedView('/work'), { fresh: true });
+
+      store.applySessionPinToggle(
+        '/work',
+        { ...row },
+        {
+          pinned: true,
+          pinnedAt: '2026-02-02T00:00:00.000Z',
+        },
+      );
+      // Churn that never touches pin state: a rename of another session and
+      // a live-state tick both mint fresh page references.
+      store.patchSession('/work', 'sibling', { displayName: 'Renamed' });
+      store.applyLiveState('/work', [
+        {
+          sessionId: 'sibling',
+          clientCount: 1,
+          hasActivePrompt: true,
+          isWaitingForPermission: false,
+          isWaitingForUserQuestion: false,
+          updatedAt: '2026-02-03T00:00:00.000Z',
+        },
+      ]);
+
+      expect(
+        store
+          .getSnapshot(pinnedView('/work'))
+          .page?.sessions.map((session) => session.sessionId),
+      ).toEqual(['sibling', 'plain']);
+      // The all-sessions page keeps activity order; the toggled row must
+      // still carry the pin state after the churn.
+      expect(
+        store
+          .getSnapshot(query('/work'))
+          .page?.sessions.find((session) => session.sessionId === 'plain'),
+      ).toMatchObject({
+        isPinned: true,
+        pinnedAt: '2026-02-02T00:00:00.000Z',
+      });
+    });
+  });
+
   it('overlays live state and clears volatile fields for persisted-only sessions', async () => {
     legacy.mockResolvedValue({
       sessions: [

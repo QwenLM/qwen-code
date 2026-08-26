@@ -70,6 +70,7 @@ export interface WebShellDaemonScenario {
   sessionCatalogVersion: DaemonSessionCatalogVersion;
   events: DaemonEvent[];
   state: DaemonSessionState;
+  contextDelayMs?: number;
   /** Artifact list returned by `GET /session/:id/artifacts`. */
   artifacts: DaemonSessionArtifact[];
   /** File contents served by `GET /file?path=...`, keyed by requested path. */
@@ -376,6 +377,7 @@ export function createWebShellDaemonScenario(
     },
     events: overrides.events ?? [],
     state,
+    contextDelayMs: overrides.contextDelayMs,
     artifacts: overrides.artifacts ?? [],
     workspaceFiles: overrides.workspaceFiles ?? {},
     gitStatus: overrides.gitStatus,
@@ -518,6 +520,27 @@ export function thoughtTextEvent(
       sessionUpdate: 'agent_thought_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+    },
+    options.id,
+  );
+}
+
+export function toolCallEvent(
+  toolCallId: string,
+  toolName: string,
+  rawInput: Record<string, unknown>,
+  options: { id?: number; rawOutput?: Record<string, unknown> } = {},
+): DaemonEvent {
+  return sessionUpdateEvent(
+    {
+      sessionUpdate: 'tool_call',
+      toolCallId,
+      toolName,
+      title: toolName,
+      kind: 'other',
+      status: 'completed',
+      rawInput,
+      ...(options.rawOutput ? { rawOutput: options.rawOutput } : {}),
     },
     options.id,
   );
@@ -1547,6 +1570,11 @@ async function handleDaemonRoute(
       return;
     }
     if (action === 'context') {
+      if (scenario.contextDelayMs) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, scenario.contextDelayMs),
+        );
+      }
       await json(route, {
         v: 1,
         sessionId,
@@ -1581,13 +1609,30 @@ async function handleDaemonRoute(
         await badRequest(route, 'Invalid config-option request.');
         return;
       }
-      const configOptions = Array.isArray(scenario.state.configOptions)
-        ? scenario.state.configOptions.map((option) =>
-            isRecord(option) && option['id'] === configId
-              ? { ...option, currentValue: value }
-              : option,
-          )
+      const currentConfigOptions = Array.isArray(scenario.state.configOptions)
+        ? scenario.state.configOptions
         : [];
+      const reasoningOption = currentConfigOptions.find(
+        (option) => isRecord(option) && option['id'] === configId,
+      );
+      const allowedValues = isRecord(reasoningOption)
+        ? reasoningOption['options']
+        : undefined;
+      if (
+        !Array.isArray(allowedValues) ||
+        !allowedValues.some(
+          (option) =>
+            isRecord(option) && readStringField(option, 'value') === value,
+        )
+      ) {
+        await badRequest(route, 'Unsupported config-option value.');
+        return;
+      }
+      const configOptions = currentConfigOptions.map((option) =>
+        isRecord(option) && option['id'] === configId
+          ? { ...option, currentValue: value }
+          : option,
+      );
       scenario.state.configOptions = configOptions;
       await json(route, { configOptions });
       return;

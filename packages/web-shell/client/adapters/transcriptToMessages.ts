@@ -22,7 +22,8 @@ import type {
   DaemonMessageTodoItem,
   DaemonUserMessage,
 } from './messageTypes.js';
-import { isTodoWriteToolName } from '../utils/todos.js';
+import { isSubAgentToolCall } from './toolClassification.js';
+import { parseTodoItemsFromEntries } from '../utils/todos.js';
 
 interface PermissionToolInfo {
   title?: string;
@@ -358,29 +359,6 @@ function isTextBlockEmpty(block: DaemonTextTranscriptBlock): boolean {
   return block.text.length === 0;
 }
 
-function parseDaemonTodoItemsFromEntries(
-  entries: readonly unknown[],
-): DaemonMessageTodoItem[] | undefined {
-  const todos = entries.flatMap((entry, index): DaemonMessageTodoItem[] => {
-    const item = getRecord(entry);
-    const content = getString(item, 'content');
-    if (!content) return [];
-    const id = getString(item, 'id') ?? `plan-${index}`;
-    return [
-      {
-        id,
-        content,
-        status: getTodoStatus(getString(item, 'status')),
-        ...(() => {
-          const priority = getTodoPriority(getString(item, 'priority'));
-          return priority ? { priority } : {};
-        })(),
-      },
-    ];
-  });
-  return todos.length > 0 ? todos : undefined;
-}
-
 /**
  * Sum the per-block token usage the SDK reducer stamped onto assistant blocks
  * when several merge into one rendered message. Returns undefined when neither
@@ -519,6 +497,24 @@ export function transcriptBlocksToDaemonMessages(
             variant: 'info',
             source: 'background_notification',
             data: getBackgroundNotificationData(textBlock),
+            timestamp: blockTime,
+          });
+          break;
+        }
+        const meta = getRecord(textBlock.meta);
+        if (meta?.['source'] === 'vision_bridge_notice') {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'vision_bridge_notice',
+            ...(meta['visionBridgeNotice'] !== undefined
+              ? { data: meta['visionBridgeNotice'] }
+              : {}),
             timestamp: blockTime,
           });
           break;
@@ -999,11 +995,8 @@ function appendToolCallMessage(
   //
   // Synthetic raw-shell groups (pushed by the `shell` block fallback) use the
   // bare block id without the `tg-` prefix and never absorb real tool calls.
-  // Sub-agent calls and todo_write updates each stand alone in their own group
-  // box instead of being crammed in with the tools around them: an agent renders
-  // an expandable panel, and a todo update is its own collapsible checklist.
-  const isStandalone = (t: DaemonMessageToolCall) =>
-    isSubAgentToolCall(t) || isTodoWriteToolName(t.toolName);
+  // TodoWrite merges like any other tool.
+  const isStandalone = (t: DaemonMessageToolCall) => isSubAgentToolCall(t);
   const last = messages[messages.length - 1];
   if (
     last &&
@@ -1070,22 +1063,6 @@ function isTerminalToolStatus(status: DaemonMessageToolCallStatus): boolean {
   return status === 'completed' || status === 'failed';
 }
 
-function isSubAgentToolCall(tool: DaemonMessageToolCall): boolean {
-  const name = tool.toolName.toLowerCase();
-  if (name === 'agent' || name === 'task') return true;
-  if (tool.subTools || tool.subContent) return true;
-  if (isTaskExecutionRaw(tool.rawOutput)) return true;
-  return Boolean(tool.args?.subagent_type);
-}
-
-function isTaskExecutionRaw(raw: unknown): boolean {
-  return (
-    !!raw &&
-    typeof raw === 'object' &&
-    (raw as Record<string, unknown>).type === 'task_execution'
-  );
-}
-
 function parsePlanTodos(text: string): DaemonMessageTodoItem[] | undefined {
   const rawJson = text.startsWith('plan: ')
     ? text.slice('plan: '.length)
@@ -1103,7 +1080,8 @@ function parsePlanTodos(text: string): DaemonMessageTodoItem[] | undefined {
     ) {
       return undefined;
     }
-    return parseDaemonTodoItemsFromEntries(record['entries']);
+    const todos = parseTodoItemsFromEntries(record['entries']);
+    return todos.length > 0 ? todos : undefined;
   } catch {
     return undefined;
   }
@@ -1122,22 +1100,6 @@ function getString(
 ): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function getTodoStatus(
-  value: string | undefined,
-): DaemonMessageTodoItem['status'] {
-  return value === 'completed' || value === 'in_progress' || value === 'pending'
-    ? value
-    : 'pending';
-}
-
-function getTodoPriority(
-  value: string | undefined,
-): DaemonMessageTodoItem['priority'] | undefined {
-  return value === 'high' || value === 'medium' || value === 'low'
-    ? value
-    : undefined;
 }
 
 function daemonToolBlockToToolCall(

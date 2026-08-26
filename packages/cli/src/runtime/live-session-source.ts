@@ -4,10 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  isValidSessionId,
-  normalizeSessionIdForLookup,
-} from '../config/session-id.js';
+import { normalizeSessionIdForLookup } from '../config/session-id.js';
 
 export const LIVE_SESSION_SOURCE_PREFIX = 'realtime_voice:';
 export const STANDALONE_SESSION_SOURCE_TYPE = 'standalone';
@@ -19,9 +16,6 @@ export interface LiveSessionCreationMetadata {
 }
 
 export interface ConversationSessionMetadataStore {
-  getSessionLocation(
-    sessionId: string,
-  ): Promise<'active' | 'archived' | 'conflict' | undefined>;
   readCreationMetadataIfReadable(
     sessionId: string,
     state: 'active' | 'archived',
@@ -108,19 +102,33 @@ export function classifyTopLevelConversationSource(
   return undefined;
 }
 
+// Any single-path-segment name the transcript store could hold. Deliberately
+// wider than the storage enumeration pattern: parent ids written by older
+// builds (nil/v6/v7 UUIDs, agent-suffixed ids) must stay resolvable, while
+// path separators can never reach the joined transcript path.
+const SAFE_TRANSCRIPT_NAME_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+const WINDOWS_DEVICE_NAME_PATTERN =
+  /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i;
+
 async function readExistingMetadata(
   sessionId: string,
   store: ConversationSessionMetadataStore,
 ): Promise<LiveSessionCreationMetadata | undefined> {
-  const location = await store.getSessionLocation(sessionId);
-  if (location !== 'active' && location !== 'archived') return undefined;
-  const metadata = await store.readCreationMetadataIfReadable(
-    sessionId,
-    location,
+  if (
+    !SAFE_TRANSCRIPT_NAME_PATTERN.test(sessionId) ||
+    WINDOWS_DEVICE_NAME_PATTERN.test(sessionId)
+  ) {
+    return undefined;
+  }
+  // Creation metadata is immutable, so one tolerant read per location
+  // decides. Probing the location around the read would only turn a
+  // concurrent archive move into a spurious "not found": a session moved
+  // before the active read is found by the archived read, and a session
+  // moved after it was already read correctly.
+  return (
+    (await store.readCreationMetadataIfReadable(sessionId, 'active')) ??
+    (await store.readCreationMetadataIfReadable(sessionId, 'archived'))
   );
-  if (!metadata) return undefined;
-  const confirmedLocation = await store.getSessionLocation(sessionId);
-  return confirmedLocation === location ? metadata : undefined;
 }
 
 export async function readLoadableConversationSession(
@@ -134,9 +142,10 @@ export async function readLoadableConversationSession(
   if (topLevel) return topLevel;
 
   const parentSessionId = metadata.parentSessionId;
+  // No shape validation beyond the reader's own path-safety gate: the storage
+  // layer decides what resolves, so ids written by older builds keep working.
   if (
     parentSessionId === undefined ||
-    !isValidSessionId(parentSessionId) ||
     normalizeSessionIdForLookup(parentSessionId) ===
       normalizeSessionIdForLookup(sessionId)
   ) {

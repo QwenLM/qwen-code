@@ -7,9 +7,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  SessionIdCaseConflictError,
   SessionService,
+  SessionStorageEntryError,
   SessionWriterConflictError,
   SessionWriterLostError,
   type SessionWriterLease,
@@ -29,8 +32,10 @@ import {
   archiveDaemonSessions,
   assertSessionArchived,
   assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
+  resolveSessionIdForRestore,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
   DaemonDrainingError,
@@ -80,6 +85,85 @@ describe('assertSessionLoadable', () => {
       assertSessionLoadable(workspaceDir, sessionId),
     ).rejects.toThrow(SessionConflictError);
     expect(getLocationSpy).toHaveBeenCalledWith(sessionId);
+  });
+
+  it('reads the active copy after restore selected an exact conflict', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+
+    await expect(
+      assertSessionLoadable(workspaceDir, sessionId, undefined, {
+        allowActiveConflict: true,
+      }),
+    ).resolves.toBe('active');
+  });
+
+  it('does not read a differently spelled active/archive conflict', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const storageSessionId = sessionId.toUpperCase();
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'conflict',
+    );
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockRejectedValue(
+      new SessionIdCaseConflictError(sessionId, storageSessionId),
+    );
+
+    await expect(
+      assertSessionLoadable(workspaceDir, sessionId, undefined, {
+        allowActiveConflict: true,
+      }),
+    ).rejects.toThrow(SessionConflictError);
+  });
+
+  it('resolves an exact active/archive conflict only for restore', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    const service = new SessionService(workspaceDir);
+
+    await expect(resolveSessionIdForRestore(service, sessionId)).resolves.toBe(
+      sessionId,
+    );
+    await expect(
+      assertSessionRestorable(workspaceDir, sessionId, sessionId),
+    ).resolves.toBe('active');
+  });
+
+  it('does not restore a differently spelled active/archive conflict', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const storageSessionId = sessionId.toUpperCase();
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'conflict',
+    );
+
+    await expect(
+      assertSessionRestorable(workspaceDir, storageSessionId, sessionId),
+    ).rejects.toThrow(SessionConflictError);
+  });
+
+  it('maps a differently spelled active/archive conflict without another read', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const candidateSessionId = sessionId.toUpperCase();
+    const service = new SessionService(workspaceDir);
+    const conflict = new SessionIdCaseConflictError(
+      sessionId,
+      candidateSessionId,
+    );
+    vi.spyOn(service, 'findSessionIdIgnoringCase').mockRejectedValue(conflict);
+    const getLocation = vi
+      .spyOn(service, 'getSessionLocation')
+      .mockRejectedValue(
+        Object.assign(new Error('catalog failed'), { code: 'EIO' }),
+      );
+
+    await expect(
+      resolveSessionIdForRestore(service, sessionId),
+    ).rejects.toThrow(SessionConflictError);
+    expect(getLocation).not.toHaveBeenCalled();
   });
 
   it('ignores archived files that do not belong to this project', async () => {
@@ -306,6 +390,7 @@ describe('archiveDaemonSessions', () => {
     expect(result).toEqual({
       archived: [sessionId],
       alreadyArchived: [],
+      resolvedConflicts: [],
       notFound: [],
       errors: [],
     });
@@ -333,6 +418,7 @@ describe('archiveDaemonSessions', () => {
     expect(result).toEqual({
       archived: [sessionId],
       alreadyArchived: [],
+      resolvedConflicts: [],
       notFound: [],
       errors: [],
     });
@@ -383,6 +469,35 @@ describe('archiveDaemonSessions', () => {
     expect(byId['other']!.enabled).toBeUndefined(); // unrelated — untouched
   });
 
+  it('reports task maintenance failure after archiving the transcript', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440051';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'bound',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+    ]);
+    const cronFile = getCronFilePath(workspaceDir);
+    fs.rmSync(cronFile);
+    fs.mkdirSync(cronFile);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.archived).toEqual([sessionId]);
+    expect(result.errors).toEqual([{ sessionId, error: expect.any(Error) }]);
+  });
+
   it('does not acquire writer leases for ids already archived or missing', async () => {
     const archivedId = '550e8400-e29b-41d4-a716-446655440003';
     const missingId = '550e8400-e29b-41d4-a716-446655440004';
@@ -401,6 +516,7 @@ describe('archiveDaemonSessions', () => {
     expect(result).toEqual({
       archived: [],
       alreadyArchived: [archivedId],
+      resolvedConflicts: [],
       notFound: [missingId],
       errors: [],
     });
@@ -438,6 +554,70 @@ describe('archiveDaemonSessions', () => {
     });
     expect(retried.archived).toEqual([sessionId]);
   });
+
+  it('takes over a sealed empty transcript before maintenance', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440006';
+    const activePath = sessionPath(workspaceDir, sessionId, 'active');
+    fs.mkdirSync(path.dirname(activePath), { recursive: true });
+    fs.writeFileSync(activePath, '');
+    const service = new SessionService(workspaceDir);
+    const previous = await service.acquireSessionWriterLease(sessionId, {
+      processKind: 'daemon',
+      reclaimPolicy: 'never',
+    });
+    await previous.sealForHandoff();
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toMatchObject({
+      archived: [sessionId],
+      errors: [],
+    });
+    expect(fs.existsSync(activePath)).toBe(false);
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(true);
+  });
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a transcript FIFO without waiting for a writer',
+    async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440106';
+      const activePath = sessionPath(workspaceDir, sessionId, 'active');
+      fs.mkdirSync(path.dirname(activePath), { recursive: true });
+      execFileSync('mkfifo', [activePath]);
+      let writer: number | undefined;
+      const unblock = setTimeout(() => {
+        writer = fs.openSync(
+          activePath,
+          fs.constants.O_WRONLY | (fs.constants.O_NONBLOCK ?? 0),
+        );
+      }, 500);
+      const startedAt = Date.now();
+
+      try {
+        const result = await archiveDaemonSessions({
+          sessionIds: [sessionId],
+          service: new SessionService(workspaceDir),
+          bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+          coordinator: new SessionArchiveCoordinator(),
+        });
+
+        expect(result.errors[0]?.error).toBeInstanceOf(
+          SessionStorageEntryError,
+        );
+        expect(Date.now() - startedAt).toBeLessThan(400);
+      } finally {
+        clearTimeout(unblock);
+        if (writer !== undefined) fs.closeSync(writer);
+      }
+    },
+  );
 
   it('keeps independent batch sessions moving when one writer conflicts', async () => {
     const blockedId = '550e8400-e29b-41d4-a716-446655440008';
@@ -510,10 +690,13 @@ describe('archiveDaemonSessions', () => {
     const availableId = '550e8400-e29b-41d4-a716-446655440020';
     writeSessionFile(workspaceDir, availableId, 'active');
     const service = new SessionService(workspaceDir);
-    const getLocation = service.getSessionLocation.bind(service);
+    const getLocation = service.getMaintainableSessionLocation.bind(service);
     const failure = new Error('classification failed');
-    vi.spyOn(service, 'getSessionLocation').mockImplementation((sessionId) =>
-      sessionId === failedId ? Promise.reject(failure) : getLocation(sessionId),
+    vi.spyOn(service, 'getMaintainableSessionLocation').mockImplementation(
+      (sessionId) =>
+        sessionId === failedId
+          ? Promise.reject(failure)
+          : getLocation(sessionId),
     );
 
     const result = await archiveDaemonSessions({
@@ -553,21 +736,25 @@ describe('archiveDaemonSessions', () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440010';
     writeSessionFile(workspaceDir, sessionId, 'active');
     const service = new SessionService(workspaceDir);
-    const originalGetLocation = service.getSessionLocation.bind(service);
+    const originalGetLocation =
+      service.getMaintainableSessionLocation.bind(service);
     let classifications = 0;
-    vi.spyOn(service, 'getSessionLocation').mockImplementation(async (id) => {
-      classifications++;
-      if (classifications === 2) {
-        fs.mkdirSync(path.dirname(sessionPath(workspaceDir, id, 'archived')), {
-          recursive: true,
-        });
-        fs.renameSync(
-          sessionPath(workspaceDir, id, 'active'),
-          sessionPath(workspaceDir, id, 'archived'),
-        );
-      }
-      return originalGetLocation(id);
-    });
+    vi.spyOn(service, 'getMaintainableSessionLocation').mockImplementation(
+      async (id) => {
+        classifications++;
+        if (classifications === 2) {
+          fs.mkdirSync(
+            path.dirname(sessionPath(workspaceDir, id, 'archived')),
+            { recursive: true },
+          );
+          fs.renameSync(
+            sessionPath(workspaceDir, id, 'active'),
+            sessionPath(workspaceDir, id, 'archived'),
+          );
+        }
+        return originalGetLocation(id);
+      },
+    );
 
     const result = await archiveDaemonSessions({
       sessionIds: [sessionId],
@@ -579,6 +766,7 @@ describe('archiveDaemonSessions', () => {
     expect(result).toEqual({
       archived: [],
       alreadyArchived: [sessionId],
+      resolvedConflicts: [],
       notFound: [],
       errors: [],
     });
@@ -606,6 +794,32 @@ describe('archiveDaemonSessions', () => {
     expect(result.archived).toEqual([]);
     expect(result.errors).toHaveLength(1);
     expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it('repairs an active/archive conflict by keeping the archived copy', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440116';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    const archivedPath = sessionPath(workspaceDir, sessionId, 'archived');
+    const archivedBytes = fs.readFileSync(archivedPath);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      coordinator: new SessionArchiveCoordinator(),
+      resolveConflicts: true,
+    });
+
+    expect(result).toMatchObject({
+      archived: [sessionId],
+      resolvedConflicts: [sessionId],
+      errors: [],
+    });
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+    expect(fs.readFileSync(archivedPath)).toEqual(archivedBytes);
   });
 
   it('does not report success after release fails but reconciles the task to the applied archive', async () => {
@@ -732,6 +946,36 @@ describe('archiveDaemonSessions', () => {
       true,
     );
   });
+
+  it('recovers an enabled task whose session is already archived', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440063';
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'stranded',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+    ]);
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: { closeSession: vi.fn().mockResolvedValue(undefined) },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.alreadyArchived).toEqual([sessionId]);
+    const stranded = (await readCronTasks(workspaceDir)).find(
+      (task) => task.id === 'stranded',
+    );
+    expect(stranded!.enabled).toBe(false);
+    expect(stranded!.disabledByArchive).toBe(true);
+  });
 });
 
 describe('unarchiveDaemonSessions', () => {
@@ -767,6 +1011,7 @@ describe('unarchiveDaemonSessions', () => {
     expect(result).toEqual({
       unarchived: [archivedId],
       alreadyActive: [activeId],
+      resolvedConflicts: [],
       notFound: [missingId],
       errors: [],
     });
@@ -792,12 +1037,38 @@ describe('unarchiveDaemonSessions', () => {
     expect(result).toEqual({
       unarchived: [sessionId],
       alreadyActive: [],
+      resolvedConflicts: [],
       notFound: [],
       errors: [],
     });
     expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
       true,
     );
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(false);
+  });
+
+  it('repairs an active/archive conflict by keeping the active copy', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440117';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    const activePath = sessionPath(workspaceDir, sessionId, 'active');
+    const activeBytes = fs.readFileSync(activePath);
+
+    const result = await unarchiveDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      coordinator: new SessionArchiveCoordinator(),
+      resolveConflicts: true,
+    });
+
+    expect(result).toMatchObject({
+      unarchived: [sessionId],
+      resolvedConflicts: [sessionId],
+      errors: [],
+    });
+    expect(fs.readFileSync(activePath)).toEqual(activeBytes);
     expect(
       fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
     ).toBe(false);
@@ -842,6 +1113,7 @@ describe('unarchiveDaemonSessions', () => {
     expect(result).toEqual({
       unarchived: [],
       alreadyActive: [],
+      resolvedConflicts: [],
       notFound: [],
       errors: [{ sessionId: archivedId, error: failure }],
     });
@@ -857,10 +1129,13 @@ describe('unarchiveDaemonSessions', () => {
     const availableId = '550e8400-e29b-41d4-a716-446655440022';
     writeSessionFile(workspaceDir, availableId, 'archived');
     const service = new SessionService(workspaceDir);
-    const getLocation = service.getSessionLocation.bind(service);
+    const getLocation = service.getMaintainableSessionLocation.bind(service);
     const failure = new Error('classification failed');
-    vi.spyOn(service, 'getSessionLocation').mockImplementation((sessionId) =>
-      sessionId === failedId ? Promise.reject(failure) : getLocation(sessionId),
+    vi.spyOn(service, 'getMaintainableSessionLocation').mockImplementation(
+      (sessionId) =>
+        sessionId === failedId
+          ? Promise.reject(failure)
+          : getLocation(sessionId),
     );
 
     const result = await unarchiveDaemonSessions({
@@ -879,22 +1154,24 @@ describe('unarchiveDaemonSessions', () => {
     writeSessionFile(workspaceDir, unarchivedId, 'archived');
     writeSessionFile(workspaceDir, blockedId, 'archived');
     const service = new SessionService(workspaceDir);
-    const getLocation = service.getSessionLocation.bind(service);
+    const getLocation = service.getMaintainableSessionLocation.bind(service);
     const coordinator = new SessionArchiveCoordinator();
     let releaseBlocked!: () => void;
     const blocked = new Promise<void>((resolve) => {
       releaseBlocked = resolve;
     });
     let competingMaintenance: Promise<void> | undefined;
-    vi.spyOn(service, 'getSessionLocation').mockImplementation((sessionId) => {
-      if (sessionId === unarchivedId && !competingMaintenance) {
-        competingMaintenance = coordinator.runExclusiveMany(
-          [blockedId],
-          () => blocked,
-        );
-      }
-      return getLocation(sessionId);
-    });
+    vi.spyOn(service, 'getMaintainableSessionLocation').mockImplementation(
+      (sessionId) => {
+        if (sessionId === unarchivedId && !competingMaintenance) {
+          competingMaintenance = coordinator.runExclusiveMany(
+            [blockedId],
+            () => blocked,
+          );
+        }
+        return getLocation(sessionId);
+      },
+    );
 
     const result = await unarchiveDaemonSessions({
       sessionIds: [unarchivedId, blockedId],
@@ -1018,6 +1295,37 @@ describe('deleteDaemonSessions', () => {
     vi.restoreAllMocks();
   });
 
+  it('deletes both copies of an exact active/archive conflict', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440069';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    const service = new SessionService(workspaceDir);
+    const acquire = vi.spyOn(service, 'acquireSessionWriterLease');
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+      },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result).toEqual({
+      removed: [sessionId],
+      notFound: [],
+      errors: [],
+    });
+    expect(acquire).toHaveBeenCalledOnce();
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+    expect(
+      fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
+    ).toBe(false);
+  });
+
   it('removes a scheduled task bound to the deleted session', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440070';
     writeSessionFile(workspaceDir, sessionId, 'active');
@@ -1056,6 +1364,66 @@ describe('deleteDaemonSessions', () => {
 
     const ids = (await readCronTasks(workspaceDir)).map((t) => t.id).sort();
     expect(ids).toEqual(['other']); // bound task deleted, unbound survives
+  });
+
+  it('repairs task maintenance on retry after deleting the transcript', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440171';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'bound',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+    ]);
+    const cronFile = getCronFilePath(workspaceDir);
+    const cronContents = fs.readFileSync(cronFile);
+    fs.rmSync(cronFile);
+    fs.mkdirSync(cronFile);
+    const deleteSessionAttachments = vi.fn().mockResolvedValue(undefined);
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments,
+      },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(result.errors).toEqual([
+      {
+        sessionId,
+        error: 'Scheduled task lifecycle update failed.',
+      },
+    ]);
+    expect(deleteSessionAttachments).toHaveBeenCalledWith(sessionId);
+
+    fs.rmSync(cronFile, { recursive: true, force: true });
+    fs.writeFileSync(cronFile, cronContents);
+
+    const retry = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service: new SessionService(workspaceDir),
+      bridge: {
+        closeSession: vi.fn().mockResolvedValue(undefined),
+        deleteSessionAttachments,
+      },
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(retry).toEqual({
+      removed: [],
+      notFound: [sessionId],
+      errors: [],
+    });
+    expect(await readCronTasks(workspaceDir)).toEqual([]);
   });
 
   it('collapses case-variant spellings in one batch to a single delete', async () => {
@@ -1250,6 +1618,42 @@ describe('deleteDaemonSessions', () => {
       deleteDaemonSessionIfOrphan({
         sessionId,
         service,
+        bridge: {
+          killSession: vi.fn().mockResolvedValue(true),
+          markSessionCatalogChanged,
+        },
+        coordinator: new SessionArchiveCoordinator(),
+      }),
+    ).resolves.toBe(true);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      false,
+    );
+    expect(markSessionCatalogChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns true when task maintenance fails after orphan deletion', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440086';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    await updateCronTasks(workspaceDir, () => [
+      {
+        id: 'bound',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId,
+      },
+    ]);
+    const cronFile = getCronFilePath(workspaceDir);
+    fs.rmSync(cronFile);
+    fs.mkdirSync(cronFile);
+    const markSessionCatalogChanged = vi.fn();
+
+    await expect(
+      deleteDaemonSessionIfOrphan({
+        sessionId,
+        service: new SessionService(workspaceDir),
         bridge: {
           killSession: vi.fn().mockResolvedValue(true),
           markSessionCatalogChanged,

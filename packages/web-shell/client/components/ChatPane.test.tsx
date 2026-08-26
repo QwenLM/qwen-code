@@ -33,6 +33,7 @@ let streamingStateValue: string;
 let pendingPermission: any;
 let sessionHasActivePromptValue: boolean;
 let queuedPromptStreamingState: string | undefined;
+let queuedPromptSessionHasActivePrompt: boolean | undefined;
 let latestOnSubmit:
   | ((
       text: string,
@@ -142,8 +143,12 @@ vi.mock('../session-catalog/session-catalog-hooks', () => ({
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
-  useQueuedPrompts: (args: { streamingState: string }) => {
+  useQueuedPrompts: (args: {
+    streamingState: string;
+    sessionHasActivePrompt?: boolean;
+  }) => {
     queuedPromptStreamingState = args.streamingState;
+    queuedPromptSessionHasActivePrompt = args.sessionHasActivePrompt;
     return {
       queuedPrompts: queuedPromptsMock,
       queuedTexts: queuedTextsMock,
@@ -409,6 +414,7 @@ beforeEach(() => {
   renderRealChatEditor = false;
   sessionHasActivePromptValue = false;
   queuedPromptStreamingState = undefined;
+  queuedPromptSessionHasActivePrompt = undefined;
   latestComposerCoreOptions.current = null;
   latestFollowupAccept = undefined;
   latestMonitorDetailsOnOpen = undefined;
@@ -1657,6 +1663,7 @@ describe('ChatPane', () => {
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).toHaveBeenCalled();
     expect(queuedPromptStreamingState).toBe('responding');
+    expect(queuedPromptSessionHasActivePrompt).toBe(false);
   });
 
   it('inserts a prompt before the first stream event reaches the pane', () => {
@@ -1671,7 +1678,8 @@ describe('ChatPane', () => {
 
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).toHaveBeenCalled();
-    expect(queuedPromptStreamingState).toBe('responding');
+    expect(queuedPromptStreamingState).toBe('idle');
+    expect(queuedPromptSessionHasActivePrompt).toBe(true);
 
     sendPrompt.mockClear();
     enqueuePrompt.mockClear();
@@ -1686,6 +1694,7 @@ describe('ChatPane', () => {
     );
 
     expect(queuedPromptStreamingState).toBe('idle');
+    expect(queuedPromptSessionHasActivePrompt).toBe(false);
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });

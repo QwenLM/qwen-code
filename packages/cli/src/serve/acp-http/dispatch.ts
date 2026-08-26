@@ -12,7 +12,6 @@ import {
   GROUP_COLOR_OPTIONS,
   Storage,
   SessionService,
-  SessionIdCaseConflictError,
   SessionOrganizationError,
   SESSION_WRITER_RPC_CODES,
   type SessionGroupColor,
@@ -37,7 +36,6 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   SessionArchivingError,
-  SessionConflictError,
 } from '../acp-session-bridge.js';
 import type {
   BridgeChannelQuarantinedError,
@@ -133,11 +131,12 @@ import {
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
   archiveDaemonSessions,
-  assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   DaemonDrainingError,
   logSessionArchiveWarning,
+  resolveSessionIdForRestore,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -343,6 +342,9 @@ const TRUSTED_WORKSPACE_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/mcp/resources`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
+  `${QWEN_METHOD_NS}sessions/delete`,
+  `${QWEN_METHOD_NS}sessions/archive`,
+  `${QWEN_METHOD_NS}sessions/unarchive`,
   `${QWEN_METHOD_NS}workspace/agents/list`,
   `${QWEN_METHOD_NS}workspace/agents/get`,
   `${QWEN_METHOD_NS}workspace/agents/create`,
@@ -373,6 +375,9 @@ const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}file/edit`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
   `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
+  `${QWEN_METHOD_NS}sessions/delete`,
+  `${QWEN_METHOD_NS}sessions/archive`,
+  `${QWEN_METHOD_NS}sessions/unarchive`,
   `${QWEN_METHOD_NS}workspace/agents/create`,
   `${QWEN_METHOD_NS}workspace/agents/update`,
   `${QWEN_METHOD_NS}workspace/agents/delete`,
@@ -1212,6 +1217,15 @@ export class AcpDispatcher {
     return [...new Set(sessionIds as string[])];
   }
 
+  private parseResolveConflicts(params: Record<string, unknown>): boolean {
+    const value = params['resolveConflicts'];
+    if (value === undefined) return false;
+    if (typeof value !== 'boolean') {
+      throw new AcpParamError('`resolveConflicts` must be a boolean');
+    }
+    return value;
+  }
+
   private rejectActiveLiveSessionMutation(
     conn: AcpConnection,
     id: JsonRpcId | undefined,
@@ -1855,24 +1869,6 @@ export class AcpDispatcher {
             // of a caller id contends on one key), so the request spelling
             // alone covers the raw-spelled batch delete/archive/unarchive
             // locks (parity with the REST restore handler).
-            const guardSessionService = new SessionService(cwd, {
-              runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
-            });
-            let persistedGuardId: string | undefined;
-            try {
-              persistedGuardId =
-                await guardSessionService.findSessionIdIgnoringCase(sessionId);
-            } catch (error) {
-              if (
-                error instanceof SessionIdCaseConflictError &&
-                (await guardSessionService.getSessionLocation(
-                  error.candidateSessionId ?? sessionId,
-                )) === 'conflict'
-              ) {
-                throw new SessionConflictError(sessionId);
-              }
-              throw error;
-            }
             const restored = await this.archiveCoordinator.runSharedMany(
               [sessionId],
               async () => {
@@ -1880,30 +1876,20 @@ export class AcpDispatcher {
                 const sessionService = new SessionService(cwd, {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
                 });
-                let storageSessionId = persistedGuardId ?? sessionId;
-                let persistedSessionId: string | undefined;
-                try {
-                  persistedSessionId =
-                    await sessionService.findSessionIdIgnoringCase(sessionId);
-                } catch (error) {
-                  if (
-                    error instanceof SessionIdCaseConflictError &&
-                    (await sessionService.getSessionLocation(
-                      error.candidateSessionId ?? sessionId,
-                    )) === 'conflict'
-                  ) {
-                    throw new SessionConflictError(sessionId);
-                  }
-                  throw error;
-                }
+                let storageSessionId = sessionId;
+                const persistedSessionId = await resolveSessionIdForRestore(
+                  sessionService,
+                  sessionId,
+                );
                 if (persistedSessionId) {
                   storageSessionId = persistedSessionId;
                 } else if (this.liveSessionIsolation) {
                   throw new SessionNotFoundError(sessionId);
                 }
-                await assertSessionLoadable(
+                await assertSessionRestorable(
                   cwd,
                   storageSessionId,
+                  sessionId,
                   sessionRuntime.sessionRuntimeBaseDir,
                 );
                 // Re-seed the persisted parent lineage so a restored sub-session
@@ -4659,6 +4645,7 @@ export class AcpDispatcher {
                 service: svc,
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
+                assertCanMutate: assertGenerationOpen,
                 onError: ({ phase, sessionId, error }) => {
                   const safeSessionId = logSafe(sessionId.slice(0, 8));
                   const safeMessage = logSafe(error);
@@ -4668,12 +4655,14 @@ export class AcpDispatcher {
                 },
               }),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
 
         case `${QWEN_METHOD_NS}sessions/archive`: {
           const ids = this.parseSessionIds(params);
+          const resolveConflicts = this.parseResolveConflicts(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
@@ -4686,11 +4675,15 @@ export class AcpDispatcher {
                 service: svc,
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
+                resolveConflicts,
+                assertCanMutate: assertGenerationOpen,
               }),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             archived: result.archived,
             alreadyArchived: result.alreadyArchived,
+            resolvedConflicts: result.resolvedConflicts,
             notFound: result.notFound,
             errors: this.serializeSessionErrors(result.errors),
           } as unknown);
@@ -4699,6 +4692,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/unarchive`: {
           const ids = this.parseSessionIds(params);
+          const resolveConflicts = this.parseResolveConflicts(params);
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
           });
@@ -4709,11 +4703,15 @@ export class AcpDispatcher {
                 sessionIds: ids,
                 service: svc,
                 coordinator: this.archiveCoordinator,
+                resolveConflicts,
+                assertCanMutate: assertGenerationOpen,
               }),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             unarchived: result.unarchived,
             alreadyActive: result.alreadyActive,
+            resolvedConflicts: result.resolvedConflicts,
             notFound: result.notFound,
             errors: this.serializeSessionErrors(result.errors),
           } as unknown);
