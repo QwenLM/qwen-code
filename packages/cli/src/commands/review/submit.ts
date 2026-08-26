@@ -71,6 +71,7 @@ import {
   tryIngestBodyCriticals,
   tryToCount,
   type ComposeReviewInput,
+  type DeferredEntry,
   type FixedFinding,
 } from './compose-review.js';
 import {
@@ -421,6 +422,18 @@ function compose(
    * ruling naming one (#9940 review).
    */
   mintedIds: string[] | undefined;
+  /**
+   * The deferral entries floor enforcement CONSTRUCTED out of drafted
+   * comments — index-parallel with `floorEnforced` — for the gate's
+   * scan of the rerouted `file`/`title` channels (#9940 review).
+   */
+  floorEnforcedEntries: DeferredEntry[];
+  /**
+   * The `Budget gap:` disclosures the composed body renders —
+   * transcript-derived text no payload state field carries, scanned by
+   * the gate like the other rendered channels (#9940 review).
+   */
+  budgetGapDisclosures: string[];
 } {
   const comments = payload.comments ?? [];
   const state = payload.state ?? ({} as ComposeReviewInput);
@@ -474,6 +487,8 @@ function compose(
     fixedFindings: r.fixedFindings,
     draftedIds: r.draftedIds,
     mintedIds: r.mintedIds,
+    floorEnforcedEntries: r.floorEnforcedEntries,
+    budgetGapDisclosures: r.budgetGapDisclosures,
   };
 }
 
@@ -666,10 +681,17 @@ function inconsistencies(
    * account, the uncoverable chunks, the not-reviewed dimensions, the
    * downgrade reasons, and the deferral entries' `file` and `title` at
    * any severity), scanned WHOLE-TOKEN because the prescribed entry
-   * shapes put the id mid-line; the rulings' own `by` text, which rides
-   * verbatim into the posted reply; and the `modelId` the attribution
-   * footer interpolates — the footer, the marker and the reply render it
-   * only when attribution is on, and so does its scan (#9940 review).
+   * shapes put the id mid-line; the deferral entries floor enforcement
+   * CONSTRUCTS out of drafted comments and the `Budget gap:` lines
+   * parsed from sub-agent transcripts — both rendered verbatim and
+   * carried by NO payload state field (#9940 review); and the `modelId`
+   * the attribution footer interpolates — the footer, the marker and the
+   * reply render it only when attribution is on, and so does its scan
+   * (#9940 review). The rulings' `by` text is NOT a channel: every id a
+   * scan of it can catch is a member of `fixedFindings` — singly ruled
+   * fixed in this same payload — so the leg could only refuse
+   * self-consistent payloads, never a standing-vs-fixed re-post, and
+   * real re-posts ride the channels above (#9940 review).
    */
   fixedFindings: FixedFinding[] = [],
   preRerouteComments?: ReviewComment[],
@@ -681,6 +703,22 @@ function inconsistencies(
    * review).
    */
   mintedIds: readonly string[] = [],
+  /**
+   * The deferral entries floor enforcement CONSTRUCTED out of drafted
+   * comments, beside the AUTHORED index of the comment each was moved
+   * out of — the refusal cites that index, the one naming the culprit
+   * in the model's own payload (#9940 review).
+   */
+  reroutedDeferrals: { indices: number[]; entries: DeferredEntry[] } = {
+    indices: [],
+    entries: [],
+  },
+  /**
+   * The `Budget gap:` disclosures the compose renders into the body —
+   * transcript-derived text no payload state field carries (#9940
+   * review).
+   */
+  budgetGapDisclosures: readonly string[] = [],
 ): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
@@ -705,16 +743,6 @@ function inconsistencies(
         );
       }
     }
-    // `by` rides VERBATIM into the posted `R<id> fixed by <by>` reply —
-    // a retired id re-voiced there contradicts the ruling it rides.
-    fixedFindings.forEach((f, i) => {
-      if (typeof f.by !== 'string') return;
-      for (const [, id] of f.by.matchAll(LEDGER_ID_SCAN)) {
-        if (id !== undefined && fixedIds.has(id)) {
-          problems.push(contradiction(`state.fixedFindings[${i}].by`, id));
-        }
-      }
-    });
     const drafted = preRerouteComments ?? comments;
     const indices = preRerouteComments
       ? preRerouteAuthoredIndices
@@ -795,6 +823,36 @@ function inconsistencies(
         }
       });
     }
+    // The floor-enforced reroute CONSTRUCTS its deferral entries out of
+    // drafted comments — `file` from the comment's path, `title` from
+    // its whole marker-stripped body — and the deferral list renders
+    // both verbatim. Neither field rides the `state.deferredSuggestions`
+    // the leg above reads, so a retired id planted in either escapes it
+    // (#9940 review).
+    reroutedDeferrals.entries.forEach((entry, i) => {
+      const at = `comments[${reroutedDeferrals.indices[i] ?? i}]`;
+      for (const [channel, text] of [
+        ['rerouted path', entry.file],
+        ['rerouted body', entry.title],
+      ] as const) {
+        for (const [, id] of text.matchAll(LEDGER_ID_SCAN)) {
+          if (id !== undefined && fixedIds.has(id)) {
+            problems.push(contradiction(`${at} (${channel})`, id));
+          }
+        }
+      }
+    });
+    // `Budget gap:` lines parsed from sub-agent transcripts render
+    // VERBATIM into the not-reviewed section — a channel no payload
+    // state field carries, read off the compose's own disclosure of
+    // what the body posts (#9940 review).
+    budgetGapDisclosures.forEach((gap, i) => {
+      for (const [, id] of gap.matchAll(LEDGER_ID_SCAN)) {
+        if (id !== undefined && fixedIds.has(id)) {
+          problems.push(contradiction(`budgetGapDisclosures[${i}]`, id));
+        }
+      }
+    });
     // `modelId` rides VERBATIM into the public footer — the body's and
     // every fixed-resolve reply's — but only while attribution is on;
     // with it off nothing renders the field, so it contradicts nothing.
@@ -1445,6 +1503,8 @@ function submit(
   let fixedFindings: FixedFinding[];
   let draftedIds: Array<string | undefined> | undefined;
   let mintedIds: string[] | undefined;
+  let floorEnforcedEntries: DeferredEntry[];
+  let budgetGapDisclosures: string[];
   try {
     ({
       event,
@@ -1454,6 +1514,8 @@ function submit(
       fixedFindings,
       draftedIds,
       mintedIds,
+      floorEnforcedEntries,
+      budgetGapDisclosures,
     } = compose(
       payload,
       cliVersion,
@@ -1513,6 +1575,8 @@ function submit(
     preRerouteComments,
     preRerouteAuthoredIndices,
     mintedIds ?? [],
+    { indices: floorEnforced, entries: floorEnforcedEntries },
+    budgetGapDisclosures,
   );
   if (problems.length > 0) {
     throw new Error(
@@ -1529,9 +1593,14 @@ function submit(
   // it is born: a later `still stands` replies into it, a `fixed` ruling
   // resolves it (#9940 review). GitHub only — the Aone write path has no
   // review-thread graph to reach into. The insertion preserves every
-  // property the gate above validated: the severity marker, visibility and
-  // fence state all sit behind it, untouched.
+  // property the gate above validated — the severity marker, visibility
+  // and fence state all sit behind it, untouched — because a body that
+  // OPENS a code fence takes no stamp at all (stampCarriedId leaves it
+  // un-stamped, disclosed below): text before the backticks would stop
+  // the posted first line leading the fence the gate validated (#9940
+  // review).
   const stampedFresh = new Set<number>();
+  let stampSkippedFence = 0;
   if (!aoneWrite && draftedIds !== undefined) {
     const comments = payload.comments ?? [];
     payload = {
@@ -1544,11 +1613,27 @@ function submit(
         const id = draftedIds[i];
         if (id === undefined || typeof c.body !== 'string') return c;
         const body = stampCarriedId(c.body, id);
-        if (body === c.body) return c;
+        if (body === c.body) {
+          // Unchanged although an id was owed: the body carries one
+          // already (the model's carry stays verbatim) or it opens a
+          // code fence and the stamp was skipped — only the latter is a
+          // disclosure (#9940 review).
+          if (carriedFindingOf(c.body) === null) stampSkippedFence++;
+          return c;
+        }
         stampedFresh.add(i);
         return { ...c, body };
       }),
     };
+    if (stampSkippedFence > 0) {
+      writeStderrLine(
+        `Thread lifecycle: ${stampSkippedFence} draft(s) open a code ` +
+          `fence on their first line and were left un-stamped — a stamp ` +
+          `there would break the fence the gate validated. Their ` +
+          `thread roots carry no ledger id, so no later carry or ` +
+          `fixed ruling can reach them; resolve such threads by hand.`,
+      );
+    }
   }
 
   // What the platform receives: the caller's findings, under the verdict
@@ -1687,8 +1772,13 @@ function submit(
               : `${r.id} fixed by ${r.by}`) +
             (footer === undefined ? '' : `\n\n${footer}`),
         }));
+        // Phrased as a PLAN: the line is written before the dry-run
+        // check and before any write, and a resolve mutation can still
+        // fail — a past-tense "resolved" here would claim what the
+        // bookkeeping below may then deny in the same stream (#9940
+        // review).
         writeStderrLine(
-          `Thread lifecycle: ${plan.resolves.length} thread(s) resolved ` +
+          `Thread lifecycle: ${plan.resolves.length} thread(s) to resolve ` +
             `for ${fixedFindings.length} fixed ruling(s). ` +
             preStampCaveat,
         );

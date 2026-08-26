@@ -316,6 +316,35 @@ describe('planThreadActions — matching threads to findings', () => {
     expect(plan.replies).toEqual([{ index: 0, id: 'R1-2', commentId: 1002 }]);
   });
 
+  it('among TWO marked threads, a still-standing reply pairs the newest (#9940 review)', () => {
+    // Consecutive fix-induced rounds each open a fresh marked thread
+    // under the id; the standing claim under it is the LATEST
+    // re-report's, so a still-standing re-assertion belongs on the
+    // newer marked thread. Oldest-first inside the marked tier paired
+    // it with the superseded older one every round — the marked thread
+    // never consumes, being never answered (#9940 review).
+    const plan = planThreadActions(
+      [
+        thread({
+          threadId: 'T-induced-old',
+          rootCommentId: 2001,
+          rootCreatedAt: '2026-08-02T00:00:00Z',
+          rootBody: '**[Critical]** R1-2: (fix-induced) the round-2 hole',
+        }),
+        thread({
+          threadId: 'T-induced-new',
+          rootCommentId: 3001,
+          rootCreatedAt: '2026-08-03T00:00:00Z',
+          rootBody: '**[Critical]** R1-2: (fix-induced) the round-3 hole',
+        }),
+      ],
+      'qwen-bot',
+      [{ index: 0, id: 'R1-2' }],
+      [],
+    );
+    expect(plan.replies).toEqual([{ index: 0, id: 'R1-2', commentId: 3001 }]);
+  });
+
   it('a fixed ruling resolves the marked and unmarked threads of one id alike', () => {
     const plan = planThreadActions(
       [
@@ -375,6 +404,30 @@ describe('stampCarriedId — the write side of the readback', () => {
 
   it('returns an unmarked body unchanged — nothing to stamp into', () => {
     expect(stampCarriedId('no marker here', 'R1-1')).toBe('no marker here');
+  });
+
+  it('leaves a fence-opening body un-stamped — a stamp would break the fence (#9940 review)', () => {
+    // The stamp inserts ` R<n>-<k>: ` between the marker and the body; a
+    // body whose first line is a code fence would then post with text
+    // before the backticks — no longer a CommonMark fence opener — and
+    // the flipped fence structure is the exact exposure the gate's
+    // fence refusal polices, created AFTER the gate validated the
+    // pre-stamp shape. Such drafts post un-stamped and degrade to the
+    // pre-stamping behaviour: their threads match no later carry or
+    // fixed ruling (#9940 review).
+    for (const draft of [
+      '**[Suggestion]** ```diff\n-old\n+new\n```\n\nthe pin moved',
+      '**[Critical]** ~~~\nthe log\n~~~',
+    ]) {
+      expect(stampCarriedId(draft, 'R3-1')).toBe(draft);
+    }
+    // A fence that opens on line 2 is untouched by a line-1 stamp.
+    expect(
+      stampCarriedId(
+        '**[Suggestion]** the claim\n```diff\n-old\n+new\n```',
+        'R3-2',
+      ),
+    ).toBe('**[Suggestion]** R3-2: the claim\n```diff\n-old\n+new\n```');
   });
 
   it('stamps through leading residue, and before residue after the marker', () => {
@@ -543,7 +596,25 @@ describe('fetchReviewThreads — the read the whole lifecycle plans from', () =>
     );
     const threads = fetchReviewThreads('o/r', 1);
     expect(ghMock).toHaveBeenCalledTimes(30);
-    expect(threads).toHaveLength(30);
+    // The echoed cursor re-fetches the SAME page thirty times; the read
+    // dedupes by thread id, or one fixed ruling would post its
+    // non-idempotent reply into — and resolve — the one thread thirty
+    // times (#9940 review).
+    expect(threads.map((t) => t.threadId)).toEqual(['T1']);
+  });
+
+  it('dedupes a thread id echoed on two distinct pages — the resolve leg is not idempotent (#9940 review)', () => {
+    // A moving cursor can still echo a node an earlier page returned;
+    // the plan's resolve leg pushes one entry per array element, so
+    // uniqueness must hold at the read itself.
+    ghMock.mockImplementation((...a: string[]) =>
+      a.includes('after=cur-1')
+        ? page([node({})], { hasNextPage: false, endCursor: 'cur-2' })
+        : page([node({})], { hasNextPage: true, endCursor: 'cur-1' }),
+    );
+    const threads = fetchReviewThreads('o/r', 1);
+    expect(ghMock).toHaveBeenCalledTimes(2);
+    expect(threads.map((t) => t.threadId)).toEqual(['T1']);
   });
 
   it('stops after a page whose endCursor is empty — hasNextPage alone cannot fetch (#9940 review)', () => {

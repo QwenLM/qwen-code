@@ -57,7 +57,11 @@ import {
   severityOf,
   stripSeverityPrefix,
 } from './inline-counts.js';
-import { ledgerClaimLine, type FixedFinding } from '../compose-review.js';
+import {
+  ENTRY_FENCE_DELIMITER_RE,
+  ledgerClaimLine,
+  type FixedFinding,
+} from '../compose-review.js';
 
 /** One review thread, reduced to what the lifecycle decisions read. */
 export interface ReviewThread {
@@ -106,6 +110,7 @@ const MAX_THREAD_PAGES = 30;
 export function fetchReviewThreads(repo: string, pr: number): ReviewThread[] {
   const [owner, name] = repo.split('/');
   const threads: ReviewThread[] = [];
+  const seen = new Set<string>();
   let after: string | undefined;
   for (let page = 0; page < MAX_THREAD_PAGES; page++) {
     const args = [
@@ -164,6 +169,14 @@ export function fetchReviewThreads(repo: string, pr: number): ReviewThread[] {
       ) {
         continue;
       }
+      // A stale/echoed cursor — the known cursor-pagination failure
+      // class — re-fetches the same page to the cap, and a moving
+      // cursor can still echo an earlier page's node; the plan's
+      // resolve leg is NOT idempotent (one reply per thread), so
+      // duplicates would multiply a ruling's reply and resolve per
+      // copy. Uniqueness holds here, at the read (#9940 review).
+      if (seen.has(node.id)) continue;
+      seen.add(node.id);
       threads.push({
         threadId: node.id,
         isResolved: node.isResolved === true,
@@ -242,7 +255,9 @@ export function carriedFindingOf(body: unknown): {
  * whatever claim line it arrived with (the ledger records the re-mint;
  * the root and the marker disagree exactly as they did before stamps).
  * Returns the body unchanged when there is nothing to stamp into (no
- * marker) or nothing to stamp (an id already leads).
+ * marker), nothing to stamp (an id already leads), or the stamp would
+ * break what the gate validated — a body that OPENS a code fence
+ * (#9940 review).
  */
 export function stampCarriedId(body: string, id: string): string {
   if (carriedFindingOf(body) !== null) return body;
@@ -252,7 +267,17 @@ export function stampCarriedId(body: string, id: string): string {
   const lead = LEADING_INVISIBLE_RE.exec(body)?.[0] ?? '';
   const visible = body.slice(lead.length);
   if (!visible.startsWith(marker)) return body;
-  return `${lead}${marker} ${id}: ${stripSeverityPrefix(visible)}`;
+  const rest = stripSeverityPrefix(visible);
+  // The insertion lands between the marker and the body; when the body
+  // OPENS a code fence, text before the backticks stops the posted first
+  // line leading the fence — flipping the fence structure the gate
+  // validated on the pre-stamp shape (under attribution off the unclosed
+  // flip swallows the appended invisible marker as visible code). Left
+  // un-stamped, the draft degrades to the pre-stamping behaviour: its
+  // thread root carries no id, so no later carry or fixed ruling can
+  // reach it — the documented safe degradation (#9940 review).
+  if (ENTRY_FENCE_DELIMITER_RE.test(rest)) return body;
+  return `${lead}${marker} ${id}: ${rest}`;
 }
 
 export interface ThreadActionPlan {
@@ -282,13 +307,14 @@ export interface ThreadActionPlan {
  *    draft stays inline only once every live thread under the id took
  *    its reply. ONE exception: a `(fix-induced)` root is preferred
  *    over an unmarked
- *    one regardless of age. The flow reuses one id across two defects —
- *    the superseded original and the induced hole — and the standing
- *    claim under the id is the LATEST re-report's: once a fix-induced
- *    re-report exists, a still-standing re-assertion belongs on the
- *    induced defect's own marked thread, not on the superseded
- *    original's older one (the readClaim contract: the new defect keeps
- *    its OWN thread);
+ *    one regardless of age, and among several marked threads the NEWEST
+ *    leads — each fix-induced round opens its own marked thread, and the
+ *    standing claim under the id is the LATEST re-report's. The flow
+ *    reuses one id across two defects — the superseded original and the
+ *    induced hole — and once a fix-induced re-report exists, a
+ *    still-standing re-assertion belongs on the induced defect's own
+ *    marked thread, not on the superseded original's older one (the
+ *    readClaim contract: the new defect keeps its OWN thread);
  *  - a fixed ruling resolves EVERY matching thread — the one cleanup a
  *    multiplied pre-fix lineage (#9659's four R1-15 threads) gets.
  */
@@ -316,7 +342,9 @@ export function planThreadActions(
     list.sort(
       (a, b) =>
         Number(b.marked) - Number(a.marked) ||
-        a.thread.rootCreatedAt.localeCompare(b.thread.rootCreatedAt),
+        (a.marked
+          ? b.thread.rootCreatedAt.localeCompare(a.thread.rootCreatedAt)
+          : a.thread.rootCreatedAt.localeCompare(b.thread.rootCreatedAt)),
     );
   }
 

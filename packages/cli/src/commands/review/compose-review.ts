@@ -964,6 +964,22 @@ export interface ComposeReviewResult {
    */
   mintedIds?: string[];
   /**
+   * The deferral entries floor enforcement CONSTRUCTED out of drafted
+   * comments — index-parallel with `floorEnforced` — each one's `file`
+   * the comment's path and its `title` the whole marker-stripped body.
+   * The deferral list renders both verbatim, and neither field rides
+   * `state.deferredSuggestions`, so `submit`'s contradiction gate scans
+   * exactly these beside the model's own entries (#9940 review).
+   */
+  floorEnforcedEntries: DeferredEntry[];
+  /**
+   * The `Budget gap:` lines this body discloses — parsed from sub-agent
+   * transcripts and rendered verbatim into the not-reviewed section, a
+   * channel no payload state field carries. `submit`'s contradiction
+   * gate scans them like every other rendered model line (#9940 review).
+   */
+  budgetGapDisclosures: string[];
+  /**
    * The convergence paragraph, when a signal fired — the SAME text the body
    * carries, returned so a terminal copy exists.
    *
@@ -5050,6 +5066,8 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      floorEnforcedEntries: reroute.entries,
+      budgetGapDisclosures: keptBudgetGaps.map((it) => it.gap),
       postedInline,
       postedFresh,
       fixedFindings,
@@ -5140,6 +5158,8 @@ function composeReviewBody(
       remediation,
       deferredCount: deferredSuggestions.length,
       floorEnforced: reroute.indices,
+      floorEnforcedEntries: reroute.entries,
+      budgetGapDisclosures: keptBudgetGaps.map((it) => it.gap),
       postedInline,
       postedFresh,
       fixedFindings,
@@ -5393,6 +5413,8 @@ function composeReviewBody(
     remediation,
     deferredCount: deferredSuggestions.length,
     floorEnforced: reroute.indices,
+    floorEnforcedEntries: reroute.entries,
+    budgetGapDisclosures: keptBudgetGaps.map((it) => it.gap),
     postedInline,
     postedFresh,
     fixedFindings,

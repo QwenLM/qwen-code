@@ -280,6 +280,8 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       fixedFindings: [],
     });
   });
@@ -378,6 +380,8 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       fixedFindings: [{ id: 'R1-2', by: 'the guard rewrite' }],
     });
     expect(() =>
@@ -432,6 +436,8 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       fixedFindings: [],
       draftedIds: ['R1-1'],
     });
@@ -483,6 +489,8 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       fixedFindings: [],
     });
     authMock.mockReturnValue({
@@ -1514,6 +1522,8 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'No issues found. LGTM!',
       cappedBy: [],
       floorEnforced: [],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       fixedFindings: [],
     });
     submitAoneMock.mockReturnValue({
@@ -1545,6 +1555,8 @@ describe('submit posts an authorised Aone target through a1', () => {
       body: 'No issues found. LGTM!',
       cappedBy: [],
       floorEnforced: [],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       fixedFindings: [],
     });
     submitAoneMock.mockReturnValue({
@@ -1709,6 +1721,8 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       fixedFindings: [],
     });
   });
@@ -2776,6 +2790,8 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [0],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       fixedFindings: [],
     });
     const renumbered = {
@@ -2941,6 +2957,8 @@ describe('the Aone submit receipt (producer half of the audit contract)', () => 
       body: 'One confirmed blocker blocks the merge.',
       cappedBy: [],
       floorEnforced: [],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       fixedFindings: [],
     });
   });

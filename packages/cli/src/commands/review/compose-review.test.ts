@@ -5704,6 +5704,8 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
       cappedBy: [],
       downgraded: false,
       floorEnforced: [],
+      floorEnforcedEntries: [],
+      budgetGapDisclosures: [],
       postedInline: 0,
       postedFresh: 0,
       downgradedFrom: null,

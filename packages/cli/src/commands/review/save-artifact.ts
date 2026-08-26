@@ -49,7 +49,15 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 interface PersistedVerdict
   extends Omit<
     ComposeReviewResult,
-    'postedInline' | 'postedFresh' | 'prevPostedInline' | 'fixedFindings'
+    | 'postedInline'
+    | 'postedFresh'
+    | 'prevPostedInline'
+    | 'fixedFindings'
+    // Submit-time gate channels, live-only: the validator neither reads
+    // nor writes them, so carrying them here would advertise fields no
+    // artifact contains (the `prevPostedInline` precedent).
+    | 'floorEnforcedEntries'
+    | 'budgetGapDisclosures'
   > {
   verdictLine: string;
   /**

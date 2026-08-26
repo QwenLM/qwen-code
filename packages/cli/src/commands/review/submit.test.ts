@@ -4317,6 +4317,186 @@ describe('the thread lifecycle', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
+  it('refuses a floor-rerouted entry whose PATH re-voices an id it also rules fixed (#9940 review)', () => {
+    // The reroute CONSTRUCTS each deferral entry from the comment's
+    // path (as `file`) and its whole marker-stripped body (as `title`),
+    // and the deferral list renders both verbatim. An id that sits in
+    // the path never rides the claim line the comments leg reads, so
+    // the constructed entry is the only scan that can reach it (#9940
+    // review).
+    seedThreads([]);
+    const review = payload(
+      [
+        {
+          path: 'src/R2-1.ts',
+          line: 4,
+          body: '**[Suggestion]** the null check is missing',
+        },
+      ],
+      {
+        severityFloor: 'critical',
+        fixedFindings: [{ id: 'R2-1', by: 'the rewrite' }],
+      },
+    );
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /rerouted path.*re-posts R2-1/s,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a floor-rerouted entry whose BODY re-voices an id past the claim line (#9940 review)', () => {
+    // The rerouted title is the WHOLE marker-stripped body collapsed to
+    // one line — an id on line two of the draft rides into the posted
+    // deferral list past the claim-line leg, which reads line one only
+    // (#9940 review).
+    seedThreads([]);
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** the null check is missing\n\nSame root cause as R2-1 — the check was removed.',
+        },
+      ],
+      {
+        severityFloor: 'critical',
+        fixedFindings: [{ id: 'R2-1', by: 'the rewrite' }],
+      },
+    );
+    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+      /rerouted body.*re-posts R2-1/s,
+    );
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses a budget-gap disclosure re-voicing an id it also rules fixed (#9940 review)', () => {
+    // `Budget gap:` lines are parsed from sub-agent transcripts and
+    // rendered VERBATIM into the posted body — no payload state field
+    // carries them, so a retired id named in one escapes every leg that
+    // reads only payload fields: the post would resolve R1-2's thread
+    // while the same body publicly names R1-2 as not fully verified
+    // (#9940 review).
+    const diffPath = join(dir, 'gap-diff.txt');
+    writeFileSync(diffPath, 'diff');
+    const planPath = join(dir, 'gap-plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        srcDiffLines: 10,
+        diffLines: 10,
+        files: [],
+        chunks: [{ id: 1, startLine: 1, endLine: 1 }],
+      }),
+    );
+    const d = promptRecordDir(planPath);
+    mkdirSync(d, { recursive: true });
+    const launch =
+      'You are reviewing chunk 1 of 1.\n' +
+      `read_file(file_path="${diffPath}", offset=0, limit=100)`;
+    writeFileSync(join(d, 'chunk-1.txt'), launch);
+    writeFileSync(briefPath(planPath, 'chunk-1'), 'chunk-1 brief');
+    const old = new Date(2020, 0, 1);
+    utimesSync(planPath, old, old);
+    const sub = join(dir, 'subagents', 'SUBG');
+    mkdirSync(sub, { recursive: true });
+    const base = {
+      agentId: 'g1',
+      agentName: 'general-purpose',
+      sessionId: 'SUBG',
+    };
+    writeFileSync(
+      join(sub, 'agent-g1.jsonl'),
+      [
+        {
+          ...base,
+          type: 'user',
+          message: { role: 'user', parts: [{ text: launch }] },
+        },
+        {
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  name: 'read_file',
+                  args: { file_path: diffPath, offset: 0, limit: 100 },
+                },
+              },
+            ],
+          },
+        },
+        {
+          ...base,
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  name: 'read_file',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        },
+        {
+          ...base,
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                text:
+                  'Walked chunk 1.\n' +
+                  "Budget gap: R1-2's resolve-leg pairing at N>1",
+              },
+            ],
+          },
+        },
+      ]
+        .map((x) => JSON.stringify(x))
+        .join('\n') + '\n',
+    );
+    seedThreads([
+      {
+        id: 'T1',
+        commentId: 1001,
+        body: '**[Critical]** R1-2: the guard drops a valid case',
+      },
+    ]);
+    const review = payload([], {
+      planPath,
+      fixedFindings: [{ id: 'R1-2', by: 'the fix' }],
+    });
+
+    const prevDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    const prevSession = process.env['QWEN_CODE_SESSION_ID'];
+    process.env['QWEN_CODE_PROJECT_DIR'] = dir;
+    process.env['QWEN_CODE_SESSION_ID'] = 'SUBG';
+    const sessionRecDir = join('.qwen', 'tmp', 's-SUBG');
+    mkdirSync(sessionRecDir, { recursive: true });
+    writeFileSync(
+      join(sessionRecDir, 'qwen-skill-args-review.txt'),
+      'https://github.com/QwenLM/qwen-code/pull/6771\n',
+    );
+    try {
+      expect(() => runSubmit(authorizedPost({ review }))).toThrow(
+        /budgetGapDisclosures\[0\].*re-posts R1-2/s,
+      );
+    } finally {
+      rmSync(sessionRecDir, { recursive: true, force: true });
+      if (prevDir === undefined) delete process.env['QWEN_CODE_PROJECT_DIR'];
+      else process.env['QWEN_CODE_PROJECT_DIR'] = prevDir;
+      if (prevSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
+      else process.env['QWEN_CODE_SESSION_ID'] = prevSession;
+    }
+    expect(ghMock).not.toHaveBeenCalled();
+  });
+
   it('refuses a payload that re-posts an id it also rules fixed', () => {
     const review = payload(
       [
@@ -4384,6 +4564,12 @@ describe('the thread lifecycle', () => {
       carriedRepliesPlanned: 1,
       threadsResolvedPlanned: 1,
     });
+    // The planning line phrases the count as a PLAN — the dry run
+    // writes nothing, and a past-tense "resolved" beside the
+    // not-posting line would claim and deny the same resolve in one
+    // stream (#9940 review).
+    const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(stderr).toContain('thread(s) to resolve');
   });
 
   it('a body-Critical re-report of a fixed id is the same contradiction, refused', () => {
@@ -4494,6 +4680,11 @@ describe('the thread lifecycle', () => {
     expect(resolveCalls()).toHaveLength(1);
     const stderr = writeStderrSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(stderr).toContain('resolveReviewThread(T9) failed');
+    // The planning line said "to resolve"; the failed mutation then names
+    // its own warning. A past-tense "1 thread(s) resolved" ahead of that
+    // warning would assert and deny the same resolve in one stream
+    // (#9940 review).
+    expect(stderr).not.toMatch(/thread\(s\) resolved for/);
     expect(stdoutJson()).toMatchObject({
       posted: true,
       threadActionFailures: 1,
@@ -4628,22 +4819,24 @@ describe('the thread lifecycle', () => {
     expect(ghMock).not.toHaveBeenCalled();
   });
 
-  it('refuses a fixed ruling whose `by` re-voices an id the rulings retire (#9940 review)', () => {
-    // `by` rides verbatim into the posted `R<id> fixed by <by>` reply —
-    // one pass may not retire R1-2 and publicly assert it still stands.
+  it('a `by` naming its own or a sibling fixed id is self-consistent — it posts (#9940 review)', () => {
+    // Every id a scan of `by` can catch is a member of `fixedFindings` —
+    // already singly ruled fixed in this same payload — so such a leg
+    // can only refuse self-consistent payloads (an own-id or a sibling
+    // cross-reference), never a standing-vs-fixed contradiction, and
+    // its refusal text misdiagnoses a ruling that IS already one way.
+    // Real re-posts ride the channels the gate still scans; this one is
+    // exempt (#9940 review).
+    seedThreads([]);
     const review = payload([], {
       fixedFindings: [
         { id: 'R1-2', by: 'the parser rewrite' },
-        {
-          id: 'R1-3',
-          by: 'R1-2 still stands at HEAD — the rewrite regressed it',
-        },
+        { id: 'R1-3', by: 'the same rewrite that retired R1-2' },
+        { id: 'R2-1', by: 'R2-1 addressed by the revert in abc' },
       ],
     });
-    expect(() => runSubmit(authorizedPost({ review }))).toThrow(
-      /contradicts itself/,
-    );
-    expect(ghMock).not.toHaveBeenCalled();
+    runSubmit(authorizedPost({ review }));
+    expect(stdoutJson()).toMatchObject({ posted: true });
   });
 
   it('refuses a deferral entry whose FILE re-voices an id it also rules fixed (#9940 review)', () => {
@@ -4678,6 +4871,40 @@ describe('the thread lifecycle', () => {
       /contradicts itself/,
     );
     expect(ghMock).not.toHaveBeenCalled();
+  });
+
+  it('a fence-opening draft posts un-stamped — the fence survives the post (#9940 review)', () => {
+    seedThreads([]);
+    // A plan + prev ledger so the round's marker rides and the stamp
+    // loop runs — the marker exists under attribution off too.
+    const planPath = file('plan-fence.json', { prNumber: 6777 });
+    file('qwen-review-pr-6777-prev-ledger.json', {
+      v: 1,
+      round: 3,
+      findings: [],
+    });
+    const review = payload(
+      [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** ```diff\n-old\n+new\n```\n\nthe pin moved',
+        },
+      ],
+      { planPath },
+    );
+    runSubmit(authorizedPost({ review }), '0.21.3', { attribution: false });
+    const comments = reviewPost().comments as Array<{ body: string }>;
+    // The posted (marker-stripped) body still LEADS with the fence — a
+    // stamp would have glued the id in front of the backticks, and the
+    // first line would no longer be a CommonMark fence opener (#9940
+    // review).
+    expect(comments[0]!.body.startsWith('```diff')).toBe(true);
+    expect(
+      writeStderrSpy.mock.calls.some((c) =>
+        String(c[0]).includes('left un-stamped'),
+      ),
+    ).toBe(true);
   });
 
   it('a modelId naming a retired id posts under attribution OFF — the field renders nothing (#9940 review)', () => {
