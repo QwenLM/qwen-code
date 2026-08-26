@@ -9,8 +9,10 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = readFileSync('.github/workflows/release.yml', 'utf8');
+const releaseYaml = parse(workflow);
 const cuaReleaseWorkflow = readFileSync(
   '.github/workflows/cd-cua-driver.yml',
   'utf8',
@@ -80,23 +82,52 @@ describe('CUA release workflow', () => {
 });
 
 describe('release workflow', () => {
-  it('restores shared ECS workspace ownership before every checkout', () => {
-    const checkoutCount = (workflow.match(/- name: 'Checkout'/g) ?? []).length;
-    const restoreCount = (
-      workflow.match(/- name: 'Restore workspace ownership'/g) ?? []
-    ).length;
+  it('cleans every shared ECS workspace before checkout', () => {
+    const checkoutJobs = Object.entries(releaseYaml.jobs).filter(([, job]) =>
+      (job.steps ?? []).some((step) =>
+        String(step.uses ?? '').includes('actions/checkout'),
+      ),
+    );
+    const cleanupCopies = [];
 
-    const beforeEachCheckout = workflow
-      .split("- name: 'Checkout'")
-      .slice(0, -1);
-
-    expect(checkoutCount).toBe(5);
-    expect(restoreCount).toBe(checkoutCount);
-    for (const prefix of beforeEachCheckout) {
-      expect(
-        prefix.lastIndexOf("- name: 'Restore workspace ownership'"),
-      ).toBeGreaterThan(prefix.lastIndexOf('steps:'));
+    expect(checkoutJobs.map(([id]) => id)).toEqual([
+      'prepare',
+      'quality',
+      'integration_none',
+      'integration_docker',
+      'publish',
+    ]);
+    for (const [id, job] of checkoutJobs) {
+      const checkoutIndex = job.steps.findIndex((step) =>
+        String(step.uses ?? '').includes('actions/checkout'),
+      );
+      const restoreIndex = job.steps.findIndex(
+        (step) => step.name === 'Restore workspace ownership',
+      );
+      const cleanup = job.steps[restoreIndex]?.run;
+      expect(restoreIndex, id).toBeGreaterThanOrEqual(0);
+      expect(restoreIndex, id).toBeLessThan(checkoutIndex);
+      expect(cleanup, id).toContain(
+        'find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +',
+      );
+      cleanupCopies.push(cleanup);
     }
+    for (const copy of cleanupCopies.slice(1)) {
+      expect(copy).toBe(cleanupCopies[0]);
+    }
+  });
+
+  it('checks docker availability before the docker checkout', () => {
+    const steps = releaseYaml.jobs.integration_docker.steps;
+    const preflightIndex = steps.findIndex(
+      (step) => step.name === 'Check docker daemon',
+    );
+    const checkoutIndex = steps.findIndex((step) =>
+      String(step.uses ?? '').includes('actions/checkout'),
+    );
+    expect(preflightIndex).toBeGreaterThanOrEqual(0);
+    expect(preflightIndex).toBeLessThan(checkoutIndex);
+    expect(steps[preflightIndex].run).toContain('docker info');
   });
 
   it('fires the fleet-moving npm-published dispatch on stable releases only', () => {
