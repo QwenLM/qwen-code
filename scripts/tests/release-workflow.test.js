@@ -513,3 +513,47 @@ describe('Live Host feed contract', () => {
     );
   });
 });
+
+describe('release lane runner routing', () => {
+  // The exact conditional runs-on the ECS migration routes the release
+  // lanes through: repository guard + MAINTAINER_ECS_RUNNER_DISABLED kill
+  // switch + both the ecs-qwen and ubuntu-latest branches. Same pinning
+  // shape as qwen-autofix-workflow.test.js's heavy-job runs-on tripwire.
+  const ecsRunsOn =
+    "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}";
+
+  it('pins every routed release job to the conditional ECS runs-on', () => {
+    const conditionalJobs = [
+      'prepare',
+      'quality',
+      'integration_none',
+      'integration_docker',
+      'publish',
+    ];
+    for (const name of conditionalJobs) {
+      const job = releaseYaml.jobs[name];
+      expect(job, `job missing from release.yml: ${name}`).toBeTruthy();
+      // Reverting any lane to a hosted runner, dropping the kill-switch
+      // clause, or typoing the expression must fail here — an unpinned
+      // revert would silently re-pin releases to hosted capacity (the
+      // stall this migration exists to fix) or defeat the kill switch.
+      expect(job['runs-on'], `runs-on drifted on job: ${name}`).toBe(
+        ecsRunsOn,
+      );
+    }
+  });
+
+  it('keeps the failure notifier on an ephemeral hosted runner', () => {
+    // notify_failure exists to report failures OF the ECS pool; in
+    // post-claim pool failures (runner crash, pool-wide loss) its `if:`
+    // gate opens while the pool is wedged, so routing it back onto the
+    // pool would kill the alert chain. The job is gh/jq-only, so hosted
+    // capacity costs nothing — sibling failure notifiers (release-sdk*,
+    // release-vscode-companion, qwen-code-pr-review's fallback comment)
+    // stay hosted for exactly this reason.
+    expect(releaseYaml.jobs.notify_failure['runs-on']).toBe('ubuntu-latest');
+    expect(releaseYaml.jobs.notify_failure['runs-on']).not.toContain(
+      'ecs-qwen',
+    );
+  });
+});
