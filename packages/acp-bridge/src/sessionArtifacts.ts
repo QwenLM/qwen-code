@@ -244,6 +244,9 @@ interface StoredArtifact extends NormalizedArtifact {
   durableTombstoneRequired?: boolean;
   hideWorkspacePath?: boolean;
   missingFromStatError?: boolean;
+  lastObservedSha256?: string;
+  lastObservedSizeBytes?: number;
+  lastObservedMtimeMs?: number;
 }
 
 interface WorkspaceStatusExpected {
@@ -1749,9 +1752,14 @@ export class SessionArtifactStore {
         );
       }
       artifact.lastStatAt = options.now ?? Date.now();
+      const observationChanged =
+        !status.escaped &&
+        status.status !== 'missing' &&
+        recordWorkspaceObservation(artifact, status);
       if (
         artifact.status !== previousStatus ||
-        artifact.sizeBytes !== previousSizeBytes
+        artifact.sizeBytes !== previousSizeBytes ||
+        observationChanged
       ) {
         artifact.updatedAt = new Date(artifact.lastStatAt).toISOString();
       }
@@ -1787,7 +1795,7 @@ export class SessionArtifactStore {
         action: 'removed',
         artifactId: existing.id,
         artifact: toRemovedPublicArtifact(existing, removedAt),
-        reason: 'explicit',
+        reason: 'eviction',
         durableTombstoneRequired:
           existing.durableTombstoneRequired ||
           existing.retention !== 'ephemeral'
@@ -3287,6 +3295,7 @@ async function getWorkspaceStatus(
           status: 'changed',
           sizeBytes: stat.size,
           mtimeMs: stat.mtimeMs,
+          sha256,
         };
       }
       return {
@@ -3371,6 +3380,37 @@ function recordedWorkspaceSizeBytes(
     return recorded;
   }
   return artifact.sizeBytes;
+}
+
+function recordWorkspaceObservation(
+  artifact: StoredArtifact,
+  status: {
+    sha256?: string;
+    sizeBytes?: number;
+    mtimeMs?: number;
+  },
+): boolean {
+  const hadObservation =
+    artifact.lastObservedSha256 !== undefined ||
+    artifact.lastObservedSizeBytes !== undefined ||
+    artifact.lastObservedMtimeMs !== undefined;
+  let changed = false;
+  if (hadObservation) {
+    if (
+      status.sha256 !== undefined &&
+      artifact.lastObservedSha256 !== undefined
+    ) {
+      changed = status.sha256 !== artifact.lastObservedSha256;
+    } else {
+      changed =
+        status.sizeBytes !== artifact.lastObservedSizeBytes ||
+        status.mtimeMs !== artifact.lastObservedMtimeMs;
+    }
+  }
+  artifact.lastObservedSha256 = status.sha256;
+  artifact.lastObservedSizeBytes = status.sizeBytes;
+  artifact.lastObservedMtimeMs = status.mtimeMs;
+  return changed;
 }
 
 function isWorkspaceContentChanged(

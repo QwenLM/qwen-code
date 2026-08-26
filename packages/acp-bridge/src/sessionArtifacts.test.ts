@@ -543,6 +543,108 @@ describe('SessionArtifactStore', () => {
     expect(stillChanged?.updatedAt).toBe(changed?.updatedAt);
   });
 
+  it('advances updatedAt when a changed workspace file is edited again at the same size', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-second-same-size-edit',
+      workspaceCwd: workspace,
+    });
+    const filePath = path.join(workspace, 'report.txt');
+    await fs.writeFile(filePath, 'aaaa');
+    const created = await store.upsertMany([
+      { title: 'Report', workspacePath: 'report.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const createdAt = created.changes[0]?.artifact?.createdAt;
+
+    await fs.writeFile(filePath, 'bbbb');
+    await fs.utimes(
+      filePath,
+      new Date('2026-07-06T00:00:00.000Z'),
+      new Date('2026-07-06T00:00:00.000Z'),
+    );
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const firstEdit = await store.get(artifactId);
+    expect(firstEdit).toMatchObject({ status: 'changed', sizeBytes: 4 });
+    expect(firstEdit?.updatedAt).not.toBe(createdAt);
+
+    await fs.writeFile(filePath, 'cccc');
+    await fs.utimes(
+      filePath,
+      new Date('2026-07-07T00:00:00.000Z'),
+      new Date('2026-07-07T00:00:00.000Z'),
+    );
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const secondEdit = await store.get(artifactId);
+    expect(secondEdit).toMatchObject({ status: 'changed', sizeBytes: 4 });
+    expect(secondEdit?.updatedAt).not.toBe(firstEdit?.updatedAt);
+
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const restat = await store.get(artifactId);
+    expect(restat?.updatedAt).toBe(secondEdit?.updatedAt);
+  });
+
+  it('lets a client record a workspace path after write_file vanish-forget', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's1-write-file-vanish-client-rerecord',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>tmp</html>',
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'alibaba.html',
+          workspacePath: 'alibaba.html',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true },
+    );
+
+    await fs.rm(path.join(workspace, 'alibaba.html'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+    expect(events.at(-1)?.changes).toEqual([
+      expect.objectContaining({
+        action: 'removed',
+        reason: 'eviction',
+      }),
+    ]);
+
+    await fs.writeFile(
+      path.join(workspace, 'alibaba.html'),
+      '<html>kept</html>',
+    );
+    const rerecorded = await store.upsertMany([
+      {
+        title: 'alibaba.html',
+        workspacePath: 'alibaba.html',
+        source: 'client',
+        clientId: 'client-a',
+      },
+    ]);
+    expect(rerecorded.changes).toEqual([
+      expect.objectContaining({
+        action: 'created',
+        artifact: expect.objectContaining({
+          workspacePath: 'alibaba.html',
+          source: 'client',
+        }),
+      }),
+    ]);
+  });
+
   it('ignores a published content hash supplied by an untrusted caller', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-untrusted-published-hash',
