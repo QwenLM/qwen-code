@@ -394,9 +394,19 @@ describe('emit-workflow — where it writes', () => {
     writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
     run(plan);
     const scriptDir = dirname(reviewWorkflowScriptPath(plan));
-    expect(readdirSync(scriptDir).filter((n) => n.endsWith('.tmp'))).toEqual(
-      [],
-    );
+    const tempFiles = () =>
+      readdirSync(scriptDir).filter((n) => n.endsWith('.tmp'));
+    expect(tempFiles()).toEqual([]);
+
+    // The failed-write half: the rename throws AFTER the temp file exists,
+    // the case the finally cleanup exists for. A non-empty directory at the
+    // target makes renameSync throw on every platform.
+    const scriptPath = reviewWorkflowScriptPath(plan);
+    rmSync(scriptPath);
+    mkdirSync(scriptPath);
+    writeFileSync(join(scriptPath, 'blocker'), 'keep me out', 'utf8');
+    expect(() => run(plan)).toThrow();
+    expect(tempFiles()).toEqual([]);
   });
 
   it('names a script per plan, so concurrent reviews do not overwrite each other', () => {
@@ -426,6 +436,34 @@ describe('emit-workflow — where it writes', () => {
     ).toThrow(/cannot read the rules/);
     expect(readRecordedPrompts(plan).size).toBe(0);
     expect(existsSync(reviewWorkflowScriptPath(plan))).toBe(false);
+  });
+
+  it('threads --rules through the handler into every reviewing brief', () => {
+    const plan = join(dir, 'plan.json');
+    writeFileSync(plan, JSON.stringify(localPlan()), 'utf8');
+    const rulesPath = join(dir, 'rules.md');
+    writeFileSync(
+      rulesPath,
+      'RULE: every brief must carry this — MARKER-rules-7c1e',
+      'utf8',
+    );
+
+    (emitWorkflowCommand.handler as (a: unknown) => void)({
+      plan,
+      rules: rulesPath,
+    });
+
+    expect(existsSync(reviewWorkflowScriptPath(plan))).toBe(true);
+    const keys = [...readRecordedPrompts(plan).keys()];
+    // Agent 7 runs deterministic build and test commands, not a review, so
+    // its brief carries no rules; every reviewing role's does.
+    const reviewing = keys.filter((key) => key !== '7');
+    expect(reviewing.length).toBeGreaterThan(1);
+    for (const key of reviewing) {
+      expect(readFileSync(briefPath(plan, key), 'utf8')).toContain(
+        'MARKER-rules-7c1e',
+      );
+    }
   });
 });
 

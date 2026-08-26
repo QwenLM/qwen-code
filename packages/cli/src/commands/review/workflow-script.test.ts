@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import * as vm from 'node:vm';
 import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   buildReviewWorkflowScript,
@@ -17,13 +18,36 @@ import {
 // Every case below runs the REAL output of `buildReviewWorkflowScript`, so a
 // roster that serialized wrong would fail these as surely as a broken loop.
 //
-// The harness is an analogue of the sandbox, not the sandbox itself:
-// `createWorkflowSandbox` is not exported from the core package, and importing
-// it would make this a cross-package change for no gain in what is being
-// checked — this script's own behaviour. The one assumption is the documented
-// one: `export const meta = {...}` is stripped and the rest runs as an async
-// function body. The real runtime executes it end-to-end when the skill is
-// wired to it.
+// The harness mirrors the runtime's execution shape (workflow-sandbox.ts)
+// rather than importing it — `createWorkflowSandbox` is not exported from
+// the core package, and exporting it for this test would be a cross-package
+// change for no gain in what is being checked:
+//   - the meta block is STRIPPED, never executed: the sandbox parses it as
+//     a pure literal, so no live `meta` binding may reach the body;
+//   - the body runs inside the runtime's strict-mode async IIFE wrapper, so
+//     an undeclared assignment throws here like it throws at dispatch;
+//   - the body runs in a vm context binding only the globals this harness
+//     stands in for — a host-only global like `setTimeout` fails here like
+//     it fails in the sandbox;
+//   - the `agent` stub applies the runtime's option gates.
+// What it does not mirror: the sandbox's throwing Date/Math replacements
+// (a fresh vm context has a real Date, so the determinism case asserts on
+// the source instead) and the meta literal parser (not exported from the
+// core package; the meta block's purity is asserted on the source below).
+//
+// The runtime's option allowlist (workflow-sandbox.ts): a key outside it is
+// a typo the sandbox refuses at dispatch, so it must be refused here.
+const KNOWN_AGENT_OPTS = [
+  'label',
+  'phase',
+  'schema',
+  'model',
+  'isolation',
+  'agentType',
+  'stallMs',
+  'workingDir',
+];
+
 async function runScript(
   script: string,
   dispatch: (prompt: string, opts: unknown) => Promise<unknown>,
@@ -37,24 +61,51 @@ async function runScript(
   const logs: string[] = [];
   const phases: string[] = [];
 
-  const agent = async (prompt: string, opts: unknown) => {
-    dispatched.push({ prompt, opts });
-    return dispatch(prompt, opts);
+  // The runtime's gates: an unknown option is refused, an empty workingDir
+  // is not "no pin", and workingDir together with isolation is a
+  // contradiction about who owns the directory's lifetime.
+  const agent = async (prompt: string, opts: Record<string, unknown>) => {
+    const options = opts ?? {};
+    for (const key of Object.keys(options)) {
+      if (!KNOWN_AGENT_OPTS.includes(key)) {
+        throw new Error(`agent({${key}}): unknown option.`);
+      }
+    }
+    if (options['workingDir'] !== undefined) {
+      if (
+        typeof options['workingDir'] !== 'string' ||
+        options['workingDir'].trim().length === 0
+      ) {
+        throw new Error('agent({workingDir}): must be a non-empty string.');
+      }
+      if (options['isolation'] !== undefined) {
+        throw new Error(
+          'agent({workingDir, isolation}): incompatible options.',
+        );
+      }
+    }
+    dispatched.push({ prompt, opts: options });
+    return dispatch(prompt, options);
   };
   // Mirrors the runtime's errors-as-data contract: a thunk that rejects
   // becomes a `null` element, and the call itself never rejects.
   const parallel = async (thunks: Array<() => Promise<unknown>>) =>
     Promise.all(thunks.map((t) => t().catch(() => null)));
+  const phase = (title: string): void => {
+    phases.push(title);
+  };
+  const log = (message: string): void => {
+    logs.push(message);
+  };
 
-  const body = script.replace('export const meta =', 'const meta =');
-  const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
-  const fn = new AsyncFunction('agent', 'parallel', 'phase', 'log', body);
-  const result = await fn(
-    agent,
-    parallel,
-    (t: string) => phases.push(t),
-    (m: string) => logs.push(m),
-  );
+  // Strip the meta block exactly like the runtime does — it is parsed as a
+  // pure literal there, never executed, so the body must run with no `meta`
+  // binding either.
+  const body = script.slice(script.indexOf('\n};') + '\n};'.length);
+  // The runtime's wrapper: an async IIFE under 'use strict'.
+  const wrapped = `(async () => {'use strict';\n${body}\n})()`;
+  const context = vm.createContext({ agent, parallel, phase, log });
+  const result: unknown = await new vm.Script(wrapped).runInContext(context);
   return { result, dispatched, logs, phases };
 }
 
@@ -79,6 +130,11 @@ describe('the generated Step 3A fan-out script', () => {
     expect(script).not.toContain('Date.now');
     expect(script).not.toContain('Math.random');
     expect(script).not.toContain('new Date');
+    // The sandbox's safeDate throws on these forms too, and the vm harness
+    // cannot stand in for it — a fresh context carries a working Date.
+    expect(script).not.toContain('Date.parse');
+    expect(script).not.toContain('Date.UTC');
+    expect(script).not.toMatch(/\bDate\s*\(/);
   });
 
   it('dispatches every agent in the roster, once each, in one phase', async () => {
