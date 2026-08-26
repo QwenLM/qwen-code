@@ -450,7 +450,7 @@ export interface LlmChatSendOptions {
   disableModelFallbacks?: boolean;
 }
 
-/** @deprecated Use `LlmChatSendOptions`; retained for one release. */
+/** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
 export type GeminiChatSendOptions = LlmChatSendOptions;
 
 interface TryCompressOptions {

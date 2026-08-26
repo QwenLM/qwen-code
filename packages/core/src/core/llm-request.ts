@@ -15,8 +15,8 @@ import { partToString } from '../utils/partUtils.js';
 export type LlmCodeRequest = PartListUnion;
 
 /**
- * @deprecated Use `LlmCodeRequest`. Kept for one release so standalone core
- * package consumers can migrate without a breaking rename.
+ * @deprecated Use `LlmCodeRequest`. Retained until a future major release so
+ * standalone core package consumers can migrate without a breaking rename.
  */
 export type GeminiCodeRequest = LlmCodeRequest;
 

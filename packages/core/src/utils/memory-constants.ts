@@ -75,11 +75,11 @@ export function getAllMemoryFilenames(): string[] {
   return [currentMemoryFilename];
 }
 
-/** @deprecated Use `setMemoryFilename`; retained for one release. */
+/** @deprecated Use `setMemoryFilename`; retained until a future major release. */
 export const setGeminiMdFilename = setMemoryFilename;
 
-/** @deprecated Use `getCurrentMemoryFilename`; retained for one release. */
+/** @deprecated Use `getCurrentMemoryFilename`; retained until a future major release. */
 export const getCurrentGeminiMdFilename = getCurrentMemoryFilename;
 
-/** @deprecated Use `getAllMemoryFilenames`; retained for one release. */
+/** @deprecated Use `getAllMemoryFilenames`; retained until a future major release. */
 export const getAllGeminiMdFilenames = getAllMemoryFilenames;

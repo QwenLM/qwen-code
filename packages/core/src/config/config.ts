@@ -1082,7 +1082,7 @@ export interface ConfigParameters {
   lspClient?: LspClient;
   userMemory?: string;
   memoryFileCount?: number;
-  /** @deprecated Use `memoryFileCount`; retained for one release. */
+  /** @deprecated Use `memoryFileCount`; retained until a future major release. */
   geminiMdFileCount?: number;
   approvalMode?: ApprovalMode;
   contextFileName?: string | string[];
@@ -6379,12 +6379,12 @@ export class Config {
     this.memoryFileCount = count;
   }
 
-  /** @deprecated Use `getMemoryFileCount`; retained for one release. */
+  /** @deprecated Use `getMemoryFileCount`; retained until a future major release. */
   getGeminiMdFileCount(): number {
     return this.getMemoryFileCount();
   }
 
-  /** @deprecated Use `setMemoryFileCount`; retained for one release. */
+  /** @deprecated Use `setMemoryFileCount`; retained until a future major release. */
   setGeminiMdFileCount(count: number): void {
     this.setMemoryFileCount(count);
   }

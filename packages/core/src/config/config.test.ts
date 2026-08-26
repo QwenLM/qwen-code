@@ -608,7 +608,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('memory file count compatibility', () => {
-    it('keeps the legacy parameter and accessors working for one release', () => {
+    it('keeps the legacy parameter and accessors until a future major release', () => {
       const config = new Config({ ...baseParams, geminiMdFileCount: 2 });
 
       expect(config.getMemoryFileCount()).toBe(2);
