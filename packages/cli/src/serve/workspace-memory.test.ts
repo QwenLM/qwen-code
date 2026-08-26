@@ -27,7 +27,7 @@ import {
 import { createMutationGate } from './auth.js';
 import {
   InvalidClientIdError,
-  type AcpSessionBridge,
+  type WorkspaceEventBridge,
 } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
@@ -38,7 +38,7 @@ function buildBridgeStub(
   opts: {
     knownIds?: Iterable<string>;
   } = {},
-): AcpSessionBridge & { events: RecordedEvent[] } {
+): WorkspaceEventBridge & { events: RecordedEvent[] } {
   const events: RecordedEvent[] = [];
   const known = new Set<string>(opts.knownIds ?? []);
   return {
@@ -49,75 +49,11 @@ function buildBridgeStub(
     knownClientIds() {
       return new Set(known);
     },
-    // Methods below are not used by the memory routes; throw to keep
-    // unrelated tests from accidentally relying on them.
-    spawnOrAttach: () => {
-      throw new Error('not implemented');
-    },
-    loadSession: () => {
-      throw new Error('not implemented');
-    },
-    resumeSession: () => {
-      throw new Error('not implemented');
-    },
-    sendPrompt: () => {
-      throw new Error('not implemented');
-    },
-    cancelSession: () => {
-      throw new Error('not implemented');
-    },
-    subscribeEvents: () => {
-      throw new Error('not implemented');
-    },
-    closeSession: () => {
-      throw new Error('not implemented');
-    },
-    updateSessionMetadata: () => {
-      throw new Error('not implemented');
-    },
-    respondToPermission: () => {
-      throw new Error('not implemented');
-    },
-    respondToSessionPermission: () => {
-      throw new Error('not implemented');
-    },
-    listWorkspaceSessions: () => {
-      throw new Error('not implemented');
-    },
-    recordHeartbeat: () => {
-      throw new Error('not implemented');
-    },
-    getHeartbeatState: () => undefined,
-    getWorkspaceMcpStatus: async () => {
-      throw new Error('not implemented');
-    },
-    getWorkspaceSkillsStatus: async () => {
-      throw new Error('not implemented');
-    },
-    getWorkspaceProvidersStatus: async () => {
-      throw new Error('not implemented');
-    },
-    getSessionContextStatus: async () => {
-      throw new Error('not implemented');
-    },
-    getSessionSupportedCommandsStatus: async () => {
-      throw new Error('not implemented');
-    },
-    setSessionModel: async () => {
-      throw new Error('not implemented');
-    },
-    killSession: async () => true,
-    detachClient: async () => {},
-    sessionCount: 0,
-    pendingPermissionCount: 0,
-    killAllSync: () => {},
-    shutdown: async () => {},
-    preheat: async () => {},
-  } as unknown as AcpSessionBridge & { events: RecordedEvent[] };
+  };
 }
 
 function buildApp(opts: {
-  bridge: AcpSessionBridge;
+  bridge: WorkspaceEventBridge;
   boundWorkspace: string;
   strictNoToken?: boolean;
   collectStatus?: Parameters<

@@ -6,6 +6,7 @@
 
 import { callAgentViewSupervisor } from './supervisor-client.js';
 import type {
+  AgentViewInputKind,
   AgentViewWorkerControlEvent,
   AgentViewSessionState,
   AgentViewWorkerEvent,
@@ -45,6 +46,7 @@ export interface AgentViewWorkerStateReport {
   cwd?: string;
   summary?: string;
   waitingFor?: string;
+  inputKind?: AgentViewInputKind;
   lastResult?: string;
 }
 
@@ -54,6 +56,11 @@ export interface AgentViewWorkerHeartbeat {
 
 const lastStateReportKeys = new Map<string, string>();
 const stateReportChains = new Map<string, Promise<void>>();
+const pendingStateReports = new Map<string, AgentViewWorkerStateReport>();
+const activePrompts = new Map<
+  string,
+  { promptId: string; phase: 'received' | 'ready' | 'accepted' }
+>();
 
 export function createAgentViewWorkerSidebandEnv(
   config: AgentViewWorkerSidebandEnv,
@@ -105,6 +112,10 @@ export async function sendAgentViewWorkerEvent(
   if (!sideband) return undefined;
   return callAgentViewSupervisor(sideband.sidebandEndpoint, 'workerEvent', {
     ...event,
+    // Stamp at emit time so the dequeue ordering guard (event.at vs
+    // lastQueuedPromptAt) protects in production — worker events are
+    // otherwise built without an `at` field.
+    at: new Date().toISOString(),
     sessionId: sideband.sessionId,
     token: sideband.token,
   });
@@ -115,6 +126,10 @@ export async function readAgentViewWorkerControlEvents(
 ): Promise<AgentViewWorkerControlEvent[]> {
   const sideband = readAgentViewWorkerSidebandEnv(env);
   if (!sideband) return [];
+  const pendingReport = pendingStateReports.get(sideband.sessionId);
+  if (pendingReport) {
+    await reportAgentViewWorkerState(pendingReport, env);
+  }
 
   const result = await callAgentViewSupervisor(
     sideband.sidebandEndpoint,
@@ -129,7 +144,16 @@ export async function readAgentViewWorkerControlEvents(
   if (!isRecord(result)) return [];
   const events = result['events'];
   if (!Array.isArray(events)) return [];
-  return events.filter(isAgentViewWorkerControlEvent);
+  return events.filter(isAgentViewWorkerControlEvent).filter((event) => {
+    if (event.type !== 'prompt') return true;
+    const active = activePrompts.get(sideband.sessionId);
+    if (active?.promptId === event.promptId) return false;
+    activePrompts.set(sideband.sessionId, {
+      promptId: event.promptId,
+      phase: 'received',
+    });
+    return true;
+  });
 }
 
 export async function reportAgentViewWorkerState(
@@ -138,21 +162,61 @@ export async function reportAgentViewWorkerState(
 ): Promise<void> {
   const sideband = readAgentViewWorkerSidebandEnv(env);
   if (!sideband) return;
+  const activePrompt = activePrompts.get(sideband.sessionId);
+  if (
+    activePrompt &&
+    activePrompt.phase === 'received' &&
+    report.sessionState === 'idle'
+  ) {
+    activePrompt.phase = 'ready';
+  }
+  const promptId =
+    activePrompt &&
+    (activePrompt.phase === 'accepted' ||
+      (activePrompt.phase === 'ready' && report.sessionState === 'working'))
+      ? activePrompt.promptId
+      : undefined;
+  if (promptId && activePrompt?.phase === 'ready') {
+    activePrompt.phase = 'accepted';
+  }
+  if (promptId) {
+    pendingStateReports.set(sideband.sessionId, report);
+  }
 
   const event = {
     type: 'state',
     ...report,
+    ...(promptId ? { promptId } : {}),
     // activeCwd is guaranteed by readAgentViewWorkerSidebandEnv and survives
     // a deleted cwd, unlike process.cwd(), which throws ENOENT.
     cwd: report.cwd ?? sideband.activeCwd,
   } as const;
   const key = JSON.stringify(event);
   const sendAndRecord = async () => {
-    if (key === lastStateReportKeys.get(sideband.sessionId)) return;
+    if (key === lastStateReportKeys.get(sideband.sessionId)) {
+      if (pendingStateReports.get(sideband.sessionId) === report) {
+        pendingStateReports.delete(sideband.sessionId);
+      }
+      return;
+    }
 
     try {
       await sendAgentViewWorkerEvent(event, env);
       lastStateReportKeys.set(sideband.sessionId, key);
+      if (pendingStateReports.get(sideband.sessionId) === report) {
+        pendingStateReports.delete(sideband.sessionId);
+      }
+      const currentPrompt = activePrompts.get(sideband.sessionId);
+      if (
+        event.promptId &&
+        currentPrompt?.phase === 'accepted' &&
+        (event.sessionState === 'idle' ||
+          event.sessionState === 'completed' ||
+          event.sessionState === 'stopped' ||
+          event.sessionState === 'failed')
+      ) {
+        activePrompts.delete(sideband.sessionId);
+      }
     } catch {
       lastStateReportKeys.delete(sideband.sessionId);
     }
@@ -190,6 +254,8 @@ export function startAgentViewWorkerHeartbeat(
 export function resetAgentViewWorkerStateReportForTests(): void {
   lastStateReportKeys.clear();
   stateReportChains.clear();
+  pendingStateReports.clear();
+  activePrompts.clear();
 }
 
 function isAgentViewWorkerControlEvent(
@@ -205,8 +271,13 @@ function isAgentViewWorkerControlEvent(
   if (value['type'] === 'redraw') {
     return true;
   }
+  if (value['type'] === 'stop') {
+    return true;
+  }
   if (value['type'] === 'prompt') {
-    return typeof value['text'] === 'string';
+    return (
+      typeof value['promptId'] === 'string' && typeof value['text'] === 'string'
+    );
   }
   return (
     value['type'] === 'answer' &&

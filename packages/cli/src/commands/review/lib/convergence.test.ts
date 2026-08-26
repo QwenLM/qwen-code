@@ -773,6 +773,24 @@ describe('renderMechanismHealth — is the machinery working', () => {
     })!;
     expect(r.en).toContain('re-reads the whole diff');
     expect(r.zh).toContain('重读整个 diff');
+    // The clause splits the shapes that fire it: a recovered round with no
+    // anchor at all, one whose side file holds a GRAFTED anchor the running
+    // identity cannot use, and one whose graft the running round's fetch
+    // refused or resolved to the head. The split is load-bearing: before it,
+    // the wording said the recovered round "had none either" — false beside
+    // a side file that visibly holds the sha, and pointing away from the
+    // actual cause (identity mismatch, or a deterministic refusal the graft
+    // re-derives every round).
+    expect(r.en).toContain(
+      'none at all, one with no certifier, one certified by an identity other than',
+    );
+    expect(r.en).toContain(
+      "or one this round's fetch refused or resolved to the head",
+    );
+    expect(r.en).not.toContain('had none either');
+    expect(r.zh).toContain(
+      '要么完全没有、要么没有认证者、要么由本轮运行身份之外的身份认证、要么被本轮的获取拒绝或解析为头提交',
+    );
     // The termination condition is "an anchor again", not "a clean close":
     // the marker also withholds on a missing fetched sha and on a model
     // identity drift, both of which a cleanly-closed round can carry.
@@ -781,6 +799,33 @@ describe('renderMechanismHealth — is the machinery working', () => {
     // as "until one closes cleanly", which an exact-string pin missed.
     expect(r.en).not.toMatch(/until (a round|one) closes cleanly/);
     expect(r.zh).toContain('直到某一轮的标记重新带上锚点');
+    // The onset is hedged: a fail-closed round that leaves a COMPLETE work
+    // list beside a strictly-earlier anchored own marker is grafted onto
+    // one round later, so "the next review re-reads the whole diff" is
+    // false there and the wording says so. The hedge carries the SAME
+    // usability qualifier as the termination clause: a graft that landed
+    // but the running round cannot use (certifier mismatch, fetch refusal,
+    // resolved to the head) does NOT spare the re-read, and an onset
+    // promising otherwise contradicts the disclosure on exactly that
+    // shape — the one 'discloses a grafted anchor the running model
+    // cannot use' pins with 're-reads the whole diff' still in the body.
+    expect(r.en).toContain(
+      'unless recovery grafts an earlier own anchor that the round running it can use onto the complete work list this round leaves behind',
+    );
+    expect(r.zh).toContain(
+      '除非恢复流程把本轮能使用的更早自有锚点嫁接到本轮留下的完整工作清单上',
+    );
+    // The termination list names BOTH exits: a round whose own marker
+    // carries an anchor again, and a USABLE graft — a grafted anchor whose
+    // certifier mismatches the round running it (or whose fetch refuses it)
+    // re-fires every round without ending the streak, so the exit is a
+    // graft the running round can use, not any graft. Before the clause,
+    // the disclosure predicted an endless re-read on exactly the large-PR
+    // shapes the graft exists for.
+    expect(r.en).toContain(
+      'or a graft lands that the round running it can use',
+    );
+    expect(r.zh).toContain('或落地的嫁接能被运行该轮的评审使用');
     // The design once prescribed a re-anchor round here; the measurements
     // did not bear out its premise, so the shape is disclosed and nothing
     // is recommended.

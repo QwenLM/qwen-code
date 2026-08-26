@@ -117,6 +117,13 @@ export interface CompressionProps {
    * older sessions, which are treated as 'summarize'.
    */
   compressionKind?: 'summarize' | 'fast';
+  /**
+   * Token-count provenance (#9309). The compression paths measure on
+   * different scales, so estimated numbers are rendered with a '~' prefix
+   * to keep consecutive banners from reading as lost context.
+   */
+  originalTokenCountIsEstimated?: boolean;
+  newTokenCountIsEstimated?: boolean;
 }
 
 export interface SummaryProps {
