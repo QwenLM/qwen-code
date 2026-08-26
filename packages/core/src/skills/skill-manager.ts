@@ -458,6 +458,8 @@ export class SkillManager {
       }
     }
 
+    this.qualifyCollidingExtensionSkills(skillsCache);
+
     this.skillsCache = skillsCache;
 
     // Rebuild the activation registry so that newly added/removed `paths:`
@@ -511,6 +513,40 @@ export class SkillManager {
         `(${conditional.length} conditional)`,
     );
     await this.notifyChangeListeners();
+  }
+
+  /**
+   * Renames an extension skill to `<owner>:<name>` when its bare name
+   * already exists at another level or on another extension's skill
+   * (#9408). Unambiguous names keep their manifest form, so existing
+   * references and settings keep matching. gemini-cli#23566 always
+   * qualifies; this qualifies on collision only.
+   */
+  private qualifyCollidingExtensionSkills(
+    skillsCache: Map<SkillLevel, SkillConfig[]>,
+  ): void {
+    const extensionSkills = skillsCache.get('extension') ?? [];
+    if (extensionSkills.length === 0) return;
+
+    const claimed = new Set<string>();
+    for (const level of ['project', 'user', 'bundled'] as const) {
+      for (const skill of skillsCache.get(level) ?? []) {
+        claimed.add(skill.name.toLowerCase());
+      }
+    }
+
+    const counts = new Map<string, number>();
+    for (const skill of extensionSkills) {
+      const bare = skill.name.toLowerCase();
+      counts.set(bare, (counts.get(bare) ?? 0) + 1);
+    }
+
+    for (const skill of extensionSkills) {
+      const bare = skill.name.toLowerCase();
+      if ((counts.get(bare) ?? 0) > 1 || claimed.has(bare)) {
+        skill.name = `${skill.extensionName}:${skill.name}`;
+      }
+    }
   }
 
   /**
@@ -1004,11 +1040,9 @@ export class SkillManager {
           const owner = extension.displayName ?? extension.name;
           skills.push({
             ...skill,
-            // Extension skills are registered under a qualified name so
-            // they cannot collide with user, project, or bundled skills
-            // of the same name (#9408). All consumers see the qualified
-            // form. Mirrors gemini-cli#23566.
-            name: `${owner}:${skill.name}`,
+            // Left unqualified here: collision resolution needs every
+            // level loaded, so refreshCache does it in one pass (#9408).
+            // Mirrors gemini-cli#23566.
             extensionName: owner,
             // Normalize so downstream consumers reading `skill.priority`
             // (e.g. the `/skills` display sort) observe the same value
@@ -1177,6 +1211,11 @@ export class SkillManager {
     if (!this.skillsCache.has(level)) {
       const levelSkills = await this.listSkillsAtLevel(level);
       this.skillsCache.set(level, levelSkills);
+      // Partial cache: only same-extension duplicates are visible here.
+      // Cross-level collisions qualify on the next full refresh.
+      if (level === 'extension') {
+        this.qualifyCollidingExtensionSkills(this.skillsCache);
+      }
     }
   }
 

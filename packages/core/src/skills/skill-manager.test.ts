@@ -870,19 +870,18 @@ Body`);
       });
 
       expect(skills.map((skill) => skill.name)).toEqual([
-        'test-extension:bad-priority',
-        'test-extension:high-priority',
+        'bad-priority',
+        'high-priority',
       ]);
       // The non-number priority should still be normalized on the skill
       // itself so downstream consumers (the /skills display sort) see a
       // clean value.
-      const badSkill = skills.find(
-        (s) => s.name === 'test-extension:bad-priority',
-      );
+      const badSkill = skills.find((s) => s.name === 'bad-priority');
       expect(badSkill?.priority).toBe(0);
+      expect(badSkill?.extensionName).toBe('test-extension');
     });
 
-    it('should namespace extension skills under the providing extension', async () => {
+    it('keeps an extension skill bare while its name is unambiguous', async () => {
       vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
         {
           id: 'rust',
@@ -916,21 +915,194 @@ Body`);
         force: true,
       });
 
-      // Skill names come back prefixed with the owning extension's name.
-      expect(skills.map((s) => s.name)).toEqual([
-        'rust:never-type',
-        'rust:pdf',
-      ]);
-      const namespaced = skills.find((s) => s.name === 'rust:never-type');
-      expect(namespaced?.extensionName).toBe('rust');
-
-      // The bare name no longer resolves; lookups must use the prefixed form.
-      await expect(manager.loadSkill('never-type')).resolves.toBeNull();
+      // Nothing else claims these names, so they stay bare and
+      // invocable without a prefix.
+      expect(skills.map((s) => s.name)).toEqual(['never-type', 'pdf']);
+      for (const skill of skills) {
+        expect(skill.extensionName).toBe('rust');
+      }
+      await expect(manager.loadSkill('never-type')).resolves.toMatchObject({
+        name: 'never-type',
+        level: 'extension',
+      });
       await expect(
         manager.loadSkillForRuntime('rust:never-type'),
+      ).resolves.toBeNull();
+    });
+
+    it('qualifies an extension skill whose bare name a user skill already claims', async () => {
+      const userQwenSkillsDir = path.join(TEST_HOME, '.qwen', 'skills');
+      mockParseYaml.mockImplementation((yamlString: string) =>
+        yaml.parse(yamlString),
+      );
+      vi.mocked(fs.readdir).mockReset();
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        if (String(dirPath) === userQwenSkillsDir) {
+          return Promise.resolve([
+            {
+              name: 'pdf',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+      vi.mocked(fs.readFile).mockImplementation(() =>
+        Promise.resolve('---\nname: pdf\ndescription: User pdf\n---\nBody'),
+      );
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'rust',
+          name: 'rust',
+          version: '1.97.1',
+          isActive: true,
+          path: '/extensions/rust',
+          config: { name: 'rust', version: '1.97.1' },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'pdf',
+              description: 'Rust pdf skill',
+              body: 'Body',
+              filePath: '/extensions/rust/skills/pdf/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+
+      const skills = await manager.listSkills({ force: true });
+
+      const userCopy = skills.find((s) => s.name === 'pdf');
+      const extensionCopy = skills.find((s) => s.name === 'rust:pdf');
+      expect(userCopy?.level).toBe('user');
+      expect(extensionCopy?.level).toBe('extension');
+      expect(extensionCopy?.extensionName).toBe('rust');
+
+      // The user skill keeps the bare name; the extension copy resolves
+      // only as rust:pdf.
+      await expect(manager.loadSkill('pdf')).resolves.toMatchObject({
+        level: 'user',
+      });
+      await expect(manager.loadSkill('pdf', 'extension')).resolves.toBeNull();
+      await expect(manager.loadSkill('rust:pdf')).resolves.toMatchObject({
+        level: 'extension',
+      });
+    });
+
+    it('qualifies a cross-level collision only after a full refresh', async () => {
+      const userQwenSkillsDir = path.join(TEST_HOME, '.qwen', 'skills');
+      mockParseYaml.mockImplementation((yamlString: string) =>
+        yaml.parse(yamlString),
+      );
+      vi.mocked(fs.readdir).mockReset();
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        if (String(dirPath) === userQwenSkillsDir) {
+          return Promise.resolve([
+            {
+              name: 'pdf',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+      vi.mocked(fs.readFile).mockImplementation(() =>
+        Promise.resolve('---\nname: pdf\ndescription: User pdf\n---\nBody'),
+      );
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'rust',
+          name: 'rust',
+          version: '1.97.1',
+          isActive: true,
+          path: '/extensions/rust',
+          config: { name: 'rust', version: '1.97.1' },
+          contextFiles: [],
+          skills: [
+            {
+              name: 'pdf',
+              description: 'Rust pdf skill',
+              body: 'Body',
+              filePath: '/extensions/rust/skills/pdf/SKILL.md',
+              level: 'extension',
+            },
+          ],
+        },
+      ]);
+
+      // A leveled read on a cold manager builds a partial cache: only
+      // same-extension duplicates are visible, so the user claim goes
+      // unnoticed and the bare name still resolves there.
+      await expect(
+        manager.loadSkill('pdf', 'extension'),
       ).resolves.toMatchObject({
-        name: 'rust:never-type',
-        extensionName: 'rust',
+        name: 'pdf',
+        level: 'extension',
+      });
+
+      await manager.listSkills({ force: true });
+
+      // The full refresh re-decides from every level; from here on the
+      // extension copy answers only to its qualified name.
+      await expect(manager.loadSkill('pdf', 'extension')).resolves.toBeNull();
+      await expect(manager.loadSkill('pdf')).resolves.toMatchObject({
+        level: 'user',
+      });
+      await expect(manager.loadSkill('rust:pdf')).resolves.toMatchObject({
+        level: 'extension',
+      });
+    });
+
+    it('qualifies same-named skills from two extensions', async () => {
+      const chatSkill = (extension: string) => ({
+        name: 'chat',
+        description: `${extension} chat`,
+        body: 'Body',
+        filePath: `/extensions/${extension}/skills/chat/SKILL.md`,
+        level: 'extension' as const,
+      });
+      vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+        {
+          id: 'rust',
+          name: 'rust',
+          version: '1.97.1',
+          isActive: true,
+          path: '/extensions/rust',
+          config: { name: 'rust', version: '1.97.1' },
+          contextFiles: [],
+          skills: [chatSkill('rust')],
+        },
+        {
+          id: 'docs',
+          name: 'docs',
+          version: '1.0.0',
+          isActive: true,
+          path: '/extensions/docs',
+          config: { name: 'docs', version: '1.0.0' },
+          contextFiles: [],
+          skills: [chatSkill('docs')],
+        },
+      ]);
+
+      const skills = await manager.listSkills({
+        level: 'extension',
+        force: true,
+      });
+
+      // Both copies get qualified; the bare name resolves to nothing.
+      expect(skills.map((s) => s.name)).toEqual(['docs:chat', 'rust:chat']);
+      await expect(manager.loadSkill('chat')).resolves.toBeNull();
+      await expect(manager.loadSkill('docs:chat')).resolves.toMatchObject({
+        extensionName: 'docs',
       });
     });
 
