@@ -12,8 +12,19 @@
 // repository's only non-Linux, non-GNU signal was silently off, and a macOS
 // failure shipped and sat in `main` (#9220). Nothing here can prove a lane
 // ran; what these tests hold is the wiring that lets it: the triggers, the
-// fail-safe direction of the gate, the nightly's blast radius, and the
-// alerting that makes a nightly failure visible.
+// nightly's blast radius, and the alerting that makes a nightly failure
+// visible.
+//
+// The pull-request trigger and its platform-sensitivity classifier are OFF
+// while the standing Windows failures are being fixed (see the note above
+// test_macos in ci.yml): on pull requests the Windows lane was reporting
+// failures on every PR for defects no PR caused, and neither lane gates a
+// merge. That leaves the nightly as the lanes' ONLY live trigger, so the
+// assertions here are the wiring that keeps it alive — the schedule exists,
+// both lanes accept it, nothing else rides it, and its failure files an
+// issue. Restoring the pull-request path means reverting the commit that
+// carried this change; the classifier script and its tests were left in
+// place so that stays a revert.
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -39,18 +50,25 @@ describe('platform lanes — triggers', () => {
   });
 
   for (const lane of LANES) {
-    it(`${lane} runs on the schedule, the queue, a dispatch, and a sensitive PR`, () => {
+    it(`${lane} runs on the schedule, the queue, and a dispatch`, () => {
       const cond = condOf(lane);
       // Presence AND the disjunction between clauses: an `&&` where a `||`
       // belongs leaves the gate unsatisfiable for a trigger (event_name is
       // single-valued) while a presence-only check stays green.
-      expect(cond).toMatch(/event_name == 'schedule'\s*\|\|/);
       expect(cond).toMatch(/event_name == 'merge_group'\s*\|\|/);
-      expect(cond).toMatch(/event_name == 'workflow_dispatch'\s*\|\|/);
-      expect(cond).toContain("github.event_name == 'pull_request'");
-      expect(cond).toContain(
-        'needs.classify_platform.outputs.platform_sensitive',
-      );
+      expect(cond).toMatch(/event_name == 'schedule'\s*\|\|/);
+      expect(cond).toContain("github.event_name == 'workflow_dispatch'");
+    });
+
+    it(`${lane} stays off the pull-request path while it is red there`, () => {
+      // Half a restoration is worse than none: a pull_request arm put back
+      // without its classifier (or the reverse) either runs the lanes on
+      // every PR or consults an output no job produces. Restore the trigger
+      // by reverting the commit that removed it, not by editing one side.
+      const cond = condOf(lane);
+      expect(cond).not.toContain("'pull_request'");
+      expect(cond).not.toContain('platform_sensitive');
+      expect(ci.jobs[lane].needs).not.toContain('classify_platform');
     });
 
     it(`${lane}'s triggers are alternatives, not requirements`, () => {
@@ -67,11 +85,8 @@ describe('platform lanes — triggers', () => {
         cond.lastIndexOf(')'),
       );
       expect(group).toContain("github.event_name == 'schedule'");
-      expect(group.split('||').length).toBeGreaterThanOrEqual(4);
-      // The only `&&` allowed inside the group is the one binding the
-      // pull-request clause to its classifier output.
+      expect(group.split('||').length).toBeGreaterThanOrEqual(3);
       for (const clause of group.split('||')) {
-        if (clause.includes('platform_sensitive')) continue;
         expect(
           clause,
           `event clause is conjoined: ${clause.trim()}`,
@@ -79,17 +94,10 @@ describe('platform lanes — triggers', () => {
       }
     });
 
-    it(`${lane} skips only on a confident 'false'`, () => {
-      // The fail-safe direction is the whole design: `== 'true'` would turn
-      // every classifier error, every skipped classify job and every empty
-      // output into a silently skipped lane. `!= 'false'` spends runner
-      // minutes instead of coverage.
-      const cond = condOf(lane);
-      expect(cond).toContain("platform_sensitive != 'false'");
-      expect(cond).not.toContain("platform_sensitive == 'true'");
-      // And the gate must survive a skipped or failed classifier job.
-      expect(cond).toContain('!cancelled()');
-      expect(ci.jobs[lane].needs).toContain('classify_platform');
+    it(`${lane} survives an upstream skip`, () => {
+      // classify_pr is still a `needs` edge; without `!cancelled()` a skip
+      // or failure there would skip the lane on the nightly too.
+      expect(condOf(lane)).toContain('!cancelled()');
     });
   }
 
@@ -166,74 +174,25 @@ describe('platform lanes — triggers', () => {
   });
 });
 
-describe('platform lanes — the sensitivity classifier job', () => {
-  const job = ci.jobs.classify_platform;
-
-  it('exists, is cheap, and cannot take the run down with it', () => {
-    expect(job).toBeDefined();
-    expect(job['continue-on-error']).toBe(true);
-    expect(job['timeout-minutes']).toBeLessThanOrEqual(10);
-    // Hosted on purpose: it needs a checkout, and the persistent pool's
-    // workspace is exactly what other jobs have poisoned before.
-    expect(job['runs-on']).toBe('ubuntu-latest');
-    expect(job.outputs.platform_sensitive).toContain(
-      'steps.platform.outputs.platform_sensitive',
-    );
+describe('platform lanes — the retired sensitivity classifier', () => {
+  it('is gone from the workflow, whole', () => {
+    // Off with the pull-request trigger it fed: nothing consumes its output,
+    // so a surviving job would spend a hosted runner per pull request on a
+    // classification no gate reads — and a surviving reference would consult
+    // a job that no longer exists. Deleted means deleted everywhere.
+    expect(ci.jobs.classify_platform).toBeUndefined();
+    expect(JSON.stringify(ci)).not.toContain('classify_platform');
   });
 
-  it('checks out the base commit, never the pull request head', () => {
-    // This job runs before any review and executes a script from the tree it
-    // checks out. The contributor's head would be the contributor's
-    // classifier, running with this job's token.
-    const checkout = job.steps.find((s) =>
-      String(s.uses ?? '').includes('actions/checkout'),
-    );
-    expect(checkout).toBeDefined();
-    expect(checkout.with.ref).toBe('${{ github.event.pull_request.base.sha }}');
-    expect(checkout.with.ref).not.toContain('head');
-    expect(checkout.with['persist-credentials']).toBe(false);
-  });
-
-  it('answers "run the lanes" for anything it is not sure about', () => {
-    const run = job.steps.find((s) => s.id === 'platform').run;
-    // A fork PR is not classified at all — the listing call is the same one
-    // the profile gate restricts to same-repo PRs.
-    expect(run).toContain('IS_SAME_REPO_PR');
-    expect(run).toContain('sensitive=true');
-    // Only the two words the classifier is allowed to say are accepted; a
-    // non-zero exit or anything else warns and runs the lanes.
-    expect(run).toContain('0:true|0:false');
-    expect(run).toMatch(/::warning::.*running the macOS and Windows lanes/);
-    // The wrapper call is wrapped in `set +e`/`set -e`: the runner invokes
-    // `shell: bash` steps with `-e`, so without the guard a non-zero exit
-    // aborts the step at the assignment and the warn-and-run case above is
-    // dead code. Same shape as the sibling Classify CI profile step.
-    expect(run).toContain(
-      [
-        '  set +e',
-        '  classified="$(.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}" platform)"',
-        '  rc=$?',
-        '  set -e',
-      ].join('\n'),
-    );
-  });
-
-  it('drives the classifier through the shared listing wrapper', () => {
-    // Not a second listing: the wrapper's comment declares itself the single
-    // home of that contract, and two call sites listing separately is how the
-    // same PR ends up classified differently in two places.
-    const run = job.steps.find((s) => s.id === 'platform').run;
-    expect(run).toContain(
-      '.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}" platform',
-    );
-  });
-
-  it('runs the classifier unit tests in CI', () => {
-    // The helper-test list is the single place both the github_ci_only step
-    // and the full Test step read; a classifier not named there is untested
-    // on every profile.
+  it('keeps its classifier script tested for the restoration', () => {
+    // The script layer stayed in place precisely so restoring the
+    // pull-request trigger is a revert. A classifier that rotted untested in
+    // the meantime would make that revert a regression instead.
     expect(ci.env.HELPER_TESTS).toContain(
       '.github/scripts/ci/classify-platform-sensitivity.test.mjs',
+    );
+    expect(ci.env.HELPER_TESTS).toContain(
+      '.github/scripts/ci/classify-pr-profile.test.mjs',
     );
   });
 });
