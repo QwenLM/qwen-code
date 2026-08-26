@@ -7860,7 +7860,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         sessionId: 'sess-1',
         update: {
           sessionUpdate: 'available_commands_update',
-          availableCommands: [{ name: 'help', description: 'Help' }],
+          availableCommands: [
+            { name: 'help', description: 'Help' },
+            { name: 'workflows', description: 'Manage workflows' },
+          ],
           _meta: {
             availableSkills: ['bugfix'],
             availableSkillDetails: skillDetails,
@@ -7881,7 +7884,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         sessionId: 'sess-1',
         update: {
           sessionUpdate: 'available_commands_update',
-          availableCommands: [{ name: 'help', description: 'Help' }],
+          availableCommands: [
+            { name: 'help', description: 'Help' },
+            { name: 'workflows', description: 'Manage workflows' },
+          ],
           _meta: {
             availableSkills: ['bugfix'],
             availableSkillDetails: skillDetails,
@@ -8657,6 +8663,23 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       await new Promise((r) => setTimeout(r, 30));
 
+      const sessionStream = await openStream(connId, 'sess-1');
+      const sessionFrame = takeFrames(sessionStream, 1);
+      await new Promise((r) => setTimeout(r, 30));
+      bridge.queues.get('sess-1')?.push({
+        type: 'session_update',
+        data: {
+          sessionId: 'sess-1',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              { name: 'init', description: 'Initialize' },
+              { name: 'workflows', description: 'Manage workflows' },
+            ],
+          },
+        },
+      });
+
       await post(connId, {
         jsonrpc: '2.0',
         id: 60,
@@ -8711,6 +8734,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(byId.get(63)).toMatchObject({
         result: { sessionId: 'sess-1', tasks: [] },
       });
+      await expect(sessionFrame).resolves.toEqual([
+        expect.objectContaining({
+          method: 'session/update',
+          params: expect.objectContaining({
+            update: expect.objectContaining({
+              sessionUpdate: 'available_commands_update',
+              availableCommands: [{ name: 'init', description: 'Initialize' }],
+            }),
+          }),
+        }),
+      ]);
       // The untrusted-workspace gate fail-closes the read path too: the
       // includeWorkflows opt-in must not reach the child.
       expect(bridge.lastSessionTasksOptions).toEqual({

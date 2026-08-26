@@ -1142,6 +1142,7 @@ function makeHarness(opts?: {
     undefined,
     {
       workspaceRegistry: registry,
+      daemonEnv: {},
       ...(opts?.daemonLog ? { daemonLog: opts.daemonLog } : {}),
       ...(opts?.liveConversationWorkspace
         ? { liveConversationWorkspace: opts.liveConversationWorkspace }

@@ -4345,6 +4345,7 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, {
         bridge: primaryBridge,
         workspaceRegistry: registry,
+        daemonEnv: {},
       });
 
       const response = await request(app)
@@ -13659,7 +13660,10 @@ describe('createServeApp', () => {
           sessionId: 'persisted-replay',
           update: {
             sessionUpdate: 'available_commands_update',
-            availableCommands: [{ name: 'help', description: 'Help' }],
+            availableCommands: [
+              { name: 'help', description: 'Help' },
+              { name: 'workflows', description: 'Manage workflows' },
+            ],
             _meta: {
               availableSkills: ['bugfix'],
               availableSkillDetails: [
@@ -13691,7 +13695,10 @@ describe('createServeApp', () => {
           sessionId: 'persisted-replay',
           update: {
             sessionUpdate: 'available_commands_update',
-            availableCommands: [{ name: 'help', description: 'Help' }],
+            availableCommands: [
+              { name: 'help', description: 'Help' },
+              { name: 'workflows', description: 'Manage workflows' },
+            ],
             _meta: {
               availableSkills: ['bugfix'],
               availableSkillDetails: [
@@ -13712,11 +13719,26 @@ describe('createServeApp', () => {
           liveJournal: [journalCommandsEvent, textEvent],
         }),
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'primary-id',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              trusted: true,
+              bridge,
+            }),
+          ]),
+        },
+      );
       const res = await request(app)
         .post('/session/persisted-replay/load')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({});
+        .send({ cwd: WS_BOUND });
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ sessionId: 'persisted-replay' });
@@ -13806,6 +13828,61 @@ describe('createServeApp', () => {
         },
       });
       expect(JSON.stringify(res.body)).not.toContain('LEAK-CANARY-SKILL-BODY');
+    });
+
+    it('redacts workflows from untrusted load response replay arrays', async () => {
+      const commandsEvent = {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'untrusted-replay',
+          update: {
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              { name: 'help', description: 'Help' },
+              { name: 'workflows', description: 'Manage workflows' },
+            ],
+          },
+        },
+      } satisfies BridgeEvent;
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'client-load',
+          state: {},
+          compactedReplay: [commandsEvent],
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        {
+          bridge,
+          workspaceRegistry: createWorkspaceRegistry([
+            makeWorkspaceRuntimeForTest({
+              workspaceId: 'primary-id',
+              workspaceCwd: WS_BOUND,
+              primary: true,
+              trusted: false,
+              bridge,
+            }),
+          ]),
+        },
+      );
+
+      const res = await request(app)
+        .post('/session/untrusted-replay/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_BOUND });
+
+      expect(res.status).toBe(200);
+      expect(res.body.compactedReplay[0].data.update.availableCommands).toEqual(
+        [{ name: 'help', description: 'Help' }],
+      );
+      expect(commandsEvent.data.update.availableCommands).toHaveLength(2);
     });
 
     it('passes client identity headers through to load/resume bridge calls', async () => {
@@ -24458,7 +24535,10 @@ describe('createServeApp', () => {
               type: 'session_update',
               data: {
                 sessionUpdate: 'available_commands_update',
-                availableCommands: [{ name: 'help', description: 'Help' }],
+                availableCommands: [
+                  { name: 'help', description: 'Help' },
+                  { name: 'workflows', description: 'Manage workflows' },
+                ],
                 _meta: {
                   availableSkills: ['bugfix'],
                   availableSkillDetails: [
@@ -24475,6 +24555,15 @@ describe('createServeApp', () => {
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary-id',
+            workspaceCwd: wsDir,
+            primary: true,
+            trusted: true,
+            bridge,
+          }),
+        ]),
       });
 
       const res = await request(app)
@@ -24484,10 +24573,61 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       const event = res.body.events[0] as { data: Record<string, unknown> };
       expect(event.data['sessionUpdate']).toBe('available_commands_update');
+      expect(event.data['availableCommands']).toEqual([
+        { name: 'help', description: 'Help' },
+        { name: 'workflows', description: 'Manage workflows' },
+      ]);
       const meta = event.data['_meta'] as Record<string, unknown>;
       expect(meta['availableSkills']).toEqual(['bugfix']);
       expect(meta).not.toHaveProperty('availableSkillDetails');
       expect(JSON.stringify(res.body)).not.toContain('x'.repeat(64));
+    });
+
+    it('redacts workflows from untrusted transcript events', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaad';
+      const commandsEvent = {
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            { name: 'help', description: 'Help' },
+            { name: 'workflows', description: 'Manage workflows' },
+          ],
+        },
+      } satisfies Omit<BridgeEvent, 'id'>;
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [commandsEvent],
+          hasMore: false,
+        }),
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary-id',
+            workspaceCwd: wsDir,
+            primary: true,
+            trusted: false,
+            bridge,
+          }),
+        ]),
+      });
+
+      const res = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.events[0].data.availableCommands).toEqual([
+        { name: 'help', description: 'Help' },
+      ]);
+      expect(commandsEvent.data.availableCommands).toHaveLength(2);
     });
 
     it('forwards an exclusive persisted-record boundary', async () => {
@@ -30129,7 +30269,10 @@ describe('GET /session/:id/events (SSE)', () => {
     // entries and the skill name list.
     const sharedUpdate = {
       sessionUpdate: 'available_commands_update',
-      availableCommands: [{ name: 'help', description: 'Help' }],
+      availableCommands: [
+        { name: 'help', description: 'Help' },
+        { name: 'workflows', description: 'Manage workflows' },
+      ],
       _meta: {
         availableSkills: ['bugfix'],
         availableSkillDetails: [
@@ -30145,6 +30288,13 @@ describe('GET /session/:id/events (SSE)', () => {
       },
     };
     const bridge = fakeBridge({
+      summaryImpl: (sessionId) => ({
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-08-26T00:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+      }),
       async *subscribeImpl() {
         yield {
           id: 1,
@@ -30166,7 +30316,22 @@ describe('GET /session/:id/events (SSE)', () => {
         };
       },
     });
-    const app = createServeApp(baseOpts, undefined, { bridge });
+    const app = createServeApp(
+      { ...baseOpts, workspace: WS_BOUND },
+      undefined,
+      {
+        bridge,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary-id',
+            workspaceCwd: WS_BOUND,
+            primary: true,
+            trusted: true,
+            bridge,
+          }),
+        ]),
+      },
+    );
 
     const res = await request(app)
       .get('/session/sess-A/events')
@@ -30207,6 +30372,7 @@ describe('GET /session/:id/events (SSE)', () => {
     expect(commandsUpdate['sessionUpdate']).toBe('available_commands_update');
     expect(commandsUpdate['availableCommands']).toEqual([
       { name: 'help', description: 'Help' },
+      { name: 'workflows', description: 'Manage workflows' },
     ]);
     const meta = commandsUpdate['_meta'] as Record<string, unknown>;
     expect(meta['availableSkills']).toEqual(['bugfix']);
@@ -30256,6 +30422,80 @@ describe('GET /session/:id/events (SSE)', () => {
       data?: { update?: Record<string, unknown> };
     };
     expect(payload.data!.update).not.toHaveProperty('_meta');
+  });
+
+  it('redacts workflows from untrusted SSE frames', async () => {
+    const sharedUpdate = {
+      sessionUpdate: 'available_commands_update',
+      availableCommands: [
+        { name: 'help', description: 'Help' },
+        { name: 'workflows', description: 'Manage workflows' },
+      ],
+    };
+    const bridge = fakeBridge({
+      summaryImpl: (sessionId) => ({
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        createdAt: '2026-08-26T00:00:00.000Z',
+        clientCount: 1,
+        hasActivePrompt: false,
+      }),
+      async *subscribeImpl() {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: { sessionId: 'sess-A', update: sharedUpdate },
+        };
+      },
+    });
+    const app = createServeApp(
+      { ...baseOpts, workspace: WS_BOUND },
+      undefined,
+      {
+        bridge,
+        workspaceRegistry: createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary-id',
+            workspaceCwd: WS_BOUND,
+            primary: true,
+            trusted: false,
+            bridge,
+          }),
+        ]),
+      },
+    );
+
+    const res = await request(app)
+      .get('/session/sess-A/events')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+    expect(res.status).toBe(200);
+    const payload = res.text
+      .split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map(
+        (line) =>
+          JSON.parse(line.slice('data: '.length)) as {
+            type?: string;
+            data?: {
+              update?: {
+                sessionUpdate?: string;
+                availableCommands?: unknown[];
+              };
+            };
+          },
+      )
+      .find(
+        (candidate) =>
+          candidate.type === 'session_update' &&
+          candidate.data?.update?.sessionUpdate === 'available_commands_update',
+      );
+    expect(payload).toBeDefined();
+    expect(payload!.data!.update!.availableCommands).toEqual([
+      { name: 'help', description: 'Help' },
+    ]);
+    expect(sharedUpdate.availableCommands).toHaveLength(2);
   });
 
   it('correlates the SSE response, daemon lifecycle log, and request span', async () => {

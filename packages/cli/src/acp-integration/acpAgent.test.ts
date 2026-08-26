@@ -2092,6 +2092,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         dispose: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
+        refreshWorkflowHistory: ReturnType<typeof vi.fn>;
         deleteWorkflowHistory: ReturnType<typeof vi.fn>;
         isIdle: ReturnType<typeof vi.fn>;
         isTurnIdle: ReturnType<typeof vi.fn>;
@@ -4362,8 +4363,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           ),
           installManagedConversationActivation: vi.fn(),
           installPendingManagedConversationBinding: vi.fn(),
-          commitManagedConversationBinding: vi.fn().mockResolvedValue(undefined),
-          releaseManagedConversationBinding: vi.fn().mockResolvedValue(undefined),
+          commitManagedConversationBinding: vi
+            .fn()
+            .mockResolvedValue(undefined),
+          releaseManagedConversationBinding: vi
+            .fn()
+            .mockResolvedValue(undefined),
           appendLiveConversationTranscript: vi
             .fn()
             .mockResolvedValue(undefined),
@@ -8681,6 +8686,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   it('loads persisted workflow snapshots into the session task history', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
     Object.assign(innerConfig, {
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         getAll: vi.fn().mockReturnValue([]),
@@ -10966,6 +10972,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const get = vi.fn();
       const cancel = vi.fn();
       Object.assign(innerConfig, {
+        getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+          getAll: vi.fn().mockReturnValue([]),
+        }),
+        getBackgroundShellRegistry: vi.fn().mockReturnValue({
+          getAll: vi.fn().mockReturnValue([]),
+        }),
+        getMonitorRegistry: vi.fn().mockReturnValue({
+          getAll: vi.fn().mockReturnValue([]),
+        }),
         getWorkflowRunRegistry: vi.fn().mockReturnValue({ get, cancel }),
       });
       vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValueOnce({
@@ -11014,6 +11029,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         savedWorkflows: [],
       });
       await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
+          sessionId,
+          includeWorkflows: true,
+        }),
+      ).resolves.toMatchObject({ sessionId, tasks: [] });
+      await expect(
         agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
           sessionId,
           taskId: 'wf-1',
@@ -11028,6 +11049,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }),
       ).resolves.toEqual({ changed: false });
       expect(mockListSavedWorkflows).not.toHaveBeenCalled();
+      expect(lastSessionMock!.refreshWorkflowHistory).not.toHaveBeenCalled();
       expect(get).not.toHaveBeenCalled();
       expect(cancel).not.toHaveBeenCalled();
       expect(lastSessionMock!.deleteWorkflowHistory).not.toHaveBeenCalled();

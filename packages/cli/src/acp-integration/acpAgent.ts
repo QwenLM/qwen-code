@@ -8337,9 +8337,11 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
+        const session = this.sessionOrThrow(sessionId);
         return (await this.buildSessionTasksStatus(
           sessionId,
-          params['includeWorkflows'] === true,
+          params['includeWorkflows'] === true &&
+            this.canUseWorkflowControls(session.getConfig()),
         )) as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.sessionLspStatus: {
