@@ -985,8 +985,12 @@ export class AgentCore {
               transition.reason === 'retry'
                 ? {
                     type: GeminiEventType.Retry,
-                    isContinuation:
-                      transition.retryInfo.isContinuation === true,
+                    // Preserve the upstream event shape: only continuation
+                    // retries carry `isContinuation`; fresh retries must not
+                    // grow the property (consumers rely on its absence).
+                    ...('isContinuation' in transition.retryInfo
+                      ? { isContinuation: transition.retryInfo.isContinuation }
+                      : {}),
                   }
                 : {
                     type: GeminiEventType.ModelFallback,
