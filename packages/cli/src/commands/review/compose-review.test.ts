@@ -6581,6 +6581,39 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.disclosed[0]).toContain('mapping unsupported');
   });
 
+  it.each([
+    ['skipped: [null]', { skipped: [null] }],
+    ['skipped: {}', { skipped: {} }],
+    ['skipped: 42', { skipped: 42 }],
+    ['errored: [null]', { errored: [null] }],
+    ['deferred: [null]', { deferred: [null] }],
+    ['checked: [null]', { checked: [null] }],
+    ['checked: [{ findings: [null] }]', { checked: [{ findings: [null] }] }],
+    // The deliberate decision: a string entry is not a shape the linter
+    // writes (entries are objects), so it is the same untrusted channel —
+    // refused whole-report, not silently dropped and not rendered.
+    ['skipped: ["x"]', { skipped: ['x'] }],
+  ])('a malformed report (%s) fails closed, never throws', (_label, shape) => {
+    // Without the structural check each of these threw a TypeError inside
+    // the loops and lost the whole round, blockers included.
+    const p = writePlan({});
+    writeReport(shape as Record<string, unknown>);
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.disclosed).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('malformed');
+  });
+
+  it('a null report root fails closed too — the diffHash check never dereferences it', () => {
+    const p = writePlan({});
+    writeFileSync(join(dir, 'qwen-review-script-lint.json'), 'null');
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('malformed');
+  });
+
   it('renders a non-string or missing report field inertly — never a throw', () => {
     // The report is read with `JSON.parse(...) as ScriptLintReport` and no
     // runtime validation, and it is a side file the review agent can

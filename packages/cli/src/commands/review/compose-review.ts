@@ -5450,6 +5450,31 @@ export function withoutGateReposts(
   return ownBodyCriticals.filter((c) => !regenerated.has(locator(c)));
 }
 
+/**
+ * A structurally valid script-lint report: a plain-object root, and every
+ * list field (`checked` / `skipped` / `errored` / `deferred`, plus the
+ * nested `checked[].findings`) either absent/nullish or an array of plain
+ * objects. The gate's loops dereference entries and iterate fields without
+ * per-shape guards, so anything outside this contract is a TypeError, not
+ * a report.
+ */
+function structurallyValidReport(report: unknown): boolean {
+  const isPlainObject = (v: unknown): v is Record<string, unknown> =>
+    typeof v === 'object' && v !== null && !Array.isArray(v);
+  if (!isPlainObject(report)) return false;
+  for (const key of ['checked', 'skipped', 'errored', 'deferred'] as const) {
+    const v = report[key];
+    if (v === undefined || v === null) continue;
+    if (!Array.isArray(v) || v.some((e) => !isPlainObject(e))) return false;
+  }
+  for (const c of (report.checked ?? []) as Array<Record<string, unknown>>) {
+    const f = c.findings;
+    if (f === undefined || f === null) continue;
+    if (!Array.isArray(f) || f.some((e) => !isPlainObject(e))) return false;
+  }
+  return true;
+}
+
 export function scriptLintGate(planPath: string): {
   criticals: string[];
   unreviewed: string[];
@@ -5509,6 +5534,22 @@ export function scriptLintGate(planPath: string): {
         'the executable-script lint — `qwen review script-lint` produced no report',
       );
     }
+    return { criticals, unreviewed, disclosed };
+  }
+  // A parsed-but-MALFORMED report fails closed too — before the diffHash
+  // check dereferences it. The JSON is a side file the review agent can
+  // rewrite, and the hash is readable out of that same file, so a "fresh"
+  // report proves nothing about provenance; a null entry, a non-array
+  // field, or a null root would throw a TypeError in the loops below and
+  // lose the whole round, blockers included. The decision is whole-report
+  // refusal rather than per-entry salvage — and string entries like
+  // `skipped: ["x"]` are deliberately IN that refusal: the linter writes
+  // object entries, so a non-object entry is the same untrusted channel,
+  // not a shape to render.
+  if (!structurallyValidReport(report)) {
+    unreviewed.push(
+      'the executable-script lint — the report is malformed; re-run `qwen review script-lint`',
+    );
     return { criticals, unreviewed, disclosed };
   }
   // Fail closed on a STALE report — bound to the diff's CONTENT, not a commit. The
