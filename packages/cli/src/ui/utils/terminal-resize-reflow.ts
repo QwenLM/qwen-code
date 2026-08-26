@@ -521,8 +521,8 @@ export function installTerminalResizeReflow(
     } else {
       // No published decision (synthetic writer, unpatched Ink): classify
       // with Ink's fullscreen rule (wrapped height >= viewport), trying the
-      // slotted window first: on the boundary a one-line-short anchor rejects
-      // later diffs instead of corrupting kept lines.
+      // slotted window first; at the boundary a one-line-short anchor is
+      // accepted by later diffs, not rejected — only the marker resolves it.
       for (const isTrailing of [true, false]) {
         const lines = candidate(isTrailing);
         if (lines === null) continue;
@@ -721,22 +721,24 @@ export function installTerminalResizeReflow(
         }
       } else if (expectFrame) {
         const printable = stripAnsi(chunk).trim() !== '';
-        if (
-          barePrintableCount === 0 &&
-          Date.now() >= handoffUntil &&
-          !(isVP && printable && parseDiffHead(chunk) === null)
-        ) {
-          // The commit's bare writes land in one synchronous render; a bare
-          // write this late is a stray (notification bell, kitty APC image,
-          // tmux DCS), not the handoff. VP exception: a printable write
-          // with no diff head is the post-shrink redraw delayed past the
-          // window (throttle + reconciliation of the re-laid-out tree);
-          // once the window has closed no incremental diff can re-anchor a
-          // frozen model, so keep the arm and capture it. Static mode
-          // self-heals on the next erase-prefixed redraw and keeps
-          // disarming strays. Once the burst has started (a printable
-          // write was captured) the clock no longer applies — follow-up
-          // writes are modeled exactly as inside the window.
+        const diffHead = parseDiffHead(chunk);
+        // The commit's bare writes land in one synchronous render; a bare
+        // write this late is a stray (notification bell, kitty APC image,
+        // tmux DCS), not the handoff, and disarms the arm. VP exceptions —
+        // a late burst that must stay capturable: before anything was
+        // captured, a printable write with no diff head is the post-shrink
+        // redraw delayed past the window (throttle + reconciliation of the
+        // re-laid-out tree); once a frame was captured, a bare diff is its
+        // follow-up render. Every other post-window write must not reach
+        // the capture path: an arm held open past the window would
+        // force-store the next stray as the live frame. Static mode
+        // self-heals on the next erase-prefixed redraw and disarms strays
+        // unconditionally.
+        const lateBurst =
+          isVP &&
+          printable &&
+          (barePrintableCount === 0 ? diffHead === null : diffHead !== null);
+        if (Date.now() >= handoffUntil && !lateBurst) {
           expectFrame = false;
         }
         if (expectFrame && printable) {
@@ -754,7 +756,7 @@ export function installTerminalResizeReflow(
             debugLogger.debug('diff', { applied: true, armed: true });
             expectFrame = false;
             barePrintableCount = 0;
-          } else if (parseDiffHead(chunk) === null) {
+          } else if (diffHead === null) {
             modelFrame(chunk, barePrintableCount > 1);
             if (barePrintableCount > 1) expectFrame = false;
           }

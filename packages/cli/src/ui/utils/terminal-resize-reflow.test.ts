@@ -308,6 +308,31 @@ describe('installTerminalResizeReflow', () => {
     }
   });
 
+  it('a post-window stray cannot clobber a captured single-write burst', () => {
+    vi.useFakeTimers();
+    try {
+      const stdout = new FakeStdout();
+      const { restore } = installTerminalResizeReflow(
+        stdout as unknown as NodeJS.WriteStream,
+      );
+      stdout.write(eraseLines(10) + frame(60, 10));
+      stdout.write(eraseLines(10)); // arms the handoff
+      stdout.write(frame(60, 10)); // single-write burst: captured, position 1
+      vi.advanceTimersByTime(60); // past HANDOFF_WINDOW_MS
+      stdout.write('\x07'); // stray bell: disarms, must not become the model
+      stdout.columns = 15;
+      stdout.emit('resize');
+      stdout.write(eraseLines(6));
+      // Model is still the 10-line frame (40 rows at 15 cols); a stray
+      // force-stored as the model (1 row) would leave the erase
+      // unamplified.
+      expect(stdout.written.at(-1)).toBe(eraseLines(40));
+      restore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('the VP clear window expires', () => {
     vi.useFakeTimers();
     try {

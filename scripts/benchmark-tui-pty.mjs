@@ -93,7 +93,9 @@ function startFakeProvider() {
         const payload = {
           id: `bench-${i}`,
           object: 'chat.completion.chunk',
-          choices: [{ index: 0, delta: { content: delta }, finish_reason: null }],
+          choices: [
+            { index: 0, delta: { content: delta }, finish_reason: null },
+          ],
         };
         res.write(`data: ${JSON.stringify(payload)}\n\n`);
         i += 1;
@@ -289,7 +291,9 @@ class Session {
 
 function splitCmd(cmd) {
   const parts = cmd.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-  const args = parts.map((p) => p.replace(/^["']|["']$/g, ''));
+  const args = parts.map((p) =>
+    p.replace(/"([^"]*)"|'([^']*)'/g, (_m, dq, sq) => dq ?? sq),
+  );
   return [args[0], args.slice(1)];
 }
 
@@ -297,8 +301,12 @@ function splitCmd(cmd) {
 // Workloads (design doc, Verification / Measurement setup)
 
 const BURST = 'a'.repeat(212);
-const PACED_FIRST = 'the quick brown fox jumps over the lazy dog. '.repeat(5).slice(0, 213);
-const PACED_AFTER = 'second pass over the same composer after history. '.repeat(3).slice(0, 112);
+const PACED_FIRST = 'the quick brown fox jumps over the lazy dog. '
+  .repeat(5)
+  .slice(0, 213);
+const PACED_AFTER = 'second pass over the same composer after history. '
+  .repeat(3)
+  .slice(0, 112);
 const PROMPT = 'Stream a long markdown answer, please.';
 
 async function runPhase(session, name, fn) {
@@ -332,13 +340,21 @@ async function main() {
   console.log('=== Qwen Code TUI Render Throughput PTY Benchmark ===');
   console.log(`Command          : ${CMD}`);
   console.log(`PTY              : ${COLS}x${ROWS}`);
-  console.log(`Fake SSE provider: http://127.0.0.1:${PORT}/v1 (${SSE_CHUNKS} chunks @ ${SSE_INTERVAL_MS}ms)`);
+  console.log(
+    `Fake SSE provider: http://127.0.0.1:${PORT}/v1 (${SSE_CHUNKS} chunks @ ${SSE_INTERVAL_MS}ms)`,
+  );
 
   const server = await startFakeProvider();
   const extraEnv = {};
-  for (const pair of (process.env['QWEN_BENCH_EXTRA_ENV'] ?? '').split(' ')) {
+  for (const pair of (process.env['QWEN_BENCH_EXTRA_ENV'] ?? '').match(
+    /(?:[^\s"']+|"[^"]*"|'[^']*')+/g,
+  ) ?? []) {
     const eq = pair.indexOf('=');
-    if (eq > 0) extraEnv[pair.slice(0, eq)] = pair.slice(eq + 1);
+    if (eq > 0) {
+      extraEnv[pair.slice(0, eq)] = pair
+        .slice(eq + 1)
+        .replace(/^["']|["']$/g, '');
+    }
   }
   extraEnv['NODE_OPTIONS'] = [
     extraEnv['NODE_OPTIONS'] ?? process.env['NODE_OPTIONS'] ?? '',
@@ -351,14 +367,19 @@ async function main() {
   const phases = [];
   try {
     // Wait for the prompt to come up (the composer input marker).
-    await session.waitForOutput(/❯|>|>/, 60_000);
+    await session.waitForOutput(/❯|>/, 60_000);
+    // Startup output (banner, tips, composer frame) is not part of any
+    // phase; drop what the readiness gate consumed.
+    session.writes = 0;
+    session.bytes = 0;
 
     phases.push(
+      // Paste-only, matching the recorded protocol: no in-window submit,
+      // so the fake provider's streamed response does not land in the burst
+      // metrics and no committed turn is visible before the paced phases.
       await runPhase(session, 'burst paste (212 chars)', async (s) => {
         await s.paste(BURST);
         await sleep(2_000);
-        await s.key('\r'); // submit; the burst becomes one committed turn
-        await sleep(3_000);
       }),
     );
 
@@ -401,9 +422,13 @@ async function main() {
     );
 
     phases.push(
-      await runPhase(session, 'paced input after long history (112 chars)', async (s) => {
-        for (const ch of PACED_AFTER) await s.key(ch, PACE_MS);
-      }),
+      await runPhase(
+        session,
+        'paced input after long history (112 chars)',
+        async (s) => {
+          for (const ch of PACED_AFTER) await s.key(ch, PACE_MS);
+        },
+      ),
     );
   } finally {
     session.kill();
@@ -424,9 +449,7 @@ async function main() {
   console.log('─'.repeat(92));
   for (const p of phases) {
     const el = eventLoopSamples.slice(p.elFrom, p.elTo);
-    const p95 = el.length
-      ? Math.max(...el.map((r) => r.p95))
-      : Number.NaN;
+    const p95 = el.length ? Math.max(...el.map((r) => r.p95)) : Number.NaN;
     const keyP50 = p.latencies.length
       ? [...p.latencies].sort((a, b) => a - b)[
           Math.floor(p.latencies.length / 2)
@@ -436,7 +459,9 @@ async function main() {
       p.name.slice(0, 41).padEnd(42) +
         String(p.writes).padStart(8) +
         String(p.bytes).padStart(10) +
-        (p.cpuMs === null ? 'n/a' : Math.round(p.cpuMs).toString()).padStart(9) +
+        (p.cpuMs === null ? 'n/a' : Math.round(p.cpuMs).toString()).padStart(
+          9,
+        ) +
         (Number.isNaN(p95) ? 'n/a' : p95.toFixed(2)).padStart(11) +
         (Number.isNaN(keyP50) ? 'n/a' : keyP50.toFixed(2)).padStart(12),
     );

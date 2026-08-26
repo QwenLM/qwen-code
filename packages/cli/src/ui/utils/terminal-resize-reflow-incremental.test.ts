@@ -478,6 +478,39 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
     }
   });
 
+  it('a post-window stray bell cannot clobber a captured single-write VP burst', () => {
+    const stdout = new FakeStdout();
+    const { restore, repaint } = installTerminalResizeReflow(
+      stdout as unknown as NodeJS.WriteStream,
+      { virtualViewport: true },
+    );
+    const dateNow = vi.spyOn(Date, 'now');
+    try {
+      let now = 1_000_000;
+      dateNow.mockImplementation(() => now);
+      const prev = frameLines(20, 10);
+      stdout.write(ansiEscapes.eraseLines(10) + prev.join('\n'));
+      // Shrink arms the handoff; the single bare redraw is captured inside
+      // the window, then a stray bell arrives after the window expires.
+      stdout.columns = 12;
+      stdout.emit('resize');
+      stdout.write(RETURN_PREFIX + ansiEscapes.eraseLines(10));
+      stdout.write(prev.join('\n')); // bare redraw: captured, position 1
+      now += 100; // past the 50 ms handoff window
+      stdout.write('\x07'); // notification bell: must not become the model
+      stdout.written.length = 0;
+      repaint!();
+      // The wake repaint replays the captured frame — not CLEAR_VIEWPORT
+      // plus the bell.
+      expect(stdout.written).toEqual([
+        ansiEscapes.clearViewport + prev.join('\n'),
+      ]);
+    } finally {
+      dateNow.mockRestore();
+      restore();
+    }
+  });
+
   it('anchors only the live frame when a reset carries <Static> transcript', () => {
     const stdout = new FakeStdout();
     const { restore, repaint } = installTerminalResizeReflow(
@@ -1313,6 +1346,80 @@ describe('installTerminalResizeReflow (VP incremental rendering)', () => {
         expect(replay).toContain('line-0 content');
         expect(replay).toContain('line-5 updated-value');
         expect(replay).toContain('line-11 content');
+      } finally {
+        if (app) {
+          await act(async () => {
+            app!.unmount();
+          });
+        }
+        restore();
+      }
+    });
+
+    it('anchors an overflow reset through the marker real Ink publishes', async () => {
+      const stdout = new FakeStdout();
+      // A 3-row viewport makes the reset boundary reachable: the frame at
+      // exactly viewport height is fullscreen (slotless), while the
+      // wrapped-height fallback classifier would accept the one-line-short
+      // slotted candidate (2 packed rows < 3) and drop the frame's top line.
+      stdout.rows = 3;
+      const { restore, repaint } = installTerminalResizeReflow(
+        stdout as unknown as NodeJS.WriteStream,
+        { virtualViewport: true },
+      );
+      let setLines!: (lines: string[]) => void;
+      const App = () => {
+        const [lines, setState] = useState(['a-0']);
+        setLines = setState;
+        return createElement(
+          Box,
+          { flexDirection: 'column' },
+          lines.map((line, i) => createElement(Text, { key: i }, line)),
+        );
+      };
+      let app: Instance | undefined;
+      try {
+        await act(async () => {
+          app = render(createElement(App), {
+            stdout: stdout as unknown as NodeJS.WriteStream,
+            interactive: true,
+            incrementalRendering: true,
+            maxFps: 1000,
+            patchConsole: false,
+          });
+        });
+        await app!.waitUntilRenderFlush();
+
+        // Overflow the viewport: Ink writes a clearTerminal reset and
+        // publishes its fullscreen decision for it.
+        await act(async () => {
+          setLines(['b-0', 'b-1', 'b-2', 'b-3']);
+        });
+        await app!.waitUntilRenderFlush();
+
+        // Collapse to exactly the viewport height: a second reset, published
+        // fullscreen (slotless). The next diff anchors against this window.
+        await act(async () => {
+          setLines(['c-0', 'c-1', 'c-2']);
+        });
+        await app!.waitUntilRenderFlush();
+
+        await act(async () => {
+          setLines(['c-0', 'UPDATED-c-1', 'c-2']);
+        });
+        await app!.waitUntilRenderFlush();
+
+        stdout.written.length = 0;
+        repaint!();
+        expect(stdout.written.length).toBe(1);
+        const replay = stdout.written[0]!;
+        expect(replay.startsWith(ansiEscapes.clearViewport)).toBe(true);
+        // The top line survives the anchor (the fallback classifier drops
+        // it) and the update landed through the anchored model.
+        expect(replay).toContain('c-0');
+        expect(replay).toContain('UPDATED-c-1');
+        expect(replay).toContain('c-2');
+        expect(replay).not.toContain('b-');
       } finally {
         if (app) {
           await act(async () => {
