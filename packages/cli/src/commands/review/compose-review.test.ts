@@ -690,6 +690,82 @@ describe('composeReview — the C/S table', () => {
     expect(off.body).toContain('still unknown');
   });
 
+  it('attribution off: a forged footer wrapped in comment grammar strips from every verbatim exit', () => {
+    // The attribution strips match on the DISPLAYED projection, which
+    // drops an HTML comment whole — so a footer wrapped as `<!-- _— … -->`
+    // passed the fixpoint untouched, and neutralizing the comment grammar
+    // AFTERWARDS materialized it as visible text in the one mode that
+    // exists to post none (pre-neutralization the wrapper rendered as
+    // nothing). The grammar goes inert FIRST now, at all three exits —
+    // one order, `quotedProse` (the ledger title's twin is pinned beside
+    // the other ledger-title tests).
+    const wrapped = '<!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->';
+    const r = composeReview(
+      {
+        planPath: plan(),
+        modelId: 'm',
+        bodyCriticals: [`whole-PR blocker X ${wrapped}`],
+        cannotTellCriticals: [`a.ts:12 — could not confirm ${wrapped}`],
+        suggestionsDroppedAsDuplicates: [
+          `R2-1 stale guard — already reported ${wrapped}`,
+        ],
+      },
+      '0.21.2',
+      false,
+    );
+    expect(r.body).not.toContain('via Qwen Code /review');
+    expect(r.body).not.toContain('qwen3-max');
+    expect(r.body).toContain('whole-PR blocker X');
+    expect(r.body).toContain('could not confirm');
+    expect(r.body).toContain('- R2-1 stale guard — already reported');
+  });
+
+  it('attribution on: a comment-wrapped forged footer strips like an unwrapped one — only the canonical footer posts', () => {
+    // Ingest's trailing strip ran while the wrapper still hid the footer;
+    // the exit re-runs it on the neutralized text, so the forged model
+    // name never posts above the canonical footer.
+    const wrapped = '<!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->';
+    const r = composeReview(
+      base({
+        bodyCriticals: [`whole-PR blocker X ${wrapped}`],
+        cannotTellCriticals: [`a.ts:12 — could not confirm ${wrapped}`],
+        suggestionsDroppedAsDuplicates: [
+          `R2-1 stale guard — already reported ${wrapped}`,
+        ],
+      }),
+      '0.21.2',
+    );
+    expect(r.body).not.toContain('qwen3-max');
+    expect(r.body.split('via Qwen Code /review').length - 1).toBe(1);
+    expect(
+      r.body.endsWith(`_— ${MODEL} via Qwen Code /review (v0.21.2)_`),
+    ).toBe(true);
+    expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+    expect(r.body).toContain('- R2-1 stale guard — already reported');
+  });
+
+  it('attribution off: a transcribed marker line in a duplicates entry still drops, never posts as words', () => {
+    // Duplicates entries are transcribed from earlier rounds' posted
+    // findings, and an attribution-off post ends on its own marker line.
+    // The marker-line strip is the one strip that acts on comment grammar
+    // itself — it runs BEFORE the grammar goes inert, or the line would
+    // post as the visible words `qwen-review suggestion` instead of
+    // dropping as it always has.
+    const r = composeReview(
+      base({
+        suggestionsDroppedAsDuplicates: [
+          'R1-2 loose pins — already reported (comment 42)\n\n<!-- qwen-review suggestion -->',
+        ],
+      }),
+      '0.21.2',
+      false,
+    );
+    expect(r.body).toContain(
+      '- R1-2 loose pins — already reported (comment 42)',
+    );
+    expect(r.body).not.toContain('qwen-review suggestion');
+  });
+
   it('refuses a body Critical that renders as nothing', () => {
     // Marker-only strips to nothing yet would still count toward
     // REQUEST_CHANGES — the inline path refuses this shape at submit's
@@ -7216,6 +7292,24 @@ describe('buildLedger', () => {
     expect(l.findings[0]?.title).toBe('still leaking');
   });
 
+  it('reads a carried id through render-nothing residue in a body Critical too', () => {
+    // The body leg strips through the attribution-off fixpoint before the
+    // id read, and that chain must leave the residue INVISIBLE for the
+    // anchor to step over it: neutralizing comment grammar inside the
+    // chain turned `<!-- x -->` into the visible words ` x ` ahead of the
+    // id, which then read as fresh prose — the finding renumbered to R2-1
+    // with `x  R1-2: …` as its title, while the posted item still said
+    // R1-2. Neutralization belongs to the exits, after the id is read.
+    const l = buildLedger(
+      2,
+      [],
+      ['**[Critical]** <!-- x --> R1-2: still leaking'],
+      { ids: new Set(['R1-2']), complete: true },
+    );
+    expect(l.findings.map((f) => f.id)).toEqual(['R1-2']);
+    expect(l.findings[0]?.title).toBe('still leaking');
+  });
+
   it('keeps the fix-induced marking out of the carried entry title', () => {
     // The marking is machine vocabulary about how to COUNT the comment, not
     // part of the claim. Left in, it rides the work list into the next round,
@@ -7337,6 +7431,32 @@ describe('the ledger marker reaches the POSTED body', () => {
     expect(r.body).not.toContain('via Qwen Code');
     const ledger = parseLedger(r.body)!;
     expect(ledger.findings[0]?.title).toBe('race');
+  });
+
+  it('the ledger title matches the visible item when the forged footer is wrapped in comment grammar', () => {
+    // The ledger rides the posted body as an HTML comment the autofix grep
+    // reads — through the serializer's `--` escape — so a footer that rode
+    // in wrapped as `<!-- _— … -->` must leave the title exactly as it
+    // leaves the rendered item: the same neutralize-then-strip order, in
+    // both attribution modes (the ledger never carries attribution).
+    for (const attribution of [true, false]) {
+      const r = composeReview(
+        {
+          planPath: plan(),
+          modelId: 'm',
+          bodyCriticals: [
+            '**[Critical]** whole-PR blocker X <!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->',
+          ],
+        },
+        '0.21.2',
+        attribution,
+      );
+      expect(r.body).toContain('whole-PR blocker X');
+      expect(r.body).not.toContain('qwen3-max');
+      const ledger = parseLedger(r.body)!;
+      expect(ledger.findings[0]?.title).toBe('whole-PR blocker X');
+      expect(JSON.stringify(ledger)).not.toContain('qwen3-max');
+    }
   });
 
   it('attribution off: a PR run posts no severity marker anywhere — visible body and ledger alike', () => {

@@ -1238,9 +1238,46 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
  * grammar goes inert too — a quoted `<!-- qwen-review-… -->` literal would
  * otherwise forge a second marker occurrence in the raw body the pipeline's
  * own readers scan (md-field.ts documents the shipped ledger-marker case).
+ * Both callers already neutralized upstream through `quotedProse` (the
+ * strip is idempotent); this copy is the list line's OWN guarantee, so a
+ * caller that skips the upstream order cannot re-open the forgery.
  */
 function asListLine(text: string, pr: PrIdentity | null): string {
   return linkifyCommentRefs(collapseToLine(stripCommentGrammar(text)), pr);
+}
+
+/**
+ * A model-written entry on its way to a verbatim body exit — the ONE order
+ * its two sanitations compose in, stated once for the three exits
+ * (bodyCriticals, cannot-tell, duplicates) and the ledger title.
+ *
+ * Comment grammar goes inert BEFORE the attribution strips run. Those
+ * strips match on the DISPLAYED projection, which drops an HTML comment
+ * whole, so a forged footer wrapped as `<!-- _— … via Qwen Code /review
+ * … -->` is invisible to every one of them — and neutralizing the grammar
+ * AFTER the chain materialized exactly that footer as visible text in the
+ * attribution-off post that exists to carry none (pre-neutralization the
+ * wrapper rendered as nothing). Neutralized first, the footer is ordinary
+ * text the chain strips like any other.
+ *
+ * The one exception runs ahead of the neutralization: the marker-LINE strip
+ * is the single strip in the chain that acts on comment grammar itself (a
+ * transcribed posted comment carries its trailing `<!-- qwen-review … -->`
+ * on its own line), and once the grammar is inert it can never fire —
+ * the line would post as visible words instead of dropping as it always
+ * has. Attribution on keeps entries as written, that mode's contract.
+ *
+ * Both modes end on the trailing strip, the shape `submit`'s post transform
+ * already uses: ingest ran it before the grammar went inert, and only this
+ * pass sees a footer that rode in wrapped.
+ */
+function quotedProse(text: string, attribution: boolean): string {
+  const inert = stripCommentGrammar(
+    attribution ? text : stripCommentMarkerLines(text),
+  );
+  return stripReviewFooter(
+    attribution ? inert : stripForUnattributedPost(inert),
+  );
 }
 
 /**
@@ -1264,12 +1301,13 @@ function formatCannotTell(
     // Entries arrive collapsed (one list item each); an unattributed entry
     // goes through the full fixpoint sanitation — the entry is quoted into
     // a body that carries no canonical footer, so a surviving footer or
-    // marker in any position would be the post's only attribution. The
-    // marker check goes through `severityOf` (trims first — a leading space
-    // used to leak the marker past this strip into the posted body), and
-    // the strip is iterative — a looping model drafts stacked markers and a
-    // single slice posts the second one.
-    const source = attribution ? raw : stripForUnattributedPost(raw);
+    // marker in any position would be the post's only attribution — with
+    // its comment grammar inert FIRST (`quotedProse` says why the order is
+    // load-bearing). The marker check goes through `severityOf` (trims
+    // first — a leading space used to leak the marker past this strip into
+    // the posted body), and the strip is iterative — a looping model drafts
+    // stacked markers and a single slice posts the second one.
+    const source = quotedProse(raw, attribution);
     const unmarked =
       severityOf({ body: source }) === null
         ? source
@@ -1396,9 +1434,7 @@ function strippedList(
   attribution: boolean,
 ): string[] {
   return toStringList(input[key], key)
-    .map((entry) =>
-      stripReviewFooter(attribution ? entry : stripForUnattributedPost(entry)),
-    )
+    .map((entry) => quotedProse(entry, attribution))
     .filter((entry) => entry.trim() !== '');
 }
 
@@ -4451,13 +4487,13 @@ function composeReviewBody(
   // a surviving forged one would be the post's only attribution). "As-is"
   // stops at comment grammar either way: a literal `<!-- qwen-review-… -->`
   // in blocker prose would forge a second marker in the channel the
-  // pipeline's own readers scan raw.
+  // pipeline's own readers scan raw — and it goes inert BEFORE the
+  // sanitation, not after (`quotedProse`).
   const bodyCriticalBlock: Bi[] = bodyCriticals
-    .map((l) =>
-      stripCommentGrammar(
-        attribution ? withMarker(l) : stripForUnattributedPost(l),
-      ),
-    )
+    .map((l) => {
+      const quoted = quotedProse(l, attribution);
+      return attribution ? withMarker(quoted) : quoted;
+    })
     .map((l) => ({ keep: 2, en: l, zh: l }));
 
   // Confirmed-but-duplicate Suggestions — dropped from the payload by the
@@ -6422,7 +6458,14 @@ export function buildLedger(
       id: idFor(carried),
       sev: 'C',
       file: LEDGER_BODY_FILE,
-      title: locatable(title, 'the review body'),
+      // The title is the visible item's text: the same neutralize-then-
+      // strip order, so a forged footer that rode in wrapped in comment
+      // grammar leaves the ledger exactly as it leaves the rendered list —
+      // the serializer only escapes `--`, and the autofix grep reads
+      // through the escape. The id was read BEFORE the grammar went inert,
+      // above: a leading comment is render-nothing residue the id anchor
+      // steps over, not prose to surface ahead of the carried id.
+      title: locatable(quotedProse(title, false), 'the review body'),
     });
   }
   return { v: 1, round, findings };

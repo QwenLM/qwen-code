@@ -5,7 +5,6 @@
  */
 
 import { stripSeverityPrefix } from './inline-counts.js';
-import { stripCommentGrammar } from './md-field.js';
 
 // The attribution footer every posted review carries, stated once.
 //
@@ -834,25 +833,23 @@ export function stripParagraphMarkers(body: string): string {
  * post transform and gate, compose's body lists, the ledger titles — goes
  * through here so the sites cannot drift.
  *
- * `stripCommentGrammar` sits in the chain at the one position that keeps
- * both invariants: AFTER `stripCommentMarkerLines`, so a bare
- * `<!-- qwen-review … -->` line is still removed invisibly while wrapped
- * (grammar-first would unwrap it into VISIBLE marker text), and BEFORE the
- * footer strips, so a footer smuggled inside an HTML comment
- * (`<!-- _— model via Qwen Code /review (v1)_ -->`) loses its wrapper and
- * becomes matchable — the invisibles projection otherwise carries the
- * wrapped forgery through untouched, and a later grammar strip would then
- * unwrap it into visible forged attribution.
+ * Comment grammar is deliberately NOT neutralized in this chain, even
+ * though a forged footer wrapped in an HTML comment slips past every strip
+ * above (they match the displayed projection, which drops the comment
+ * whole). The chain is shared with submit's inline-comment transform,
+ * whose contract keeps a quoted marker MENTION verbatim, and with the
+ * ledger's id read, which steps over a leading comment as render-nothing
+ * residue — a strip here turned both into visible words. The verbatim
+ * body exits neutralize the grammar BEFORE calling in (`quotedProse` in
+ * compose-review), where the wrapped footer then strips like any other.
  */
 export function stripForUnattributedPost(body: string): string {
   let current = body;
   for (;;) {
     const next = stripFooterSpans(
       stripParagraphMarkers(
-        stripCommentGrammar(
-          stripCommentMarkerLines(
-            stripSeverityPrefix(stripForgedFooterLines(current)),
-          ),
+        stripCommentMarkerLines(
+          stripSeverityPrefix(stripForgedFooterLines(current)),
         ),
       ),
     );

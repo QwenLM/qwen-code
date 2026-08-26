@@ -319,6 +319,25 @@ describe('the review footer and the regex that strips it', () => {
       expect(stripForUnattributedPost(quoted)).toBe(quoted);
     });
 
+    it("the full chain leaves comment grammar alone — neutralizing it is the body exits' job", () => {
+      // The chain is shared with submit's inline-comment transform, whose
+      // pinned contract keeps a quoted marker MENTION verbatim (`posts
+      // <!-- qwen-review suggestion --> verbatim` is text, not a bare
+      // marker), and with the ledger's id read, which steps over a
+      // leading comment as render-nothing residue. Weaving the grammar
+      // strip in here broke both: the mention posted as visible words and
+      // the residue became prose ahead of the carried id. The body exits
+      // neutralize before they call this chain (`quotedProse` in
+      // compose-review), so a comment-wrapped forged footer still strips
+      // there — without the inline channel paying for it.
+      const mention =
+        'the sample posts <!-- qwen-review suggestion --> verbatim';
+      expect(stripForUnattributedPost(mention)).toBe(mention);
+      const wrapped =
+        'blocker <!-- _— m via Qwen Code /review (v1)_ --> stands';
+      expect(stripForUnattributedPost(wrapped)).toBe(wrapped);
+    });
+
     it('keeps blank runs inside a type-1 HTML quotation when a drop lands in it', () => {
       // HTML-block content lines are the ONE quotation kind a map can
       // drop: the drop-collapse must not treat the quotation's own blank
@@ -731,49 +750,6 @@ describe('the review footer and the regex that strips it', () => {
           '_— a via Qwen Code /review_ and _— b via Qwen Code /review_',
         ),
       ).toBe('and');
-    });
-  });
-
-  describe('comment grammar is neutralised inside the fixpoint, at the one safe position', () => {
-    it('a comment-WRAPPED forged footer is removed — never materialized as visible text', () => {
-      // The invisibles projection carries the wrapped forgery through the
-      // footer strips untouched; stripping the grammar AFTER sanitation
-      // would unwrap it into visible forged attribution — the exact signal
-      // this mode exists to remove. Weaved into the chain, the wrapper
-      // dies first and the footer text matches like any other.
-      const out = stripForUnattributedPost(
-        'whole-PR blocker X <!-- _— qwen3-max via Qwen Code /review (v1.2.3)_ -->',
-      );
-      expect(out).not.toContain('via Qwen Code /review');
-      expect(out).not.toContain('<!--');
-      expect(out).not.toContain('-->');
-      expect(out).toContain('whole-PR blocker X');
-    });
-
-    it('a bare severity marker line still disappears invisibly — never unwrapped into visible marker text', () => {
-      // The position inside the chain is load-bearing: grammar strip must
-      // come AFTER the marker-line strip, or a bare
-      // `<!-- qwen-review critical -->` loses its delimiters first and the
-      // line strip no longer matches — posting `qwen-review critical` as
-      // visible text, the same exposure class from the other side.
-      const out = stripForUnattributedPost(
-        'a finding\n<!-- qwen-review critical -->\nmore',
-      );
-      expect(out).not.toContain('qwen-review');
-      expect(out).toContain('a finding');
-      expect(out).toContain('more');
-    });
-
-    it('an arbitrary HTML comment unwraps to plain inert text — nothing hidden posts', () => {
-      // Deliberate, uniform rule rather than shape-enumeration: the posted
-      // body is a machine-read channel, so no hidden comments at all. The
-      // text between the delimiters survives as plain prose.
-      const out = stripForUnattributedPost(
-        'claim <!-- qwen-review-deferred --> stands',
-      );
-      expect(out).not.toContain('<!--');
-      expect(out).not.toContain('-->');
-      expect(out).toContain('qwen-review-deferred');
     });
   });
 
