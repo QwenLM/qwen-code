@@ -79,7 +79,7 @@ describe('openTuiRuntimeFailureLines', () => {
   it('names the runtime failure and provides the verified Bun command', () => {
     const unsupported = probeOpenTuiRuntime(nodeVersions, missingNodeFfi);
     const text = openTuiRuntimeFailureLines(unsupported).join('\n');
-    expect(text).toContain('@opentui/core 0.5.1');
+    expect(text).toContain('@opentui/core 0.5.8');
     expect(text).toContain(BUN_FALLBACK_COMMAND);
     expect(text).not.toContain('Node v24 is supported');
   });

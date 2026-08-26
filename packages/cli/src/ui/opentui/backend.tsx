@@ -15,7 +15,6 @@ import type {
   ScrollBoxRenderable,
 } from '@opentui/core';
 import { findUrlAtRow, readBufferRow } from './link-click.js';
-import { MultiClickSelectionController } from './multi-click-select.js';
 import { renderDiffBody, type DiffLine } from './diff-render.js';
 import { C, SYNTAX, applyThemeMode, applyOpenTuiTheme } from './theme.js';
 import { detectInitialThemeMode } from './theme-auto.js';
@@ -761,6 +760,11 @@ function buildBanner(
 // push the option list off-screen.
 const CONFIRM_BODY_MAX_LINES = 12;
 
+// Must exceed @opentui/core's CLICK_REPEAT_INTERVAL_MS (500ms) so a
+// copy-triggered selection clear cannot split a double-click into a fresh
+// click sequence (see copyActiveSelection).
+const SELECTION_CLEAR_DELAY_MS = 600;
+
 /**
  * Select a startup tip (ink Tips.pickStartupTip parity). Called once per
  * session via useMemo([]) — recordShown writes to disk.
@@ -1174,6 +1178,11 @@ function App({
 
   // Copy the active selection and clear it (opencode Selection.copy parity;
   // shared by copy-on-select, ctrl+c and ctrl+y).
+  // The clear is deferred past the framework's 500ms click-repeat window
+  // (@opentui/core #1407): clearSelection() also resets the renderer's
+  // multi-click counter, so clearing on release would break a double-click
+  // -> triple-click sequence mid-stream. The isDragging guard leaves an
+  // already-started next selection untouched when the timer fires.
   const copyActiveSelection = useCallback(async (): Promise<boolean> => {
     const text = renderer.getSelection()?.getSelectedText();
     if (!text) return false;
@@ -1184,28 +1193,22 @@ function App({
         : '⚠ Clipboard write failed',
     );
     setTimeout(() => setToast(null), 1500);
-    renderer.clearSelection();
+    setTimeout(() => {
+      const selection = renderer.getSelection();
+      if (selection && !selection.isDragging) renderer.clearSelection();
+    }, SELECTION_CLEAR_DELAY_MS);
     return true;
   }, [renderer]);
 
-  // copy-on-select: drag text, release → clipboard (like a native terminal)
+  // copy-on-select: drag text, release → clipboard (like a native terminal).
+  // Double/triple-click word/line selection is the framework's since
+  // @opentui/core 0.5.7 (#1407): the renderer counts left presses itself and
+  // passes word/line behavior into local selection, so release still copies
+  // through the handler below.
   useSelectionHandler(async (selection) => {
     if (!selection.getSelectedText()) return;
     await copyActiveSelection();
   });
-
-  // Double/triple-click word/line selection (ink parity): the framework's
-  // selection state machine is char-drag only; on the 2nd/3rd click this
-  // rewrites its just-started point selection to the word/line span, and
-  // release still copies through the handler above.
-  const multiClickSelection = useMemo(
-    () =>
-      new MultiClickSelectionController(
-        () => renderer.currentRenderBuffer,
-        renderer,
-      ),
-    [renderer],
-  );
 
   const applyEvent = useCallback((ev: OpenTuiStreamEvent) => {
     setItems((prev) => foldLiveEvent(prev, ev));
@@ -2968,9 +2971,6 @@ function App({
         verticalScrollbarOptions={{ visible: false }}
         onMouseUp={(e) => {
           handleLinkClick(e);
-        }}
-        onMouseDown={(e) => {
-          multiClickSelection.handleMouseDown(e);
         }}
       >
         {banner}

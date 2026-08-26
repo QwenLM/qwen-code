@@ -7,9 +7,10 @@
 /**
  * Fail-closed runtime preflight for the experimental OpenTUI renderer.
  *
- * The locked @opentui/core 0.5.1 loads its native renderer through FFI:
+ * The locked @opentui/core 0.5.8 loads its native renderer through FFI:
  * `bun:ffi` under Bun, and the built-in `node:ffi` module under Node.js.
- * Node builds that cannot load `node:ffi` (e.g. v24) only fail deep inside
+ * Node builds that cannot load `node:ffi` (node:ffi ships with Node 26.4+;
+ * earlier majors lack it) only fail deep inside
  * @opentui/core, after the terminal has already been taken over. This gate
  * probes the runtime BEFORE the native-dependent renderer is imported and,
  * when unsupported, exits non-zero with a verified Bun invocation. The
@@ -75,7 +76,7 @@ export function openTuiRuntimeFailureLines(
   return [
     'The OpenTUI renderer needs native FFI, which this runtime cannot provide.',
     `Detected: ${probe.reason}.`,
-    'The locked @opentui/core 0.5.1 requires Bun, or a Node.js build that can actually load node:ffi.',
+    'The locked @opentui/core 0.5.8 requires Bun, or a Node.js build that can actually load node:ffi.',
     'Re-run under Bun instead:',
     '',
     `    ${BUN_FALLBACK_COMMAND}`,
