@@ -9970,10 +9970,29 @@ exit 1
     expect(reviewScanJob).not.toContain('actions/checkout');
     // The scan's per-run WORKDIR must not outlive the run on the pool:
     // 0700 at creation and an always() cleanup step mirroring the heavy
-    // jobs' teardown.
-    expect(reviewScanJob).toContain('(umask 077; mkdir -p "${WORKDIR}")');
-    expect(reviewScanJob).toContain("- name: 'Clean up scan workdir'");
-    expect(reviewScanJob).toContain("if: 'always()'");
+    // jobs' teardown. The value pins the autofix* prefix — the contract
+    // with the heavy jobs' age sweep, the only reclaim channel left after
+    // a hard runner kill.
+    expect(reviewScanJob).toContain(
+      "WORKDIR: '/tmp/autofix-scan-${{ github.run_id }}'",
+    );
+    // Pre-clean immediately before create: run_id is public and mkdir -p
+    // alone would accept a dir or symlink pre-planted on the shared /tmp.
+    expect(reviewScanJob).toContain(
+      'rm -rf "${WORKDIR}"\n          (umask 077; mkdir -p "${WORKDIR}")',
+    );
+    // The fleet file lives inside WORKDIR so the always() step and the age
+    // sweep reclaim it when the EXIT trap cannot (cancelled/killed run).
+    expect(reviewScanJob).toContain('FLEET_FILE="${WORKDIR}/fleet.tsv"');
+    expect(reviewScanJob).not.toContain('FLEET_FILE="$(mktemp)"');
+    // Pin the cleanup step's command inside its own slice, not job-wide: a
+    // no-op cleanup with the right name and if: shipped green before.
+    const scanCleanupStep =
+      reviewScanJob.match(
+        /- name: 'Clean up scan workdir'[\s\S]*?(?=\n[ ]{6}- name: '|\n[ ]{2}# ==========|$)/,
+      )?.[0] ?? '';
+    expect(scanCleanupStep).toContain("if: 'always()'");
+    expect(scanCleanupStep).toContain('rm -rf "${WORKDIR}"');
     for (const name of ['takeover-command', 'retry-command', 'takeover-ack']) {
       const job =
         workflow.match(
@@ -10736,10 +10755,17 @@ exit 1
     // gh's own env channels are pinned/stripped BEFORE the first gh call in
     // each PAT step, so a $GITHUB_ENV-planted GH_HOST cannot reroute the
     // identity check and a planted GH_TOKEN cannot outrank the inline one.
+    // The scan lane shares the persistent pool with those PAT steps
+    // (af-148), so route and review-scan carry the same reroute hardening
+    // in the same loop — one preamble shape, one edit site: a planted
+    // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
+    // collaborator-permission lookups into a local socket.
     for (const [step, firstGh] of [
       [publishPrStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [pushAndReportStep, 'GH_TOKEN="${GITHUB_TOKEN}" gh api user'],
       [prepareStep, 'PR_LIVE="$(gh pr view'],
+      [routeStep, 'gh api "repos/${REPO}/collaborators'],
+      [reviewScanJob, 'gh pr view'],
     ]) {
       const ghPin = step.indexOf('export GH_HOST=github.com');
       expect(ghPin).toBeGreaterThan(-1);
@@ -10751,22 +10777,6 @@ exit 1
       );
       expect(step.indexOf(firstGh)).toBeGreaterThan(-1);
       expect(ghPin).toBeLessThan(step.indexOf(firstGh));
-    }
-    // The scan lane shares the persistent pool with those PAT steps
-    // (af-148), so its gh calls carry the same reroute hardening: a planted
-    // ~/.config/gh there would send the scan's CI_DEV_BOT_PAT or route's
-    // collaborator-permission lookups into a local socket.
-    for (const [step, firstGh] of [
-      [routeStep, 'gh api "repos/${REPO}/collaborators'],
-      [reviewScanJob, 'gh pr view'],
-    ]) {
-      const ghPin = step.indexOf('export GH_HOST=github.com');
-      expect(ghPin).toBeGreaterThan(-1);
-      expect(step).toMatch(/unset GH_ENTERPRISE_TOKEN GH_TOKEN/);
-      expect(step).toContain(
-        'export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"',
-      );
-      expect(step.indexOf(firstGh)).toBeGreaterThan(ghPin);
     }
     // DRIFT ALARM, NOT A BOUNDARY. The guarantee that a planted channel
     // cannot reach the privileged work is the `env -i` clean child, pinned
@@ -15858,7 +15868,10 @@ exit 1
 
     // Replay the real helper + render block over fixtures.
     const lines = scan.split('\n');
-    const hi = lines.findIndex((l) => l.trim() === 'FLEET_FILE="$(mktemp)"');
+    const hi = lines.findIndex(
+      (l) => l.trim() === 'FLEET_FILE="${WORKDIR}/fleet.tsv"',
+    );
+    expect(hi).toBeGreaterThan(-1);
     const hj = lines.findIndex((l, i) => i > hi && l.trim() === '}');
     const helper = lines.slice(hi, hj + 1).join('\n');
     expect(helper).toContain('fleet_row()');
@@ -15880,6 +15893,9 @@ exit 1
         [
           'set -uo pipefail',
           'SUMMARY_FILE="$(mktemp)"',
+          // The helper references the job-level WORKDIR (fleet file home);
+          // its EXIT trap then reclaims this replay dir.
+          'WORKDIR="$(mktemp -d)"',
           helper,
           'COUNT=1',
           "fleet_row 7329 'SELECTED' '1 review + 5 inline new (round 0/5)'",
@@ -15915,6 +15931,9 @@ exit 1
         [
           'set -uo pipefail',
           'SUMMARY_FILE="$(mktemp)"',
+          // The helper references the job-level WORKDIR (fleet file home);
+          // its EXIT trap then reclaims this replay dir.
+          'WORKDIR="$(mktemp -d)"',
           helper,
           'COUNT=0',
           render,

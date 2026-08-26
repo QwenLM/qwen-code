@@ -2120,17 +2120,28 @@ jobs:
             exit 1
           fi
 
+          # Pre-clean before create, mirroring the heavy jobs: run_id is
+          # public and sequential, and mkdir -p alone would succeed over a
+          # dir or symlink pre-planted on the shared pool /tmp — the scan's
+          # redirects would then land in an attacker-chosen place, and a
+          # planted bot-prs.json would feed the forced-PR guard below.
+          rm -rf "${WORKDIR}"
+          (umask 077; mkdir -p "${WORKDIR}")
+
           # Fleet visibility: every per-PR decision below also records a row so
           # the run summary shows the WHOLE managed fleet in one table.
           # Reconstructing this by hand (list bot PRs, regex each one's eval
           # markers, cross-check checks and fork state) was the only way to see
           # a stall, so stalls stayed invisible until someone went looking.
-          FLEET_FILE="$(mktemp)"
+          # Inside WORKDIR, not mktemp's /tmp/tmp.*: on a cancelled run the
+          # EXIT trap never fires, and only the always() step and the heavy
+          # jobs' autofix* age sweep reclaim what this step leaves — neither
+          # can reach a tmp.* name.
+          FLEET_FILE="${WORKDIR}/fleet.tsv"
           trap 'rm -f "${FLEET_FILE}"; rm -rf "${WORKDIR}"' EXIT
           fleet_row() {
             printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${FLEET_FILE}"
           }
-          (umask 077; mkdir -p "${WORKDIR}")
 
           read_forced_pr_meta() {
             local attempt meta
