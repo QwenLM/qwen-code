@@ -115,6 +115,8 @@ jobs:
           # The default public URL is derived from the bucket so that
           # overriding only one of the two vars cannot post comment links
           # that 404 against (or show stale objects from) the other bucket.
+          # A cross-region ALIYUN_OSS_ENDPOINT override must also override
+          # ALIYUN_OSS_PUBLIC_BASE_URL because the default host pins Hangzhou.
           ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || format('https://{0}.oss-cn-hangzhou.aliyuncs.com', vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets') }}"
         run: |-

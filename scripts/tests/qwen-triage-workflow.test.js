@@ -3978,6 +3978,77 @@ describe('qwen-triage verify hardening round 2', () => {
       const comment4 = readFileSync(out4, 'utf8');
       expect(comment4).toContain('Sandboxed verification');
       expect(comment4).not.toContain('Evidence images');
+
+      // Exercise the production success dispatch too: copy the verified
+      // binary into a job-private PATH and run the real uploader through it.
+      const realUploader = readFileSync(
+        'scripts/upload-aliyun-oss-assets.js',
+        'utf8',
+      );
+      const realUtils = readFileSync('scripts/release-script-utils.js', 'utf8');
+      mkdirSync(join(work, 'scripts'), { recursive: true });
+      writeFileSync(
+        join(work, 'scripts', 'upload-aliyun-oss-assets.js'),
+        realUploader,
+      );
+      writeFileSync(join(work, 'scripts', 'release-script-utils.js'), realUtils);
+      writeFileSync(
+        join(dir, 'ossutil'),
+        [
+          '#!/bin/bash',
+          'set -euo pipefail',
+          '[ "$1" = cp ]',
+          'src="$2"; dest="$3"',
+          'target="$OSS_STUB_ROOT/${dest#oss://}"',
+          '/bin/mkdir -p "$(/usr/bin/dirname "$target")"',
+          '/bin/cp "$src" "$target"',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const out5 = join(dir, 'comment5.md');
+      const res5 = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out5,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '81',
+          GITHUB_RUN_ATTEMPT: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          ALIYUN_OSS_BUCKET: 'assets-bucket',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://assets.example.test',
+          OSSUTIL_INSTALL_OUTCOME: 'success',
+          OSS_STUB_ROOT: join(dir, 'oss-production'),
+        },
+      });
+      if (res5.status !== 0) {
+        throw new Error(`production dispatch failed:\n${res5.stdout}\n${res5.stderr}`);
+      }
+      expect(
+        readdirSync(
+          join(
+            dir,
+            'oss-production',
+            'assets-bucket',
+            'pr-assets',
+            'verify',
+            'pr7999-81-1',
+          ),
+        ).sort(),
+      ).toEqual(['01-ab.png', '04-edge.png']);
+      expect(readFileSync(out5, 'utf8')).toContain(
+        'https://assets.example.test/pr-assets/verify/pr7999-81-1/01-ab.png',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
