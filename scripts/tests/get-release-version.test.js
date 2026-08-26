@@ -292,6 +292,19 @@ describe('getVersion', () => {
       expect(result.previousReleaseTag).toBe('v0.6.1');
     });
 
+    it('should return an empty previous tag when no stable git tags exist', () => {
+      vi.mocked(execSync).mockImplementation((command) => {
+        if (command.includes("git tag -l 'v*'")) {
+          // Only prerelease tags exist; the stable filter drops them all.
+          return 'v0.7.0-preview.1\nv0.8.0-nightly.20250916.abcdef';
+        }
+        return mockExecSync(command);
+      });
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.previousReleaseTag).toBe('');
+    });
+
     it('should fall back to package.json when no nightly dist-tag exists (preview)', () => {
       const mockWithNoNightly = (command) => {
         // No nightly dist-tag exists
