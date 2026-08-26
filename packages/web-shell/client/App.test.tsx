@@ -6362,6 +6362,79 @@ describe('App session workflow', () => {
         ?.getAttribute('data-dialog-title'),
     ).toBe('Background tasks');
   });
+
+  it('keeps workflow agent tools mounted behind the tasks dialog', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'todo-workflow',
+            toolName: 'todo_write',
+            status: 'completed',
+            args: {
+              todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+            },
+            rawOutput: {
+              sessionWorkflow: true,
+              plan: { id: 'plan-1' },
+            },
+          },
+        ],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work', description: 'Do the work' },
+          },
+        ],
+      },
+    ];
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => testState.latestTodoPanelOnOpen?.());
+    await flush();
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Do the work');
+
+    // A follow-up user message empties the floating plan while the tagged
+    // session-workflow plan (and the inspector projecting it) stays.
+    testState.messages = [
+      ...testState.messages,
+      { id: 'follow-up', role: 'user', content: 'Keep going' },
+    ];
+    rerender();
+    await flush();
+
+    await act(async () => {
+      testState.latestStatusBarOnOpenTasks?.();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    // The dialog renders the floating plan, which is empty after the user
+    // message, so it shows no agent tools.
+    expect(testState.latestTasksStatusProps?.agentTools).toEqual([]);
+    // The inspector behind the dialog must stay anchored to the workflow
+    // plan and keep its linked subagent (R15-5).
+    expect(
+      container.querySelector('[data-testid="workflow-inspector"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Do the work');
+  });
 });
 
 describe('App composer footer renderer', () => {

@@ -7236,9 +7236,6 @@ export function App({
     onAgentTasksChange(environmentAgentTasks);
   }, [environmentAgentTasks, onAgentTasksChange]);
   const planAgentTools = useMemo(() => {
-    if (tasksDialogMessage) {
-      return getAgentToolsForPlan(messages, floatingTodosState);
-    }
     if (
       !sessionWorkflowEnabled ||
       (mainView !== 'cockpit' &&
@@ -7249,13 +7246,24 @@ export function App({
     return getAgentToolsForPlan(messages, sessionWorkflowTodosState);
   }, [
     artifactPanelTabs,
-    floatingTodosState,
     mainView,
     messages,
     sessionWorkflowEnabled,
     sessionWorkflowTodosState,
-    tasksDialogMessage,
   ]);
+  // The tasks dialog renders the floating (latest) plan, so its agent tools
+  // anchor to floatingTodosState. That anchoring must stay out of
+  // planAgentTools: the cockpit and workflow inspector stay mounted behind
+  // the dialog and would lose (or re-anchor) the session-workflow plan's
+  // linked tools whenever the dialog opens after a user message emptied the
+  // floating plan.
+  const tasksDialogAgentTools = useMemo(
+    () =>
+      tasksDialogMessage
+        ? getAgentToolsForPlan(messages, floatingTodosState)
+        : [],
+    [floatingTodosState, messages, tasksDialogMessage],
+  );
   const reloadTargetedWorkspaceSettings = useCallback(async () => {
     const status = await reloadWorkspaceSettings();
     if (mainVoiceTarget?.route === 'workspace-qualified') {
@@ -12118,7 +12126,9 @@ export function App({
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
                 planTodos={sessionWorkflowEnabled ? floatingTodos : []}
-                agentTools={sessionWorkflowEnabled ? planAgentTools : []}
+                agentTools={
+                  sessionWorkflowEnabled ? tasksDialogAgentTools : []
+                }
                 onOpenSubagent={(tool) => {
                   setTasksDialogMessage(null);
                   openSubagentPanel(tool);
