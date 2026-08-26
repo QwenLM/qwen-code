@@ -5274,7 +5274,12 @@ class QwenAgent implements Agent {
     // (same pattern filesystem.ts uses for `_meta.bom` / `_meta.encoding`).
     const size = normalizeAcpSessionListSize(params._meta?.['size']);
 
-    const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
+    // Per-request settings: `this.settings` is a "latest loaded" cache, so in
+    // a multi-workspace daemon it may hold another workspace's
+    // advanced.runtimeOutputDir and this listing would scan the wrong runtime
+    // root (returning an empty/foreign list for this cwd).
+    const settings = loadSettingsCached(cwd);
+    const result = await runWithAcpRuntimeOutputDir(settings, cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
         cursor: numericCursor,
@@ -10736,8 +10741,13 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
+        // Per-request settings, not the "latest loaded" this.settings cache:
+        // another workspace's advanced.runtimeOutputDir would point this
+        // destructive lookup at the wrong runtime root — silently returning
+        // success:false for a session that exists, or deleting a stale
+        // same-id copy under the wrong root.
         const success = await runWithAcpRuntimeOutputDir(
-          this.settings,
+          loadSettingsCached(cwd),
           cwd,
           async () => {
             const sessionService = new SessionService(cwd);
@@ -10786,8 +10796,9 @@ class QwenAgent implements Agent {
           const ok = await liveRecording.recordCustomTitle(title, 'manual');
           return { success: ok };
         }
+        // Per-request settings for the same reason as deleteSession above.
         const success = await runWithAcpRuntimeOutputDir(
-          this.settings,
+          loadSettingsCached(cwd),
           cwd,
           async () => {
             const sessionService = new SessionService(cwd);
