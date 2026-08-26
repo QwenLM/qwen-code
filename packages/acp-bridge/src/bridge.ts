@@ -4064,6 +4064,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // A Goal turn drains the mid-turn queue but owns no prompt slot, so
           // nothing else would settle what its last drain missed.
           settleMidTurnQueueAfterGoalTurn,
+          opts.onCreateCurrentSessionScheduledTask,
         );
         const rawConnection = new ClientSideConnection(
           () =>
