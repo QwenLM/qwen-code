@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type {
@@ -19,6 +20,7 @@ import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
 import type { DebugLogger } from '../utils/debugLogger.js';
+import { FULL_OUTPUT_DIGEST_LABEL } from '../tools/truncation.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -2748,6 +2750,28 @@ describe('LoopDetectionService', () => {
       );
     });
 
+    it('still halts when result evidence is only partial (fail-safe)', () => {
+      // Incomplete evidence (a dropped/failed execution records no result)
+      // must never grant the result-aware exemption: the guard needs one
+      // recorded result per preceding request before it trusts a streak.
+      let fired = false;
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+        if (fired) break;
+        if (i !== 2) {
+          // Skip one recording mid-streak: 4 results for 5 requests.
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult('frozen board'),
+          );
+        }
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
     it('still halts at the threshold when every result is unchanged', () => {
       const unchanged = '#1 [in_progress] @peer-a — task';
       let fired = false;
@@ -2880,6 +2904,135 @@ describe('LoopDetectionService', () => {
       }
       expect(fired).toBe(true);
       expect(svc.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
+    describe('oversized (persisted) results fingerprint as stubs (issue #9450)', () => {
+      // Results over the persistence threshold are rewritten into stubs
+      // whose envelope embeds a per-call unique path. Hashing the envelope
+      // verbatim would fingerprint uniquely every poll, silently disabling
+      // every result-aware guard for exactly the largest results.
+      const digestOf = (content: string): string =>
+        createHash('sha256').update(content).digest('hex');
+
+      const persistedStub = (
+        boardState: string,
+        opts: { digest?: string; path?: string } = {},
+      ): string => {
+        const digestLine =
+          opts.digest !== undefined
+            ? `\n${FULL_OUTPUT_DIGEST_LABEL}${opts.digest}`
+            : '';
+        return `<persisted-output>
+Output too large (42 KB). Full output saved to: ${opts.path ?? '/tool-results/call-x.txt'}${digestLine}
+Note: this file may be cleaned up after 24 hours.
+
+Preview (up to 2000 chars):
+${boardState}
+</persisted-output>`;
+      };
+
+      const driveUntilFireOrEnd = (
+        results: () => Part[],
+        rounds: number,
+      ): boolean => {
+        let fired = false;
+        for (let i = 0; i < rounds && !fired; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+          if (fired) break;
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            results(),
+          );
+        }
+        return fired;
+      };
+
+      it('halts a frozen oversized board despite per-call unique stub paths', () => {
+        // Same frozen content persisted to a DIFFERENT per-call path each
+        // poll: the envelope varies, the digest does not, so the guard must
+        // still see five unchanged results and halt at the same threshold.
+        let callCounter = 0;
+        const fired = driveUntilFireOrEnd(() => {
+          callCounter += 1;
+          return taskListResult(
+            persistedStub('frozen oversized board', {
+              digest: digestOf('frozen oversized board'),
+              path: `/tool-results/call-${callCounter}.txt`,
+            }),
+            `call-${callCounter}`,
+          );
+        }, 8);
+        expect(fired).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        );
+      });
+
+      it('keeps an oversized board alive when mutations land beyond the preview window', () => {
+        // The preview covers only the first chars; the full-output digest is
+        // what keeps the fingerprint sensitive to mutations past it.
+        let version = 0;
+        const fired = driveUntilFireOrEnd(() => {
+          version += 1;
+          const content = `board head\n${'x'.repeat(3000)}\ntail v${version}`;
+          return taskListResult(
+            persistedStub('board head', { digest: digestOf(content) }),
+          );
+        }, 4 * TOOL_CALL_LOOP_THRESHOLD);
+        expect(fired).toBe(false);
+      });
+
+      it('falls back to the path-free preview for digest-less stubs', () => {
+        // Stubs produced before the digest line existed: identical previews
+        // in different envelopes must still collide (halt), changed previews
+        // must not.
+        let callCounter = 0;
+        const frozen = driveUntilFireOrEnd(() => {
+          callCounter += 1;
+          return taskListResult(
+            persistedStub('legacy frozen preview', {
+              path: `/tool-results/legacy-${callCounter}.txt`,
+            }),
+            `call-${callCounter}`,
+          );
+        }, 8);
+        expect(frozen).toBe(true);
+
+        const svc = new LoopDetectionService(makeConfig());
+        svc.reset('legacy-changed');
+        let fired = false;
+        for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD && !fired; i++) {
+          fired = svc.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+          if (fired) break;
+          fired = svc.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult(
+              persistedStub(`legacy preview v${i}`, {
+                path: `/tool-results/legacy-${i}.txt`,
+              }),
+            ),
+          );
+        }
+        expect(fired).toBe(false);
+      });
+
+      it('fingerprints quoted stub markers mid-content as ordinary text', () => {
+        // Board content can QUOTE a stub (label + hex); only LEADING
+        // producer shapes are stubs, so two boards differing only in quoted
+        // content must still count as changed.
+        const quoted = (hex: string) =>
+          `peer said:\n${FULL_OUTPUT_DIGEST_LABEL}${hex}\nend`;
+        let fired = false;
+        for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD && !fired; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`call-${i}`));
+          if (fired) break;
+          fired = service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult(quoted(digestOf(`content ${i}`))),
+          );
+        }
+        expect(fired).toBe(false);
+      });
     });
 
     it('restarts the streak when a result changed, then halts on a fresh unchanged streak', () => {

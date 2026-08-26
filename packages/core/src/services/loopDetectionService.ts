@@ -20,6 +20,11 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
+import {
+  FULL_OUTPUT_DIGEST_LABEL,
+  PREVIEW_SIZE_CHARS,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+} from '../tools/truncation.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
 // implementation lives in a leaf module so replay detection in
@@ -184,6 +189,82 @@ export function shouldHaltOnTurnToolCallCap(
   const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
   const stuck = maxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
   return isExplicitCap || totalCalls > hardCap || stuck;
+}
+
+// Producer shapes of the oversized-result stubs (see tools/truncation.ts).
+// Recognition is anchored on these LEADING prefixes: results like task_list
+// embed peer-authored text verbatim, and that text can quote stub markers —
+// honoring a marker found mid-string would let quoted content collapse or
+// vary the fingerprint, so only shapes that START with a producer prefix are
+// treated as stubs (issue #9450).
+const STUB_PRODUCER_PREFIXES: readonly string[] = [
+  '<persisted-output>',
+  'Output too large (',
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+];
+
+const STUB_PREVIEW_MARKER = `Preview (up to ${PREVIEW_SIZE_CHARS} chars):`;
+const STUB_TRUNCATED_PART_MARKER = 'Truncated part of the output:\n';
+
+/**
+ * Reads the sha256 digest a stub producer embedded for the FULL
+ * pre-truncation output: the label must START its line and be followed by
+ * exactly 64 hex chars ending the line. A mid-line mention of the label
+ * (quoted content) never matches (issue #9450).
+ */
+function extractAnchoredStubDigest(value: string): string | null {
+  let searchFrom = 0;
+  for (;;) {
+    const index = value.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
+    if (index === -1) return null;
+    if (index === 0 || value[index - 1] === '\n') {
+      const digestStart = index + FULL_OUTPUT_DIGEST_LABEL.length;
+      const digest = value.slice(digestStart, digestStart + 64);
+      const terminator = value[digestStart + 64];
+      if (
+        /^[0-9a-f]{64}$/.test(digest) &&
+        (terminator === undefined || terminator === '\n' || terminator === '\r')
+      ) {
+        return digest;
+      }
+    }
+    searchFrom = index + FULL_OUTPUT_DIGEST_LABEL.length;
+  }
+}
+
+/**
+ * Reduces an oversized-result stub to a stable fingerprint payload.
+ * Oversized tool results are rewritten into truncation stubs whose envelope
+ * embeds a per-call unique artifact path (`<toolResultsDir>/<callId>.txt`,
+ * a random temp file); hashing the envelope verbatim would fingerprint
+ * uniquely every poll — silently disabling every result-aware guard for
+ * exactly the largest results (a frozen board would read as "changed every
+ * time", issue #9450).
+ *
+ * Prefer the producers' sha256 of the full pre-truncation output
+ * (FULL_OUTPUT_DIGEST_LABEL): stable across calls for identical content and
+ * sensitive to mutations anywhere, including beyond the preview window.
+ * Stubs without a digest line fall back to their path-free visible payload
+ * (preview, or head+tail after the truncation marker). Non-stub text passes
+ * through unchanged.
+ */
+function stripPersistenceEnvelope(value: string): string {
+  if (!STUB_PRODUCER_PREFIXES.some((prefix) => value.startsWith(prefix))) {
+    return value;
+  }
+  const digest = extractAnchoredStubDigest(value);
+  if (digest !== null) {
+    return `<persisted-stub>sha256:${digest}`;
+  }
+  for (const marker of [STUB_PREVIEW_MARKER, STUB_TRUNCATED_PART_MARKER]) {
+    const payloadStart = value.indexOf(marker);
+    if (payloadStart !== -1) {
+      const payload = value.slice(payloadStart + marker.length);
+      const closeTag = payload.indexOf('</persisted-output>');
+      return `<persisted-stub>payload:${closeTag === -1 ? payload : payload.slice(0, closeTag)}`;
+    }
+  }
+  return `<persisted-stub>raw:${value}`;
 }
 
 /**
@@ -464,6 +545,10 @@ export class LoopDetectionService {
   /**
    * Reconstructs the model-visible result text from tool response parts.
    * Only the fingerprint of this text is retained, never the text itself.
+   * Oversized results arrive as persistence stubs whose envelope embeds a
+   * per-call unique file path; each string value is reduced to its stable
+   * payload first (see stripPersistenceEnvelope) so identical underlying
+   * results fingerprint identically no matter where they were persisted.
    * Returns null when the parts carry no functionResponse content.
    */
   private static extractResultText(
@@ -473,7 +558,11 @@ export class LoopDetectionService {
     for (const part of responseParts) {
       const functionResponse = part.functionResponse;
       if (!functionResponse) continue;
-      chunks.push(JSON.stringify(functionResponse.response ?? {}));
+      chunks.push(
+        JSON.stringify(functionResponse.response ?? {}, (_key, value) =>
+          typeof value === 'string' ? stripPersistenceEnvelope(value) : value,
+        ),
+      );
     }
     return chunks.length > 0 ? chunks.join('\n') : null;
   }

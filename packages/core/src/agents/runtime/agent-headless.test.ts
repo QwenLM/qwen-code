@@ -2432,6 +2432,104 @@ describe('subagent.ts', () => {
         );
       });
 
+      it('counts a provider-duplicate call id once so result evidence stays in sync (issue #9450)', async () => {
+        // A provider can stream the SAME call id twice in one response — the
+        // exact pathology dedupeToolCallsById exists for. Execution collapses
+        // the pair to one call (one recorded result), so the loop guard must
+        // also count one request; otherwise the request counter runs one
+        // ahead of the result evidence and the result-aware exemption
+        // fails safe, halting a fully productive poller.
+        const taskListToolDef: FunctionDeclaration = {
+          name: 'task_list',
+          description: 'Lists team tasks',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([taskListToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['task_list'] };
+        const taskListArgs = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        // Round 1 emits the same call id twice (the provider duplicate); the
+        // remaining rounds emit one call each, the board changing every time.
+        const duplicateId = 'dup_call_0';
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              { id: duplicateId, name: 'task_list', args: taskListArgs },
+              { id: duplicateId, name: 'task_list', args: taskListArgs },
+            ],
+            ...Array.from({ length: 5 }, (_, index) => [
+              {
+                id: `poll_${index + 1}`,
+                name: 'task_list',
+                args: taskListArgs,
+              },
+            ]),
+            'stop',
+          ]),
+        );
+
+        let boardVersion = 0;
+        const taskListInvocation = {
+          params: taskListArgs,
+          getDescription: vi.fn().mockReturnValue('List tasks'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          // Every executed poll returns a changed board.
+          execute: vi.fn().mockImplementation(async () => {
+            boardVersion += 1;
+            return {
+              llmContent: `#7 [in_progress] @peer-a — task (v${boardVersion})`,
+              returnDisplay: 'Listed tasks',
+            };
+          }),
+        };
+        const taskListTool = {
+          name: 'task_list',
+          displayName: 'Task List',
+          description: 'List tasks in the team task list',
+          kind: 'READ' as const,
+          schema: taskListToolDef,
+          build: vi.fn().mockImplementation(() => taskListInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: false,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'task_list' ? taskListTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          { ...defaultRunConfig, max_turns: 20 },
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        // The duplicate id executes once (dedupeToolCallsById), so 6 executed
+        // polls across 7 model turns; the changed board must carry the agent
+        // to goal instead of a false loop halt.
+        expect(taskListInvocation.execute).toHaveBeenCalledTimes(6);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(7);
+        expect(scope.getTerminateMode()).not.toBe(
+          AgentTerminateMode.LOOP_DETECTED,
+        );
+      });
+
       it('does not carry a stale loop attribution into a re-executed run (issue #9450)', async () => {
         const taskListToolDef: FunctionDeclaration = {
           name: 'task_list',
