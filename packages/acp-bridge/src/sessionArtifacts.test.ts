@@ -3246,15 +3246,27 @@ describe('SessionArtifactStore', () => {
     vi.setSystemTime(new Date(Date.now() + 6_000));
     const originalLstat = fs.lstat.bind(fs);
     let swapped = false;
-    const lstatSpy = vi.spyOn(fs, 'lstat').mockImplementation(async (entry) => {
-      const stat = await originalLstat(entry);
-      if (!swapped && String(entry) === realTarget) {
-        swapped = true;
-        await fs.writeFile(replacement, 'after');
-        await fs.rename(replacement, target);
-      }
-      return stat;
-    });
+    const lstatSpy = vi
+      .spyOn(fs, 'lstat')
+      // Forward the options through: the store lstats with { bigint: true }
+      // for the identity check, and a spy that dropped it would hand back
+      // numeric stats that never equal the bigint fstat — hiding a broken
+      // comparison behind a type mismatch.
+      .mockImplementation((async (
+        entry: Parameters<typeof fs.lstat>[0],
+        options?: Parameters<typeof fs.lstat>[1],
+      ) => {
+        const stat = await originalLstat(
+          entry,
+          options as Parameters<typeof originalLstat>[1],
+        );
+        if (!swapped && String(entry) === realTarget) {
+          swapped = true;
+          await fs.writeFile(replacement, 'after');
+          await fs.rename(replacement, target);
+        }
+        return stat;
+      }) as typeof fs.lstat);
 
     try {
       const artifact = await store.get(artifactId);

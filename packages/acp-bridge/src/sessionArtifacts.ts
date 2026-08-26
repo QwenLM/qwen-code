@@ -5,7 +5,12 @@
  */
 
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, promises as fs, type Stats } from 'node:fs';
+import {
+  constants as fsConstants,
+  promises as fs,
+  type BigIntStats,
+  type Stats,
+} from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -3107,16 +3112,19 @@ async function getWorkspaceStatus(
     if (!relative || isOutsidePath(relative)) {
       return { status: 'missing', escaped: true };
     }
-    const preOpenStat = await fs.lstat(realPath);
+    // Identity is compared on bigint stats: NTFS file ids are 64-bit and the
+    // Number spelling loses precision above 2^53, so two files created close
+    // together can round to the SAME numeric ino and defeat the swap check.
+    const preOpenStat = await fs.lstat(realPath, { bigint: true });
     const handle = await fs.open(
       realPath,
       fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
     );
     try {
-      const stat = await handle.stat();
-      if (!isSameFile(preOpenStat, stat)) {
+      if (!isSameFile(preOpenStat, await handle.stat({ bigint: true }))) {
         return { status: 'missing', escaped: true };
       }
+      const stat = await handle.stat();
       if (!stat.isFile()) {
         throw new Error('path is not a regular file');
       }
@@ -3187,7 +3195,7 @@ async function getWorkspaceStatus(
   }
 }
 
-function isSameFile(before: Stats, after: Stats): boolean {
+function isSameFile(before: BigIntStats, after: BigIntStats): boolean {
   return before.dev === after.dev && before.ino === after.ino;
 }
 
